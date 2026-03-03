@@ -1,26 +1,19 @@
 import SwiftUI
+import ARKit
 
 struct CaptureView: View {
     @State private var isPrivacyFilterOn = true
     @State private var mode = 1 // 0 = Streaming, 1 = Capture
     @State private var isUploading = false
     @State private var uploadMessage: String? = nil
+    @State private var currentARSession: ARSession? = nil
 
     @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
 
     var body: some View {
         ZStack {
-            // Simulated Camera View
-            Color.black.ignoresSafeArea()
-            Image(systemName: "camera.viewfinder")
-                .font(.system(size: 100))
-                .foregroundColor(Color.white.opacity(0.2))
-
-            // Simulated AR Grid Heatmap Overlay
-            Rectangle()
-                .fill(
-                    RadialGradient(gradient: Gradient(colors: [Color.green.opacity(0.3), Color.clear]), center: .center, startRadius: 50, endRadius: 200)
-                )
+            // Live ARKit Scene Reconstruction View
+            ARCoverageView(arSession: $currentARSession)
                 .ignoresSafeArea()
 
             VStack {
@@ -93,7 +86,7 @@ struct CaptureView: View {
                         // Capture Button overlaying HUD
                         Button(action: {
                             if mode == 1 {
-                                uploadDummyData()
+                                uploadPointCloudData()
                             }
                         }) {
                             ZStack {
@@ -134,13 +127,18 @@ struct CaptureView: View {
         .preferredColorScheme(.dark)
     }
 
-    private func uploadDummyData() {
+    private func uploadPointCloudData() {
         guard mode == 1 else { return } // Only upload in Capture mode
+
+        guard let objData = ARCoverageView.exportPointCloudOBJ(from: currentARSession), !objData.isEmpty else {
+            uploadMessage = "No Mesh Data"
+            return
+        }
+
         isUploading = true
         uploadMessage = "Uploading..."
 
-        let dummyData = "Dummy capture data from WiSEScan iOS".data(using: .utf8)!
-        let filename = "wisescan_ios_capture_\(UUID().uuidString).txt"
+        let filename = "wisescan_ios_mesh_\(UUID().uuidString).obj"
 
         // Ensure the base URL ends with a slash before appending the filename
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
@@ -152,8 +150,9 @@ struct CaptureView: View {
 
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
+        request.setValue("text/plain", forHTTPHeaderField: "Content-Type")
 
-        let task = URLSession.shared.uploadTask(with: request, from: dummyData) { data, response, error in
+        let task = URLSession.shared.uploadTask(with: request, from: objData) { data, response, error in
             DispatchQueue.main.async {
                 self.isUploading = false
                 if let error = error {

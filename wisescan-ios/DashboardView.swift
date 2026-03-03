@@ -144,10 +144,14 @@ struct WearableCard: View {
                         .font(.headline)
                         .foregroundColor(.white)
                     if isPaired {
-                        Text("(Paired) ")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                        + Text("●").foregroundColor(.green).font(.caption2)
+                        HStack(spacing: 2) {
+                            Text("(Paired)")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                            Text("●")
+                                .foregroundColor(.green)
+                                .font(.caption2)
+                        }
                     }
                 }
                 Text("Device ID: \(deviceId)")
