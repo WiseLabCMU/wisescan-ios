@@ -4,6 +4,7 @@ import SceneKit
 /// Renders a 3D preview of captured OBJ mesh data using SceneKit.
 struct MeshPreviewView: UIViewRepresentable {
     let meshData: Data
+    var vertexColors: Data? = nil
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -37,7 +38,7 @@ struct MeshPreviewView: UIViewRepresentable {
         scene.rootNode.addChildNode(fillLight)
 
         // Parse OBJ data and build geometry
-        if let (geometry, _) = buildGeometry(from: meshData) {
+        if let (geometry, _) = buildGeometry(from: meshData, vertexColors: vertexColors) {
             let node = SCNNode(geometry: geometry)
 
             // Center the model
@@ -75,8 +76,8 @@ struct MeshPreviewView: UIViewRepresentable {
 
     func updateUIView(_ uiView: SCNView, context: Context) {}
 
-    /// Parses OBJ data and creates geometry with height-based vertex colors.
-    private func buildGeometry(from data: Data) -> (SCNGeometry, Int)? {
+    /// Parses OBJ data and creates geometry with vertex colors (camera-sampled or height-based fallback).
+    private func buildGeometry(from data: Data, vertexColors: Data?) -> (SCNGeometry, Int)? {
         guard let objString = String(data: data, encoding: .utf8) else { return nil }
 
         var vertices: [SCNVector3] = []
@@ -109,16 +110,23 @@ struct MeshPreviewView: UIViewRepresentable {
 
         guard !vertices.isEmpty && !indices.isEmpty else { return nil }
 
-        // Generate height-based vertex colors (blue at bottom → cyan → green at top)
-        let yRange = maxY - minY
-        var colors: [SIMD4<Float>] = []
-        for v in vertices {
-            let t = yRange > 0 ? (v.y - minY) / yRange : 0.5
-            // Color gradient: deep blue → cyan → green
-            let r: Float = 0.0
-            let g: Float = min(t * 1.5, 1.0)
-            let b: Float = max(1.0 - t * 1.5, 0.2)
-            colors.append(SIMD4<Float>(r, g, b, 1.0))
+        // Use camera colors if available, otherwise height gradient
+        var colors: [SIMD4<Float>]
+        var hasCameraColors = false
+        if let colorData = vertexColors {
+            let count = colorData.count / MemoryLayout<SIMD4<Float>>.stride
+            if count == vertices.count {
+                colors = [SIMD4<Float>](repeating: .zero, count: count)
+                _ = colors.withUnsafeMutableBytes { ptr in
+                    colorData.copyBytes(to: ptr)
+                }
+                hasCameraColors = true
+            } else {
+                // Count mismatch — fall back to gradient
+                colors = heightGradientColors(vertices: vertices, minY: minY, maxY: maxY)
+            }
+        } else {
+            colors = heightGradientColors(vertices: vertices, minY: minY, maxY: maxY)
         }
 
         // Compute face normals and accumulate per-vertex for smooth shading
@@ -169,13 +177,29 @@ struct MeshPreviewView: UIViewRepresentable {
         let geometry = SCNGeometry(sources: [vertexSource, normalSource, colorSource], elements: [element])
 
         let material = SCNMaterial()
-        material.lightingModel = .physicallyBased
+        if hasCameraColors {
+            // Unlit rendering for camera colors — show actual sampled colors
+            material.lightingModel = .constant
+        } else {
+            material.lightingModel = .physicallyBased
+            material.roughness.contents = 0.6
+            material.metalness.contents = 0.1
+        }
         material.diffuse.contents = UIColor.white // vertex colors will modulate
-        material.roughness.contents = 0.6
-        material.metalness.contents = 0.1
         material.isDoubleSided = true
         geometry.materials = [material]
 
         return (geometry, vertices.count)
+    }
+
+    private func heightGradientColors(vertices: [SCNVector3], minY: Float, maxY: Float) -> [SIMD4<Float>] {
+        let yRange = maxY - minY
+        return vertices.map { v in
+            let t = yRange > 0 ? (v.y - minY) / yRange : 0.5
+            let r: Float = 0.0
+            let g: Float = min(t * 1.5, 1.0)
+            let b: Float = max(1.0 - t * 1.5, 0.2)
+            return SIMD4<Float>(r, g, b, 1.0)
+        }
     }
 }

@@ -123,7 +123,7 @@ struct ScanCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // 3D mesh preview (interactive: rotate/zoom)
-            MeshPreviewView(meshData: scan.meshData)
+            MeshPreviewView(meshData: scan.meshData, vertexColors: scan.vertexColors)
                 .frame(height: 200)
                 .clipped()
 

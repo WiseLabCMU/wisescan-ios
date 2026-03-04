@@ -218,11 +218,15 @@ struct CaptureView: View {
             return
         }
 
+        // Sample camera colors at vertex positions for preview coloring
+        let vertexColors = ARCoverageView.sampleVertexColors(from: currentARSession)
+
         let _ = scanStore.addScan(
             meshData: result.data,
             vertexCount: result.vertexCount,
             faceCount: result.faceCount,
-            rawDataPath: rawDataPath
+            rawDataPath: rawDataPath,
+            vertexColors: vertexColors
         )
 
         saveMessage = "Scan Saved!"
