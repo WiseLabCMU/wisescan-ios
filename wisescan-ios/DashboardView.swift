@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
+    @State private var showSettings = false
 
     var body: some View {
         NavigationStack {
@@ -67,6 +68,16 @@ struct DashboardView: View {
             }
             .navigationTitle("WiSEscan Connect")
             .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { showSettings = true }) {
+                        Image(systemName: "gearshape")
+                    }
+                }
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView()
+            }
             .preferredColorScheme(.dark)
         }
     }

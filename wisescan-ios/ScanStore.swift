@@ -10,6 +10,7 @@ struct CapturedScan: Identifiable {
     let meshData: Data
     let vertexCount: Int
     let faceCount: Int
+    var rawDataPath: URL? = nil
     var selectedFormat: ExportFormat = .obj
     var uploadStatus: UploadStatus = .pending
 
@@ -29,6 +30,7 @@ enum ExportFormat: String, CaseIterable {
     case obj = "OBJ"
     case ply = "PLY"
     case usdz = "USDZ"
+    case raw = "RAW"
 }
 
 enum UploadStatus: Equatable {
@@ -54,14 +56,15 @@ class ScanStore {
     var scans: [CapturedScan] = []
     private var scanCounter = 0
 
-    func addScan(meshData: Data, vertexCount: Int, faceCount: Int) -> CapturedScan {
+    func addScan(meshData: Data, vertexCount: Int, faceCount: Int, rawDataPath: URL? = nil) -> CapturedScan {
         scanCounter += 1
         let scan = CapturedScan(
             name: "Scan \(scanCounter)",
             capturedAt: Date(),
             meshData: meshData,
             vertexCount: vertexCount,
-            faceCount: faceCount
+            faceCount: faceCount,
+            rawDataPath: rawDataPath
         )
         scans.insert(scan, at: 0) // newest first
         return scan

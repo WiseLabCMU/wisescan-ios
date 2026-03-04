@@ -11,6 +11,9 @@ struct CaptureView: View {
     @State private var isRecording = false
     @State private var recordingSeconds = 0
     @State private var recordingTimer: Timer? = nil
+    @State private var frameCaptureSession = FrameCaptureSession()
+    @AppStorage("rawOverlapMax") private var rawOverlapMax: Double = 60.0
+    @AppStorage("rawRejectBlur") private var rawRejectBlur: Bool = true
     @Binding var selectedTab: Int
 
     var body: some View {
@@ -182,6 +185,11 @@ struct CaptureView: View {
         recordingSeconds = 0
         saveMessage = nil
 
+        // Start frame capture for raw data export
+        if let session = currentARSession {
+            frameCaptureSession.start(session: session, overlapMax: rawOverlapMax, rejectBlur: rawRejectBlur)
+        }
+
         // Start a timer to track recording duration
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             recordingSeconds += 1
@@ -192,6 +200,9 @@ struct CaptureView: View {
         isRecording = false
         recordingTimer?.invalidate()
         recordingTimer = nil
+
+        // Stop frame capture and get raw data path
+        let rawDataPath = frameCaptureSession.stop()
 
         // Export and save the scan
         guard let result = ARCoverageView.exportMeshOBJ(from: currentARSession),
@@ -204,7 +215,8 @@ struct CaptureView: View {
         let _ = scanStore.addScan(
             meshData: result.data,
             vertexCount: result.vertexCount,
-            faceCount: result.faceCount
+            faceCount: result.faceCount,
+            rawDataPath: rawDataPath
         )
 
         saveMessage = "Scan Saved!"

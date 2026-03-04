@@ -1,0 +1,279 @@
+import Foundation
+import ARKit
+import UIKit
+import Observation
+
+/// Captures RGB frames, depth maps, and camera poses during an AR recording session.
+@Observable
+class FrameCaptureSession {
+    private(set) var frameCount = 0
+    private(set) var captureDir: URL?
+    private var timer: Timer?
+    private var imagesDir: URL?
+    private var depthDir: URL?
+    private var frames: [FrameData] = []
+    private var globalIntrinsics: CameraIntrinsics?
+    private var imageWidth: Int = 0
+    private var imageHeight: Int = 0
+    private var lastCaptureTransform: simd_float4x4?
+    private var overlapMax: Double = 80.0 // percentage
+    private var rejectBlur: Bool = true
+    private var lastCaptureTime: TimeInterval = 0
+
+    struct FrameData {
+        let index: Int
+        let transform: simd_float4x4
+    }
+
+    struct CameraIntrinsics {
+        let fx: Float
+        let fy: Float
+        let cx: Float
+        let cy: Float
+    }
+
+    /// Start capturing frames from the given AR session.
+    /// - Parameters:
+    ///   - overlapMax: Maximum overlap percentage (10-100). Higher = more frames.
+    ///   - rejectBlur: If true, skip frames with motion blur.
+    func start(session: ARSession, overlapMax: Double = 60.0, rejectBlur: Bool = true) {
+        // Create temp directory for this capture
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wisescan_raw_\(UUID().uuidString)", isDirectory: true)
+        let imagesPath = tempDir.appendingPathComponent("images", isDirectory: true)
+        let depthPath = tempDir.appendingPathComponent("depth", isDirectory: true)
+
+        try? FileManager.default.createDirectory(at: imagesPath, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: depthPath, withIntermediateDirectories: true)
+
+        self.captureDir = tempDir
+        self.imagesDir = imagesPath
+        self.depthDir = depthPath
+        self.frames = []
+        self.frameCount = 0
+        self.globalIntrinsics = nil
+        self.lastCaptureTransform = nil
+        self.overlapMax = overlapMax
+        self.rejectBlur = rejectBlur
+        self.lastCaptureTime = 0
+
+        // Check for new frames at 10fps, but only capture when sufficient movement
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.captureFrame(from: session)
+        }
+    }
+
+    /// Stop capturing and write transforms.json.
+    func stop() -> URL? {
+        timer?.invalidate()
+        timer = nil
+
+        guard let captureDir = captureDir else { return nil }
+
+        // Write transforms.json
+        writeTransformsJSON(to: captureDir)
+
+        return captureDir
+    }
+
+    private func captureFrame(from session: ARSession) {
+        guard let currentFrame = session.currentFrame,
+              let imagesDir = imagesDir,
+              let depthDir = depthDir else { return }
+
+        let index = frameCount
+        let paddedIndex = String(format: "%05d", index)
+
+        // Capture on background thread to avoid blocking AR
+        let pixelBuffer = currentFrame.capturedImage
+        let transform = currentFrame.camera.transform
+        let intrinsics = currentFrame.camera.intrinsics
+        let depthMap = currentFrame.sceneDepth?.depthMap
+
+        // Reject blurred frames based on camera tracking quality
+        if rejectBlur {
+            // Skip if tracking is not normal (e.g. limited, excessive motion)
+            if currentFrame.camera.trackingState != .normal {
+                return
+            }
+            // Skip if camera moved too fast since last capture (motion blur likely)
+            if let lastTransform = lastCaptureTransform {
+                let timeDelta = currentFrame.timestamp - lastCaptureTime
+                if timeDelta > 0 {
+                    let movement = cameraMovement(from: lastTransform, to: transform)
+                    let velocity = movement / Float(timeDelta)
+                    // If moving faster than ~0.5m/s, likely blurred
+                    if velocity > 0.5 {
+                        return
+                    }
+                }
+            }
+        }
+
+        // Skip frame if camera hasn't moved enough (based on overlap setting)
+        if let lastTransform = lastCaptureTransform {
+            let movement = cameraMovement(from: lastTransform, to: transform)
+            // Higher overlap = smaller movement threshold = more frames
+            // overlapMax 100% → threshold ~0.01m (capture almost everything)
+            // overlapMax 10%  → threshold ~0.15m (only distinct views)
+            let threshold = Float(0.15 * (1.0 - overlapMax / 100.0)) + 0.01
+            if movement < threshold {
+                return // skip — too much overlap with previous frame
+            }
+        }
+
+        lastCaptureTransform = transform
+        lastCaptureTime = currentFrame.timestamp
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
+            // Save RGB frame as JPEG
+            let rgbPath = imagesDir.appendingPathComponent("frame_\(paddedIndex).jpg")
+            if let jpegData = self.pixelBufferToJPEG(pixelBuffer) {
+                try? jpegData.write(to: rgbPath)
+            }
+
+            // Save depth map as 16-bit PNG (values in millimeters)
+            if let depthMap = depthMap {
+                let depthPath = depthDir.appendingPathComponent("frame_\(paddedIndex).png")
+                if let depthData = self.depthMapToPNG16(depthMap) {
+                    try? depthData.write(to: depthPath)
+                }
+            }
+
+            // Store frame metadata
+            DispatchQueue.main.async {
+                // Capture intrinsics from first frame
+                if self.globalIntrinsics == nil {
+                    let imageSize = CVPixelBufferGetWidth(pixelBuffer)
+                    let imageHeight = CVPixelBufferGetHeight(pixelBuffer)
+                    self.imageWidth = imageSize
+                    self.imageHeight = imageHeight
+                    self.globalIntrinsics = CameraIntrinsics(
+                        fx: intrinsics[0][0],
+                        fy: intrinsics[1][1],
+                        cx: intrinsics[2][0],
+                        cy: intrinsics[2][1]
+                    )
+                }
+
+                self.frames.append(FrameData(index: index, transform: transform))
+                self.frameCount = index + 1
+            }
+        }
+    }
+
+    // MARK: - transforms.json
+
+    private func writeTransformsJSON(to directory: URL) {
+        guard let intrinsics = globalIntrinsics else { return }
+
+        // Convert ARKit camera poses to Nerfstudio convention (OpenGL: +X right, +Y up, +Z back)
+        // ARKit: +X right, +Y up, -Z forward (same as OpenGL)
+        var frameEntries: [[String: Any]] = []
+        for frame in frames {
+            let mat = frame.transform
+            // ARKit uses the same convention as OpenGL for camera space,
+            // but we need to ensure the transform_matrix is camera-to-world
+            let paddedIndex = String(format: "%05d", frame.index)
+            let entry: [String: Any] = [
+                "file_path": "images/frame_\(paddedIndex).jpg",
+                "depth_file_path": "depth/frame_\(paddedIndex).png",
+                "transform_matrix": [
+                    [mat.columns.0.x, mat.columns.0.y, mat.columns.0.z, mat.columns.0.w],
+                    [mat.columns.1.x, mat.columns.1.y, mat.columns.1.z, mat.columns.1.w],
+                    [mat.columns.2.x, mat.columns.2.y, mat.columns.2.z, mat.columns.2.w],
+                    [mat.columns.3.x, mat.columns.3.y, mat.columns.3.z, mat.columns.3.w]
+                ]
+            ]
+            frameEntries.append(entry)
+        }
+
+        let transforms: [String: Any] = [
+            "camera_model": "OPENCV",
+            "fl_x": intrinsics.fx,
+            "fl_y": intrinsics.fy,
+            "cx": intrinsics.cx,
+            "cy": intrinsics.cy,
+            "w": imageWidth,
+            "h": imageHeight,
+            "frames": frameEntries
+        ]
+
+        let jsonPath = directory.appendingPathComponent("transforms.json")
+        if let jsonData = try? JSONSerialization.data(withJSONObject: transforms, options: .prettyPrinted) {
+            try? jsonData.write(to: jsonPath)
+        }
+    }
+
+    // MARK: - Image Conversion
+
+    private func pixelBufferToJPEG(_ pixelBuffer: CVPixelBuffer) -> Data? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+        let uiImage = UIImage(cgImage: cgImage)
+        return uiImage.jpegData(compressionQuality: 0.85)
+    }
+
+    private func depthMapToPNG16(_ depthBuffer: CVPixelBuffer) -> Data? {
+        CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
+
+        let width = CVPixelBufferGetWidth(depthBuffer)
+        let height = CVPixelBufferGetHeight(depthBuffer)
+        guard let baseAddress = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
+
+        let floatBuffer = baseAddress.assumingMemoryBound(to: Float32.self)
+
+        // Convert float meters to UInt16 millimeters
+        var uint16Buffer = [UInt16](repeating: 0, count: width * height)
+        for i in 0..<(width * height) {
+            let meters = floatBuffer[i]
+            uint16Buffer[i] = meters.isFinite ? UInt16(min(max(meters * 1000.0, 0), 65535)) : 0
+        }
+
+        // Create 16-bit grayscale CGImage
+        let data = Data(bytes: uint16Buffer, count: uint16Buffer.count * 2)
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cgImage = CGImage(
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 16,
+                  bitsPerPixel: 16,
+                  bytesPerRow: width * 2,
+                  space: CGColorSpaceCreateDeviceGray(),
+                  bitmapInfo: CGBitmapInfo(rawValue: 0),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: false,
+                  intent: .defaultIntent
+              ) else { return nil }
+
+        let uiImage = UIImage(cgImage: cgImage)
+        return uiImage.pngData()
+    }
+
+    /// Cleanup temp files.
+    func cleanup() {
+        if let dir = captureDir {
+            try? FileManager.default.removeItem(at: dir)
+        }
+        captureDir = nil
+    }
+
+    /// Compute how far the camera moved between two transforms (translation distance + rotation).
+    private func cameraMovement(from a: simd_float4x4, to b: simd_float4x4) -> Float {
+        let posA = SIMD3<Float>(a.columns.3.x, a.columns.3.y, a.columns.3.z)
+        let posB = SIMD3<Float>(b.columns.3.x, b.columns.3.y, b.columns.3.z)
+        let translationDist = simd_length(posB - posA)
+
+        // Also account for rotation (dot product of forward vectors)
+        let fwdA = SIMD3<Float>(a.columns.2.x, a.columns.2.y, a.columns.2.z)
+        let fwdB = SIMD3<Float>(b.columns.2.x, b.columns.2.y, b.columns.2.z)
+        let rotationChange = 1.0 - abs(simd_dot(simd_normalize(fwdA), simd_normalize(fwdB)))
+
+        return translationDist + rotationChange * 0.3
+    }
+}

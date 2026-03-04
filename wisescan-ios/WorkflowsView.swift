@@ -3,6 +3,7 @@ import SwiftUI
 struct WorkflowsView: View {
     @Environment(ScanStore.self) private var scanStore
     @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
+    @State private var showSettings = false
 
     var body: some View {
         NavigationStack {
@@ -86,6 +87,16 @@ struct WorkflowsView: View {
             }
             .navigationTitle("WORKFLOWS")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { showSettings = true }) {
+                        Image(systemName: "gearshape")
+                    }
+                }
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView()
+            }
             .preferredColorScheme(.dark)
         }
     }
@@ -212,7 +223,8 @@ struct ScanCard: View {
         onUpdate(updated)
 
         let ext = selectedFormat.rawValue.lowercased()
-        let filename = "wisescan_\(scan.name.replacingOccurrences(of: " ", with: "_"))_\(scan.id.uuidString.prefix(8)).\(ext)"
+        let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
+        let filename = "wisescan_\(scanName)_\(scan.id.uuidString.prefix(8)).\(ext == "raw" ? "zip" : ext)"
 
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         guard let url = URL(string: baseURLString + filename) else {
@@ -221,6 +233,61 @@ struct ScanCard: View {
             return
         }
 
+        // For RAW format, zip the raw data directory
+        if selectedFormat == .raw {
+            guard let rawPath = scan.rawDataPath else {
+                updated.uploadStatus = .failed("No raw data")
+                onUpdate(updated)
+                return
+            }
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                let zipURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("\(scanName)_\(scan.id.uuidString.prefix(8)).zip")
+
+                // Use NSFileCoordinator to create a ZIP
+                var error: NSError?
+                let coordinator = NSFileCoordinator()
+                coordinator.coordinate(readingItemAt: rawPath, options: .forUploading, error: &error) { zipTempURL in
+                    try? FileManager.default.copyItem(at: zipTempURL, to: zipURL)
+                }
+
+                guard error == nil, let zipData = try? Data(contentsOf: zipURL) else {
+                    DispatchQueue.main.async {
+                        var result = scan
+                        result.selectedFormat = selectedFormat
+                        result.uploadStatus = .failed("Zip failed")
+                        onUpdate(result)
+                    }
+                    return
+                }
+
+                // Upload the ZIP
+                var request = URLRequest(url: url)
+                request.httpMethod = "PUT"
+                request.setValue("application/zip", forHTTPHeaderField: "Content-Type")
+
+                let task = URLSession.shared.uploadTask(with: request, from: zipData) { _, response, uploadError in
+                    try? FileManager.default.removeItem(at: zipURL)
+                    DispatchQueue.main.async {
+                        var result = scan
+                        result.selectedFormat = selectedFormat
+                        if let uploadError = uploadError {
+                            result.uploadStatus = .failed(uploadError.localizedDescription)
+                        } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
+                            result.uploadStatus = .success
+                        } else {
+                            result.uploadStatus = .failed("Server error")
+                        }
+                        onUpdate(result)
+                    }
+                }
+                task.resume()
+            }
+            return
+        }
+
+        // Standard format upload (OBJ, PLY, USDZ)
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
