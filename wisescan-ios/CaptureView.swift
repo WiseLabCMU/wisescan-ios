@@ -32,9 +32,9 @@ struct CaptureView: View {
             VStack {
                 // Top Controls
                 HStack {
-                    // Privacy Filter Toggle
+                    // Remove Humans Toggle
                     HStack {
-                        Text("Privacy Filter")
+                        Text("Remove Humans")
                             .font(.subheadline)
                             .foregroundColor(.white)
                         Toggle("", isOn: $isPrivacyFilterOn)

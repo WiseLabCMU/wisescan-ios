@@ -3,6 +3,11 @@ import SwiftUI
 struct DashboardView: View {
     @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
     @State private var showSettings = false
+    @State private var serverStatus: ServerStatus = .unknown
+
+    enum ServerStatus {
+        case unknown, checking, available, unavailable
+    }
 
     var body: some View {
         NavigationStack {
@@ -15,19 +20,61 @@ struct DashboardView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
-                        Text("STATIC UPLOAD PATH")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
-                            .padding(.horizontal)
 
-                        TextField("Upload URL", text: $uploadURL)
-                            .padding()
-                            .background(.ultraThinMaterial)
-                            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))
-                            .cornerRadius(16)
-                            .padding(.horizontal)
-                            .foregroundColor(.white)
+                        // Upload Server Status Card
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Image(systemName: serverStatusIcon)
+                                    .foregroundColor(serverStatusColor)
+                                    .font(.title2)
+                                    .frame(width: 40)
 
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Upload Server")
+                                        .font(.headline)
+                                        .foregroundColor(.white)
+                                    Text(serverStatusLabel)
+                                        .font(.caption)
+                                        .foregroundColor(serverStatusColor)
+                                }
+                                Spacer()
+
+                                Button(action: { checkServer() }) {
+                                    HStack(spacing: 4) {
+                                        if serverStatus == .checking {
+                                            ProgressView()
+                                                .scaleEffect(0.7)
+                                                .tint(.cyan)
+                                        }
+                                        Text(serverStatus == .checking ? "Checking…" : "Test")
+                                            .font(.subheadline).bold()
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 8)
+                                    .background(Color.cyan.opacity(0.2))
+                                    .foregroundColor(.cyan)
+                                    .cornerRadius(8)
+                                }
+                                .disabled(serverStatus == .checking)
+                            }
+
+                            Text(uploadURL)
+                                .font(.caption2)
+                                .foregroundColor(.gray)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .padding()
+                        .background(.ultraThinMaterial)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(serverStatusBorderColor, lineWidth: 1)
+                        )
+                        .cornerRadius(16)
+                        .padding(.horizontal)
+
+                        // Local Servers (mDNS) — not yet implemented
+                        /*
                         Text("LOCAL SERVERS (mDNS)")
                             .font(.subheadline)
                             .foregroundColor(.gray)
@@ -37,6 +84,7 @@ struct DashboardView: View {
                         ServerCard(name: "Scanner_Pro_3D", model: "Alpha-9 | 192.168.1.45", isConnected: true)
                         ServerCard(name: "Studio_Scan_X", model: "X100 | 192.168.1.102", isConnected: false)
                         ServerCard(name: "Lab_Scanner_Beta", model: "Beta-3 | 192.168.1.115", isConnected: false)
+                        */
 
                         Text("WEARABLE DEVICES")
                             .font(.subheadline)
@@ -44,7 +92,10 @@ struct DashboardView: View {
                             .padding(.horizontal)
                             .padding(.top, 16)
 
+                        // Wearable stubs commented out — keep Add button
+                        /*
                         WearableCard(name: "Vision Glass S", deviceId: "VG-S02948", isPaired: true)
+                        */
 
                         Button(action: {}) {
                             HStack {
@@ -79,10 +130,76 @@ struct DashboardView: View {
                 SettingsView()
             }
             .preferredColorScheme(.dark)
+            .onAppear { checkServer() }
         }
+    }
+
+    // MARK: - Server Status Helpers
+
+    private var serverStatusIcon: String {
+        switch serverStatus {
+        case .unknown: return "questionmark.circle"
+        case .checking: return "arrow.clockwise.circle"
+        case .available: return "checkmark.circle.fill"
+        case .unavailable: return "xmark.circle.fill"
+        }
+    }
+
+    private var serverStatusColor: Color {
+        switch serverStatus {
+        case .unknown: return .gray
+        case .checking: return .cyan
+        case .available: return .green
+        case .unavailable: return .red
+        }
+    }
+
+    private var serverStatusBorderColor: Color {
+        switch serverStatus {
+        case .available: return Color.green.opacity(0.5)
+        case .unavailable: return Color.red.opacity(0.3)
+        default: return Color.white.opacity(0.1)
+        }
+    }
+
+    private var serverStatusLabel: String {
+        switch serverStatus {
+        case .unknown: return "Not tested"
+        case .checking: return "Checking…"
+        case .available: return "Server reachable"
+        case .unavailable: return "Server unreachable"
+        }
+    }
+
+    private func checkServer() {
+        guard let url = URL(string: uploadURL) else {
+            serverStatus = .unavailable
+            return
+        }
+
+        serverStatus = .checking
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 5
+
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            DispatchQueue.main.async {
+                if let httpResponse = response as? HTTPURLResponse,
+                   (200...499).contains(httpResponse.statusCode) {
+                    // Any HTTP response means server is reachable
+                    // (even 4xx means the server itself is running)
+                    serverStatus = .available
+                } else {
+                    serverStatus = .unavailable
+                }
+            }
+        }.resume()
     }
 }
 
+// Kept for future use but currently not displayed
+/*
 struct ServerCard: View {
     var name: String
     var model: String
@@ -191,6 +308,7 @@ struct WearableCard: View {
         .padding(.horizontal)
     }
 }
+*/
 
 #Preview {
     DashboardView()

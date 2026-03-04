@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @AppStorage("rawOverlapMax") private var rawOverlapMax: Double = 60.0
     @AppStorage("rawRejectBlur") private var rawRejectBlur: Bool = true
+    @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -14,6 +15,23 @@ struct SettingsView: View {
                     .ignoresSafeArea()
 
                 List {
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            TextField("Upload URL", text: $uploadURL)
+                                .foregroundColor(.white)
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                                .keyboardType(.URL)
+                            Text("HTTP(S) endpoint for scan uploads. Used by the Upload button on scan cards.")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                        .padding(.vertical, 4)
+                    } header: {
+                        Text("UPLOAD SERVER")
+                    }
+                    .listRowBackground(Color.white.opacity(0.05))
+
                     Section {
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
@@ -53,7 +71,7 @@ struct SettingsView: View {
                         guideRow(
                             icon: "1.circle.fill",
                             title: "Capture",
-                            text: "Point your device at a scene. Toggle Privacy Filter to exclude people. Tap the capture button to start recording — the mesh overlay shows scanning progress in real-time."
+                            text: "Point your device at a scene. Toggle Remove Humans to exclude people from the scan. Tap the capture button to start recording — the mesh overlay shows scanning progress in real-time."
                         )
                         guideRow(
                             icon: "2.circle.fill",

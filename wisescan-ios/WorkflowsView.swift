@@ -39,15 +39,24 @@ struct WorkflowsView: View {
                             }
                         }
 
-                        // Workflows List
-                        HStack {
-                            Text("WORKFLOWS")
+                        // Workflows — not yet implemented
+                        VStack(spacing: 12) {
+                            Image(systemName: "hammer.fill")
+                                .font(.title2)
+                                .foregroundColor(.gray)
+                            Text("Server Workflows Coming Soon")
                                 .font(.subheadline)
                                 .foregroundColor(.gray)
-                            Spacer()
+                            Text("Automated processing pipelines (Quick Mesh, Gaussian Splat, Spatial Indexing) will appear here once server orchestration is connected.")
+                                .font(.caption)
+                                .foregroundColor(.gray.opacity(0.7))
+                                .multilineTextAlignment(.center)
                         }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 20)
                         .padding(.horizontal)
 
+                        /*
                         VStack(spacing: 16) {
                             WorkflowCard(
                                 icon: "icloud.and.arrow.up",
@@ -81,6 +90,7 @@ struct WorkflowsView: View {
                             )
                         }
                         .padding(.horizontal)
+                        */
                     }
                     .padding(.vertical)
                 }
