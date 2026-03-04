@@ -93,6 +93,10 @@ struct SettingsView: View {
                             format: "RAW",
                             desc: "Nerfstudio-compatible bundle: RGB images, 16-bit depth maps, and camera poses (transforms.json). Use for NeRF/3DGS reconstruction."
                         )
+                        formatRow(
+                            format: "PLYCM",
+                            desc: "Polycam-compatible bundle: RGB images, depth maps, per-frame camera JSONs (cameras/), and mesh_info.json. Compatible with Polycam's raw data import."
+                        )
                     } header: {
                         Text("EXPORT FORMATS")
                     }

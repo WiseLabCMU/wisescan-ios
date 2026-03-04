@@ -248,7 +248,8 @@ struct ScanCard: View {
 
         let ext = selectedFormat.rawValue.lowercased()
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
-        let filename = "wisescan_\(scanName)_\(scan.id.uuidString.prefix(8)).\(ext == "raw" ? "zip" : ext)"
+        let isRawType = selectedFormat == .raw || selectedFormat == .polycam
+        let filename = "wisescan_\(scanName)_\(scan.id.uuidString.prefix(8)).\(isRawType ? "zip" : ext)"
 
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         guard let url = URL(string: baseURLString + filename) else {
@@ -257,8 +258,8 @@ struct ScanCard: View {
             return
         }
 
-        // For RAW format, zip the raw data directory
-        if selectedFormat == .raw {
+        // For RAW/Polycam format, zip the raw data directory
+        if isRawType {
             guard let rawPath = scan.rawDataPath else {
                 updated.uploadStatus = .failed("No raw data")
                 onUpdate(updated)
@@ -336,9 +337,10 @@ struct ScanCard: View {
     private func saveToFiles() {
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
         let ext = selectedFormat.rawValue.lowercased()
-        let filename = "wisescan_\(scanName)_\(scan.id.uuidString.prefix(8)).\(ext == "raw" ? "zip" : ext)"
+        let isRawType = selectedFormat == .raw || selectedFormat == .polycam
+        let filename = "wisescan_\(scanName)_\(scan.id.uuidString.prefix(8)).\(isRawType ? "zip" : ext)"
 
-        if selectedFormat == .raw {
+        if isRawType {
             guard let rawPath = scan.rawDataPath else { return }
             DispatchQueue.global(qos: .userInitiated).async {
                 let zipURL = FileManager.default.temporaryDirectory

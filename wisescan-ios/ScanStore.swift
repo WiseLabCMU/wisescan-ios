@@ -31,6 +31,7 @@ enum ExportFormat: String, CaseIterable {
     case ply = "PLY"
     case usdz = "USDZ"
     case raw = "RAW"
+    case polycam = "PLYCM"
 }
 
 enum UploadStatus: Equatable {

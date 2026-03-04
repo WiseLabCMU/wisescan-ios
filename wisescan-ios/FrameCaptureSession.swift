@@ -11,6 +11,8 @@ class FrameCaptureSession {
     private var timer: Timer?
     private var imagesDir: URL?
     private var depthDir: URL?
+    private var camerasDir: URL?
+    private var confidenceDir: URL?
     private var frames: [FrameData] = []
     private var globalIntrinsics: CameraIntrinsics?
     private var imageWidth: Int = 0
@@ -44,13 +46,19 @@ class FrameCaptureSession {
             .appendingPathComponent("wisescan_raw_\(UUID().uuidString)", isDirectory: true)
         let imagesPath = tempDir.appendingPathComponent("images", isDirectory: true)
         let depthPath = tempDir.appendingPathComponent("depth", isDirectory: true)
+        let camerasPath = tempDir.appendingPathComponent("cameras", isDirectory: true)
+        let confidencePath = tempDir.appendingPathComponent("confidence", isDirectory: true)
 
         try? FileManager.default.createDirectory(at: imagesPath, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: depthPath, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: camerasPath, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: confidencePath, withIntermediateDirectories: true)
 
         self.captureDir = tempDir
         self.imagesDir = imagesPath
         self.depthDir = depthPath
+        self.camerasDir = camerasPath
+        self.confidenceDir = confidencePath
         self.frames = []
         self.frameCount = 0
         self.globalIntrinsics = nil
@@ -66,15 +74,18 @@ class FrameCaptureSession {
         }
     }
 
-    /// Stop capturing and write transforms.json.
+    /// Stop capturing and write export metadata.
     func stop() -> URL? {
         timer?.invalidate()
         timer = nil
 
         guard let captureDir = captureDir else { return nil }
 
-        // Write transforms.json
+        // Write Nerfstudio transforms.json
         writeTransformsJSON(to: captureDir)
+
+        // Write Polycam per-frame camera JSONs
+        writePolycamCameras(to: captureDir)
 
         return captureDir
     }
@@ -212,6 +223,52 @@ class FrameCaptureSession {
         let jsonPath = directory.appendingPathComponent("transforms.json")
         if let jsonData = try? JSONSerialization.data(withJSONObject: transforms, options: .prettyPrinted) {
             try? jsonData.write(to: jsonPath)
+        }
+    }
+
+    // MARK: - Polycam Camera JSONs
+
+    private func writePolycamCameras(to directory: URL) {
+        guard let intrinsics = globalIntrinsics,
+              let camerasDir = camerasDir else { return }
+
+        for frame in frames {
+            let mat = frame.transform
+            let paddedIndex = String(format: "%05d", frame.index)
+
+            // Polycam uses t_00..t_23 (3×4 flattened, row-major, omitting last row [0,0,0,1])
+            // ARKit transform is column-major, so we transpose
+            let cameraJSON: [String: Any] = [
+                "t_00": mat.columns.0.x, "t_01": mat.columns.1.x, "t_02": mat.columns.2.x, "t_03": mat.columns.3.x,
+                "t_10": mat.columns.0.y, "t_11": mat.columns.1.y, "t_12": mat.columns.2.y, "t_13": mat.columns.3.y,
+                "t_20": mat.columns.0.z, "t_21": mat.columns.1.z, "t_22": mat.columns.2.z, "t_23": mat.columns.3.z,
+                "fx": intrinsics.fx,
+                "fy": intrinsics.fy,
+                "cx": intrinsics.cx,
+                "cy": intrinsics.cy,
+                "width": imageWidth,
+                "height": imageHeight,
+                "blur_score": 1.0, // frames passed blur rejection are assumed sharp
+                "image_path": "images/frame_\(paddedIndex).jpg",
+                "depth_path": "depth/frame_\(paddedIndex).png"
+            ]
+
+            let jsonPath = camerasDir.appendingPathComponent("frame_\(paddedIndex).json")
+            if let jsonData = try? JSONSerialization.data(withJSONObject: cameraJSON, options: .prettyPrinted) {
+                try? jsonData.write(to: jsonPath)
+            }
+        }
+
+        // Write mesh_info.json with basic metadata
+        let meshInfo: [String: Any] = [
+            "num_frames": frames.count,
+            "image_width": imageWidth,
+            "image_height": imageHeight,
+            "coordinate_system": "arkit"
+        ]
+        let meshInfoPath = directory.appendingPathComponent("mesh_info.json")
+        if let jsonData = try? JSONSerialization.data(withJSONObject: meshInfo, options: .prettyPrinted) {
+            try? jsonData.write(to: meshInfoPath)
         }
     }
 
