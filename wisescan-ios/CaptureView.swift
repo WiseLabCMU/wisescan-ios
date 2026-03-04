@@ -2,18 +2,21 @@ import SwiftUI
 import ARKit
 
 struct CaptureView: View {
+    @Environment(ScanStore.self) private var scanStore
+    @State private var scanStats = ScanStats()
     @State private var isPrivacyFilterOn = true
     @State private var mode = 1 // 0 = Streaming, 1 = Capture
-    @State private var isUploading = false
-    @State private var uploadMessage: String? = nil
     @State private var currentARSession: ARSession? = nil
-
-    @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
+    @State private var saveMessage: String? = nil
+    @State private var isRecording = false
+    @State private var recordingSeconds = 0
+    @State private var recordingTimer: Timer? = nil
+    @Binding var selectedTab: Int
 
     var body: some View {
         ZStack {
             // Live ARKit Scene Reconstruction View
-            ARCoverageView(arSession: $currentARSession)
+            ARCoverageView(arSession: $currentARSession, scanStats: scanStats)
                 .ignoresSafeArea()
 
             VStack {
@@ -35,6 +38,24 @@ struct CaptureView: View {
 
                     Spacer()
 
+                    // Recording indicator
+                    if isRecording {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(Color.red)
+                                .frame(width: 10, height: 10)
+                            Text("REC \(formattedTime)")
+                                .font(.caption).bold()
+                                .foregroundColor(.white)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.red.opacity(0.3))
+                        .cornerRadius(20)
+                    }
+
+                    Spacer()
+
                     // Mode Switcher
                     Picker("Mode", selection: $mode) {
                         Text("Streaming").tag(0)
@@ -44,6 +65,7 @@ struct CaptureView: View {
                     .frame(width: 160)
                     .background(.ultraThinMaterial)
                     .cornerRadius(8)
+                    .disabled(isRecording)
                 }
                 .padding()
 
@@ -52,25 +74,31 @@ struct CaptureView: View {
                 // Bottom HUD and Capture Button
                 VStack {
                     ZStack(alignment: .bottom) {
-                        // HUD background
+                        // HUD background with live stats
                         HStack {
-                            Text("18.4 MB | 124K Polygons")
+                            Text("\(scanStats.formattedSize) | \(scanStats.formattedPolygons) Polygons")
                                 .font(.caption)
                                 .foregroundColor(.white)
 
                             Spacer()
 
                             VStack(alignment: .trailing, spacing: 4) {
-                                Text("Scan Quality: 88%")
+                                Text("Scan Quality: \(scanStats.qualityPercent)%")
                                     .font(.caption)
                                     .foregroundColor(.white)
-                                // Fake progress bar
-                                HStack(spacing: 2) {
-                                    Rectangle().fill(Color.cyan).frame(width: 20, height: 4)
-                                    Rectangle().fill(Color.green).frame(width: 20, height: 4)
-                                    Rectangle().fill(Color.yellow).frame(width: 20, height: 4)
+                                // Quality bar
+                                GeometryReader { geo in
+                                    ZStack(alignment: .leading) {
+                                        Rectangle()
+                                            .fill(Color.white.opacity(0.2))
+                                            .frame(height: 4)
+                                        Rectangle()
+                                            .fill(qualityColor)
+                                            .frame(width: geo.size.width * scanStats.averageQuality, height: 4)
+                                    }
+                                    .cornerRadius(2)
                                 }
-                                .cornerRadius(2)
+                                .frame(width: 60, height: 4)
                             }
                         }
                         .padding()
@@ -86,38 +114,39 @@ struct CaptureView: View {
                         // Capture Button overlaying HUD
                         Button(action: {
                             if mode == 1 {
-                                uploadPointCloudData()
+                                toggleRecording()
                             }
                         }) {
                             ZStack {
                                 Circle()
                                     .fill(.ultraThinMaterial)
                                     .frame(width: 80, height: 80)
-                                    .overlay(Circle().stroke(Color.cyan, lineWidth: 2))
+                                    .overlay(Circle().stroke(isRecording ? Color.red : Color.cyan, lineWidth: 2))
 
-                                if isUploading {
-                                    ProgressView()
-                                        .tint(.white)
+                                if isRecording {
+                                    // Stop icon (rounded square)
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(Color.red)
+                                        .frame(width: 28, height: 28)
                                 } else {
                                     Circle()
                                         .fill(mode == 1 ? Color.white : Color.red)
                                         .frame(width: 30, height: 30)
                                 }
 
-                                if let msg = uploadMessage {
+                                if let msg = saveMessage {
                                     Text(msg)
                                         .font(.caption2).bold()
                                         .foregroundColor(.white)
-                                        .offset(y: 35)
+                                        .offset(y: 50)
                                 } else {
-                                    Text("00:14")
-                                        .font(.caption2).bold()
-                                        .foregroundColor(.white)
-                                        .offset(y: 24)
+                                    Text(isRecording ? "Tap to stop" : (mode == 1 ? "Tap to scan" : ""))
+                                        .font(.caption2)
+                                        .foregroundColor(.white.opacity(0.7))
+                                        .offset(y: 50)
                                 }
                             }
                         }
-                        .disabled(isUploading)
                         .offset(y: -20)
                     }
                 }
@@ -127,54 +156,74 @@ struct CaptureView: View {
         .preferredColorScheme(.dark)
     }
 
-    private func uploadPointCloudData() {
-        guard mode == 1 else { return } // Only upload in Capture mode
+    private var qualityColor: Color {
+        let q = scanStats.averageQuality
+        if q < 0.3 { return .red }
+        if q < 0.6 { return .yellow }
+        return .green
+    }
 
-        guard let objData = ARCoverageView.exportPointCloudOBJ(from: currentARSession), !objData.isEmpty else {
-            uploadMessage = "No Mesh Data"
+    private var formattedTime: String {
+        let minutes = recordingSeconds / 60
+        let seconds = recordingSeconds % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func toggleRecording() {
+        if isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
+
+    private func startRecording() {
+        isRecording = true
+        recordingSeconds = 0
+        saveMessage = nil
+
+        // Start a timer to track recording duration
+        recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            recordingSeconds += 1
+        }
+    }
+
+    private func stopRecording() {
+        isRecording = false
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+
+        // Export and save the scan
+        guard let result = ARCoverageView.exportMeshOBJ(from: currentARSession),
+              !result.data.isEmpty else {
+            saveMessage = "No Mesh Data"
+            clearMessage()
             return
         }
 
-        isUploading = true
-        uploadMessage = "Uploading..."
+        let _ = scanStore.addScan(
+            meshData: result.data,
+            vertexCount: result.vertexCount,
+            faceCount: result.faceCount
+        )
 
-        let filename = "wisescan_ios_mesh_\(UUID().uuidString).obj"
+        saveMessage = "Scan Saved!"
 
-        // Ensure the base URL ends with a slash before appending the filename
-        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
-        guard let url = URL(string: baseURLString + filename) else {
-            uploadMessage = "Invalid URL"
-            isUploading = false
-            return
+        // Switch to Workflows tab after a brief delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            selectedTab = 2
+            saveMessage = nil
         }
+    }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "PUT"
-        request.setValue("text/plain", forHTTPHeaderField: "Content-Type")
-
-        let task = URLSession.shared.uploadTask(with: request, from: objData) { data, response, error in
-            DispatchQueue.main.async {
-                self.isUploading = false
-                if let error = error {
-                    self.uploadMessage = "Error"
-                    print("Upload error: \(error.localizedDescription)")
-                } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-                    self.uploadMessage = "Success!"
-                } else {
-                    self.uploadMessage = "Failed"
-                }
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                    if self.uploadMessage == "Success!" || self.uploadMessage == "Failed" || self.uploadMessage == "Error" {
-                        self.uploadMessage = nil
-                    }
-                }
-            }
+    private func clearMessage() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            saveMessage = nil
         }
-        task.resume()
     }
 }
 
 #Preview {
-    CaptureView()
+    CaptureView(selectedTab: .constant(1))
+        .environment(ScanStore())
 }

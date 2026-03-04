@@ -5,6 +5,7 @@ import ARKit
 struct ARCoverageView: UIViewRepresentable {
     // Expose the active session to the parent view for exporting
     @Binding var arSession: ARSession?
+    var scanStats: ScanStats
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
@@ -21,10 +22,15 @@ struct ARCoverageView: UIViewRepresentable {
         config.environmentTexturing = .automatic
 
         // Attach the delegate to handle mesh updates
+        context.coordinator.scanStats = scanStats
+        context.coordinator.arView = arView
         arView.session.delegate = context.coordinator
 
         // Start the AR session
         arView.session.run(config)
+
+        // Enable built-in scene understanding overlay
+        arView.debugOptions.insert(.showSceneUnderstanding)
 
         // Pass the session back up via binding
         DispatchQueue.main.async {
@@ -44,6 +50,8 @@ struct ARCoverageView: UIViewRepresentable {
         // Keep track of mesh anchors to visualize coverage improving
         // Key: Anchor ID, Value: (Entity, UpdateCount)
         private var meshEntities: [UUID: (entity: ModelEntity, updateCount: Int)] = [:]
+        var scanStats: ScanStats?
+        weak var arView: ARView?
 
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
             processMeshAnchors(anchors, in: session)
@@ -62,10 +70,11 @@ struct ARCoverageView: UIViewRepresentable {
                     }
                 }
             }
+            updateStats(in: session)
         }
 
         private func processMeshAnchors(_ anchors: [ARAnchor], in session: ARSession) {
-            guard let arView = session.delegate as? ARView else { return }
+            guard let arView = arView else { return }
 
             for anchor in anchors {
                 guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
@@ -92,26 +101,61 @@ struct ARCoverageView: UIViewRepresentable {
                     var material = SimpleMaterial(color: currentColor, isMetallic: false)
                     material.triangleFillMode = .lines // Render as wireframe grid
 
-                    if let existingRecord = meshEntities[meshAnchor.identifier] {
-                        // Update existing entity
-                        existingRecord.entity.model?.mesh = meshResource
-                        existingRecord.entity.model?.materials = [material]
-                        existingRecord.entity.transform.matrix = meshAnchor.transform
-                        meshEntities[meshAnchor.identifier] = (existingRecord.entity, newCount)
-                    } else {
-                        // Create new entity
-                        let entity = ModelEntity(mesh: meshResource, materials: [material])
-                        entity.transform.matrix = meshAnchor.transform
+                    DispatchQueue.main.async {
+                        if let existingRecord = self.meshEntities[meshAnchor.identifier] {
+                            // Update existing entity
+                            existingRecord.entity.model?.mesh = meshResource
+                            existingRecord.entity.model?.materials = [material]
+                            self.meshEntities[meshAnchor.identifier] = (existingRecord.entity, newCount)
+                        } else {
+                            // Create new entity — no transform needed, AnchorEntity handles positioning
+                            let entity = ModelEntity(mesh: meshResource, materials: [material])
 
-                        let anchorEntity = AnchorEntity(anchor: meshAnchor)
-                        anchorEntity.addChild(entity)
-                        arView.scene.addAnchor(anchorEntity)
+                            let anchorEntity = AnchorEntity(anchor: meshAnchor)
+                            anchorEntity.addChild(entity)
+                            arView.scene.addAnchor(anchorEntity)
 
-                        meshEntities[meshAnchor.identifier] = (entity, newCount)
+                            self.meshEntities[meshAnchor.identifier] = (entity, newCount)
+                        }
                     }
 
                 } catch {
                     print("Error generating mesh from ARMeshAnchor: \(error)")
+                }
+            }
+
+            updateStats(in: session)
+        }
+
+        private func updateStats(in session: ARSession) {
+            guard let scanStats = scanStats,
+                  let currentFrame = session.currentFrame else { return }
+
+            var totalVerts = 0
+            var totalFaces = 0
+            var totalUpdates = 0
+            var anchorCount = 0
+
+            for anchor in currentFrame.anchors {
+                guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
+                totalVerts += meshAnchor.geometry.vertices.count
+                totalFaces += meshAnchor.geometry.faces.count
+                anchorCount += 1
+
+                if let record = meshEntities[meshAnchor.identifier] {
+                    totalUpdates += record.updateCount
+                }
+            }
+
+            DispatchQueue.main.async {
+                scanStats.totalVertices = totalVerts
+                scanStats.totalFaces = totalFaces
+                // Quality: average update count per anchor, capped at 10 updates = 100%
+                if anchorCount > 0 {
+                    let avgUpdates = Double(totalUpdates) / Double(anchorCount)
+                    scanStats.averageQuality = min(avgUpdates / 10.0, 1.0)
+                } else {
+                    scanStats.averageQuality = 0.0
                 }
             }
         }
@@ -150,11 +194,13 @@ struct ARCoverageView: UIViewRepresentable {
     }
 
     // Static helper to extract all active mesh geometry into an OBJ string
-    static func exportPointCloudOBJ(from session: ARSession?) -> Data? {
+    static func exportMeshOBJ(from session: ARSession?) -> (data: Data, vertexCount: Int, faceCount: Int)? {
         guard let session = session, let currentFrame = session.currentFrame else { return nil }
 
         var objData = ""
         var vertexOffset = 1
+        var totalVertices = 0
+        var totalFaces = 0
 
         for anchor in currentFrame.anchors {
             guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
@@ -173,6 +219,7 @@ struct ARCoverageView: UIViewRepresentable {
 
                 objData += "v \(worldPos.x) \(worldPos.y) \(worldPos.z)\n"
             }
+            totalVertices += vertices.count
 
             // Extract faces
             let faces = geometry.faces
@@ -189,10 +236,12 @@ struct ARCoverageView: UIViewRepresentable {
 
                 objData += "f \(v1) \(v2) \(v3)\n"
             }
+            totalFaces += faces.count
 
             vertexOffset += vertices.count
         }
 
-        return objData.data(using: .utf8)
+        guard let data = objData.data(using: .utf8), !data.isEmpty else { return nil }
+        return (data, totalVertices, totalFaces)
     }
 }

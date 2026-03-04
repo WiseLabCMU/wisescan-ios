@@ -65,7 +65,7 @@ struct DashboardView: View {
                     .padding(.vertical)
                 }
             }
-            .navigationTitle("Scan3D Connect")
+            .navigationTitle("WiSEscan Connect")
             .navigationBarTitleDisplayMode(.large)
             .preferredColorScheme(.dark)
         }
