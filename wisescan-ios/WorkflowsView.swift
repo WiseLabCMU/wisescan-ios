@@ -110,6 +110,8 @@ struct ScanCard: View {
     var onUpdate: (CapturedScan) -> Void
 
     @State private var selectedFormat: ExportFormat
+    @State private var showShareSheet = false
+    @State private var exportFileURL: URL? = nil
 
     init(scan: CapturedScan, uploadURL: String, onUpdate: @escaping (CapturedScan) -> Void) {
         self.scan = scan
@@ -162,20 +164,37 @@ struct ScanCard: View {
                     }
                 }
 
-                // Upload button
-                Button(action: { uploadScan() }) {
-                    HStack {
-                        Image(systemName: "icloud.and.arrow.up")
-                        Text("Upload \(selectedFormat.rawValue)")
-                            .font(.subheadline).bold()
+                // Action buttons
+                HStack(spacing: 10) {
+                    // Save to Files button
+                    Button(action: { saveToFiles() }) {
+                        HStack {
+                            Image(systemName: "square.and.arrow.down")
+                            Text("Save")
+                                .font(.subheadline).bold()
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color.cyan.opacity(0.8))
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(scan.uploadStatus == .uploading ? Color.gray : Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
+
+                    // Upload button
+                    Button(action: { uploadScan() }) {
+                        HStack {
+                            Image(systemName: "icloud.and.arrow.up")
+                            Text("Upload")
+                                .font(.subheadline).bold()
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(scan.uploadStatus == .uploading ? Color.gray : Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                    }
+                    .disabled(scan.uploadStatus == .uploading || scan.uploadStatus == .success)
                 }
-                .disabled(scan.uploadStatus == .uploading || scan.uploadStatus == .success)
             }
             .padding()
         }
@@ -183,6 +202,11 @@ struct ScanCard: View {
         .cornerRadius(16)
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))
         .padding(.horizontal)
+        .sheet(isPresented: $showShareSheet) {
+            if let fileURL = exportFileURL {
+                ShareSheet(activityItems: [fileURL])
+            }
+        }
     }
 
     @ViewBuilder
@@ -308,6 +332,52 @@ struct ScanCard: View {
         }
         task.resume()
     }
+
+    private func saveToFiles() {
+        let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
+        let ext = selectedFormat.rawValue.lowercased()
+        let filename = "wisescan_\(scanName)_\(scan.id.uuidString.prefix(8)).\(ext == "raw" ? "zip" : ext)"
+
+        if selectedFormat == .raw {
+            guard let rawPath = scan.rawDataPath else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let zipURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(filename)
+                try? FileManager.default.removeItem(at: zipURL) // clean up existing
+
+                var error: NSError?
+                let coordinator = NSFileCoordinator()
+                coordinator.coordinate(readingItemAt: rawPath, options: .forUploading, error: &error) { zipTempURL in
+                    try? FileManager.default.copyItem(at: zipTempURL, to: zipURL)
+                }
+
+                if error == nil {
+                    DispatchQueue.main.async {
+                        self.exportFileURL = zipURL
+                        self.showShareSheet = true
+                    }
+                }
+            }
+        } else {
+            let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+            try? scan.meshData.write(to: fileURL)
+            self.exportFileURL = fileURL
+            self.showShareSheet = true
+        }
+    }
+}
+
+// MARK: - Share Sheet
+
+struct ShareSheet: UIViewControllerRepresentable {
+    var activityItems: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 // MARK: - Workflow Card
