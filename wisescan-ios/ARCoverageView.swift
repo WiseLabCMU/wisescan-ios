@@ -367,66 +367,105 @@ struct ARCoverageView: UIViewRepresentable {
         return (data, totalVertices, totalFaces)
     }
 
-    /// Samples RGB colors from the camera image at each mesh vertex position (for preview only).
-    static func sampleVertexColors(from session: ARSession?) -> Data? {
-        guard let session = session,
-              let currentFrame = session.currentFrame else { return nil }
+    /// Accumulates vertex colors from camera frames during recording for preview rendering.
+    class VertexColorAccumulator {
+        // (anchorUUID, vertexIndex) → accumulated RGB color
+        private var colorMap: [String: SIMD3<Float>] = [:]
+        private var sampleTimer: Timer?
 
-        let camera = currentFrame.camera
-        let capturedImage = currentFrame.capturedImage
-        let imgWidth = CVPixelBufferGetWidth(capturedImage)
-        let imgHeight = CVPixelBufferGetHeight(capturedImage)
-        let viewportSize = CGSize(width: CGFloat(imgWidth), height: CGFloat(imgHeight))
+        /// Start accumulating — call when recording begins.
+        func start(session: ARSession) {
+            colorMap = [:]
+            sampleTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                self?.accumulate(from: session)
+            }
+        }
 
-        CVPixelBufferLockBaseAddress(capturedImage, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(capturedImage, .readOnly) }
+        /// Stop accumulating.
+        func stop() {
+            sampleTimer?.invalidate()
+            sampleTimer = nil
+        }
 
-        // Get Y and CbCr planes
-        guard let yBase = CVPixelBufferGetBaseAddressOfPlane(capturedImage, 0),
-              let cbcrBase = CVPixelBufferGetBaseAddressOfPlane(capturedImage, 1) else { return nil }
-        let yStride = CVPixelBufferGetBytesPerRowOfPlane(capturedImage, 0)
-        let cbcrStride = CVPixelBufferGetBytesPerRowOfPlane(capturedImage, 1)
-        let yPtr = yBase.assumingMemoryBound(to: UInt8.self)
-        let cbcrPtr = cbcrBase.assumingMemoryBound(to: UInt8.self)
+        /// Sample visible vertex colors from the current camera frame.
+        private func accumulate(from session: ARSession) {
+            guard let currentFrame = session.currentFrame else { return }
+            let camera = currentFrame.camera
+            let capturedImage = currentFrame.capturedImage
+            let imgWidth = CVPixelBufferGetWidth(capturedImage)
+            let imgHeight = CVPixelBufferGetHeight(capturedImage)
+            let viewportSize = CGSize(width: CGFloat(imgWidth), height: CGFloat(imgHeight))
 
-        var colors: [SIMD4<Float>] = []
+            CVPixelBufferLockBaseAddress(capturedImage, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(capturedImage, .readOnly) }
 
-        for anchor in currentFrame.anchors {
-            guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
-            let geometry = meshAnchor.geometry
-            let transform = meshAnchor.transform
+            guard let yBase = CVPixelBufferGetBaseAddressOfPlane(capturedImage, 0),
+                  let cbcrBase = CVPixelBufferGetBaseAddressOfPlane(capturedImage, 1) else { return }
+            let yStride = CVPixelBufferGetBytesPerRowOfPlane(capturedImage, 0)
+            let cbcrStride = CVPixelBufferGetBytesPerRowOfPlane(capturedImage, 1)
+            let yPtr = yBase.assumingMemoryBound(to: UInt8.self)
+            let cbcrPtr = cbcrBase.assumingMemoryBound(to: UInt8.self)
 
-            for i in 0..<geometry.vertices.count {
-                let pointer = geometry.vertices.buffer.contents().advanced(by: i * geometry.vertices.stride)
-                let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                let localPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
-                let worldPos = transform * localPos
-                let worldPoint = simd_float3(worldPos.x, worldPos.y, worldPos.z)
+            for anchor in currentFrame.anchors {
+                guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
+                let geometry = meshAnchor.geometry
+                let transform = meshAnchor.transform
+                let anchorID = meshAnchor.identifier.uuidString
 
-                // Use ARKit's built-in projection
-                let projected = camera.projectPoint(worldPoint, orientation: .landscapeRight, viewportSize: viewportSize)
-                let px = Int(projected.x)
-                let py = Int(projected.y)
+                for i in 0..<geometry.vertices.count {
+                    let pointer = geometry.vertices.buffer.contents().advanced(by: i * geometry.vertices.stride)
+                    let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
+                    let localPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
+                    let worldPos = transform * localPos
+                    let worldPoint = simd_float3(worldPos.x, worldPos.y, worldPos.z)
 
-                if px >= 0 && px < imgWidth && py >= 0 && py < imgHeight {
-                    // Sample YCbCr and convert to RGB
-                    let yVal = Float(yPtr[py * yStride + px]) / 255.0
-                    let cx = (px / 2) * 2
-                    let cy = py / 2
-                    let cb = Float(cbcrPtr[cy * cbcrStride + cx]) / 255.0 - 0.5
-                    let cr = Float(cbcrPtr[cy * cbcrStride + cx + 1]) / 255.0 - 0.5
+                    let projected = camera.projectPoint(worldPoint, orientation: .landscapeRight, viewportSize: viewportSize)
+                    let px = Int(projected.x)
+                    let py = Int(projected.y)
 
-                    let r = max(0, min(1, yVal + 1.402 * cr))
-                    let g = max(0, min(1, yVal - 0.344136 * cb - 0.714136 * cr))
-                    let b = max(0, min(1, yVal + 1.772 * cb))
-                    colors.append(SIMD4<Float>(r, g, b, 1.0))
-                } else {
-                    colors.append(SIMD4<Float>(0.5, 0.5, 0.5, 1.0)) // gray for out-of-view
+                    // Only color vertices currently visible in the camera
+                    if px >= 0 && px < imgWidth && py >= 0 && py < imgHeight {
+                        let yVal = Float(yPtr[py * yStride + px]) / 255.0
+                        let cx = (px / 2) * 2
+                        let cy = py / 2
+                        let cb = Float(cbcrPtr[cy * cbcrStride + cx]) / 255.0 - 0.5
+                        let cr = Float(cbcrPtr[cy * cbcrStride + cx + 1]) / 255.0 - 0.5
+
+                        let r = max(0, min(1, yVal + 1.402 * cr))
+                        let g = max(0, min(1, yVal - 0.344136 * cb - 0.714136 * cr))
+                        let b = max(0, min(1, yVal + 1.772 * cb))
+
+                        let key = "\(anchorID)_\(i)"
+                        colorMap[key] = SIMD3<Float>(r, g, b) // latest sample wins
+                    }
                 }
             }
         }
 
-        guard !colors.isEmpty else { return nil }
-        return Data(bytes: colors, count: colors.count * MemoryLayout<SIMD4<Float>>.stride)
+        /// Build the final vertex color Data by iterating anchors in the same order as exportMeshOBJ.
+        func buildColorData(from session: ARSession?) -> Data? {
+            guard let session = session,
+                  let currentFrame = session.currentFrame else { return nil }
+
+            var colors: [SIMD4<Float>] = []
+
+            for anchor in currentFrame.anchors {
+                guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
+                let anchorID = meshAnchor.identifier.uuidString
+                let geometry = meshAnchor.geometry
+
+                for i in 0..<geometry.vertices.count {
+                    let key = "\(anchorID)_\(i)"
+                    if let rgb = colorMap[key] {
+                        colors.append(SIMD4<Float>(rgb.x, rgb.y, rgb.z, 1.0))
+                    } else {
+                        colors.append(SIMD4<Float>(0.5, 0.5, 0.5, 1.0)) // unsampled → gray
+                    }
+                }
+            }
+
+            guard !colors.isEmpty else { return nil }
+            return Data(bytes: colors, count: colors.count * MemoryLayout<SIMD4<Float>>.stride)
+        }
     }
 }

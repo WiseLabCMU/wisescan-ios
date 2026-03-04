@@ -12,6 +12,7 @@ struct CaptureView: View {
     @State private var recordingSeconds = 0
     @State private var recordingTimer: Timer? = nil
     @State private var frameCaptureSession = FrameCaptureSession()
+    @State private var colorAccumulator = ARCoverageView.VertexColorAccumulator()
     @AppStorage("rawOverlapMax") private var rawOverlapMax: Double = 60.0
     @AppStorage("rawRejectBlur") private var rawRejectBlur: Bool = true
     @Binding var selectedTab: Int
@@ -192,8 +193,10 @@ struct CaptureView: View {
         saveMessage = nil
 
         // Start frame capture for raw data export
+        // Start vertex color accumulation for preview
         if let session = currentARSession {
             frameCaptureSession.start(session: session, overlapMax: rawOverlapMax, rejectBlur: rawRejectBlur, privacyFilter: isPrivacyFilterOn)
+            colorAccumulator.start(session: session)
         }
 
         // Start a timer to track recording duration
@@ -209,6 +212,7 @@ struct CaptureView: View {
 
         // Stop frame capture and get raw data path
         let rawDataPath = frameCaptureSession.stop()
+        colorAccumulator.stop()
 
         // Export and save the scan (with privacy filtering)
         guard let result = ARCoverageView.exportMeshOBJ(from: currentARSession, privacyFilter: isPrivacyFilterOn),
@@ -218,8 +222,8 @@ struct CaptureView: View {
             return
         }
 
-        // Sample camera colors at vertex positions for preview coloring
-        let vertexColors = ARCoverageView.sampleVertexColors(from: currentARSession)
+        // Build accumulated vertex colors for preview
+        let vertexColors = colorAccumulator.buildColorData(from: currentARSession)
 
         let _ = scanStore.addScan(
             meshData: result.data,
