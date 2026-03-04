@@ -18,6 +18,7 @@ class FrameCaptureSession {
     private var lastCaptureTransform: simd_float4x4?
     private var overlapMax: Double = 80.0 // percentage
     private var rejectBlur: Bool = true
+    private var privacyFilter: Bool = false
     private var lastCaptureTime: TimeInterval = 0
 
     struct FrameData {
@@ -36,7 +37,8 @@ class FrameCaptureSession {
     /// - Parameters:
     ///   - overlapMax: Maximum overlap percentage (10-100). Higher = more frames.
     ///   - rejectBlur: If true, skip frames with motion blur.
-    func start(session: ARSession, overlapMax: Double = 60.0, rejectBlur: Bool = true) {
+    ///   - privacyFilter: If true, blur faces in images and zero person regions in depth.
+    func start(session: ARSession, overlapMax: Double = 60.0, rejectBlur: Bool = true, privacyFilter: Bool = false) {
         // Create temp directory for this capture
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("wisescan_raw_\(UUID().uuidString)", isDirectory: true)
@@ -55,6 +57,7 @@ class FrameCaptureSession {
         self.lastCaptureTransform = nil
         self.overlapMax = overlapMax
         self.rejectBlur = rejectBlur
+        self.privacyFilter = privacyFilter
         self.lastCaptureTime = 0
 
         // Check for new frames at 10fps, but only capture when sufficient movement
@@ -128,16 +131,21 @@ class FrameCaptureSession {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
 
-            // Save RGB frame as JPEG
+            // Save RGB frame as JPEG (with face blurring if privacy filter is on)
             let rgbPath = imagesDir.appendingPathComponent("frame_\(paddedIndex).jpg")
             if let jpegData = self.pixelBufferToJPEG(pixelBuffer) {
-                try? jpegData.write(to: rgbPath)
+                if self.privacyFilter, let blurredData = FaceBlurUtil.blurFaces(in: jpegData) {
+                    try? blurredData.write(to: rgbPath)
+                } else {
+                    try? jpegData.write(to: rgbPath)
+                }
             }
 
-            // Save depth map as 16-bit PNG (values in millimeters)
+            // Save depth map as 16-bit PNG (zero out person regions if privacy on)
             if let depthMap = depthMap {
                 let depthPath = depthDir.appendingPathComponent("frame_\(paddedIndex).png")
-                if let depthData = self.depthMapToPNG16(depthMap) {
+                let segBuffer = self.privacyFilter ? currentFrame.segmentationBuffer : nil
+                if let depthData = self.depthMapToPNG16(depthMap, personMask: segBuffer) {
                     try? depthData.write(to: depthPath)
                 }
             }
@@ -217,7 +225,7 @@ class FrameCaptureSession {
         return uiImage.jpegData(compressionQuality: 0.85)
     }
 
-    private func depthMapToPNG16(_ depthBuffer: CVPixelBuffer) -> Data? {
+    private func depthMapToPNG16(_ depthBuffer: CVPixelBuffer, personMask: CVPixelBuffer? = nil) -> Data? {
         CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
 
@@ -227,11 +235,43 @@ class FrameCaptureSession {
 
         let floatBuffer = baseAddress.assumingMemoryBound(to: Float32.self)
 
-        // Convert float meters to UInt16 millimeters
+        // Read person segmentation mask if provided
+        var maskBase: UnsafeMutableRawPointer?
+        var maskWidth = 0, maskHeight = 0, maskStride = 0
+        if let mask = personMask {
+            CVPixelBufferLockBaseAddress(mask, .readOnly)
+            maskBase = CVPixelBufferGetBaseAddress(mask)
+            maskWidth = CVPixelBufferGetWidth(mask)
+            maskHeight = CVPixelBufferGetHeight(mask)
+            maskStride = CVPixelBufferGetBytesPerRow(mask)
+        }
+
+        // Convert float meters to UInt16 millimeters, zeroing person regions
         var uint16Buffer = [UInt16](repeating: 0, count: width * height)
-        for i in 0..<(width * height) {
-            let meters = floatBuffer[i]
-            uint16Buffer[i] = meters.isFinite ? UInt16(min(max(meters * 1000.0, 0), 65535)) : 0
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = y * width + x
+
+                // Check person mask (scale coordinates if sizes differ)
+                if let mBase = maskBase {
+                    let mx = x * maskWidth / max(width, 1)
+                    let my = y * maskHeight / max(height, 1)
+                    if mx < maskWidth && my < maskHeight {
+                        let pixel = mBase.advanced(by: my * maskStride + mx).assumingMemoryBound(to: UInt8.self).pointee
+                        if pixel > 128 {
+                            uint16Buffer[i] = 0 // zero out person region
+                            continue
+                        }
+                    }
+                }
+
+                let meters = floatBuffer[i]
+                uint16Buffer[i] = meters.isFinite ? UInt16(min(max(meters * 1000.0, 0), 65535)) : 0
+            }
+        }
+
+        if personMask != nil {
+            CVPixelBufferUnlockBaseAddress(personMask!, .readOnly)
         }
 
         // Create 16-bit grayscale CGImage

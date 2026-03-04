@@ -19,8 +19,14 @@ struct CaptureView: View {
     var body: some View {
         ZStack {
             // Live ARKit Scene Reconstruction View
-            ARCoverageView(arSession: $currentARSession, scanStats: scanStats)
+            ARCoverageView(arSession: $currentARSession, scanStats: scanStats, privacyFilter: isPrivacyFilterOn)
                 .ignoresSafeArea()
+
+            // Face blur overlay (shown when privacy filter is on)
+            if isPrivacyFilterOn {
+                FaceBlurOverlay(arSession: currentARSession)
+                    .ignoresSafeArea()
+            }
 
             VStack {
                 // Top Controls
@@ -187,7 +193,7 @@ struct CaptureView: View {
 
         // Start frame capture for raw data export
         if let session = currentARSession {
-            frameCaptureSession.start(session: session, overlapMax: rawOverlapMax, rejectBlur: rawRejectBlur)
+            frameCaptureSession.start(session: session, overlapMax: rawOverlapMax, rejectBlur: rawRejectBlur, privacyFilter: isPrivacyFilterOn)
         }
 
         // Start a timer to track recording duration
@@ -204,8 +210,8 @@ struct CaptureView: View {
         // Stop frame capture and get raw data path
         let rawDataPath = frameCaptureSession.stop()
 
-        // Export and save the scan
-        guard let result = ARCoverageView.exportMeshOBJ(from: currentARSession),
+        // Export and save the scan (with privacy filtering)
+        guard let result = ARCoverageView.exportMeshOBJ(from: currentARSession, privacyFilter: isPrivacyFilterOn),
               !result.data.isEmpty else {
             saveMessage = "No Mesh Data"
             clearMessage()

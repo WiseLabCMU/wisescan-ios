@@ -3,36 +3,35 @@ import RealityKit
 import ARKit
 
 struct ARCoverageView: UIViewRepresentable {
-    // Expose the active session to the parent view for exporting
     @Binding var arSession: ARSession?
     var scanStats: ScanStats
+    var privacyFilter: Bool
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
 
-        // Ensure the device supports Scene Reconstruction (LiDAR required)
         guard ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) else {
             print("Device does not support LiDAR scene reconstruction.")
             return arView
         }
 
-        // Configure ARKit for environment meshing
         let config = ARWorldTrackingConfiguration()
         config.sceneReconstruction = .mesh
         config.environmentTexturing = .automatic
 
-        // Attach the delegate to handle mesh updates
+        // Enable person segmentation for privacy filtering
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
+            config.frameSemantics.insert(.personSegmentationWithDepth)
+        }
+
         context.coordinator.scanStats = scanStats
         context.coordinator.arView = arView
+        context.coordinator.privacyFilter = privacyFilter
         arView.session.delegate = context.coordinator
 
-        // Start the AR session
         arView.session.run(config)
-
-        // Enable built-in scene understanding overlay
         arView.debugOptions.insert(.showSceneUnderstanding)
 
-        // Pass the session back up via binding
         DispatchQueue.main.async {
             self.arSession = arView.session
         }
@@ -40,18 +39,19 @@ struct ARCoverageView: UIViewRepresentable {
         return arView
     }
 
-    func updateUIView(_ uiView: ARView, context: Context) {}
+    func updateUIView(_ uiView: ARView, context: Context) {
+        context.coordinator.privacyFilter = privacyFilter
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
 
     class Coordinator: NSObject, ARSessionDelegate {
-        // Keep track of mesh anchors to visualize coverage improving
-        // Key: Anchor ID, Value: (Entity, UpdateCount)
         private var meshEntities: [UUID: (entity: ModelEntity, updateCount: Int)] = [:]
         var scanStats: ScanStats?
         weak var arView: ARView?
+        var privacyFilter: Bool = true
 
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
             processMeshAnchors(anchors, in: session)
@@ -76,51 +76,55 @@ struct ARCoverageView: UIViewRepresentable {
         private func processMeshAnchors(_ anchors: [ARAnchor], in session: ARSession) {
             guard let arView = arView else { return }
 
+            // Get person segmentation buffer for privacy filtering
+            let segBuffer = privacyFilter ? session.currentFrame?.segmentationBuffer : nil
+            let camera = session.currentFrame?.camera
+
             for anchor in anchors {
                 guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
 
-                // Track how many times this mesh chunk has been updated
                 let currentCount = meshEntities[meshAnchor.identifier]?.updateCount ?? 0
                 let newCount = currentCount + 1
 
-                // Generate geometry
                 let geometry = meshAnchor.geometry
                 do {
-                    let meshResource = try generateMeshResource(from: geometry)
+                    let meshResource: MeshResource
+                    if privacyFilter, let segBuffer = segBuffer, let camera = camera {
+                        meshResource = try generateFilteredMeshResource(
+                            from: geometry, transform: meshAnchor.transform,
+                            segmentation: segBuffer, camera: camera
+                        )
+                    } else {
+                        meshResource = try generateMeshResource(from: geometry)
+                    }
 
-                    // Determine color based on update count (Simulating coverage improvement)
-                    // Blue = newly discovered, Green = well scanned (updated multiple times)
                     let blendFactor = min(CGFloat(newCount) / 10.0, 1.0)
                     let currentColor = UIColor(
                         red: 0.0,
-                        green: blendFactor * 1.0,  // Shifts towards green
-                        blue: (1.0 - blendFactor) * 1.0, // Shifts away from blue
+                        green: blendFactor * 1.0,
+                        blue: (1.0 - blendFactor) * 1.0,
                         alpha: 0.8
                     )
 
                     var material = SimpleMaterial(color: currentColor, isMetallic: false)
-                    material.triangleFillMode = .lines // Render as wireframe grid
+                    material.triangleFillMode = .lines
 
                     DispatchQueue.main.async {
                         if let existingRecord = self.meshEntities[meshAnchor.identifier] {
-                            // Update existing entity
                             existingRecord.entity.model?.mesh = meshResource
                             existingRecord.entity.model?.materials = [material]
                             self.meshEntities[meshAnchor.identifier] = (existingRecord.entity, newCount)
                         } else {
-                            // Create new entity — no transform needed, AnchorEntity handles positioning
                             let entity = ModelEntity(mesh: meshResource, materials: [material])
-
                             let anchorEntity = AnchorEntity(anchor: meshAnchor)
                             anchorEntity.addChild(entity)
                             arView.scene.addAnchor(anchorEntity)
-
                             self.meshEntities[meshAnchor.identifier] = (entity, newCount)
                         }
                     }
 
                 } catch {
-                    print("Error generating mesh from ARMeshAnchor: \(error)")
+                    print("Error generating mesh: \(error)")
                 }
             }
 
@@ -150,7 +154,6 @@ struct ARCoverageView: UIViewRepresentable {
             DispatchQueue.main.async {
                 scanStats.totalVertices = totalVerts
                 scanStats.totalFaces = totalFaces
-                // Quality: average update count per anchor, capped at 10 updates = 100%
                 if anchorCount > 0 {
                     let avgUpdates = Double(totalUpdates) / Double(anchorCount)
                     scanStats.averageQuality = min(avgUpdates / 10.0, 1.0)
@@ -160,7 +163,7 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
-        // Helper to convert ARMeshGeometry to RealityKit MeshResource
+        // Standard mesh resource (no filtering)
         private func generateMeshResource(from geometry: ARMeshGeometry) throws -> MeshResource {
             let vertices = geometry.vertices
             let faces = geometry.faces
@@ -176,7 +179,6 @@ struct ARCoverageView: UIViewRepresentable {
             var faceBuffer = [UInt32]()
             faceBuffer.reserveCapacity(faces.count * 3)
             let faceBytes = faces.bytesPerIndex * faces.indexCountPerPrimitive
-
             for i in 0..<faces.count {
                 let pointer = faces.buffer.contents().advanced(by: i * faceBytes)
                 let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
@@ -188,14 +190,110 @@ struct ARCoverageView: UIViewRepresentable {
             var descriptor = MeshDescriptor(name: "ARMeshGeometry")
             descriptor.positions = MeshBuffer(vertexBuffer)
             descriptor.primitives = .triangles(faceBuffer)
+            return try MeshResource.generate(from: [descriptor])
+        }
 
+        // Privacy-filtered mesh: skip faces where vertices project onto person pixels
+        private func generateFilteredMeshResource(
+            from geometry: ARMeshGeometry,
+            transform: simd_float4x4,
+            segmentation: CVPixelBuffer,
+            camera: ARCamera
+        ) throws -> MeshResource {
+            let vertices = geometry.vertices
+            let faces = geometry.faces
+
+            let segWidth = CVPixelBufferGetWidth(segmentation)
+            let segHeight = CVPixelBufferGetHeight(segmentation)
+
+            CVPixelBufferLockBaseAddress(segmentation, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(segmentation, .readOnly) }
+            let segBase = CVPixelBufferGetBaseAddress(segmentation)
+            let segStride = CVPixelBufferGetBytesPerRow(segmentation)
+
+            // Read all vertices
+            var vertexBuffer = [SIMD3<Float>]()
+            vertexBuffer.reserveCapacity(vertices.count)
+            for i in 0..<vertices.count {
+                let pointer = vertices.buffer.contents().advanced(by: i * vertices.stride)
+                let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
+                vertexBuffer.append(vertex)
+            }
+
+            // Precompute per-vertex "is person" flag by projecting to image space
+            let viewMatrix = camera.viewMatrix(for: .landscapeRight)
+            let imageResolution = camera.imageResolution
+            let projMatrix = camera.projectionMatrix(for: .landscapeRight, viewportSize: imageResolution, zNear: 0.001, zFar: 100)
+
+            var isPersonVertex = [Bool](repeating: false, count: vertices.count)
+            for i in 0..<vertices.count {
+                let localPos = SIMD4<Float>(vertexBuffer[i].x, vertexBuffer[i].y, vertexBuffer[i].z, 1.0)
+                let worldPos = transform * localPos
+                let camPos = viewMatrix * worldPos
+                let clipPos = projMatrix * camPos
+
+                guard clipPos.w > 0 else { continue }
+                let ndcX = clipPos.x / clipPos.w
+                let ndcY = clipPos.y / clipPos.w
+
+                // NDC to pixel coordinates in segmentation buffer
+                let px = Int((ndcX * 0.5 + 0.5) * Float(segWidth))
+                let py = Int((1.0 - (ndcY * 0.5 + 0.5)) * Float(segHeight))
+
+                if px >= 0 && px < segWidth && py >= 0 && py < segHeight,
+                   let base = segBase {
+                    let pixel = base.advanced(by: py * segStride + px).assumingMemoryBound(to: UInt8.self).pointee
+                    isPersonVertex[i] = pixel > 128
+                }
+            }
+
+            // Filter faces: skip if any vertex is person
+            var faceBuffer = [UInt32]()
+            let faceBytes = faces.bytesPerIndex * faces.indexCountPerPrimitive
+            for i in 0..<faces.count {
+                let pointer = faces.buffer.contents().advanced(by: i * faceBytes)
+                let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
+
+                let i0 = Int(indices.0)
+                let i1 = Int(indices.1)
+                let i2 = Int(indices.2)
+
+                // Skip face if any vertex is classified as person
+                if isPersonVertex[i0] || isPersonVertex[i1] || isPersonVertex[i2] {
+                    continue
+                }
+
+                faceBuffer.append(indices.0)
+                faceBuffer.append(indices.1)
+                faceBuffer.append(indices.2)
+            }
+
+            var descriptor = MeshDescriptor(name: "ARMeshGeometry")
+            descriptor.positions = MeshBuffer(vertexBuffer)
+            descriptor.primitives = .triangles(faceBuffer)
             return try MeshResource.generate(from: [descriptor])
         }
     }
 
-    // Static helper to extract all active mesh geometry into an OBJ string
-    static func exportMeshOBJ(from session: ARSession?) -> (data: Data, vertexCount: Int, faceCount: Int)? {
+    // MARK: - Export
+
+    static func exportMeshOBJ(from session: ARSession?, privacyFilter: Bool = false) -> (data: Data, vertexCount: Int, faceCount: Int)? {
         guard let session = session, let currentFrame = session.currentFrame else { return nil }
+
+        // Get person segmentation for privacy filtering
+        var personPixels: (buffer: CVPixelBuffer, width: Int, height: Int, stride: Int, base: UnsafeMutableRawPointer)?
+        if privacyFilter, let segBuffer = currentFrame.segmentationBuffer {
+            CVPixelBufferLockBaseAddress(segBuffer, .readOnly)
+            if let base = CVPixelBufferGetBaseAddress(segBuffer) {
+                personPixels = (segBuffer, CVPixelBufferGetWidth(segBuffer), CVPixelBufferGetHeight(segBuffer),
+                                CVPixelBufferGetBytesPerRow(segBuffer), base)
+            }
+        }
+
+        let camera = currentFrame.camera
+        let viewMatrix = camera.viewMatrix(for: .landscapeRight)
+        let imageRes = camera.imageResolution
+        let projMatrix = camera.projectionMatrix(for: .landscapeRight, viewportSize: imageRes, zNear: 0.001, zFar: 100)
 
         var objData = ""
         var vertexOffset = 1
@@ -207,21 +305,35 @@ struct ARCoverageView: UIViewRepresentable {
             let geometry = meshAnchor.geometry
             let transform = meshAnchor.transform
 
-            // Extract and transform vertices
             let vertices = geometry.vertices
+            var worldPositions = [SIMD3<Float>]()
+            var isPersonVertex = [Bool](repeating: false, count: vertices.count)
+
             for i in 0..<vertices.count {
                 let pointer = vertices.buffer.contents().advanced(by: i * vertices.stride)
                 let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-
-                // Transform local vertex to world coordinate
                 let localPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
                 let worldPos = transform * localPos
 
+                worldPositions.append(SIMD3(worldPos.x, worldPos.y, worldPos.z))
                 objData += "v \(worldPos.x) \(worldPos.y) \(worldPos.z)\n"
+
+                // Check person segmentation
+                if let pp = personPixels {
+                    let camPos = viewMatrix * worldPos
+                    let clipPos = projMatrix * camPos
+                    if clipPos.w > 0 {
+                        let px = Int((clipPos.x / clipPos.w * 0.5 + 0.5) * Float(pp.width))
+                        let py = Int((1.0 - (clipPos.y / clipPos.w * 0.5 + 0.5)) * Float(pp.height))
+                        if px >= 0 && px < pp.width && py >= 0 && py < pp.height {
+                            let pixel = pp.base.advanced(by: py * pp.stride + px).assumingMemoryBound(to: UInt8.self).pointee
+                            isPersonVertex[i] = pixel > 128
+                        }
+                    }
+                }
             }
             totalVertices += vertices.count
 
-            // Extract faces
             let faces = geometry.faces
             let faceBytes = faces.bytesPerIndex * faces.indexCountPerPrimitive
 
@@ -229,16 +341,28 @@ struct ARCoverageView: UIViewRepresentable {
                 let pointer = faces.buffer.contents().advanced(by: i * faceBytes)
                 let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
 
-                // OBJ indices are 1-based and need offset from previous anchors
+                // Skip person faces if privacy filter is on
+                if privacyFilter {
+                    let i0 = Int(indices.0)
+                    let i1 = Int(indices.1)
+                    let i2 = Int(indices.2)
+                    if isPersonVertex[i0] || isPersonVertex[i1] || isPersonVertex[i2] {
+                        continue
+                    }
+                }
+
                 let v1 = Int(indices.0) + vertexOffset
                 let v2 = Int(indices.1) + vertexOffset
                 let v3 = Int(indices.2) + vertexOffset
-
                 objData += "f \(v1) \(v2) \(v3)\n"
+                totalFaces += 1
             }
-            totalFaces += faces.count
 
             vertexOffset += vertices.count
+        }
+
+        if let pp = personPixels {
+            CVPixelBufferUnlockBaseAddress(pp.buffer, .readOnly)
         }
 
         guard let data = objData.data(using: .utf8), !data.isEmpty else { return nil }
