@@ -227,8 +227,8 @@ sequenceDiagram
 | REQ-014 | Workflow Orchestration | Select preset server pipelines (Mesh, Splat, Spatial Indexing) | High |
 | REQ-015 | Job Observability | Display remote Prefect job status locally | Medium |
 | REQ-016 | Scan4D Ghost Overlay | Render previous mesh as translucent overlay during rescan | Medium |
-| REQ-017 | Scan4D Change Detection | Highlight areas where new mesh differs from old | Low |
-| REQ-018 | Scan4D Multi-Device Sync | Download previous scans from backend for shared scanning workload | Low |
+| REQ-017 | Scan4D Ground Truth Offset | Capture GPS or AprilTag data alongside scans for backend alignment seeding | High |
+| REQ-018 | OpenFLAME Live Relocalization | Use backend server to stream visual localization back to device, bypassing ARKit maps | Low |
 | REQ-019 | Persistent Scan Storage | SwiftData/SQLite for on-disk location + scan metadata | High |
 
 ---
@@ -284,14 +284,15 @@ classDiagram
 
 ## Anchoring Strategy (Scan4D)
 
-| Mechanism | Reliability | Robustness to Change | Best Use |
-|:----------|:-----------|:---------------------|:---------|
-| `ARWorldMap` | ⭐⭐⭐⭐ | ⭐⭐ | Same-day rescans |
-| RoomPlan API | ⭐⭐⭐ | ⭐⭐⭐⭐ | Structural alignment |
-| Image Anchors / AprilTags | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Lab environments |
-| ICP Mesh Alignment | ⭐⭐ | ⭐⭐⭐ | Moderate changes |
+| Mechanism | Role | Reliability | Best Use |
+|:----------|:-----|:------------|:---------|
+| **Backend ICP Alignment** | **Ultimate Truth** | ⭐⭐⭐⭐ | High-fidelity historical alignment of point clouds/splats on the server. |
+| **GPS / Anchor Tags** | **Ground Truth Seed**| ⭐⭐⭐⭐⭐ | Categorical offset to give the backend a starting guess before ICP. |
+| **`ARWorldMap`** | **Edge UI Guide** | ⭐⭐ | Transient local caching to power the live "ghost overlay" UI during capture. |
+| OpenFLAME | Server-Assisted UI | ⭐⭐⭐ | Future upgrade for live UI guiding, streaming visual features to backend. |
+| RoomPlan API | Deprioritized | ⭐⭐⭐ | Apple-locked semantic tracking; better handled off-device by the server. |
 
-**Current implementation:** `ARWorldMap` (primary). See [Scan4D_Architecture.md](Design/Scan4D_Architecture.md) for full rationale.
+**Current implementation:** `ARWorldMap` is saved categorically and used for Edge UI relocalization. See [Design/Scan4D_Architecture.md](Design/Scan4D_Architecture.md) for full rationale on the Backend-First philosophy.
 
 ---
 

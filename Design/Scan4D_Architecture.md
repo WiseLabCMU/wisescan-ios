@@ -3,38 +3,42 @@
 ## Overview
 Scan4D allows users to perform time-series scanning of the same physical space to track changes over time. The system will guide users to re-scan previously mapped areas, rendering an overlay of prior scans to detect moved furniture or altered structures.
 
-## Core Mechanisms: Spatial Anchoring
+## Core Mechanisms: Spatial Anchoring & Relocalization
 
-To perfectly overlay a past scan onto a current AR session, the system must recognize the physical space and align coordinate systems. We have several options:
+To perfectly overlay a past scan onto a current session and track changes over time, the system needs to align coordinate systems. Our architecture divides this responsibility between the **Edge Device (Live UI)** and the **Backend Server (Ultimate Truth)**.
 
-### 1. ARKit World Map (`ARWorldMap`)
-- **How it works:** ARKit continuously builds a map of the space (feature points, plane anchors). We can save this map and reload it in a subsequent session.
-- **Pros:** Native to ARKit, highly accurate relocalization (often sub-centimeter).
-- **Cons:** Extremely sensitive to lighting changes and major physical shifts. If the room looks significantly different, relocalization will fail. File sizes can be large.
-- **Best Use:** Same-day or very short-term rescans.
+### The Backend Pipeline (The Ultimate Source of Truth)
+The hackable backend server is responsible for the definitive, high-fidelity alignment of time-series scans.
+- **How it works:** Incoming scans provide a categorical **GPS / Anchor Tag ground truth offset**. The server then uses robust algorithms like **ICP (Iterative Closest Point)** or feature-matching via **OpenFLAME** to mathematically align the new mesh/splat to the historical baseline.
+- **Why it's better:** It is ecosystem-agnostic, infinitely scalable in compute, and allows researchers to swap in novel localization algorithms without updating the iOS app.
 
-### 2. Apple RoomPlan API (iOS 16+)
-- **How it works:** Uses machine learning to detect room layout (walls, windows, doors, furniture bounding boxes).
-- **Pros:** Very robust against minor moved objects (chairs, tables). The core room structure serves as the anchor.
-- **Cons:** Less granular than raw mesh reconstruction.
-- **Best Use:** Structural alignment and semantic understanding.
+### The Edge Device (Live Session Guidance)
+If the backend does the real alignment, why do we need relocalization on the iOS device during capture? **To render the "ghost skeleton."**
+Live relocalization is crucial to show the user what was previously scanned, guiding their coverage and highlighting real-time differences. We have several options for this live edge-anchoring:
 
-### 3. Image Anchors / Visual Fiducials (`ARImageAnchor` / AprilTags)
-- **How it works:** Place a known physical marker (QR code, printed AprilTag, or a distinctive poster) in the room. The system aligns the coordinate system to this marker.
-- **Pros:** 100% reliable relocalization as long as the marker hasn't moved. Incredibly robust across time, lighting, and device changes.
-- **Cons:** Requires physical markers in the environment.
-- **Best Use:** Industrial, lab, or controlled environments.
+#### 1. ARKit World Map (`ARWorldMap`) - *Current Default*
+- **How it works:** We save the ARKit map of feature points and upload it alongside the mesh as a categorical asset. When "Scanning Again," the app downloads (or loads locally) this map to explicitly snap the current ARSession to the historical coordinates.
+- **Pros:** Native to ARKit, powers the live ghost UI immediately.
+- **Cons:** Very sensitive to lighting/structural changes; large file sizes.
 
-### 4. Custom Point Cloud / Mesh Alignment (ICP - Iterative Closest Point)
-- **How it works:** Load the previous 3D mesh and align the new incoming LiDAR mesh to it mathematically in real-time.
-- **Pros:** Can handle moderate changes, doesn't rely on Apple's transient feature points.
-- **Cons:** Computationally heavy, complex to implement efficiently on mobile.
+#### 2. OpenFLAME Live Localization (Server-Assisted)
+- **How it works:** The device streams lightweight visual features to the server. The server runs OpenFLAME localization against the historical index and streams back a coordinate correction transform to the device in real-time.
+- **Pros:** Bypasses `ARWorldMap` fragility; centralizes the logic.
+- **Cons:** Requires a robust, low-latency network connection to the backend during capture.
 
-### Recommendation: Hybrid Approach
-For Scan4D, a hybrid approach is standard in the industry:
-1. **Primary:** `ARWorldMap` (try native relocalization first).
-2. **Fallback/Assisted:** Image Anchors. We can prompt the user to scan a specific known object/poster in the room to "snap" the coordinate systems together if automatic world map relocalization fails.
-3. **Optional:** Location-based grouping (GPS + Wi-Fi fingerprinting) to suggest which scan the user is currently near.
+#### 3. Image Anchors / Visual Fiducials (AprilTags)
+- **How it works:** Standardized markers in the environment provide an immediate, 100% reliable local coordinate snap.
+- **Pros:** Perfect for controlled lab environments; incredibly robust over time.
+- **Cons:** Requires physical infrastructure.
+
+#### 4. Apple RoomPlan API (Deprioritized)
+- **How it works:** AI bounding boxes for walls/furniture.
+- **Verdict:** Deprioritized. It is heavily tied to the Apple ecosystem. Semantic understanding and structural extraction are tasks better suited for the hackable backend pipeline rather than the edge client.
+
+### Recommendation: The GPS-Seeded Hybrid Approach
+1. **Always capture rough Ground Truth:** Every scan must log GPS coordinates (and/or visible AprilTags) to give the server a starting offset.
+2. **Package everything:** Upload the Mesh, RAW data, AND the `ARWorldMap` in the payload. The server has all the data it needs.
+3. **Edge-driven UI:** Use `ARWorldMap` (or eventually live OpenFLAME queries) *strictly* to power the in-app ghost overlay and guide user coverage. Leave the final, perfect mesh alignment to the backend ICP pipeline.
 
 ## Data Model & Hierarchy
 
