@@ -56,16 +56,17 @@ struct ARCoverageView: UIViewRepresentable {
         Coordinator()
     }
 
-    // MARK: - 2D Coverage Overlay View
-
     /// Draws projected mesh anchor coverage as a negative mask (unscanned areas are tiled with the pattern).
     class CoverageOverlayView: UIView {
         /// Each element is an array of convex hull points for one anchor's coverage area.
         var coveragePolygons: [[CGPoint]] = []
         private var patternImage: UIImage?
 
+        /// Toggle to enable or disable coverage pattern rendering. Set to false to hide it for now.
+        var isCoverageEnabled: Bool = false
+
         override func draw(_ rect: CGRect) {
-            guard let ctx = UIGraphicsGetCurrentContext() else { return }
+            guard isCoverageEnabled, let ctx = UIGraphicsGetCurrentContext() else { return }
 
             // Load the pattern image once
             if patternImage == nil {
