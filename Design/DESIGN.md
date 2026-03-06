@@ -1,4 +1,4 @@
-# WiSEScan iOS Application Design
+# Scan4D Application Design
 
 Based on the architecture specifications (`wiselab-scan/ARCHITECTURE.md`), the iOS application will act as the primary sensor client and edge proxy. The design focuses on three core interfaces using SwiftUI, aiming for a professional, hackable "pro-tool" aesthetic utilizing dark mode and glassmorphism (e.g., `.ultraThinMaterial`).
 

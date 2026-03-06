@@ -1,6 +1,6 @@
-# WiSEScan iOS
+# Scan4D
 
-`wisescan-ios` is the companion reality capture mobile application for the WiSEScan platform. It acts as an advanced sensor client designed to bridge high-fidelity device data with backend reconstruction servers.
+Scan4D is the time-series reality capture application for the WiSEScan platform. It acts as an advanced sensor client designed to bridge high-fidelity device data with backend reconstruction servers.
 
 **Requires:** iOS 17.0+ · LiDAR-equipped iPhone or iPad · Xcode 15+
 
@@ -10,7 +10,8 @@
 | :--- | :--- | :--- |
 | **LiDAR Mesh Capture** | Real-time scene reconstruction with live wireframe overlay and quality HUD | ✅ Complete |
 | **Start/Stop Recording** | Tap to start scanning with timer, tap again to stop and save | ✅ Complete |
-| **Remove Humans** | Person segmentation removes humans from mesh; face detection blurs faces on camera feed and in exports | ✅ Complete |
+| **Scan4D (Time-Series)** | Group scans by Location and use `ARWorldMap` caching to relocalize and rescan the exact same physical space over time | ✅ Complete |
+| **Privacy Filtering** | Person segmentation removes humans from mesh; face detection blurs faces on camera feed and in exports | ✅ Complete |
 | **3D Scan Preview** | Interactive SceneKit preview with camera-sampled vertex coloring | ✅ Complete |
 | **Export Formats** | OBJ, PLY, USDZ, RAW (Nerfstudio), and Polycam raw data | ✅ Complete |
 | **Save to Files** | Export scans locally via iOS share sheet (Files, AirDrop, etc.) | ✅ Complete |
@@ -80,7 +81,7 @@ scan.zip/
 └── transforms.json  # Also included for Nerfstudio compatibility
 ```
 
-## Remove Humans
+## Privacy Filtering
 
 When enabled (toggle on Capture screen):
 
@@ -91,8 +92,9 @@ When enabled (toggle on Capture screen):
 
 ## Quick Start
 
-1. Open `wisescan-ios.xcodeproj` in Xcode
+1. Open the Xcode project in Xcode
 2. Set your development team signing in the target settings
 3. Build and deploy to a LiDAR-equipped device (iPhone 12 Pro or newer)
 4. Configure the upload URL in Settings (gear icon)
-5. Go to Capture → tap record → scan → tap stop → review on Workflows tab
+5. Go to Capture → tap record → scan → tap stop → name your space to save it
+6. In the Workflows tab, tap **Scan Again** under a Location to perform an aligned time-series rescan of that exact space
