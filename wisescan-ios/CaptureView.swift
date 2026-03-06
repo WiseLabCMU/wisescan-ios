@@ -4,6 +4,7 @@ import ARKit
 struct CaptureView: View {
     @Environment(ScanStore.self) private var scanStore
     @State private var scanStats = ScanStats()
+    @State private var locationManager = LocationManager()
     @AppStorage("privacyFilter") private var isPrivacyFilterOn = true
     @State private var mode = 1 // 0 = Streaming, 1 = Capture
     @State private var currentARSession: ARSession? = nil
@@ -32,10 +33,25 @@ struct CaptureView: View {
         let worldMapURL: URL?
     }
 
+    var activeGhostMeshData: Data? {
+        guard let locId = scanStore.activeLocationForScan,
+              let location = scanStore.locations.first(where: { $0.id == locId }),
+              let latestScan = location.scans.first else {
+            return nil
+        }
+        return latestScan.meshData
+    }
+
     var body: some View {
         ZStack {
             // Live ARKit Scene Reconstruction View
-            ARCoverageView(arSession: $currentARSession, scanStats: scanStats, privacyFilter: isPrivacyFilterOn, initialWorldMapURL: scanStore.activeRelocalizationMap)
+            ARCoverageView(
+                arSession: $currentARSession,
+                scanStats: scanStats,
+                privacyFilter: isPrivacyFilterOn,
+                initialWorldMapURL: scanStore.activeRelocalizationMap,
+                initialGhostMeshData: activeGhostMeshData
+            )
                 .ignoresSafeArea()
 
             // Face blur overlay (shown when privacy filter is on)
@@ -43,6 +59,10 @@ struct CaptureView: View {
                 FaceBlurOverlay(arSession: currentARSession)
                     .ignoresSafeArea()
             }
+
+            // Permissions Overlay (Preempts user if not authorized)
+            PermissionsOverlay(locationManager: locationManager)
+                .ignoresSafeArea()
 
             VStack {
                 // Top Controls
@@ -225,7 +245,15 @@ struct CaptureView: View {
         // Start frame capture for raw data export
         // Start vertex color accumulation for preview
         if let session = currentARSession {
-            frameCaptureSession.start(session: session, overlapMax: rawOverlapMax, rejectBlur: rawRejectBlur, privacyFilter: isPrivacyFilterOn)
+            // Provide LocationManager to frame capture session so it can grab metadata
+            frameCaptureSession.start(
+                session: session,
+                overlapMax: rawOverlapMax,
+                rejectBlur: rawRejectBlur,
+                privacyFilter: isPrivacyFilterOn,
+                locationManager: locationManager,
+                activeLocationId: scanStore.activeLocationForScan
+            )
             colorAccumulator.start(session: session)
         }
 
@@ -260,6 +288,18 @@ struct CaptureView: View {
         // Export ARWorldMap for Scan4D relocalization
         ARCoverageView.VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL in
             DispatchQueue.main.async {
+
+                // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping
+                if let rawDir = rawDataPath {
+                    let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
+                    try? result.data.write(to: meshFileURL)
+
+                    if let mapURL = mapURL {
+                        let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
+                        try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
+                    }
+                }
+
                 self.pendingScan = PendingScanData(
                     meshData: result.data,
                     vertexCount: result.vertexCount,

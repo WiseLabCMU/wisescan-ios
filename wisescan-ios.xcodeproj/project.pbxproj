@@ -260,6 +260,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Scan4D;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Camera is required for AR capture and streaming.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Local Network is required to connect to Scan4D servers.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Scan4D requires Location data to assign a ground truth position (GPS coordinates) to your scans so they can be accurately aligned in the real world later.";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIRequiredDeviceCapabilities = arkit;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
@@ -296,6 +297,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Scan4D;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Camera is required for AR capture and streaming.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Local Network is required to connect to Scan4D servers.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Scan4D requires Location data to assign a ground truth position (GPS coordinates) to your scans so they can be accurately aligned in the real world later.";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIRequiredDeviceCapabilities = arkit;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;

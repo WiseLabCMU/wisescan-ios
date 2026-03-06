@@ -23,6 +23,10 @@ class FrameCaptureSession {
     private var privacyFilter: Bool = false
     private var lastCaptureTime: TimeInterval = 0
 
+    // Metadata dependencies
+    private var locationManager: LocationManager?
+    private var activeLocationId: UUID?
+
     struct FrameData {
         let index: Int
         let transform: simd_float4x4
@@ -40,7 +44,7 @@ class FrameCaptureSession {
     ///   - overlapMax: Maximum overlap percentage (10-100). Higher = more frames.
     ///   - rejectBlur: If true, skip frames with motion blur.
     ///   - privacyFilter: If true, blur faces in images and zero person regions in depth.
-    func start(session: ARSession, overlapMax: Double = 60.0, rejectBlur: Bool = true, privacyFilter: Bool = false) {
+    func start(session: ARSession, overlapMax: Double = 60.0, rejectBlur: Bool = true, privacyFilter: Bool = false, locationManager: LocationManager? = nil, activeLocationId: UUID? = nil) {
         // Create temp directory for this capture
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("scan4d_raw_\(UUID().uuidString)", isDirectory: true)
@@ -67,6 +71,8 @@ class FrameCaptureSession {
         self.rejectBlur = rejectBlur
         self.privacyFilter = privacyFilter
         self.lastCaptureTime = 0
+        self.locationManager = locationManager
+        self.activeLocationId = activeLocationId
 
         // Check for new frames at 10fps, but only capture when sufficient movement
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -86,6 +92,9 @@ class FrameCaptureSession {
 
         // Write Polycam per-frame camera JSONs
         writePolycamCameras(to: captureDir)
+
+        // Write Scan4D ground-truth metadata
+        writeScan4DMetadata(to: captureDir)
 
         return captureDir
     }
@@ -269,6 +278,36 @@ class FrameCaptureSession {
         let meshInfoPath = directory.appendingPathComponent("mesh_info.json")
         if let jsonData = try? JSONSerialization.data(withJSONObject: meshInfo, options: .prettyPrinted) {
             try? jsonData.write(to: meshInfoPath)
+        }
+    }
+
+    // MARK: - Scan4D Metadata
+
+    private func writeScan4DMetadata(to directory: URL) {
+        var metadata: [String: Any] = [
+            "timestamp": Date().timeIntervalSince1970,
+            "device": UIDevice.current.name,
+            "system_version": UIDevice.current.systemVersion
+        ]
+
+        if let locId = activeLocationId {
+            metadata["location_id"] = locId.uuidString
+        }
+
+        if let location = locationManager?.currentLocation {
+            metadata["gps_latitude"] = location.coordinate.latitude
+            metadata["gps_longitude"] = location.coordinate.longitude
+            metadata["gps_altitude"] = location.altitude
+            metadata["gps_accuracy"] = location.horizontalAccuracy
+        }
+
+        if let heading = locationManager?.currentHeading {
+            metadata["compass_heading"] = heading.trueHeading > 0 ? heading.trueHeading : heading.magneticHeading
+        }
+
+        let jsonPath = directory.appendingPathComponent("scan4d_metadata.json")
+        if let jsonData = try? JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted) {
+            try? jsonData.write(to: jsonPath)
         }
     }
 

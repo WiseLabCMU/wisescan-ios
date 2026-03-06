@@ -7,6 +7,7 @@ struct ARCoverageView: UIViewRepresentable {
     var scanStats: ScanStats
     var privacyFilter: Bool
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
+    var initialGhostMeshData: Data? = nil // Raw OBJ data from the previous scan
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
@@ -40,6 +41,26 @@ struct ARCoverageView: UIViewRepresentable {
         arView.session.delegate = context.coordinator
         arView.debugOptions.insert(.showSceneUnderstanding)
         arView.session.run(config)
+
+        // Background parse the ghost mesh if provided
+        if let ghostData = initialGhostMeshData {
+            DispatchQueue.global(qos: .userInitiated).async {
+                if let resource = MeshParser.generateMeshResource(from: ghostData) {
+                    DispatchQueue.main.async {
+                        // Create a static, semi-transparent material
+                        var material = UnlitMaterial(color: .red) // Bright red to stand out
+                        material.blending = .transparent(opacity: 0.3)
+
+                        let modelEntity = ModelEntity(mesh: resource, materials: [material])
+                        let anchorEntity = AnchorEntity(world: .zero) // Lock to world origin
+                        anchorEntity.addChild(modelEntity)
+
+                        context.coordinator.ghostAnchorEntity = anchorEntity
+                        // We do not add it to the scene YET. We wait for relocalization.
+                    }
+                }
+            }
+        }
 
         // Add a transparent overlay view for 2D coverage rendering
         let overlay = CoverageOverlayView(frame: arView.bounds)
@@ -133,6 +154,10 @@ struct ARCoverageView: UIViewRepresentable {
         private var coverageTimer: Timer?
         private var anchorUpdateCounts: [UUID: Int] = [:]
 
+        // Ghost Mesh properties
+        var ghostAnchorEntity: AnchorEntity?
+        private var hasAddedGhostMesh = false
+
         func startCoverageTimer() {
             coverageTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
                 self?.updateCoverageOverlay()
@@ -141,6 +166,17 @@ struct ARCoverageView: UIViewRepresentable {
 
         deinit {
             coverageTimer?.invalidate()
+        }
+
+        // Watch for relocalization success
+        func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+            if camera.trackingState == .normal && !hasAddedGhostMesh {
+                if let ghostAnchor = ghostAnchorEntity, let arView = arView {
+                    print("AR session relocalized successfully. Adding Ghost Mesh overlay.")
+                    arView.scene.addAnchor(ghostAnchor)
+                    hasAddedGhostMesh = true
+                }
+            }
         }
 
         // Track anchor update counts via delegate
