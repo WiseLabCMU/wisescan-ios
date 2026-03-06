@@ -40,7 +40,9 @@ struct ARCoverageView: UIViewRepresentable {
 
         arView.session.delegate = context.coordinator
         arView.debugOptions.insert(.showSceneUnderstanding)
-        arView.session.run(config)
+
+        let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
+        arView.session.run(config, options: runOptions)
 
         // Background parse the ghost mesh if provided
         if let ghostData = initialGhostMeshData {
@@ -52,6 +54,7 @@ struct ARCoverageView: UIViewRepresentable {
                         material.blending = .transparent(opacity: 0.3)
 
                         let modelEntity = ModelEntity(mesh: resource, materials: [material])
+
                         let anchorEntity = AnchorEntity(world: .zero) // Lock to world origin
                         anchorEntity.addChild(modelEntity)
 
