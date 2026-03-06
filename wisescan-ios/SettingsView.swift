@@ -71,20 +71,25 @@ struct SettingsView: View {
                         guideRow(
                             icon: "1.circle.fill",
                             title: "Capture",
-                            text: "Point your device at a scene. Toggle Remove Humans to exclude people from the scan. Tap the capture button to start recording — the mesh overlay shows scanning progress in real-time."
+                            text: "Point your device at a scene. Toggle Privacy Filter to exclude people from the scan. Tap the capture button to start recording — the mesh overlay shows scanning progress in real-time."
                         )
                         guideRow(
                             icon: "2.circle.fill",
-                            title: "Stop & Review",
-                            text: "Tap stop when done. Your scan appears on the Workflows tab with a 3D preview, polygon count, and file size."
+                            title: "Name & Save",
+                            text: "Tap stop when done. Name your space to save it. Your scan appears on the Workflows tab under its specific Location."
                         )
                         guideRow(
                             icon: "3.circle.fill",
+                            title: "Scan4D (Scan Again)",
+                            text: "Tap 'Scan Again' on any Location to perform a time-series rescan. The app will relocalize using the previous scan's spatial anchors to perfectly align the new data."
+                        )
+                        guideRow(
+                            icon: "4.circle.fill",
                             title: "Choose Format",
                             text: "Select an export format (OBJ, PLY, USDZ, or RAW) using the segmented picker on each scan card."
                         )
                         guideRow(
-                            icon: "4.circle.fill",
+                            icon: "5.circle.fill",
                             title: "Save or Upload",
                             text: "Save locally to Files, AirDrop to another device, or upload to your configured server."
                         )

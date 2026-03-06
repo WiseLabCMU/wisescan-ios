@@ -24,7 +24,7 @@ struct ContentView: View {
                 }
                 .tag(1)
 
-            WorkflowsView()
+            WorkflowsView(selectedTab: $selectedTab)
                 .tabItem {
                     Label("Workflows", systemImage: "arrow.triangle.2.circlepath")
                 }

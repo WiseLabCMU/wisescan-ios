@@ -12,6 +12,8 @@ struct CapturedScan: Identifiable {
     let faceCount: Int
     var rawDataPath: URL? = nil
     var vertexColors: Data? = nil
+    var worldMapURL: URL? = nil // Support for Scan4D anchoring
+    var locationId: UUID? = nil
     var selectedFormat: ExportFormat = .obj
     var uploadStatus: UploadStatus = .pending
 
@@ -51,15 +53,41 @@ enum UploadStatus: Equatable {
     }
 }
 
+// MARK: - Scan Hierarchy Model
+
+struct ScanLocation: Identifiable {
+    let id = UUID()
+    var name: String
+    var scans: [CapturedScan] = []
+}
+
 // MARK: - Scan Store (shared across views)
 
 @Observable
 class ScanStore {
-    var scans: [CapturedScan] = []
+    var locations: [ScanLocation] = []
     private var scanCounter = 0
 
-    func addScan(meshData: Data, vertexCount: Int, faceCount: Int, rawDataPath: URL? = nil, vertexColors: Data? = nil) -> CapturedScan {
+    // Scan4D state for initiating a new scan of an existing location
+    var activeRelocalizationMap: URL? = nil
+    var activeLocationForScan: UUID? = nil
+
+    func addLocation(name: String) -> ScanLocation {
+        let location = ScanLocation(name: name)
+        locations.insert(location, at: 0)
+        return location
+    }
+
+    func addScan(meshData: Data, vertexCount: Int, faceCount: Int, rawDataPath: URL? = nil, vertexColors: Data? = nil, worldMapURL: URL? = nil, locationId: UUID? = nil) -> CapturedScan {
         scanCounter += 1
+
+        // If no locations exist yet, create a default one
+        if locations.isEmpty {
+            let _ = addLocation(name: "Default Location")
+        }
+
+        let targetLocationId = locationId ?? locations[0].id
+
         let scan = CapturedScan(
             name: "Scan \(scanCounter)",
             capturedAt: Date(),
@@ -67,10 +95,25 @@ class ScanStore {
             vertexCount: vertexCount,
             faceCount: faceCount,
             rawDataPath: rawDataPath,
-            vertexColors: vertexColors
+            vertexColors: vertexColors,
+            worldMapURL: worldMapURL,
+            locationId: targetLocationId
         )
-        scans.insert(scan, at: 0) // newest first
+
+        if let idx = locations.firstIndex(where: { $0.id == targetLocationId }) {
+            locations[idx].scans.insert(scan, at: 0) // newest first
+        }
+
         return scan
+    }
+
+    func updateScan(_ updatedScan: CapturedScan) {
+        guard let locId = updatedScan.locationId,
+              let lIdx = locations.firstIndex(where: { $0.id == locId }),
+              let sIdx = locations[lIdx].scans.firstIndex(where: { $0.id == updatedScan.id }) else {
+            return
+        }
+        locations[lIdx].scans[sIdx] = updatedScan
     }
 }
 

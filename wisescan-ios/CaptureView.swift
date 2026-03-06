@@ -16,11 +16,26 @@ struct CaptureView: View {
     @AppStorage("rawOverlapMax") private var rawOverlapMax: Double = 60.0
     @AppStorage("rawRejectBlur") private var rawRejectBlur: Bool = true
     @Binding var selectedTab: Int
+    var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
+
+    // Scan4D properties
+    @State private var showNamePrompt = false
+    @State private var newLocationName = ""
+    @State private var pendingScan: PendingScanData? = nil
+
+    struct PendingScanData {
+        let meshData: Data
+        let vertexCount: Int
+        let faceCount: Int
+        let rawDataPath: URL?
+        let vertexColors: Data?
+        let worldMapURL: URL?
+    }
 
     var body: some View {
         ZStack {
             // Live ARKit Scene Reconstruction View
-            ARCoverageView(arSession: $currentARSession, scanStats: scanStats, privacyFilter: isPrivacyFilterOn)
+            ARCoverageView(arSession: $currentARSession, scanStats: scanStats, privacyFilter: isPrivacyFilterOn, initialWorldMapURL: scanStore.activeRelocalizationMap)
                 .ignoresSafeArea()
 
             // Face blur overlay (shown when privacy filter is on)
@@ -32,9 +47,9 @@ struct CaptureView: View {
             VStack {
                 // Top Controls
                 HStack {
-                    // Remove Humans Toggle
+                    // Privacy Filter Toggle
                     HStack {
-                        Text("Remove Humans")
+                        Text("Privacy Filter")
                             .font(.subheadline)
                             .foregroundColor(.white)
                         Toggle("", isOn: $isPrivacyFilterOn)
@@ -169,6 +184,16 @@ struct CaptureView: View {
                 stopRecording()
             }
         }
+        .alert("Name this Space", isPresented: $showNamePrompt) {
+            TextField("Location Name (e.g., Living Room)", text: $newLocationName)
+            Button("Save", action: { savePendingScan() })
+            Button("Cancel", role: .cancel) {
+                pendingScan = nil
+                saveMessage = nil
+            }
+        } message: {
+            Text("Enter a unique name for this space so you can efficiently 'Scan Again' later.")
+        }
     }
 
     private var qualityColor: Color {
@@ -230,25 +255,75 @@ struct CaptureView: View {
         // Build accumulated vertex colors for preview
         let vertexColors = colorAccumulator.buildColorData(from: currentARSession)
 
-        let _ = scanStore.addScan(
-            meshData: result.data,
-            vertexCount: result.vertexCount,
-            faceCount: result.faceCount,
-            rawDataPath: rawDataPath,
-            vertexColors: vertexColors
-        )
+        saveMessage = "Saving World Map..."
 
-        saveMessage = "Scan Saved!"
+        // Export ARWorldMap for Scan4D relocalization
+        ARCoverageView.VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL in
+            DispatchQueue.main.async {
+                self.pendingScan = PendingScanData(
+                    meshData: result.data,
+                    vertexCount: result.vertexCount,
+                    faceCount: result.faceCount,
+                    rawDataPath: rawDataPath,
+                    vertexColors: vertexColors,
+                    worldMapURL: mapURL
+                )
 
-        // Switch to Workflows tab after a brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            selectedTab = 2
-            saveMessage = nil
+                if self.scanStore.activeLocationForScan != nil {
+                    // It's a "Scan Again", skip prompt and save immediately
+                    self.savePendingScan()
+                } else {
+                    // It's a brand new scan, prompt for a name
+                    self.newLocationName = ""
+                    self.showNamePrompt = true
+                }
+            }
         }
     }
 
     private func clearMessage() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            saveMessage = nil
+        }
+    }
+
+    private func savePendingScan() {
+        guard let pending = pendingScan else { return }
+
+        // Determine the location ID
+        let locationId: UUID
+        var finalName = "New Space"
+
+        if let activeLocationId = scanStore.activeLocationForScan {
+            locationId = activeLocationId
+        } else {
+            let trimmedName = newLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
+            finalName = trimmedName.isEmpty ? "New Space" : trimmedName
+            // Create a new location to hold this scan and future Scan4D rescans
+            let newLocation = scanStore.addLocation(name: finalName)
+            locationId = newLocation.id
+        }
+
+        let _ = scanStore.addScan(
+            meshData: pending.meshData,
+            vertexCount: pending.vertexCount,
+            faceCount: pending.faceCount,
+            rawDataPath: pending.rawDataPath,
+            vertexColors: pending.vertexColors,
+            worldMapURL: pending.worldMapURL,
+            locationId: locationId
+        )
+
+        saveMessage = "Scan Saved!"
+        pendingScan = nil
+
+        // Reset the active state so subsequent scans don't default to this location
+        scanStore.activeLocationForScan = nil
+        scanStore.activeRelocalizationMap = nil
+
+        // Switch to Workflows tab after a brief delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            selectedTab = 2
             saveMessage = nil
         }
     }

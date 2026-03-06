@@ -6,6 +6,7 @@ struct ARCoverageView: UIViewRepresentable {
     @Binding var arSession: ARSession?
     var scanStats: ScanStats
     var privacyFilter: Bool
+    var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
@@ -18,6 +19,14 @@ struct ARCoverageView: UIViewRepresentable {
         let config = ARWorldTrackingConfiguration()
         config.sceneReconstruction = .mesh
         config.environmentTexturing = .automatic
+
+        // Load initial world map if provided
+        if let mapURL = initialWorldMapURL,
+           let data = try? Data(contentsOf: mapURL),
+           let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
+            config.initialWorldMap = worldMap
+            print("Loaded initial ARWorldMap for relocalization.")
+        }
 
         // Enable person segmentation for privacy filtering
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
@@ -182,11 +191,14 @@ struct ARCoverageView: UIViewRepresentable {
                 let vertices = geometry.vertices
 
                 // Compute axis-aligned bounding box in local space
+                guard vertices.count > 0, vertices.stride > 0, vertices.buffer.length >= vertices.count * vertices.stride else { continue }
                 var minV = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
                 var maxV = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
 
                 for i in 0..<vertices.count {
-                    let ptr = vertices.buffer.contents().advanced(by: i * vertices.stride)
+                    let offset = i * vertices.stride
+                    guard offset + MemoryLayout<SIMD3<Float>>.size <= vertices.buffer.length else { break }
+                    let ptr = vertices.buffer.contents().advanced(by: offset)
                     let v = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
                     minV = min(minV, v)
                     maxV = max(maxV, v)
@@ -461,6 +473,35 @@ struct ARCoverageView: UIViewRepresentable {
                         let key = "\(anchorID)_\(i)"
                         colorMap[key] = SIMD3<Float>(r, g, b) // latest sample wins
                     }
+                }
+            }
+        }
+
+        // MARK: - Export Helpers
+
+        /// Exports the current ARWorldMap to a local URL.
+        static func exportWorldMap(from session: ARSession?, completion: @escaping (URL?) -> Void) {
+            guard let session = session else {
+                completion(nil)
+                return
+            }
+
+            session.getCurrentWorldMap { worldMap, error in
+                guard let map = worldMap, error == nil else {
+                    print("Error getting ARWorldMap: \(String(describing: error))")
+                    completion(nil)
+                    return
+                }
+
+                do {
+                    let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
+                    let filename = "worldmap_\(UUID().uuidString.prefix(8)).worldmap"
+                    let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+                    try data.write(to: fileURL)
+                    completion(fileURL)
+                } catch {
+                    print("Error saving ARWorldMap: \(error)")
+                    completion(nil)
                 }
             }
         }

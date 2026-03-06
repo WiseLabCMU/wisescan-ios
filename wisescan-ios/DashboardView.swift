@@ -117,7 +117,7 @@ struct DashboardView: View {
                     .padding(.vertical)
                 }
             }
-            .navigationTitle("WiSEscan Connect")
+            .navigationTitle("Scan4D Connect")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {

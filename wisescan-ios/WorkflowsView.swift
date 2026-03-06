@@ -4,6 +4,7 @@ struct WorkflowsView: View {
     @Environment(ScanStore.self) private var scanStore
     @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
     @State private var showSettings = false
+    @Binding var selectedTab: Int
 
     var body: some View {
         NavigationStack {
@@ -17,7 +18,7 @@ struct WorkflowsView: View {
                     VStack(spacing: 24) {
 
                         // Captured Scans
-                        if scanStore.scans.isEmpty {
+                        if scanStore.locations.allSatisfy({ $0.scans.isEmpty }) {
                             VStack(spacing: 16) {
                                 Image(systemName: "viewfinder")
                                     .font(.system(size: 48))
@@ -32,9 +33,37 @@ struct WorkflowsView: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 40)
                         } else {
-                            ForEach(Array(scanStore.scans.enumerated()), id: \.element.id) { index, scan in
-                                ScanCard(scan: scan, uploadURL: uploadURL) { updatedScan in
-                                    scanStore.scans[index] = updatedScan
+                            ForEach(scanStore.locations) { location in
+                                if !location.scans.isEmpty {
+                                    VStack(alignment: .leading, spacing: 16) {
+                                        HStack {
+                                            Text(location.name.uppercased())
+                                                .font(.caption).bold()
+                                                .foregroundColor(.gray)
+                                            Spacer()
+
+                                            // Scan4D action: initiate a new scan for this location
+                                            Button(action: {
+                                                scanStore.activeLocationForScan = location.id
+                                                // Grab the most recent world map for this location if available
+                                                scanStore.activeRelocalizationMap = location.scans.first?.worldMapURL
+                                                selectedTab = 1 // Switch to Capture View
+                                            }) {
+                                                Label("Scan Again", systemImage: "plus.viewfinder")
+                                                    .font(.caption).bold()
+                                                    .foregroundColor(.cyan)
+                                            }
+                                        }
+                                        .padding(.horizontal)
+                                        .padding(.top, 8)
+
+                                        ForEach(location.scans) { scan in
+                                            ScanCard(scan: scan, uploadURL: uploadURL) { updatedScan in
+                                                scanStore.updateScan(updatedScan)
+                                            }
+                                        }
+                                    }
+                                    .padding(.bottom, 16)
                                 }
                             }
                         }
@@ -259,7 +288,7 @@ struct ScanCard: View {
         let ext = selectedFormat.rawValue.lowercased()
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
         let isRawType = selectedFormat == .raw || selectedFormat == .polycam
-        let filename = "wisescan_\(scanName)_\(scan.id.uuidString.prefix(8)).\(isRawType ? "zip" : ext)"
+        let filename = "scan4d_\(scanName)_\(scan.id.uuidString.prefix(8)).\(isRawType ? "zip" : ext)"
 
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         guard let url = URL(string: baseURLString + filename) else {
@@ -348,7 +377,7 @@ struct ScanCard: View {
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
         let ext = selectedFormat.rawValue.lowercased()
         let isRawType = selectedFormat == .raw || selectedFormat == .polycam
-        let filename = "wisescan_\(scanName)_\(scan.id.uuidString.prefix(8)).\(isRawType ? "zip" : ext)"
+        let filename = "scan4d_\(scanName)_\(scan.id.uuidString.prefix(8)).\(isRawType ? "zip" : ext)"
 
         if isRawType {
             guard let rawPath = scan.rawDataPath else { return }
@@ -451,6 +480,6 @@ struct WorkflowCard: View {
 }
 
 #Preview {
-    WorkflowsView()
+    WorkflowsView(selectedTab: .constant(2))
         .environment(ScanStore())
 }

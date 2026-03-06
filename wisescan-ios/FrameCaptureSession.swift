@@ -43,7 +43,7 @@ class FrameCaptureSession {
     func start(session: ARSession, overlapMax: Double = 60.0, rejectBlur: Bool = true, privacyFilter: Bool = false) {
         // Create temp directory for this capture
         let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wisescan_raw_\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("scan4d_raw_\(UUID().uuidString)", isDirectory: true)
         let imagesPath = tempDir.appendingPathComponent("images", isDirectory: true)
         let depthPath = tempDir.appendingPathComponent("depth", isDirectory: true)
         let camerasPath = tempDir.appendingPathComponent("cameras", isDirectory: true)
