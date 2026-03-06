@@ -179,12 +179,12 @@ sequenceDiagram
 | **Description** | Interactive SceneKit preview with camera-sampled vertex coloring or height-gradient fallback. |
 | **Source** | [MeshPreviewView.swift](wisescan-ios/MeshPreviewView.swift) · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `VertexColorAccumulator` |
 
-### REQ-006: Export Formats
+### REQ-006: Export Formats & Backend Ingestion
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | OBJ, PLY, USDZ mesh exports + RAW (Nerfstudio `transforms.json`) + Polycam (`cameras/` + `mesh_info.json`). |
-| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `exportMeshOBJ()` · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `writeTransformsJSON()`, `writePolycamCameras()` |
+| **Description** | All exports (OBJ, PLY, USDZ, RAW, PLYCM) are packaged into a unified `.zip` archive. The archive includes the chosen payload along with `scan4d_metadata.json` (injecting a `"export_format"` key), and the `relocalization.worldmap`. The server uses the JSON to determine how to parse the ZIP. |
+| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `exportMeshOBJ()` · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `writeTransformsJSON()` · [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) — Unified PDF archiving |
 
 ### REQ-007: Save & Upload
 | | |

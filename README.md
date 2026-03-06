@@ -4,6 +4,8 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 
 **Requires:** iOS 17.0+ · LiDAR-equipped iPhone or iPad · Xcode 15+
 
+**Backend Integration:** Receivers: [wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload) (testing fallback) and [wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion) (production Prefect pipeline).
+
 ## Features & Implementation Status
 
 | Feature | Description | Status |
@@ -44,42 +46,38 @@ wisescan-ios/
 └── SettingsView.swift         # Upload URL, RAW export settings, workflow guide, recommended apps
 ```
 
-## Export Formats
+## Export Formats & Backend Ingestion
 
-| Format | Contents | Viewer |
+All exports are now bundled into a unified `.zip` archive on device. Regardless of the user's dropdown selection, the backend will receive the raw sequence data alongside the requested mesh formats. The server reads the dynamically injected `scan4d_metadata.json["export_format"]` to route the payload correctly.
+
+| Format | Included in `.zip` Payload | Viewer |
 | :--- | :--- | :--- |
-| **OBJ** | Wavefront 3D mesh | MeshLab, Polycam, Blender |
-| **PLY** | Polygon file with vertex data | MeshLab, Polycam, CloudCompare |
-| **USDZ** | Apple 3D format | iOS Quick Look (native), Reality Composer |
-| **RAW** | ZIP: images/ + depth/ + transforms.json | Nerfstudio (`ns-process-data`), COLMAP |
-| **PLYCM** | ZIP: images/ + depth/ + cameras/ + mesh_info.json | Polycam raw data import |
+| **OBJ** | `mesh.obj`, metadata, anchor map, RAW frames | MeshLab, Polycam, Blender |
+| **PLY** | `mesh.ply`, metadata, anchor map, RAW frames | MeshLab, Polycam, CloudCompare |
+| **USDZ** | `mesh.usdz`, metadata, anchor map, RAW frames | iOS Quick Look (native), Reality Composer |
+| **RAW** | `transforms.json`, `images/`, `depth/`, metadata | Nerfstudio (`ns-process-data`), COLMAP |
+| **PLYCM** | `cameras/`, `images/`, `depth/`, `mesh_info.json` | Polycam raw data import |
 
-### RAW Export Format (Nerfstudio-compatible)
-
+### Unified Payload Structure
+Example output for a standard RAW export:
 ```
-scan.zip/
-├── images/          # RGB frames (JPEG, ~2fps adaptive)
+scan4d_scanName_raw_uuid.zip/
+├── scan4d_metadata.json  # GPS tags, Location ID, & "export_format"
+├── relocalization.worldmap # ARKit spatial anchor for Ghost Overlay rescanning
+├── mesh.obj              # Real-time LiDAR wireframe mesh
+├── images/               # RGB frames (JPEG, ~2fps adaptive)
 │   ├── frame_00000.jpg
 │   └── ...
-├── depth/           # 16-bit PNG depth maps (millimeters)
+├── depth/                # 16-bit PNG depth maps (millimeters)
 │   ├── frame_00000.png
 │   └── ...
-└── transforms.json  # Camera intrinsics + per-frame 4×4 poses
+└── transforms.json       # Camera intrinsics + per-frame 4×4 poses (Nerfstudio-compatible)
 ```
 
-### Polycam Export Format
-
-```
-scan.zip/
-├── images/          # RGB frames (JPEG)
-├── depth/           # 16-bit PNG depth maps (millimeters)
-├── cameras/         # Per-frame camera JSON (t_00..t_23 pose, fx/fy/cx/cy)
-│   ├── frame_00000.json
-│   └── ...
-├── confidence/      # Confidence maps (reserved)
-├── mesh_info.json   # Frame count, image dimensions, coordinate system
-└── transforms.json  # Also included for Nerfstudio compatibility
-```
+### Backend Receivers
+Scan4D is designed to upload these packages directly to edge/cloud servers. Reference implementors:
+- **[wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload):** A simple Python FastAPI receiver that accepts `.zip` PUT requests and saves them. Best for local loopback testing.
+- **[wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion):** The primary production pipeline built on Prefect.io. Automatically routes data to OpenFLAME or COLMAP based on the `scan4d_metadata.json` tags.
 
 ## Privacy Filtering
 

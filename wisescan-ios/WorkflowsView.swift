@@ -287,8 +287,8 @@ struct ScanCard: View {
 
         let ext = selectedFormat.rawValue.lowercased()
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
-        let isRawType = selectedFormat == .raw || selectedFormat == .polycam
-        let filename = "scan4d_\(scanName)_\(scan.id.uuidString.prefix(8)).\(isRawType ? "zip" : ext)"
+        let formatStr = selectedFormat.rawValue.lowercased()
+        let filename = "scan4d_\(formatStr)_\(scanName)_\(scan.id.uuidString.prefix(8)).zip"
 
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         guard let url = URL(string: baseURLString + filename) else {
@@ -297,113 +297,100 @@ struct ScanCard: View {
             return
         }
 
-        // For RAW/Polycam format, zip the raw data directory
-        if isRawType {
-            guard let rawPath = scan.rawDataPath else {
-                updated.uploadStatus = .failed("No raw data")
-                onUpdate(updated)
-                return
-            }
-
-            DispatchQueue.global(qos: .userInitiated).async {
-                let zipURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("\(scanName)_\(scan.id.uuidString.prefix(8)).zip")
-
-                // Use NSFileCoordinator to create a ZIP
-                var error: NSError?
-                let coordinator = NSFileCoordinator()
-                coordinator.coordinate(readingItemAt: rawPath, options: .forUploading, error: &error) { zipTempURL in
-                    try? FileManager.default.copyItem(at: zipTempURL, to: zipURL)
-                }
-
-                guard error == nil, let zipData = try? Data(contentsOf: zipURL) else {
-                    DispatchQueue.main.async {
-                        var result = scan
-                        result.selectedFormat = selectedFormat
-                        result.uploadStatus = .failed("Zip failed")
-                        onUpdate(result)
-                    }
-                    return
-                }
-
-                // Upload the ZIP
-                var request = URLRequest(url: url)
-                request.httpMethod = "PUT"
-                request.setValue("application/zip", forHTTPHeaderField: "Content-Type")
-
-                let task = URLSession.shared.uploadTask(with: request, from: zipData) { _, response, uploadError in
-                    try? FileManager.default.removeItem(at: zipURL)
-                    DispatchQueue.main.async {
-                        var result = scan
-                        result.selectedFormat = selectedFormat
-                        if let uploadError = uploadError {
-                            result.uploadStatus = .failed(uploadError.localizedDescription)
-                        } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-                            result.uploadStatus = .success
-                        } else {
-                            result.uploadStatus = .failed("Server error")
-                        }
-                        onUpdate(result)
-                    }
-                }
-                task.resume()
-            }
+        guard let rawPath = scan.rawDataPath else {
+            updated.uploadStatus = .failed("No raw data")
+            onUpdate(updated)
             return
         }
 
-        // Standard format upload (OBJ, PLY, USDZ)
-        var request = URLRequest(url: url)
-        request.httpMethod = "PUT"
-        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let zipURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(filename)
 
-        let task = URLSession.shared.uploadTask(with: request, from: scan.meshData) { _, response, error in
-            DispatchQueue.main.async {
-                var result = scan
-                result.selectedFormat = selectedFormat
-                if let error = error {
-                    result.uploadStatus = .failed(error.localizedDescription)
-                } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-                    result.uploadStatus = .success
-                } else {
-                    result.uploadStatus = .failed("Server error")
+            // Inject the selected format into scan4d_metadata.json before zipping
+            let metadataURL = rawPath.appendingPathComponent("scan4d_metadata.json")
+            if let data = try? Data(contentsOf: metadataURL),
+               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                json["export_format"] = formatStr
+                if let newData = try? JSONSerialization.data(withJSONObject: json, options: .prettyPrinted) {
+                    try? newData.write(to: metadataURL)
                 }
-                onUpdate(result)
             }
+
+            // Use NSFileCoordinator to create a ZIP
+            var error: NSError?
+            let coordinator = NSFileCoordinator()
+            coordinator.coordinate(readingItemAt: rawPath, options: .forUploading, error: &error) { zipTempURL in
+                try? FileManager.default.copyItem(at: zipTempURL, to: zipURL)
+            }
+
+            guard error == nil else {
+                DispatchQueue.main.async {
+                    var result = scan
+                    result.selectedFormat = selectedFormat
+                    result.uploadStatus = .failed("Zip failed")
+                    onUpdate(result)
+                }
+                return
+            }
+
+            // Upload the ZIP natively via streaming
+            var request = URLRequest(url: url)
+            request.httpMethod = "PUT"
+            request.setValue("application/zip", forHTTPHeaderField: "Content-Type")
+
+            let task = URLSession.shared.uploadTask(with: request, fromFile: zipURL) { _, response, uploadError in
+                try? FileManager.default.removeItem(at: zipURL)
+                DispatchQueue.main.async {
+                    var result = scan
+                    result.selectedFormat = selectedFormat
+                    if let uploadError = uploadError {
+                        result.uploadStatus = .failed(uploadError.localizedDescription)
+                    } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
+                        result.uploadStatus = .success
+                    } else {
+                        result.uploadStatus = .failed("Server error")
+                    }
+                    onUpdate(result)
+                }
+            }
+            task.resume()
         }
-        task.resume()
     }
 
     private func saveToFiles() {
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
-        let ext = selectedFormat.rawValue.lowercased()
-        let isRawType = selectedFormat == .raw || selectedFormat == .polycam
-        let filename = "scan4d_\(scanName)_\(scan.id.uuidString.prefix(8)).\(isRawType ? "zip" : ext)"
+        let formatStr = selectedFormat.rawValue.lowercased()
+        let filename = "scan4d_\(formatStr)_\(scanName)_\(scan.id.uuidString.prefix(8)).zip"
 
-        if isRawType {
-            guard let rawPath = scan.rawDataPath else { return }
-            DispatchQueue.global(qos: .userInitiated).async {
-                let zipURL = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(filename)
-                try? FileManager.default.removeItem(at: zipURL) // clean up existing
+        guard let rawPath = scan.rawDataPath else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let zipURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(filename)
+            try? FileManager.default.removeItem(at: zipURL) // clean up existing
 
-                var error: NSError?
-                let coordinator = NSFileCoordinator()
-                coordinator.coordinate(readingItemAt: rawPath, options: .forUploading, error: &error) { zipTempURL in
-                    try? FileManager.default.copyItem(at: zipTempURL, to: zipURL)
-                }
-
-                if error == nil {
-                    DispatchQueue.main.async {
-                        self.exportFileURL = zipURL
-                        self.showShareSheet = true
-                    }
+            // Inject the selected format into scan4d_metadata.json before zipping
+            let metadataURL = rawPath.appendingPathComponent("scan4d_metadata.json")
+            if let data = try? Data(contentsOf: metadataURL),
+               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                json["export_format"] = formatStr
+                if let newData = try? JSONSerialization.data(withJSONObject: json, options: .prettyPrinted) {
+                    try? newData.write(to: metadataURL)
                 }
             }
-        } else {
-            let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-            try? scan.meshData.write(to: fileURL)
-            self.exportFileURL = fileURL
-            self.showShareSheet = true
+
+            var error: NSError?
+            let coordinator = NSFileCoordinator()
+            coordinator.coordinate(readingItemAt: rawPath, options: .forUploading, error: &error) { zipTempURL in
+                try? FileManager.default.copyItem(at: zipTempURL, to: zipURL)
+            }
+
+            if error == nil {
+                DispatchQueue.main.async {
+                    self.exportFileURL = zipURL
+                    self.showShareSheet = true
+                }
+            }
         }
     }
 }
