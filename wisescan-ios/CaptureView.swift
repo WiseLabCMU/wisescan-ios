@@ -4,7 +4,7 @@ import ARKit
 struct CaptureView: View {
     @Environment(ScanStore.self) private var scanStore
     @State private var scanStats = ScanStats()
-    @State private var isPrivacyFilterOn = true
+    @AppStorage("privacyFilter") private var isPrivacyFilterOn = true
     @State private var mode = 1 // 0 = Streaming, 1 = Capture
     @State private var currentARSession: ARSession? = nil
     @State private var saveMessage: String? = nil
@@ -164,6 +164,11 @@ struct CaptureView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onDisappear {
+            if isRecording {
+                stopRecording()
+            }
+        }
     }
 
     private var qualityColor: Color {
