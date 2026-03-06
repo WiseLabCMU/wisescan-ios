@@ -27,10 +27,19 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.scanStats = scanStats
         context.coordinator.arView = arView
         context.coordinator.privacyFilter = privacyFilter
-        arView.session.delegate = context.coordinator
 
-        arView.session.run(config)
+        arView.session.delegate = context.coordinator
         arView.debugOptions.insert(.showSceneUnderstanding)
+        arView.session.run(config)
+
+        // Add a transparent overlay view for 2D coverage rendering
+        let overlay = CoverageOverlayView(frame: arView.bounds)
+        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        overlay.backgroundColor = .clear
+        overlay.isUserInteractionEnabled = false
+        arView.addSubview(overlay)
+        context.coordinator.overlayView = overlay
+        context.coordinator.startCoverageTimer()
 
         DispatchQueue.main.async {
             self.arSession = arView.session
@@ -47,88 +56,214 @@ struct ARCoverageView: UIViewRepresentable {
         Coordinator()
     }
 
+    // MARK: - 2D Coverage Overlay View
+
+    /// Draws projected mesh anchor coverage as a negative mask (unscanned areas are tiled with the pattern).
+    class CoverageOverlayView: UIView {
+        /// Each element is an array of convex hull points for one anchor's coverage area.
+        var coveragePolygons: [[CGPoint]] = []
+        private var patternImage: UIImage?
+
+        override func draw(_ rect: CGRect) {
+            guard let ctx = UIGraphicsGetCurrentContext() else { return }
+
+            // Load the pattern image once
+            if patternImage == nil {
+                patternImage = UIImage(named: "CoverageMask")
+            }
+            guard let image = patternImage, let cgImage = image.cgImage else { return }
+
+            ctx.saveGState()
+
+            // 1. Add the full screen boundary rect to the path
+            ctx.beginPath()
+            ctx.addRect(bounds)
+
+            // 2. Add all coverage polygons to the path
+            for polygon in coveragePolygons {
+                guard polygon.count >= 3 else { continue }
+                ctx.move(to: polygon[0])
+                for i in 1..<polygon.count {
+                    ctx.addLine(to: polygon[i])
+                }
+                ctx.closePath()
+            }
+
+            // 3. Clip using even-odd rule.
+            // The polygons are "holes" inside the outer full-screen rect.
+            ctx.clip(using: .evenOdd)
+
+            // 4. Draw the image across the entire view bounds (only unscanned areas will show)
+            let tileSize = max(bounds.width, bounds.height)
+            ctx.setAlpha(0.6) // slightly more opaque to encourage clearing it
+            let cols = Int(ceil(bounds.width / tileSize))
+            let rows = Int(ceil(bounds.height / tileSize))
+            for row in 0...rows {
+                for col in 0...cols {
+                    let tileRect = CGRect(x: CGFloat(col) * tileSize, y: CGFloat(row) * tileSize, width: tileSize, height: tileSize)
+                    ctx.saveGState()
+                    ctx.translateBy(x: tileRect.minX, y: tileRect.maxY)
+                    ctx.scaleBy(x: 1, y: -1)
+                    ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: tileSize, height: tileSize))
+                    ctx.restoreGState()
+                }
+            }
+
+            ctx.restoreGState()
+        }
+    }
+
+    // MARK: - Coordinator
+
     class Coordinator: NSObject, ARSessionDelegate {
-        private var meshEntities: [UUID: (entity: ModelEntity, updateCount: Int)] = [:]
         var scanStats: ScanStats?
         weak var arView: ARView?
+        weak var overlayView: CoverageOverlayView?
         var privacyFilter: Bool = true
+        private var coverageTimer: Timer?
+        private var anchorUpdateCounts: [UUID: Int] = [:]
 
+        func startCoverageTimer() {
+            coverageTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+                self?.updateCoverageOverlay()
+            }
+        }
+
+        deinit {
+            coverageTimer?.invalidate()
+        }
+
+        // Track anchor update counts via delegate
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-            processMeshAnchors(anchors, in: session)
+            for anchor in anchors {
+                if let mesh = anchor as? ARMeshAnchor {
+                    anchorUpdateCounts[mesh.identifier] = 1
+                }
+            }
+            updateStats(in: session)
         }
 
         func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-            processMeshAnchors(anchors, in: session)
+            for anchor in anchors {
+                if let mesh = anchor as? ARMeshAnchor {
+                    anchorUpdateCounts[mesh.identifier, default: 0] += 1
+                }
+            }
+            updateStats(in: session)
         }
 
         func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
             for anchor in anchors {
-                if let meshAnchor = anchor as? ARMeshAnchor {
-                    if let (entity, _) = meshEntities[meshAnchor.identifier] {
-                        entity.removeFromParent()
-                        meshEntities.removeValue(forKey: meshAnchor.identifier)
-                    }
+                if let mesh = anchor as? ARMeshAnchor {
+                    anchorUpdateCounts.removeValue(forKey: mesh.identifier)
                 }
             }
             updateStats(in: session)
         }
 
-        private func processMeshAnchors(_ anchors: [ARAnchor], in session: ARSession) {
-            guard let arView = arView else { return }
+        // MARK: - 2D Projection (Bounding-box approach)
 
-            // Get person segmentation buffer for privacy filtering
-            let segBuffer = privacyFilter ? session.currentFrame?.segmentationBuffer : nil
-            let camera = session.currentFrame?.camera
+        private func updateCoverageOverlay() {
+            guard let arView = arView,
+                  let overlay = overlayView,
+                  let currentFrame = arView.session.currentFrame else { return }
 
-            for anchor in anchors {
+            let camera = currentFrame.camera
+            let viewportSize = arView.bounds.size
+            let orientation = UIInterfaceOrientation.portrait
+
+            var polygons = [[CGPoint]]()
+
+            for anchor in currentFrame.anchors {
                 guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
-
-                let currentCount = meshEntities[meshAnchor.identifier]?.updateCount ?? 0
-                let newCount = currentCount + 1
-
                 let geometry = meshAnchor.geometry
-                do {
-                    let meshResource: MeshResource
-                    if privacyFilter, let segBuffer = segBuffer, let camera = camera {
-                        meshResource = try generateFilteredMeshResource(
-                            from: geometry, transform: meshAnchor.transform,
-                            segmentation: segBuffer, camera: camera
-                        )
-                    } else {
-                        meshResource = try generateMeshResource(from: geometry)
+                let transform = meshAnchor.transform
+                let vertices = geometry.vertices
+
+                // Compute axis-aligned bounding box in local space
+                var minV = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+                var maxV = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+
+                for i in 0..<vertices.count {
+                    let ptr = vertices.buffer.contents().advanced(by: i * vertices.stride)
+                    let v = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
+                    minV = min(minV, v)
+                    maxV = max(maxV, v)
+                }
+
+                // Generate 8 corners of the bounding box
+                let corners: [SIMD3<Float>] = [
+                    SIMD3(minV.x, minV.y, minV.z),
+                    SIMD3(maxV.x, minV.y, minV.z),
+                    SIMD3(maxV.x, maxV.y, minV.z),
+                    SIMD3(minV.x, maxV.y, minV.z),
+                    SIMD3(minV.x, minV.y, maxV.z),
+                    SIMD3(maxV.x, minV.y, maxV.z),
+                    SIMD3(maxV.x, maxV.y, maxV.z),
+                    SIMD3(minV.x, maxV.y, maxV.z),
+                ]
+
+                // Project corners to screen space
+                var screenPoints = [CGPoint]()
+                for corner in corners {
+                    let localPos = SIMD4<Float>(corner.x, corner.y, corner.z, 1.0)
+                    let worldPos = transform * localPos
+                    let wp = simd_float3(worldPos.x, worldPos.y, worldPos.z)
+                    let screenPt = camera.projectPoint(wp, orientation: orientation, viewportSize: viewportSize)
+                    let pt = CGPoint(x: CGFloat(screenPt.x), y: CGFloat(screenPt.y))
+                    screenPoints.append(pt)
+                }
+
+                // Compute 2D convex hull of the projected points
+                let hull = convexHull(screenPoints)
+                if hull.count >= 3 {
+                    // Check if hull is at least partially on screen
+                    let hullMinX = hull.map(\.x).min()!
+                    let hullMaxX = hull.map(\.x).max()!
+                    let hullMinY = hull.map(\.y).min()!
+                    let hullMaxY = hull.map(\.y).max()!
+
+                    if hullMaxX >= 0 && hullMinX <= viewportSize.width &&
+                       hullMaxY >= 0 && hullMinY <= viewportSize.height {
+                        polygons.append(hull)
                     }
-
-                    let blendFactor = min(CGFloat(newCount) / 10.0, 1.0)
-                    let currentColor = UIColor(
-                        red: 0.0,
-                        green: blendFactor * 1.0,
-                        blue: (1.0 - blendFactor) * 1.0,
-                        alpha: 0.8
-                    )
-
-                    var material = SimpleMaterial(color: currentColor, isMetallic: false)
-                    material.triangleFillMode = .lines
-
-                    DispatchQueue.main.async {
-                        if let existingRecord = self.meshEntities[meshAnchor.identifier] {
-                            existingRecord.entity.model?.mesh = meshResource
-                            existingRecord.entity.model?.materials = [material]
-                            self.meshEntities[meshAnchor.identifier] = (existingRecord.entity, newCount)
-                        } else {
-                            let entity = ModelEntity(mesh: meshResource, materials: [material])
-                            let anchorEntity = AnchorEntity(anchor: meshAnchor)
-                            anchorEntity.addChild(entity)
-                            arView.scene.addAnchor(anchorEntity)
-                            self.meshEntities[meshAnchor.identifier] = (entity, newCount)
-                        }
-                    }
-
-                } catch {
-                    print("Error generating mesh: \(error)")
                 }
             }
 
-            updateStats(in: session)
+            DispatchQueue.main.async {
+                overlay.coveragePolygons = polygons
+                overlay.setNeedsDisplay()
+            }
+        }
+
+        /// Compute 2D convex hull using Andrew's monotone chain algorithm.
+        private func convexHull(_ points: [CGPoint]) -> [CGPoint] {
+            let sorted = points.sorted { $0.x == $1.x ? $0.y < $1.y : $0.x < $1.x }
+            if sorted.count <= 2 { return sorted }
+
+            func cross(_ o: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+                (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+            }
+
+            var lower = [CGPoint]()
+            for p in sorted {
+                while lower.count >= 2 && cross(lower[lower.count - 2], lower[lower.count - 1], p) <= 0 {
+                    lower.removeLast()
+                }
+                lower.append(p)
+            }
+
+            var upper = [CGPoint]()
+            for p in sorted.reversed() {
+                while upper.count >= 2 && cross(upper[upper.count - 2], upper[upper.count - 1], p) <= 0 {
+                    upper.removeLast()
+                }
+                upper.append(p)
+            }
+
+            lower.removeLast()
+            upper.removeLast()
+            return lower + upper
         }
 
         private func updateStats(in session: ARSession) {
@@ -146,9 +281,7 @@ struct ARCoverageView: UIViewRepresentable {
                 totalFaces += meshAnchor.geometry.faces.count
                 anchorCount += 1
 
-                if let record = meshEntities[meshAnchor.identifier] {
-                    totalUpdates += record.updateCount
-                }
+                totalUpdates += anchorUpdateCounts[meshAnchor.identifier] ?? 0
             }
 
             DispatchQueue.main.async {
@@ -161,117 +294,6 @@ struct ARCoverageView: UIViewRepresentable {
                     scanStats.averageQuality = 0.0
                 }
             }
-        }
-
-        // Standard mesh resource (no filtering)
-        private func generateMeshResource(from geometry: ARMeshGeometry) throws -> MeshResource {
-            let vertices = geometry.vertices
-            let faces = geometry.faces
-
-            var vertexBuffer = [SIMD3<Float>]()
-            vertexBuffer.reserveCapacity(vertices.count)
-            for i in 0..<vertices.count {
-                let pointer = vertices.buffer.contents().advanced(by: i * vertices.stride)
-                let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                vertexBuffer.append(vertex)
-            }
-
-            var faceBuffer = [UInt32]()
-            faceBuffer.reserveCapacity(faces.count * 3)
-            let faceBytes = faces.bytesPerIndex * faces.indexCountPerPrimitive
-            for i in 0..<faces.count {
-                let pointer = faces.buffer.contents().advanced(by: i * faceBytes)
-                let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
-                faceBuffer.append(indices.0)
-                faceBuffer.append(indices.1)
-                faceBuffer.append(indices.2)
-            }
-
-            var descriptor = MeshDescriptor(name: "ARMeshGeometry")
-            descriptor.positions = MeshBuffer(vertexBuffer)
-            descriptor.primitives = .triangles(faceBuffer)
-            return try MeshResource.generate(from: [descriptor])
-        }
-
-        // Privacy-filtered mesh: skip faces where vertices project onto person pixels
-        private func generateFilteredMeshResource(
-            from geometry: ARMeshGeometry,
-            transform: simd_float4x4,
-            segmentation: CVPixelBuffer,
-            camera: ARCamera
-        ) throws -> MeshResource {
-            let vertices = geometry.vertices
-            let faces = geometry.faces
-
-            let segWidth = CVPixelBufferGetWidth(segmentation)
-            let segHeight = CVPixelBufferGetHeight(segmentation)
-
-            CVPixelBufferLockBaseAddress(segmentation, .readOnly)
-            defer { CVPixelBufferUnlockBaseAddress(segmentation, .readOnly) }
-            let segBase = CVPixelBufferGetBaseAddress(segmentation)
-            let segStride = CVPixelBufferGetBytesPerRow(segmentation)
-
-            // Read all vertices
-            var vertexBuffer = [SIMD3<Float>]()
-            vertexBuffer.reserveCapacity(vertices.count)
-            for i in 0..<vertices.count {
-                let pointer = vertices.buffer.contents().advanced(by: i * vertices.stride)
-                let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                vertexBuffer.append(vertex)
-            }
-
-            // Precompute per-vertex "is person" flag by projecting to image space
-            let viewMatrix = camera.viewMatrix(for: .landscapeRight)
-            let imageResolution = camera.imageResolution
-            let projMatrix = camera.projectionMatrix(for: .landscapeRight, viewportSize: imageResolution, zNear: 0.001, zFar: 100)
-
-            var isPersonVertex = [Bool](repeating: false, count: vertices.count)
-            for i in 0..<vertices.count {
-                let localPos = SIMD4<Float>(vertexBuffer[i].x, vertexBuffer[i].y, vertexBuffer[i].z, 1.0)
-                let worldPos = transform * localPos
-                let camPos = viewMatrix * worldPos
-                let clipPos = projMatrix * camPos
-
-                guard clipPos.w > 0 else { continue }
-                let ndcX = clipPos.x / clipPos.w
-                let ndcY = clipPos.y / clipPos.w
-
-                // NDC to pixel coordinates in segmentation buffer
-                let px = Int((ndcX * 0.5 + 0.5) * Float(segWidth))
-                let py = Int((1.0 - (ndcY * 0.5 + 0.5)) * Float(segHeight))
-
-                if px >= 0 && px < segWidth && py >= 0 && py < segHeight,
-                   let base = segBase {
-                    let pixel = base.advanced(by: py * segStride + px).assumingMemoryBound(to: UInt8.self).pointee
-                    isPersonVertex[i] = pixel > 128
-                }
-            }
-
-            // Filter faces: skip if any vertex is person
-            var faceBuffer = [UInt32]()
-            let faceBytes = faces.bytesPerIndex * faces.indexCountPerPrimitive
-            for i in 0..<faces.count {
-                let pointer = faces.buffer.contents().advanced(by: i * faceBytes)
-                let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
-
-                let i0 = Int(indices.0)
-                let i1 = Int(indices.1)
-                let i2 = Int(indices.2)
-
-                // Skip face if any vertex is classified as person
-                if isPersonVertex[i0] || isPersonVertex[i1] || isPersonVertex[i2] {
-                    continue
-                }
-
-                faceBuffer.append(indices.0)
-                faceBuffer.append(indices.1)
-                faceBuffer.append(indices.2)
-            }
-
-            var descriptor = MeshDescriptor(name: "ARMeshGeometry")
-            descriptor.positions = MeshBuffer(vertexBuffer)
-            descriptor.primitives = .triangles(faceBuffer)
-            return try MeshResource.generate(from: [descriptor])
         }
     }
 
