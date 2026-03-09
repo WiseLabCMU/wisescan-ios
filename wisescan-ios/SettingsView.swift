@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit // Added for UIDevice.current.systemVersion
 
 struct SettingsView: View {
     @AppStorage("rawOverlapMax") private var rawOverlapMax: Double = 60.0
@@ -153,6 +154,32 @@ struct SettingsView: View {
                             .foregroundColor(.gray)
                     }
                     .listRowBackground(Color.white.opacity(0.05))
+
+                    // MARK: - Feedback
+                    Section {
+                        Button(action: {
+                            openFeedbackForm()
+                        }) {
+                            HStack(spacing: 12) {
+                                Image(systemName: "ladybug.fill")
+                                    .foregroundColor(.red)
+                                    .font(.title3)
+                                    .frame(width: 28)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Report a Bug")
+                                        .foregroundColor(.white)
+                                        .font(.subheadline).bold()
+                                    Text("Found an issue? Let us know.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    } header: {
+                        Text("FEEDBACK")
+                    }
+                    .listRowBackground(Color.white.opacity(0.05))
                 }
                 .scrollContentBackground(.hidden)
             }
@@ -239,6 +266,43 @@ struct SettingsView: View {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    // MARK: - Feedback Helper
+    private func openFeedbackForm() {
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "Unknown"
+        let osVersion = UIDevice.current.systemVersion
+
+        // GitHub Issue URL for the repository
+        let githubNewIssueURL = "https://github.com/WiseLabCMU/wisescan-ios/issues/new"
+
+        var components = URLComponents(string: githubNewIssueURL)
+
+        let issueBody = """
+        ### Steps to Reproduce
+        1.
+
+        ### Expected Behavior
+
+
+        ### Actual Behavior
+
+
+        ---
+        **App Version:** \(appVersion) (\(build))
+        **iOS Version:** \(osVersion)
+        """
+
+        components?.queryItems = [
+            URLQueryItem(name: "title", value: "[Bug] App Issue"),
+            URLQueryItem(name: "labels", value: "bug"),
+            URLQueryItem(name: "body", value: issueBody)
+        ]
+
+        if let url = components?.url {
+            UIApplication.shared.open(url)
+        }
     }
 }
 
