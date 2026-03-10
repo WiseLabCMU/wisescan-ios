@@ -285,7 +285,7 @@ struct ScanCard: View {
         updated.uploadStatus = .uploading
         onUpdate(updated)
 
-        let ext = selectedFormat.rawValue.lowercased()
+
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
         let formatStr = selectedFormat.rawValue.lowercased()
         let filename = "scan4d_\(formatStr)_\(scanName)_\(scan.id.uuidString.prefix(8)).zip"
