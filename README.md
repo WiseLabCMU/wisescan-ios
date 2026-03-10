@@ -6,28 +6,15 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 
 **Backend Integration:** Receivers: [wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload) (testing fallback) and [wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion) (production Prefect pipeline).
 
-## Features & Implementation Status
+## Features
 
-| Feature | Description | Status |
-| :--- | :--- | :--- |
-| **LiDAR Mesh Capture** | Real-time scene reconstruction with live wireframe overlay and quality HUD | ✅ Complete |
-| **Start/Stop Recording** | Tap to start scanning with timer, tap again to stop and save | ✅ Complete |
-| **Scan4D (Time-Series)** | Group scans by Location and use `ARWorldMap` caching to relocalize and rescan the exact same physical space over time | ✅ Complete |
-| **Privacy Filtering** | Person segmentation removes humans from mesh; face detection blurs faces on camera feed and in exports | ✅ Complete |
-| **3D Scan Preview** | Interactive SceneKit preview with camera-sampled vertex coloring | ✅ Complete |
-| **Export Formats** | OBJ, PLY, USDZ, RAW (Nerfstudio), and Polycam raw data | ✅ Complete |
-| **Save to Files** | Export scans locally via iOS share sheet (Files, AirDrop, etc.) | ✅ Complete |
-| **Upload to Server** | HTTP PUT upload to configured server URL with status tracking | ✅ Complete |
-| **Server Status Check** | HTTP HEAD test on Dashboard shows server reachable/unreachable | ✅ Complete |
-| **RAW Data Capture** | RGB frames (JPEG), 16-bit depth maps (PNG), camera poses (transforms.json) | ✅ Complete |
-| **Capture Settings** | Upload URL, image overlap maximum, motion blur rejection | ✅ Complete |
-| **In-App Guide** | Workflow guide, format descriptions, recommended viewer apps with links | ✅ Complete |
-| **LiDAR Check** | Alert on launch if device lacks LiDAR support | ✅ Complete |
-| **Server Discovery** | Detect local Prefect orchestration servers via mDNS/Bonjour | 🔲 Planned |
-| **Wearable Proxy** | Bridge data from secondary devices (e.g., Meta/Ray-Ban glasses) | 🔲 Planned |
-| **Streaming Mode** | Real-time lower-res tracking data sent to server | 🔲 Planned |
-| **Workflow Orchestration** | Select preset server pipelines (Mesh, Splat, Spatial Indexing) | 🔲 Planned |
-| **Job Observability** | Display remote Prefect job status locally | 🔲 Planned |
+- **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay and quality HUD.
+- **Scan4D (Time-Series):** Group scans by Location and use `ARWorldMap` caching to relocalize and rescan the exact same physical space over time.
+- **Privacy Filtering:** Person segmentation removes humans from mesh; face detection blurs faces on camera feed and in exports.
+- **Export & RAW Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses.
+- **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration.
+
+> **Note:** For a comprehensive list of all features, architecture diagrams, and detailed implementation status, please see [REQUIREMENTS.md](REQUIREMENTS.md).
 
 ## Architecture
 
