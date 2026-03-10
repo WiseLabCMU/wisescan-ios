@@ -1,10 +1,16 @@
 import SwiftUI
+import SwiftData
 
 struct SettingsView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query private var locations: [ScanLocation]
+
     @AppStorage("rawOverlapMax") private var rawOverlapMax: Double = 60.0
     @AppStorage("rawRejectBlur") private var rawRejectBlur: Bool = true
     @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
     @Environment(\.dismiss) private var dismiss
+
+    @State private var showDeleteConfirmation = false
 
     var body: some View {
         NavigationStack {
@@ -153,6 +159,25 @@ struct SettingsView: View {
                             .foregroundColor(.gray)
                     }
                     .listRowBackground(Color.white.opacity(0.05))
+
+                    // MARK: - Data Management
+                    Section {
+                        Button(role: .destructive) {
+                            showDeleteConfirmation = true
+                        } label: {
+                            HStack {
+                                Image(systemName: "trash.fill")
+                                Text("Delete All Scans")
+                            }
+                        }
+                    } header: {
+                        Text("DATA MANAGEMENT")
+                    } footer: {
+                        Text("This will permanently delete all scan locations, meshes, and raw data.")
+                            .font(.caption2)
+                            .foregroundColor(.gray)
+                    }
+                    .listRowBackground(Color.white.opacity(0.05))
                 }
                 .scrollContentBackground(.hidden)
             }
@@ -163,8 +188,26 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .alert("Delete All Data?", isPresented: $showDeleteConfirmation) {
+                Button("Delete All", role: .destructive) {
+                    deleteAllData()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This action cannot be undone. All saved scan data will be permanently removed from this device.")
+            }
             .preferredColorScheme(.dark)
         }
+    }
+
+    private func deleteAllData() {
+        for location in locations {
+            for scan in location.scans {
+                ScanFileManager.shared.deleteScan(scan, context: modelContext)
+            }
+            modelContext.delete(location)
+        }
+        try? modelContext.save()
     }
 
     // MARK: - Helper Views

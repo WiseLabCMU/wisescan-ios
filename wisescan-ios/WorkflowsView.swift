@@ -1,7 +1,11 @@
 import SwiftUI
+import SwiftData
 
 struct WorkflowsView: View {
     @Environment(ScanStore.self) private var scanStore
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \ScanLocation.name) private var locations: [ScanLocation]
+
     @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
     @State private var showSettings = false
     @Binding var selectedTab: Int
@@ -18,7 +22,7 @@ struct WorkflowsView: View {
                     VStack(spacing: 24) {
 
                         // Captured Scans
-                        if scanStore.locations.allSatisfy({ $0.scans.isEmpty }) {
+                        if locations.allSatisfy({ $0.scans.isEmpty }) {
                             VStack(spacing: 16) {
                                 Image(systemName: "viewfinder")
                                     .font(.system(size: 48))
@@ -33,7 +37,7 @@ struct WorkflowsView: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 40)
                         } else {
-                            ForEach(scanStore.locations) { location in
+                            ForEach(locations) { location in
                                 if !location.scans.isEmpty {
                                     VStack(alignment: .leading, spacing: 16) {
                                         HStack {
@@ -42,11 +46,21 @@ struct WorkflowsView: View {
                                                 .foregroundColor(.gray)
                                             Spacer()
 
+                                            // Delete Location Action
+                                            Button(role: .destructive, action: {
+                                                deleteLocation(location)
+                                            }) {
+                                                Image(systemName: "trash")
+                                                    .foregroundColor(.red)
+                                            }
+                                            .padding(.trailing, 8)
+
                                             // Scan4D action: initiate a new scan for this location
                                             Button(action: {
                                                 scanStore.activeLocationForScan = location.id
                                                 // Grab the most recent world map for this location if available
-                                                scanStore.activeRelocalizationMap = location.scans.first?.worldMapURL
+                                                let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
+                                                scanStore.activeRelocalizationMap = sortedScans.first?.worldMapURL
                                                 selectedTab = 1 // Switch to Capture View
                                             }) {
                                                 Label("Scan Again", systemImage: "plus.viewfinder")
@@ -57,9 +71,14 @@ struct WorkflowsView: View {
                                         .padding(.horizontal)
                                         .padding(.top, 8)
 
-                                        ForEach(location.scans) { scan in
+                                        let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
+                                        ForEach(sortedScans) { scan in
                                             ScanCard(scan: scan, uploadURL: uploadURL) { updatedScan in
-                                                scanStore.updateScan(updatedScan)
+                                                // trigger UI update not strictly needed for SwiftData Model observation if nested right,
+                                                // but we can save context just in case.
+                                                try? modelContext.save()
+                                            } onDelete: { scanToDelete in
+                                                ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
                                             }
                                         }
                                     }
@@ -139,32 +158,54 @@ struct WorkflowsView: View {
             .preferredColorScheme(.dark)
         }
     }
+
+    private func deleteLocation(_ loc: ScanLocation) {
+        // Find all scans first to delete files
+        for scan in loc.scans {
+            ScanFileManager.shared.deleteScan(scan, context: modelContext)
+        }
+        modelContext.delete(loc)
+        try? modelContext.save()
+    }
 }
 
 // MARK: - Scan Card
 
 struct ScanCard: View {
-    var scan: CapturedScan
+    @Bindable var scan: CapturedScan
     var uploadURL: String
     var onUpdate: (CapturedScan) -> Void
+    var onDelete: (CapturedScan) -> Void
 
     @State private var selectedFormat: ExportFormat
     @State private var showShareSheet = false
     @State private var exportFileURL: URL? = nil
 
-    init(scan: CapturedScan, uploadURL: String, onUpdate: @escaping (CapturedScan) -> Void) {
+    init(scan: CapturedScan, uploadURL: String, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void) {
         self.scan = scan
         self.uploadURL = uploadURL
         self.onUpdate = onUpdate
+        self.onDelete = onDelete
         self._selectedFormat = State(initialValue: scan.selectedFormat)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // 3D mesh preview (interactive: rotate/zoom)
-            MeshPreviewView(meshData: scan.meshData, vertexColors: scan.vertexColors)
+            MeshPreviewView(meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL)
                 .frame(height: 200)
                 .clipped()
+                .overlay(
+                    // Inner delete button for individual scan
+                    Button(action: { onDelete(scan) }) {
+                        Image(systemName: "trash.circle.fill")
+                            .font(.title)
+                            .foregroundColor(.white.opacity(0.8))
+                            .shadow(radius: 2)
+                    }
+                    .padding(8),
+                    alignment: .topTrailing
+                )
 
             VStack(alignment: .leading, spacing: 12) {
                 // Scan info
@@ -197,9 +238,8 @@ struct ScanCard: View {
                     }
                     .pickerStyle(.segmented)
                     .onChange(of: selectedFormat) { _, newValue in
-                        var updated = scan
-                        updated.selectedFormat = newValue
-                        onUpdate(updated)
+                        scan.selectedFormat = newValue
+                        onUpdate(scan)
                     }
                 }
 
@@ -228,11 +268,11 @@ struct ScanCard: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
-                        .background(scan.uploadStatus == .uploading ? Color.gray : Color.blue)
+                        .background(scan.uploadStatus.isUploading ? Color.gray : Color.blue)
                         .foregroundColor(.white)
                         .cornerRadius(10)
                     }
-                    .disabled(scan.uploadStatus == .uploading || scan.uploadStatus == .success)
+                    .disabled(scan.uploadStatus.isUploading || scan.uploadStatus.isSuccess)
                 }
             }
             .padding()
@@ -268,7 +308,7 @@ struct ScanCard: View {
     private var statusColor: Color {
         switch scan.uploadStatus {
         case .pending: return .gray
-        case .uploading: return .blue
+        case .uploading(_): return .blue
         case .success: return .green
         case .failed: return .red
         }
@@ -281,9 +321,8 @@ struct ScanCard: View {
     }
 
     private func uploadScan() {
-        var updated = scan
-        updated.uploadStatus = .uploading
-        onUpdate(updated)
+        scan.uploadStatus = .uploading(progress: 0.0)
+        onUpdate(scan)
 
 
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
@@ -292,14 +331,15 @@ struct ScanCard: View {
 
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         guard let url = URL(string: baseURLString + filename) else {
-            updated.uploadStatus = .failed("Invalid URL")
-            onUpdate(updated)
+            scan.uploadStatus = .failed("Invalid URL")
+            onUpdate(scan)
             return
         }
 
-        guard let rawPath = scan.rawDataPath else {
-            updated.uploadStatus = .failed("No raw data")
-            onUpdate(updated)
+        let rawPath = scan.rawDataPath
+        guard FileManager.default.fileExists(atPath: rawPath.path) else {
+            scan.uploadStatus = .failed("No raw data")
+            onUpdate(scan)
             return
         }
 
@@ -326,10 +366,9 @@ struct ScanCard: View {
 
             guard error == nil else {
                 DispatchQueue.main.async {
-                    var result = scan
-                    result.selectedFormat = selectedFormat
-                    result.uploadStatus = .failed("Zip failed")
-                    onUpdate(result)
+                    scan.selectedFormat = selectedFormat
+                    scan.uploadStatus = .failed("Zip failed")
+                    onUpdate(scan)
                 }
                 return
             }
@@ -342,16 +381,15 @@ struct ScanCard: View {
             let task = URLSession.shared.uploadTask(with: request, fromFile: zipURL) { _, response, uploadError in
                 try? FileManager.default.removeItem(at: zipURL)
                 DispatchQueue.main.async {
-                    var result = scan
-                    result.selectedFormat = selectedFormat
+                    scan.selectedFormat = selectedFormat
                     if let uploadError = uploadError {
-                        result.uploadStatus = .failed(uploadError.localizedDescription)
+                        scan.uploadStatus = .failed(uploadError.localizedDescription)
                     } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-                        result.uploadStatus = .success
+                        scan.uploadStatus = .success
                     } else {
-                        result.uploadStatus = .failed("Server error")
+                        scan.uploadStatus = .failed("Server error")
                     }
-                    onUpdate(result)
+                    onUpdate(scan)
                 }
             }
             task.resume()
@@ -363,7 +401,8 @@ struct ScanCard: View {
         let formatStr = selectedFormat.rawValue.lowercased()
         let filename = "scan4d_\(formatStr)_\(scanName)_\(scan.id.uuidString.prefix(8)).zip"
 
-        guard let rawPath = scan.rawDataPath else { return }
+        let rawPath = scan.rawDataPath
+        guard FileManager.default.fileExists(atPath: rawPath.path) else { return }
         DispatchQueue.global(qos: .userInitiated).async {
             let zipURL = FileManager.default.temporaryDirectory
                 .appendingPathComponent(filename)

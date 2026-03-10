@@ -1,8 +1,10 @@
 import SwiftUI
 import ARKit
+import SwiftData
 
 struct CaptureView: View {
     @Environment(ScanStore.self) private var scanStore
+    @Environment(\.modelContext) private var modelContext
     @State private var scanStats = ScanStats()
     @State private var locationManager = LocationManager()
     @AppStorage("privacyFilter") private var isPrivacyFilterOn = true
@@ -34,12 +36,16 @@ struct CaptureView: View {
     }
 
     var activeGhostMeshData: Data? {
-        guard let locId = scanStore.activeLocationForScan,
-              let location = scanStore.locations.first(where: { $0.id == locId }),
-              let latestScan = location.scans.first else {
+        guard let locId = scanStore.activeLocationForScan else {
             return nil
         }
-        return latestScan.meshData
+        let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
+        guard let location = try? modelContext.fetch(descriptor).first,
+              let latestScan = location.scans.sorted(by: { $0.capturedAt > $1.capturedAt }).first else {
+            return nil
+        }
+        // Safely load the background ghost mesh from disk since it's no longer in RAM
+        return try? Data(contentsOf: latestScan.meshFileURL)
     }
 
     var body: some View {
@@ -331,7 +337,7 @@ struct CaptureView: View {
         guard let pending = pendingScan else { return }
 
         // Determine the location ID
-        let locationId: UUID
+        let locationId: UUID?
         var finalName = "New Space"
 
         if let activeLocationId = scanStore.activeLocationForScan {
@@ -339,19 +345,19 @@ struct CaptureView: View {
         } else {
             let trimmedName = newLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
             finalName = trimmedName.isEmpty ? "New Space" : trimmedName
-            // Create a new location to hold this scan and future Scan4D rescans
-            let newLocation = scanStore.addLocation(name: finalName)
-            locationId = newLocation.id
+            locationId = nil // ScanFileManager will create a new location with this name
         }
 
-        let _ = scanStore.addScan(
+        let _ = ScanFileManager.shared.saveScan(
+            context: modelContext,
+            locationId: locationId,
+            name: finalName,
             meshData: pending.meshData,
             vertexCount: pending.vertexCount,
             faceCount: pending.faceCount,
             rawDataPath: pending.rawDataPath,
             vertexColors: pending.vertexColors,
-            worldMapURL: pending.worldMapURL,
-            locationId: locationId
+            worldMapURL: pending.worldMapURL
         )
 
         saveMessage = "Scan Saved!"

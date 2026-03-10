@@ -215,21 +215,34 @@ sequenceDiagram
 | **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `CoverageOverlayView`, `updateCoverageOverlay()`, `convexHull()` |
 | **Assets** | [coverage-mask.jpg](Design/coverage-mask.jpg) |
 
+### REQ-011: Persistent Scan Storage
+| | |
+|:--|:--|
+| **Status** | ✅ Complete |
+| **Description** | SwiftData/SQLite for on-disk location and lightweight scan metadata. Binary assets are saved directly to file URLs on disk. |
+| **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanFileManager`, `@Model ScanLocation`, `@Model CapturedScan` |
+
+### REQ-012: Local Auto-Cleanup Policy
+| | |
+|:--|:--|
+| **Status** | ✅ Complete |
+| **Description** | Automatically delete oldest scans to maintain a max-2 retention policy per Location to save device space. Also supports manual deletion of items. |
+| **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanFileManager.enforceRetentionPolicy()` · [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) — manual deletion UI |
+
 ---
 
 ## Planned Features
 
 | ID | Feature | Description | Priority |
 |:---|:--------|:------------|:---------|
-| REQ-011 | Server Discovery | Detect local Prefect servers via mDNS/Bonjour | Medium |
-| REQ-012 | Wearable Proxy | Bridge data from Meta/Ray-Ban glasses | Low |
-| REQ-013 | Streaming Mode | Real-time lower-res tracking data to server | Medium |
-| REQ-014 | Workflow Orchestration | Select preset server pipelines (Mesh, Splat, Spatial Indexing) | High |
-| REQ-015 | Job Observability | Display remote Prefect job status locally | Medium |
-| REQ-016 | Scan4D Ghost Overlay | Render previous mesh as translucent overlay during rescan | Medium |
-| REQ-017 | Scan4D Ground Truth Offset | Capture GPS or AprilTag data alongside scans for backend alignment seeding | High |
-| REQ-018 | OpenFLAME Live Relocalization | Use backend server to stream visual localization back to device, bypassing ARKit maps | Low |
-| REQ-019 | Persistent Scan Storage | SwiftData/SQLite for on-disk location + scan metadata | High |
+| REQ-013 | Server Discovery | Detect local Prefect servers via mDNS/Bonjour | Medium |
+| REQ-014 | Wearable Proxy | Bridge data from Meta/Ray-Ban glasses | Low |
+| REQ-015 | Streaming Mode | Real-time lower-res tracking data to server | Medium |
+| REQ-016 | Workflow Orchestration | Select preset server pipelines (Mesh, Splat, Spatial Indexing) | High |
+| REQ-017 | Job Observability | Display remote Prefect job status locally | Medium |
+| REQ-018 | Scan4D Ghost Overlay | Render previous mesh as translucent overlay during rescan | Medium |
+| REQ-019 | Scan4D Ground Truth Offset | Capture GPS or AprilTag data alongside scans for backend alignment seeding | High |
+| REQ-020 | OpenFLAME Live Relocalization | Use backend server to stream visual localization back to device, bypassing ARKit maps | Low |
 
 ---
 
@@ -237,45 +250,43 @@ sequenceDiagram
 
 ```mermaid
 classDiagram
-    class ScanLocation {
+    class LocationModel {
         +UUID id
         +String name
-        +CapturedScan[] scans
+        +String? remoteLocationId
+        +ScanModel[] scans
     }
 
-    class CapturedScan {
+    class ScanModel {
         +UUID id
         +String name
         +Date capturedAt
-        +Data meshData
+        +URL meshFileURL
         +Int vertexCount
         +Int faceCount
         +URL? rawDataPath
-        +Data? vertexColors
+        +URL? colorsFileURL
         +URL? worldMapURL
-        +UUID? locationId
-        +ExportFormat selectedFormat
-        +UploadStatus uploadStatus
+        +LocationModel? location
+        +String selectedFormatStr
+        +Double uploadProgress
+        +String uploadStatusStr
     }
 
     class ScanStore {
-        +ScanLocation[] locations
+        <<SwiftData/SwiftUI>>
+        +ModelContext modelContext
         +URL? activeRelocalizationMap
         +UUID? activeLocationForScan
-        +addLocation(name) ScanLocation
-        +addScan(...) CapturedScan
-        +updateScan(scan)
     }
 
-    class ScanStats {
-        +Int totalVertices
-        +Int totalFaces
-        +Double averageQuality
+    class ScanFileManager {
+        +saveScan(...) URL
+        +cleanupOldScans(for: LocationModel)
     }
 
-    ScanStore "1" --> "*" ScanLocation
-    ScanLocation "1" --> "*" CapturedScan
-    ScanStore ..> ScanStats : updates
+    LocationModel "1" --> "*" ScanModel
+    ScanStore ..> LocationModel : @Query
 ```
 
 **Source:** [ScanStore.swift](wisescan-ios/ScanStore.swift)

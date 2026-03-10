@@ -3,8 +3,8 @@ import SceneKit
 
 /// Renders a 3D preview of captured OBJ mesh data using SceneKit.
 struct MeshPreviewView: UIViewRepresentable {
-    let meshData: Data
-    var vertexColors: Data? = nil
+    var meshFileURL: URL?
+    var colorsFileURL: URL?
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -37,38 +37,52 @@ struct MeshPreviewView: UIViewRepresentable {
         fillLight.eulerAngles = SCNVector3(Float.pi / 4, -Float.pi / 3, 0)
         scene.rootNode.addChildNode(fillLight)
 
-        // Parse OBJ data and build geometry
-        if let (geometry, _) = buildGeometry(from: meshData, vertexColors: vertexColors) {
-            let node = SCNNode(geometry: geometry)
+        // Dispatch to background queue for loading files and parsing OBJ
+        DispatchQueue.global(qos: .userInitiated).async {
+            var meshData: Data? = nil
+            var colorsData: Data? = nil
 
-            // Center the model
-            let (minBound, maxBound) = node.boundingBox
-            let center = SCNVector3(
-                (minBound.x + maxBound.x) / 2,
-                (minBound.y + maxBound.y) / 2,
-                (minBound.z + maxBound.z) / 2
-            )
-            node.position = SCNVector3(-center.x, -center.y, -center.z)
+            if let meshURL = meshFileURL {
+                meshData = try? Data(contentsOf: meshURL)
+            }
+            if let colorsURL = colorsFileURL {
+                colorsData = try? Data(contentsOf: colorsURL)
+            }
 
-            // Wrap in a parent to keep centering clean
-            let containerNode = SCNNode()
-            containerNode.addChildNode(node)
-            scene.rootNode.addChildNode(containerNode)
+            if let md = meshData, let (geometry, _) = self.buildGeometry(from: md, vertexColors: colorsData) {
+                DispatchQueue.main.async {
+                    let node = SCNNode(geometry: geometry)
 
-            // Position camera based on model size
-            let size = SCNVector3(
-                maxBound.x - minBound.x,
-                maxBound.y - minBound.y,
-                maxBound.z - minBound.z
-            )
-            let maxDimension = max(size.x, max(size.y, size.z))
+                    // Center the model
+                    let (minBound, maxBound) = node.boundingBox
+                    let center = SCNVector3(
+                        (minBound.x + maxBound.x) / 2,
+                        (minBound.y + maxBound.y) / 2,
+                        (minBound.z + maxBound.z) / 2
+                    )
+                    node.position = SCNVector3(-center.x, -center.y, -center.z)
 
-            let cameraNode = SCNNode()
-            cameraNode.camera = SCNCamera()
-            cameraNode.camera?.automaticallyAdjustsZRange = true
-            cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 1.5)
-            cameraNode.look(at: SCNVector3Zero)
-            scene.rootNode.addChildNode(cameraNode)
+                    // Wrap in a parent to keep centering clean
+                    let containerNode = SCNNode()
+                    containerNode.addChildNode(node)
+                    scene.rootNode.addChildNode(containerNode)
+
+                    // Position camera based on model size
+                    let size = SCNVector3(
+                        maxBound.x - minBound.x,
+                        maxBound.y - minBound.y,
+                        maxBound.z - minBound.z
+                    )
+                    let maxDimension = max(size.x, max(size.y, size.z))
+
+                    let cameraNode = SCNNode()
+                    cameraNode.camera = SCNCamera()
+                    cameraNode.camera?.automaticallyAdjustsZRange = true
+                    cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 1.5)
+                    cameraNode.look(at: SCNVector3Zero)
+                    scene.rootNode.addChildNode(cameraNode)
+                }
+            }
         }
 
         return scnView
