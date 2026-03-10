@@ -1,0 +1,8 @@
+app_identifier("edu.cmu.wiselab.wisescan-ios")
+team_id("24D5JLAEA3") # Apple Developer Team ID
+
+# For App Store Connect API key authentication, set these environment variables:
+#   APP_STORE_CONNECT_API_KEY_KEY_ID
+#   APP_STORE_CONNECT_API_KEY_ISSUER_ID
+#   APP_STORE_CONNECT_API_KEY_KEY (base64-encoded .p8 contents)
+# Or use: fastlane run app_store_connect_api_key
