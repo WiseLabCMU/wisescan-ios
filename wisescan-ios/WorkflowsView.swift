@@ -177,16 +177,20 @@ struct ScanCard: View {
     var onUpdate: (CapturedScan) -> Void
     var onDelete: (CapturedScan) -> Void
 
-    @State private var selectedFormat: ExportFormat
+    @AppStorage("selectedExportFormat") private var selectedFormatStr: String = ExportFormat.polycam.rawValue
     @State private var showShareSheet = false
     @State private var exportFileURL: URL? = nil
+
+    private var selectedFormat: ExportFormat {
+        get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
+        nonmutating set { selectedFormatStr = newValue.rawValue }
+    }
 
     init(scan: CapturedScan, uploadURL: String, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void) {
         self.scan = scan
         self.uploadURL = uploadURL
         self.onUpdate = onUpdate
         self.onDelete = onDelete
-        self._selectedFormat = State(initialValue: scan.selectedFormat)
     }
 
     var body: some View {
@@ -231,14 +235,14 @@ struct ScanCard: View {
                     Text("Export Format")
                         .font(.caption)
                         .foregroundColor(.gray)
-                    Picker("Format", selection: $selectedFormat) {
+                    Picker("Format", selection: $selectedFormatStr) {
                         ForEach(ExportFormat.allCases, id: \.self) { format in
-                            Text(format.rawValue).tag(format)
+                            Text(format.rawValue).tag(format.rawValue)
                         }
                     }
                     .pickerStyle(.segmented)
-                    .onChange(of: selectedFormat) { _, newValue in
-                        scan.selectedFormat = newValue
+                    .onChange(of: selectedFormatStr) { _, newValue in
+                        scan.selectedFormat = ExportFormat(rawValue: newValue) ?? .polycam
                         onUpdate(scan)
                     }
                 }
