@@ -54,6 +54,7 @@
 			buildPhases = (
 				C93B8BCA2F568A6F00785D6B /* Sources */,
 				C93B8BCB2F568A6F00785D6B /* Frameworks */,
+				C93B8BF02F568B0000785D6B /* Pull Release Tag From Github */,
 				C93B8BCC2F568A6F00785D6B /* Resources */,
 			);
 			buildRules = (
@@ -113,6 +114,28 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		C93B8BF02F568B0000785D6B /* Pull Release Tag From Github */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Pull Release Tag From Github";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(INFOPLIST_PATH)",
+			);
+			runOnlyForDeploymentPostprocessing = 1;
+			shellPath = /bin/sh;
+			shellScript = "GIT_RELEASE_VERSION=$(git describe --tags)\ndefaults write \"${BUILT_PRODUCTS_DIR}/${INFOPLIST_PATH%.*}\" \"CFBundleShortVersionString\" \"${GIT_RELEASE_VERSION#*v}\"\n\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		C93B8BCA2F568A6F00785D6B /* Sources */ = {
@@ -255,6 +278,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = T7A2Y99NQV;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Custom-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Scan4D;
@@ -292,6 +316,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = T7A2Y99NQV;
 				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Custom-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Scan4D;
