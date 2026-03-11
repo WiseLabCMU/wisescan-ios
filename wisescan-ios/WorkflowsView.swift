@@ -69,6 +69,10 @@ struct WorkflowsView: View {
                                                         Button("Delete \(locToDelete.scans.count) Scan\(locToDelete.scans.count == 1 ? "" : "s")", role: .destructive) {
                                                             deleteLocation(locToDelete)
                                                             locationToDelete = nil
+                                                            // Auto-exit edit mode after deleting all scans in a location
+                                                            if locations.allSatisfy({ $0.scans.isEmpty }) {
+                                                                isEditing = false
+                                                            }
                                                         }
                                                         Button("Cancel", role: .cancel) {
                                                             locationToDelete = nil
@@ -91,6 +95,8 @@ struct WorkflowsView: View {
                                                     .font(.caption).bold()
                                                     .foregroundColor(.cyan)
                                             }
+                                            .disabled(isEditing)
+                                            .opacity(isEditing ? 0.3 : 1.0)
                                         }
                                         .padding(.horizontal)
                                         .padding(.top, 8)
@@ -103,6 +109,10 @@ struct WorkflowsView: View {
                                                 try? modelContext.save()
                                             } onDelete: { scanToDelete in
                                                 ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
+                                                // Auto-exit edit mode if no scans remain
+                                                if locations.allSatisfy({ $0.scans.isEmpty }) {
+                                                    isEditing = false
+                                                }
                                             }
                                         }
                                     }
@@ -180,7 +190,13 @@ struct WorkflowsView: View {
                         Button(action: { showSettings = true }) {
                             Image(systemName: "gearshape")
                         }
+                        .disabled(isEditing)
                     }
+                }
+            }
+            .onChange(of: selectedTab) {
+                if selectedTab != 2 { // 2 is typically the Workflows tab index
+                    isEditing = false
                 }
             }
             .sheet(isPresented: $showSettings) {
@@ -293,6 +309,7 @@ struct ScanCard: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    .disabled(isEditing)
                     .onChange(of: selectedFormatStr) { _, newValue in
                         scan.selectedFormat = ExportFormat(rawValue: newValue) ?? .polycam
                         onUpdate(scan)
@@ -310,10 +327,11 @@ struct ScanCard: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
-                        .background(Color.cyan.opacity(0.8))
-                        .foregroundColor(.white)
+                        .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
+                        .foregroundColor(isEditing ? .gray : .white)
                         .cornerRadius(10)
                     }
+                    .disabled(isEditing)
 
                     // Upload button
                     Button(action: { uploadScan() }) {
@@ -324,11 +342,11 @@ struct ScanCard: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
-                        .background(scan.uploadStatus.isUploading ? Color.gray : Color.blue)
-                        .foregroundColor(.white)
+                        .background(isEditing || scan.uploadStatus.isUploading ? Color.gray.opacity(0.3) : Color.blue)
+                        .foregroundColor(isEditing ? .gray : .white)
                         .cornerRadius(10)
                     }
-                    .disabled(scan.uploadStatus.isUploading || scan.uploadStatus.isSuccess)
+                    .disabled(isEditing || scan.uploadStatus.isUploading || scan.uploadStatus.isSuccess)
                 }
             }
             .padding()
