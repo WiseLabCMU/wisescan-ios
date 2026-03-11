@@ -8,6 +8,9 @@ struct WorkflowsView: View {
 
     @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
     @State private var showSettings = false
+    @State private var locationToDelete: ScanLocation? = nil
+    @State private var showDeleteLocationConfirm = false
+    @State private var isEditing = false
     @Binding var selectedTab: Int
 
     var body: some View {
@@ -46,14 +49,35 @@ struct WorkflowsView: View {
                                                 .foregroundColor(.gray)
                                             Spacer()
 
-                                            // Delete Location Action
-                                            Button(role: .destructive, action: {
-                                                deleteLocation(location)
-                                            }) {
-                                                Image(systemName: "trash")
-                                                    .foregroundColor(.red)
+                                            // Delete Location Action (Only visible in Edit Mode)
+                                            if isEditing {
+                                                Button(role: .destructive, action: {
+                                                    locationToDelete = location
+                                                    showDeleteLocationConfirm = true
+                                                }) {
+                                                    Image(systemName: "trash")
+                                                        .foregroundColor(.red)
+                                                }
+                                                .padding(.trailing, 8)
+                                                .confirmationDialog(
+                                                    "Delete Location",
+                                                    isPresented: $showDeleteLocationConfirm,
+                                                    presenting: locationToDelete
+                                                ) { locToDelete in
+                                                    // Ensure we only process if it matches the current row
+                                                    if locToDelete == location {
+                                                        Button("Delete \(locToDelete.scans.count) Scan\(locToDelete.scans.count == 1 ? "" : "s")", role: .destructive) {
+                                                            deleteLocation(locToDelete)
+                                                            locationToDelete = nil
+                                                        }
+                                                        Button("Cancel", role: .cancel) {
+                                                            locationToDelete = nil
+                                                        }
+                                                    }
+                                                } message: { locToDelete in
+                                                    Text("This will permanently delete \"\(locToDelete.name)\" and all \(locToDelete.scans.count) scan\(locToDelete.scans.count == 1 ? "" : "s") inside it.")
+                                                }
                                             }
-                                            .padding(.trailing, 8)
 
                                             // Scan4D action: initiate a new scan for this location
                                             Button(action: {
@@ -73,7 +97,7 @@ struct WorkflowsView: View {
 
                                         let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
                                         ForEach(sortedScans) { scan in
-                                            ScanCard(scan: scan, uploadURL: uploadURL) { updatedScan in
+                                            ScanCard(scan: scan, uploadURL: uploadURL, isEditing: isEditing) { updatedScan in
                                                 // trigger UI update not strictly needed for SwiftData Model observation if nested right,
                                                 // but we can save context just in case.
                                                 try? modelContext.save()
@@ -147,8 +171,15 @@ struct WorkflowsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: { showSettings = true }) {
-                        Image(systemName: "gearshape")
+                    HStack {
+                        Button(action: { isEditing.toggle() }) {
+                            Text(isEditing ? "Done" : "Edit")
+                                .bold(isEditing)
+                                .foregroundColor(isEditing ? .red : .cyan)
+                        }
+                        Button(action: { showSettings = true }) {
+                            Image(systemName: "gearshape")
+                        }
                     }
                 }
             }
@@ -174,21 +205,24 @@ struct WorkflowsView: View {
 struct ScanCard: View {
     @Bindable var scan: CapturedScan
     var uploadURL: String
+    var isEditing: Bool
     var onUpdate: (CapturedScan) -> Void
     var onDelete: (CapturedScan) -> Void
 
     @AppStorage("selectedExportFormat") private var selectedFormatStr: String = ExportFormat.polycam.rawValue
     @State private var showShareSheet = false
     @State private var exportFileURL: URL? = nil
+    @State private var showDeleteConfirm = false
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
         nonmutating set { selectedFormatStr = newValue.rawValue }
     }
 
-    init(scan: CapturedScan, uploadURL: String, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void) {
+    init(scan: CapturedScan, uploadURL: String, isEditing: Bool, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void) {
         self.scan = scan
         self.uploadURL = uploadURL
+        self.isEditing = isEditing
         self.onUpdate = onUpdate
         self.onDelete = onDelete
     }
@@ -200,16 +234,34 @@ struct ScanCard: View {
                 .frame(height: 200)
                 .clipped()
                 .overlay(
-                    // Inner delete button for individual scan
-                    Button(action: { onDelete(scan) }) {
-                        Image(systemName: "trash.circle.fill")
-                            .font(.title)
-                            .foregroundColor(.white.opacity(0.8))
-                            .shadow(radius: 2)
+                    Group {
+                        if isEditing {
+                            ZStack {
+                                Color.black.opacity(0.6)
+                                Button(action: { showDeleteConfirm = true }) {
+                                    VStack(spacing: 8) {
+                                        Image(systemName: "trash.circle.fill")
+                                            .font(.system(size: 44))
+                                        Text("Delete Scan")
+                                            .font(.headline)
+                                    }
+                                    .foregroundColor(.red)
+                                }
+                            }
+                        }
                     }
-                    .padding(8),
-                    alignment: .topTrailing
                 )
+                .confirmationDialog(
+                    "Delete Scan",
+                    isPresented: $showDeleteConfirm
+                ) {
+                    Button("Delete \"\(scan.name)\"", role: .destructive) {
+                        onDelete(scan)
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This will permanently delete this scan and its data.")
+                }
 
             VStack(alignment: .leading, spacing: 12) {
                 // Scan info

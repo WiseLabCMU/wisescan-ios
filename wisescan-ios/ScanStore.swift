@@ -223,17 +223,17 @@ class ScanFileManager {
                 context.insert(targetLocation)
             }
         } else {
-            let descriptor = FetchDescriptor<ScanLocation>()
-            if let allLocs = try? context.fetch(descriptor), let first = allLocs.first {
-                targetLocation = first
-            } else {
-                targetLocation = ScanLocation(name: "Default Location")
-                context.insert(targetLocation)
-            }
+            // Create a new location with the provided name
+            targetLocation = ScanLocation(name: name.isEmpty ? "New Space" : name)
+            context.insert(targetLocation)
         }
 
+        // Auto-generate scan name based on count: "Scan 1", "Scan 2", ...
+        let scanNumber = targetLocation.scans.count + 1
+        let scanName = "Scan \(scanNumber)"
+
         let newScan = CapturedScan(
-            name: name,
+            name: scanName,
             vertexCount: vertexCount,
             faceCount: faceCount
         )

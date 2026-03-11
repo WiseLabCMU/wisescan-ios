@@ -189,12 +189,14 @@ struct SettingsView: View {
                 }
             }
             .alert("Delete All Data?", isPresented: $showDeleteConfirmation) {
-                Button("Delete All", role: .destructive) {
+                let totalScans = locations.reduce(0) { $0 + $1.scans.count }
+                Button("Delete \(totalScans) Scan\(totalScans == 1 ? "" : "s")", role: .destructive) {
                     deleteAllData()
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This action cannot be undone. All saved scan data will be permanently removed from this device.")
+                let totalScans = locations.reduce(0) { $0 + $1.scans.count }
+                Text("This will permanently delete \(locations.count) location\(locations.count == 1 ? "" : "s") and \(totalScans) scan\(totalScans == 1 ? "" : "s"). This action cannot be undone.")
             }
             .preferredColorScheme(.dark)
         }

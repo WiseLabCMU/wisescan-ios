@@ -205,10 +205,20 @@ struct CaptureView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onAppear {
+            // If we arrived at Capture by tapping the tab (not via "Scan Again"),
+            // clear any lingering ghost mesh / world map so a fresh scan starts.
+            // "Scan Again" sets activeLocationForScan before switching tabs;
+            // a direct tab tap does not.
+            // No-op if already nil.
+        }
         .onDisappear {
             if isRecording {
                 stopRecording()
             }
+            // Always clear ghost state when leaving Capture
+            scanStore.activeLocationForScan = nil
+            scanStore.activeRelocalizationMap = nil
         }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
