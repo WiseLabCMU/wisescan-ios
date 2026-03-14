@@ -140,46 +140,92 @@ struct CaptureView: View {
                     .disabled(isRecording)
                 }
                 .padding()
-                .padding(.top, developerMode ? 28 : 0) // Leave room for dev banner
+                .padding(.top, developerMode ? 16 : 0) // Leave room for dev banner
 
                 Spacer()
+
+                // Capacity Warning Banner (above HUD)
+                if scanStats.isNearCapacity {
+                    HStack(spacing: 8) {
+                        Image(systemName: scanStats.isAtCapacity ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
+                            .foregroundColor(.white)
+                        Text(scanStats.isAtCapacity
+                             ? "Session at capacity — save now to avoid quality loss"
+                             : "Approaching session limits — consider saving and starting a new scan")
+                            .font(.caption2).bold()
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity)
+                    .background(scanStats.isAtCapacity ? Color.red.opacity(0.9) : Color.orange.opacity(0.9))
+                    .cornerRadius(12)
+                    .padding(.horizontal)
+                }
 
                 // Bottom HUD and Capture Button
                 VStack {
                     ZStack(alignment: .bottom) {
                         // HUD background with live stats
-                        HStack {
-                            Text("\(scanStats.formattedSize) | \(scanStats.formattedPolygons) Polygons")
-                                .font(.caption)
-                                .foregroundColor(.white)
-
-                            Spacer()
-
-                            VStack(alignment: .trailing, spacing: 4) {
-                                Text("Scan Quality: \(scanStats.qualityPercent)%")
-                                    .font(.caption)
+                        VStack(spacing: 8) {
+                            // Row 1: Live metrics
+                            HStack(spacing: 16) {
+                                Label(scanStats.formattedPolygons, systemImage: "triangle.fill")
+                                    .font(.caption2)
                                     .foregroundColor(.white)
-                                // Quality bar
+                                Label("\(scanStats.anchorCount)", systemImage: "square.grid.3x3")
+                                    .font(.caption2)
+                                    .foregroundColor(.white)
+                                Label(scanStats.driftLabel, systemImage: "location.slash")
+                                    .font(.caption2)
+                                    .foregroundColor(scanStats.driftEstimate > 0.5 ? .orange : .white)
+                                Spacer()
+                                Label(scanStats.formattedDuration, systemImage: "clock")
+                                    .font(.caption2)
+                                    .foregroundColor(.white)
+                            }
+
+                            // Row 2: Capacity bar
+                            VStack(spacing: 4) {
+                                HStack {
+                                    Text("Session Capacity")
+                                        .font(.caption2)
+                                        .foregroundColor(.gray)
+                                    Spacer()
+                                    Text("\(scanStats.capacityPercent)%")
+                                        .font(.caption2).bold()
+                                        .foregroundColor(Color(
+                                            red: scanStats.capacityColor.red,
+                                            green: scanStats.capacityColor.green,
+                                            blue: 0
+                                        ))
+                                }
                                 GeometryReader { geo in
                                     ZStack(alignment: .leading) {
                                         Rectangle()
-                                            .fill(Color.white.opacity(0.2))
-                                            .frame(height: 4)
+                                            .fill(Color.white.opacity(0.15))
+                                            .frame(height: 6)
                                         Rectangle()
-                                            .fill(qualityColor)
-                                            .frame(width: geo.size.width * scanStats.averageQuality, height: 4)
+                                            .fill(Color(
+                                                red: scanStats.capacityColor.red,
+                                                green: scanStats.capacityColor.green,
+                                                blue: 0
+                                            ))
+                                            .frame(width: geo.size.width * scanStats.capacityScore, height: 6)
                                     }
-                                    .cornerRadius(2)
+                                    .cornerRadius(3)
                                 }
-                                .frame(width: 60, height: 4)
+                                .frame(height: 6)
                             }
                         }
                         .padding()
-                        .frame(height: 80)
+                        .frame(height: 90)
                         .background(.ultraThinMaterial)
                         .overlay(
                             RoundedRectangle(cornerRadius: 24)
-                                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                                .stroke(scanStats.isNearCapacity
+                                        ? Color.orange.opacity(0.6)
+                                        : Color.white.opacity(0.2), lineWidth: 1)
                         )
                         .cornerRadius(24)
                         .padding(.horizontal)

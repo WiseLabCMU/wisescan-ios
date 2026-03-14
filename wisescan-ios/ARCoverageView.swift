@@ -184,6 +184,12 @@ struct ARCoverageView: UIViewRepresentable {
         private var coverageTimer: Timer?
         private var anchorUpdateCounts: [UUID: Int] = [:]
 
+        // Session capacity tracking
+        private var sessionStartTime: Date = Date()
+        private var baselineMemoryMB: Double = ScanStats.currentMemoryUsageMB()
+        private var trackingDegradationCount: Int = 0
+        private var totalTrackingUpdates: Int = 0
+
         // Ghost Mesh properties
         var ghostAnchorEntity: AnchorEntity?
         private var hasAddedGhostMesh = false
@@ -198,7 +204,7 @@ struct ARCoverageView: UIViewRepresentable {
             coverageTimer?.invalidate()
         }
 
-        // Watch for relocalization success
+        // Watch for relocalization success and track drift
         func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
             if camera.trackingState == .normal && !hasAddedGhostMesh {
                 if let ghostAnchor = ghostAnchorEntity, let arView = arView {
@@ -206,6 +212,41 @@ struct ARCoverageView: UIViewRepresentable {
                     arView.scene.addAnchor(ghostAnchor)
                     hasAddedGhostMesh = true
                 }
+            }
+
+            // Track drift via tracking state transitions
+            totalTrackingUpdates += 1
+            var stateStr = "normal"
+            var reasonStr = ""
+            switch camera.trackingState {
+            case .normal:
+                stateStr = "normal"
+            case .notAvailable:
+                stateStr = "notAvailable"
+                trackingDegradationCount += 1
+            case .limited(let reason):
+                stateStr = "limited"
+                switch reason {
+                case .excessiveMotion:
+                    reasonStr = "Excessive Motion"
+                    trackingDegradationCount += 1 // Real drift indicator
+                case .insufficientFeatures:
+                    reasonStr = "Insufficient Features"
+                    trackingDegradationCount += 1 // Real drift indicator
+                case .initializing:
+                    reasonStr = "Initializing"
+                    // Don't count as drift — normal startup
+                case .relocalizing:
+                    reasonStr = "Relocalizing"
+                    // Don't count as drift — normal recovery
+                @unknown default:
+                    reasonStr = "Unknown"
+                }
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                self?.scanStats?.trackingState = stateStr
+                self?.scanStats?.trackingReason = reasonStr
             }
         }
 
@@ -363,9 +404,21 @@ struct ARCoverageView: UIViewRepresentable {
                 totalUpdates += anchorUpdateCounts[meshAnchor.identifier] ?? 0
             }
 
-            DispatchQueue.main.async {
+            // Compute capacity metrics
+            let duration = Date().timeIntervalSince(sessionStartTime)
+            let memoryMB = ScanStats.currentMemoryUsageMB()
+            let drift: Double = totalTrackingUpdates > 0
+                ? min(Double(trackingDegradationCount) / Double(totalTrackingUpdates), 1.0)
+                : 0
+
+            DispatchQueue.main.async { [weak self] in
                 scanStats.totalVertices = totalVerts
                 scanStats.totalFaces = totalFaces
+                scanStats.anchorCount = anchorCount
+                scanStats.sessionDuration = duration
+                scanStats.memoryUsageMB = memoryMB
+                scanStats.baselineMemoryMB = self?.baselineMemoryMB ?? memoryMB
+                scanStats.driftEstimate = drift
                 if anchorCount > 0 {
                     let avgUpdates = Double(totalUpdates) / Double(anchorCount)
                     scanStats.averageQuality = min(avgUpdates / 10.0, 1.0)
@@ -477,7 +530,8 @@ struct ARCoverageView: UIViewRepresentable {
         /// Start accumulating — call when recording begins.
         func start(session: ARSession) {
             colorMap = [:]
-            sampleTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            sampleTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self, weak session] _ in
+                guard let session = session else { return }
                 self?.accumulate(from: session)
             }
         }

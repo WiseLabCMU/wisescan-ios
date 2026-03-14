@@ -98,16 +98,16 @@ graph TD
 | File | Role | Key Types / Functions |
 |:-----|:-----|:----------------------|
 | [AppDelegate.swift](wisescan-ios/AppDelegate.swift) | App lifecycle, splash screen | `AppDelegate` |
-| [ContentView.swift](wisescan-ios/ContentView.swift) | Root TabView, LiDAR check | `ContentView`, `hasLiDAR` |
+| [ContentView.swift](wisescan-ios/ContentView.swift) | Root TabView, LiDAR check, Developer Mode banner | `ContentView`, `hasLiDAR`, `developerMode` |
 | [DashboardView.swift](wisescan-ios/DashboardView.swift) | Server status, wearable pairing | `DashboardView` |
-| [CaptureView.swift](wisescan-ios/CaptureView.swift) | Live capture UI, recording, Scan4D naming | `CaptureView`, `startRecording()`, `stopRecording()`, `savePendingScan()` |
+| [CaptureView.swift](wisescan-ios/CaptureView.swift) | Live capture UI, recording, Scan4D naming, capacity HUD, flip camera | `CaptureView`, `startRecording()`, `stopRecording()`, `savePendingScan()` |
 | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) | ARKit session, mesh export, coverage overlay | `ARCoverageView`, `Coordinator`, `CoverageOverlayView`, `exportMeshOBJ()`, `exportWorldMap()` |
 | [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) | Live face detection + blur for exports | `FaceBlurOverlay`, `FaceBlurUtil.blurFaces()` |
 | [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) | RAW data capture (RGB, depth, poses) | `FrameCaptureSession`, `start()`, `stop()`, `writeTransformsJSON()`, `writePolycamCameras()` |
-| [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) | Scan cards, location groups, upload | `WorkflowsView`, `ScanCard` |
+| [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) | Scan cards, location groups, rename, upload | `WorkflowsView`, `ScanCard` |
 | [MeshPreviewView.swift](wisescan-ios/MeshPreviewView.swift) | SceneKit 3D preview with vertex colors | `MeshPreviewView` |
-| [ScanStore.swift](wisescan-ios/ScanStore.swift) | Data models, location hierarchy | `ScanStore`, `ScanLocation`, `CapturedScan`, `ScanStats` |
-| [SettingsView.swift](wisescan-ios/SettingsView.swift) | Upload URL, RAW settings, in-app guide | `SettingsView` |
+| [ScanStore.swift](wisescan-ios/ScanStore.swift) | Data models, location hierarchy, capacity scoring | `ScanStore`, `ScanLocation`, `CapturedScan`, `ScanStats`, `capacityScore` |
+| [SettingsView.swift](wisescan-ios/SettingsView.swift) | Upload URL, RAW settings, Developer Mode, in-app guide | `SettingsView`, `developerMode`, `flipCameraEnabled` |
 
 ---
 
@@ -229,20 +229,43 @@ sequenceDiagram
 | **Description** | Automatically delete oldest scans to maintain a max-2 retention policy per Location to save device space. Also supports manual deletion of items. |
 | **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanFileManager.enforceRetentionPolicy()` · [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) — manual deletion UI |
 
+### REQ-013: Developer Mode
+| | |
+|:--|:--|
+| **Status** | ✅ Complete |
+| **Description** | Toggleable debugging section in Settings with persistent `@AppStorage` switches. Includes Flip Camera (front/back switching via `ARFaceTrackingConfiguration`), persistent orange banner across all tabs with tap-to-disable (auto-scrolls to Settings section). Camera auto-reverts to back when dev mode is disabled. |
+| **Source** | [SettingsView.swift](wisescan-ios/SettingsView.swift) — `developerMode`, `flipCameraEnabled` · [ContentView.swift](wisescan-ios/ContentView.swift) — banner overlay · [CaptureView.swift](wisescan-ios/CaptureView.swift) — flip button · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `ARFaceTrackingConfiguration` switching |
+
+### REQ-014: Scan Capacity Metrics
+| | |
+|:--|:--|
+| **Status** | ✅ Complete |
+| **Description** | Live HUD showing polygon count, anchor count (~area), drift level, and session duration. Composite capacity score (0–1) using `max(polygonPressure, memoryPressure, anchorPressure, driftEstimate)`. Color-coded progress bar (green→yellow→red). Warning banners at >80% and >95% capacity. Memory tracks delta from session baseline, not absolute footprint. |
+| **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanStats.capacityScore`, `currentMemoryUsageMB()` · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `Coordinator.updateStats()`, drift tracking · [CaptureView.swift](wisescan-ios/CaptureView.swift) — redesigned HUD |
+| **Design Doc** | [Scan4D_Architecture.md](Design/Scan4D_Architecture.md) — "Large-Space Scanning & Map Stitching" section |
+
+### REQ-015: Location Rename
+| | |
+|:--|:--|
+| **Status** | ✅ Complete |
+| **Description** | In Edit mode, location group names become tappable (orange with pencil icon) to trigger a rename alert with text field. Saves directly to SwiftData. |
+| **Source** | [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) — `showRenameAlert`, `locationToRename` |
+
 ---
 
 ## Planned Features
 
 | ID | Feature | Description | Priority |
 |:---|:--------|:------------|:---------|
-| REQ-013 | Server Discovery | Detect local Prefect servers via mDNS/Bonjour | Medium |
-| REQ-014 | Wearable Proxy | Bridge data from Meta/Ray-Ban glasses | Low |
-| REQ-015 | Streaming Mode | Real-time lower-res tracking data to server | Medium |
-| REQ-016 | Workflow Orchestration | Select preset server pipelines (Mesh, Splat, Spatial Indexing) | High |
-| REQ-017 | Job Observability | Display remote Prefect job status locally | Medium |
-| REQ-018 | Scan4D Ghost Overlay | Render previous mesh as translucent overlay during rescan | Medium |
-| REQ-019 | Scan4D Ground Truth Offset | Capture GPS or AprilTag data alongside scans for backend alignment seeding | High |
-| REQ-020 | OpenFLAME Live Relocalization | Use backend server to stream visual localization back to device, bypassing ARKit maps | Low |
+| REQ-016 | Server Discovery | Detect local Prefect servers via mDNS/Bonjour | Medium |
+| REQ-017 | Wearable Proxy | Bridge data from Meta/Ray-Ban glasses | Low |
+| REQ-018 | Streaming Mode | Real-time lower-res tracking data to server | Medium |
+| REQ-019 | Workflow Orchestration | Select preset server pipelines (Mesh, Splat, Spatial Indexing) | High |
+| REQ-020 | Job Observability | Display remote Prefect job status locally | Medium |
+| REQ-021 | Scan4D Ghost Overlay | Render previous mesh as translucent overlay during rescan | Medium |
+| REQ-022 | Scan4D Ground Truth Offset | Capture GPS or AprilTag data alongside scans for backend alignment seeding | High |
+| REQ-023 | OpenFLAME Live Relocalization | Use backend server to stream visual localization back to device, bypassing ARKit maps | Low |
+| REQ-024 | Large-Space Map Stitching | Server-side COLMAP/RealityCapture alignment of chunked scans for spaces too large for a single ARKit session | High |
 
 ---
 

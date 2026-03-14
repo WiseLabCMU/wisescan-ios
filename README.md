@@ -11,6 +11,8 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 - **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay and quality HUD.
 - **Scan4D (Time-Series):** Group scans by Location and use `ARWorldMap` caching to relocalize and rescan the exact same physical space over time.
 - **Privacy Filtering:** Person segmentation removes humans from mesh; face detection blurs faces on camera feed and in exports.
+- **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
+- **Developer Mode:** Toggleable debugging tools including front/back camera switching for testing privacy features, with a persistent banner across all views.
 - **Export & RAW Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses.
 - **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration.
 
@@ -23,16 +25,16 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 ```
 wisescan-ios/
 ├── AppDelegate.swift          # App lifecycle, splash screen
-├── ContentView.swift          # Tab bar (Dashboard, Capture, Workflows) + LiDAR check
+├── ContentView.swift          # Tab bar (Dashboard, Capture, Workflows) + LiDAR check + Developer Mode banner
 ├── DashboardView.swift        # Upload server status card, wearable glasses connect
-├── CaptureView.swift          # Live capture UI, recording controls, scan HUD
-├── ARCoverageView.swift       # ARKit scene reconstruction, person segmentation, OBJ export, vertex color accumulator
+├── CaptureView.swift          # Live capture UI, recording controls, scan HUD, capacity metrics, flip camera
+├── ARCoverageView.swift       # ARKit scene reconstruction, person segmentation, OBJ export, capacity tracking
 ├── FaceBlurOverlay.swift      # Live face detection overlay + face blur utility for exports
 ├── FrameCaptureSession.swift  # RAW data capture (RGB, depth, poses → transforms.json + Polycam cameras/)
-├── WorkflowsView.swift        # Scan cards, format picker, save/upload actions
+├── WorkflowsView.swift        # Scan cards, location rename, format picker, save/upload actions
 ├── MeshPreviewView.swift      # SceneKit 3D mesh preview with camera-sampled or height-gradient coloring
-├── ScanStore.swift            # Shared data models (CapturedScan, ExportFormat, ScanStats)
-└── SettingsView.swift         # Upload URL, RAW export settings, workflow guide, recommended apps
+├── ScanStore.swift            # Shared data models (CapturedScan, ExportFormat, ScanStats, capacity scoring)
+└── SettingsView.swift         # Upload URL, RAW export settings, Developer Mode toggles, workflow guide
 ```
 
 ## Export Formats & Backend Ingestion

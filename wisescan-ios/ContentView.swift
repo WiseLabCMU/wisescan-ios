@@ -38,24 +38,24 @@ struct ContentView: View {
             // Persistent Developer Mode Banner
             if developerMode {
                 Button(action: { showDevSettings = true }) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 4) {
                         Image(systemName: "hammer.fill")
-                            .font(.caption)
+                            .font(.caption2)
                         Text("Developer Mode")
-                            .font(.caption).bold()
+                            .font(.caption2)
                         Spacer()
                         Text("Tap to disable")
-                            .font(.caption2)
+                            .font(.system(size: 9))
                         Image(systemName: "chevron.right")
-                            .font(.caption2)
+                            .font(.system(size: 9))
                     }
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(Color.orange.opacity(0.9))
+                    .foregroundColor(.orange)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .background(.ultraThinMaterial)
                 }
                 .sheet(isPresented: $showDevSettings) {
-                    SettingsView()
+                    SettingsView(scrollToDevMode: true)
                 }
             }
         }

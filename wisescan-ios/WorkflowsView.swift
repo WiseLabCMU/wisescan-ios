@@ -11,6 +11,9 @@ struct WorkflowsView: View {
     @State private var locationToDelete: ScanLocation? = nil
     @State private var showDeleteLocationConfirm = false
     @State private var isEditing = false
+    @State private var locationToRename: ScanLocation? = nil
+    @State private var renameText: String = ""
+    @State private var showRenameAlert = false
     @Binding var selectedTab: Int
 
     var body: some View {
@@ -44,9 +47,26 @@ struct WorkflowsView: View {
                                 if !location.scans.isEmpty {
                                     VStack(alignment: .leading, spacing: 16) {
                                         HStack {
-                                            Text(location.name.uppercased())
-                                                .font(.caption).bold()
-                                                .foregroundColor(.gray)
+                                            if isEditing {
+                                                Button(action: {
+                                                    locationToRename = location
+                                                    renameText = location.name
+                                                    showRenameAlert = true
+                                                }) {
+                                                    HStack(spacing: 4) {
+                                                        Text(location.name.uppercased())
+                                                            .font(.caption).bold()
+                                                            .foregroundColor(.orange)
+                                                        Image(systemName: "pencil")
+                                                            .font(.caption2)
+                                                            .foregroundColor(.orange)
+                                                    }
+                                                }
+                                            } else {
+                                                Text(location.name.uppercased())
+                                                    .font(.caption).bold()
+                                                    .foregroundColor(.gray)
+                                            }
                                             Spacer()
 
                                             // Delete Location Action (Only visible in Edit Mode)
@@ -201,6 +221,21 @@ struct WorkflowsView: View {
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView()
+            }
+            .alert("Rename Location", isPresented: $showRenameAlert) {
+                TextField("Location name", text: $renameText)
+                Button("Save") {
+                    if let loc = locationToRename, !renameText.trimmingCharacters(in: .whitespaces).isEmpty {
+                        loc.name = renameText.trimmingCharacters(in: .whitespaces)
+                        try? modelContext.save()
+                    }
+                    locationToRename = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    locationToRename = nil
+                }
+            } message: {
+                Text("Enter a new name for this scan group.")
             }
             .preferredColorScheme(.dark)
         }

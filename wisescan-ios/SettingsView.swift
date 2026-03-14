@@ -2,6 +2,7 @@ import SwiftUI
 import SwiftData
 
 struct SettingsView: View {
+    var scrollToDevMode: Bool = false
     @Environment(\.modelContext) private var modelContext
     @Query private var locations: [ScanLocation]
 
@@ -22,6 +23,7 @@ struct SettingsView: View {
                 LinearGradient(colors: [Color(white: 0.1), Color.black], startPoint: .topLeading, endPoint: .bottomTrailing)
                     .ignoresSafeArea()
 
+                ScrollViewReader { proxy in
                 List {
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
@@ -199,6 +201,7 @@ struct SettingsView: View {
                         }
                     }
                     .listRowBackground(Color.white.opacity(0.05))
+                    .id("devModeSection")
 
                     // MARK: - Data Management
                     Section {
@@ -220,6 +223,16 @@ struct SettingsView: View {
                     .listRowBackground(Color.white.opacity(0.05))
                 }
                 .scrollContentBackground(.hidden)
+                .onAppear {
+                    if scrollToDevMode {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            withAnimation {
+                                proxy.scrollTo("devModeSection", anchor: .top)
+                            }
+                        }
+                    }
+                }
+                } // ScrollViewReader
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)

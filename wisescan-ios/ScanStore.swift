@@ -162,12 +162,26 @@ class ScanStore {
 
 @Observable
 class ScanStats {
+    // Existing metrics
     var totalVertices: Int = 0
     var totalFaces: Int = 0
     var averageQuality: Double = 0.0 // 0.0 to 1.0
 
+    // New capacity metrics
+    var anchorCount: Int = 0
+    var trackingState: String = "notAvailable"
+    var trackingReason: String = ""
+    var sessionDuration: TimeInterval = 0
+    var memoryUsageMB: Double = 0
+    var baselineMemoryMB: Double = 0 // Captured at session start
+    var driftEstimate: Double = 0 // 0.0 to 1.0
+
+    // Capacity thresholds (tunable)
+    private let maxPolygons: Double = 2_000_000
+    private let maxMemoryDeltaMB: Double = 800 // Memory growth from scanning, not total app memory
+    private let maxAnchors: Double = 500
+
     var estimatedSizeMB: Double {
-        // Each vertex ~12 bytes (3 floats), each face ~12 bytes (3 uint32)
         let bytes = (totalVertices * 12) + (totalFaces * 12)
         return Double(bytes) / (1024.0 * 1024.0)
     }
@@ -190,6 +204,58 @@ class ScanStats {
 
     var qualityPercent: Int {
         Int(averageQuality * 100)
+    }
+
+    // MARK: - Capacity Score
+
+    var polygonPressure: Double { min(Double(totalFaces) / maxPolygons, 1.0) }
+    var memoryPressure: Double {
+        let delta = max(0, memoryUsageMB - baselineMemoryMB)
+        return min(delta / maxMemoryDeltaMB, 1.0)
+    }
+    var anchorPressure: Double { min(Double(anchorCount) / maxAnchors, 1.0) }
+
+    /// Composite capacity: highest pressure factor wins (0.0 = fresh, 1.0 = at limit)
+    var capacityScore: Double {
+        max(polygonPressure, memoryPressure, anchorPressure, driftEstimate)
+    }
+
+    var isNearCapacity: Bool { capacityScore > 0.8 }
+    var isAtCapacity: Bool { capacityScore > 0.95 }
+
+    var capacityPercent: Int { Int(capacityScore * 100) }
+
+    var capacityColor: (red: Double, green: Double) {
+        // Green → Yellow → Red gradient
+        let score = capacityScore
+        if score < 0.5 { return (score * 2.0, 1.0) }
+        return (1.0, max(0, 2.0 * (1.0 - score)))
+    }
+
+    var driftLabel: String {
+        if driftEstimate < 0.2 { return "Low" }
+        if driftEstimate < 0.5 { return "Med" }
+        if driftEstimate < 0.8 { return "High" }
+        return "Critical"
+    }
+
+    var formattedDuration: String {
+        let mins = Int(sessionDuration) / 60
+        let secs = Int(sessionDuration) % 60
+        return String(format: "%d:%02d", mins, secs)
+    }
+
+    // MARK: - Memory Measurement
+
+    static func currentMemoryUsageMB() -> Double {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? Double(info.resident_size) / (1024.0 * 1024.0) : 0
     }
 }
 
