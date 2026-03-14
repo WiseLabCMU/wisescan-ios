@@ -142,18 +142,58 @@ struct MeshPreviewView: UIViewRepresentable {
         } else {
             colors = heightGradientColors(vertices: vertices, minY: minY, maxY: maxY)
         }
+        // Subdivide mesh for smoother vertex color interpolation
+        // Each triangle → 4 sub-triangles via edge midpoints
+        var subVertices = vertices
+        var subColors = colors
+        var subIndices = [UInt32]()
+        // Cache: sorted edge pair → midpoint vertex index
+        var edgeMidpoints: [UInt64: UInt32] = [:]
+
+        func midpointIndex(_ a: UInt32, _ b: UInt32) -> UInt32 {
+            let key: UInt64 = UInt64(min(a, b)) << 32 | UInt64(max(a, b))
+            if let existing = edgeMidpoints[key] { return existing }
+            let va = subVertices[Int(a)]
+            let vb = subVertices[Int(b)]
+            let mid = SCNVector3((va.x + vb.x) / 2, (va.y + vb.y) / 2, (va.z + vb.z) / 2)
+            let ca = subColors[Int(a)]
+            let cb = subColors[Int(b)]
+            let midColor = (ca + cb) / 2
+            let idx = UInt32(subVertices.count)
+            subVertices.append(mid)
+            subColors.append(midColor)
+            edgeMidpoints[key] = idx
+            return idx
+        }
+
+        for i in stride(from: 0, to: indices.count, by: 3) {
+            let a = indices[i], b = indices[i + 1], c = indices[i + 2]
+            let ab = midpointIndex(a, b)
+            let bc = midpointIndex(b, c)
+            let ca = midpointIndex(c, a)
+            // 4 sub-triangles
+            subIndices.append(contentsOf: [a, ab, ca])
+            subIndices.append(contentsOf: [ab, b, bc])
+            subIndices.append(contentsOf: [ca, bc, c])
+            subIndices.append(contentsOf: [ab, bc, ca])
+        }
+
+        // Use subdivided data for rendering
+        let finalVertices = subVertices
+        let finalColors = subColors
+        let finalIndices = subIndices
 
         // Compute face normals and accumulate per-vertex for smooth shading
-        var vertexNormals = [SIMD3<Float>](repeating: .zero, count: vertices.count)
-        for i in stride(from: 0, to: indices.count, by: 3) {
-            let i0 = Int(indices[i])
-            let i1 = Int(indices[i + 1])
-            let i2 = Int(indices[i + 2])
-            guard i0 < vertices.count, i1 < vertices.count, i2 < vertices.count else { continue }
+        var vertexNormals = [SIMD3<Float>](repeating: .zero, count: finalVertices.count)
+        for i in stride(from: 0, to: finalIndices.count, by: 3) {
+            let i0 = Int(finalIndices[i])
+            let i1 = Int(finalIndices[i + 1])
+            let i2 = Int(finalIndices[i + 2])
+            guard i0 < finalVertices.count, i1 < finalVertices.count, i2 < finalVertices.count else { continue }
 
-            let v0 = SIMD3<Float>(vertices[i0].x, vertices[i0].y, vertices[i0].z)
-            let v1 = SIMD3<Float>(vertices[i1].x, vertices[i1].y, vertices[i1].z)
-            let v2 = SIMD3<Float>(vertices[i2].x, vertices[i2].y, vertices[i2].z)
+            let v0 = SIMD3<Float>(finalVertices[i0].x, finalVertices[i0].y, finalVertices[i0].z)
+            let v1 = SIMD3<Float>(finalVertices[i1].x, finalVertices[i1].y, finalVertices[i1].z)
+            let v2 = SIMD3<Float>(finalVertices[i2].x, finalVertices[i2].y, finalVertices[i2].z)
 
             let normal = simd_normalize(simd_cross(v1 - v0, v2 - v0))
             vertexNormals[i0] += normal
@@ -164,15 +204,15 @@ struct MeshPreviewView: UIViewRepresentable {
         let normals = vertexNormals.map { simd_normalize($0) }
             .map { SCNVector3($0.x, $0.y, $0.z) }
 
-        let vertexSource = SCNGeometrySource(vertices: vertices)
+        let vertexSource = SCNGeometrySource(vertices: finalVertices)
         let normalSource = SCNGeometrySource(normals: normals)
 
         // Color source
-        let colorData = Data(bytes: colors, count: colors.count * MemoryLayout<SIMD4<Float>>.stride)
+        let colorData = Data(bytes: finalColors, count: finalColors.count * MemoryLayout<SIMD4<Float>>.stride)
         let colorSource = SCNGeometrySource(
             data: colorData,
             semantic: .color,
-            vectorCount: colors.count,
+            vectorCount: finalColors.count,
             usesFloatComponents: true,
             componentsPerVector: 4,
             bytesPerComponent: MemoryLayout<Float>.size,
@@ -180,11 +220,11 @@ struct MeshPreviewView: UIViewRepresentable {
             dataStride: MemoryLayout<SIMD4<Float>>.stride
         )
 
-        let indexData = Data(bytes: indices, count: indices.count * MemoryLayout<UInt32>.size)
+        let indexData = Data(bytes: finalIndices, count: finalIndices.count * MemoryLayout<UInt32>.size)
         let element = SCNGeometryElement(
             data: indexData,
             primitiveType: .triangles,
-            primitiveCount: indices.count / 3,
+            primitiveCount: finalIndices.count / 3,
             bytesPerIndex: MemoryLayout<UInt32>.size
         )
 
@@ -200,7 +240,7 @@ struct MeshPreviewView: UIViewRepresentable {
             material.metalness.contents = 0.1
         }
         material.diffuse.contents = UIColor.white // vertex colors will modulate
-        material.isDoubleSided = true
+        material.isDoubleSided = false // Single-sided so you can see into rooms
         geometry.materials = [material]
 
         return (geometry, vertices.count)
