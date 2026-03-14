@@ -5,32 +5,60 @@ struct ContentView: View {
     @State private var scanStore = ScanStore()
     @State private var selectedTab = 0
     @State private var showLiDARWarning = false
+    @AppStorage("developerMode") private var developerMode: Bool = false
+    @State private var showDevSettings = false
 
     private var hasLiDAR: Bool {
         ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
     }
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            DashboardView()
-                .tabItem {
-                    Label("Dashboard", systemImage: "square.grid.2x2")
-                }
-                .tag(0)
+        ZStack(alignment: .top) {
+            TabView(selection: $selectedTab) {
+                DashboardView()
+                    .tabItem {
+                        Label("Dashboard", systemImage: "square.grid.2x2")
+                    }
+                    .tag(0)
 
-            CaptureView(selectedTab: $selectedTab)
-                .tabItem {
-                    Label("Capture", systemImage: "camera.viewfinder")
-                }
-                .tag(1)
+                CaptureView(selectedTab: $selectedTab)
+                    .tabItem {
+                        Label("Capture", systemImage: "camera.viewfinder")
+                    }
+                    .tag(1)
 
-            WorkflowsView(selectedTab: $selectedTab)
-                .tabItem {
-                    Label("Workflows", systemImage: "arrow.triangle.2.circlepath")
+                WorkflowsView(selectedTab: $selectedTab)
+                    .tabItem {
+                        Label("Workflows", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .tag(2)
+            }
+            .environment(scanStore)
+
+            // Persistent Developer Mode Banner
+            if developerMode {
+                Button(action: { showDevSettings = true }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "hammer.fill")
+                            .font(.caption)
+                        Text("Developer Mode")
+                            .font(.caption).bold()
+                        Spacer()
+                        Text("Tap to disable")
+                            .font(.caption2)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.orange.opacity(0.9))
                 }
-                .tag(2)
+                .sheet(isPresented: $showDevSettings) {
+                    SettingsView()
+                }
+            }
         }
-        .environment(scanStore)
         .preferredColorScheme(.dark)
         .onAppear {
             if !hasLiDAR {

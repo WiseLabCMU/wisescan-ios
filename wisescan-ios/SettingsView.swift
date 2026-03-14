@@ -8,6 +8,8 @@ struct SettingsView: View {
     @AppStorage("rawOverlapMax") private var rawOverlapMax: Double = 60.0
     @AppStorage("rawRejectBlur") private var rawRejectBlur: Bool = true
     @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
+    @AppStorage("developerMode") private var developerMode: Bool = false
+    @AppStorage("flipCameraEnabled") private var flipCameraEnabled: Bool = false
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -157,6 +159,44 @@ struct SettingsView: View {
                         Text("USDZ files can be previewed directly in the Files app. For OBJ/PLY, install MeshLab or Polycam. RAW exports are designed for desktop processing with Nerfstudio or COLMAP.")
                             .font(.caption2)
                             .foregroundColor(.gray)
+                    }
+                    .listRowBackground(Color.white.opacity(0.05))
+
+                    // MARK: - Developer Mode
+                    Section {
+                        Toggle(isOn: $developerMode) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Developer Mode")
+                                    .foregroundColor(.white)
+                                Text("Enable debugging tools for development and testing.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                        .tint(.orange)
+                        .padding(.vertical, 4)
+
+                        if developerMode {
+                            Toggle(isOn: $flipCameraEnabled) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Flip Camera")
+                                        .foregroundColor(.white)
+                                    Text("Adds a button on the Capture screen to switch between front and back cameras. Useful for testing privacy features with the front-facing camera.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+                        }
+                    } header: {
+                        Text("DEVELOPER MODE")
+                    } footer: {
+                        if developerMode {
+                            Text("⚠️ Developer mode is active. Some features may behave differently than in production.")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                        }
                     }
                     .listRowBackground(Color.white.opacity(0.05))
 

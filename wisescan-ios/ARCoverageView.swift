@@ -6,6 +6,7 @@ struct ARCoverageView: UIViewRepresentable {
     @Binding var arSession: ARSession?
     var scanStats: ScanStats
     var privacyFilter: Bool
+    var useFrontCamera: Bool = false
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
     var initialGhostMeshData: Data? = nil // Raw OBJ data from the previous scan
 
@@ -83,6 +84,31 @@ struct ARCoverageView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.privacyFilter = privacyFilter
+
+        // Detect camera switch
+        let currentlyUsingFront = context.coordinator.isUsingFrontCamera
+        if useFrontCamera != currentlyUsingFront {
+            context.coordinator.isUsingFrontCamera = useFrontCamera
+            if useFrontCamera {
+                // Switch to front camera using ARFaceTrackingConfiguration
+                if ARFaceTrackingConfiguration.isSupported {
+                    let faceConfig = ARFaceTrackingConfiguration()
+                    uiView.session.run(faceConfig, options: [.resetTracking, .removeExistingAnchors])
+                }
+            } else {
+                // Switch back to rear camera with full scene reconstruction
+                if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+                    let config = ARWorldTrackingConfiguration()
+                    config.sceneReconstruction = .mesh
+                    config.environmentTexturing = .automatic
+                    if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
+                        config.frameSemantics.insert(.personSegmentationWithDepth)
+                    }
+                    uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+                    uiView.debugOptions.insert(.showSceneUnderstanding)
+                }
+            }
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -154,6 +180,7 @@ struct ARCoverageView: UIViewRepresentable {
         weak var arView: ARView?
         weak var overlayView: CoverageOverlayView?
         var privacyFilter: Bool = true
+        var isUsingFrontCamera: Bool = false
         private var coverageTimer: Timer?
         private var anchorUpdateCounts: [UUID: Int] = [:]
 

@@ -8,7 +8,10 @@ struct CaptureView: View {
     @State private var scanStats = ScanStats()
     @State private var locationManager = LocationManager()
     @AppStorage("privacyFilter") private var isPrivacyFilterOn = true
+    @AppStorage("developerMode") private var developerMode: Bool = false
+    @AppStorage("flipCameraEnabled") private var flipCameraEnabled: Bool = false
     @State private var mode = 1 // 0 = Streaming, 1 = Capture
+    @State private var usingFrontCamera = false
     @State private var currentARSession: ARSession? = nil
     @State private var saveMessage: String? = nil
     @State private var isRecording = false
@@ -55,6 +58,7 @@ struct CaptureView: View {
                 arSession: $currentARSession,
                 scanStats: scanStats,
                 privacyFilter: isPrivacyFilterOn,
+                useFrontCamera: usingFrontCamera,
                 initialWorldMapURL: scanStore.activeRelocalizationMap,
                 initialGhostMeshData: activeGhostMeshData
             )
@@ -86,6 +90,23 @@ struct CaptureView: View {
                     .padding(.vertical, 8)
                     .background(.ultraThinMaterial)
                     .cornerRadius(20)
+
+                    // Flip Camera Button (Developer Mode only)
+                    if developerMode && flipCameraEnabled && !isRecording {
+                        Button(action: {
+                            usingFrontCamera.toggle()
+                        }) {
+                            Image(systemName: "camera.rotate")
+                                .font(.title3)
+                                .foregroundColor(.orange)
+                                .padding(10)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                                .overlay(
+                                    Circle().stroke(Color.orange.opacity(0.6), lineWidth: 1)
+                                )
+                        }
+                    }
 
                     Spacer()
 
@@ -119,6 +140,7 @@ struct CaptureView: View {
                     .disabled(isRecording)
                 }
                 .padding()
+                .padding(.top, developerMode ? 28 : 0) // Leave room for dev banner
 
                 Spacer()
 
@@ -211,6 +233,11 @@ struct CaptureView: View {
             // "Scan Again" sets activeLocationForScan before switching tabs;
             // a direct tab tap does not.
             // No-op if already nil.
+
+            // Auto-revert to back camera when developer mode is disabled
+            if !developerMode || !flipCameraEnabled {
+                usingFrontCamera = false
+            }
         }
         .onDisappear {
             if isRecording {
