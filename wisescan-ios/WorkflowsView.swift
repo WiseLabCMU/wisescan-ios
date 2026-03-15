@@ -505,11 +505,13 @@ struct ScanCard: View {
             request.setValue("application/zip", forHTTPHeaderField: "Content-Type")
 
             // Track upload progress using KVO
-            var progressObserver: NSKeyValueObservation?
+            // Use a reference type to hold the observer so we don't mutate a captured var in a sendable closure
+            class ObserverBox { var observer: NSKeyValueObservation? }
+            let box = ObserverBox()
             
             let task = URLSession.shared.uploadTask(with: request, fromFile: zipURL) { _, response, uploadError in
-                // Explicitly capture the observer so it lives until the task completes
-                _ = progressObserver
+                // Explicitly capture the box so the observer lives until the task completes
+                _ = box
                 
                 try? FileManager.default.removeItem(at: zipURL)
                 DispatchQueue.main.async {
@@ -525,7 +527,7 @@ struct ScanCard: View {
                 }
             }
             
-            progressObserver = task.progress.observe(\.fractionCompleted) { progress, _ in
+            box.observer = task.progress.observe(\.fractionCompleted) { progress, _ in
                 DispatchQueue.main.async {
                     if case .uploading = self.scan.uploadStatus {
                         self.scan.uploadStatus = .uploading(progress: progress.fractionCompleted)
@@ -578,8 +580,6 @@ struct ScanCard: View {
         }
     }
 
-    /// Prepares a unified .zip archive from the scan's directory (mesh, worldmap, metadata, raw frames).
-    /// The scanDir path must be captured on the main thread before calling from a background thread.
     private func prepareZip(filename: String, scanDir: URL, formatStr: String) -> URL? {
         // Inject the selected export format into scan4d_metadata.json if it exists
         // Check raw_data/ first (where FrameCaptureSession writes it), then scanDir root
@@ -588,6 +588,8 @@ struct ScanCard: View {
             rawDataDir.appendingPathComponent("scan4d_metadata.json"),
             scanDir.appendingPathComponent("scan4d_metadata.json")
         ]
+        
+        var selectedMetadataURL: URL? = nil
         for metadataURL in metadataCandidates {
             if let data = try? Data(contentsOf: metadataURL),
                var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -595,25 +597,58 @@ struct ScanCard: View {
                 if let newData = try? JSONSerialization.data(withJSONObject: json, options: .prettyPrinted) {
                     try? newData.write(to: metadataURL)
                 }
+                selectedMetadataURL = metadataURL
                 break
             }
         }
 
-        let zipURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        try? FileManager.default.removeItem(at: zipURL) // clean up existing
+        let fm = FileManager.default
+        let zipURL = fm.temporaryDirectory.appendingPathComponent(filename)
+        try? fm.removeItem(at: zipURL) // clean up existing
 
-        // Zip the entire scan directory (mesh.obj, colors.bin, arworldmap.map, raw_data/)
-        var error: NSError?
-        let coordinator = NSFileCoordinator()
-        coordinator.coordinate(readingItemAt: scanDir, options: .forUploading, error: &error) { zipTempURL in
-            try? FileManager.default.copyItem(at: zipTempURL, to: zipURL)
+        // Create staging directory
+        let stagingID = UUID().uuidString
+        let stagingDir = fm.temporaryDirectory.appendingPathComponent("staging_\(stagingID)")
+        try? fm.createDirectory(at: stagingDir, withIntermediateDirectories: true, attributes: nil)
+        
+        // Clean up staging dir when function returns (whether success or fail)
+        defer {
+            try? fm.removeItem(at: stagingDir)
+        }
+        
+        // 1. Universal Base Payload
+        if let metadataPath = selectedMetadataURL {
+            try? fm.copyItem(at: metadataPath, to: stagingDir.appendingPathComponent("scan4d_metadata.json"))
+        }
+        try? fm.copyItem(at: scanDir.appendingPathComponent("mesh.obj"), to: stagingDir.appendingPathComponent("mesh.obj"))
+        try? fm.copyItem(at: scanDir.appendingPathComponent("colors.bin"), to: stagingDir.appendingPathComponent("colors.bin"))
+        try? fm.copyItem(at: scanDir.appendingPathComponent("arworldmap.map"), to: stagingDir.appendingPathComponent("relocalization.worldmap"))
+        
+        // 2. Format-Specific Addbacks
+        // Both PLYCM and others include images and depth
+        try? fm.copyItem(at: rawDataDir.appendingPathComponent("images"), to: stagingDir.appendingPathComponent("images"))
+        try? fm.copyItem(at: rawDataDir.appendingPathComponent("depth"), to: stagingDir.appendingPathComponent("depth"))
+        
+        if formatStr == "plycm" {
+            try? fm.copyItem(at: rawDataDir.appendingPathComponent("cameras"), to: stagingDir.appendingPathComponent("cameras"))
+            try? fm.copyItem(at: rawDataDir.appendingPathComponent("mesh_info.json"), to: stagingDir.appendingPathComponent("mesh_info.json"))
+        } else {
+            // RAW, OBJ, PLY, USDZ all use transforms.json
+            try? fm.copyItem(at: rawDataDir.appendingPathComponent("transforms.json"), to: stagingDir.appendingPathComponent("transforms.json"))
         }
 
-        if let zipAttr = try? FileManager.default.attributesOfItem(atPath: zipURL.path),
+        // Zip the properly structured staging directory
+        var error: NSError?
+        let coordinator = NSFileCoordinator()
+        coordinator.coordinate(readingItemAt: stagingDir, options: .forUploading, error: &error) { zipTempURL in
+            try? fm.copyItem(at: zipTempURL, to: zipURL)
+        }
+
+        if let zipAttr = try? fm.attributesOfItem(atPath: zipURL.path),
            let zipSize = zipAttr[.size] as? Int64 {
             print("[prepareZip] zipSize=\(zipSize) bytes error=\(error?.localizedDescription ?? "none")")
         } else {
-            print("[prepareZip] error=\(error?.localizedDescription ?? "none") zipExists=\(FileManager.default.fileExists(atPath: zipURL.path))")
+            print("[prepareZip] error=\(error?.localizedDescription ?? "none") zipExists=\(fm.fileExists(atPath: zipURL.path))")
         }
         return error == nil ? zipURL : nil
     }
