@@ -4,7 +4,7 @@ import SwiftData
 struct WorkflowsView: View {
     @Environment(ScanStore.self) private var scanStore
     @Environment(\.modelContext) private var modelContext
-    @Query(sort: \ScanLocation.name) private var locations: [ScanLocation]
+    @Query(sort: \ScanLocation.updatedAt, order: .reverse) private var locations: [ScanLocation]
 
     @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
     @State private var showSettings = false
@@ -251,6 +251,13 @@ struct WorkflowsView: View {
     }
 }
 
+// MARK: - Export Item Helper
+
+struct ZipExportItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
 // MARK: - Scan Card
 
 struct ScanCard: View {
@@ -261,8 +268,8 @@ struct ScanCard: View {
     var onDelete: (CapturedScan) -> Void
 
     @AppStorage("selectedExportFormat") private var selectedFormatStr: String = ExportFormat.polycam.rawValue
-    @State private var showShareSheet = false
-    @State private var exportFileURL: URL? = nil
+    @State private var exportItem: ZipExportItem? = nil
+    @State private var showExportError = false
     @State private var showDeleteConfirm = false
 
     private var selectedFormat: ExportFormat {
@@ -381,7 +388,7 @@ struct ScanCard: View {
                         .foregroundColor(isEditing ? .gray : .white)
                         .cornerRadius(10)
                     }
-                    .disabled(isEditing || scan.uploadStatus.isUploading || scan.uploadStatus.isSuccess)
+                    .disabled(isEditing || scan.uploadStatus.isUploading)
                 }
             }
             .padding()
@@ -390,10 +397,32 @@ struct ScanCard: View {
         .cornerRadius(16)
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))
         .padding(.horizontal)
-        .sheet(isPresented: $showShareSheet) {
-            if let fileURL = exportFileURL {
-                ShareSheet(activityItems: [fileURL])
+        .sheet(item: $exportItem, onDismiss: {
+            // Safety net: if dismissed via swipe-down before completion handler fires, reset.
+            if scan.uploadStatus == .zipping {
+                scan.uploadStatus = .pending
+                onUpdate(scan)
             }
+        }) { item in
+            ShareSheet(activityItems: [item.url]) { activityType, completed, returnedItems, activityError in
+                // Only process if we aren't currently streaming an upload
+                if case .uploading = scan.uploadStatus { return }
+                
+                if let error = activityError {
+                    scan.uploadStatus = .failed(error.localizedDescription)
+                } else if completed {
+                    scan.uploadStatus = .savedLocally
+                } else {
+                    // User canceled the share sheet
+                    scan.uploadStatus = .pending
+                }
+                onUpdate(scan)
+            }
+        }
+        .alert("No Data Available", isPresented: $showExportError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("The scan data may have been deleted.")
         }
     }
 
@@ -417,6 +446,8 @@ struct ScanCard: View {
     private var statusColor: Color {
         switch scan.uploadStatus {
         case .pending: return .gray
+        case .zipping: return .cyan
+        case .savedLocally: return .green
         case .uploading(_): return .blue
         case .success: return .green
         case .failed: return .red
@@ -430,9 +461,8 @@ struct ScanCard: View {
     }
 
     private func uploadScan() {
-        scan.uploadStatus = .uploading(progress: 0.0)
+        scan.uploadStatus = .zipping
         onUpdate(scan)
-
 
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
         let formatStr = selectedFormat.rawValue.lowercased()
@@ -445,41 +475,28 @@ struct ScanCard: View {
             return
         }
 
-        let rawPath = scan.rawDataPath
-        guard FileManager.default.fileExists(atPath: rawPath.path) else {
-            scan.uploadStatus = .failed("No raw data")
+        // Capture scan directory on main thread (SwiftData models aren't thread-safe)
+        let scanDir = scan.scanDirectory
+        print("[Upload] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
+        guard FileManager.default.fileExists(atPath: scanDir.path) else {
+            scan.uploadStatus = .failed("No scan data")
             onUpdate(scan)
             return
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let zipURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent(filename)
-
-            // Inject the selected format into scan4d_metadata.json before zipping
-            let metadataURL = rawPath.appendingPathComponent("scan4d_metadata.json")
-            if let data = try? Data(contentsOf: metadataURL),
-               var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                json["export_format"] = formatStr
-                if let newData = try? JSONSerialization.data(withJSONObject: json, options: .prettyPrinted) {
-                    try? newData.write(to: metadataURL)
-                }
-            }
-
-            // Use NSFileCoordinator to create a ZIP
-            var error: NSError?
-            let coordinator = NSFileCoordinator()
-            coordinator.coordinate(readingItemAt: rawPath, options: .forUploading, error: &error) { zipTempURL in
-                try? FileManager.default.copyItem(at: zipTempURL, to: zipURL)
-            }
-
-            guard error == nil else {
+            guard let zipURL = self.prepareZip(filename: filename, scanDir: scanDir, formatStr: formatStr) else {
                 DispatchQueue.main.async {
-                    scan.selectedFormat = selectedFormat
-                    scan.uploadStatus = .failed("Zip failed")
-                    onUpdate(scan)
+                    self.scan.selectedFormat = self.selectedFormat
+                    self.scan.uploadStatus = .failed("Zip failed")
+                    self.onUpdate(self.scan)
                 }
                 return
+            }
+            
+            DispatchQueue.main.async {
+                self.scan.uploadStatus = .uploading(progress: 0.0)
+                self.onUpdate(self.scan)
             }
 
             // Upload the ZIP natively via streaming
@@ -487,59 +504,118 @@ struct ScanCard: View {
             request.httpMethod = "PUT"
             request.setValue("application/zip", forHTTPHeaderField: "Content-Type")
 
+            // Track upload progress using KVO
+            var progressObserver: NSKeyValueObservation?
+            
             let task = URLSession.shared.uploadTask(with: request, fromFile: zipURL) { _, response, uploadError in
+                // Explicitly capture the observer so it lives until the task completes
+                _ = progressObserver
+                
                 try? FileManager.default.removeItem(at: zipURL)
                 DispatchQueue.main.async {
-                    scan.selectedFormat = selectedFormat
+                    self.scan.selectedFormat = self.selectedFormat
                     if let uploadError = uploadError {
-                        scan.uploadStatus = .failed(uploadError.localizedDescription)
+                        self.scan.uploadStatus = .failed(uploadError.localizedDescription)
                     } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-                        scan.uploadStatus = .success
+                        self.scan.uploadStatus = .success
                     } else {
-                        scan.uploadStatus = .failed("Server error")
+                        self.scan.uploadStatus = .failed("Server error")
                     }
-                    onUpdate(scan)
+                    self.onUpdate(self.scan)
                 }
             }
+            
+            progressObserver = task.progress.observe(\.fractionCompleted) { progress, _ in
+                DispatchQueue.main.async {
+                    if case .uploading = self.scan.uploadStatus {
+                        self.scan.uploadStatus = .uploading(progress: progress.fractionCompleted)
+                        self.onUpdate(self.scan)
+                    }
+                }
+            }
+            
             task.resume()
         }
     }
 
     private func saveToFiles() {
+        scan.uploadStatus = .zipping
+        onUpdate(scan)
+
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
         let formatStr = selectedFormat.rawValue.lowercased()
         let filename = "scan4d_\(formatStr)_\(scanName)_\(scan.id.uuidString.prefix(8)).zip"
 
-        let rawPath = scan.rawDataPath
-        guard FileManager.default.fileExists(atPath: rawPath.path) else { return }
-        DispatchQueue.global(qos: .userInitiated).async {
-            let zipURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent(filename)
-            try? FileManager.default.removeItem(at: zipURL) // clean up existing
+        let scanDir = scan.scanDirectory
+        print("[SaveToFiles] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
+        print("[SaveToFiles] location?.id: \(scan.location?.id.uuidString ?? "nil")")
+        print("[SaveToFiles] meshFileURL: \(scan.meshFileURL.path) exists=\(FileManager.default.fileExists(atPath: scan.meshFileURL.path))")
+        print("[SaveToFiles] rawDataPath: \(scan.rawDataPath.path) exists=\(FileManager.default.fileExists(atPath: scan.rawDataPath.path))")
 
-            // Inject the selected format into scan4d_metadata.json before zipping
-            let metadataURL = rawPath.appendingPathComponent("scan4d_metadata.json")
+        guard FileManager.default.fileExists(atPath: scanDir.path) else {
+            print("[SaveToFiles] ERROR: scanDirectory does not exist")
+            self.scan.uploadStatus = .failed("No data")
+            self.onUpdate(self.scan)
+            self.showExportError = true
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let zipURL = self.prepareZip(filename: filename, scanDir: scanDir, formatStr: formatStr) {
+                DispatchQueue.main.async {
+                    self.exportItem = ZipExportItem(url: zipURL)
+                    
+                    // We don't mark as Saved Locally here anymore.
+                    // The ShareSheet completion handler will do it.
+                }
+            } else {
+                DispatchQueue.main.async {
+                    self.scan.uploadStatus = .failed("Zip failed")
+                    self.onUpdate(self.scan)
+                    self.showExportError = true
+                }
+            }
+        }
+    }
+
+    /// Prepares a unified .zip archive from the scan's directory (mesh, worldmap, metadata, raw frames).
+    /// The scanDir path must be captured on the main thread before calling from a background thread.
+    private func prepareZip(filename: String, scanDir: URL, formatStr: String) -> URL? {
+        // Inject the selected export format into scan4d_metadata.json if it exists
+        // Check raw_data/ first (where FrameCaptureSession writes it), then scanDir root
+        let rawDataDir = scanDir.appendingPathComponent("raw_data")
+        let metadataCandidates = [
+            rawDataDir.appendingPathComponent("scan4d_metadata.json"),
+            scanDir.appendingPathComponent("scan4d_metadata.json")
+        ]
+        for metadataURL in metadataCandidates {
             if let data = try? Data(contentsOf: metadataURL),
                var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 json["export_format"] = formatStr
                 if let newData = try? JSONSerialization.data(withJSONObject: json, options: .prettyPrinted) {
                     try? newData.write(to: metadataURL)
                 }
-            }
-
-            var error: NSError?
-            let coordinator = NSFileCoordinator()
-            coordinator.coordinate(readingItemAt: rawPath, options: .forUploading, error: &error) { zipTempURL in
-                try? FileManager.default.copyItem(at: zipTempURL, to: zipURL)
-            }
-
-            if error == nil {
-                DispatchQueue.main.async {
-                    self.exportFileURL = zipURL
-                    self.showShareSheet = true
-                }
+                break
             }
         }
+
+        let zipURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        try? FileManager.default.removeItem(at: zipURL) // clean up existing
+
+        // Zip the entire scan directory (mesh.obj, colors.bin, arworldmap.map, raw_data/)
+        var error: NSError?
+        let coordinator = NSFileCoordinator()
+        coordinator.coordinate(readingItemAt: scanDir, options: .forUploading, error: &error) { zipTempURL in
+            try? FileManager.default.copyItem(at: zipTempURL, to: zipURL)
+        }
+
+        if let zipAttr = try? FileManager.default.attributesOfItem(atPath: zipURL.path),
+           let zipSize = zipAttr[.size] as? Int64 {
+            print("[prepareZip] zipSize=\(zipSize) bytes error=\(error?.localizedDescription ?? "none")")
+        } else {
+            print("[prepareZip] error=\(error?.localizedDescription ?? "none") zipExists=\(FileManager.default.fileExists(atPath: zipURL.path))")
+        }
+        return error == nil ? zipURL : nil
     }
 }
 
@@ -547,9 +623,11 @@ struct ScanCard: View {
 
 struct ShareSheet: UIViewControllerRepresentable {
     var activityItems: [Any]
+    var completion: UIActivityViewController.CompletionWithItemsHandler? = nil
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
         let controller = UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
+        controller.completionWithItemsHandler = completion
         return controller
     }
 

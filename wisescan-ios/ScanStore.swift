@@ -37,6 +37,8 @@ class CapturedScan {
     @Transient var uploadStatus: UploadStatus {
         get {
             if uploadStatusStr == "pending" { return .pending }
+            if uploadStatusStr == "zipping" { return .zipping }
+            if uploadStatusStr == "savedLocally" { return .savedLocally }
             if uploadStatusStr == "success" { return .success }
             if uploadStatusStr.starts(with: "failed:") {
                 let msg = String(uploadStatusStr.dropFirst(7))
@@ -51,6 +53,12 @@ class CapturedScan {
             switch newValue {
             case .pending:
                 uploadStatusStr = "pending"
+                uploadProgress = 0.0
+            case .zipping:
+                uploadStatusStr = "zipping"
+                uploadProgress = 0.0
+            case .savedLocally:
+                uploadStatusStr = "savedLocally"
                 uploadProgress = 0.0
             case .success:
                 uploadStatusStr = "success"
@@ -107,14 +115,18 @@ enum ExportFormat: String, CaseIterable, Codable {
 
 enum UploadStatus: Equatable {
     case pending
+    case zipping
     case uploading(progress: Double)
+    case savedLocally
     case success
     case failed(String)
 
     var label: String {
         switch self {
         case .pending: return "Ready"
+        case .zipping: return "Zipping..."
         case .uploading(let p): return "Uploading (\(Int(p * 100))%)..."
+        case .savedLocally: return "Saved Locally"
         case .success: return "Uploaded"
         case .failed(let msg): return "Failed: \(msg)"
         }
@@ -122,6 +134,7 @@ enum UploadStatus: Equatable {
 
     var isUploading: Bool {
         if case .uploading = self { return true }
+        if case .zipping = self { return true }
         return false
     }
 
@@ -137,14 +150,16 @@ enum UploadStatus: Equatable {
 class ScanLocation {
     var id: UUID
     var name: String
+    var updatedAt: Date = Date()
     var remoteLocationId: String?
 
     @Relationship(deleteRule: .cascade)
     var scans: [CapturedScan] = []
 
-    init(id: UUID = UUID(), name: String, remoteLocationId: String? = nil) {
+    init(id: UUID = UUID(), name: String, updatedAt: Date = Date(), remoteLocationId: String? = nil) {
         self.id = id
         self.name = name
+        self.updatedAt = updatedAt
         self.remoteLocationId = remoteLocationId
     }
 }
@@ -306,6 +321,7 @@ class ScanFileManager {
 
         targetLocation.scans.append(newScan)
         newScan.location = targetLocation
+        targetLocation.updatedAt = Date() // Bump to top of workflow list
         context.insert(newScan)
 
         do {
