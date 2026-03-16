@@ -21,5 +21,5 @@ enum AppDefaults {
     static let developerMode: Bool = false
     static let flipCameraEnabled: Bool = false
     static let privacyFilter: Bool = true
-    static let selectedExportFormat = "PLYCM" // ExportFormat.polycam.rawValue
+    static let selectedExportFormat = "Scan4D" // ExportFormat.scan4d.rawValue
 }

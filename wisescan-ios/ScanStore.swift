@@ -24,13 +24,13 @@ class CapturedScan {
         self.capturedAt = capturedAt
         self.vertexCount = vertexCount
         self.faceCount = faceCount
-        self.selectedFormatStr = ExportFormat.polycam.rawValue
+        self.selectedFormatStr = ExportFormat.scan4d.rawValue
         self.uploadStatusStr = "pending"
         self.uploadProgress = 0.0
     }
 
     @Transient var selectedFormat: ExportFormat {
-        get { ExportFormat(rawValue: selectedFormatStr) ?? .obj }
+        get { ExportFormat(rawValue: selectedFormatStr) ?? .scan4d }
         set { selectedFormatStr = newValue.rawValue }
     }
 
@@ -107,7 +107,8 @@ class CapturedScan {
 }
 
 enum ExportFormat: String, CaseIterable, Codable {
-    case polycam = "PLYCM"
+    case scan4d = "Scan4D"
+    case polycam = "Polycam"
     case raw = "RAW"
     case usdz = "USDZ"
     case ply = "PLY"

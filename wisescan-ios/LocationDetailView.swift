@@ -116,7 +116,8 @@ struct LocationDetailView: View {
                                 description: "Fast photogrammetry pipeline optimized for immediate preview. Lower resolution textures.",
                                 time: "~5 mins",
                                 buttonText: "Run Workflow",
-                                isPrimary: true
+                                isPrimary: true,
+                                isDisabled: true
                             )
 
                             WorkflowCard(
@@ -124,11 +125,20 @@ struct LocationDetailView: View {
                                 title: "Gaussian Splat",
                                 description: "High-fidelity radiance field reconstruction for photo-realistic novel view synthesis.",
                                 time: "~25 mins",
-                                buttonText: "Run Workflow"
+                                buttonText: "Run Workflow",
+                                isDisabled: true
+                            )
+
+                            WorkflowCard(
+                                icon: "map.fill",
+                                title: "Spatial Indexing",
+                                description: "OpenFLAME spatial indexing with automatic semantic labelling. Identifies and tags objects, surfaces, and regions for spatial queries and AR anchoring.",
+                                time: "~10 mins",
+                                buttonText: "Run Workflow",
+                                isDisabled: true
                             )
                         }
                         .padding(.horizontal)
-                        .opacity(0.5) // visually disabled until backend is ready
                     }
                     .padding(.top, 16)
                     .opacity(isEditing ? 0.3 : 1.0)
@@ -181,6 +191,7 @@ struct WorkflowCard: View {
     var time: String
     var buttonText: String
     var isPrimary: Bool = false
+    var isDisabled: Bool = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
@@ -212,10 +223,11 @@ struct WorkflowCard: View {
                             .font(.caption).bold()
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(isPrimary ? Color.blue : Color.white.opacity(0.2))
-                            .foregroundColor(.white)
+                            .background(isDisabled ? Color.gray.opacity(0.3) : (isPrimary ? Color.blue : Color.white.opacity(0.2)))
+                            .foregroundColor(isDisabled ? .gray : .white)
                             .cornerRadius(8)
                     }
+                    .disabled(isDisabled)
                 }
                 .padding(.top, 4)
             }
@@ -227,6 +239,7 @@ struct WorkflowCard: View {
                 .stroke(isPrimary ? Color.cyan.opacity(0.3) : Color.white.opacity(0.1), lineWidth: 1)
         )
         .cornerRadius(16)
+        .opacity(isDisabled ? 0.6 : 1.0)
     }
 }
 

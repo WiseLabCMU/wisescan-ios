@@ -28,7 +28,7 @@ struct UserGuideView: View {
                     guideRow(
                         icon: "4.circle.fill",
                         title: "Choose Format",
-                        text: "Select an export format (OBJ, PLY, USDZ, or RAW) using the segmented picker on each scan card."
+                        text: "Select an export format (Scan4D, Polycam, OBJ, PLY, USDZ, or RAW) using the format picker on each scan card."
                     )
                     guideRow(
                         icon: "5.circle.fill",
@@ -43,7 +43,11 @@ struct UserGuideView: View {
                 // MARK: - Export Formats
                 Section {
                     formatRow(
-                        format: "PLYCM",
+                        format: "Scan4D",
+                        desc: "Default format. Includes mesh, raw frames, depth maps, camera poses, and relocalization data. Optimized for Scan4D server workflows."
+                    )
+                    formatRow(
+                        format: "Polycam",
                         desc: "Polycam-compatible bundle: RGB images, depth maps, per-frame camera JSONs (cameras/), and mesh_info.json. Compatible with Polycam's raw data import."
                     )
                     formatRow(

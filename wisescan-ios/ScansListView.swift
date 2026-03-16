@@ -286,19 +286,21 @@ struct ScanCard: View {
                 }
 
                 // Format picker
-                VStack(alignment: .leading, spacing: 6) {
+                HStack {
                     Text("Export Format")
                         .font(.caption)
                         .foregroundColor(.gray)
+                    Spacer()
                     Picker("Format", selection: $selectedFormatStr) {
                         ForEach(ExportFormat.allCases, id: \.self) { format in
                             Text(format.rawValue).tag(format.rawValue)
                         }
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
+                    .tint(.cyan)
                     .disabled(isEditing)
                     .onChange(of: selectedFormatStr) { _, newValue in
-                        scan.selectedFormat = ExportFormat(rawValue: newValue) ?? .polycam
+                        scan.selectedFormat = ExportFormat(rawValue: newValue) ?? .scan4d
                         onUpdate(scan)
                     }
                 }
@@ -576,11 +578,11 @@ struct ScanCard: View {
         try? fm.copyItem(at: scanDir.appendingPathComponent("arworldmap.map"), to: stagingDir.appendingPathComponent("relocalization.worldmap"))
         
         // 2. Format-Specific Addbacks
-        // Both PLYCM and others include images and depth
+        // Both Polycam and others include images and depth
         try? fm.copyItem(at: rawDataDir.appendingPathComponent("images"), to: stagingDir.appendingPathComponent("images"))
         try? fm.copyItem(at: rawDataDir.appendingPathComponent("depth"), to: stagingDir.appendingPathComponent("depth"))
         
-        if formatStr == "plycm" {
+        if formatStr == "polycam" {
             try? fm.copyItem(at: rawDataDir.appendingPathComponent("cameras"), to: stagingDir.appendingPathComponent("cameras"))
             try? fm.copyItem(at: rawDataDir.appendingPathComponent("mesh_info.json"), to: stagingDir.appendingPathComponent("mesh_info.json"))
         } else {
