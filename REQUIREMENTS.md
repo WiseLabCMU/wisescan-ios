@@ -332,12 +332,22 @@ classDiagram
 
 ## Export Format Reference
 
-| Format | Extension | Contents | Downstream Tool |
-|:-------|:----------|:---------|:----------------|
-| OBJ | `.obj` | Wavefront 3D mesh | MeshLab, Blender |
-| PLY | `.ply` | Polygon file + vertex data | CloudCompare, Polycam |
-| USDZ | `.usdz` | Apple 3D | iOS Quick Look |
-| RAW | `.zip` | `images/` + `depth/` + `transforms.json` | Nerfstudio, COLMAP |
-| PLYCM | `.zip` | `images/` + `depth/` + `cameras/` + `mesh_info.json` | Polycam raw import |
+Note: All exports from the app generate a single `.zip` archive containing the following core Universal Payload. The only difference between formats is how the camera poses are serialized (Nerfstudio vs Polycam schema) and the intent downstream.
+
+**Universal zip payload components (included in ALL formats):**
+- `scan4d_metadata.json`
+- `mesh.obj`
+- `colors.bin`
+- `relocalization.worldmap`
+- `images/` directory
+- `depth/` directory
+
+| Format | Target Downstream Tool | Additional Format-Specific Files in Zip |
+|:-------|:-----------------------|:----------------------------------------|
+| OBJ | MeshLab, Blender | `transforms.json` |
+| PLY | CloudCompare | `transforms.json` |
+| USDZ | iOS Quick Look / RealityKit | `transforms.json` |
+| RAW | Nerfstudio, COLMAP | `transforms.json` |
+| PLYCM | Polycam raw web import | `cameras/` directory, `mesh_info.json` |
 
 ---

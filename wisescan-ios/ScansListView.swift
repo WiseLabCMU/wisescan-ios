@@ -1,7 +1,7 @@
 import SwiftUI
 import SwiftData
 
-struct WorkflowsView: View {
+struct ScansListView: View {
     @Environment(ScanStore.self) private var scanStore
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ScanLocation.updatedAt, order: .reverse) private var locations: [ScanLocation]
@@ -11,201 +11,79 @@ struct WorkflowsView: View {
     @State private var locationToDelete: ScanLocation? = nil
     @State private var showDeleteLocationConfirm = false
     @State private var isEditing = false
-    @State private var locationToRename: ScanLocation? = nil
-    @State private var renameText: String = ""
-    @State private var showRenameAlert = false
     @Binding var selectedTab: Int
 
+    let columns = [
+        GridItem(.adaptive(minimum: 160), spacing: 16)
+    ]
+
     var body: some View {
-        NavigationStack {
+        @Bindable var store = scanStore
+        NavigationStack(path: $store.navigationPath) {
             ZStack {
                 Color.black.ignoresSafeArea()
-
                 LinearGradient(colors: [Color(white: 0.1), Color.black], startPoint: .topLeading, endPoint: .bottomTrailing)
                     .ignoresSafeArea()
 
                 ScrollView {
-                    VStack(spacing: 24) {
-
-                        // Captured Scans
-                        if locations.allSatisfy({ $0.scans.isEmpty }) {
-                            VStack(spacing: 16) {
-                                Image(systemName: "viewfinder")
-                                    .font(.system(size: 48))
-                                    .foregroundColor(.gray)
-                                Text("No scans yet")
-                                    .font(.headline)
-                                    .foregroundColor(.gray)
-                                Text("Capture a scan to see it here")
-                                    .font(.caption)
-                                    .foregroundColor(.gray.opacity(0.7))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 40)
-                        } else {
+                    if locations.isEmpty {
+                        VStack(spacing: 16) {
+                            Image(systemName: "folder")
+                                .font(.system(size: 48))
+                                .foregroundColor(.gray)
+                            Text("No scans yet")
+                                .font(.headline)
+                                .foregroundColor(.gray)
+                            Text("Capture a scan to see it here")
+                                .font(.caption)
+                                .foregroundColor(.gray.opacity(0.7))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 60)
+                    } else {
+                        LazyVGrid(columns: columns, spacing: 16) {
                             ForEach(locations) { location in
-                                if !location.scans.isEmpty {
-                                    VStack(alignment: .leading, spacing: 16) {
-                                        HStack {
-                                            if isEditing {
-                                                Button(action: {
-                                                    locationToRename = location
-                                                    renameText = location.name
-                                                    showRenameAlert = true
-                                                }) {
-                                                    HStack(spacing: 4) {
-                                                        Text(location.name.uppercased())
-                                                            .font(.caption).bold()
-                                                            .foregroundColor(.orange)
-                                                        Image(systemName: "pencil")
-                                                            .font(.caption2)
-                                                            .foregroundColor(.orange)
-                                                    }
-                                                }
-                                            } else {
-                                                Text(location.name.uppercased())
-                                                    .font(.caption).bold()
-                                                    .foregroundColor(.gray)
-                                            }
-                                            Spacer()
-
-                                            // Delete Location Action (Only visible in Edit Mode)
-                                            if isEditing {
-                                                Button(role: .destructive, action: {
-                                                    locationToDelete = location
-                                                    showDeleteLocationConfirm = true
-                                                }) {
-                                                    Image(systemName: "trash")
-                                                        .foregroundColor(.red)
-                                                }
-                                                .padding(.trailing, 8)
-                                                .confirmationDialog(
-                                                    "Delete Location",
-                                                    isPresented: $showDeleteLocationConfirm,
-                                                    presenting: locationToDelete
-                                                ) { locToDelete in
-                                                    // Ensure we only process if it matches the current row
-                                                    if locToDelete == location {
-                                                        Button("Delete \(locToDelete.scans.count) Scan\(locToDelete.scans.count == 1 ? "" : "s")", role: .destructive) {
-                                                            deleteLocation(locToDelete)
-                                                            locationToDelete = nil
-                                                            // Auto-exit edit mode after deleting all scans in a location
-                                                            if locations.allSatisfy({ $0.scans.isEmpty }) {
-                                                                isEditing = false
-                                                            }
-                                                        }
-                                                        Button("Cancel", role: .cancel) {
-                                                            locationToDelete = nil
-                                                        }
-                                                    }
-                                                } message: { locToDelete in
-                                                    Text("This will permanently delete \"\(locToDelete.name)\" and all \(locToDelete.scans.count) scan\(locToDelete.scans.count == 1 ? "" : "s") inside it.")
-                                                }
-                                            }
-
-                                            // Scan4D action: initiate a new scan for this location
-                                            Button(action: {
-                                                scanStore.activeLocationForScan = location.id
-                                                // Grab the most recent world map for this location if available
-                                                let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
-                                                scanStore.activeRelocalizationMap = sortedScans.first?.worldMapURL
-                                                selectedTab = 1 // Switch to Capture View
-                                            }) {
-                                                Label("Scan Again", systemImage: "plus.viewfinder")
-                                                    .font(.caption).bold()
-                                                    .foregroundColor(.cyan)
-                                            }
-                                            .disabled(isEditing)
-                                            .opacity(isEditing ? 0.3 : 1.0)
-                                        }
-                                        .padding(.horizontal)
-                                        .padding(.top, 8)
-
-                                        let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
-                                        ForEach(sortedScans) { scan in
-                                            ScanCard(scan: scan, uploadURL: uploadURL, isEditing: isEditing) { updatedScan in
-                                                // trigger UI update not strictly needed for SwiftData Model observation if nested right,
-                                                // but we can save context just in case.
-                                                try? modelContext.save()
-                                            } onDelete: { scanToDelete in
-                                                ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
-                                                // Auto-exit edit mode if no scans remain
-                                                if locations.allSatisfy({ $0.scans.isEmpty }) {
-                                                    isEditing = false
-                                                }
-                                            }
-                                        }
+                                ZStack(alignment: .topTrailing) {
+                                    NavigationLink(value: location) {
+                                        LocationGridTile(location: location)
                                     }
-                                    .padding(.bottom, 16)
+                                    .buttonStyle(.plain)
+                                    .disabled(isEditing)
+                                    .opacity(isEditing ? 0.6 : 1.0)
+
+                                    if isEditing {
+                                        Button(action: {
+                                            locationToDelete = location
+                                            showDeleteLocationConfirm = true
+                                        }) {
+                                            Image(systemName: "minus.circle.fill")
+                                                .font(.title2)
+                                                .foregroundColor(.red)
+                                                .background(Circle().fill(Color.white).padding(4))
+                                        }
+                                        .offset(x: 8, y: -8)
+                                    }
                                 }
                             }
                         }
-
-                        // Workflows — not yet implemented
-                        VStack(spacing: 12) {
-                            Image(systemName: "hammer.fill")
-                                .font(.title2)
-                                .foregroundColor(.gray)
-                            Text("Server Workflows Coming Soon")
-                                .font(.subheadline)
-                                .foregroundColor(.gray)
-                            Text("Automated processing pipelines (Quick Mesh, Gaussian Splat, Spatial Indexing) will appear here once server orchestration is connected.")
-                                .font(.caption)
-                                .foregroundColor(.gray.opacity(0.7))
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 20)
-                        .padding(.horizontal)
-
-                        /*
-                        VStack(spacing: 16) {
-                            WorkflowCard(
-                                icon: "icloud.and.arrow.up",
-                                title: "STATIC UPLOAD",
-                                description: "Upload scan directly to storage. No processing pipeline, just raw file storage at your configured URL.",
-                                time: "~1m",
-                                buttonText: "Upload Raw",
-                                isPrimary: false
-                            )
-                            WorkflowCard(
-                                icon: "bolt.fill",
-                                title: "QUICK MESH",
-                                description: "Fast processing for low-poly mesh & textures. Ideal for preview, AR, game assets.",
-                                time: "~5m",
-                                buttonText: "Start Quick Mesh"
-                            )
-                            WorkflowCard(
-                                icon: "sparkles",
-                                title: "HIGH-QUALITY SPLAT",
-                                description: "Maximum density 3D Gaussian splat. Photorealistic detail, radiance fields, cinematic export.",
-                                time: "~15m",
-                                buttonText: "Process Splat",
-                                isPrimary: true
-                            )
-                            WorkflowCard(
-                                icon: "arkit",
-                                title: "SPATIAL INDEXING",
-                                description: "Optimized index for large environments. Efficient retrieval, spatial queries, cloud storage.",
-                                time: "~10m",
-                                buttonText: "Index Space"
-                            )
-                        }
-                        .padding(.horizontal)
-                        */
+                        .padding()
                     }
-                    .padding(.vertical)
                 }
             }
-            .navigationTitle("WORKFLOWS")
+            .navigationTitle("SCANS")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: ScanLocation.self) { loc in
+                LocationDetailView(location: loc, selectedTab: $selectedTab)
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     HStack {
-                        Button(action: { isEditing.toggle() }) {
-                            Text(isEditing ? "Done" : "Edit")
-                                .bold(isEditing)
-                                .foregroundColor(isEditing ? .red : .cyan)
+                        if !locations.isEmpty {
+                            Button(action: { isEditing.toggle() }) {
+                                Text(isEditing ? "Done" : "Edit")
+                                    .bold(isEditing)
+                                    .foregroundColor(isEditing ? .red : .cyan)
+                            }
                         }
                         Button(action: { showSettings = true }) {
                             Image(systemName: "gearshape")
@@ -215,39 +93,107 @@ struct WorkflowsView: View {
                 }
             }
             .onChange(of: selectedTab) {
-                if selectedTab != 2 { // 2 is typically the Workflows tab index
+                if selectedTab != 2 {
                     isEditing = false
                 }
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView()
             }
-            .alert("Rename Location", isPresented: $showRenameAlert) {
-                TextField("Location name", text: $renameText)
-                Button("Save") {
-                    if let loc = locationToRename, !renameText.trimmingCharacters(in: .whitespaces).isEmpty {
-                        loc.name = renameText.trimmingCharacters(in: .whitespaces)
-                        try? modelContext.save()
-                    }
-                    locationToRename = nil
+            .confirmationDialog(
+                "Delete Location",
+                isPresented: $showDeleteLocationConfirm,
+                presenting: locationToDelete
+            ) { locToDelete in
+                Button("Delete \(locToDelete.scans.count) Scan\(locToDelete.scans.count == 1 ? "" : "s")", role: .destructive) {
+                    deleteLocation(locToDelete)
+                    locationToDelete = nil
+                    if locations.isEmpty { isEditing = false }
                 }
-                Button("Cancel", role: .cancel) {
-                    locationToRename = nil
-                }
-            } message: {
-                Text("Enter a new name for this scan group.")
+                Button("Cancel", role: .cancel) { locationToDelete = nil }
+            } message: { locToDelete in
+                Text("This will permanently delete \"\(locToDelete.name)\" and all scans inside it.")
             }
             .preferredColorScheme(.dark)
         }
     }
 
     private func deleteLocation(_ loc: ScanLocation) {
-        // Find all scans first to delete files
         for scan in loc.scans {
             ScanFileManager.shared.deleteScan(scan, context: modelContext)
         }
         modelContext.delete(loc)
         try? modelContext.save()
+    }
+}
+
+// MARK: - Location Grid Tile
+
+struct LocationGridTile: View {
+    let location: ScanLocation
+
+    var latestScan: CapturedScan? {
+        location.scans.sorted(by: { $0.capturedAt > $1.capturedAt }).first
+    }
+
+    var thumbnailImage: UIImage? {
+        guard let latest = latestScan else { return nil }
+        let thumbURL = latest.thumbnailURL
+        if FileManager.default.fileExists(atPath: thumbURL.path),
+           let data = try? Data(contentsOf: thumbURL) {
+            return UIImage(data: data)
+        }
+        return nil
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Thumbnail Area
+            ZStack {
+                Color.gray.opacity(0.2)
+                
+                if let uiImage = thumbnailImage {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(height: 120)
+                        .clipped()
+                } else {
+                    Image(systemName: "photo")
+                        .font(.largeTitle)
+                        .foregroundColor(.gray.opacity(0.5))
+                }
+            }
+            .frame(height: 120)
+
+            // Info Area
+            VStack(alignment: .leading, spacing: 4) {
+                Text(location.name)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                
+                HStack {
+                    Text("\(location.scans.count) scan\(location.scans.count == 1 ? "" : "s")")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                    Spacer()
+                    if let latest = latestScan {
+                        Text(latest.timeSinceCapture)
+                            .font(.caption2)
+                            .foregroundColor(.gray)
+                    }
+                }
+            }
+            .padding(10)
+            .background(Color.white.opacity(0.05))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+        )
     }
 }
 
@@ -675,65 +621,39 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
-// MARK: - Workflow Card
 
-struct WorkflowCard: View {
-    var icon: String
-    var title: String
-    var description: String
-    var time: String
-    var buttonText: String
-    var isPrimary: Bool = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            Image(systemName: icon)
-                .font(.title)
-                .foregroundColor(isPrimary ? .cyan : .white)
-                .frame(width: 40)
-                .padding(.top, 4)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(title)
-                    .font(.headline)
-                    .foregroundColor(.white)
-
-                Text(description)
-                    .font(.caption)
-                    .foregroundColor(.gray)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack {
-                    Label("Time: \(time)", systemImage: "clock")
-                        .font(.caption)
-                        .foregroundColor(.green)
-
-                    Spacer()
-
-                    Button(action: {}) {
-                        Text(buttonText)
-                            .font(.caption).bold()
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(isPrimary ? Color.blue : Color.white.opacity(0.2))
-                            .foregroundColor(.white)
-                            .cornerRadius(8)
-                    }
-                }
-                .padding(.top, 4)
-            }
-        }
-        .padding()
-        .background(.ultraThinMaterial)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(isPrimary ? Color.cyan.opacity(0.3) : Color.white.opacity(0.1), lineWidth: 1)
-        )
-        .cornerRadius(16)
-    }
+#Preview("ScansListView") {
+    let config = ModelConfiguration(isStoredInMemoryOnly: true)
+    let container = try! ModelContainer(for: ScanLocation.self, CapturedScan.self, configurations: config)
+    let sampleLocation = ScanLocation(name: "Sample Location")
+    let sampleScan = CapturedScan(name: "Sample Scan 1", vertexCount: 1500, faceCount: 2000)
+    sampleLocation.scans.append(sampleScan)
+    container.mainContext.insert(sampleLocation)
+    
+    return ScansListView(selectedTab: .constant(2))
+        .modelContainer(container)
+        .environment(ScanStore())
 }
 
-#Preview {
-    WorkflowsView(selectedTab: .constant(2))
-        .environment(ScanStore())
+#Preview("LocationGridTile") {
+    let sampleLocation = ScanLocation(name: "Sample Location")
+    let sampleScan = CapturedScan(name: "Sample Scan 1", vertexCount: 1500, faceCount: 2000)
+    sampleLocation.scans.append(sampleScan)
+    return LocationGridTile(location: sampleLocation)
+        .frame(width: 160)
+        .padding()
+        .background(Color.black)
+}
+
+#Preview("ScanCard") {
+    let sampleScan = CapturedScan(name: "Sample Scan 1", vertexCount: 1500, faceCount: 2000)
+    return ScanCard(
+        scan: sampleScan,
+        uploadURL: "https://example.com/upload",
+        isEditing: false,
+        onUpdate: { _ in },
+        onDelete: { _ in }
+    )
+    .padding()
+    .background(Color.black)
 }

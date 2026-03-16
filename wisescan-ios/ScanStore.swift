@@ -83,6 +83,7 @@ class CapturedScan {
     @Transient var meshFileURL: URL { scanDirectory.appendingPathComponent("mesh.obj") }
     @Transient var colorsFileURL: URL { scanDirectory.appendingPathComponent("colors.bin") }
     @Transient var worldMapURL: URL { scanDirectory.appendingPathComponent("arworldmap.map") }
+    @Transient var thumbnailURL: URL { scanDirectory.appendingPathComponent("thumbnail.jpg") }
     @Transient var rawDataPath: URL { scanDirectory.appendingPathComponent("raw_data") }
 
     @Transient var estimatedSizeMB: Double {
@@ -171,6 +172,9 @@ class ScanStore {
     // Scan4D state for initiating a new scan of an existing location
     var activeRelocalizationMap: URL? = nil
     var activeLocationForScan: UUID? = nil
+    
+    // Shared navigation state to allow programmatic pushes
+    var navigationPath = NavigationPath()
 }
 
 // MARK: - Live Scan Stats (updated by ARCoverageView)
@@ -291,7 +295,8 @@ class ScanFileManager {
         faceCount: Int,
         rawDataPath: URL?,
         vertexColors: Data?,
-        worldMapURL: URL?
+        worldMapURL: URL?,
+        thumbnailData: Data? = nil
     ) -> CapturedScan {
         let targetLocation: ScanLocation
 
@@ -329,6 +334,7 @@ class ScanFileManager {
             try meshData.write(to: newScan.meshFileURL)
             if let colors = vertexColors { try colors.write(to: newScan.colorsFileURL) }
             if let map = worldMapURL { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) }
+            if let thumb = thumbnailData { try thumb.write(to: newScan.thumbnailURL) }
 
             if let raw = rawDataPath, FileManager.default.fileExists(atPath: raw.path) {
                 // Remove existing if any, then move

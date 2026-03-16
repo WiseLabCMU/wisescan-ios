@@ -36,6 +36,7 @@ struct CaptureView: View {
         let rawDataPath: URL?
         let vertexColors: Data?
         let worldMapURL: URL?
+        let thumbnailData: Data?
     }
 
     var activeGhostMeshData: Data? {
@@ -369,6 +370,24 @@ struct CaptureView: View {
             return
         }
 
+        // Capture a 2D thumbnail from the current camera frame
+        var thumbnailData: Data? = nil
+        if let currentFrame = currentARSession?.currentFrame {
+            let ciImage = CIImage(cvPixelBuffer: currentFrame.capturedImage)
+            let context = CIContext()
+            if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
+                let uiImage = UIImage(cgImage: cgImage)
+                // Resize for thumbnail explicitly
+                let targetSize = CGSize(width: 800, height: Int(800.0 * (uiImage.size.height / uiImage.size.width)))
+                UIGraphicsBeginImageContextWithOptions(targetSize, false, 1.0)
+                // ARKit frames are landscapeRight by default, rotate it natively
+                UIImage(cgImage: cgImage, scale: 1.0, orientation: .right).draw(in: CGRect(origin: .zero, size: targetSize))
+                let resizedImage = UIGraphicsGetImageFromCurrentImageContext()
+                UIGraphicsEndImageContext()
+                thumbnailData = resizedImage?.jpegData(compressionQuality: 0.6)
+            }
+        }
+
         // Build accumulated vertex colors for preview
         let vertexColors = colorAccumulator.buildColorData(from: currentARSession)
 
@@ -395,7 +414,8 @@ struct CaptureView: View {
                     faceCount: result.faceCount,
                     rawDataPath: rawDataPath,
                     vertexColors: vertexColors,
-                    worldMapURL: mapURL
+                    worldMapURL: mapURL,
+                    thumbnailData: thumbnailData
                 )
 
                 if self.scanStore.activeLocationForScan != nil {
@@ -431,7 +451,7 @@ struct CaptureView: View {
             locationId = nil // ScanFileManager will create a new location with this name
         }
 
-        let _ = ScanFileManager.shared.saveScan(
+        let savedScan = ScanFileManager.shared.saveScan(
             context: modelContext,
             locationId: locationId,
             name: finalName,
@@ -440,7 +460,8 @@ struct CaptureView: View {
             faceCount: pending.faceCount,
             rawDataPath: pending.rawDataPath,
             vertexColors: pending.vertexColors,
-            worldMapURL: pending.worldMapURL
+            worldMapURL: pending.worldMapURL,
+            thumbnailData: pending.thumbnailData
         )
 
         saveMessage = "Scan Saved!"
@@ -450,9 +471,17 @@ struct CaptureView: View {
         scanStore.activeLocationForScan = nil
         scanStore.activeRelocalizationMap = nil
 
-        // Switch to Workflows tab after a brief delay
+        // Programmatically navigate to the created LocationDetailView
+        let savedLoc = savedScan.location
+
+        // Switch to Scans tab after a brief delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             selectedTab = 2
+            if let loc = savedLoc {
+                // Clear any existing path and append the new/updated location
+                scanStore.navigationPath.removeLast(scanStore.navigationPath.count)
+                scanStore.navigationPath.append(loc)
+            }
             saveMessage = nil
         }
     }
