@@ -5,7 +5,7 @@ struct ContentView: View {
     @State private var scanStore = ScanStore()
     @State private var selectedTab = 0
     @State private var showLiDARWarning = false
-    @AppStorage("developerMode") private var developerMode: Bool = false
+    @AppStorage(AppDefaults.Key.developerMode) private var developerMode: Bool = AppDefaults.developerMode
     @State private var showDevSettings = false
 
     private var hasLiDAR: Bool {

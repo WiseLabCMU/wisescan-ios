@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct DashboardView: View {
-    @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
+    @AppStorage(AppDefaults.Key.uploadURL) private var uploadURL = AppDefaults.uploadURL
     @State private var showSettings = false
     @State private var serverStatus: ServerStatus = .unknown
 

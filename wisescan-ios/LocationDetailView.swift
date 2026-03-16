@@ -6,9 +6,12 @@ struct LocationDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(ScanStore.self) private var scanStore
     @Binding var selectedTab: Int // Pass through to allow "Scan Again" to switch tabs
-    @State private var locationToRename: ScanLocation? = nil
+    @State private var isEditing = false
+    @State private var showSettings = false
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
+
+    @AppStorage(AppDefaults.Key.uploadURL) private var uploadURL = AppDefaults.uploadURL
 
     var body: some View {
         ZStack {
@@ -37,30 +40,33 @@ struct LocationDetailView: View {
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 16)
-                            .background(Color.cyan.opacity(0.8))
+                            .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
                             .cornerRadius(16)
                         }
+                        .disabled(isEditing)
+                        .opacity(isEditing ? 0.5 : 1.0)
 
-                        // Rename Button
-                        Button(action: {
-                            locationToRename = location
-                            newLocationName = location.name
-                            showRenameAlert = true
-                        }) {
-                            HStack {
-                                Image(systemName: "pencil")
-                                Text("Rename Location")
+                        // Rename Button (edit mode only)
+                        if isEditing {
+                            Button(action: {
+                                newLocationName = location.name
+                                showRenameAlert = true
+                            }) {
+                                HStack {
+                                    Image(systemName: "pencil")
+                                    Text("Rename Location")
+                                }
+                                .font(.subheadline)
+                                .foregroundColor(.orange)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(Color.orange.opacity(0.1))
+                                .cornerRadius(12)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                                )
                             }
-                            .font(.subheadline)
-                            .foregroundColor(.orange)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(Color.orange.opacity(0.1))
-                            .cornerRadius(12)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                            )
                         }
                     }
                     .padding(.horizontal)
@@ -81,11 +87,15 @@ struct LocationDetailView: View {
                         ForEach(sortedScans) { scan in
                             ScanCard(
                                 scan: scan,
-                                uploadURL: "https://wiselambda4.lan.cmu.edu/wisescan-uploads/",
-                                isEditing: false,
+                                uploadURL: uploadURL,
+                                isEditing: isEditing,
                                 onUpdate: { _ in try? modelContext.save() },
                                 onDelete: { scanToDelete in
                                     ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
+                                    // Auto-exit edit mode if no scans remain
+                                    if location.scans.isEmpty {
+                                        isEditing = false
+                                    }
                                 }
                             )
                             .padding(.horizontal)
@@ -121,6 +131,7 @@ struct LocationDetailView: View {
                         .opacity(0.5) // visually disabled until backend is ready
                     }
                     .padding(.top, 16)
+                    .opacity(isEditing ? 0.3 : 1.0)
 
                     Spacer().frame(height: 100)
                 }
@@ -128,11 +139,31 @@ struct LocationDetailView: View {
         }
         .navigationTitle(location.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                HStack {
+                    if !location.scans.isEmpty {
+                        Button(action: { isEditing.toggle() }) {
+                            Text(isEditing ? "Done" : "Edit")
+                                .bold(isEditing)
+                                .foregroundColor(isEditing ? .red : .cyan)
+                        }
+                    }
+                    Button(action: { showSettings = true }) {
+                        Image(systemName: "gearshape")
+                    }
+                    .disabled(isEditing)
+                }
+            }
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+        }
         .alert("Rename Location", isPresented: $showRenameAlert) {
             TextField("New Name", text: $newLocationName)
             Button("Save") {
-                if let loc = locationToRename, !newLocationName.isEmpty {
-                    loc.name = newLocationName
+                if !newLocationName.isEmpty {
+                    location.name = newLocationName
                     try? modelContext.save()
                 }
             }

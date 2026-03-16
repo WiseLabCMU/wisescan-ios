@@ -7,9 +7,9 @@ struct CaptureView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var scanStats = ScanStats()
     @State private var locationManager = LocationManager()
-    @AppStorage("privacyFilter") private var isPrivacyFilterOn = true
-    @AppStorage("developerMode") private var developerMode: Bool = false
-    @AppStorage("flipCameraEnabled") private var flipCameraEnabled: Bool = false
+    @AppStorage(AppDefaults.Key.privacyFilter) private var isPrivacyFilterOn = AppDefaults.privacyFilter
+    @AppStorage(AppDefaults.Key.developerMode) private var developerMode: Bool = AppDefaults.developerMode
+    @AppStorage(AppDefaults.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppDefaults.flipCameraEnabled
     @State private var mode = 1 // 0 = Streaming, 1 = Capture
     @State private var usingFrontCamera = false
     @State private var currentARSession: ARSession? = nil
@@ -19,8 +19,8 @@ struct CaptureView: View {
     @State private var recordingTimer: Timer? = nil
     @State private var frameCaptureSession = FrameCaptureSession()
     @State private var colorAccumulator = ARCoverageView.VertexColorAccumulator()
-    @AppStorage("rawOverlapMax") private var rawOverlapMax: Double = 60.0
-    @AppStorage("rawRejectBlur") private var rawRejectBlur: Bool = true
+    @AppStorage(AppDefaults.Key.rawOverlapMax) private var rawOverlapMax: Double = AppDefaults.rawOverlapMax
+    @AppStorage(AppDefaults.Key.rawRejectBlur) private var rawRejectBlur: Bool = AppDefaults.rawRejectBlur
     @Binding var selectedTab: Int
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
 

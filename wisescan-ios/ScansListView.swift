@@ -6,7 +6,6 @@ struct ScansListView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \ScanLocation.updatedAt, order: .reverse) private var locations: [ScanLocation]
 
-    @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
     @State private var showSettings = false
     @State private var locationToDelete: ScanLocation? = nil
     @State private var showDeleteLocationConfirm = false
@@ -213,7 +212,7 @@ struct ScanCard: View {
     var onUpdate: (CapturedScan) -> Void
     var onDelete: (CapturedScan) -> Void
 
-    @AppStorage("selectedExportFormat") private var selectedFormatStr: String = ExportFormat.polycam.rawValue
+    @AppStorage(AppDefaults.Key.selectedExportFormat) private var selectedFormatStr: String = AppDefaults.selectedExportFormat
     @State private var exportItem: ZipExportItem? = nil
     @State private var showExportError = false
     @State private var showDeleteConfirm = false

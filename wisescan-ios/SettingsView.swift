@@ -6,11 +6,11 @@ struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var locations: [ScanLocation]
 
-    @AppStorage("rawOverlapMax") private var rawOverlapMax: Double = 60.0
-    @AppStorage("rawRejectBlur") private var rawRejectBlur: Bool = true
-    @AppStorage("uploadURL") private var uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
-    @AppStorage("developerMode") private var developerMode: Bool = false
-    @AppStorage("flipCameraEnabled") private var flipCameraEnabled: Bool = false
+    @AppStorage(AppDefaults.Key.rawOverlapMax) private var rawOverlapMax: Double = AppDefaults.rawOverlapMax
+    @AppStorage(AppDefaults.Key.rawRejectBlur) private var rawRejectBlur: Bool = AppDefaults.rawRejectBlur
+    @AppStorage(AppDefaults.Key.uploadURL) private var uploadURL = AppDefaults.uploadURL
+    @AppStorage(AppDefaults.Key.developerMode) private var developerMode: Bool = AppDefaults.developerMode
+    @AppStorage(AppDefaults.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppDefaults.flipCameraEnabled
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
