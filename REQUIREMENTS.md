@@ -107,6 +107,7 @@ graph TD
 | [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) | Scan cards, location groups, rename, upload | `WorkflowsView`, `ScanCard` |
 | [MeshPreviewView.swift](wisescan-ios/MeshPreviewView.swift) | SceneKit 3D preview with vertex colors | `MeshPreviewView` |
 | [ScanStore.swift](wisescan-ios/ScanStore.swift) | Data models, location hierarchy, capacity scoring | `ScanStore`, `ScanLocation`, `CapturedScan`, `ScanStats`, `capacityScore` |
+| [MeshConverter.swift](wisescan-ios/MeshConverter.swift) | OBJ→PLY and OBJ→USDZ mesh conversion | `MeshConverter.objToPLY()`, `MeshConverter.objToUSDZ()` |
 | [SettingsView.swift](wisescan-ios/SettingsView.swift) | Upload URL, RAW settings, Developer Mode, in-app guide | `SettingsView`, `developerMode`, `flipCameraEnabled` |
 
 ---
@@ -183,8 +184,8 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | All exports (OBJ, PLY, USDZ, RAW, PLYCM) are packaged into a unified `.zip` archive. The archive includes the chosen payload along with `scan4d_metadata.json` (injecting a `"export_format"` key), and the `relocalization.worldmap`. The server uses the JSON to determine how to parse the ZIP. |
-| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `exportMeshOBJ()` · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `writeTransformsJSON()` · [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) — Unified PDF archiving |
+| **Description** | Each export format includes only the data relevant to that format. Scan4D bundles metadata + relocalization + Polycam payload. Polycam exports raw import data. RAW exports Nerfstudio-compatible poses. OBJ exports the raw mesh file. PLY and USDZ are converted from OBJ on-device via `MeshConverter`. |
+| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `exportMeshOBJ()` · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `writeTransformsJSON()` · [ScansListView.swift](wisescan-ios/ScansListView.swift) — `prepareExport()` · [MeshConverter.swift](wisescan-ios/MeshConverter.swift) — `objToPLY()`, `objToUSDZ()` |
 
 ### REQ-007: Save & Upload
 | | |
@@ -332,22 +333,15 @@ classDiagram
 
 ## Export Format Reference
 
-Note: All exports from the app generate a single `.zip` archive containing the following core Universal Payload. The only difference between formats is how the camera poses are serialized (Nerfstudio vs Polycam schema) and the intent downstream.
+Each format includes only its own payload — no universal base.
 
-**Universal zip payload components (included in ALL formats):**
-- `scan4d_metadata.json`
-- `mesh.obj`
-- `colors.bin`
-- `relocalization.worldmap`
-- `images/` directory
-- `depth/` directory
-
-| Format | Target Downstream Tool | Additional Format-Specific Files in Zip |
-|:-------|:-----------------------|:----------------------------------------|
-| OBJ | MeshLab, Blender | `transforms.json` |
-| PLY | CloudCompare | `transforms.json` |
-| USDZ | iOS Quick Look / RealityKit | `transforms.json` |
-| RAW | Nerfstudio, COLMAP | `transforms.json` |
-| PLYCM | Polycam raw web import | `cameras/` directory, `mesh_info.json` |
+| Format | Extension | Contents | Target Tool |
+|:-------|:----------|:---------|:------------|
+| Scan4D | `.zip` | `scan4d_metadata.json`, `relocalization.worldmap`, `images/`, `depth/`, `cameras/`, `mesh_info.json` | Scan4D server workflows |
+| Polycam | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
+| RAW | `.zip` | `images/`, `depth/`, `transforms.json` | Nerfstudio, COLMAP |
+| OBJ | `.obj` | Single mesh file (no vertex colors) | MeshLab, Blender |
+| PLY | `.ply` | Converted mesh with embedded vertex colors | MeshLab, CloudCompare |
+| USDZ | `.usdz` | Converted mesh via ModelIO | iOS Quick Look |
 
 ---

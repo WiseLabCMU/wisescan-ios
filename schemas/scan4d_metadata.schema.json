@@ -34,11 +34,6 @@
       "format": "uuid",
       "description": "The UUID of the ScanLocation this capture belongs to."
     },
-    "export_format": {
-      "type": "string",
-      "enum": ["obj", "plycm", "usdz", "raw", "ply"],
-      "description": "The string identifying the format chosen during export (e.g., obj, plycm, usdz)."
-    },
     "gps_latitude": {
       "type": "number",
       "description": "GPS latitude, present if location tracking is available."
@@ -66,7 +61,6 @@
     "os_name",
     "os_version",
     "app_version",
-    "build_type",
-    "export_format"
+    "build_type"
   ]
 }

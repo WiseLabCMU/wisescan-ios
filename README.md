@@ -39,30 +39,33 @@ wisescan-ios/
 
 ## Export Formats & Backend Ingestion
 
-All exports are now bundled into a unified `.zip` archive on device. Regardless of the user's dropdown selection, the backend will receive the raw sequence data alongside the requested mesh formats. The server reads the dynamically injected `scan4d_metadata.json["export_format"]` to route the payload correctly.
+Each export format includes **only** the data relevant to that format. The filename convention is:
+`scan4d_{locationName}_{scanName}_{format}_{timestamp}_{uuid}.{ext}`
 
-| Format | Included in `.zip` Payload | Viewer |
-| :--- | :--- | :--- |
-| **OBJ** | `mesh.obj`, metadata, anchor map, RAW frames | MeshLab, Polycam, Blender |
-| **PLY** | `mesh.ply`, metadata, anchor map, RAW frames | MeshLab, Polycam, CloudCompare |
-| **USDZ** | `mesh.usdz`, metadata, anchor map, RAW frames | iOS Quick Look (native), Reality Composer |
-| **RAW** | `transforms.json`, `images/`, `depth/`, metadata | Nerfstudio (`ns-process-data`), COLMAP |
-| **PLYCM** | `cameras/`, `images/`, `depth/`, `mesh_info.json` | Polycam raw data import |
+| Format | Extension | Contents | Viewer |
+| :--- | :--- | :--- | :--- |
+| **Scan4D** | `.zip` | `scan4d_metadata.json`, `relocalization.worldmap`, + full Polycam payload | Scan4D server workflows |
+| **Polycam** | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
+| **RAW** | `.zip` | `images/`, `depth/`, `transforms.json` | Nerfstudio, COLMAP |
+| **OBJ** | `.obj` | Single mesh file (no vertex colors) | MeshLab, Blender |
+| **PLY** | `.ply` | Converted mesh with embedded vertex colors | MeshLab, CloudCompare |
+| **USDZ** | `.usdz` | Converted mesh via ModelIO | iOS Quick Look (native) |
 
-### Unified Payload Structure
-Example output for a standard RAW export:
+### Example: Scan4D Export
 ```
-scan4d_scanName_raw_uuid.zip/
-├── scan4d_metadata.json  # GPS tags, Location ID, & "export_format"
-├── relocalization.worldmap # ARKit spatial anchor for Ghost Overlay rescanning
-├── mesh.obj              # Real-time LiDAR wireframe mesh
-├── images/               # RGB frames (JPEG, ~2fps adaptive)
+scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
+├── scan4d_metadata.json    # GPS tags, Location ID, & "export_format"
+├── relocalization.worldmap # ARKit spatial anchor for Scan4D rescanning
+├── images/                 # RGB frames (JPEG, ~2fps adaptive)
 │   ├── frame_00000.jpg
 │   └── ...
-├── depth/                # 16-bit PNG depth maps (millimeters)
+├── depth/                  # 16-bit PNG depth maps (millimeters)
 │   ├── frame_00000.png
 │   └── ...
-└── transforms.json       # Camera intrinsics + per-frame 4×4 poses (Nerfstudio-compatible)
+├── cameras/                # Per-frame Polycam JSON configs
+│   ├── frame_00000.json
+│   └── ...
+└── mesh_info.json          # Frame counts and image dimensions
 ```
 
 ### Backend Receivers

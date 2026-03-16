@@ -113,6 +113,24 @@ enum ExportFormat: String, CaseIterable, Codable {
     case usdz = "USDZ"
     case ply = "PLY"
     case obj = "OBJ"
+
+    var fileExtension: String {
+        switch self {
+        case .usdz: return "usdz"
+        case .ply: return "ply"
+        case .obj: return "obj"
+        case .scan4d, .polycam, .raw: return "zip"
+        }
+    }
+
+    var contentType: String {
+        switch self {
+        case .usdz: return "model/vnd.usdz+zip"
+        case .ply: return "application/x-ply"
+        case .obj: return "application/x-wavefront-obj"
+        case .scan4d, .polycam, .raw: return "application/zip"
+        }
+    }
 }
 
 enum UploadStatus: Equatable {

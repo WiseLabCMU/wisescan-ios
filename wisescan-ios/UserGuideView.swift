@@ -44,11 +44,11 @@ struct UserGuideView: View {
                 Section {
                     formatRow(
                         format: "Scan4D",
-                        desc: "Default format. Includes mesh, raw frames, depth maps, camera poses, and relocalization data. Optimized for Scan4D server workflows."
+                        desc: "Default format. Includes scan4d_metadata, relocalization worldmap, plus the full Polycam raw import payload (images, depth, cameras, mesh_info). Zip archive."
                     )
                     formatRow(
                         format: "Polycam",
-                        desc: "Polycam-compatible bundle: RGB images, depth maps, per-frame camera JSONs (cameras/), and mesh_info.json. Compatible with Polycam's raw data import."
+                        desc: "Polycam raw data import only: RGB images, depth maps, per-frame camera JSONs (cameras/), and mesh_info.json. Zip archive."
                     )
                     formatRow(
                         format: "RAW",
@@ -56,15 +56,15 @@ struct UserGuideView: View {
                     )
                     formatRow(
                         format: "USDZ",
-                        desc: "Apple's 3D format. Opens natively on iPhone/iPad with Quick Look — tap to view in AR."
+                        desc: "Apple's 3D format converted from on-device mesh via ModelIO. Opens natively on iPhone/iPad with Quick Look."
                     )
                     formatRow(
                         format: "PLY",
-                        desc: "Polygon file with vertex data. Common in photogrammetry and point cloud workflows."
+                        desc: "Polygon file with embedded vertex colors, converted from on-device OBJ mesh."
                     )
                     formatRow(
                         format: "OBJ",
-                        desc: "Wavefront 3D mesh. Universal format supported by almost all 3D software."
+                        desc: "Wavefront 3D mesh file. Universal format supported by almost all 3D software. No vertex colors."
                     )
                 } header: {
                     Text("EXPORT FORMATS")
