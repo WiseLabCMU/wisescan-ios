@@ -64,6 +64,9 @@ struct ARCoverageView: UIViewRepresentable {
                 if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
                     config.frameSemantics.insert(.personSegmentationWithDepth)
                 }
+                if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+                    config.frameSemantics.insert(.sceneDepth)
+                }
                 // Load initial world map for Scan4D relocalization
                 if let mapURL = initialWorldMapURL,
                    let data = try? Data(contentsOf: mapURL),
@@ -118,6 +121,9 @@ struct ARCoverageView: UIViewRepresentable {
                 config.environmentTexturing = .automatic
                 if isRecording, ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
                     config.frameSemantics.insert(.personSegmentationWithDepth)
+                }
+                if isRecording, ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+                    config.frameSemantics.insert(.sceneDepth)
                 }
                 uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
                 if isRecording {
