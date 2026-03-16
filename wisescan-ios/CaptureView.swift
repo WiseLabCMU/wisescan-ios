@@ -325,7 +325,7 @@ struct CaptureView: View {
                 session: session,
                 overlapMax: rawOverlapMax,
                 rejectBlur: rawRejectBlur,
-                privacyFilter: false, // Face blur deferred to export time
+                privacyFilter: isPrivacyFilterOn, // Applied during export
                 locationManager: locationManager,
                 activeLocationId: scanStore.activeLocationForScan
             )

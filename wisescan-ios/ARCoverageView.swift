@@ -34,14 +34,6 @@ struct ARCoverageView: UIViewRepresentable {
 
         arView.session.run(config)
 
-        // Add a transparent overlay view for 2D coverage rendering
-        let overlay = CoverageOverlayView(frame: arView.bounds)
-        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        overlay.backgroundColor = .clear
-        overlay.isUserInteractionEnabled = false
-        arView.addSubview(overlay)
-        context.coordinator.overlayView = overlay
-
         DispatchQueue.main.async {
             self.arSession = arView.session
         }
@@ -77,7 +69,6 @@ struct ARCoverageView: UIViewRepresentable {
                 uiView.session.run(config, options: runOptions)
                 uiView.debugOptions.insert(.showSceneUnderstanding)
                 context.coordinator.resetForRecording()
-                context.coordinator.startCoverageTimer()
 
                 // Background parse the ghost mesh if provided (Scan4D rescan)
                 if let ghostData = initialGhostMeshData {
@@ -137,74 +128,14 @@ struct ARCoverageView: UIViewRepresentable {
         Coordinator()
     }
 
-    /// Draws projected mesh anchor coverage as a negative mask (unscanned areas are tiled with the pattern).
-    class CoverageOverlayView: UIView {
-        /// Each element is an array of convex hull points for one anchor's coverage area.
-        var coveragePolygons: [[CGPoint]] = []
-        private var patternImage: UIImage?
-
-        /// Toggle to enable or disable coverage pattern rendering. Set to false to hide it for now.
-        var isCoverageEnabled: Bool = false
-
-        override func draw(_ rect: CGRect) {
-            guard isCoverageEnabled, let ctx = UIGraphicsGetCurrentContext() else { return }
-
-            // Load the pattern image once
-            if patternImage == nil {
-                patternImage = UIImage(named: "CoverageMask")
-            }
-            guard let image = patternImage, let cgImage = image.cgImage else { return }
-
-            ctx.saveGState()
-
-            // 1. Add the full screen boundary rect to the path
-            ctx.beginPath()
-            ctx.addRect(bounds)
-
-            // 2. Add all coverage polygons to the path
-            for polygon in coveragePolygons {
-                guard polygon.count >= 3 else { continue }
-                ctx.move(to: polygon[0])
-                for i in 1..<polygon.count {
-                    ctx.addLine(to: polygon[i])
-                }
-                ctx.closePath()
-            }
-
-            // 3. Clip using even-odd rule.
-            // The polygons are "holes" inside the outer full-screen rect.
-            ctx.clip(using: .evenOdd)
-
-            // 4. Draw the image across the entire view bounds (only unscanned areas will show)
-            let tileSize = max(bounds.width, bounds.height)
-            ctx.setAlpha(0.6) // slightly more opaque to encourage clearing it
-            let cols = Int(ceil(bounds.width / tileSize))
-            let rows = Int(ceil(bounds.height / tileSize))
-            for row in 0...rows {
-                for col in 0...cols {
-                    let tileRect = CGRect(x: CGFloat(col) * tileSize, y: CGFloat(row) * tileSize, width: tileSize, height: tileSize)
-                    ctx.saveGState()
-                    ctx.translateBy(x: tileRect.minX, y: tileRect.maxY)
-                    ctx.scaleBy(x: 1, y: -1)
-                    ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: tileSize, height: tileSize))
-                    ctx.restoreGState()
-                }
-            }
-
-            ctx.restoreGState()
-        }
-    }
-
     // MARK: - Coordinator
 
     class Coordinator: NSObject, ARSessionDelegate {
         var scanStats: ScanStats?
         weak var arView: ARView?
-        weak var overlayView: CoverageOverlayView?
         var privacyFilter: Bool = true
         var isUsingFrontCamera: Bool = false
         var isRecording: Bool = false
-        private var coverageTimer: Timer?
         private var anchorUpdateCounts: [UUID: Int] = [:]
 
         // Session capacity tracking
@@ -216,13 +147,6 @@ struct ARCoverageView: UIViewRepresentable {
         // Ghost Mesh properties
         var ghostAnchorEntity: AnchorEntity?
         private var hasAddedGhostMesh = false
-
-        func startCoverageTimer() {
-            coverageTimer?.invalidate()
-            coverageTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
-                self?.updateCoverageOverlay()
-            }
-        }
 
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
@@ -236,8 +160,6 @@ struct ARCoverageView: UIViewRepresentable {
 
         /// Reset coordinator state when returning to nominal (idle) mode.
         func resetForNominal() {
-            coverageTimer?.invalidate()
-            coverageTimer = nil
             anchorUpdateCounts.removeAll()
             trackingDegradationCount = 0
             totalTrackingUpdates = 0
@@ -247,11 +169,7 @@ struct ARCoverageView: UIViewRepresentable {
             ghostAnchorEntity = nil
             hasAddedGhostMesh = false
 
-            // Clear coverage overlay
             DispatchQueue.main.async { [weak self] in
-                self?.overlayView?.coveragePolygons = []
-                self?.overlayView?.setNeedsDisplay()
-
                 // Zero out scan stats
                 self?.scanStats?.totalVertices = 0
                 self?.scanStats?.totalFaces = 0
@@ -264,10 +182,6 @@ struct ARCoverageView: UIViewRepresentable {
                 self?.scanStats?.trackingState = "notAvailable"
                 self?.scanStats?.trackingReason = ""
             }
-        }
-
-        deinit {
-            coverageTimer?.invalidate()
         }
 
         // Watch for relocalization success and track drift
@@ -347,114 +261,6 @@ struct ARCoverageView: UIViewRepresentable {
             updateStats(in: session)
         }
 
-        // MARK: - 2D Projection (Bounding-box approach)
-
-        private func updateCoverageOverlay() {
-            guard isRecording,
-                  let arView = arView,
-                  let overlay = overlayView,
-                  let currentFrame = arView.session.currentFrame else { return }
-
-            let camera = currentFrame.camera
-            let viewportSize = arView.bounds.size
-            let orientation = UIInterfaceOrientation.portrait
-
-            var polygons = [[CGPoint]]()
-
-            for anchor in currentFrame.anchors {
-                guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
-                let geometry = meshAnchor.geometry
-                let transform = meshAnchor.transform
-                let vertices = geometry.vertices
-
-                // Compute axis-aligned bounding box in local space
-                guard vertices.count > 0, vertices.stride > 0, vertices.buffer.length >= vertices.count * vertices.stride else { continue }
-                var minV = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
-                var maxV = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
-
-                for i in 0..<vertices.count {
-                    let offset = i * vertices.stride
-                    guard offset + MemoryLayout<SIMD3<Float>>.size <= vertices.buffer.length else { break }
-                    let ptr = vertices.buffer.contents().advanced(by: offset)
-                    let v = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                    minV = min(minV, v)
-                    maxV = max(maxV, v)
-                }
-
-                // Generate 8 corners of the bounding box
-                let corners: [SIMD3<Float>] = [
-                    SIMD3(minV.x, minV.y, minV.z),
-                    SIMD3(maxV.x, minV.y, minV.z),
-                    SIMD3(maxV.x, maxV.y, minV.z),
-                    SIMD3(minV.x, maxV.y, minV.z),
-                    SIMD3(minV.x, minV.y, maxV.z),
-                    SIMD3(maxV.x, minV.y, maxV.z),
-                    SIMD3(maxV.x, maxV.y, maxV.z),
-                    SIMD3(minV.x, maxV.y, maxV.z),
-                ]
-
-                // Project corners to screen space
-                var screenPoints = [CGPoint]()
-                for corner in corners {
-                    let localPos = SIMD4<Float>(corner.x, corner.y, corner.z, 1.0)
-                    let worldPos = transform * localPos
-                    let wp = simd_float3(worldPos.x, worldPos.y, worldPos.z)
-                    let screenPt = camera.projectPoint(wp, orientation: orientation, viewportSize: viewportSize)
-                    let pt = CGPoint(x: CGFloat(screenPt.x), y: CGFloat(screenPt.y))
-                    screenPoints.append(pt)
-                }
-
-                // Compute 2D convex hull of the projected points
-                let hull = convexHull(screenPoints)
-                if hull.count >= 3 {
-                    // Check if hull is at least partially on screen
-                    let hullMinX = hull.map(\.x).min()!
-                    let hullMaxX = hull.map(\.x).max()!
-                    let hullMinY = hull.map(\.y).min()!
-                    let hullMaxY = hull.map(\.y).max()!
-
-                    if hullMaxX >= 0 && hullMinX <= viewportSize.width &&
-                       hullMaxY >= 0 && hullMinY <= viewportSize.height {
-                        polygons.append(hull)
-                    }
-                }
-            }
-
-            DispatchQueue.main.async {
-                overlay.coveragePolygons = polygons
-                overlay.setNeedsDisplay()
-            }
-        }
-
-        /// Compute 2D convex hull using Andrew's monotone chain algorithm.
-        private func convexHull(_ points: [CGPoint]) -> [CGPoint] {
-            let sorted = points.sorted { $0.x == $1.x ? $0.y < $1.y : $0.x < $1.x }
-            if sorted.count <= 2 { return sorted }
-
-            func cross(_ o: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
-                (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
-            }
-
-            var lower = [CGPoint]()
-            for p in sorted {
-                while lower.count >= 2 && cross(lower[lower.count - 2], lower[lower.count - 1], p) <= 0 {
-                    lower.removeLast()
-                }
-                lower.append(p)
-            }
-
-            var upper = [CGPoint]()
-            for p in sorted.reversed() {
-                while upper.count >= 2 && cross(upper[upper.count - 2], upper[upper.count - 1], p) <= 0 {
-                    upper.removeLast()
-                }
-                upper.append(p)
-            }
-
-            lower.removeLast()
-            upper.removeLast()
-            return lower + upper
-        }
 
         private func updateStats(in session: ARSession) {
             guard let scanStats = scanStats,
