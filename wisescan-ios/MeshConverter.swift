@@ -1,5 +1,6 @@
 import Foundation
 import ModelIO
+import SceneKit
 
 /// Mesh format conversion utilities for export.
 enum MeshConverter {
@@ -92,18 +93,41 @@ enum MeshConverter {
     /// Converts an OBJ mesh to USDZ using Apple's ModelIO framework.
     /// Returns `true` on success.
     static func objToUSDZ(objURL: URL, outputURL: URL) -> Bool {
-        let asset = MDLAsset(url: objURL)
-        guard asset.count > 0 else {
-            print("[MeshConverter] No objects found in OBJ file")
+        guard FileManager.default.fileExists(atPath: objURL.path) else {
+            print("[MeshConverter] OBJ file not found at \(objURL.path)")
             return false
         }
 
+        // Try ModelIO first
+        if MDLAsset.canExportFileExtension("usdz") {
+            let asset = MDLAsset(url: objURL)
+            if asset.count > 0 {
+                do {
+                    try asset.export(to: outputURL)
+                    print("[MeshConverter] USDZ written via ModelIO to \(outputURL.lastPathComponent)")
+                    return true
+                } catch {
+                    print("[MeshConverter] ModelIO USDZ export failed: \(error), trying SceneKit fallback")
+                }
+            } else {
+                print("[MeshConverter] ModelIO found no objects, trying SceneKit fallback")
+            }
+        } else {
+            print("[MeshConverter] ModelIO does not support USDZ export, trying SceneKit fallback")
+        }
+
+        // SceneKit fallback
         do {
-            try asset.export(to: outputURL)
-            print("[MeshConverter] USDZ written to \(outputURL.lastPathComponent)")
-            return true
+            let scene = try SCNScene(url: objURL, options: nil)
+            let success = scene.write(to: outputURL, options: nil, delegate: nil, progressHandler: nil)
+            if success {
+                print("[MeshConverter] USDZ written via SceneKit to \(outputURL.lastPathComponent)")
+            } else {
+                print("[MeshConverter] SceneKit USDZ write returned false")
+            }
+            return success
         } catch {
-            print("[MeshConverter] USDZ export failed: \(error)")
+            print("[MeshConverter] SceneKit USDZ export failed: \(error)")
             return false
         }
     }
