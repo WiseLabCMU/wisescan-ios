@@ -31,7 +31,7 @@ wisescan-ios/
 ├── ARCoverageView.swift       # ARKit scene reconstruction, person segmentation, OBJ export, capacity tracking
 ├── FaceBlurOverlay.swift      # Live face detection overlay + face blur utility for exports
 ├── FrameCaptureSession.swift  # RAW data capture (RGB, depth, poses → transforms.json + Polycam cameras/)
-├── WorkflowsView.swift        # Scan cards, location rename, format picker, save/upload actions
+├── ScansListView.swift        # Scan cards, location rename, format picker, save/upload actions
 ├── MeshPreviewView.swift      # SceneKit 3D mesh preview with camera-sampled or height-gradient coloring
 ├── ScanStore.swift            # Shared data models (CapturedScan, ExportFormat, ScanStats, capacity scoring)
 └── SettingsView.swift         # Upload URL, RAW export settings, Developer Mode toggles, workflow guide

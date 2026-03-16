@@ -64,7 +64,7 @@ graph TD
     subgraph "Tab Views"
         DV[DashboardView.swift]
         CAP[CaptureView.swift]
-        WV[WorkflowsView.swift]
+        WV[ScansListView.swift]
     end
 
     subgraph "AR Engine"
@@ -104,7 +104,7 @@ graph TD
 | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) | ARKit session, mesh export, coverage overlay | `ARCoverageView`, `Coordinator`, `CoverageOverlayView`, `exportMeshOBJ()`, `exportWorldMap()` |
 | [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) | Live face detection + blur for exports | `FaceBlurOverlay`, `FaceBlurUtil.blurFaces()` |
 | [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) | RAW data capture (RGB, depth, poses) | `FrameCaptureSession`, `start()`, `stop()`, `writeTransformsJSON()`, `writePolycamCameras()` |
-| [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) | Scan cards, location groups, rename, upload | `WorkflowsView`, `ScanCard` |
+| [ScansListView.swift](wisescan-ios/ScansListView.swift) | Scan cards, location groups, rename, upload | `ScansListView`, `ScanCard` |
 | [MeshPreviewView.swift](wisescan-ios/MeshPreviewView.swift) | SceneKit 3D preview with vertex colors | `MeshPreviewView` |
 | [ScanStore.swift](wisescan-ios/ScanStore.swift) | Data models, location hierarchy, capacity scoring | `ScanStore`, `ScanLocation`, `CapturedScan`, `ScanStats`, `capacityScore` |
 | [MeshConverter.swift](wisescan-ios/MeshConverter.swift) | OBJ→PLY and OBJ→USDZ mesh conversion | `MeshConverter.objToPLY()`, `MeshConverter.objToUSDZ()` |
@@ -126,7 +126,7 @@ graph TD
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Tap to start scanning with timer, tap again to stop and save. Auto-stop on view disappear. |
+| **Description** | Tap to start scanning with timer, tap again to stop and save. Capture view starts in **nominal mode** (camera passthrough only, no scene reconstruction). Recording activates full AR processing (mesh overlay, depth capture, capacity tracking). Stopping or leaving the view silently resets to nominal mode. Auto-stop on view disappear. |
 | **Source** | [CaptureView.swift](wisescan-ios/CaptureView.swift) — `startRecording()`, `stopRecording()`, `.onDisappear` |
 
 ### REQ-003: Scan4D (Time-Series Scanning)
@@ -192,7 +192,7 @@ sequenceDiagram
 |:--|:--|
 | **Status** | ✅ Complete |
 | **Description** | Save to Files via share sheet. HTTP PUT upload to configurable URL with status tracking (pending → uploading → success/failed). ZIP packaging for RAW/Polycam. |
-| **Source** | [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) — `ScanCard`, `uploadScan()`, `saveToFiles()` |
+| **Source** | [ScansListView.swift](wisescan-ios/ScansListView.swift) — `ScanCard`, `uploadScan()`, `saveToFiles()` |
 
 ### REQ-008: Server Status & Settings
 | | |
@@ -228,7 +228,7 @@ sequenceDiagram
 |:--|:--|
 | **Status** | ✅ Complete |
 | **Description** | Automatically delete oldest scans to maintain a max-2 retention policy per Location to save device space. Also supports manual deletion of items. |
-| **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanFileManager.enforceRetentionPolicy()` · [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) — manual deletion UI |
+| **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanFileManager.enforceRetentionPolicy()` · [ScansListView.swift](wisescan-ios/ScansListView.swift) — manual deletion UI |
 
 ### REQ-013: Developer Mode
 | | |
@@ -250,7 +250,7 @@ sequenceDiagram
 |:--|:--|
 | **Status** | ✅ Complete |
 | **Description** | In Edit mode, location group names become tappable (orange with pencil icon) to trigger a rename alert with text field. Saves directly to SwiftData. |
-| **Source** | [WorkflowsView.swift](wisescan-ios/WorkflowsView.swift) — `showRenameAlert`, `locationToRename` |
+| **Source** | [ScansListView.swift](wisescan-ios/ScansListView.swift) — `showRenameAlert`, `locationToRename` |
 
 ---
 

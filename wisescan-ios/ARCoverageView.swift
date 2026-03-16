@@ -4,6 +4,7 @@ import ARKit
 
 struct ARCoverageView: UIViewRepresentable {
     @Binding var arSession: ARSession?
+    @Binding var isRecording: Bool
     var scanStats: ScanStats
     var privacyFilter: Bool
     var useFrontCamera: Bool = false
@@ -18,53 +19,20 @@ struct ARCoverageView: UIViewRepresentable {
             return arView
         }
 
+        // Start in nominal mode: camera passthrough only, no scene reconstruction
         let config = ARWorldTrackingConfiguration()
-        config.sceneReconstruction = .mesh
+        config.sceneReconstruction = []
         config.environmentTexturing = .automatic
-
-        // Load initial world map if provided
-        if let mapURL = initialWorldMapURL,
-           let data = try? Data(contentsOf: mapURL),
-           let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
-            config.initialWorldMap = worldMap
-            print("Loaded initial ARWorldMap for relocalization.")
-        }
-
-        // Enable person segmentation for privacy filtering
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
-            config.frameSemantics.insert(.personSegmentationWithDepth)
-        }
 
         context.coordinator.scanStats = scanStats
         context.coordinator.arView = arView
         context.coordinator.privacyFilter = privacyFilter
+        context.coordinator.isRecording = false
 
         arView.session.delegate = context.coordinator
-        arView.debugOptions.insert(.showSceneUnderstanding)
+        // No debug options in nominal mode (no wireframe overlay)
 
-        let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
-        arView.session.run(config, options: runOptions)
-
-        // Background parse the ghost mesh if provided
-        if let ghostData = initialGhostMeshData {
-            DispatchQueue.global(qos: .userInitiated).async {
-                if let resource = MeshParser.generateMeshResource(from: ghostData) {
-                    DispatchQueue.main.async {
-                        // Create a static, semi-transparent material
-                        var material = UnlitMaterial(color: .red) // Bright red to stand out
-                        material.blending = .transparent(opacity: 0.3)
-
-                        let modelEntity = ModelEntity(mesh: resource, materials: [material])
-
-                        let anchorEntity = AnchorEntity(world: .zero) // Lock to world origin
-                        anchorEntity.addChild(modelEntity)
-
-                        context.coordinator.ghostAnchorEntity = anchorEntity
-                        // We do not add it to the scene YET. We wait for relocalization.
-                    }
-                }
-            }
-        }
+        arView.session.run(config)
 
         // Add a transparent overlay view for 2D coverage rendering
         let overlay = CoverageOverlayView(frame: arView.bounds)
@@ -73,7 +41,6 @@ struct ARCoverageView: UIViewRepresentable {
         overlay.isUserInteractionEnabled = false
         arView.addSubview(overlay)
         context.coordinator.overlayView = overlay
-        context.coordinator.startCoverageTimer()
 
         DispatchQueue.main.async {
             self.arSession = arView.session
@@ -85,26 +52,75 @@ struct ARCoverageView: UIViewRepresentable {
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.privacyFilter = privacyFilter
 
+        // Detect recording state change → switch AR session config
+        let wasRecording = context.coordinator.isRecording
+        if isRecording != wasRecording {
+            context.coordinator.isRecording = isRecording
+            if isRecording {
+                // Upgrade to full scene reconstruction
+                let config = ARWorldTrackingConfiguration()
+                config.sceneReconstruction = .mesh
+                config.environmentTexturing = .automatic
+                if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
+                    config.frameSemantics.insert(.personSegmentationWithDepth)
+                }
+                // Load initial world map for Scan4D relocalization
+                if let mapURL = initialWorldMapURL,
+                   let data = try? Data(contentsOf: mapURL),
+                   let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
+                    config.initialWorldMap = worldMap
+                }
+                let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
+                uiView.session.run(config, options: runOptions)
+                uiView.debugOptions.insert(.showSceneUnderstanding)
+                context.coordinator.resetForRecording()
+                context.coordinator.startCoverageTimer()
+
+                // Background parse the ghost mesh if provided (Scan4D rescan)
+                if let ghostData = initialGhostMeshData {
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        if let resource = MeshParser.generateMeshResource(from: ghostData) {
+                            DispatchQueue.main.async {
+                                var material = UnlitMaterial(color: .red)
+                                material.blending = .transparent(opacity: 0.3)
+                                let modelEntity = ModelEntity(mesh: resource, materials: [material])
+                                let anchorEntity = AnchorEntity(world: .zero)
+                                anchorEntity.addChild(modelEntity)
+                                context.coordinator.ghostAnchorEntity = anchorEntity
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Downgrade to nominal: camera passthrough only
+                context.coordinator.resetForNominal()
+                let config = ARWorldTrackingConfiguration()
+                config.sceneReconstruction = []
+                config.environmentTexturing = .automatic
+                uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+                uiView.debugOptions.remove(.showSceneUnderstanding)
+            }
+        }
+
         // Detect camera switch
         let currentlyUsingFront = context.coordinator.isUsingFrontCamera
         if useFrontCamera != currentlyUsingFront {
             context.coordinator.isUsingFrontCamera = useFrontCamera
             if useFrontCamera {
-                // Switch to front camera using ARFaceTrackingConfiguration
                 if ARFaceTrackingConfiguration.isSupported {
                     let faceConfig = ARFaceTrackingConfiguration()
                     uiView.session.run(faceConfig, options: [.resetTracking, .removeExistingAnchors])
                 }
             } else {
-                // Switch back to rear camera with full scene reconstruction
-                if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
-                    let config = ARWorldTrackingConfiguration()
-                    config.sceneReconstruction = .mesh
-                    config.environmentTexturing = .automatic
-                    if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
-                        config.frameSemantics.insert(.personSegmentationWithDepth)
-                    }
-                    uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+                // Switch back to rear camera — use recording-appropriate config
+                let config = ARWorldTrackingConfiguration()
+                config.sceneReconstruction = isRecording ? .mesh : []
+                config.environmentTexturing = .automatic
+                if isRecording, ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
+                    config.frameSemantics.insert(.personSegmentationWithDepth)
+                }
+                uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+                if isRecording {
                     uiView.debugOptions.insert(.showSceneUnderstanding)
                 }
             }
@@ -181,6 +197,7 @@ struct ARCoverageView: UIViewRepresentable {
         weak var overlayView: CoverageOverlayView?
         var privacyFilter: Bool = true
         var isUsingFrontCamera: Bool = false
+        var isRecording: Bool = false
         private var coverageTimer: Timer?
         private var anchorUpdateCounts: [UUID: Int] = [:]
 
@@ -195,8 +212,51 @@ struct ARCoverageView: UIViewRepresentable {
         private var hasAddedGhostMesh = false
 
         func startCoverageTimer() {
+            coverageTimer?.invalidate()
             coverageTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
                 self?.updateCoverageOverlay()
+            }
+        }
+
+        /// Reset coordinator state when entering recording mode.
+        func resetForRecording() {
+            anchorUpdateCounts.removeAll()
+            trackingDegradationCount = 0
+            totalTrackingUpdates = 0
+            sessionStartTime = Date()
+            baselineMemoryMB = ScanStats.currentMemoryUsageMB()
+            hasAddedGhostMesh = false
+        }
+
+        /// Reset coordinator state when returning to nominal (idle) mode.
+        func resetForNominal() {
+            coverageTimer?.invalidate()
+            coverageTimer = nil
+            anchorUpdateCounts.removeAll()
+            trackingDegradationCount = 0
+            totalTrackingUpdates = 0
+
+            // Remove ghost mesh if present
+            ghostAnchorEntity?.removeFromParent()
+            ghostAnchorEntity = nil
+            hasAddedGhostMesh = false
+
+            // Clear coverage overlay
+            DispatchQueue.main.async { [weak self] in
+                self?.overlayView?.coveragePolygons = []
+                self?.overlayView?.setNeedsDisplay()
+
+                // Zero out scan stats
+                self?.scanStats?.totalVertices = 0
+                self?.scanStats?.totalFaces = 0
+                self?.scanStats?.anchorCount = 0
+                self?.scanStats?.sessionDuration = 0
+                self?.scanStats?.memoryUsageMB = 0
+                self?.scanStats?.baselineMemoryMB = 0
+                self?.scanStats?.driftEstimate = 0
+                self?.scanStats?.averageQuality = 0
+                self?.scanStats?.trackingState = "notAvailable"
+                self?.scanStats?.trackingReason = ""
             }
         }
 
@@ -252,6 +312,7 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Track anchor update counts via delegate
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+            guard isRecording else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     anchorUpdateCounts[mesh.identifier] = 1
@@ -261,6 +322,7 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+            guard isRecording else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     anchorUpdateCounts[mesh.identifier, default: 0] += 1
@@ -270,6 +332,7 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+            guard isRecording else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     anchorUpdateCounts.removeValue(forKey: mesh.identifier)
@@ -281,7 +344,8 @@ struct ARCoverageView: UIViewRepresentable {
         // MARK: - 2D Projection (Bounding-box approach)
 
         private func updateCoverageOverlay() {
-            guard let arView = arView,
+            guard isRecording,
+                  let arView = arView,
                   let overlay = overlayView,
                   let currentFrame = arView.session.currentFrame else { return }
 

@@ -10,7 +10,7 @@ struct CaptureView: View {
     @AppStorage(AppDefaults.Key.privacyFilter) private var isPrivacyFilterOn = AppDefaults.privacyFilter
     @AppStorage(AppDefaults.Key.developerMode) private var developerMode: Bool = AppDefaults.developerMode
     @AppStorage(AppDefaults.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppDefaults.flipCameraEnabled
-    @State private var mode = 1 // 0 = Streaming, 1 = Capture
+    // Stream mode removed — fixed to Capture (Stream is a future feature)
     @State private var usingFrontCamera = false
     @State private var currentARSession: ARSession? = nil
     @State private var saveMessage: String? = nil
@@ -57,6 +57,7 @@ struct CaptureView: View {
             // Live ARKit Scene Reconstruction View
             ARCoverageView(
                 arSession: $currentARSession,
+                isRecording: $isRecording,
                 scanStats: scanStats,
                 privacyFilter: isPrivacyFilterOn,
                 useFrontCamera: usingFrontCamera,
@@ -127,26 +128,14 @@ struct CaptureView: View {
                         .cornerRadius(20)
                     }
 
-                    Spacer()
-
-                    // Mode Switcher
-                    Picker("Mode", selection: $mode) {
-                        Text("Streaming").tag(0)
-                        Text("Capture").tag(1)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 160)
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(8)
-                    .disabled(isRecording)
                 }
                 .padding()
                 .padding(.top, developerMode ? 16 : 0) // Leave room for dev banner
 
                 Spacer()
 
-                // Capacity Warning Banner (above HUD)
-                if scanStats.isNearCapacity {
+                // Capacity Warning Banner (above HUD, only during recording)
+                if isRecording && scanStats.isNearCapacity {
                     HStack(spacing: 8) {
                         Image(systemName: scanStats.isAtCapacity ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
                             .foregroundColor(.white)
@@ -167,76 +156,74 @@ struct CaptureView: View {
                 // Bottom HUD and Capture Button
                 VStack {
                     ZStack(alignment: .bottom) {
-                        // HUD background with live stats
-                        VStack(spacing: 8) {
-                            // Row 1: Live metrics
-                            HStack(spacing: 16) {
-                                Label(scanStats.formattedPolygons, systemImage: "triangle.fill")
-                                    .font(.caption2)
-                                    .foregroundColor(.white)
-                                Label("\(scanStats.anchorCount)", systemImage: "square.grid.3x3")
-                                    .font(.caption2)
-                                    .foregroundColor(.white)
-                                Label(scanStats.driftLabel, systemImage: "location.slash")
-                                    .font(.caption2)
-                                    .foregroundColor(scanStats.driftEstimate > 0.5 ? .orange : .white)
-                                Spacer()
-                                Label(scanStats.formattedDuration, systemImage: "clock")
-                                    .font(.caption2)
-                                    .foregroundColor(.white)
-                            }
-
-                            // Row 2: Capacity bar
-                            VStack(spacing: 4) {
-                                HStack {
-                                    Text("Session Capacity")
+                        // HUD background with live stats (only during recording)
+                        if isRecording {
+                            VStack(spacing: 8) {
+                                // Row 1: Live metrics
+                                HStack(spacing: 16) {
+                                    Label(scanStats.formattedPolygons, systemImage: "triangle.fill")
                                         .font(.caption2)
-                                        .foregroundColor(.gray)
+                                        .foregroundColor(.white)
+                                    Label("\(scanStats.anchorCount)", systemImage: "square.grid.3x3")
+                                        .font(.caption2)
+                                        .foregroundColor(.white)
+                                    Label(scanStats.driftLabel, systemImage: "location.slash")
+                                        .font(.caption2)
+                                        .foregroundColor(scanStats.driftEstimate > 0.5 ? .orange : .white)
                                     Spacer()
-                                    Text("\(scanStats.capacityPercent)%")
-                                        .font(.caption2).bold()
-                                        .foregroundColor(Color(
-                                            red: scanStats.capacityColor.red,
-                                            green: scanStats.capacityColor.green,
-                                            blue: 0
-                                        ))
+                                    Label(scanStats.formattedDuration, systemImage: "clock")
+                                        .font(.caption2)
+                                        .foregroundColor(.white)
                                 }
-                                GeometryReader { geo in
-                                    ZStack(alignment: .leading) {
-                                        Rectangle()
-                                            .fill(Color.white.opacity(0.15))
-                                            .frame(height: 6)
-                                        Rectangle()
-                                            .fill(Color(
+
+                                // Row 2: Capacity bar
+                                VStack(spacing: 4) {
+                                    HStack {
+                                        Text("Session Capacity")
+                                            .font(.caption2)
+                                            .foregroundColor(.gray)
+                                        Spacer()
+                                        Text("\(scanStats.capacityPercent)%")
+                                            .font(.caption2).bold()
+                                            .foregroundColor(Color(
                                                 red: scanStats.capacityColor.red,
                                                 green: scanStats.capacityColor.green,
                                                 blue: 0
                                             ))
-                                            .frame(width: geo.size.width * scanStats.capacityScore, height: 6)
                                     }
-                                    .cornerRadius(3)
+                                    GeometryReader { geo in
+                                        ZStack(alignment: .leading) {
+                                            Rectangle()
+                                                .fill(Color.white.opacity(0.15))
+                                                .frame(height: 6)
+                                            Rectangle()
+                                                .fill(Color(
+                                                    red: scanStats.capacityColor.red,
+                                                    green: scanStats.capacityColor.green,
+                                                    blue: 0
+                                                ))
+                                                .frame(width: geo.size.width * scanStats.capacityScore, height: 6)
+                                        }
+                                        .cornerRadius(3)
+                                    }
+                                    .frame(height: 6)
                                 }
-                                .frame(height: 6)
                             }
+                            .padding()
+                            .frame(height: 90)
+                            .background(.ultraThinMaterial)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 24)
+                                    .stroke(scanStats.isNearCapacity
+                                            ? Color.orange.opacity(0.6)
+                                            : Color.white.opacity(0.2), lineWidth: 1)
+                            )
+                            .cornerRadius(24)
+                            .padding(.horizontal)
                         }
-                        .padding()
-                        .frame(height: 90)
-                        .background(.ultraThinMaterial)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 24)
-                                .stroke(scanStats.isNearCapacity
-                                        ? Color.orange.opacity(0.6)
-                                        : Color.white.opacity(0.2), lineWidth: 1)
-                        )
-                        .cornerRadius(24)
-                        .padding(.horizontal)
 
-                        // Capture Button overlaying HUD
-                        Button(action: {
-                            if mode == 1 {
-                                toggleRecording()
-                            }
-                        }) {
+                        // Capture Button
+                        Button(action: { toggleRecording() }) {
                             ZStack {
                                 Circle()
                                     .fill(.ultraThinMaterial)
@@ -244,13 +231,12 @@ struct CaptureView: View {
                                     .overlay(Circle().stroke(isRecording ? Color.red : Color.cyan, lineWidth: 2))
 
                                 if isRecording {
-                                    // Stop icon (rounded square)
                                     RoundedRectangle(cornerRadius: 4)
                                         .fill(Color.red)
                                         .frame(width: 28, height: 28)
                                 } else {
                                     Circle()
-                                        .fill(mode == 1 ? Color.white : Color.red)
+                                        .fill(Color.white)
                                         .frame(width: 30, height: 30)
                                 }
 
@@ -260,14 +246,14 @@ struct CaptureView: View {
                                         .foregroundColor(.white)
                                         .offset(y: 50)
                                 } else {
-                                    Text(isRecording ? "Tap to stop" : (mode == 1 ? "Tap to scan" : ""))
+                                    Text(isRecording ? "Tap to stop" : "Tap to scan")
                                         .font(.caption2)
                                         .foregroundColor(.white.opacity(0.7))
                                         .offset(y: 50)
                                 }
                             }
                         }
-                        .offset(y: -20)
+                        .offset(y: isRecording ? -20 : 0)
                     }
                 }
                 .padding(.bottom, 20)
@@ -354,21 +340,18 @@ struct CaptureView: View {
     }
 
     private func stopRecording() {
-        isRecording = false
         recordingTimer?.invalidate()
         recordingTimer = nil
+
+        // ── Extract all AR data BEFORE switching to nominal mode ──
+        // (Setting isRecording = false triggers ARCoverageView to drop mesh anchors)
 
         // Stop frame capture and get raw data path
         let rawDataPath = frameCaptureSession.stop()
         colorAccumulator.stop()
 
-        // Export and save the scan (with privacy filtering)
-        guard let result = ARCoverageView.exportMeshOBJ(from: currentARSession, privacyFilter: isPrivacyFilterOn),
-              !result.data.isEmpty else {
-            saveMessage = "No Mesh Data"
-            clearMessage()
-            return
-        }
+        // Export mesh from the still-active AR session
+        let meshResult = ARCoverageView.exportMeshOBJ(from: currentARSession, privacyFilter: isPrivacyFilterOn)
 
         // Capture a 2D thumbnail from the current camera frame
         var thumbnailData: Data? = nil
@@ -377,10 +360,8 @@ struct CaptureView: View {
             let context = CIContext()
             if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
                 let uiImage = UIImage(cgImage: cgImage)
-                // Resize for thumbnail explicitly
                 let targetSize = CGSize(width: 800, height: Int(800.0 * (uiImage.size.height / uiImage.size.width)))
                 UIGraphicsBeginImageContextWithOptions(targetSize, false, 1.0)
-                // ARKit frames are landscapeRight by default, rotate it natively
                 UIImage(cgImage: cgImage, scale: 1.0, orientation: .right).draw(in: CGRect(origin: .zero, size: targetSize))
                 let resizedImage = UIGraphicsGetImageFromCurrentImageContext()
                 UIGraphicsEndImageContext()
@@ -390,6 +371,19 @@ struct CaptureView: View {
 
         // Build accumulated vertex colors for preview
         let vertexColors = colorAccumulator.buildColorData(from: currentARSession)
+
+        // ── Now switch to nominal mode (drops mesh anchors, frees AR memory) ──
+        isRecording = false
+
+        // Release color accumulator memory immediately
+        colorAccumulator = ARCoverageView.VertexColorAccumulator()
+
+        guard let result = meshResult, !result.data.isEmpty else {
+            saveMessage = "No Mesh Data"
+            frameCaptureSession = FrameCaptureSession()
+            clearMessage()
+            return
+        }
 
         saveMessage = "Saving World Map..."
 
@@ -417,6 +411,9 @@ struct CaptureView: View {
                     worldMapURL: mapURL,
                     thumbnailData: thumbnailData
                 )
+
+                // Release frame capture session memory
+                self.frameCaptureSession = FrameCaptureSession()
 
                 if self.scanStore.activeLocationForScan != nil {
                     // It's a "Scan Again", skip prompt and save immediately

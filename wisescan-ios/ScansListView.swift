@@ -537,7 +537,6 @@ struct ScanCard: View {
     private func prepareExport(filename: String, scanDir: URL, format: ExportFormat) -> URL? {
         let fm = FileManager.default
         let rawDataDir = scanDir.appendingPathComponent("raw_data")
-        let formatStr = format.rawValue.lowercased()
 
         // Locate scan4d_metadata.json
         func findMetadata() -> URL? {
