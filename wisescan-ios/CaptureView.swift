@@ -254,6 +254,19 @@ struct CaptureView: View {
                             }
                         }
                         .offset(y: isRecording ? -20 : 0)
+                        
+                        if isRecording && frameCaptureSession.isBlurWarningActive {
+                            Text("⚠️ Moving too fast! Slow down.")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(Color.orange.opacity(0.85))
+                                .cornerRadius(20)
+                                .padding(.bottom, 8)
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                                .animation(.easeInOut, value: frameCaptureSession.isBlurWarningActive)
+                        }
                     }
                 }
                 .padding(.bottom, 20)

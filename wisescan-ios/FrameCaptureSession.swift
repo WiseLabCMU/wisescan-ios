@@ -23,6 +23,11 @@ class FrameCaptureSession {
     private var privacyFilter: Bool = false
     private var lastCaptureTime: TimeInterval = 0
 
+    // Blur Warning logic
+    private(set) var isBlurWarningActive: Bool = false
+    private var blurWarningTimer: Timer?
+    private var consecutiveBlurredFrames: Int = 0
+
     // Metadata dependencies
     private var locationManager: LocationManager?
     private var activeLocationId: UUID?
@@ -67,6 +72,10 @@ class FrameCaptureSession {
         self.frameCount = 0
         self.globalIntrinsics = nil
         self.lastCaptureTransform = nil
+        self.isBlurWarningActive = false
+        self.consecutiveBlurredFrames = 0
+        self.blurWarningTimer?.invalidate()
+        self.blurWarningTimer = nil
         self.overlapMax = overlapMax
         self.rejectBlur = rejectBlur
         self.privacyFilter = privacyFilter
@@ -115,21 +124,41 @@ class FrameCaptureSession {
 
         // Reject blurred frames based on camera tracking quality
         if rejectBlur {
+            var isBlurred = false
+            
             // Skip if tracking is not normal (e.g. limited, excessive motion)
             if currentFrame.camera.trackingState != .normal {
-                return
+                isBlurred = true
             }
+            
             // Skip if camera moved too fast since last capture (motion blur likely)
-            if let lastTransform = lastCaptureTransform {
+            if !isBlurred, let lastTransform = lastCaptureTransform {
                 let timeDelta = currentFrame.timestamp - lastCaptureTime
                 if timeDelta > 0 {
                     let movement = cameraMovement(from: lastTransform, to: transform)
                     let velocity = movement / Float(timeDelta)
                     // If moving faster than ~0.5m/s, likely blurred
                     if velocity > 0.5 {
-                        return
+                        isBlurred = true
                     }
                 }
+            }
+            
+            if isBlurred {
+                // Increment blurred frame counter
+                consecutiveBlurredFrames += 1
+                
+                // If we get several blurred frames in a row, trigger the warning
+                if consecutiveBlurredFrames >= 5 && !isBlurWarningActive {
+                    DispatchQueue.main.async {
+                        self.isBlurWarningActive = true
+                        self.resetBlurWarningTimer()
+                    }
+                }
+                return
+            } else {
+                // Valid frame, reset blur counter
+                consecutiveBlurredFrames = 0
             }
         }
 
@@ -421,5 +450,14 @@ class FrameCaptureSession {
         let rotationChange = 1.0 - abs(simd_dot(simd_normalize(fwdA), simd_normalize(fwdB)))
 
         return translationDist + rotationChange * 0.3
+    }
+    
+    private func resetBlurWarningTimer() {
+        blurWarningTimer?.invalidate()
+        blurWarningTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.isBlurWarningActive = false
+            }
+        }
     }
 }

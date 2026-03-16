@@ -101,7 +101,7 @@ graph TD
 | [ContentView.swift](wisescan-ios/ContentView.swift) | Root TabView, LiDAR check, Developer Mode banner | `ContentView`, `hasLiDAR`, `developerMode` |
 | [DashboardView.swift](wisescan-ios/DashboardView.swift) | Server status, wearable pairing | `DashboardView` |
 | [CaptureView.swift](wisescan-ios/CaptureView.swift) | Live capture UI, recording, Scan4D naming, capacity HUD, flip camera | `CaptureView`, `startRecording()`, `stopRecording()`, `savePendingScan()` |
-| [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) | ARKit session, mesh export, coverage overlay | `ARCoverageView`, `Coordinator`, `CoverageOverlayView`, `exportMeshOBJ()`, `exportWorldMap()` |
+| [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) | ARKit session, mesh export | `ARCoverageView`, `Coordinator`, `exportMeshOBJ()`, `exportWorldMap()` |
 | [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) | Live face detection + blur for exports | `FaceBlurOverlay`, `FaceBlurUtil.blurFaces()` |
 | [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) | RAW data capture (RGB, depth, poses) | `FrameCaptureSession`, `start()`, `stop()`, `writeTransformsJSON()`, `writePolycamCameras()` |
 | [ScansListView.swift](wisescan-ios/ScansListView.swift) | Scan cards, location groups, rename, upload | `ScansListView`, `ScanCard` |
@@ -146,7 +146,7 @@ sequenceDiagram
     Note over U,FCS: ── Recording (live) ──
     CV->>AR: sceneReconstruction = .mesh + .sceneDepth
     CV->>FCS: start(session, privacyFilter: false)
-    Note right of AR: LIVE: Scene reconstruction<br/>LIVE: Coverage overlay (0.3s)<br/>LIVE: Face blur overlay (Vision 0.1s)<br/>LIVE: Stats tracking
+    Note right of AR: LIVE: Scene reconstruction<br/>LIVE: Face blur overlay (Vision 0.1s)<br/>LIVE: Stats tracking
     Note right of FCS: LIVE: Frame capture (RGB + depth + pose)<br/>Face blur DEFERRED to export
 
     U->>CV: Tap Stop
@@ -244,16 +244,16 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Adaptive-rate RGB frames (JPEG), 16-bit depth maps (PNG, mm), and camera poses. Overlap-based frame selection with motion blur rejection. |
+| **Description** | Adaptive-rate RGB frames (JPEG), 16-bit depth maps (PNG, mm), and camera poses. Overlap-based frame selection with motion blur rejection and real-time live UI toast warning for sustained excessive motion. |
 | **Source** | [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `captureFrame()`, `cameraMovement()` |
 
 ### REQ-010: Coverage Overlay
 | | |
 |:--|:--|
-| **Status** | ✅ Complete (disabled by default) |
-| **Description** | 2D overlay using anchor bounding-box convex hulls. Supports negative masking with tiled image pattern (`CoverageMask`). Currently disabled via `isCoverageEnabled = false`. |
-| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `CoverageOverlayView`, `updateCoverageOverlay()`, `convexHull()` |
-| **Assets** | [coverage-mask.jpg](Design/coverage-mask.jpg) |
+| **Status** | 🗑️ Removed |
+| **Description** | Originally a 2D overlay using anchor bounding-box convex hulls and negative masking with a tiled image pattern. This feature and its assets (`CoverageMask`) were entirely removed to simplify the codebase in favor of native LiDAR mesh visualizing. |
+| **Source** | N/A |
+| **Assets** | N/A |
 
 ### REQ-011: Persistent Scan Storage
 | | |
