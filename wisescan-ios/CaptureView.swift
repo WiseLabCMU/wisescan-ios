@@ -18,7 +18,7 @@ struct CaptureView: View {
     @State private var recordingSeconds = 0
     @State private var recordingTimer: Timer? = nil
     @State private var frameCaptureSession = FrameCaptureSession()
-    @State private var colorAccumulator = ARCoverageView.VertexColorAccumulator()
+    // colorAccumulator removed — vertex coloring now deferred to post-processing
     @AppStorage(AppDefaults.Key.rawOverlapMax) private var rawOverlapMax: Double = AppDefaults.rawOverlapMax
     @AppStorage(AppDefaults.Key.rawRejectBlur) private var rawRejectBlur: Bool = AppDefaults.rawRejectBlur
     @Binding var selectedTab: Int
@@ -66,8 +66,8 @@ struct CaptureView: View {
             )
                 .ignoresSafeArea()
 
-            // Face blur overlay (shown when privacy filter is on)
-            if isPrivacyFilterOn {
+            // Face blur overlay (shown when privacy filter is on AND recording)
+            if isPrivacyFilterOn && isRecording {
                 FaceBlurOverlay(arSession: currentARSession)
                     .ignoresSafeArea()
             }
@@ -319,18 +319,16 @@ struct CaptureView: View {
         saveMessage = nil
 
         // Start frame capture for raw data export
-        // Start vertex color accumulation for preview
         if let session = currentARSession {
             // Provide LocationManager to frame capture session so it can grab metadata
             frameCaptureSession.start(
                 session: session,
                 overlapMax: rawOverlapMax,
                 rejectBlur: rawRejectBlur,
-                privacyFilter: isPrivacyFilterOn,
+                privacyFilter: false, // Face blur deferred to export time
                 locationManager: locationManager,
                 activeLocationId: scanStore.activeLocationForScan
             )
-            colorAccumulator.start(session: session)
         }
 
         // Start a timer to track recording duration
@@ -348,7 +346,6 @@ struct CaptureView: View {
 
         // Stop frame capture and get raw data path
         let rawDataPath = frameCaptureSession.stop()
-        colorAccumulator.stop()
 
         // Export mesh from the still-active AR session
         let meshResult = ARCoverageView.exportMeshOBJ(from: currentARSession, privacyFilter: isPrivacyFilterOn)
@@ -369,14 +366,8 @@ struct CaptureView: View {
             }
         }
 
-        // Build accumulated vertex colors for preview
-        let vertexColors = colorAccumulator.buildColorData(from: currentARSession)
-
         // ── Now switch to nominal mode (drops mesh anchors, frees AR memory) ──
         isRecording = false
-
-        // Release color accumulator memory immediately
-        colorAccumulator = ARCoverageView.VertexColorAccumulator()
 
         guard let result = meshResult, !result.data.isEmpty else {
             saveMessage = "No Mesh Data"
@@ -385,43 +376,52 @@ struct CaptureView: View {
             return
         }
 
-        saveMessage = "Saving World Map..."
+        saveMessage = "Coloring mesh..."
 
-        // Export ARWorldMap for Scan4D relocalization
-        ARCoverageView.VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL in
+        // Run vertex coloring in background using saved camera frames
+        DispatchQueue.global(qos: .userInitiated).async {
+            let vertexColors = ARCoverageView.VertexColorAccumulator.colorizeFromSavedFrames(
+                objData: result.data,
+                rawDataDir: rawDataPath
+            )
+
             DispatchQueue.main.async {
+                self.saveMessage = "Saving World Map..."
 
-                // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping
-                if let rawDir = rawDataPath {
-                    let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
-                    try? result.data.write(to: meshFileURL)
+                // Export ARWorldMap for Scan4D relocalization
+                ARCoverageView.VertexColorAccumulator.exportWorldMap(from: self.currentARSession) { mapURL in
+                    DispatchQueue.main.async {
+                        // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping
+                        if let rawDir = rawDataPath {
+                            let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
+                            try? result.data.write(to: meshFileURL)
 
-                    if let mapURL = mapURL {
-                        let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
-                        try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
+                            if let mapURL = mapURL {
+                                let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
+                                try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
+                            }
+                        }
+
+                        self.pendingScan = PendingScanData(
+                            meshData: result.data,
+                            vertexCount: result.vertexCount,
+                            faceCount: result.faceCount,
+                            rawDataPath: rawDataPath,
+                            vertexColors: vertexColors,
+                            worldMapURL: mapURL,
+                            thumbnailData: thumbnailData
+                        )
+
+                        // Release frame capture session memory
+                        self.frameCaptureSession = FrameCaptureSession()
+
+                        if self.scanStore.activeLocationForScan != nil {
+                            self.savePendingScan()
+                        } else {
+                            self.newLocationName = ""
+                            self.showNamePrompt = true
+                        }
                     }
-                }
-
-                self.pendingScan = PendingScanData(
-                    meshData: result.data,
-                    vertexCount: result.vertexCount,
-                    faceCount: result.faceCount,
-                    rawDataPath: rawDataPath,
-                    vertexColors: vertexColors,
-                    worldMapURL: mapURL,
-                    thumbnailData: thumbnailData
-                )
-
-                // Release frame capture session memory
-                self.frameCaptureSession = FrameCaptureSession()
-
-                if self.scanStore.activeLocationForScan != nil {
-                    // It's a "Scan Again", skip prompt and save immediately
-                    self.savePendingScan()
-                } else {
-                    // It's a brand new scan, prompt for a name
-                    self.newLocationName = ""
-                    self.showNamePrompt = true
                 }
             }
         }

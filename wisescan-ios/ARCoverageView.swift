@@ -593,79 +593,6 @@ struct ARCoverageView: UIViewRepresentable {
 
     /// Accumulates vertex colors from camera frames during recording for preview rendering.
     class VertexColorAccumulator {
-        // (anchorUUID, vertexIndex) → accumulated RGB color
-        private var colorMap: [String: SIMD3<Float>] = [:]
-        private var sampleTimer: Timer?
-
-        /// Start accumulating — call when recording begins.
-        func start(session: ARSession) {
-            colorMap = [:]
-            sampleTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self, weak session] _ in
-                guard let session = session else { return }
-                self?.accumulate(from: session)
-            }
-        }
-
-        /// Stop accumulating.
-        func stop() {
-            sampleTimer?.invalidate()
-            sampleTimer = nil
-        }
-
-        /// Sample visible vertex colors from the current camera frame.
-        private func accumulate(from session: ARSession) {
-            guard let currentFrame = session.currentFrame else { return }
-            let camera = currentFrame.camera
-            let capturedImage = currentFrame.capturedImage
-            let imgWidth = CVPixelBufferGetWidth(capturedImage)
-            let imgHeight = CVPixelBufferGetHeight(capturedImage)
-            let viewportSize = CGSize(width: CGFloat(imgWidth), height: CGFloat(imgHeight))
-
-            CVPixelBufferLockBaseAddress(capturedImage, .readOnly)
-            defer { CVPixelBufferUnlockBaseAddress(capturedImage, .readOnly) }
-
-            guard let yBase = CVPixelBufferGetBaseAddressOfPlane(capturedImage, 0),
-                  let cbcrBase = CVPixelBufferGetBaseAddressOfPlane(capturedImage, 1) else { return }
-            let yStride = CVPixelBufferGetBytesPerRowOfPlane(capturedImage, 0)
-            let cbcrStride = CVPixelBufferGetBytesPerRowOfPlane(capturedImage, 1)
-            let yPtr = yBase.assumingMemoryBound(to: UInt8.self)
-            let cbcrPtr = cbcrBase.assumingMemoryBound(to: UInt8.self)
-
-            for anchor in currentFrame.anchors {
-                guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
-                let geometry = meshAnchor.geometry
-                let transform = meshAnchor.transform
-                let anchorID = meshAnchor.identifier.uuidString
-
-                for i in 0..<geometry.vertices.count {
-                    let pointer = geometry.vertices.buffer.contents().advanced(by: i * geometry.vertices.stride)
-                    let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                    let localPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
-                    let worldPos = transform * localPos
-                    let worldPoint = simd_float3(worldPos.x, worldPos.y, worldPos.z)
-
-                    let projected = camera.projectPoint(worldPoint, orientation: .landscapeRight, viewportSize: viewportSize)
-                    let px = Int(projected.x)
-                    let py = Int(projected.y)
-
-                    // Only color vertices currently visible in the camera
-                    if px >= 0 && px < imgWidth && py >= 0 && py < imgHeight {
-                        let yVal = Float(yPtr[py * yStride + px]) / 255.0
-                        let cx = (px / 2) * 2
-                        let cy = py / 2
-                        let cb = Float(cbcrPtr[cy * cbcrStride + cx]) / 255.0 - 0.5
-                        let cr = Float(cbcrPtr[cy * cbcrStride + cx + 1]) / 255.0 - 0.5
-
-                        let r = max(0, min(1, yVal + 1.402 * cr))
-                        let g = max(0, min(1, yVal - 0.344136 * cb - 0.714136 * cr))
-                        let b = max(0, min(1, yVal + 1.772 * cb))
-
-                        let key = "\(anchorID)_\(i)"
-                        colorMap[key] = SIMD3<Float>(r, g, b) // latest sample wins
-                    }
-                }
-            }
-        }
 
         // MARK: - Export Helpers
 
@@ -696,30 +623,131 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
-        /// Build the final vertex color Data by iterating anchors in the same order as exportMeshOBJ.
-        func buildColorData(from session: ARSession?) -> Data? {
-            guard let session = session,
-                  let currentFrame = session.currentFrame else { return nil }
+        /// Colorize OBJ mesh vertices using saved camera frames (post-processing).
+        /// Reads saved JPEG images and camera JSON transforms from `rawDataDir`,
+        /// parses vertices from `objData`, and projects each vertex into camera frames
+        /// to sample RGB color.
+        static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?) -> Data? {
+            guard let rawDir = rawDataDir else { return nil }
+            let fm = FileManager.default
 
-            var colors: [SIMD4<Float>] = []
+            // Parse OBJ vertices
+            guard let objString = String(data: objData, encoding: .utf8) else { return nil }
+            var vertices: [SIMD3<Float>] = []
+            for line in objString.components(separatedBy: .newlines) {
+                let parts = line.split(separator: " ")
+                guard parts.count >= 4, parts[0] == "v" else { continue }
+                if let x = Float(parts[1]), let y = Float(parts[2]), let z = Float(parts[3]) {
+                    vertices.append(SIMD3<Float>(x, y, z))
+                }
+            }
+            guard !vertices.isEmpty else { return nil }
 
-            for anchor in currentFrame.anchors {
-                guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
-                let anchorID = meshAnchor.identifier.uuidString
-                let geometry = meshAnchor.geometry
+            // Find saved camera JSONs
+            let camerasDir = rawDir.appendingPathComponent("cameras")
+            let imagesDir = rawDir.appendingPathComponent("images")
+            guard fm.fileExists(atPath: camerasDir.path),
+                  fm.fileExists(atPath: imagesDir.path) else { return nil }
 
-                for i in 0..<geometry.vertices.count {
-                    let key = "\(anchorID)_\(i)"
-                    if let rgb = colorMap[key] {
-                        colors.append(SIMD4<Float>(rgb.x, rgb.y, rgb.z, 1.0))
-                    } else {
-                        colors.append(SIMD4<Float>(0.5, 0.5, 0.5, 1.0)) // unsampled → gray
-                    }
+            let cameraFiles = (try? fm.contentsOfDirectory(at: camerasDir, includingPropertiesForKeys: nil))?
+                .filter { $0.pathExtension == "json" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent } ?? []
+
+            guard !cameraFiles.isEmpty else { return nil }
+
+            // Sample up to 10 evenly-spaced frames for efficiency
+            let maxFrames = min(cameraFiles.count, 10)
+            let stride = max(1, cameraFiles.count / maxFrames)
+            let sampledFiles = Swift.stride(from: 0, to: cameraFiles.count, by: stride).prefix(maxFrames).map { cameraFiles[$0] }
+
+            // Initialize color array (gray default for unsampled vertices)
+            var colors = [SIMD3<Float>](repeating: SIMD3<Float>(0.5, 0.5, 0.5), count: vertices.count)
+            var colored = [Bool](repeating: false, count: vertices.count)
+
+            for cameraFile in sampledFiles {
+                // Parse camera JSON (Polycam format with t_XX transform and intrinsics)
+                guard let jsonData = try? Data(contentsOf: cameraFile),
+                      let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { continue }
+
+                guard let fx = (json["fx"] as? NSNumber)?.floatValue,
+                      let fy = (json["fy"] as? NSNumber)?.floatValue,
+                      let cx = (json["cx"] as? NSNumber)?.floatValue,
+                      let cy = (json["cy"] as? NSNumber)?.floatValue,
+                      let imgW = (json["width"] as? NSNumber)?.intValue,
+                      let imgH = (json["height"] as? NSNumber)?.intValue else { continue }
+
+                // Reconstruct 4x4 camera-to-world transform (row-major t_XX values)
+                guard let t00 = (json["t_00"] as? NSNumber)?.floatValue,
+                      let t01 = (json["t_01"] as? NSNumber)?.floatValue,
+                      let t02 = (json["t_02"] as? NSNumber)?.floatValue,
+                      let t03 = (json["t_03"] as? NSNumber)?.floatValue,
+                      let t10 = (json["t_10"] as? NSNumber)?.floatValue,
+                      let t11 = (json["t_11"] as? NSNumber)?.floatValue,
+                      let t12 = (json["t_12"] as? NSNumber)?.floatValue,
+                      let t13 = (json["t_13"] as? NSNumber)?.floatValue,
+                      let t20 = (json["t_20"] as? NSNumber)?.floatValue,
+                      let t21 = (json["t_21"] as? NSNumber)?.floatValue,
+                      let t22 = (json["t_22"] as? NSNumber)?.floatValue,
+                      let t23 = (json["t_23"] as? NSNumber)?.floatValue else { continue }
+
+                // Camera-to-world (row-major → column-major for simd)
+                let cam2World = simd_float4x4(columns: (
+                    SIMD4<Float>(t00, t10, t20, 0),
+                    SIMD4<Float>(t01, t11, t21, 0),
+                    SIMD4<Float>(t02, t12, t22, 0),
+                    SIMD4<Float>(t03, t13, t23, 1)
+                ))
+                // World-to-camera
+                let world2Cam = cam2World.inverse
+
+                // Load corresponding image
+                guard let imagePath = json["image_path"] as? String else { continue }
+                let imageURL = rawDir.appendingPathComponent(imagePath)
+                guard let imageData = try? Data(contentsOf: imageURL),
+                      let uiImage = UIImage(data: imageData),
+                      let cgImage = uiImage.cgImage else { continue }
+
+                // Get pixel data
+                let width = cgImage.width
+                let height = cgImage.height
+                guard let pixelData = cgImage.dataProvider?.data,
+                      let ptr = CFDataGetBytePtr(pixelData) else { continue }
+                let bytesPerRow = cgImage.bytesPerRow
+                let bytesPerPixel = cgImage.bitsPerPixel / 8
+
+                // Project each vertex into this camera frame
+                for (i, vertex) in vertices.enumerated() {
+                    let worldPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
+                    let camPos = world2Cam * worldPos
+
+                    // Must be in front of camera (z < 0 in camera space for ARKit convention)
+                    guard camPos.z < 0 else { continue }
+
+                    // Project using intrinsics: px = fx * X/Z + cx, py = fy * Y/Z + cy
+                    let invZ = -1.0 / camPos.z
+                    let px = Int(fx * camPos.x * invZ + cx)
+                    let py = Int(fy * camPos.y * invZ + cy)
+
+                    guard px >= 0 && px < imgW && py >= 0 && py < imgH else { continue }
+                    guard px < width && py < height else { continue }
+
+                    let offset = py * bytesPerRow + px * bytesPerPixel
+                    let r = Float(ptr[offset]) / 255.0
+                    let g = Float(ptr[offset + 1]) / 255.0
+                    let b = Float(ptr[offset + 2]) / 255.0
+
+                    // Latest frame with visibility wins (simple strategy)
+                    colors[i] = SIMD3<Float>(r, g, b)
+                    colored[i] = true
                 }
             }
 
-            guard !colors.isEmpty else { return nil }
-            return Data(bytes: colors, count: colors.count * MemoryLayout<SIMD4<Float>>.stride)
+            let coloredCount = colored.filter { $0 }.count
+            print("[VertexColor] Colored \(coloredCount)/\(vertices.count) vertices from \(sampledFiles.count) frames")
+
+            // Convert to SIMD4<Float> with alpha=1 (matches buildColorData format)
+            let rgba = colors.map { SIMD4<Float>($0.x, $0.y, $0.z, 1.0) }
+            return Data(bytes: rgba, count: rgba.count * MemoryLayout<SIMD4<Float>>.stride)
         }
     }
 }

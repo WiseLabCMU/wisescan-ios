@@ -144,7 +144,7 @@ enum UploadStatus: Equatable {
     var label: String {
         switch self {
         case .pending: return "Ready"
-        case .zipping: return "Zipping..."
+        case .zipping: return "Converting..."
         case .uploading(let p): return "Uploading (\(Int(p * 100))%)..."
         case .savedLocally: return "Saved Locally"
         case .success: return "Uploaded"

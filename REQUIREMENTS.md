@@ -129,6 +129,45 @@ graph TD
 | **Description** | Tap to start scanning with timer, tap again to stop and save. Capture view starts in **nominal mode** (camera passthrough only, no scene reconstruction). Recording activates full AR processing (mesh overlay, depth capture, capacity tracking). Stopping or leaving the view silently resets to nominal mode. Auto-stop on view disappear. |
 | **Source** | [CaptureView.swift](wisescan-ios/CaptureView.swift) — `startRecording()`, `stopRecording()`, `.onDisappear` |
 
+#### Capture Lifecycle: Nominal → Recording → Post-Processing → Preview
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant CV as CaptureView
+    participant AR as ARCoverageView
+    participant FCS as FrameCaptureSession
+
+    Note over U,FCS: ── Nominal Mode (idle) ──
+    CV->>AR: sceneReconstruction = []
+    Note right of AR: Camera passthrough only<br/>No mesh, no depth, no timers
+
+    U->>CV: Tap Record
+    Note over U,FCS: ── Recording (live) ──
+    CV->>AR: sceneReconstruction = .mesh + .sceneDepth
+    CV->>FCS: start(session, privacyFilter: false)
+    Note right of AR: LIVE: Scene reconstruction<br/>LIVE: Coverage overlay (0.3s)<br/>LIVE: Face blur overlay (Vision 0.1s)<br/>LIVE: Stats tracking
+    Note right of FCS: LIVE: Frame capture (RGB + depth + pose)<br/>Face blur DEFERRED to export
+
+    U->>CV: Tap Stop
+    Note over U,FCS: ── Data Extraction (sync, before nominal) ──
+    CV->>FCS: stop() → rawDataPath
+    CV->>AR: exportMeshOBJ() → mesh.obj
+    CV->>CV: captureThumbnail()
+
+    CV->>AR: isRecording = false
+    Note over U,FCS: ── Post-Processing (background) ──
+    AR->>AR: resetForNominal(), sceneReconstruction = []
+    CV->>CV: colorizeFromSavedFrames(mesh, cameras/)
+    Note right of CV: DEFERRED: Vertex coloring<br/>Reads saved JPEGs + camera transforms<br/>Projects OBJ vertices into ~10 frames
+
+    CV->>AR: exportWorldMap() → .worldmap
+    CV->>CV: savePendingScan()
+
+    Note over U,FCS: ── Preview ──
+    CV->>U: Navigate to LocationDetailView
+```
+
 ### REQ-003: Scan4D (Time-Series Scanning)
 | | |
 |:--|:--|
