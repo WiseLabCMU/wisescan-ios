@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Polycam Camera JSON Schema",
+  "description": "Camera parameters generated per frame when exporting in PLYCM format",
+  "type": "object",
+  "properties": {
+    "t_00": { "type": "number" },
+    "t_01": { "type": "number" },
+    "t_02": { "type": "number" },
+    "t_03": { "type": "number" },
+    "t_10": { "type": "number" },
+    "t_11": { "type": "number" },
+    "t_12": { "type": "number" },
+    "t_13": { "type": "number" },
+    "t_20": { "type": "number" },
+    "t_21": { "type": "number" },
+    "t_22": { "type": "number" },
+    "t_23": { "type": "number" },
+    "fx": {
+      "type": "number",
+      "description": "The focal length on the x axis."
+    },
+    "fy": {
+      "type": "number",
+      "description": "The focal length on the y axis."
+    },
+    "cx": {
+      "type": "number",
+      "description": "The optical center offset on the x axis."
+    },
+    "cy": {
+      "type": "number",
+      "description": "The optical center offset on the y axis."
+    },
+    "width": {
+      "type": "integer",
+      "description": "Resolution width of the RGB images."
+    },
+    "height": {
+      "type": "integer",
+      "description": "Resolution height of the RGB images."
+    },
+    "blur_score": {
+      "type": "number",
+      "description": "Set to 1.0, as blurry frames are prerejected."
+    },
+    "image_path": {
+      "type": "string",
+      "description": "Relative path to the RGB image."
+    },
+    "depth_path": {
+      "type": "string",
+      "description": "Relative path to the associated depth map."
+    }
+  },
+  "required": [
+    "t_00", "t_01", "t_02", "t_03",
+    "t_10", "t_11", "t_12", "t_13",
+    "t_20", "t_21", "t_22", "t_23",
+    "fx", "fy", "cx", "cy",
+    "width", "height", "blur_score",
+    "image_path", "depth_path"
+  ]
+}

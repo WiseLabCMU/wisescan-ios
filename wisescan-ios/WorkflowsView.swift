@@ -464,9 +464,12 @@ struct ScanCard: View {
         scan.uploadStatus = .zipping
         onUpdate(scan)
 
+        let locationName = scan.location?.name.replacingOccurrences(of: " ", with: "_") ?? "Unknown_Location"
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
         let formatStr = selectedFormat.rawValue.lowercased()
-        let filename = "scan4d_\(formatStr)_\(scanName)_\(scan.id.uuidString.prefix(8)).zip"
+        
+        let timestamp = Int(scan.capturedAt.timeIntervalSince1970)
+        let filename = "scan4d_\(locationName)_\(scanName)_\(formatStr)_\(timestamp)_\(scan.id.uuidString.prefix(8)).zip"
 
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         guard let url = URL(string: baseURLString + filename) else {
@@ -544,9 +547,12 @@ struct ScanCard: View {
         scan.uploadStatus = .zipping
         onUpdate(scan)
 
+        let locationName = scan.location?.name.replacingOccurrences(of: " ", with: "_") ?? "Unknown_Location"
         let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
         let formatStr = selectedFormat.rawValue.lowercased()
-        let filename = "scan4d_\(formatStr)_\(scanName)_\(scan.id.uuidString.prefix(8)).zip"
+        
+        let timestamp = Int(scan.capturedAt.timeIntervalSince1970)
+        let filename = "scan4d_\(locationName)_\(scanName)_\(formatStr)_\(timestamp)_\(scan.id.uuidString.prefix(8)).zip"
 
         let scanDir = scan.scanDirectory
         print("[SaveToFiles] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")

@@ -284,10 +284,20 @@ class FrameCaptureSession {
     // MARK: - Scan4D Metadata
 
     private func writeScan4DMetadata(to directory: URL) {
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
+        #if DEBUG
+        let buildType = "debug"
+        #else
+        let buildType = "release"
+        #endif
+
         var metadata: [String: Any] = [
             "timestamp": Date().timeIntervalSince1970,
             "device": UIDevice.current.name,
-            "system_version": UIDevice.current.systemVersion
+            "os_name": UIDevice.current.systemName,
+            "os_version": UIDevice.current.systemVersion,
+            "app_version": appVersion,
+            "build_type": buildType
         ]
 
         if let locId = activeLocationId {

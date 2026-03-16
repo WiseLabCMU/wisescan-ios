@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Polycam Mesh Info JSON Schema",
+  "description": "Summary JSON describing image dimensions and frame counts for Polycam exports",
+  "type": "object",
+  "properties": {
+    "num_frames": {
+      "type": "integer",
+      "description": "Total count of frames captured in the session."
+    },
+    "image_width": {
+      "type": "integer",
+      "description": "Resolution width of the RGB images."
+    },
+    "image_height": {
+      "type": "integer",
+      "description": "Resolution height of the RGB images."
+    },
+    "coordinate_system": {
+      "type": "string",
+      "enum": ["arkit", "arcore", "unknown"],
+      "description": "The spatial coordinate system used (e.g., arkit, arcore)."
+    }
+  },
+  "required": [
+    "num_frames",
+    "image_width",
+    "image_height",
+    "coordinate_system"
+  ]
+}

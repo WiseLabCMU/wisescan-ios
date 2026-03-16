@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Transforms JSON Schema",
+  "description": "Transforms generated for camera poses compatible with Nerfstudio",
+  "type": "object",
+  "properties": {
+    "camera_model": {
+      "type": "string",
+      "enum": ["OPENCV", "PINHOLE", "OPENCV_FISHEYE", "PINHOLE_FISHEYE"],
+      "description": "The camera model type (e.g., OPENCV, PINHOLE)."
+    },
+    "fl_x": {
+      "type": "number",
+      "description": "The focal length on the x axis."
+    },
+    "fl_y": {
+      "type": "number",
+      "description": "The focal length on the y axis."
+    },
+    "cx": {
+      "type": "number",
+      "description": "The optical center offset on the x axis."
+    },
+    "cy": {
+      "type": "number",
+      "description": "The optical center offset on the y axis."
+    },
+    "w": {
+      "type": "integer",
+      "description": "Resolution width of the RGB images."
+    },
+    "h": {
+      "type": "integer",
+      "description": "Resolution height of the RGB images."
+    },
+    "frames": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file_path": {
+            "type": "string",
+            "description": "Relative path to the RGB image."
+          },
+          "depth_file_path": {
+            "type": "string",
+            "description": "Relative path to the associated depth map."
+          },
+          "transform_matrix": {
+            "type": "array",
+            "description": "A 4x4 matrix representing the camera-to-world transform.",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 4,
+              "maxItems": 4
+            },
+            "minItems": 4,
+            "maxItems": 4
+          }
+        },
+        "required": [
+          "file_path",
+          "transform_matrix"
+        ]
+      }
+    }
+  },
+  "required": [
+    "camera_model",
+    "fl_x",
+    "fl_y",
+    "cx",
+    "cy",
+    "w",
+    "h",
+    "frames"
+  ]
+}

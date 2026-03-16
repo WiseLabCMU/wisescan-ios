@@ -149,6 +149,31 @@ struct SettingsView: View {
                     }
                     .listRowBackground(Color.white.opacity(0.05))
                     .id("devModeSection")
+
+                    // MARK: - App Info Footer
+                    Section {
+                        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
+                        let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "Unknown"
+                        #if DEBUG
+                        let buildType = "Debug"
+                        #else
+                        let buildType = "Release"
+                        #endif
+                        
+                        HStack {
+                            Spacer()
+                            VStack(spacing: 4) {
+                                Text("Scan4D Version \(appVersion) (\(buildNumber))")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                                Text("Build Type: \(buildType)")
+                                    .font(.caption2)
+                                    .foregroundColor(.gray.opacity(0.7))
+                            }
+                            Spacer()
+                        }
+                    }
+                    .listRowBackground(Color.clear)
                 }
                 .scrollContentBackground(.hidden)
                 .onAppear {

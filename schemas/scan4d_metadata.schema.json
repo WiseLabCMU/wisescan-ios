@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Scan4D Metadata JSON Schema",
+  "description": "Metadata generated alongside a Scan4D mesh export",
+  "type": "object",
+  "properties": {
+    "timestamp": {
+      "type": "number",
+      "description": "Unix epoch time (UTC) when the capture reached completion."
+    },
+    "device": {
+      "type": "string",
+      "description": "The device name capturing the scan (e.g., iPhone 15 Pro, Pixel 8)."
+    },
+    "os_name": {
+      "type": "string",
+      "description": "The operating system running on the device (e.g., iOS, Android, visionOS)."
+    },
+    "os_version": {
+      "type": "string",
+      "description": "The specific version of the operating system (e.g., 17.4)."
+    },
+    "app_version": {
+      "type": "string",
+      "description": "The version of the capture application (e.g., 1.0.0)."
+    },
+    "build_type": {
+      "type": "string",
+      "enum": ["debug", "release", "unknown"],
+      "description": "The build configuration used for the capture application."
+    },
+    "location_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The UUID of the ScanLocation this capture belongs to."
+    },
+    "export_format": {
+      "type": "string",
+      "enum": ["obj", "plycm", "usdz", "raw", "ply"],
+      "description": "The string identifying the format chosen during export (e.g., obj, plycm, usdz)."
+    },
+    "gps_latitude": {
+      "type": "number",
+      "description": "GPS latitude, present if location tracking is available."
+    },
+    "gps_longitude": {
+      "type": "number",
+      "description": "GPS longitude, present if location tracking is available."
+    },
+    "gps_altitude": {
+      "type": "number",
+      "description": "GPS altitude in meters, present if location tracking is available."
+    },
+    "gps_accuracy": {
+      "type": "number",
+      "description": "Horizontal GPS accuracy in meters."
+    },
+    "compass_heading": {
+      "type": "number",
+      "description": "True heading (or magnetic if true isn't available) in degrees 0-359.9."
+    }
+  },
+  "required": [
+    "timestamp",
+    "device",
+    "os_name",
+    "os_version",
+    "app_version",
+    "build_type",
+    "export_format"
+  ]
+}
