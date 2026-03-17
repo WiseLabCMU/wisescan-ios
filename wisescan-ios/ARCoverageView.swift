@@ -70,8 +70,58 @@ struct ARCoverageView: UIViewRepresentable {
         return arView
     }
 
+
+
+
+
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.privacyFilter = privacyFilter
+
+        // Detect ghost mesh data changes (e.g., user tapped "Extend Scan" after initial view creation)
+        let newGhostCount = initialGhostMeshData?.count
+        if newGhostCount != context.coordinator.lastGhostMeshDataCount {
+            context.coordinator.lastGhostMeshDataCount = newGhostCount
+
+            // Tear down old ghost mesh if any
+            if let oldAnchor = context.coordinator.ghostAnchorEntity {
+                uiView.scene.removeAnchor(oldAnchor)
+            }
+            context.coordinator.ghostAnchorEntity = nil
+            context.coordinator.hasAddedGhostMesh = false
+
+            if let ghostData = initialGhostMeshData {
+                // Load the world map for relocalization
+                let config = ARWorldTrackingConfiguration()
+                config.sceneReconstruction = isRecording ? .mesh : []
+                config.environmentTexturing = .automatic
+                if let mapURL = initialWorldMapURL,
+                   let data = try? Data(contentsOf: mapURL),
+                   let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
+                    config.initialWorldMap = worldMap
+                }
+                let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
+                uiView.session.run(config, options: runOptions)
+
+                // Background parse the new ghost mesh
+                DispatchQueue.global(qos: .userInitiated).async {
+                    if let resource = MeshParser.generateMeshResource(from: ghostData) {
+                        DispatchQueue.main.async {
+                            var material = UnlitMaterial(color: .red)
+                            material.blending = .transparent(opacity: 0.3)
+                            let modelEntity = ModelEntity(mesh: resource, materials: [material])
+                            let anchorEntity = AnchorEntity(world: .zero)
+                            anchorEntity.addChild(modelEntity)
+                            context.coordinator.ghostAnchorEntity = anchorEntity
+
+                            if uiView.session.currentFrame?.camera.trackingState == .normal && !context.coordinator.hasAddedGhostMesh {
+                                uiView.scene.addAnchor(anchorEntity)
+                                context.coordinator.hasAddedGhostMesh = true
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Detect recording state change → switch AR session config
         let wasRecording = context.coordinator.isRecording
@@ -196,6 +246,7 @@ struct ARCoverageView: UIViewRepresentable {
         // Ghost Mesh properties
         var ghostAnchorEntity: AnchorEntity?
         var hasAddedGhostMesh = false
+        var lastGhostMeshDataCount: Int? = nil // Track changes to ghost mesh data
 
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
