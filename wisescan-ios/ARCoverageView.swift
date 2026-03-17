@@ -20,9 +20,16 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         // Start in nominal mode: camera passthrough only, no scene reconstruction
+        // EXCEPT if we are extending a scan, in which case we load the map right away
         let config = ARWorldTrackingConfiguration()
         config.sceneReconstruction = []
         config.environmentTexturing = .automatic
+        if let mapURL = initialWorldMapURL,
+           let data = try? Data(contentsOf: mapURL),
+           let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
+            config.initialWorldMap = worldMap
+        }
+        let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
 
         context.coordinator.scanStats = scanStats
         context.coordinator.arView = arView
@@ -32,7 +39,29 @@ struct ARCoverageView: UIViewRepresentable {
         arView.session.delegate = context.coordinator
         // No debug options in nominal mode (no wireframe overlay)
 
-        arView.session.run(config)
+        arView.session.run(config, options: runOptions)
+
+        // Background parse the ghost mesh if provided (Scan4D extend scan)
+        if let ghostData = initialGhostMeshData {
+            DispatchQueue.global(qos: .userInitiated).async {
+                if let resource = MeshParser.generateMeshResource(from: ghostData) {
+                    DispatchQueue.main.async {
+                        var material = UnlitMaterial(color: .red)
+                        material.blending = .transparent(opacity: 0.3)
+                        let modelEntity = ModelEntity(mesh: resource, materials: [material])
+                        let anchorEntity = AnchorEntity(world: .zero)
+                        anchorEntity.addChild(modelEntity)
+                        context.coordinator.ghostAnchorEntity = anchorEntity
+                        
+                        // Prevent race condition: If tracking is already normal before parser finished, add it now.
+                        if arView.session.currentFrame?.camera.trackingState == .normal && !context.coordinator.hasAddedGhostMesh {
+                            arView.scene.addAnchor(anchorEntity)
+                            context.coordinator.hasAddedGhostMesh = true
+                        }
+                    }
+                }
+            }
+        }
 
         DispatchQueue.main.async {
             self.arSession = arView.session
@@ -70,8 +99,8 @@ struct ARCoverageView: UIViewRepresentable {
                 uiView.debugOptions.insert(.showSceneUnderstanding)
                 context.coordinator.resetForRecording()
 
-                // Background parse the ghost mesh if provided (Scan4D rescan)
-                if let ghostData = initialGhostMeshData {
+                // Background parse the ghost mesh if we didn't already load it in nominal mode
+                if let ghostData = initialGhostMeshData, context.coordinator.ghostAnchorEntity == nil {
                     DispatchQueue.global(qos: .userInitiated).async {
                         if let resource = MeshParser.generateMeshResource(from: ghostData) {
                             DispatchQueue.main.async {
@@ -81,6 +110,11 @@ struct ARCoverageView: UIViewRepresentable {
                                 let anchorEntity = AnchorEntity(world: .zero)
                                 anchorEntity.addChild(modelEntity)
                                 context.coordinator.ghostAnchorEntity = anchorEntity
+                                
+                                if uiView.session.currentFrame?.camera.trackingState == .normal && !context.coordinator.hasAddedGhostMesh {
+                                    uiView.scene.addAnchor(anchorEntity)
+                                    context.coordinator.hasAddedGhostMesh = true
+                                }
                             }
                         }
                     }
@@ -91,8 +125,23 @@ struct ARCoverageView: UIViewRepresentable {
                 let config = ARWorldTrackingConfiguration()
                 config.sceneReconstruction = []
                 config.environmentTexturing = .automatic
-                uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+                // Preserve the world map if we are in an extend-scan scenario
+                if let mapURL = initialWorldMapURL,
+                   let data = try? Data(contentsOf: mapURL),
+                   let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
+                    config.initialWorldMap = worldMap
+                }
+                let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : [.resetTracking, .removeExistingAnchors]
+                uiView.session.run(config, options: runOptions)
                 uiView.debugOptions.remove(.showSceneUnderstanding)
+                
+                // Re-add ghost mesh if extending
+                if initialGhostMeshData != nil {
+                    if let ghostAnchor = context.coordinator.ghostAnchorEntity {
+                        uiView.scene.addAnchor(ghostAnchor)
+                        context.coordinator.hasAddedGhostMesh = true
+                    }
+                }
             }
         }
 
@@ -146,7 +195,7 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Ghost Mesh properties
         var ghostAnchorEntity: AnchorEntity?
-        private var hasAddedGhostMesh = false
+        var hasAddedGhostMesh = false
 
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
@@ -164,9 +213,9 @@ struct ARCoverageView: UIViewRepresentable {
             trackingDegradationCount = 0
             totalTrackingUpdates = 0
 
-            // Remove ghost mesh if present
-            ghostAnchorEntity?.removeFromParent()
-            ghostAnchorEntity = nil
+            // DO NOT explicitly remove the ghost mesh anymore, because nominal mode 
+            // now supports displaying the ghost mesh if we are in an "Extend Scan" flow.
+            // The coordinator retains the ghostAnchorEntity so it can be re-added if necessary.
             hasAddedGhostMesh = false
 
             DispatchQueue.main.async { [weak self] in

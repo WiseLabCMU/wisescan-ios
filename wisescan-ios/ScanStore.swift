@@ -191,6 +191,7 @@ class ScanStore {
     // Scan4D state for initiating a new scan of an existing location
     var activeRelocalizationMap: URL? = nil
     var activeLocationForScan: UUID? = nil
+    var activeScanToExtend: UUID? = nil
     
     // Shared navigation state to allow programmatic pushes
     var navigationPath = NavigationPath()
@@ -371,14 +372,7 @@ class ScanFileManager {
     }
 
     func enforceRetentionPolicy(location: ScanLocation, context: ModelContext) {
-        // Keep Last 2 Rule
-        let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
-        guard sortedScans.count > 2 else { return }
-
-        let toDelete = sortedScans.dropFirst(2)
-        for scan in toDelete {
-            deleteScan(scan, context: context)
-        }
+        // Keep Last 2 Rule removed - users can now keep unlimited scans for adjacent large-space mapping
     }
 
     func deleteScan(_ scan: CapturedScan, context: ModelContext) {

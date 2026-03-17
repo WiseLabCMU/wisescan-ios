@@ -168,14 +168,12 @@ sequenceDiagram
     CV->>U: Navigate to LocationDetailView
 ```
 
-### REQ-003: Scan4D (Time-Series Scanning)
+### REQ-003: Scan4D (Adjacent Extended Scanning)
 | | |
 |:--|:--|
 | **Status** | ✅ Complete (Phase 1 — Local) |
-| **Description** | Group scans by named Location. Cache `ARWorldMap` per scan. "Scan Again" reloads the map for ARKit relocalization, aligning new scans to the same coordinate system. |
-| **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanLocation`, `addLocation()`, `activeRelocalizationMap` · [CaptureView.swift](wisescan-ios/CaptureView.swift) — `savePendingScan()`, naming alert · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `initialWorldMapURL`, `exportWorldMap()` |
-| **Design Doc** | [Scan4D_Architecture.md](Design/Scan4D_Architecture.md) |
-| **Future** | Ghost overlay of previous mesh, change detection highlighting, multi-device sync |
+| **Description** | Enable scanning of large, unbounded spaces by explicitly breaking them into an adjacent series of manageable ARKit chunks ("scans"), localized to a shared coordinate frame. |
+| **Details** | - **Relocalization Setup:** Tapping "Extend Scan" from an existing scan card initiates the capture view, using that specific scan's `ARWorldMap` as the initialization target. - **Ghost Visualization:** The user is shown the exact mesh of the scan they selected to extend from, rendered as a 0.3 opacity red overlay (`UnlitMaterial`). - **UI Prompting:** A dismissable transient toast ("Move to the edge of the red region to begin your next scan") instructs the user to step to the boundary of their previous capture before recording. This encourages overlapping spatial context. - **Server-Side Focus:** The device no longer attempts to forcefully merge these 3D meshes together. Instead, it relies strictly on backend workflows (e.g., RealityCapture, COLMAP, ICP) to globally align the adjacent chunks using the shared ARKit coordinates, visual overlap, and raw image datasets. |
 
 ```mermaid
 sequenceDiagram
@@ -262,12 +260,12 @@ sequenceDiagram
 | **Description** | SwiftData/SQLite for on-disk location and lightweight scan metadata. Binary assets are saved directly to file URLs on disk. |
 | **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanFileManager`, `@Model ScanLocation`, `@Model CapturedScan` |
 
-### REQ-012: Local Auto-Cleanup Policy
-| | |
-|:--|:--|
-| **Status** | ✅ Complete |
-| **Description** | Automatically delete oldest scans to maintain a max-2 retention policy per Location to save device space. Also supports manual deletion of items. |
-| **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanFileManager.enforceRetentionPolicy()` · [ScansListView.swift](wisescan-ios/ScansListView.swift) — manual deletion UI |
+### REQ-012: Map Stitching and Coverage
+**Description:** Prevent localized mesh limits from capping scan size by encouraging adjacent spatial mapping.
+
+**Details:**
+- There is no upper limit on how many scans can exist inside a single Location. Users are encouraged to chop up large environments (like multi-room offices) into several overlapping sessions.
+- **Unbounded Local Storage:** The "Keep Last 2" local storage retention limit has been removed, as all scans in a chain are required to reconstruct a complete master scene. Scans must be deleted manually by the user or purged upon successful upload to the server.
 
 ### REQ-013: Developer Mode
 | | |

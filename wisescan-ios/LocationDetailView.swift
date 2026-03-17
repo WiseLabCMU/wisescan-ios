@@ -24,28 +24,6 @@ struct LocationDetailView: View {
                 VStack(spacing: 24) {
                     // MARK: - Header Actions
                     VStack(spacing: 16) {
-                        // Scan Again Button
-                        Button(action: {
-                            scanStore.activeLocationForScan = location.id
-                            scanStore.activeRelocalizationMap = location.scans.first(where: {
-                                FileManager.default.fileExists(atPath: $0.worldMapURL.path)
-                            })?.worldMapURL
-                            selectedTab = 1 // Switch to Capture Tab
-                        }) {
-                            HStack {
-                                Image(systemName: "plus.viewfinder")
-                                Text("Scan Again")
-                            }
-                            .font(.headline)
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
-                            .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
-                            .cornerRadius(16)
-                        }
-                        .disabled(isEditing)
-                        .opacity(isEditing ? 0.5 : 1.0)
-
                         // Rename Button (edit mode only)
                         if isEditing {
                             Button(action: {
@@ -96,6 +74,12 @@ struct LocationDetailView: View {
                                     if location.scans.isEmpty {
                                         isEditing = false
                                     }
+                                },
+                                onExtend: { scanToExtend in
+                                    scanStore.activeLocationForScan = location.id
+                                    scanStore.activeRelocalizationMap = scanToExtend.worldMapURL
+                                    scanStore.activeScanToExtend = scanToExtend.id
+                                    selectedTab = 1 // Switch to Capture Tab
                                 }
                             )
                             .padding(.horizontal)

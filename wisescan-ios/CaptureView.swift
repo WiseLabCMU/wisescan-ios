@@ -29,6 +29,8 @@ struct CaptureView: View {
     @State private var newLocationName = ""
     @State private var pendingScan: PendingScanData? = nil
 
+    @State private var showExtendPrompt = false
+    
     struct PendingScanData {
         let meshData: Data
         let vertexCount: Int
@@ -40,16 +42,17 @@ struct CaptureView: View {
     }
 
     var activeGhostMeshData: Data? {
-        guard let locId = scanStore.activeLocationForScan else {
+        guard let locId = scanStore.activeLocationForScan,
+              let scanId = scanStore.activeScanToExtend else {
             return nil
         }
         let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
         guard let location = try? modelContext.fetch(descriptor).first,
-              let latestScan = location.scans.sorted(by: { $0.capturedAt > $1.capturedAt }).first else {
+              let targetScan = location.scans.first(where: { $0.id == scanId }) else {
             return nil
         }
         // Safely load the background ghost mesh from disk since it's no longer in RAM
-        return try? Data(contentsOf: latestScan.meshFileURL)
+        return try? Data(contentsOf: targetScan.meshFileURL)
     }
 
     var body: some View {
@@ -77,6 +80,33 @@ struct CaptureView: View {
                 .ignoresSafeArea()
 
             VStack {
+                // Extend Scan Prompt (transient)
+                if showExtendPrompt {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Extend Scan")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            Text("Move to the edge of the red region to begin your next scan.")
+                                .font(.subheadline)
+                                .foregroundColor(.white.opacity(0.8))
+                        }
+                        Spacer()
+                        Button(action: { showExtendPrompt = false }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.title2)
+                                .foregroundColor(.white.opacity(0.6))
+                        }
+                    }
+                    .padding()
+                    .background(Color.indigo.opacity(0.9))
+                    .cornerRadius(16)
+                    .padding(.horizontal)
+                    .padding(.top, developerMode ? 60 : 20) // Leave room for top controls
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .animation(.spring(), value: showExtendPrompt)
+                }
+                
                 // Top Controls
                 HStack {
                     // Privacy Filter Toggle
@@ -274,11 +304,13 @@ struct CaptureView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
-            // If we arrived at Capture by tapping the tab (not via "Scan Again"),
+            // If we arrived at Capture by tapping the tab (not via "Extend Scan"),
             // clear any lingering ghost mesh / world map so a fresh scan starts.
-            // "Scan Again" sets activeLocationForScan before switching tabs;
+            // "Extend Scan" sets activeLocationForScan before switching tabs;
             // a direct tab tap does not.
             // No-op if already nil.
+            
+            showExtendPrompt = (scanStore.activeScanToExtend != nil)
 
             // Auto-revert to back camera when developer mode is disabled
             if !developerMode || !flipCameraEnabled {
@@ -292,6 +324,7 @@ struct CaptureView: View {
             // Always clear ghost state when leaving Capture
             scanStore.activeLocationForScan = nil
             scanStore.activeRelocalizationMap = nil
+            scanStore.activeScanToExtend = nil
         }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
@@ -347,6 +380,9 @@ struct CaptureView: View {
         // Start a timer to track recording duration
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             recordingSeconds += 1
+            if recordingSeconds > 4 {
+                showExtendPrompt = false // Auto-dismiss after recording starts
+            }
         }
     }
 

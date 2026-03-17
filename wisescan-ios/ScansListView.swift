@@ -211,6 +211,7 @@ struct ScanCard: View {
     var isEditing: Bool
     var onUpdate: (CapturedScan) -> Void
     var onDelete: (CapturedScan) -> Void
+    var onExtend: (CapturedScan) -> Void
 
     @AppStorage(AppDefaults.Key.selectedExportFormat) private var selectedFormatStr: String = AppDefaults.selectedExportFormat
     @State private var exportItem: ZipExportItem? = nil
@@ -222,12 +223,13 @@ struct ScanCard: View {
         nonmutating set { selectedFormatStr = newValue.rawValue }
     }
 
-    init(scan: CapturedScan, uploadURL: String, isEditing: Bool, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void) {
+    init(scan: CapturedScan, uploadURL: String, isEditing: Bool, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void, onExtend: @escaping (CapturedScan) -> Void) {
         self.scan = scan
         self.uploadURL = uploadURL
         self.isEditing = isEditing
         self.onUpdate = onUpdate
         self.onDelete = onDelete
+        self.onExtend = onExtend
     }
 
     var body: some View {
@@ -306,36 +308,53 @@ struct ScanCard: View {
                 }
 
                 // Action buttons
-                HStack(spacing: 10) {
-                    // Save to Files button
-                    Button(action: { saveToFiles() }) {
+                VStack(spacing: 12) {
+                    // Extend Scan button
+                    Button(action: { onExtend(scan) }) {
                         HStack {
-                            Image(systemName: "square.and.arrow.down")
-                            Text("Save")
+                            Image(systemName: "plus.viewfinder")
+                            Text("Extend Scan")
                                 .font(.subheadline).bold()
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
-                        .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
+                        .background(isEditing ? Color.gray.opacity(0.3) : Color.indigo.opacity(0.8))
                         .foregroundColor(isEditing ? .gray : .white)
                         .cornerRadius(10)
                     }
                     .disabled(isEditing)
 
-                    // Upload button
-                    Button(action: { uploadScan() }) {
-                        HStack {
-                            Image(systemName: "icloud.and.arrow.up")
-                            Text("Upload")
-                                .font(.subheadline).bold()
+                    HStack(spacing: 10) {
+                        // Save to Files button
+                        Button(action: { saveToFiles() }) {
+                            HStack {
+                                Image(systemName: "square.and.arrow.down")
+                                Text("Save")
+                                    .font(.subheadline).bold()
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
+                            .foregroundColor(isEditing ? .gray : .white)
+                            .cornerRadius(10)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(isEditing || scan.uploadStatus.isUploading ? Color.gray.opacity(0.3) : Color.blue)
-                        .foregroundColor(isEditing ? .gray : .white)
-                        .cornerRadius(10)
+                        .disabled(isEditing)
+
+                        // Upload button
+                        Button(action: { uploadScan() }) {
+                            HStack {
+                                Image(systemName: "icloud.and.arrow.up")
+                                Text("Upload")
+                                    .font(.subheadline).bold()
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(isEditing || scan.uploadStatus.isUploading ? Color.gray.opacity(0.3) : Color.blue)
+                            .foregroundColor(isEditing ? .gray : .white)
+                            .cornerRadius(10)
+                        }
+                        .disabled(isEditing || scan.uploadStatus.isUploading)
                     }
-                    .disabled(isEditing || scan.uploadStatus.isUploading)
                 }
             }
             .padding()
@@ -713,7 +732,8 @@ struct ShareSheet: UIViewControllerRepresentable {
         uploadURL: "https://example.com/upload",
         isEditing: false,
         onUpdate: { _ in },
-        onDelete: { _ in }
+        onDelete: { _ in },
+        onExtend: { _ in }
     )
     .padding()
     .background(Color.black)
