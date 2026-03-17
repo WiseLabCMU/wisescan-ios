@@ -87,7 +87,7 @@ struct CaptureView: View {
                             Text("Extend Scan")
                                 .font(.headline)
                                 .foregroundColor(.white)
-                            Text("Move to the edge of the red region to begin your next scan.")
+                            Text("Re-scan the red area to update it over time, or move to its edge and scan new ground to stitch a larger space.")
                                 .font(.subheadline)
                                 .foregroundColor(.white.opacity(0.8))
                         }

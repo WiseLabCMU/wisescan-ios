@@ -9,7 +9,7 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 ## Features
 
 - **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay and quality HUD.
-- **Scan4D (Time-Series):** Group scans by Location and use `ARWorldMap` caching to relocalize and rescan the exact same physical space over time.
+- **Scan4D (Extend Scan):** Group scans by Location. Use "Extend Scan" with a red ghost-mesh overlay to either re-scan the same space for time-series updates, or move to the edge and scan adjacent areas for downstream stitching.
 - **Privacy Filtering:** Person segmentation removes humans from mesh; face detection blurs faces on camera feed and in exports.
 - **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
 - **Developer Mode:** Toggleable debugging tools including front/back camera switching for testing privacy features, with a persistent banner across all views.
@@ -89,4 +89,4 @@ When enabled (toggle on Capture screen):
 3. Build and deploy to a LiDAR-equipped device (iPhone 12 Pro or newer)
 4. Configure the upload URL in Settings (gear icon)
 5. Go to Capture → tap record → scan → tap stop → name your space to save it
-6. In the Workflows tab, tap **Scan Again** under a Location to perform an aligned time-series rescan of that exact space
+6. In the Scans tab, tap **Extend Scan** on any scan card to either re-scan the same space (time-series) or scan adjacent areas (stitching). The red overlay shows the previous scan boundary.

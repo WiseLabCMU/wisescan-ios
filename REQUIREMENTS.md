@@ -168,12 +168,12 @@ sequenceDiagram
     CV->>U: Navigate to LocationDetailView
 ```
 
-### REQ-003: Scan4D (Adjacent Extended Scanning)
+### REQ-003: Scan4D (Extend Scan — Time-Series & Adjacent Stitching)
 | | |
 |:--|:--|
 | **Status** | ✅ Complete (Phase 1 — Local) |
-| **Description** | Enable scanning of large, unbounded spaces by explicitly breaking them into an adjacent series of manageable ARKit chunks ("scans"), localized to a shared coordinate frame. |
-| **Details** | - **Relocalization Setup:** Tapping "Extend Scan" from an existing scan card initiates the capture view, using that specific scan's `ARWorldMap` as the initialization target. - **Ghost Visualization:** The user is shown the exact mesh of the scan they selected to extend from, rendered as a 0.3 opacity red overlay (`UnlitMaterial`). - **UI Prompting:** A dismissable transient toast ("Move to the edge of the red region to begin your next scan") instructs the user to step to the boundary of their previous capture before recording. This encourages overlapping spatial context. - **Server-Side Focus:** The device no longer attempts to forcefully merge these 3D meshes together. Instead, it relies strictly on backend workflows (e.g., RealityCapture, COLMAP, ICP) to globally align the adjacent chunks using the shared ARKit coordinates, visual overlap, and raw image datasets. |
+| **Description** | Enable two complementary scanning workflows via a single "Extend Scan" button, both powered by `ARWorldMap` relocalization and a ghost-mesh overlay. |
+| **Details** | **Use Case 1 — Time-Series Re-Scan:** Scan the same space again at a later time. The red ghost overlay shows the original capture area; the user re-scans the identical region. The backend pipeline can diff or merge these scans to track changes over time. **Use Case 2 — Adjacent-Space Stitching:** Extend a scan into an adjacent area. The user moves to the edge of the red ghost overlay and begins recording, overlapping slightly with the previous scan. The backend pipeline stitches the chunks together (via COLMAP, RealityCapture, or ICP) to build a single unified model from multiple adjacent sessions. Both use cases share identical device-side mechanics: (1) **Relocalization Setup:** Tapping "Extend Scan" on any scan card loads that scan's `ARWorldMap` as the AR session initialization target. (2) **Ghost Visualization:** The selected scan's mesh renders as a 0.3-opacity red overlay (`UnlitMaterial`). (3) **UI Prompting:** A dismissable toast instructs the user to either re-scan the red region (time-series) or move to its edge (adjacent stitching). (4) **Server-Side Focus:** No on-device mesh merging. The backend receives individual chunked scans with shared ARKit coordinate frames, visual overlap, and raw image data for downstream alignment. |
 
 ```mermaid
 sequenceDiagram
@@ -191,16 +191,19 @@ sequenceDiagram
     Cap->>U: "Name this Space" prompt
     U->>Cap: "Kitchen"
     Cap->>SS: addLocation("Kitchen")
-    Cap->>SS: addScan(mesh, worldMap)
+    Cap->>SS: addScan("Scan 1", mesh, worldMap)
 
-    Note over U,SS: Scan Again (Relocalization)
-    U->>SS: Tap "Scan Again" on Kitchen
-    SS-->>Cap: activeRelocalizationMap = worldMapURL
-    Cap->>AR: makeUIView(initialWorldMapURL)
+    Note over U,SS: Extend Scan (Time-Series or Adjacent)
+    U->>SS: Tap "Extend Scan" on Scan 1
+    SS-->>Cap: activeRelocalizationMap + activeScanToExtend
+    Cap->>AR: updateUIView (ghost mesh + worldMap)
     AR->>AR: config.initialWorldMap = loaded map
-    AR-->>U: ARKit relocalizes to Kitchen
-    U->>Cap: Tap Stop
-    Cap->>SS: addScan(mesh, worldMap, locationId)
+    AR->>AR: Parse ghost mesh → red overlay
+    AR-->>U: Ghost overlay + relocalization
+    Note right of U: Option A: Re-scan same space (time-series)
+    Note right of U: Option B: Move to edge, scan adjacent area
+    U->>Cap: Tap Record → Tap Stop
+    Cap->>SS: addScan("Scan 2", mesh, worldMap, locationId)
 ```
 
 ### REQ-004: Privacy Filtering
@@ -261,10 +264,11 @@ sequenceDiagram
 | **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanFileManager`, `@Model ScanLocation`, `@Model CapturedScan` |
 
 ### REQ-012: Map Stitching and Coverage
-**Description:** Prevent localized mesh limits from capping scan size by encouraging adjacent spatial mapping.
+**Description:** Prevent localized mesh limits from capping scan size by supporting both time-series re-scans and adjacent spatial mapping.
 
 **Details:**
-- There is no upper limit on how many scans can exist inside a single Location. Users are encouraged to chop up large environments (like multi-room offices) into several overlapping sessions.
+- There is no upper limit on how many scans can exist inside a single Location. Users are encouraged to either re-scan the same space at different times (for time-series analysis) or chop up large environments (like multi-room offices) into several overlapping adjacent sessions.
+- **Dual Workflow Support:** "Extend Scan" supports both re-scanning an existing area and extending into new adjacent areas. The backend pipeline determines whether to treat the scans as temporal updates or spatial extensions based on overlap and metadata.
 - **Unbounded Local Storage:** The "Keep Last 2" local storage retention limit has been removed, as all scans in a chain are required to reconstruct a complete master scene. Scans must be deleted manually by the user or purged upon successful upload to the server.
 
 ### REQ-013: Developer Mode
@@ -300,10 +304,10 @@ sequenceDiagram
 | REQ-018 | Streaming Mode | Real-time lower-res tracking data to server | Medium |
 | REQ-019 | Workflow Orchestration | Select preset server pipelines (Mesh, Splat, Spatial Indexing) | High |
 | REQ-020 | Job Observability | Display remote Prefect job status locally | Medium |
-| REQ-021 | Scan4D Ghost Overlay | Render previous mesh as translucent overlay during rescan | Medium |
+| ~~REQ-021~~ | ~~Scan4D Ghost Overlay~~ | ✅ **Implemented** — Red translucent overlay renders previous scan during Extend Scan | — |
 | REQ-022 | Scan4D Ground Truth Offset | Capture GPS or AprilTag data alongside scans for backend alignment seeding | High |
 | REQ-023 | OpenFLAME Live Relocalization | Use backend server to stream visual localization back to device, bypassing ARKit maps | Low |
-| REQ-024 | Large-Space Map Stitching | Server-side COLMAP/RealityCapture alignment of chunked scans for spaces too large for a single ARKit session | High |
+| ~~REQ-024~~ | ~~Large-Space Map Stitching~~ | ✅ **Implemented (client-side)** — Extend Scan supports adjacent chunking with shared coordinate frames; server-side alignment is a downstream concern | — |
 
 ---
 

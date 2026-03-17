@@ -22,8 +22,8 @@ struct UserGuideView: View {
                     )
                     guideRow(
                         icon: "3.circle.fill",
-                        title: "Scan4D (Scan Again)",
-                        text: "Tap 'Scan Again' on any Location to perform a time-series rescan. The app will relocalize using the previous scan's spatial anchors to perfectly align the new data."
+                        title: "Extend Scan",
+                        text: "Tap 'Extend Scan' on any scan to continue mapping. A red overlay shows your previous scan. Re-scan the same area for time-series updates, or move to the edge and scan adjacent areas — the backend will stitch them together."
                     )
                     guideRow(
                         icon: "4.circle.fill",
