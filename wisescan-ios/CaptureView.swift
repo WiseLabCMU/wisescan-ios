@@ -306,6 +306,10 @@ struct CaptureView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
+            // Lock to portrait during capture for stable intrinsics & tracking
+            AppDelegate.orientationLocked = true
+            UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
+
             // If we arrived at Capture by tapping the tab (not via "Extend Scan"),
             // clear any lingering ghost mesh / world map so a fresh scan starts.
             // "Extend Scan" sets activeLocationForScan before switching tabs;
@@ -320,6 +324,9 @@ struct CaptureView: View {
             }
         }
         .onDisappear {
+            // Unlock orientation when leaving capture
+            AppDelegate.orientationLocked = false
+
             if isRecording {
                 stopRecording()
             }

@@ -7,9 +7,23 @@
 
 import SwiftUI
 import SwiftData
+import UIKit
+
+/// UIApplicationDelegate for orientation locking support.
+/// CaptureView sets `orientationLocked = true` on appear to lock portrait during scanning.
+class AppDelegate: NSObject, UIApplicationDelegate {
+    /// When true, the app is locked to portrait orientation (used during capture).
+    static var orientationLocked = false
+
+    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        return AppDelegate.orientationLocked ? .portrait : .all
+    }
+}
 
 @main
 struct Scan4DApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             ScanLocation.self,
