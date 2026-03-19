@@ -10,6 +10,9 @@ struct CaptureView: View {
     @AppStorage(AppDefaults.Key.privacyFilter) private var isPrivacyFilterOn = AppDefaults.privacyFilter
     @AppStorage(AppDefaults.Key.developerMode) private var developerMode: Bool = AppDefaults.developerMode
     @AppStorage(AppDefaults.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppDefaults.flipCameraEnabled
+    @AppStorage(AppDefaults.Key.testIMU) private var testIMU: Bool = AppDefaults.testIMU
+    @AppStorage(AppDefaults.Key.testCameraImages) private var testCameraImages: Bool = AppDefaults.testCameraImages
+    @AppStorage(AppDefaults.Key.testDepthMaps) private var testDepthMaps: Bool = AppDefaults.testDepthMaps
     // Stream mode removed — fixed to Capture (Stream is a future feature)
     @State private var usingFrontCamera = false
     @State private var currentARSession: ARSession? = nil
@@ -418,7 +421,10 @@ struct CaptureView: View {
                 rejectBlur: rejectBlur,
                 privacyFilter: isPrivacyFilterOn, // Applied during export
                 locationManager: locationManager,
-                activeLocationId: scanStore.activeLocationForScan
+                activeLocationId: scanStore.activeLocationForScan,
+                testIMU: developerMode && testIMU,
+                testCameraImages: developerMode && testCameraImages,
+                testDepthMaps: developerMode && testDepthMaps
             )
         }
 
@@ -463,7 +469,19 @@ struct CaptureView: View {
         // ── Now switch to nominal mode (drops mesh anchors, frees AR memory) ──
         isRecording = false
 
-        guard let result = meshResult, !result.data.isEmpty else {
+        var finalMeshResult = meshResult
+
+        // If test modes are active and no mesh was generated (e.g. Simulator), inject a dummy mesh
+        if finalMeshResult == nil || finalMeshResult!.data.isEmpty {
+            if developerMode && (testCameraImages || testIMU || testDepthMaps) {
+                let dummyObj = "v -0.5 -0.5 -0.5\nv 0.5 -0.5 -0.5\nv 0.5 0.5 -0.5\nf 1 2 3\n"
+                if let dummyObjData = dummyObj.data(using: .utf8) {
+                    finalMeshResult = (dummyObjData, 3, 1)
+                }
+            }
+        }
+
+        guard let result = finalMeshResult, !result.data.isEmpty else {
             saveMessage = "No Mesh Data"
             frameCaptureSession = FrameCaptureSession()
             clearMessage()

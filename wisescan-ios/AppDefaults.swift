@@ -11,6 +11,9 @@ enum AppDefaults {
         static let developerMode = "developerMode"
         static let flipCameraEnabled = "flipCameraEnabled"
         static let debugVertexMapping = "debugVertexMapping"
+        static let testIMU = "testIMU"
+        static let testCameraImages = "testCameraImages"
+        static let testDepthMaps = "testDepthMaps"
         static let privacyFilter = "privacyFilter"
         static let selectedExportFormat = "selectedExportFormat"
     }
@@ -22,6 +25,9 @@ enum AppDefaults {
     static let developerMode: Bool = false
     static let flipCameraEnabled: Bool = false
     static let debugVertexMapping: Bool = false
+    static let testIMU: Bool = false
+    static let testCameraImages: Bool = false
+    static let testDepthMaps: Bool = false
     static let privacyFilter: Bool = true
     static let selectedExportFormat = "Scan4D" // ExportFormat.scan4d.rawValue
 

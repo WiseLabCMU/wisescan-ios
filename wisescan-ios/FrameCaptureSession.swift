@@ -23,6 +23,12 @@ class FrameCaptureSession {
     private var privacyFilter: Bool = false
     private var lastCaptureTime: TimeInterval = 0
 
+    // Test modes
+    private var isTestingIMU: Bool = false
+    private var isTestingImages: Bool = false
+    private var isTestingDepth: Bool = false
+    private var testSequenceIndex: Int = 0
+
     // Blur Warning logic
     private(set) var isBlurWarningActive: Bool = false
     private var blurWarningTimer: Timer?
@@ -55,7 +61,17 @@ class FrameCaptureSession {
     ///   - overlapMax: Maximum overlap percentage (10-100). Higher = more frames.
     ///   - rejectBlur: If true, skip frames with motion blur.
     ///   - privacyFilter: If true, blur faces in images and zero person regions in depth.
-    func start(session: ARSession, overlapMax: Double = 60.0, rejectBlur: Bool = true, privacyFilter: Bool = false, locationManager: LocationManager? = nil, activeLocationId: UUID? = nil) {
+    func start(
+        session: ARSession,
+        overlapMax: Double = 60.0,
+        rejectBlur: Bool = true,
+        privacyFilter: Bool = false,
+        locationManager: LocationManager? = nil,
+        activeLocationId: UUID? = nil,
+        testIMU: Bool = false,
+        testCameraImages: Bool = false,
+        testDepthMaps: Bool = false
+    ) {
         // Create temp directory for this capture
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("scan4d_raw_\(UUID().uuidString)", isDirectory: true)
@@ -90,6 +106,11 @@ class FrameCaptureSession {
         self.locationManager = locationManager
         self.activeLocationId = activeLocationId
 
+        self.isTestingIMU = testIMU
+        self.isTestingImages = testCameraImages
+        self.isTestingDepth = testDepthMaps
+        self.testSequenceIndex = 0
+
         // Check for new frames at 10fps, but only capture when sufficient movement
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             self?.captureFrame(from: session)
@@ -123,12 +144,18 @@ class FrameCaptureSession {
 
         // Capture on background thread to avoid blocking AR
         let pixelBuffer = currentFrame.capturedImage
-        let transform = currentFrame.camera.transform
-        let intrinsics = currentFrame.camera.intrinsics
+        var transform = currentFrame.camera.transform
+        var intrinsics = currentFrame.camera.intrinsics
         let depthMap = currentFrame.sceneDepth?.depthMap
 
+        if isTestingIMU {
+            let (testTransform, testIntrinsics) = TestDataGenerator.generatePoseAndIntrinsics(for: testSequenceIndex)
+            transform = testTransform
+            intrinsics = testIntrinsics
+        }
+
         // Reject blurred frames based on camera tracking quality
-        if rejectBlur {
+        if rejectBlur && !isTestingIMU {
             var isBlurred = false
             
             // Skip if tracking is not normal (e.g. limited, excessive motion)
@@ -173,7 +200,7 @@ class FrameCaptureSession {
             // overlapMax 100% → threshold ~0.01m (capture almost everything)
             // overlapMax 10%  → threshold ~0.15m (only distinct views)
             let threshold = Float(Double(AppDefaults.overlapBaseThreshold) * (1.0 - overlapMax / 100.0)) + AppDefaults.overlapMinThreshold
-            if movement < threshold {
+            if !isTestingIMU && movement < threshold {
                 return // skip — too much overlap with previous frame
             }
         }
@@ -182,12 +209,17 @@ class FrameCaptureSession {
         lastCaptureTime = currentFrame.timestamp
         let segBuffer = self.privacyFilter ? currentFrame.segmentationBuffer : nil
 
+        let currentIndex = self.testSequenceIndex
+        self.testSequenceIndex += 1 // Increment sequence index for synthetic progression
+
         ioQueue.async { [weak self] in
             guard let self = self, let imagesDir = self.imagesDir else { return }
 
             // Depth is optional — LiDAR devices get depth, others just capture images + poses
             var validDepthData: Data? = nil
-            if let dMap = depthMap {
+            if self.isTestingDepth {
+                validDepthData = TestDataGenerator.generateDepthMap(for: currentIndex)
+            } else if let dMap = depthMap {
                 let depthFormat = CVPixelBufferGetPixelFormatType(dMap)
                 guard depthFormat == kCVPixelFormatType_DepthFloat32 else {
                     print("[FrameCapture] Unexpected depth format: \(depthFormat), skipping depth")
@@ -196,19 +228,22 @@ class FrameCaptureSession {
                 validDepthData = self.depthMapToPNG16(dMap, personMask: segBuffer)
             }
 
-            guard let jpegData = self.pixelBufferToJPEG(pixelBuffer) else {
-                return
-            }
-            
-            var finalJpegData = jpegData
-            if self.privacyFilter {
-                let (blurredData, centers) = FaceBlurUtil.blurFacesAndGetCenters(in: jpegData)
-                if let bData = blurredData {
-                    finalJpegData = bData
+            var finalJpegData: Data
+            if self.isTestingImages {
+                finalJpegData = TestDataGenerator.generateImage(for: currentIndex, transform: transform, intrinsics: intrinsics)
+            } else {
+                guard let jpegData = self.pixelBufferToJPEG(pixelBuffer) else {
+                    return
                 }
-                
-                // Unproject face centers to 3D using depth map (only if depth available)
-                if !centers.isEmpty, let dMap = depthMap {
+                var tempJpegData = jpegData
+                if self.privacyFilter {
+                    let (blurredData, centers) = FaceBlurUtil.blurFacesAndGetCenters(in: jpegData)
+                    if let bData = blurredData {
+                        tempJpegData = bData
+                    }
+                    
+                    // Unproject face centers to 3D using depth map (only if depth available)
+                    if !centers.isEmpty, let dMap = depthMap {
                     let depthWidth = CVPixelBufferGetWidth(dMap)
                     let depthHeight = CVPixelBufferGetHeight(dMap)
                     let imgWidth = Float(CVPixelBufferGetWidth(pixelBuffer))
@@ -266,8 +301,10 @@ class FrameCaptureSession {
                     CVPixelBufferUnlockBaseAddress(dMap, .readOnly)
                 }
             }
+            finalJpegData = tempJpegData
+        }
             
-            let index = self.frames.count
+        let index = self.frames.count
             let paddedIndex = String(format: "%05d", index)
             let rgbPath = imagesDir.appendingPathComponent("frame_\(paddedIndex).jpg")
             
@@ -547,3 +584,4 @@ class FrameCaptureSession {
         }
     }
 }
+
