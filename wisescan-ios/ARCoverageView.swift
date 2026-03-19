@@ -138,14 +138,7 @@ struct ARCoverageView: UIViewRepresentable {
                 if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
                     config.frameSemantics.insert(.sceneDepth)
                 }
-                // Load initial world map for Scan4D relocalization
-                if let mapURL = initialWorldMapURL,
-                   let data = try? Data(contentsOf: mapURL),
-                   let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
-                    config.initialWorldMap = worldMap
-                }
-                let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
-                uiView.session.run(config, options: runOptions)
+                uiView.session.run(config)
                 uiView.debugOptions.insert(.showSceneUnderstanding)
                 context.coordinator.resetForRecording()
 
@@ -175,23 +168,8 @@ struct ARCoverageView: UIViewRepresentable {
                 let config = ARWorldTrackingConfiguration()
                 config.sceneReconstruction = []
                 config.environmentTexturing = .automatic
-                // Preserve the world map if we are in an extend-scan scenario
-                if let mapURL = initialWorldMapURL,
-                   let data = try? Data(contentsOf: mapURL),
-                   let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
-                    config.initialWorldMap = worldMap
-                }
-                let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : [.resetTracking, .removeExistingAnchors]
-                uiView.session.run(config, options: runOptions)
+                uiView.session.run(config)
                 uiView.debugOptions.remove(.showSceneUnderstanding)
-                
-                // Re-add ghost mesh if extending
-                if initialGhostMeshData != nil {
-                    if let ghostAnchor = context.coordinator.ghostAnchorEntity {
-                        uiView.scene.addAnchor(ghostAnchor)
-                        context.coordinator.hasAddedGhostMesh = true
-                    }
-                }
             }
         }
 
@@ -255,7 +233,6 @@ struct ARCoverageView: UIViewRepresentable {
             totalTrackingUpdates = 0
             sessionStartTime = Date()
             baselineMemoryMB = ScanStats.currentMemoryUsageMB()
-            hasAddedGhostMesh = false
         }
 
         /// Reset coordinator state when returning to nominal (idle) mode.
@@ -263,11 +240,6 @@ struct ARCoverageView: UIViewRepresentable {
             anchorUpdateCounts.removeAll()
             trackingDegradationCount = 0
             totalTrackingUpdates = 0
-
-            // DO NOT explicitly remove the ghost mesh anymore, because nominal mode 
-            // now supports displaying the ghost mesh if we are in an "Extend Scan" flow.
-            // The coordinator retains the ghostAnchorEntity so it can be re-added if necessary.
-            hasAddedGhostMesh = false
 
             DispatchQueue.main.async { [weak self] in
                 // Zero out scan stats

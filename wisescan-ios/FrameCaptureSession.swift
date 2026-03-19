@@ -114,9 +114,7 @@ class FrameCaptureSession {
     }
 
     private func captureFrame(from session: ARSession) {
-        guard let currentFrame = session.currentFrame,
-              let imagesDir = imagesDir,
-              let depthDir = depthDir else { return }
+        guard let currentFrame = session.currentFrame else { return }
 
         // Capture on background thread to avoid blocking AR
         let pixelBuffer = currentFrame.capturedImage
