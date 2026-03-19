@@ -236,7 +236,7 @@ struct ScanCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             // 3D mesh preview (interactive: rotate/zoom)
-            MeshPreviewView(meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory)
+            MeshPreviewContainer(meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory)
                 .frame(height: 200)
                 .clipped()
                 .overlay(

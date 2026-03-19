@@ -1,11 +1,78 @@
 import SwiftUI
 import SceneKit
+import Combine
+
+/// Wrapper that overlays 2D privacy markers on the SceneKit mesh preview.
+/// Face anchor 3D positions are projected to screen coordinates each frame.
+struct MeshPreviewContainer: View {
+    var meshFileURL: URL?
+    var colorsFileURL: URL?
+    var scanDirectoryURL: URL?
+
+    @StateObject private var markerState = MarkerProjectionState()
+
+    var body: some View {
+        ZStack {
+            MeshPreviewView(
+                meshFileURL: meshFileURL,
+                colorsFileURL: colorsFileURL,
+                scanDirectoryURL: scanDirectoryURL,
+                markerState: markerState
+            )
+
+            // 2D overlay icons projected from 3D face anchor positions
+            ForEach(markerState.screenPositions.indices, id: \.self) { i in
+                let pos = markerState.screenPositions[i]
+                if pos.isVisible {
+                    Image(systemName: "eye.slash.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.red)
+                        .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
+                        .position(x: pos.point.x, y: pos.point.y)
+                }
+            }
+        }
+    }
+}
+
+/// Published state for projected 2D marker positions.
+class MarkerProjectionState: ObservableObject {
+    struct MarkerScreenPos {
+        var point: CGPoint
+        var isVisible: Bool
+    }
+
+    @Published var screenPositions: [MarkerScreenPos] = []
+
+    /// 3D anchor positions in scene-local coordinates (with center offset applied)
+    var anchorPositions: [SCNVector3] = []
+    /// Reference to the SCNView for projection
+    weak var scnView: SCNView?
+
+    func updateProjections() {
+        guard let scnView = scnView, scnView.pointOfView != nil else { return }
+        var newPositions: [MarkerScreenPos] = []
+        for anchor in anchorPositions {
+            let projected = scnView.projectPoint(anchor)
+            let screenPoint = CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y))
+            // projected.z < 1 means in front of camera
+            let visible = projected.z > 0 && projected.z < 1
+                && screenPoint.x >= 0 && screenPoint.x <= scnView.bounds.width
+                && screenPoint.y >= 0 && screenPoint.y <= scnView.bounds.height
+            newPositions.append(MarkerScreenPos(point: screenPoint, isVisible: visible))
+        }
+        DispatchQueue.main.async {
+            self.screenPositions = newPositions
+        }
+    }
+}
 
 /// Renders a 3D preview of captured OBJ mesh data using SceneKit.
 struct MeshPreviewView: UIViewRepresentable {
     var meshFileURL: URL?
     var colorsFileURL: URL?
     var scanDirectoryURL: URL?
+    var markerState: MarkerProjectionState
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -15,6 +82,7 @@ struct MeshPreviewView: UIViewRepresentable {
 
         let scene = SCNScene()
         scnView.scene = scene
+        scnView.delegate = context.coordinator
 
         // Lighting setup for better visibility
         let ambientLight = SCNNode()
@@ -86,12 +154,13 @@ struct MeshPreviewView: UIViewRepresentable {
                     )
                     node.position = SCNVector3(-center.x, -center.y, -center.z)
 
-                    // Add privacy markers (raw anchor position since the parent node is already centered)
-                    for anchor in faceAnchors {
-                        let markerNode = self.createPrivacyMarker()
-                        markerNode.position = SCNVector3(anchor.x, anchor.y, anchor.z)
-                        node.addChildNode(markerNode)
+                    // Store face anchor positions for 2D projection (offset by center)
+                    // Anchors are in the node's local space, which is shifted by -center
+                    // projectPoint needs world-space coords, so final = anchor - center
+                    self.markerState.anchorPositions = faceAnchors.map { a in
+                        SCNVector3(a.x - center.x, a.y - center.y, a.z - center.z)
                     }
+                    self.markerState.scnView = scnView
 
                     // Wrap in a parent to keep centering clean
                     let containerNode = SCNNode()
@@ -121,25 +190,23 @@ struct MeshPreviewView: UIViewRepresentable {
 
     func updateUIView(_ uiView: SCNView, context: Context) {}
 
-    private func createPrivacyMarker() -> SCNNode {
-        let sphere = SCNSphere(radius: 0.1)
-        sphere.firstMaterial?.diffuse.contents = UIColor.red.withAlphaComponent(0.8)
-        let node = SCNNode(geometry: sphere)
-        
-        let config = UIImage.SymbolConfiguration(pointSize: 64, weight: .bold)
-        if let image = UIImage(systemName: "eye.slash.fill", withConfiguration: config)?.withTintColor(.white, renderingMode: .alwaysOriginal) {
-            let plane = SCNPlane(width: 0.2, height: 0.2)
-            plane.firstMaterial?.diffuse.contents = image
-            plane.firstMaterial?.isDoubleSided = true
-            let iconNode = SCNNode(geometry: plane)
-            // Billboard constraint makes the icon always face the camera
-            let constraint = SCNBillboardConstraint()
-            constraint.freeAxes = .all
-            iconNode.constraints = [constraint]
-            node.addChildNode(iconNode)
-        }
-        return node
+    func makeCoordinator() -> Coordinator {
+        Coordinator(markerState: markerState)
     }
+
+    class Coordinator: NSObject, SCNSceneRendererDelegate {
+        let markerState: MarkerProjectionState
+
+        init(markerState: MarkerProjectionState) {
+            self.markerState = markerState
+        }
+
+        func renderer(_ renderer: SCNSceneRenderer, didRenderScene scene: SCNScene, atTime time: TimeInterval) {
+            markerState.updateProjections()
+        }
+    }
+
+
 
     /// Parses OBJ data and creates geometry with vertex colors (camera-sampled or height-based fallback).
     private func buildGeometry(from data: Data, vertexColors: Data?) -> (SCNGeometry, Int)? {
