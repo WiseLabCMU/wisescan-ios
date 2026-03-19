@@ -32,6 +32,8 @@ class FrameCaptureSession {
     private var locationManager: LocationManager?
     private var activeLocationId: UUID?
 
+    private let ioQueue = DispatchQueue(label: "com.wisescan.capture.io", qos: .userInitiated)
+
     struct FrameData {
         let index: Int
         let transform: simd_float4x4
@@ -96,14 +98,17 @@ class FrameCaptureSession {
 
         guard let captureDir = captureDir else { return nil }
 
-        // Write Nerfstudio transforms.json
-        writeTransformsJSON(to: captureDir)
+        // Block to ensure ongoing frame captures complete and write their JSONs
+        ioQueue.sync {
+            // Write Nerfstudio transforms.json
+            self.writeTransformsJSON(to: captureDir)
 
-        // Write Polycam per-frame camera JSONs
-        writePolycamCameras(to: captureDir)
+            // Write Polycam per-frame camera JSONs
+            self.writePolycamCameras(to: captureDir)
 
-        // Write Scan4D ground-truth metadata
-        writeScan4DMetadata(to: captureDir)
+            // Write Scan4D ground-truth metadata
+            self.writeScan4DMetadata(to: captureDir)
+        }
 
         return captureDir
     }
@@ -112,9 +117,6 @@ class FrameCaptureSession {
         guard let currentFrame = session.currentFrame,
               let imagesDir = imagesDir,
               let depthDir = depthDir else { return }
-
-        let index = frameCount
-        let paddedIndex = String(format: "%05d", index)
 
         // Capture on background thread to avoid blocking AR
         let pixelBuffer = currentFrame.capturedImage
@@ -176,37 +178,37 @@ class FrameCaptureSession {
 
         lastCaptureTransform = transform
         lastCaptureTime = currentFrame.timestamp
+        let segBuffer = self.privacyFilter ? currentFrame.segmentationBuffer : nil
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
+        ioQueue.async { [weak self] in
+            guard let self = self, let imagesDir = self.imagesDir, let depthDir = self.depthDir else { return }
 
-            // Save RGB frame as JPEG (with face blurring if privacy filter is on)
+            guard let dMap = depthMap,
+                  let jpegData = self.pixelBufferToJPEG(pixelBuffer),
+                  let depthData = self.depthMapToPNG16(dMap, personMask: segBuffer) else {
+                return
+            }
+            
+            var finalJpegData = jpegData
+            if self.privacyFilter, let blurredData = FaceBlurUtil.blurFaces(in: jpegData) {
+                finalJpegData = blurredData
+            }
+            
+            let index = self.frames.count
+            let paddedIndex = String(format: "%05d", index)
             let rgbPath = imagesDir.appendingPathComponent("frame_\(paddedIndex).jpg")
-            if let jpegData = self.pixelBufferToJPEG(pixelBuffer) {
-                if self.privacyFilter, let blurredData = FaceBlurUtil.blurFaces(in: jpegData) {
-                    try? blurredData.write(to: rgbPath)
-                } else {
-                    try? jpegData.write(to: rgbPath)
-                }
-            }
-
-            // Save depth map as 16-bit PNG (zero out person regions if privacy on)
-            if let depthMap = depthMap {
-                let depthPath = depthDir.appendingPathComponent("frame_\(paddedIndex).png")
-                let segBuffer = self.privacyFilter ? currentFrame.segmentationBuffer : nil
-                if let depthData = self.depthMapToPNG16(depthMap, personMask: segBuffer) {
-                    try? depthData.write(to: depthPath)
-                }
-            }
-
-            // Store frame metadata
-            DispatchQueue.main.async {
-                // Capture intrinsics from first frame
+            let depthPath = depthDir.appendingPathComponent("frame_\(paddedIndex).png")
+            
+            do {
+                try finalJpegData.write(to: rgbPath, options: .atomic)
+                try depthData.write(to: depthPath, options: .atomic)
+                
+                let imgWidth = CVPixelBufferGetWidth(pixelBuffer)
+                let imgHeight = CVPixelBufferGetHeight(pixelBuffer)
+                
                 if self.globalIntrinsics == nil {
-                    let imageSize = CVPixelBufferGetWidth(pixelBuffer)
-                    let imageHeight = CVPixelBufferGetHeight(pixelBuffer)
-                    self.imageWidth = imageSize
-                    self.imageHeight = imageHeight
+                    self.imageWidth = imgWidth
+                    self.imageHeight = imgHeight
                     self.globalIntrinsics = CameraIntrinsics(
                         fx: intrinsics[0][0],
                         fy: intrinsics[1][1],
@@ -214,9 +216,16 @@ class FrameCaptureSession {
                         cy: intrinsics[2][1]
                     )
                 }
-
+                
                 self.frames.append(FrameData(index: index, transform: transform))
-                self.frameCount = index + 1
+                let newlyAddedCount = self.frames.count
+                
+                DispatchQueue.main.async {
+                    self.frameCount = newlyAddedCount
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: rgbPath)
+                try? FileManager.default.removeItem(at: depthPath)
             }
         }
     }

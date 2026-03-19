@@ -6,8 +6,8 @@ struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var locations: [ScanLocation]
 
-    @AppStorage(AppDefaults.Key.rawOverlapMax) private var rawOverlapMax: Double = AppDefaults.rawOverlapMax
-    @AppStorage(AppDefaults.Key.rawRejectBlur) private var rawRejectBlur: Bool = AppDefaults.rawRejectBlur
+    @AppStorage(AppDefaults.Key.rawOverlapMax) private var overlapMax: Double = AppDefaults.overlapMax
+    @AppStorage(AppDefaults.Key.rawRejectBlur) private var rejectBlur: Bool = AppDefaults.rejectBlur
     @AppStorage(AppDefaults.Key.uploadURL) private var uploadURL = AppDefaults.uploadURL
     @AppStorage(AppDefaults.Key.developerMode) private var developerMode: Bool = AppDefaults.developerMode
     @AppStorage(AppDefaults.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppDefaults.flipCameraEnabled
@@ -64,11 +64,11 @@ struct SettingsView: View {
                                 Text("Image Overlap Maximum")
                                     .foregroundColor(.white)
                                 Spacer()
-                                Text("\(Int(rawOverlapMax))%")
+                                Text("\(Int(overlapMax))%")
                                     .foregroundColor(.cyan)
                                     .font(.headline)
                             }
-                            Slider(value: $rawOverlapMax, in: 10...100, step: 5)
+                            Slider(value: $overlapMax, in: 10...100, step: 5)
                                 .tint(.cyan)
                             Text("Controls maximum overlap between consecutive captured frames. Lower values capture fewer, more distinct frames. Higher values capture more frames with greater overlap.")
                                 .font(.caption)
@@ -76,7 +76,7 @@ struct SettingsView: View {
                         }
                         .padding(.vertical, 4)
 
-                        Toggle(isOn: $rawRejectBlur) {
+                        Toggle(isOn: $rejectBlur) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Reject Blurred Frames")
                                     .foregroundColor(.white)
@@ -88,7 +88,7 @@ struct SettingsView: View {
                         .tint(.cyan)
                         .padding(.vertical, 4)
                     } header: {
-                        Text("RAW EXPORT")
+                        Text("SCAN CAPTURE")
                     }
                     .listRowBackground(Color.white.opacity(0.05))
 

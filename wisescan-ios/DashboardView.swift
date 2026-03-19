@@ -81,21 +81,18 @@ struct DashboardView: View {
                             .padding(.horizontal)
                             .padding(.top, 16)
 
-                        ServerCard(name: "Scanner_Pro_3D", model: "Alpha-9 | 192.168.1.45", isConnected: true)
-                        ServerCard(name: "Studio_Scan_X", model: "X100 | 192.168.1.102", isConnected: false)
-                        ServerCard(name: "Lab_Scanner_Beta", model: "Beta-3 | 192.168.1.115", isConnected: false)
+                        ServerCard(name: "Scanner_Pro_3D", model: "Alpha-9 | 192.168.1.45", isConnected: true, isDisabled: true)
+                        ServerCard(name: "Studio_Scan_X", model: "X100 | 192.168.1.102", isConnected: false, isDisabled: true)
+                        ServerCard(name: "Lab_Scanner_Beta", model: "Beta-3 | 192.168.1.115", isConnected: false, isDisabled: true)
                         */
 
-                        Text("WEARABLE DEVICES")
+                        Text("WEARABLE DEVICES (COMING SOON)")
                             .font(.subheadline)
                             .foregroundColor(.gray)
                             .padding(.horizontal)
                             .padding(.top, 16)
 
-                        // Wearable stubs commented out — keep Add button
-                        /*
-                        WearableCard(name: "Vision Glass S", deviceId: "VG-S02948", isPaired: true)
-                        */
+                        WearableCard(name: "Vision Glass S", deviceId: "VG-S02948", isPaired: true, isDisabled: true)
 
                         Button(action: {}) {
                             HStack {
@@ -113,6 +110,7 @@ struct DashboardView: View {
                             .foregroundColor(.white)
                         }
                         .padding(.horizontal)
+                        .disabled(true)
                     }
                     .padding(.vertical)
                 }
@@ -198,12 +196,12 @@ struct DashboardView: View {
     }
 }
 
-// Kept for future use but currently not displayed
-/*
+// Kept for future use
 struct ServerCard: View {
     var name: String
     var model: String
     var isConnected: Bool
+    var isDisabled: Bool = false
 
     var body: some View {
         HStack {
@@ -238,10 +236,11 @@ struct ServerCard: View {
                     .font(.subheadline).bold()
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
-                    .background(isConnected ? Color.green.opacity(0.2) : Color.white.opacity(0.1))
-                    .foregroundColor(isConnected ? .green : .white)
+                    .background(isDisabled ? Color.gray.opacity(0.3) : (isConnected ? Color.green.opacity(0.2) : Color.white.opacity(0.1)))
+                    .foregroundColor(isDisabled ? .gray : (isConnected ? .green : .white))
                     .cornerRadius(8)
             }
+            .disabled(isDisabled)
         }
         .padding()
         .background(.ultraThinMaterial)
@@ -251,6 +250,7 @@ struct ServerCard: View {
         )
         .cornerRadius(16)
         .padding(.horizontal)
+        .opacity(isDisabled ? 0.6 : 1.0)
     }
 }
 
@@ -258,6 +258,7 @@ struct WearableCard: View {
     var name: String
     var deviceId: String
     var isPaired: Bool
+    var isDisabled: Bool = false
 
     var body: some View {
         HStack {
@@ -293,10 +294,11 @@ struct WearableCard: View {
                     .font(.subheadline).bold()
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
-                    .background(Color.green.opacity(0.8))
-                    .foregroundColor(.black)
+                    .background(isDisabled ? Color.gray.opacity(0.3) : Color.green.opacity(0.8))
+                    .foregroundColor(isDisabled ? .gray : .black)
                     .cornerRadius(8)
             }
+            .disabled(isDisabled)
         }
         .padding()
         .background(.ultraThinMaterial)
@@ -306,9 +308,9 @@ struct WearableCard: View {
         )
         .cornerRadius(16)
         .padding(.horizontal)
+        .opacity(isDisabled ? 0.6 : 1.0)
     }
 }
-*/
 
 #Preview {
     DashboardView()

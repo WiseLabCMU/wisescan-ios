@@ -16,8 +16,8 @@ enum AppDefaults {
 
     // MARK: - Default Values
     static let uploadURL = "https://wiselambda4.lan.cmu.edu/wisescan-uploads/"
-    static let rawOverlapMax: Double = 60.0
-    static let rawRejectBlur: Bool = true
+    static let overlapMax: Double = 60.0
+    static let rejectBlur: Bool = true
     static let developerMode: Bool = false
     static let flipCameraEnabled: Bool = false
     static let privacyFilter: Bool = true

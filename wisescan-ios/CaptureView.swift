@@ -19,8 +19,8 @@ struct CaptureView: View {
     @State private var recordingTimer: Timer? = nil
     @State private var frameCaptureSession = FrameCaptureSession()
     // colorAccumulator removed — vertex coloring now deferred to post-processing
-    @AppStorage(AppDefaults.Key.rawOverlapMax) private var rawOverlapMax: Double = AppDefaults.rawOverlapMax
-    @AppStorage(AppDefaults.Key.rawRejectBlur) private var rawRejectBlur: Bool = AppDefaults.rawRejectBlur
+    @AppStorage(AppDefaults.Key.rawOverlapMax) private var overlapMax: Double = AppDefaults.overlapMax
+    @AppStorage(AppDefaults.Key.rawRejectBlur) private var rejectBlur: Bool = AppDefaults.rejectBlur
     @Binding var selectedTab: Int
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
 
@@ -78,6 +78,19 @@ struct CaptureView: View {
             // Permissions Overlay (Preempts user if not authorized)
             PermissionsOverlay(locationManager: locationManager)
                 .ignoresSafeArea()
+
+            if isRecording && frameCaptureSession.isBlurWarningActive {
+                Text("⚠️ Moving too fast! Slow down.")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(Color.orange.opacity(0.85))
+                    .cornerRadius(20)
+                    .shadow(radius: 5)
+                    .transition(.scale.combined(with: .opacity))
+                    .animation(.easeInOut(duration: 0.2), value: frameCaptureSession.isBlurWarningActive)
+            }
 
             VStack {
                 // Extend Scan Prompt (transient)
@@ -284,19 +297,6 @@ struct CaptureView: View {
                             }
                         }
                         .offset(y: isRecording ? -20 : 0)
-                        
-                        if isRecording && frameCaptureSession.isBlurWarningActive {
-                            Text("⚠️ Moving too fast! Slow down.")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .background(Color.orange.opacity(0.85))
-                                .cornerRadius(20)
-                                .padding(.bottom, 8)
-                                .transition(.move(edge: .bottom).combined(with: .opacity))
-                                .animation(.easeInOut, value: frameCaptureSession.isBlurWarningActive)
-                        }
                     }
                 }
                 .padding(.bottom, 20)
@@ -369,8 +369,8 @@ struct CaptureView: View {
             // Provide LocationManager to frame capture session so it can grab metadata
             frameCaptureSession.start(
                 session: session,
-                overlapMax: rawOverlapMax,
-                rejectBlur: rawRejectBlur,
+                overlapMax: overlapMax,
+                rejectBlur: rejectBlur,
                 privacyFilter: isPrivacyFilterOn, // Applied during export
                 locationManager: locationManager,
                 activeLocationId: scanStore.activeLocationForScan
