@@ -11,19 +11,18 @@ struct ARCoverageView: UIViewRepresentable {
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
     var initialGhostMeshData: Data? = nil // Raw OBJ data from the previous scan
 
+    /// Whether this device has LiDAR for scene reconstruction and depth capture.
+    static let supportsLiDAR = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
+
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
-
-        guard ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) else {
-            print("Device does not support LiDAR scene reconstruction.")
-            return arView
-        }
 
         // Start in nominal mode: camera passthrough only, no scene reconstruction
         // EXCEPT if we are extending a scan, in which case we load the map right away
         let config = ARWorldTrackingConfiguration()
-        config.sceneReconstruction = []
-        config.environmentTexturing = .automatic
+        if Self.supportsLiDAR {
+            config.sceneReconstruction = []
+        }
         if let mapURL = initialWorldMapURL,
            let data = try? Data(contentsOf: mapURL),
            let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
@@ -75,7 +74,7 @@ struct ARCoverageView: UIViewRepresentable {
             if let ghostData = initialGhostMeshData {
                 // Load the world map for relocalization
                 let config = ARWorldTrackingConfiguration()
-                config.sceneReconstruction = isRecording ? .mesh : []
+                config.sceneReconstruction = (Self.supportsLiDAR && isRecording) ? .mesh : []
                 config.environmentTexturing = .automatic
                 if let mapURL = initialWorldMapURL,
                    let data = try? Data(contentsOf: mapURL),
@@ -97,7 +96,9 @@ struct ARCoverageView: UIViewRepresentable {
             if isRecording {
                 // Upgrade to full scene reconstruction
                 let config = ARWorldTrackingConfiguration()
-                config.sceneReconstruction = .mesh
+                if Self.supportsLiDAR {
+                    config.sceneReconstruction = .mesh
+                }
                 config.environmentTexturing = .automatic
                 if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
                     config.frameSemantics.insert(.personSegmentationWithDepth)
@@ -117,7 +118,9 @@ struct ARCoverageView: UIViewRepresentable {
                 // Downgrade to nominal: camera passthrough only
                 context.coordinator.resetForNominal()
                 let config = ARWorldTrackingConfiguration()
-                config.sceneReconstruction = []
+                if Self.supportsLiDAR {
+                    config.sceneReconstruction = []
+                }
                 config.environmentTexturing = .automatic
                 uiView.session.run(config)
                 uiView.debugOptions.remove(.showSceneUnderstanding)
@@ -136,7 +139,7 @@ struct ARCoverageView: UIViewRepresentable {
             } else {
                 // Switch back to rear camera — use recording-appropriate config
                 let config = ARWorldTrackingConfiguration()
-                config.sceneReconstruction = isRecording ? .mesh : []
+                config.sceneReconstruction = (Self.supportsLiDAR && isRecording) ? .mesh : []
                 config.environmentTexturing = .automatic
                 if isRecording, ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
                     config.frameSemantics.insert(.personSegmentationWithDepth)

@@ -183,19 +183,20 @@ class FrameCaptureSession {
         let segBuffer = self.privacyFilter ? currentFrame.segmentationBuffer : nil
 
         ioQueue.async { [weak self] in
-            guard let self = self, let imagesDir = self.imagesDir, let depthDir = self.depthDir else { return }
+            guard let self = self, let imagesDir = self.imagesDir else { return }
 
-            guard let dMap = depthMap else { return }
-
-            // Guard: verify depth buffer is Float32 format
-            let depthFormat = CVPixelBufferGetPixelFormatType(dMap)
-            guard depthFormat == kCVPixelFormatType_DepthFloat32 else {
-                print("[FrameCapture] Unexpected depth format: \(depthFormat), skipping frame")
-                return
+            // Depth is optional — LiDAR devices get depth, others just capture images + poses
+            var validDepthData: Data? = nil
+            if let dMap = depthMap {
+                let depthFormat = CVPixelBufferGetPixelFormatType(dMap)
+                guard depthFormat == kCVPixelFormatType_DepthFloat32 else {
+                    print("[FrameCapture] Unexpected depth format: \(depthFormat), skipping depth")
+                    return
+                }
+                validDepthData = self.depthMapToPNG16(dMap, personMask: segBuffer)
             }
 
-            guard let jpegData = self.pixelBufferToJPEG(pixelBuffer),
-                  let depthData = self.depthMapToPNG16(dMap, personMask: segBuffer) else {
+            guard let jpegData = self.pixelBufferToJPEG(pixelBuffer) else {
                 return
             }
             
@@ -206,8 +207,8 @@ class FrameCaptureSession {
                     finalJpegData = bData
                 }
                 
-                // Unproject face centers to 3D using depth map
-                if !centers.isEmpty {
+                // Unproject face centers to 3D using depth map (only if depth available)
+                if !centers.isEmpty, let dMap = depthMap {
                     let depthWidth = CVPixelBufferGetWidth(dMap)
                     let depthHeight = CVPixelBufferGetHeight(dMap)
                     let imgWidth = Float(CVPixelBufferGetWidth(pixelBuffer))
@@ -269,11 +270,13 @@ class FrameCaptureSession {
             let index = self.frames.count
             let paddedIndex = String(format: "%05d", index)
             let rgbPath = imagesDir.appendingPathComponent("frame_\(paddedIndex).jpg")
-            let depthPath = depthDir.appendingPathComponent("frame_\(paddedIndex).png")
             
             do {
                 try finalJpegData.write(to: rgbPath, options: .atomic)
-                try depthData.write(to: depthPath, options: .atomic)
+                if let depthData = validDepthData, let depthDir = self.depthDir {
+                    let depthPath = depthDir.appendingPathComponent("frame_\(paddedIndex).png")
+                    try depthData.write(to: depthPath, options: .atomic)
+                }
                 
                 let imgWidth = CVPixelBufferGetWidth(pixelBuffer)
                 let imgHeight = CVPixelBufferGetHeight(pixelBuffer)
@@ -297,7 +300,6 @@ class FrameCaptureSession {
                 }
             } catch {
                 try? FileManager.default.removeItem(at: rgbPath)
-                try? FileManager.default.removeItem(at: depthPath)
             }
         }
     }

@@ -65,10 +65,10 @@ struct ContentView: View {
                 showLiDARWarning = true
             }
         }
-        .alert("LiDAR Not Available", isPresented: $showLiDARWarning) {
-            Button("OK", role: .cancel) {}
+        .alert("Lite Mode — No LiDAR", isPresented: $showLiDARWarning) {
+            Button("Got it", role: .cancel) {}
         } message: {
-            Text("This device does not have a LiDAR sensor. 3D scanning and mesh capture features require a LiDAR-equipped device (iPhone Pro or iPad Pro).")
+            Text("This device does not have a LiDAR sensor. You can still capture images and camera poses for server-side photogrammetry, but real-time 3D mesh, depth, and coverage overlay features are unavailable.")
         }
     }
 }

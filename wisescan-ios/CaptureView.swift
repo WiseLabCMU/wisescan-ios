@@ -97,6 +97,21 @@ struct CaptureView: View {
                     .animation(.easeInOut(duration: 0.2), value: frameCaptureSession.isBlurWarningActive)
             }
 
+            // Lite mode banner for non-LiDAR devices
+            if !ARCoverageView.supportsLiDAR {
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle.fill")
+                    Text("Lite Mode — Capturing images only (no depth/mesh)")
+                }
+                .font(.caption)
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Color.blue.opacity(0.75))
+                .cornerRadius(16)
+                .padding(.top, 50)
+            }
+
             VStack {
                 // Extend Scan Prompt (transient)
                 if showExtendPrompt {

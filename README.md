@@ -2,13 +2,31 @@
 
 Scan4D is the time-series reality capture application for the WiSEScan platform. It acts as an advanced sensor client designed to bridge high-fidelity device data with backend reconstruction servers.
 
-**Requires:** iOS 17.0+ · LiDAR-equipped iPhone or iPad · Xcode 15+
+**Requires:** iOS 17.0+ · ARKit-capable iPhone or iPad · Xcode 15+  
+**Recommended:** LiDAR-equipped device (iPhone/iPad Pro) for full mesh + depth capture
 
 **Backend Integration:** Receivers: [wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload) (testing fallback) and [wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion) (production Prefect pipeline).
 
+## Device Support
+
+| Capability | Full Mode (LiDAR) | Lite Mode (No LiDAR) |
+| :--- | :--- | :--- |
+| **Devices** | iPhone Pro, iPad Pro | iPhone 16, older iPhones/iPads |
+| **RGB Frames** | ✅ | ✅ |
+| **Camera Poses** | ✅ ARKit tracking | ✅ ARKit tracking |
+| **Depth Maps** | ✅ LiDAR depth | ❌ |
+| **Real-time Mesh** | ✅ Scene reconstruction | ❌ |
+| **Coverage Overlay** | ✅ Wireframe | ❌ |
+| **Privacy Markers** | ✅ 3D face anchors | ❌ (2D blur only) |
+| **Mesh Preview** | ✅ Colored 3D model | ❌ |
+| **Server Reconstruction** | Full pipeline | Photogrammetry only |
+
+> **Future:** Wearable glasses (e.g., Meta Ray-Ban) will add a frames-only mode with no ARKit — server-side visual SLAM for reconstruction.
+
 ## Features
 
-- **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay and quality HUD.
+- **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay and quality HUD (LiDAR devices only).
+- **Lite Mode:** Non-LiDAR devices capture images + camera poses for server-side photogrammetry. A persistent banner indicates lite mode.
 - **Scan4D (Extend Scan):** Group scans by Location. Use "Extend Scan" with a red ghost-mesh overlay to either re-scan the same space for time-series updates, or move to the edge and scan adjacent areas for downstream stitching.
 - **Privacy Filtering:** Person segmentation removes human geometry from the localized mesh; face detection blurs faces on camera feeds and natively generates unprojected 3D red-alert markers indicating downstream face removal on your mesh preview.
 - **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
