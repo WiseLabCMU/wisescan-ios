@@ -11,6 +11,7 @@ struct SettingsView: View {
     @AppStorage(AppDefaults.Key.uploadURL) private var uploadURL = AppDefaults.uploadURL
     @AppStorage(AppDefaults.Key.developerMode) private var developerMode: Bool = AppDefaults.developerMode
     @AppStorage(AppDefaults.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppDefaults.flipCameraEnabled
+    @AppStorage(AppDefaults.Key.debugVertexMapping) private var debugVertexMapping: Bool = AppDefaults.debugVertexMapping
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -131,6 +132,18 @@ struct SettingsView: View {
                                     Text("Flip Camera")
                                         .foregroundColor(.white)
                                     Text("Adds a button on the Capture screen to switch between front and back cameras. Useful for testing privacy features with the front-facing camera.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $debugVertexMapping) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Test Vertex Mapping")
+                                        .foregroundColor(.white)
+                                    Text("Runs and logs a diagnostic projection test during mesh coloring to verify 3D-to-2D image math accuracy.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

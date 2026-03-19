@@ -10,6 +10,7 @@ enum AppDefaults {
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"
         static let flipCameraEnabled = "flipCameraEnabled"
+        static let debugVertexMapping = "debugVertexMapping"
         static let privacyFilter = "privacyFilter"
         static let selectedExportFormat = "selectedExportFormat"
     }
@@ -20,6 +21,7 @@ enum AppDefaults {
     static let rejectBlur: Bool = true
     static let developerMode: Bool = false
     static let flipCameraEnabled: Bool = false
+    static let debugVertexMapping: Bool = false
     static let privacyFilter: Bool = true
     static let selectedExportFormat = "Scan4D" // ExportFormat.scan4d.rawValue
 }
