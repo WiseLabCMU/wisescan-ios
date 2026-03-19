@@ -75,10 +75,10 @@ struct FaceBlurOverlay: View {
 // MARK: - Face Blurring Utility for Image Export
 
 enum FaceBlurUtil {
-    /// Applies Gaussian blur to detected face regions in the image.
-    static func blurFaces(in imageData: Data) -> Data? {
+    /// Applies Gaussian blur to detected face regions in the image and returns their normalized center coordinates.
+    static func blurFacesAndGetCenters(in imageData: Data) -> (Data?, [CGPoint]) {
         guard let uiImage = UIImage(data: imageData),
-              let ciImage = CIImage(image: uiImage) else { return imageData }
+              let ciImage = CIImage(image: uiImage) else { return (imageData, []) }
 
         let handler = VNImageRequestHandler(ciImage: ciImage, options: [:])
         let request = VNDetectFaceRectanglesRequest()
@@ -86,19 +86,24 @@ enum FaceBlurUtil {
         do {
             try handler.perform([request])
         } catch {
-            return imageData
+            return (imageData, [])
         }
 
         guard let results = request.results, !results.isEmpty else {
-            return imageData // no faces found, return original
+            return (imageData, []) // no faces found, return original
         }
 
         let context = CIContext()
         var outputImage = ciImage
         let imageSize = ciImage.extent
+        var faceCenters: [CGPoint] = []
 
         for face in results {
             let box = face.boundingBox
+            // Vision origin is bottom-left, typically we want top-left UVs for depth map lookup
+            let uv = CGPoint(x: box.midX, y: 1.0 - box.midY)
+            faceCenters.append(uv)
+
             // Convert normalized rect to pixel coordinates
             let faceRect = CGRect(
                 x: box.origin.x * imageSize.width,
@@ -131,7 +136,7 @@ enum FaceBlurUtil {
             outputImage = blended
         }
 
-        guard let cgImage = context.createCGImage(outputImage, from: imageSize) else { return imageData }
-        return UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.85)
+        guard let cgImage = context.createCGImage(outputImage, from: imageSize) else { return (imageData, faceCenters) }
+        return (UIImage(cgImage: cgImage).jpegData(compressionQuality: 0.85), faceCenters)
     }
 }

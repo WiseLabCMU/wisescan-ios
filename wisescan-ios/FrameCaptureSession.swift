@@ -28,6 +28,9 @@ class FrameCaptureSession {
     private var blurWarningTimer: Timer?
     private var consecutiveBlurredFrames: Int = 0
 
+    // Privacy logic
+    private(set) var faceAnchors: [SIMD3<Float>] = []
+
     // Metadata dependencies
     private var locationManager: LocationManager?
     private var activeLocationId: UUID?
@@ -81,6 +84,7 @@ class FrameCaptureSession {
         self.overlapMax = overlapMax
         self.rejectBlur = rejectBlur
         self.privacyFilter = privacyFilter
+        self.faceAnchors = []
         self.lastCaptureTime = 0
         self.locationManager = locationManager
         self.activeLocationId = activeLocationId
@@ -188,8 +192,59 @@ class FrameCaptureSession {
             }
             
             var finalJpegData = jpegData
-            if self.privacyFilter, let blurredData = FaceBlurUtil.blurFaces(in: jpegData) {
-                finalJpegData = blurredData
+            if self.privacyFilter {
+                let (blurredData, centers) = FaceBlurUtil.blurFacesAndGetCenters(in: jpegData)
+                if let bData = blurredData {
+                    finalJpegData = bData
+                }
+                
+                // Unproject face centers to 3D using depth map
+                if !centers.isEmpty {
+                    let depthWidth = CVPixelBufferGetWidth(dMap)
+                    let depthHeight = CVPixelBufferGetHeight(dMap)
+                    let imgWidth = Float(CVPixelBufferGetWidth(pixelBuffer))
+                    let imgHeight = Float(CVPixelBufferGetHeight(pixelBuffer))
+                    
+                    CVPixelBufferLockBaseAddress(dMap, .readOnly)
+                    if let base = CVPixelBufferGetBaseAddress(dMap)?.assumingMemoryBound(to: Float32.self) {
+                        for uv in centers {
+                            let px = Int(uv.x * CGFloat(depthWidth))
+                            let py = Int(uv.y * CGFloat(depthHeight))
+                            let clampedX = min(max(px, 0), depthWidth - 1)
+                            let clampedY = min(max(py, 0), depthHeight - 1)
+                            
+                            let z = base[clampedY * depthWidth + clampedX]
+                            if z > 0 && z < 10.0 { // reasonable face distance limit
+                                let fx = intrinsics[0][0]
+                                let fy = intrinsics[1][1]
+                                let cx = intrinsics[2][0]
+                                let cy = intrinsics[2][1]
+                                
+                                let x_cam = (Float(uv.x) * imgWidth - cx) * z / fx
+                                let y_cam = (Float(uv.y) * imgHeight - cy) * z / fy
+                                let z_cam = -z
+                                
+                                let localPoint = SIMD4<Float>(x_cam, y_cam, z_cam, 1.0)
+                                let worldPoint = transform * localPoint
+                                let point3D = SIMD3<Float>(worldPoint.x, worldPoint.y, worldPoint.z)
+                                
+                                // Simple cluster merging
+                                var found = false
+                                for i in 0..<self.faceAnchors.count {
+                                    if simd_distance(self.faceAnchors[i], point3D) < 0.3 {
+                                        self.faceAnchors[i] = (self.faceAnchors[i] + point3D) * 0.5
+                                        found = true
+                                        break
+                                    }
+                                }
+                                if !found {
+                                    self.faceAnchors.append(point3D)
+                                }
+                            }
+                        }
+                    }
+                    CVPixelBufferUnlockBaseAddress(dMap, .readOnly)
+                }
             }
             
             let index = self.frames.count
@@ -349,6 +404,10 @@ class FrameCaptureSession {
 
         if let heading = locationManager?.currentHeading {
             metadata["compass_heading"] = heading.trueHeading > 0 ? heading.trueHeading : heading.magneticHeading
+        }
+
+        if !faceAnchors.isEmpty {
+            metadata["face_anchors"] = faceAnchors.map { [$0.x, $0.y, $0.z] }
         }
 
         let jsonPath = directory.appendingPathComponent("scan4d_metadata.json")

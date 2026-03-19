@@ -5,6 +5,7 @@ import SceneKit
 struct MeshPreviewView: UIViewRepresentable {
     var meshFileURL: URL?
     var colorsFileURL: URL?
+    var scanDirectoryURL: URL?
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -49,6 +50,20 @@ struct MeshPreviewView: UIViewRepresentable {
                 colorsData = try? Data(contentsOf: colorsURL)
             }
 
+            var faceAnchors: [SCNVector3] = []
+            if let scanDir = self.scanDirectoryURL {
+                let jsonURL = scanDir.appendingPathComponent("scan4d_metadata.json")
+                if let data = try? Data(contentsOf: jsonURL),
+                   let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let anchors = dict["face_anchors"] as? [[Float]] {
+                    for a in anchors {
+                        if a.count == 3 {
+                            faceAnchors.append(SCNVector3(a[0], a[1], a[2]))
+                        }
+                    }
+                }
+            }
+
             if let md = meshData, let (geometry, _) = self.buildGeometry(from: md, vertexColors: colorsData) {
                 DispatchQueue.main.async {
                     let node = SCNNode(geometry: geometry)
@@ -61,6 +76,13 @@ struct MeshPreviewView: UIViewRepresentable {
                         (minBound.z + maxBound.z) / 2
                     )
                     node.position = SCNVector3(-center.x, -center.y, -center.z)
+
+                    // Add privacy markers
+                    for anchor in faceAnchors {
+                        let markerNode = self.createPrivacyMarker()
+                        markerNode.position = SCNVector3(anchor.x - center.x, anchor.y - center.y, anchor.z - center.z)
+                        node.addChildNode(markerNode)
+                    }
 
                     // Wrap in a parent to keep centering clean
                     let containerNode = SCNNode()
@@ -89,6 +111,26 @@ struct MeshPreviewView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {}
+
+    private func createPrivacyMarker() -> SCNNode {
+        let sphere = SCNSphere(radius: 0.1)
+        sphere.firstMaterial?.diffuse.contents = UIColor.red.withAlphaComponent(0.8)
+        let node = SCNNode(geometry: sphere)
+        
+        let config = UIImage.SymbolConfiguration(pointSize: 64, weight: .bold)
+        if let image = UIImage(systemName: "eye.slash.fill", withConfiguration: config)?.withTintColor(.white, renderingMode: .alwaysOriginal) {
+            let plane = SCNPlane(width: 0.2, height: 0.2)
+            plane.firstMaterial?.diffuse.contents = image
+            plane.firstMaterial?.isDoubleSided = true
+            let iconNode = SCNNode(geometry: plane)
+            // Billboard constraint makes the icon always face the camera
+            let constraint = SCNBillboardConstraint()
+            constraint.freeAxes = .all
+            iconNode.constraints = [constraint]
+            node.addChildNode(iconNode)
+        }
+        return node
+    }
 
     /// Parses OBJ data and creates geometry with vertex colors (camera-sampled or height-based fallback).
     private func buildGeometry(from data: Data, vertexColors: Data?) -> (SCNGeometry, Int)? {
