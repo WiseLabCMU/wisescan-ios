@@ -173,7 +173,7 @@ sequenceDiagram
 |:--|:--|
 | **Status** | ✅ Complete (Phase 1 — Local) |
 | **Description** | Enable two complementary scanning workflows via a single "Extend Scan" button, both powered by `ARWorldMap` relocalization and a ghost-mesh overlay. |
-| **Details** | **Use Case 1 — Time-Series Re-Scan:** Scan the same space again at a later time. The red ghost overlay shows the original capture area; the user re-scans the identical region. The backend pipeline can diff or merge these scans to track changes over time. **Use Case 2 — Adjacent-Space Stitching:** Extend a scan into an adjacent area. The user moves to the edge of the red ghost overlay and begins recording, overlapping slightly with the previous scan. The backend pipeline stitches the chunks together (via COLMAP, RealityCapture, or ICP) to build a single unified model from multiple adjacent sessions. Both use cases share identical device-side mechanics: (1) **Relocalization Setup:** Tapping "Extend Scan" on any scan card loads that scan's `ARWorldMap` as the AR session initialization target. (2) **Ghost Visualization:** The selected scan's mesh renders as a 0.3-opacity red overlay (`UnlitMaterial`). (3) **UI Prompting:** A dismissable toast instructs the user to either re-scan the red region (time-series) or move to its edge (adjacent stitching). (4) **Server-Side Focus:** No on-device mesh merging. The backend receives individual chunked scans with shared ARKit coordinate frames, visual overlap, and raw image data for downstream alignment. |
+| **Details** | **Use Case 1 — Time-Series Re-Scan:** Scan the same space again at a later time. The red ghost overlay shows the original capture area; the user re-scans the identical region. The backend pipeline can diff or merge these scans to track changes over time. **Use Case 2 — Adjacent-Space Stitching:** Extend a scan into an adjacent area. The user moves to the edge of the red ghost overlay and begins recording, overlapping slightly with the previous scan. The backend pipeline stitches the chunks together (via COLMAP, RealityCapture, or ICP) to build a single unified model from multiple adjacent sessions. Both use cases share identical device-side mechanics: (1) **Relocalization Setup:** Tapping "Extend Scan" on any scan card loads that scan's `ARWorldMap` as the AR session initialization target. (2) **Ghost Visualization:** The selected scan's mesh renders as a 0.3-opacity red overlay (`UnlitMaterial`). (3) **UI Prompting:** A dismissable toast instructs the user to either re-scan the red region (time-series) or move to its edge (adjacent stitching). (4) **Session Stability:** Destructive configurations like `.resetTracking` are strictly bypassed, guaranteeing that the ghost overlay anchors flawlessly without natively drifting out of phase between clips. (5) **Server-Side Focus:** No on-device mesh merging. The backend receives individual chunked scans with shared ARKit coordinate frames, visual overlap, and raw image data for downstream alignment. |
 
 ```mermaid
 sequenceDiagram
@@ -186,9 +186,8 @@ sequenceDiagram
     U->>Cap: Tap Record
     Cap->>AR: Start ARSession
     U->>Cap: Tap Stop
-    Cap->>AR: exportWorldMap()
     AR-->>Cap: worldMapURL
-    Cap->>U: "Name this Space" prompt
+    Cap->>U: "Name this Space" prompt (Async/Non-blocking)
     U->>Cap: "Kitchen"
     Cap->>SS: addLocation("Kitchen")
     Cap->>SS: addScan("Scan 1", mesh, worldMap)
@@ -210,14 +209,14 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Person segmentation removes humans from mesh. Face detection blurs faces live and in exports. Depth maps zero out person regions. Persistent toggle via `@AppStorage`. |
+| **Description** | Person segmentation removes humans from mesh. Face detection blurs faces live and in exports. Detected 2D bounding boxes are unprojected against the 16-bit depth buffer to dynamically cluster `[SIMD3]` markers representing captured human heads. These `face_anchors` bypass mesh inclusion and orbit the final preview mesh as red indicators before the server deletes the bodies downstream. Depth maps zero out person regions. Persistent toggle via `@AppStorage`. |
 | **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `privacyFilter`, person segmentation · [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) — `detectFaces()`, `FaceBlurUtil.blurFaces()` · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — privacy-aware frame capture |
 
 ### REQ-005: 3D Scan Preview
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Interactive SceneKit preview with camera-sampled vertex coloring or height-gradient fallback. |
+| **Description** | Interactive SceneKit preview. Uses camera-sampled vertex coloring optimized with a dynamic 150-frame capacity and a precise 150mm *Depth Occlusion Culling* threshold to prevent color bleeding through walls. Parses `scan4d_metadata.json` to spawn 3D Privacy Markers. Falls back to height-gradient coloring. |
 | **Source** | [MeshPreviewView.swift](wisescan-ios/MeshPreviewView.swift) · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `VertexColorAccumulator` |
 
 ### REQ-006: Export Formats & Backend Ingestion
@@ -241,11 +240,11 @@ sequenceDiagram
 | **Description** | Dashboard shows server reachability via HTTP HEAD. Settings for upload URL, overlap %, blur rejection. In-app workflow guide. |
 | **Source** | [DashboardView.swift](wisescan-ios/DashboardView.swift) · [SettingsView.swift](wisescan-ios/SettingsView.swift) |
 
-### REQ-009: RAW Data Capture
+### REQ-009: Scan Capture Data
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Adaptive-rate RGB frames (JPEG), 16-bit depth maps (PNG, mm), and camera poses. Overlap-based frame selection with motion blur rejection and real-time live UI toast warning for sustained excessive motion. |
+| **Description** | Adaptive-rate RGB frames (JPEG), 16-bit depth maps (PNG, mm), and camera poses. Overlap-based frame selection with motion blur rejection and real-time centered UI toast warnings for excessive motion. Features a fully isolated sequential `ioQueue` guaranteeing 1:1 parity between image, depth, and transform JSON drops natively bypassing async races. |
 | **Source** | [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `captureFrame()`, `cameraMovement()` |
 
 ### REQ-010: Coverage Overlay

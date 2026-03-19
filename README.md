@@ -10,10 +10,10 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 
 - **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay and quality HUD.
 - **Scan4D (Extend Scan):** Group scans by Location. Use "Extend Scan" with a red ghost-mesh overlay to either re-scan the same space for time-series updates, or move to the edge and scan adjacent areas for downstream stitching.
-- **Privacy Filtering:** Person segmentation removes humans from mesh; face detection blurs faces on camera feed and in exports.
+- **Privacy Filtering:** Person segmentation removes human geometry from the localized mesh; face detection blurs faces on camera feeds and natively generates unprojected 3D red-alert markers indicating downstream face removal on your mesh preview.
 - **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
 - **Developer Mode:** Toggleable debugging tools including front/back camera switching for testing privacy features, with a persistent banner across all views.
-- **Export & RAW Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses.
+- **Export & Scan Capture Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses governed by motion-blur rejection and overlapping metrics.
 - **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration.
 
 > **Note:** For a comprehensive list of all features, architecture diagrams, and detailed implementation status, please see [REQUIREMENTS.md](REQUIREMENTS.md).
@@ -54,7 +54,7 @@ Each export format includes **only** the data relevant to that format. The filen
 ### Example: Scan4D Export
 ```
 scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
-├── scan4d_metadata.json    # GPS tags, Location ID, & "export_format"
+├── scan4d_metadata.json    # GPS tags, Location ID, `export_format`, & `face_anchors`
 ├── relocalization.worldmap # ARKit spatial anchor for Scan4D rescanning
 ├── images/                 # RGB frames (JPEG, ~2fps adaptive)
 │   ├── frame_00000.jpg

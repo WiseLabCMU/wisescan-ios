@@ -52,14 +52,23 @@ struct MeshPreviewView: UIViewRepresentable {
 
             var faceAnchors: [SCNVector3] = []
             if let scanDir = self.scanDirectoryURL {
-                let jsonURL = scanDir.appendingPathComponent("scan4d_metadata.json")
-                if let data = try? Data(contentsOf: jsonURL),
-                   let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let anchors = dict["face_anchors"] as? [[Float]] {
-                    for a in anchors {
-                        if a.count == 3 {
-                            faceAnchors.append(SCNVector3(a[0], a[1], a[2]))
+                // Check both raw_data/ subdirectory and scan root (mirrors export logic)
+                let candidates = [
+                    scanDir.appendingPathComponent("raw_data").appendingPathComponent("scan4d_metadata.json"),
+                    scanDir.appendingPathComponent("scan4d_metadata.json")
+                ]
+                for jsonURL in candidates {
+                    if let data = try? Data(contentsOf: jsonURL),
+                       let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let anchors = dict["face_anchors"] as? [[String: NSNumber]] {
+                        for a in anchors {
+                            if let x = a["x"]?.floatValue,
+                               let y = a["y"]?.floatValue,
+                               let z = a["z"]?.floatValue {
+                                faceAnchors.append(SCNVector3(x, y, z))
+                            }
                         }
+                        break // found it, stop searching
                     }
                 }
             }
