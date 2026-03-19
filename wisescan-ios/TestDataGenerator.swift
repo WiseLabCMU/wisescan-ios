@@ -5,13 +5,19 @@ import UIKit
 // MARK: - Test Data Generator Fallback
 
 class TestDataGenerator {
+    // Default dimensions matching typical iPhone wide-angle AR camera
+    static let defaultW = 1920
+    static let defaultH = 1440
     static let totalFrames = 36 // 36 frames for a full 360-degree loop (10 degrees per frame)
-    static let w = 800
-    static let h = 600
-    static let fx: Float = 600.0
-    static let fy: Float = 600.0
-    static let cx = Float(w) / 2.0
-    static let cy = Float(h) / 2.0
+    
+    static func intrinsics(w: Int, h: Int) -> (fx: Float, fy: Float, cx: Float, cy: Float) {
+        // Approximate intrinsics: focal length ~75% of width (typical wide-angle AR camera)
+        let fx = Float(w) * 0.75
+        let fy = fx
+        let cx = Float(w) / 2.0
+        let cy = Float(h) / 2.0
+        return (fx, fy, cx, cy)
+    }
     
     // Virtual Green Box (1 meter wide) floating at origin
     static let boxSize: Float = 0.5
@@ -29,7 +35,7 @@ class TestDataGenerator {
         simd_float4(-boxSize,  boxSize,  boxSize, 1)
     ]
     
-    static func generatePoseAndIntrinsics(for index: Int) -> (simd_float4x4, simd_float3x3) {
+    static func generatePoseAndIntrinsics(for index: Int, w: Int = defaultW, h: Int = defaultH) -> (simd_float4x4, simd_float3x3) {
         let frameIndex = index % totalFrames
         let angle = Float(frameIndex) * 2.0 * .pi / Float(totalFrames)
         let camX = sin(angle) * radius
@@ -47,15 +53,16 @@ class TestDataGenerator {
         mat.columns.2 = simd_float4(-forward, 0) // ARKit camera space (-Z forward)
         mat.columns.3 = simd_float4(camX, camY, camZ, 1)
         
-        let intrinsics = simd_float3x3(
+        let (fx, fy, cx, cy) = intrinsics(w: w, h: h)
+        let intrinsicsMat = simd_float3x3(
             simd_float3(fx, 0, 0),
             simd_float3(0, fy, 0),
             simd_float3(cx, cy, 1)
         )
-        return (mat, intrinsics)
+        return (mat, intrinsicsMat)
     }
     
-    static func generateImage(for index: Int, transform: simd_float4x4, intrinsics: simd_float3x3) -> Data {
+    static func generateImage(for index: Int, w: Int = defaultW, h: Int = defaultH, transform: simd_float4x4, intrinsics: simd_float3x3) -> Data {
         let frameIndex = index % totalFrames
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         // Draw into context
@@ -122,7 +129,7 @@ class TestDataGenerator {
         return uiImage.jpegData(compressionQuality: 0.8) ?? Data()
     }
     
-    static func generateDepthMap(for index: Int) -> Data {
+    static func generateDepthMap(for index: Int, w: Int = defaultW, h: Int = defaultH) -> Data {
         // Output format expects 16-bit PNG (millimeters)
         var depthPixels = [UInt16](repeating: 2000, count: w * h) // 2.0 meters flat wall
         

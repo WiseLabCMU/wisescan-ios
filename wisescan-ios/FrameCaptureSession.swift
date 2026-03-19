@@ -126,6 +126,8 @@ class FrameCaptureSession {
 
         // Block to ensure ongoing frame captures complete and write their JSONs
         ioQueue.sync {
+            print("[FrameCapture] Stopping — \(self.frames.count) frames captured (testIMU=\(self.isTestingIMU) testImages=\(self.isTestingImages) testDepth=\(self.isTestingDepth))")
+
             // Write Nerfstudio transforms.json
             self.writeTransformsJSON(to: captureDir)
 
@@ -140,16 +142,23 @@ class FrameCaptureSession {
     }
 
     private func captureFrame(from session: ARSession) {
-        guard let currentFrame = session.currentFrame else { return }
+        let fullyTest = isTestingIMU && isTestingImages && isTestingDepth
+        let currentFrame = session.currentFrame
 
-        // Capture on background thread to avoid blocking AR
-        let pixelBuffer = currentFrame.capturedImage
-        var transform = currentFrame.camera.transform
-        var intrinsics = currentFrame.camera.intrinsics
-        let depthMap = currentFrame.sceneDepth?.depthMap
+        // On Simulator, currentFrame is always nil. Allow fully-synthetic capture to proceed.
+        guard currentFrame != nil || fullyTest else { return }
+
+        // Resolve image dimensions: real camera if available, else test defaults
+        let pixelBuffer = currentFrame?.capturedImage
+        let camW = pixelBuffer.map { CVPixelBufferGetWidth($0) } ?? TestDataGenerator.defaultW
+        let camH = pixelBuffer.map { CVPixelBufferGetHeight($0) } ?? TestDataGenerator.defaultH
+
+        var transform = currentFrame?.camera.transform ?? matrix_identity_float4x4
+        var intrinsics = currentFrame?.camera.intrinsics ?? simd_float3x3(1)
+        let depthMap = currentFrame?.sceneDepth?.depthMap
 
         if isTestingIMU {
-            let (testTransform, testIntrinsics) = TestDataGenerator.generatePoseAndIntrinsics(for: testSequenceIndex)
+            let (testTransform, testIntrinsics) = TestDataGenerator.generatePoseAndIntrinsics(for: testSequenceIndex, w: camW, h: camH)
             transform = testTransform
             intrinsics = testIntrinsics
         }
@@ -159,13 +168,13 @@ class FrameCaptureSession {
             var isBlurred = false
             
             // Skip if tracking is not normal (e.g. limited, excessive motion)
-            if currentFrame.camera.trackingState != .normal {
+            if let frame = currentFrame, frame.camera.trackingState != .normal {
                 isBlurred = true
             }
             
             // Skip if camera moved too fast since last capture (motion blur likely)
-            if !isBlurred, let lastTransform = lastCaptureTransform {
-                let timeDelta = currentFrame.timestamp - lastCaptureTime
+            if !isBlurred, let lastTransform = lastCaptureTransform, let frame = currentFrame {
+                let timeDelta = frame.timestamp - lastCaptureTime
                 if timeDelta > 0 {
                     let movement = cameraMovement(from: lastTransform, to: transform)
                     let velocity = movement / Float(timeDelta)
@@ -206,8 +215,10 @@ class FrameCaptureSession {
         }
 
         lastCaptureTransform = transform
-        lastCaptureTime = currentFrame.timestamp
-        let segBuffer = self.privacyFilter ? currentFrame.segmentationBuffer : nil
+        if let frame = currentFrame {
+            lastCaptureTime = frame.timestamp
+        }
+        let segBuffer = self.privacyFilter ? currentFrame?.segmentationBuffer : nil
 
         let currentIndex = self.testSequenceIndex
         self.testSequenceIndex += 1 // Increment sequence index for synthetic progression
@@ -218,7 +229,7 @@ class FrameCaptureSession {
             // Depth is optional — LiDAR devices get depth, others just capture images + poses
             var validDepthData: Data? = nil
             if self.isTestingDepth {
-                validDepthData = TestDataGenerator.generateDepthMap(for: currentIndex)
+                validDepthData = TestDataGenerator.generateDepthMap(for: currentIndex, w: camW, h: camH)
             } else if let dMap = depthMap {
                 let depthFormat = CVPixelBufferGetPixelFormatType(dMap)
                 guard depthFormat == kCVPixelFormatType_DepthFloat32 else {
@@ -230,9 +241,9 @@ class FrameCaptureSession {
 
             var finalJpegData: Data
             if self.isTestingImages {
-                finalJpegData = TestDataGenerator.generateImage(for: currentIndex, transform: transform, intrinsics: intrinsics)
+                finalJpegData = TestDataGenerator.generateImage(for: currentIndex, w: camW, h: camH, transform: transform, intrinsics: intrinsics)
             } else {
-                guard let jpegData = self.pixelBufferToJPEG(pixelBuffer) else {
+                guard let pBuf = pixelBuffer, let jpegData = self.pixelBufferToJPEG(pBuf) else {
                     return
                 }
                 var tempJpegData = jpegData
@@ -246,8 +257,8 @@ class FrameCaptureSession {
                     if !centers.isEmpty, let dMap = depthMap {
                     let depthWidth = CVPixelBufferGetWidth(dMap)
                     let depthHeight = CVPixelBufferGetHeight(dMap)
-                    let imgWidth = Float(CVPixelBufferGetWidth(pixelBuffer))
-                    let imgHeight = Float(CVPixelBufferGetHeight(pixelBuffer))
+                    let imgWidth = Float(camW)
+                    let imgHeight = Float(camH)
                     
                     CVPixelBufferLockBaseAddress(dMap, .readOnly)
                     if let base = CVPixelBufferGetBaseAddress(dMap)?.assumingMemoryBound(to: Float32.self) {
@@ -315,12 +326,9 @@ class FrameCaptureSession {
                     try depthData.write(to: depthPath, options: .atomic)
                 }
                 
-                let imgWidth = CVPixelBufferGetWidth(pixelBuffer)
-                let imgHeight = CVPixelBufferGetHeight(pixelBuffer)
-                
                 if self.globalIntrinsics == nil {
-                    self.imageWidth = imgWidth
-                    self.imageHeight = imgHeight
+                    self.imageWidth = camW
+                    self.imageHeight = camH
                     self.globalIntrinsics = CameraIntrinsics(
                         fx: intrinsics[0][0],
                         fy: intrinsics[1][1],
