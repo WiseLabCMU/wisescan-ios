@@ -233,7 +233,7 @@ class FrameCaptureSession {
                             let cy = intrinsics[2][1]
                             
                             let x_cam = (Float(uv.x) * imgWidth - cx) * z / fx
-                            let y_cam = (Float(uv.y) * imgHeight - cy) * z / fy
+                            let y_cam = (cy - Float(uv.y) * imgHeight) * z / fy
                             let z_cam = -z
                             
                             let localPoint = SIMD4<Float>(x_cam, y_cam, z_cam, 1.0)

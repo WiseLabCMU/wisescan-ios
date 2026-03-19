@@ -32,13 +32,37 @@ struct FaceBlurOverlay: View {
         .onDisappear { stopDetection() }
     }
 
-    /// Convert Vision's normalized rect (origin bottom-left) to screen coordinates.
+    /// Convert Vision's normalized rect (origin bottom-left, corrected for .right orientation)
+    /// to screen coordinates, accounting for AR camera aspect-fill cropping.
     private func visionRectToScreen(_ rect: CGRect, in size: CGSize) -> CGRect {
-        let x = rect.origin.x * size.width
-        let y = (1.0 - rect.origin.y - rect.height) * size.height
-        let w = rect.width * size.width
-        let h = rect.height * size.height
-        // Pad the rectangle slightly for better coverage
+        // The AR camera feed (4:3 landscape) is aspect-filled into the view.
+        // Vision's normalized coords span the full camera image, but the view
+        // may crop top/bottom or left/right. Compute the visible offset.
+        let cameraAspect: CGFloat = 4.0 / 3.0 // standard iPhone LiDAR camera
+        let viewAspect = size.width / size.height
+
+        var scaleX: CGFloat = 1.0
+        var scaleY: CGFloat = 1.0
+        var offsetX: CGFloat = 0.0
+        var offsetY: CGFloat = 0.0
+
+        if viewAspect < cameraAspect {
+            // View is taller than camera → height fills, width is cropped
+            scaleY = size.height
+            scaleX = size.height * cameraAspect
+            offsetX = (scaleX - size.width) / 2.0
+        } else {
+            // View is wider than camera → width fills, height is cropped
+            scaleX = size.width
+            scaleY = size.width / cameraAspect
+            offsetY = (scaleY - size.height) / 2.0
+        }
+
+        let x = rect.origin.x * scaleX - offsetX
+        let y = (1.0 - rect.origin.y - rect.height) * scaleY - offsetY
+        let w = rect.width * scaleX
+        let h = rect.height * scaleY
+
         let padding: CGFloat = 8
         return CGRect(x: x - padding, y: y - padding, width: w + padding * 2, height: h + padding * 2)
     }
