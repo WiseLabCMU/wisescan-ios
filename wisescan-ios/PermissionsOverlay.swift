@@ -52,7 +52,8 @@ struct PermissionsOverlay: View {
             .onChange(of: scenePhase) { oldPhase, newPhase in
                 if newPhase == .active {
                     cameraStatus = AVCaptureDevice.authorizationStatus(for: .video)
-                    locationManager.authorizationStatus = locationManager.authorizationStatus // forces publish
+                    // Re-read from the underlying CLLocationManager to trigger @Observable update
+                    locationManager.refreshAuthorizationStatus()
                 }
             }
         }

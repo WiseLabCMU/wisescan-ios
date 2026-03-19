@@ -130,19 +130,10 @@ struct ScansListView: View {
 
 struct LocationGridTile: View {
     let location: ScanLocation
+    @State private var thumbnailImage: UIImage? = nil
 
     var latestScan: CapturedScan? {
         location.scans.sorted(by: { $0.capturedAt > $1.capturedAt }).first
-    }
-
-    var thumbnailImage: UIImage? {
-        guard let latest = latestScan else { return nil }
-        let thumbURL = latest.thumbnailURL
-        if FileManager.default.fileExists(atPath: thumbURL.path),
-           let data = try? Data(contentsOf: thumbURL) {
-            return UIImage(data: data)
-        }
-        return nil
     }
 
     var body: some View {
@@ -193,6 +184,16 @@ struct LocationGridTile: View {
             RoundedRectangle(cornerRadius: 16)
                 .stroke(Color.white.opacity(0.1), lineWidth: 1)
         )
+        .task(id: latestScan?.id) {
+            // Load thumbnail asynchronously to avoid main-thread I/O (#7)
+            guard let latest = latestScan else { thumbnailImage = nil; return }
+            let url = latest.thumbnailURL
+            thumbnailImage = await Task.detached(priority: .utility) {
+                guard FileManager.default.fileExists(atPath: url.path),
+                      let data = try? Data(contentsOf: url) else { return nil as UIImage? }
+                return UIImage(data: data)
+            }.value
+        }
     }
 }
 
@@ -426,18 +427,22 @@ struct ScanCard: View {
         return "\(count)"
     }
 
+    /// Generates a consistent export filename for both upload and save-to-files.
+    private func makeExportFilename(format: ExportFormat) -> String {
+        let locationName = scan.location?.name.replacingOccurrences(of: " ", with: "_") ?? "Unknown_Location"
+        let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
+        let formatStr = format.rawValue.lowercased()
+        let timestamp = Int(scan.capturedAt.timeIntervalSince1970)
+        let fileExt = format.fileExtension
+        return "scan4d_\(locationName)_\(scanName)_\(formatStr)_\(timestamp)_\(scan.id.uuidString.prefix(8)).\(fileExt)"
+    }
+
     private func uploadScan() {
         scan.uploadStatus = .zipping
         onUpdate(scan)
 
-        let locationName = scan.location?.name.replacingOccurrences(of: " ", with: "_") ?? "Unknown_Location"
-        let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
         let format = selectedFormat
-        let formatStr = format.rawValue.lowercased()
-        
-        let timestamp = Int(scan.capturedAt.timeIntervalSince1970)
-        let fileExt = format.fileExtension
-        let filename = "scan4d_\(locationName)_\(scanName)_\(formatStr)_\(timestamp)_\(scan.id.uuidString.prefix(8)).\(fileExt)"
+        let filename = makeExportFilename(format: format)
 
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         guard let url = URL(string: baseURLString + filename) else {
@@ -513,14 +518,8 @@ struct ScanCard: View {
         scan.uploadStatus = .zipping
         onUpdate(scan)
 
-        let locationName = scan.location?.name.replacingOccurrences(of: " ", with: "_") ?? "Unknown_Location"
-        let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
         let format = selectedFormat
-        let formatStr = format.rawValue.lowercased()
-        
-        let timestamp = Int(scan.capturedAt.timeIntervalSince1970)
-        let fileExt = format.fileExtension
-        let filename = "scan4d_\(locationName)_\(scanName)_\(formatStr)_\(timestamp)_\(scan.id.uuidString.prefix(8)).\(fileExt)"
+        let filename = makeExportFilename(format: format)
 
         let scanDir = scan.scanDirectory
         print("[SaveToFiles] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
@@ -578,8 +577,12 @@ struct ScanCard: View {
                 let src = rawDataDir.appendingPathComponent(item)
                 let dst = dir.appendingPathComponent(item)
                 if fm.fileExists(atPath: src.path) {
-                    try? fm.copyItem(at: src, to: dst)
-                    print("[prepareExport] ✓ copied \(item)")
+                    do {
+                        try fm.copyItem(at: src, to: dst)
+                        print("[prepareExport] ✓ copied \(item)")
+                    } catch {
+                        print("[prepareExport] ✗ failed to copy \(item): \(error.localizedDescription)")
+                    }
                 } else {
                     print("[prepareExport] ✗ missing \(item) at \(src.path)")
                 }
@@ -619,12 +622,20 @@ struct ScanCard: View {
             // scan4d_metadata.json + relocalization.worldmap + full Polycam payload
             return withStagingDir { stagingDir in
                 if let metaURL = findMetadata() {
-                    try? fm.copyItem(at: metaURL, to: stagingDir.appendingPathComponent("scan4d_metadata.json"))
+                    do {
+                        try fm.copyItem(at: metaURL, to: stagingDir.appendingPathComponent("scan4d_metadata.json"))
+                    } catch {
+                        print("[prepareExport] Failed to copy metadata: \(error.localizedDescription)")
+                    }
                 }
-                try? fm.copyItem(
-                    at: scanDir.appendingPathComponent("arworldmap.map"),
-                    to: stagingDir.appendingPathComponent("relocalization.worldmap")
-                )
+                do {
+                    try fm.copyItem(
+                        at: scanDir.appendingPathComponent("arworldmap.map"),
+                        to: stagingDir.appendingPathComponent("relocalization.worldmap")
+                    )
+                } catch {
+                    print("[prepareExport] Failed to copy worldmap: \(error.localizedDescription)")
+                }
                 stagePolycamPayload(to: stagingDir)
                 return zipStaging(stagingDir)
             }
@@ -639,9 +650,17 @@ struct ScanCard: View {
         case .raw:
             // Nerfstudio format: images/, depth/, transforms.json
             return withStagingDir { stagingDir in
-                try? fm.copyItem(at: rawDataDir.appendingPathComponent("images"), to: stagingDir.appendingPathComponent("images"))
-                try? fm.copyItem(at: rawDataDir.appendingPathComponent("depth"), to: stagingDir.appendingPathComponent("depth"))
-                try? fm.copyItem(at: rawDataDir.appendingPathComponent("transforms.json"), to: stagingDir.appendingPathComponent("transforms.json"))
+                let copyItems = [("images", "images"), ("depth", "depth"), ("transforms.json", "transforms.json")]
+                for (src, dst) in copyItems {
+                    do {
+                        try fm.copyItem(
+                            at: rawDataDir.appendingPathComponent(src),
+                            to: stagingDir.appendingPathComponent(dst)
+                        )
+                    } catch {
+                        print("[prepareExport] RAW: failed to copy \(src): \(error.localizedDescription)")
+                    }
+                }
                 return zipStaging(stagingDir)
             }
 

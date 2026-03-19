@@ -7,42 +7,22 @@ enum MeshConverter {
 
     // MARK: - OBJ → PLY
 
-    /// Converts an OBJ mesh + colors.bin (per-vertex RGB bytes) to an ASCII PLY file.
+    /// Converts an OBJ mesh + colors.bin (per-vertex SIMD4<Float> RGBA) to an ASCII PLY file.
     /// Returns `true` on success.
     static func objToPLY(objURL: URL, colorsURL: URL, outputURL: URL) -> Bool {
-        guard let objData = try? String(contentsOf: objURL, encoding: .utf8) else {
-            print("[MeshConverter] Failed to read OBJ file")
+        guard let objData = try? Data(contentsOf: objURL),
+              let parsed = MeshParser.parseOBJ(from: objData) else {
+            print("[MeshConverter] Failed to read/parse OBJ file")
             return false
         }
 
-        // Parse vertices and faces from OBJ
-        var vertices: [(Float, Float, Float)] = []
-        var faces: [[Int]] = []
+        let vertices = parsed.vertices
+        let faces = parsed.faces
 
-        for line in objData.components(separatedBy: .newlines) {
-            let parts = line.trimmingCharacters(in: .whitespaces).components(separatedBy: .whitespaces)
-            guard !parts.isEmpty else { continue }
-
-            if parts[0] == "v" && parts.count >= 4 {
-                if let x = Float(parts[1]), let y = Float(parts[2]), let z = Float(parts[3]) {
-                    vertices.append((x, y, z))
-                }
-            } else if parts[0] == "f" && parts.count >= 4 {
-                // OBJ face indices are 1-based and may contain v/vt/vn format
-                let indices = parts[1...].compactMap { component -> Int? in
-                    let idx = component.components(separatedBy: "/").first ?? component
-                    guard let i = Int(idx) else { return nil }
-                    return i - 1 // Convert to 0-based
-                }
-                if indices.count >= 3 {
-                    faces.append(indices)
-                }
-            }
-        }
-
-        // Load vertex colors (3 bytes per vertex: R, G, B)
+        // Load vertex colors (SIMD4<Float> per vertex: R, G, B, A — 16 bytes each)
         let colorData = try? Data(contentsOf: colorsURL)
-        let hasColors = colorData != nil && colorData!.count >= vertices.count * 3
+        let stride = MemoryLayout<SIMD4<Float>>.stride
+        let hasColors = colorData != nil && colorData!.count >= vertices.count * stride
 
         // Write ASCII PLY
         var ply = "ply\n"
@@ -63,19 +43,23 @@ enum MeshConverter {
         // Vertex data
         for (i, v) in vertices.enumerated() {
             if hasColors, let colors = colorData {
-                let r = colors[i * 3]
-                let g = colors[i * 3 + 1]
-                let b = colors[i * 3 + 2]
-                ply += "\(v.0) \(v.1) \(v.2) \(r) \(g) \(b)\n"
+                // Read SIMD4<Float> and convert to UInt8 [0..255]
+                let offset = i * stride
+                let rgba: SIMD4<Float> = colors.withUnsafeBytes { buf in
+                    buf.load(fromByteOffset: offset, as: SIMD4<Float>.self)
+                }
+                let r = UInt8(min(max(rgba.x * 255.0, 0), 255))
+                let g = UInt8(min(max(rgba.y * 255.0, 0), 255))
+                let b = UInt8(min(max(rgba.z * 255.0, 0), 255))
+                ply += "\(v.x) \(v.y) \(v.z) \(r) \(g) \(b)\n"
             } else {
-                ply += "\(v.0) \(v.1) \(v.2)\n"
+                ply += "\(v.x) \(v.y) \(v.z)\n"
             }
         }
 
         // Face data
         for face in faces {
-            let indexStr = face.map { String($0) }.joined(separator: " ")
-            ply += "\(face.count) \(indexStr)\n"
+            ply += "3 \(face.0) \(face.1) \(face.2)\n"
         }
 
         do {

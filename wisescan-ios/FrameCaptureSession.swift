@@ -36,6 +36,7 @@ class FrameCaptureSession {
     private var activeLocationId: UUID?
 
     private let ioQueue = DispatchQueue(label: "com.wisescan.capture.io", qos: .userInitiated)
+    private let ciContext = CIContext()  // Reuse across frames to avoid GPU pipeline re-init
 
     struct FrameData {
         let index: Int
@@ -141,8 +142,7 @@ class FrameCaptureSession {
                 if timeDelta > 0 {
                     let movement = cameraMovement(from: lastTransform, to: transform)
                     let velocity = movement / Float(timeDelta)
-                    // If moving faster than ~0.5m/s, likely blurred
-                    if velocity > 0.5 {
+                    if velocity > AppDefaults.motionBlurVelocity {
                         isBlurred = true
                     }
                 }
@@ -153,7 +153,7 @@ class FrameCaptureSession {
                 consecutiveBlurredFrames += 1
                 
                 // If we get several blurred frames in a row, trigger the warning
-                if consecutiveBlurredFrames >= 5 && !isBlurWarningActive {
+                if consecutiveBlurredFrames >= AppDefaults.consecutiveBlurThreshold && !isBlurWarningActive {
                     DispatchQueue.main.async {
                         self.isBlurWarningActive = true
                         self.resetBlurWarningTimer()
@@ -172,7 +172,7 @@ class FrameCaptureSession {
             // Higher overlap = smaller movement threshold = more frames
             // overlapMax 100% → threshold ~0.01m (capture almost everything)
             // overlapMax 10%  → threshold ~0.15m (only distinct views)
-            let threshold = Float(0.15 * (1.0 - overlapMax / 100.0)) + 0.01
+            let threshold = Float(Double(AppDefaults.overlapBaseThreshold) * (1.0 - overlapMax / 100.0)) + AppDefaults.overlapMinThreshold
             if movement < threshold {
                 return // skip — too much overlap with previous frame
             }
@@ -185,8 +185,16 @@ class FrameCaptureSession {
         ioQueue.async { [weak self] in
             guard let self = self, let imagesDir = self.imagesDir, let depthDir = self.depthDir else { return }
 
-            guard let dMap = depthMap,
-                  let jpegData = self.pixelBufferToJPEG(pixelBuffer),
+            guard let dMap = depthMap else { return }
+
+            // Guard: verify depth buffer is Float32 format
+            let depthFormat = CVPixelBufferGetPixelFormatType(dMap)
+            guard depthFormat == kCVPixelFormatType_DepthFloat32 else {
+                print("[FrameCapture] Unexpected depth format: \(depthFormat), skipping frame")
+                return
+            }
+
+            guard let jpegData = self.pixelBufferToJPEG(pixelBuffer),
                   let depthData = self.depthMapToPNG16(dMap, personMask: segBuffer) else {
                 return
             }
@@ -240,10 +248,10 @@ class FrameCaptureSession {
                             let worldPoint = transform * localPoint
                             let point3D = SIMD3<Float>(worldPoint.x, worldPoint.y, worldPoint.z)
                             
-                            // Cluster merging (0.5m ~ human head diameter)
+                            // Cluster merging — accumulate locally, assign to published property on main
                             var found = false
                             for i in 0..<self.faceAnchors.count {
-                                if simd_distance(self.faceAnchors[i], point3D) < 0.5 {
+                                if simd_distance(self.faceAnchors[i], point3D) < AppDefaults.faceClusterThresholdMeters {
                                     self.faceAnchors[i] = (self.faceAnchors[i] + point3D) * 0.5
                                     found = true
                                     break
@@ -431,10 +439,9 @@ class FrameCaptureSession {
 
     private func pixelBufferToJPEG(_ pixelBuffer: CVPixelBuffer) -> Data? {
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = CIContext()
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return nil }
         let uiImage = UIImage(cgImage: cgImage)
-        return uiImage.jpegData(compressionQuality: 0.85)
+        return uiImage.jpegData(compressionQuality: AppDefaults.jpegCompressionQuality)
     }
 
     private func depthMapToPNG16(_ depthBuffer: CVPixelBuffer, personMask: CVPixelBuffer? = nil) -> Data? {
@@ -531,7 +538,7 @@ class FrameCaptureSession {
     
     private func resetBlurWarningTimer() {
         blurWarningTimer?.invalidate()
-        blurWarningTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+        blurWarningTimer = Timer.scheduledTimer(withTimeInterval: AppDefaults.blurWarningTimeout, repeats: false) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.isBlurWarningActive = false
             }

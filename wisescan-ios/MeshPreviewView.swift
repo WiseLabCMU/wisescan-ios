@@ -86,10 +86,10 @@ struct MeshPreviewView: UIViewRepresentable {
                     )
                     node.position = SCNVector3(-center.x, -center.y, -center.z)
 
-                    // Add privacy markers
+                    // Add privacy markers (raw anchor position since the parent node is already centered)
                     for anchor in faceAnchors {
                         let markerNode = self.createPrivacyMarker()
-                        markerNode.position = SCNVector3(anchor.x - center.x, anchor.y - center.y, anchor.z - center.z)
+                        markerNode.position = SCNVector3(anchor.x, anchor.y, anchor.z)
                         node.addChildNode(markerNode)
                     }
 
@@ -143,34 +143,19 @@ struct MeshPreviewView: UIViewRepresentable {
 
     /// Parses OBJ data and creates geometry with vertex colors (camera-sampled or height-based fallback).
     private func buildGeometry(from data: Data, vertexColors: Data?) -> (SCNGeometry, Int)? {
-        guard let objString = String(data: data, encoding: .utf8) else { return nil }
+        guard let parsed = MeshParser.parseOBJ(from: data) else { return nil }
 
-        var vertices: [SCNVector3] = []
+        let vertices: [SCNVector3] = parsed.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
         var indices: [UInt32] = []
+        for face in parsed.faces {
+            indices.append(contentsOf: [face.0, face.1, face.2])
+        }
+
         var minY: Float = .greatestFiniteMagnitude
         var maxY: Float = -.greatestFiniteMagnitude
-
-        for line in objString.split(separator: "\n") {
-            let parts = line.split(separator: " ")
-            guard let prefix = parts.first else { continue }
-
-            if prefix == "v" && parts.count >= 4 {
-                if let x = Float(parts[1]),
-                   let y = Float(parts[2]),
-                   let z = Float(parts[3]) {
-                    vertices.append(SCNVector3(x, y, z))
-                    minY = min(minY, y)
-                    maxY = max(maxY, y)
-                }
-            } else if prefix == "f" && parts.count >= 4 {
-                if let i1 = UInt32(parts[1]),
-                   let i2 = UInt32(parts[2]),
-                   let i3 = UInt32(parts[3]) {
-                    indices.append(i1 - 1)
-                    indices.append(i2 - 1)
-                    indices.append(i3 - 1)
-                }
-            }
+        for v in parsed.vertices {
+            minY = min(minY, v.y)
+            maxY = max(maxY, v.y)
         }
 
         guard !vertices.isEmpty && !indices.isEmpty else { return nil }

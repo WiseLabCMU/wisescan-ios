@@ -75,7 +75,10 @@ class CapturedScan {
 
     // Configurable base Directory
     @Transient var scanDirectory: URL {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            // Fallback to temp directory if Documents is somehow unavailable
+            return FileManager.default.temporaryDirectory.appendingPathComponent("Scans").appendingPathComponent(id.uuidString)
+        }
         let locId = location?.id.uuidString ?? "unknown_location"
         return docs.appendingPathComponent("Scans").appendingPathComponent(locId).appendingPathComponent(id.uuidString)
     }
@@ -365,14 +368,9 @@ class ScanFileManager {
             print("Failed to save scan files to disk: \(error)")
         }
 
-        enforceRetentionPolicy(location: targetLocation, context: context)
         try? context.save()
 
         return newScan
-    }
-
-    func enforceRetentionPolicy(location: ScanLocation, context: ModelContext) {
-        // Keep Last 2 Rule removed - users can now keep unlimited scans for adjacent large-space mapping
     }
 
     func deleteScan(_ scan: CapturedScan, context: ModelContext) {

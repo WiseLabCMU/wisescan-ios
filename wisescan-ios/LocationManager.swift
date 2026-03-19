@@ -36,6 +36,15 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         manager.stopUpdatingHeading()
     }
 
+    /// Re-reads authorization from the underlying CLLocationManager.
+    /// Used by PermissionsOverlay to trigger an @Observable update when returning from Settings.
+    func refreshAuthorizationStatus() {
+        let current = manager.authorizationStatus
+        if current != authorizationStatus {
+            authorizationStatus = current
+        }
+    }
+
     // MARK: - CLLocationManagerDelegate
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {

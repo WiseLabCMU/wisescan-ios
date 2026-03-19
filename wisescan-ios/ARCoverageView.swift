@@ -43,24 +43,7 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Background parse the ghost mesh if provided (Scan4D extend scan)
         if let ghostData = initialGhostMeshData {
-            DispatchQueue.global(qos: .userInitiated).async {
-                if let resource = MeshParser.generateMeshResource(from: ghostData) {
-                    DispatchQueue.main.async {
-                        var material = UnlitMaterial(color: .red)
-                        material.blending = .transparent(opacity: 0.3)
-                        let modelEntity = ModelEntity(mesh: resource, materials: [material])
-                        let anchorEntity = AnchorEntity(world: .zero)
-                        anchorEntity.addChild(modelEntity)
-                        context.coordinator.ghostAnchorEntity = anchorEntity
-                        
-                        // Prevent race condition: If tracking is already normal before parser finished, add it now.
-                        if arView.session.currentFrame?.camera.trackingState == .normal && !context.coordinator.hasAddedGhostMesh {
-                            arView.scene.addAnchor(anchorEntity)
-                            context.coordinator.hasAddedGhostMesh = true
-                        }
-                    }
-                }
-            }
+            Self.loadGhostMesh(data: ghostData, coordinator: context.coordinator, arView: arView)
         }
 
         DispatchQueue.main.async {
@@ -103,23 +86,7 @@ struct ARCoverageView: UIViewRepresentable {
                 uiView.session.run(config, options: runOptions)
 
                 // Background parse the new ghost mesh
-                DispatchQueue.global(qos: .userInitiated).async {
-                    if let resource = MeshParser.generateMeshResource(from: ghostData) {
-                        DispatchQueue.main.async {
-                            var material = UnlitMaterial(color: .red)
-                            material.blending = .transparent(opacity: 0.3)
-                            let modelEntity = ModelEntity(mesh: resource, materials: [material])
-                            let anchorEntity = AnchorEntity(world: .zero)
-                            anchorEntity.addChild(modelEntity)
-                            context.coordinator.ghostAnchorEntity = anchorEntity
-
-                            if uiView.session.currentFrame?.camera.trackingState == .normal && !context.coordinator.hasAddedGhostMesh {
-                                uiView.scene.addAnchor(anchorEntity)
-                                context.coordinator.hasAddedGhostMesh = true
-                            }
-                        }
-                    }
-                }
+                Self.loadGhostMesh(data: ghostData, coordinator: context.coordinator, arView: uiView)
             }
         }
 
@@ -144,23 +111,7 @@ struct ARCoverageView: UIViewRepresentable {
 
                 // Background parse the ghost mesh if we didn't already load it in nominal mode
                 if let ghostData = initialGhostMeshData, context.coordinator.ghostAnchorEntity == nil {
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        if let resource = MeshParser.generateMeshResource(from: ghostData) {
-                            DispatchQueue.main.async {
-                                var material = UnlitMaterial(color: .red)
-                                material.blending = .transparent(opacity: 0.3)
-                                let modelEntity = ModelEntity(mesh: resource, materials: [material])
-                                let anchorEntity = AnchorEntity(world: .zero)
-                                anchorEntity.addChild(modelEntity)
-                                context.coordinator.ghostAnchorEntity = anchorEntity
-                                
-                                if uiView.session.currentFrame?.camera.trackingState == .normal && !context.coordinator.hasAddedGhostMesh {
-                                    uiView.scene.addAnchor(anchorEntity)
-                                    context.coordinator.hasAddedGhostMesh = true
-                                }
-                            }
-                        }
-                    }
+                    Self.loadGhostMesh(data: ghostData, coordinator: context.coordinator, arView: uiView)
                 }
             } else {
                 // Downgrade to nominal: camera passthrough only
@@ -203,6 +154,28 @@ struct ARCoverageView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
+    }
+
+    // MARK: - Ghost Mesh Helper
+
+    /// Loads ghost mesh OBJ data on a background queue, adds it to the AR scene when ready.
+    private static func loadGhostMesh(data: Data, coordinator: Coordinator, arView: ARView) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let resource = MeshParser.generateMeshResource(from: data) else { return }
+            DispatchQueue.main.async {
+                var material = UnlitMaterial(color: .red)
+                material.blending = .transparent(opacity: 0.3)
+                let modelEntity = ModelEntity(mesh: resource, materials: [material])
+                let anchorEntity = AnchorEntity(world: .zero)
+                anchorEntity.addChild(modelEntity)
+                coordinator.ghostAnchorEntity = anchorEntity
+
+                if arView.session.currentFrame?.camera.trackingState == .normal && !coordinator.hasAddedGhostMesh {
+                    arView.scene.addAnchor(anchorEntity)
+                    coordinator.hasAddedGhostMesh = true
+                }
+            }
+        }
     }
 
     // MARK: - Coordinator
@@ -438,6 +411,8 @@ struct ARCoverageView: UIViewRepresentable {
             let faceBytes = faces.bytesPerIndex * faces.indexCountPerPrimitive
 
             for i in 0..<faces.count {
+                // Bounds check: validate face byte access pattern
+                guard faces.bytesPerIndex == 4, faces.indexCountPerPrimitive == 3 else { break }
                 let pointer = faces.buffer.contents().advanced(by: i * faceBytes)
                 let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
 
@@ -469,248 +444,4 @@ struct ARCoverageView: UIViewRepresentable {
         return (data, totalVertices, totalFaces)
     }
 
-    /// Accumulates vertex colors from camera frames during recording for preview rendering.
-    class VertexColorAccumulator {
-
-        // MARK: - Export Helpers
-
-        /// Exports the current ARWorldMap to a local URL.
-        static func exportWorldMap(from session: ARSession?, completion: @escaping (URL?) -> Void) {
-            guard let session = session else {
-                completion(nil)
-                return
-            }
-
-            session.getCurrentWorldMap { worldMap, error in
-                guard let map = worldMap, error == nil else {
-                    print("Error getting ARWorldMap: \(String(describing: error))")
-                    completion(nil)
-                    return
-                }
-
-                do {
-                    let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
-                    let filename = "worldmap_\(UUID().uuidString.prefix(8)).worldmap"
-                    let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-                    try data.write(to: fileURL)
-                    completion(fileURL)
-                } catch {
-                    print("Error saving ARWorldMap: \(error)")
-                    completion(nil)
-                }
-            }
-        }
-
-        /// Colorize OBJ mesh vertices using saved camera frames (post-processing).
-        /// Reads saved JPEG images and camera JSON transforms from `rawDataDir`,
-        /// parses vertices from `objData`, and projects each vertex into camera frames
-        /// to sample RGB color.
-        static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?) -> Data? {
-            guard let rawDir = rawDataDir else { return nil }
-            let fm = FileManager.default
-
-            // Parse OBJ vertices
-            guard let objString = String(data: objData, encoding: .utf8) else { return nil }
-            var vertices: [SIMD3<Float>] = []
-            for line in objString.components(separatedBy: .newlines) {
-                let parts = line.split(separator: " ")
-                guard parts.count >= 4, parts[0] == "v" else { continue }
-                if let x = Float(parts[1]), let y = Float(parts[2]), let z = Float(parts[3]) {
-                    vertices.append(SIMD3<Float>(x, y, z))
-                }
-            }
-            guard !vertices.isEmpty else { return nil }
-
-            // Find saved camera JSONs
-            let camerasDir = rawDir.appendingPathComponent("cameras")
-            let imagesDir = rawDir.appendingPathComponent("images")
-            guard fm.fileExists(atPath: camerasDir.path),
-                  fm.fileExists(atPath: imagesDir.path) else { return nil }
-
-            let cameraFiles = (try? fm.contentsOfDirectory(at: camerasDir, includingPropertiesForKeys: nil))?
-                .filter { $0.pathExtension == "json" }
-                .sorted { $0.lastPathComponent < $1.lastPathComponent } ?? []
-
-            guard !cameraFiles.isEmpty else { return nil }
-
-            // Sample up to 150 evenly-spaced frames for high coverage
-            let maxFrames = min(cameraFiles.count, 150)
-            let stride = max(1, cameraFiles.count / maxFrames)
-            let sampledFiles = Swift.stride(from: 0, to: cameraFiles.count, by: stride).prefix(maxFrames).map { cameraFiles[$0] }
-
-            // Initialize color array (gray default for unsampled vertices)
-            var colors = [SIMD3<Float>](repeating: SIMD3<Float>(0.5, 0.5, 0.5), count: vertices.count)
-            var colored = [Bool](repeating: false, count: vertices.count)
-            var hasRunDeveloperTest = false
-
-            for cameraFile in sampledFiles {
-                // Parse camera JSON (Polycam format with t_XX transform and intrinsics)
-                guard let jsonData = try? Data(contentsOf: cameraFile),
-                      let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { continue }
-
-                guard let fx = (json["fx"] as? NSNumber)?.floatValue,
-                      let fy = (json["fy"] as? NSNumber)?.floatValue,
-                      let cx = (json["cx"] as? NSNumber)?.floatValue,
-                      let cy = (json["cy"] as? NSNumber)?.floatValue,
-                      let imgW = (json["width"] as? NSNumber)?.intValue,
-                      let imgH = (json["height"] as? NSNumber)?.intValue else { continue }
-
-                // Reconstruct 4x4 camera-to-world transform (row-major t_XX values)
-                guard let t00 = (json["t_00"] as? NSNumber)?.floatValue,
-                      let t01 = (json["t_01"] as? NSNumber)?.floatValue,
-                      let t02 = (json["t_02"] as? NSNumber)?.floatValue,
-                      let t03 = (json["t_03"] as? NSNumber)?.floatValue,
-                      let t10 = (json["t_10"] as? NSNumber)?.floatValue,
-                      let t11 = (json["t_11"] as? NSNumber)?.floatValue,
-                      let t12 = (json["t_12"] as? NSNumber)?.floatValue,
-                      let t13 = (json["t_13"] as? NSNumber)?.floatValue,
-                      let t20 = (json["t_20"] as? NSNumber)?.floatValue,
-                      let t21 = (json["t_21"] as? NSNumber)?.floatValue,
-                      let t22 = (json["t_22"] as? NSNumber)?.floatValue,
-                      let t23 = (json["t_23"] as? NSNumber)?.floatValue else { continue }
-
-                // Camera-to-world (row-major → column-major for simd)
-                let cam2World = simd_float4x4(columns: (
-                    SIMD4<Float>(t00, t10, t20, 0),
-                    SIMD4<Float>(t01, t11, t21, 0),
-                    SIMD4<Float>(t02, t12, t22, 0),
-                    SIMD4<Float>(t03, t13, t23, 1)
-                ))
-                // World-to-camera
-                let world2Cam = cam2World.inverse
-
-                // Developer Diagnostic Test (runs once per coloring pass if enabled)
-                if AppDefaults.developerMode && AppDefaults.debugVertexMapping && !hasRunDeveloperTest {
-                    runDeveloperMappingTest(fx: fx, fy: fy, cx: cx, cy: cy, cam2World: cam2World, world2Cam: world2Cam)
-                    hasRunDeveloperTest = true
-                }
-
-                // Load corresponding image
-                guard let imagePath = json["image_path"] as? String else { continue }
-                let imageURL = rawDir.appendingPathComponent(imagePath)
-                guard let imageData = try? Data(contentsOf: imageURL),
-                      let uiImage = UIImage(data: imageData),
-                      let cgImage = uiImage.cgImage else { continue }
-
-                // Get pixel data
-                let width = cgImage.width
-                let height = cgImage.height
-                guard let pixelData = cgImage.dataProvider?.data,
-                      let ptr = CFDataGetBytePtr(pixelData) else { continue }
-                let bytesPerRow = cgImage.bytesPerRow
-                let bytesPerPixel = cgImage.bitsPerPixel / 8
-
-                // Load corresponding depth image for occlusion testing
-                var depthPtr: UnsafePointer<UInt8>? = nil
-                var depthWidth = 0
-                var depthHeight = 0
-                var depthBytesPerRow = 0
-                var depthPixelDataBuffer: CFData? = nil
-                var isDepthLittleEndian = false
-                
-                if let depthPath = json["depth_path"] as? String {
-                    let depthURL = rawDir.appendingPathComponent(depthPath)
-                    if let depthData = try? Data(contentsOf: depthURL),
-                       let depthImage = UIImage(data: depthData),
-                       let cgDepth = depthImage.cgImage,
-                       cgDepth.bitsPerPixel == 16,
-                       let cgDepthData = cgDepth.dataProvider?.data {
-                        depthPixelDataBuffer = cgDepthData
-                        depthPtr = CFDataGetBytePtr(cgDepthData)
-                        depthWidth = cgDepth.width
-                        depthHeight = cgDepth.height
-                        depthBytesPerRow = cgDepth.bytesPerRow
-                        let info = cgDepth.bitmapInfo.rawValue
-                        isDepthLittleEndian = (info & CGBitmapInfo.byteOrder16Little.rawValue) != 0 || (info & CGBitmapInfo.byteOrder32Little.rawValue) != 0
-                    }
-                }
-
-                // Project each vertex into this camera frame
-                for (i, vertex) in vertices.enumerated() {
-                    let worldPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
-                    let camPos = world2Cam * worldPos
-
-                    // Must be in front of camera (z < 0 in camera space for ARKit convention)
-                    guard camPos.z < 0 else { continue }
-
-                    // Project using intrinsics: px = cx + fx * X/(-Z), py = cy - fy * Y/(-Z)
-                    // ARKit +Y is up, but image origin +Y is down, so we subtract to flip Y.
-                    let invZ = -1.0 / camPos.z
-                    let px = Int(fx * camPos.x * invZ + cx)
-                    let py = Int(cy - fy * camPos.y * invZ)
-
-                    guard px >= 0 && px < imgW && py >= 0 && py < imgH else { continue }
-                    guard px < width && py < height else { continue }
-
-                    // Depth Occlusion Test
-                    if let dPtr = depthPtr {
-                        let dpx = px * depthWidth / max(width, 1)
-                        let dpy = py * depthHeight / max(height, 1)
-                        if dpx >= 0 && dpx < depthWidth && dpy >= 0 && dpy < depthHeight {
-                            let dOffset = dpy * depthBytesPerRow + dpx * 2
-                            let b0 = UInt16(dPtr[dOffset])
-                            let b1 = UInt16(dPtr[dOffset + 1])
-                            let depthValue = isDepthLittleEndian ? (b1 << 8) | b0 : (b0 << 8) | b1
-                            
-                            let depthMM = Float(depthValue)
-                            let expectedMM = -camPos.z * 1000.0
-                            
-                            // If depth pixel is 0, it means no valid depth or privacy mask. Skip coloring.
-                            if depthMM == 0 { continue }
-                            
-                            // If expected distance is > 150mm farther than what the depth sensor saw, we are occluded
-                            if expectedMM > depthMM + 150.0 { continue }
-                        }
-                    }
-
-                    let offset = py * bytesPerRow + px * bytesPerPixel
-                    let r = Float(ptr[offset]) / 255.0
-                    let g = Float(ptr[offset + 1]) / 255.0
-                    let b = Float(ptr[offset + 2]) / 255.0
-
-                    // Latest frame with visibility wins (simple strategy)
-                    colors[i] = SIMD3<Float>(r, g, b)
-                    colored[i] = true
-                }
-                _ = depthPixelDataBuffer // Silence compiler warning while ensuring CFData buffer outlives the pointer
-            }
-
-            let coloredCount = colored.filter { $0 }.count
-            print("[VertexColor] Colored \(coloredCount)/\(vertices.count) vertices from \(sampledFiles.count) frames")
-
-            // Convert to SIMD4<Float> with alpha=1 (matches buildColorData format)
-            let rgba = colors.map { SIMD4<Float>($0.x, $0.y, $0.z, 1.0) }
-            return Data(bytes: rgba, count: rgba.count * MemoryLayout<SIMD4<Float>>.stride)
-        }
-        
-        /// Validates 3D-to-2D image math by projecting test vertices into camera bounds
-        static func runDeveloperMappingTest(fx: Float, fy: Float, cx: Float, cy: Float, cam2World: simd_float4x4, world2Cam: simd_float4x4) {
-            print("\n[VertexColor Debug] --- RUNNING VERTEX MAPPING DIAGNOSTIC ---")
-            print("[VertexColor Debug] Intrinsics -> fx:\(fx) fy:\(fy) cx:\(cx) cy:\(cy)")
-            
-            // Create test vertices 2 meters directly in front of the camera
-            let testVerts: [(String, SIMD4<Float>)] = [
-                ("Center", SIMD4<Float>(0, 0, -2.0, 1.0)),
-                ("Right", SIMD4<Float>(1.0, 0, -2.0, 1.0)),
-                ("Left", SIMD4<Float>(-1.0, 0, -2.0, 1.0)),
-                ("Up", SIMD4<Float>(0, 1.0, -2.0, 1.0)),
-                ("Down", SIMD4<Float>(0, -1.0, -2.0, 1.0))
-            ]
-            
-            for (name, camPos) in testVerts {
-                let worldPos = cam2World * camPos
-                let simulatedCamPos = world2Cam * worldPos // should equal camPos
-                
-                let invZ = -1.0 / simulatedCamPos.z
-                let px = Int(fx * simulatedCamPos.x * invZ + cx)
-                let py = Int(cy - fy * simulatedCamPos.y * invZ)
-                
-                let yPlacement = py > Int(cy) ? "BOTTOM HALF" : (py < Int(cy) ? "TOP HALF" : "MIDDLE")
-                let xPlacement = px > Int(cx) ? "RIGHT HALF" : (px < Int(cx) ? "LEFT HALF" : "MIDDLE")
-                
-                print("[VertexColor Debug] '\(name)' vertex at world (\(String(format: "%.2f", worldPos.x)), \(String(format: "%.2f", worldPos.y)), \(String(format: "%.2f", worldPos.z))) -> projected to px:\(px), py:\(py) (\(xPlacement), \(yPlacement))")
-            }
-            print("[VertexColor Debug] -----------------------------------------\n")
-        }
-    }
 }

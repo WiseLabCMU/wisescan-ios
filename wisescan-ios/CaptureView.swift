@@ -30,6 +30,7 @@ struct CaptureView: View {
     @State private var pendingScan: PendingScanData? = nil
     @State private var isProcessingMesh = false
     @State private var isWaitingToSave = false
+    @State private var cachedGhostMeshData: Data? = nil
 
     @State private var showExtendPrompt = false
 
@@ -43,18 +44,20 @@ struct CaptureView: View {
         let thumbnailData: Data?
     }
 
-    var activeGhostMeshData: Data? {
+    /// Loads ghost mesh data from the scan to extend, caching it in @State.
+    private func loadGhostMeshData() {
         guard let locId = scanStore.activeLocationForScan,
               let scanId = scanStore.activeScanToExtend else {
-            return nil
+            cachedGhostMeshData = nil
+            return
         }
         let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
         guard let location = try? modelContext.fetch(descriptor).first,
               let targetScan = location.scans.first(where: { $0.id == scanId }) else {
-            return nil
+            cachedGhostMeshData = nil
+            return
         }
-        // Safely load the background ghost mesh from disk since it's no longer in RAM
-        return try? Data(contentsOf: targetScan.meshFileURL)
+        cachedGhostMeshData = try? Data(contentsOf: targetScan.meshFileURL)
     }
 
     var body: some View {
@@ -67,7 +70,7 @@ struct CaptureView: View {
                 privacyFilter: isPrivacyFilterOn,
                 useFrontCamera: usingFrontCamera,
                 initialWorldMapURL: scanStore.activeRelocalizationMap,
-                initialGhostMeshData: activeGhostMeshData
+                initialGhostMeshData: cachedGhostMeshData
             )
                 .ignoresSafeArea()
 
@@ -308,13 +311,14 @@ struct CaptureView: View {
         .onAppear {
             // Lock to portrait during capture for stable intrinsics & tracking
             AppDelegate.orientationLocked = true
+            // Force UIKit to re-query supported orientations from the delegate
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                windowScene.windows.first?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            }
             UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
 
-            // If we arrived at Capture by tapping the tab (not via "Extend Scan"),
-            // clear any lingering ghost mesh / world map so a fresh scan starts.
-            // "Extend Scan" sets activeLocationForScan before switching tabs;
-            // a direct tab tap does not.
-            // No-op if already nil.
+            // Load ghost mesh once into @State cache (avoids recomputing on every body eval)
+            loadGhostMeshData()
 
             showExtendPrompt = (scanStore.activeScanToExtend != nil)
 
@@ -326,6 +330,13 @@ struct CaptureView: View {
         .onDisappear {
             // Unlock orientation when leaving capture
             AppDelegate.orientationLocked = false
+            // Allow rotation again
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                windowScene.windows.first?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            }
+
+            // Stop GPS/heading updates to save battery (#12)
+            locationManager.stopUpdating()
 
             if isRecording {
                 stopRecording()
@@ -334,6 +345,7 @@ struct CaptureView: View {
             scanStore.activeLocationForScan = nil
             scanStore.activeRelocalizationMap = nil
             scanStore.activeScanToExtend = nil
+            cachedGhostMeshData = nil
         }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
@@ -459,7 +471,7 @@ struct CaptureView: View {
 
         // Run vertex coloring in background using saved camera frames
         DispatchQueue.global(qos: .userInitiated).async {
-            let vertexColors = ARCoverageView.VertexColorAccumulator.colorizeFromSavedFrames(
+            let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
                 objData: result.data,
                 rawDataDir: rawDataPath
             )
@@ -468,7 +480,7 @@ struct CaptureView: View {
                 self.saveMessage = "Saving World Map..."
 
                 // Export ARWorldMap for Scan4D relocalization
-                ARCoverageView.VertexColorAccumulator.exportWorldMap(from: self.currentARSession) { mapURL in
+                VertexColorAccumulator.exportWorldMap(from: self.currentARSession) { mapURL in
                     DispatchQueue.main.async {
                         // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping
                         if let rawDir = rawDataPath {
