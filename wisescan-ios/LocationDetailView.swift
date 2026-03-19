@@ -62,27 +62,31 @@ struct LocationDetailView: View {
                         }
                         .padding(.top, 60)
                     } else {
-                        ForEach(sortedScans) { scan in
-                            ScanCard(
-                                scan: scan,
-                                uploadURL: uploadURL,
-                                isEditing: isEditing,
-                                onUpdate: { _ in try? modelContext.save() },
-                                onDelete: { scanToDelete in
-                                    ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
-                                    // Auto-exit edit mode if no scans remain
-                                    if location.scans.isEmpty {
-                                        isEditing = false
+                        // LazyVStack defers mesh preview creation until cards scroll into view.
+                        // Most recent scan is first (sorted descending) so it renders immediately.
+                        LazyVStack(spacing: 16) {
+                            ForEach(sortedScans) { scan in
+                                ScanCard(
+                                    scan: scan,
+                                    uploadURL: uploadURL,
+                                    isEditing: isEditing,
+                                    onUpdate: { _ in try? modelContext.save() },
+                                    onDelete: { scanToDelete in
+                                        ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
+                                        // Auto-exit edit mode if no scans remain
+                                        if location.scans.isEmpty {
+                                            isEditing = false
+                                        }
+                                    },
+                                    onExtend: { scanToExtend in
+                                        scanStore.activeLocationForScan = location.id
+                                        scanStore.activeRelocalizationMap = scanToExtend.worldMapURL
+                                        scanStore.activeScanToExtend = scanToExtend.id
+                                        selectedTab = 1 // Switch to Capture Tab
                                     }
-                                },
-                                onExtend: { scanToExtend in
-                                    scanStore.activeLocationForScan = location.id
-                                    scanStore.activeRelocalizationMap = scanToExtend.worldMapURL
-                                    scanStore.activeScanToExtend = scanToExtend.id
-                                    selectedTab = 1 // Switch to Capture Tab
-                                }
-                            )
-                            .padding(.horizontal)
+                                )
+                                .padding(.horizontal)
+                            }
                         }
                     }
 
