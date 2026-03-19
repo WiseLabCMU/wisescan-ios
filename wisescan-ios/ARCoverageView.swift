@@ -561,8 +561,8 @@ struct ARCoverageView: UIViewRepresentable {
 
             guard !cameraFiles.isEmpty else { return nil }
 
-            // Sample up to 10 evenly-spaced frames for efficiency
-            let maxFrames = min(cameraFiles.count, 10)
+            // Sample up to 150 evenly-spaced frames for high coverage
+            let maxFrames = min(cameraFiles.count, 150)
             let stride = max(1, cameraFiles.count / maxFrames)
             let sampledFiles = Swift.stride(from: 0, to: cameraFiles.count, by: stride).prefix(maxFrames).map { cameraFiles[$0] }
 
@@ -628,6 +628,31 @@ struct ARCoverageView: UIViewRepresentable {
                 let bytesPerRow = cgImage.bytesPerRow
                 let bytesPerPixel = cgImage.bitsPerPixel / 8
 
+                // Load corresponding depth image for occlusion testing
+                var depthPtr: UnsafePointer<UInt8>? = nil
+                var depthWidth = 0
+                var depthHeight = 0
+                var depthBytesPerRow = 0
+                var depthPixelDataBuffer: CFData? = nil
+                var isDepthLittleEndian = false
+                
+                if let depthPath = json["depth_path"] as? String {
+                    let depthURL = rawDir.appendingPathComponent(depthPath)
+                    if let depthData = try? Data(contentsOf: depthURL),
+                       let depthImage = UIImage(data: depthData),
+                       let cgDepth = depthImage.cgImage,
+                       cgDepth.bitsPerPixel == 16,
+                       let cgDepthData = cgDepth.dataProvider?.data {
+                        depthPixelDataBuffer = cgDepthData
+                        depthPtr = CFDataGetBytePtr(cgDepthData)
+                        depthWidth = cgDepth.width
+                        depthHeight = cgDepth.height
+                        depthBytesPerRow = cgDepth.bytesPerRow
+                        let info = cgDepth.bitmapInfo.rawValue
+                        isDepthLittleEndian = (info & CGBitmapInfo.byteOrder16Little.rawValue) != 0 || (info & CGBitmapInfo.byteOrder32Little.rawValue) != 0
+                    }
+                }
+
                 // Project each vertex into this camera frame
                 for (i, vertex) in vertices.enumerated() {
                     let worldPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
@@ -645,6 +670,27 @@ struct ARCoverageView: UIViewRepresentable {
                     guard px >= 0 && px < imgW && py >= 0 && py < imgH else { continue }
                     guard px < width && py < height else { continue }
 
+                    // Depth Occlusion Test
+                    if let dPtr = depthPtr {
+                        let dpx = px * depthWidth / max(width, 1)
+                        let dpy = py * depthHeight / max(height, 1)
+                        if dpx >= 0 && dpx < depthWidth && dpy >= 0 && dpy < depthHeight {
+                            let dOffset = dpy * depthBytesPerRow + dpx * 2
+                            let b0 = UInt16(dPtr[dOffset])
+                            let b1 = UInt16(dPtr[dOffset + 1])
+                            let depthValue = isDepthLittleEndian ? (b1 << 8) | b0 : (b0 << 8) | b1
+                            
+                            let depthMM = Float(depthValue)
+                            let expectedMM = -camPos.z * 1000.0
+                            
+                            // If depth pixel is 0, it means no valid depth or privacy mask. Skip coloring.
+                            if depthMM == 0 { continue }
+                            
+                            // If expected distance is > 150mm farther than what the depth sensor saw, we are occluded
+                            if expectedMM > depthMM + 150.0 { continue }
+                        }
+                    }
+
                     let offset = py * bytesPerRow + px * bytesPerPixel
                     let r = Float(ptr[offset]) / 255.0
                     let g = Float(ptr[offset + 1]) / 255.0
@@ -654,6 +700,7 @@ struct ARCoverageView: UIViewRepresentable {
                     colors[i] = SIMD3<Float>(r, g, b)
                     colored[i] = true
                 }
+                _ = depthPixelDataBuffer // Silence compiler warning while ensuring CFData buffer outlives the pointer
             }
 
             let coloredCount = colored.filter { $0 }.count
