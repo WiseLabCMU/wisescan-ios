@@ -28,9 +28,11 @@ struct CaptureView: View {
     @State private var showNamePrompt = false
     @State private var newLocationName = ""
     @State private var pendingScan: PendingScanData? = nil
+    @State private var isProcessingMesh = false
+    @State private var isWaitingToSave = false
 
     @State private var showExtendPrompt = false
-    
+
     struct PendingScanData {
         let meshData: Data
         let vertexCount: Int
@@ -119,7 +121,7 @@ struct CaptureView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
                     .animation(.spring(), value: showExtendPrompt)
                 }
-                
+
                 // Top Controls
                 HStack {
                     // Privacy Filter Toggle
@@ -309,7 +311,7 @@ struct CaptureView: View {
             // "Extend Scan" sets activeLocationForScan before switching tabs;
             // a direct tab tap does not.
             // No-op if already nil.
-            
+
             showExtendPrompt = (scanStore.activeScanToExtend != nil)
 
             // Auto-revert to back camera when developer mode is disabled
@@ -328,13 +330,22 @@ struct CaptureView: View {
         }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
-            Button("Save", action: { savePendingScan() })
+            Button("Save", action: { 
+                if isProcessingMesh {
+                    isWaitingToSave = true
+                    saveMessage = "Adding location details..." 
+                } else {
+                    savePendingScan()
+                }
+            })
             Button("Cancel", role: .cancel) {
                 pendingScan = nil
                 saveMessage = nil
+                isProcessingMesh = false
+                isWaitingToSave = false
             }
         } message: {
-            Text("Enter a unique name for this space so you can efficiently 'Scan Again' later.")
+            Text("Enter a unique name for this space so you can efficiently 'Extend Scan' later.")
         }
     }
 
@@ -425,7 +436,19 @@ struct CaptureView: View {
             return
         }
 
-        saveMessage = "Coloring mesh..."
+        // Prompt the user for a name IMMEDIATELY while mesh processes
+        isProcessingMesh = true
+        isWaitingToSave = false
+        
+        if scanStore.activeLocationForScan == nil {
+            newLocationName = ""
+            showNamePrompt = true
+            // saveMessage is left nil or minimally intrusive so user focuses on typing
+        } else {
+            // Already extending a scan; user won't be prompted. Wait for processing to save.
+            isWaitingToSave = true
+            saveMessage = "Coloring mesh..."
+        }
 
         // Run vertex coloring in background using saved camera frames
         DispatchQueue.global(qos: .userInitiated).async {
@@ -463,12 +486,13 @@ struct CaptureView: View {
 
                         // Release frame capture session memory
                         self.frameCaptureSession = FrameCaptureSession()
+                        self.isProcessingMesh = false
 
-                        if self.scanStore.activeLocationForScan != nil {
+                        // If user already tapped save in the alert, OR if this is a background extension
+                        if self.isWaitingToSave {
                             self.savePendingScan()
-                        } else {
-                            self.newLocationName = ""
-                            self.showNamePrompt = true
+                        } else if self.scanStore.activeLocationForScan != nil {
+                            self.savePendingScan()
                         }
                     }
                 }

@@ -5,7 +5,7 @@ struct LocationDetailView: View {
     let location: ScanLocation
     @Environment(\.modelContext) private var modelContext
     @Environment(ScanStore.self) private var scanStore
-    @Binding var selectedTab: Int // Pass through to allow "Scan Again" to switch tabs
+    @Binding var selectedTab: Int // Pass through to allow "Extend Scan" to switch tabs
     @State private var isEditing = false
     @State private var showSettings = false
     @State private var newLocationName = ""
@@ -234,7 +234,7 @@ struct WorkflowCard: View {
     let sampleScan = CapturedScan(name: "Sample Scan 1", vertexCount: 1500, faceCount: 2000)
     sampleLocation.scans.append(sampleScan)
     container.mainContext.insert(sampleLocation)
-    
+
     return LocationDetailView(location: sampleLocation, selectedTab: .constant(2))
         .modelContainer(container)
         .environment(ScanStore())
