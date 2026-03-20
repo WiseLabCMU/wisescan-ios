@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.2.0...v0.2.1) (2026-03-20)
+
+
+### Bug Fixes
+
+* **build:** resolve appstore conflicts ([34c2853](https://github.com/WiseLabCMU/wisescan-ios/commit/34c2853cfb24e151fe46ef14c6e54379021e404d))
+
 ## [0.2.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.1.0...v0.2.0) (2026-03-20)
 
 
