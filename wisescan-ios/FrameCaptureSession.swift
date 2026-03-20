@@ -148,6 +148,9 @@ class FrameCaptureSession {
         // On Simulator, currentFrame is always nil. Allow fully-synthetic capture to proceed.
         guard currentFrame != nil || fullyTest else { return }
 
+        // Cap test captures at one full 360° loop — no redundant duplicate poses
+        if isTestingIMU && testSequenceIndex >= TestDataGenerator.totalFrames { return }
+
         // Resolve image dimensions: real camera if available, else test defaults
         let pixelBuffer = currentFrame?.capturedImage
         let camW = pixelBuffer.map { CVPixelBufferGetWidth($0) } ?? TestDataGenerator.defaultW
