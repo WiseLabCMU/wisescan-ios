@@ -50,18 +50,20 @@ class MarkerProjectionState: ObservableObject {
     weak var scnView: SCNView?
 
     func updateProjections() {
-        guard let scnView = scnView, scnView.pointOfView != nil else { return }
-        var newPositions: [MarkerScreenPos] = []
-        for anchor in anchorPositions {
-            let projected = scnView.projectPoint(anchor)
-            let screenPoint = CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y))
-            // projected.z < 1 means in front of camera
-            let visible = projected.z > 0 && projected.z < 1
-                && screenPoint.x >= 0 && screenPoint.x <= scnView.bounds.width
-                && screenPoint.y >= 0 && screenPoint.y <= scnView.bounds.height
-            newPositions.append(MarkerScreenPos(point: screenPoint, isVisible: visible))
-        }
+        guard let scnView = scnView else { return }
         DispatchQueue.main.async {
+            guard scnView.pointOfView != nil else { return }
+            var newPositions: [MarkerScreenPos] = []
+            let boundsWidth = scnView.bounds.width
+            let boundsHeight = scnView.bounds.height
+            for anchor in self.anchorPositions {
+                let projected = scnView.projectPoint(anchor)
+                let screenPoint = CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y))
+                let visible = projected.z > 0 && projected.z < 1
+                    && screenPoint.x >= 0 && screenPoint.x <= boundsWidth
+                    && screenPoint.y >= 0 && screenPoint.y <= boundsHeight
+                newPositions.append(MarkerScreenPos(point: screenPoint, isVisible: visible))
+            }
             self.screenPositions = newPositions
         }
     }

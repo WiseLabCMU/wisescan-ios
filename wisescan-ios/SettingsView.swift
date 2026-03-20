@@ -12,6 +12,9 @@ struct SettingsView: View {
     @AppStorage(AppDefaults.Key.developerMode) private var developerMode: Bool = AppDefaults.developerMode
     @AppStorage(AppDefaults.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppDefaults.flipCameraEnabled
     @AppStorage(AppDefaults.Key.debugVertexMapping) private var debugVertexMapping: Bool = AppDefaults.debugVertexMapping
+    @AppStorage(AppDefaults.Key.testIMU) private var testIMU: Bool = AppDefaults.testIMU
+    @AppStorage(AppDefaults.Key.testCameraImages) private var testCameraImages: Bool = AppDefaults.testCameraImages
+    @AppStorage(AppDefaults.Key.testDepthMaps) private var testDepthMaps: Bool = AppDefaults.testDepthMaps
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -144,6 +147,42 @@ struct SettingsView: View {
                                     Text("Test Vertex Mapping")
                                         .foregroundColor(.white)
                                     Text("Runs and logs a diagnostic projection test during mesh coloring to verify 3D-to-2D image math accuracy.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $testIMU) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Test IMU & Poses")
+                                        .foregroundColor(.white)
+                                    Text("Simulates a continuous 360° circular trajectory to bypass overlap thresholds and test capture.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $testCameraImages) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Test Camera Images")
+                                        .foregroundColor(.white)
+                                    Text("Injects a dynamically rendered synthetic frame sequence (a mid-air green box) instead of live camera.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $testDepthMaps) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Test Depth Maps")
+                                        .foregroundColor(.white)
+                                    Text("Injects synthetic depth maps matching the virtual test images.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

@@ -352,20 +352,36 @@ class ScanFileManager {
         targetLocation.updatedAt = Date() // Bump to top of workflow list
         context.insert(newScan)
 
+        // Create scan directory and write mesh (required)
         do {
             try FileManager.default.createDirectory(at: newScan.scanDirectory, withIntermediateDirectories: true)
             try meshData.write(to: newScan.meshFileURL)
-            if let colors = vertexColors { try colors.write(to: newScan.colorsFileURL) }
-            if let map = worldMapURL { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) }
-            if let thumb = thumbnailData { try thumb.write(to: newScan.thumbnailURL) }
-
-            if let raw = rawDataPath, FileManager.default.fileExists(atPath: raw.path) {
-                // Remove existing if any, then move
-                try? FileManager.default.removeItem(at: newScan.rawDataPath)
-                try FileManager.default.moveItem(at: raw, to: newScan.rawDataPath)
-            }
         } catch {
-            print("Failed to save scan files to disk: \(error)")
+            print("[ScanFileManager] Failed to create scan directory or write mesh: \(error)")
+        }
+
+        // Optional files — failures must not block the critical raw data move
+        if let colors = vertexColors {
+            do { try colors.write(to: newScan.colorsFileURL) }
+            catch { print("[ScanFileManager] Failed to write colors: \(error)") }
+        }
+        if let map = worldMapURL {
+            do { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) }
+            catch { print("[ScanFileManager] Failed to copy worldmap: \(error)") }
+        }
+        if let thumb = thumbnailData {
+            do { try thumb.write(to: newScan.thumbnailURL) }
+            catch { print("[ScanFileManager] Failed to write thumbnail: \(error)") }
+        }
+
+        // Critical: move raw data directory (images, depth, cameras, metadata)
+        if let raw = rawDataPath, FileManager.default.fileExists(atPath: raw.path) {
+            try? FileManager.default.removeItem(at: newScan.rawDataPath)
+            do {
+                try FileManager.default.moveItem(at: raw, to: newScan.rawDataPath)
+            } catch {
+                print("[ScanFileManager] Failed to move raw data: \(error)")
+            }
         }
 
         try? context.save()

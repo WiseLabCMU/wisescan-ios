@@ -15,7 +15,18 @@ enum VertexColorAccumulator {
             return
         }
 
+        let completionLock = NSLock()
+        var didComplete = false
+
         session.getCurrentWorldMap { worldMap, error in
+            completionLock.lock()
+            if didComplete {
+                completionLock.unlock()
+                return
+            }
+            didComplete = true
+            completionLock.unlock()
+
             guard let map = worldMap, error == nil else {
                 print("Error getting ARWorldMap: \(String(describing: error))")
                 completion(nil)
@@ -32,6 +43,20 @@ enum VertexColorAccumulator {
                 print("Error saving ARWorldMap: \(error)")
                 completion(nil)
             }
+        }
+        
+        // Failsafe timeout for Simulator / Test modes where ARKit refuses to yield a map or error
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            completionLock.lock()
+            if didComplete {
+                completionLock.unlock()
+                return
+            }
+            didComplete = true
+            completionLock.unlock()
+            
+            print("[Warning] ARWorldMap export timed out after 2 seconds. Proceeding without map.")
+            completion(nil)
         }
     }
 
