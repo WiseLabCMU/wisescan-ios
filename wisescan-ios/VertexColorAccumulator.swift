@@ -135,7 +135,7 @@ enum VertexColorAccumulator {
             let world2Cam = cam2World.inverse
 
             // Developer Diagnostic Test (runs once per coloring pass if enabled)
-            if AppDefaults.developerMode && AppDefaults.debugVertexMapping && !hasRunDeveloperTest {
+            if UserDefaults.standard.bool(forKey: AppDefaults.Key.developerMode) && UserDefaults.standard.bool(forKey: AppDefaults.Key.debugVertexMapping) && !hasRunDeveloperTest {
                 runDeveloperMappingTest(fx: fx, fy: fy, cx: cx, cy: cy, cam2World: cam2World, world2Cam: world2Cam)
                 hasRunDeveloperTest = true
             }

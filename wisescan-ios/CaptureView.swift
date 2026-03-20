@@ -338,6 +338,9 @@ struct CaptureView: View {
             // Load ghost mesh once into @State cache (avoids recomputing on every body eval)
             loadGhostMeshData()
 
+            // Start GPS/heading updates for scan metadata
+            locationManager.startUpdating()
+
             showExtendPrompt = (scanStore.activeScanToExtend != nil)
 
             // Auto-revert to back camera when developer mode is disabled
@@ -457,12 +460,13 @@ struct CaptureView: View {
             let context = CIContext()
             if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
                 let uiImage = UIImage(cgImage: cgImage)
-                let targetSize = CGSize(width: 800, height: Int(800.0 * (uiImage.size.height / uiImage.size.width)))
+                let maxW = AppDefaults.thumbnailMaxWidth
+                let targetSize = CGSize(width: maxW, height: maxW * (uiImage.size.height / uiImage.size.width))
                 UIGraphicsBeginImageContextWithOptions(targetSize, false, 1.0)
                 UIImage(cgImage: cgImage, scale: 1.0, orientation: .right).draw(in: CGRect(origin: .zero, size: targetSize))
                 let resizedImage = UIGraphicsGetImageFromCurrentImageContext()
                 UIGraphicsEndImageContext()
-                thumbnailData = resizedImage?.jpegData(compressionQuality: 0.6)
+                thumbnailData = resizedImage?.jpegData(compressionQuality: AppDefaults.thumbnailJpegQuality)
             }
         }
 

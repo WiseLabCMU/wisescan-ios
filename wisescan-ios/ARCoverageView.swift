@@ -373,7 +373,7 @@ struct ARCoverageView: UIViewRepresentable {
         let imageRes = camera.imageResolution
         let projMatrix = camera.projectionMatrix(for: .landscapeRight, viewportSize: imageRes, zNear: 0.001, zFar: 100)
 
-        var objData = ""
+        var objLines: [String] = []
         var vertexOffset = 1
         var totalVertices = 0
         var totalFaces = 0
@@ -392,7 +392,7 @@ struct ARCoverageView: UIViewRepresentable {
                 let localPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
                 let worldPos = transform * localPos
 
-                objData += "v \(worldPos.x) \(worldPos.y) \(worldPos.z)\n"
+                objLines.append("v \(worldPos.x) \(worldPos.y) \(worldPos.z)")
 
                 // Check person segmentation
                 if let pp = personPixels {
@@ -413,9 +413,13 @@ struct ARCoverageView: UIViewRepresentable {
             let faces = geometry.faces
             let faceBytes = faces.bytesPerIndex * faces.indexCountPerPrimitive
 
+            // Validate face format before iterating
+            guard faces.bytesPerIndex == 4, faces.indexCountPerPrimitive == 3 else {
+                vertexOffset += vertices.count
+                continue
+            }
+
             for i in 0..<faces.count {
-                // Bounds check: validate face byte access pattern
-                guard faces.bytesPerIndex == 4, faces.indexCountPerPrimitive == 3 else { break }
                 let pointer = faces.buffer.contents().advanced(by: i * faceBytes)
                 let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
 
@@ -432,7 +436,7 @@ struct ARCoverageView: UIViewRepresentable {
                 let v1 = Int(indices.0) + vertexOffset
                 let v2 = Int(indices.1) + vertexOffset
                 let v3 = Int(indices.2) + vertexOffset
-                objData += "f \(v1) \(v2) \(v3)\n"
+                objLines.append("f \(v1) \(v2) \(v3)")
                 totalFaces += 1
             }
 
@@ -443,7 +447,8 @@ struct ARCoverageView: UIViewRepresentable {
             CVPixelBufferUnlockBaseAddress(pp.buffer, .readOnly)
         }
 
-        guard let data = objData.data(using: .utf8), !data.isEmpty else { return nil }
+        let objString = objLines.joined(separator: "\n") + "\n"
+        guard let data = objString.data(using: .utf8), !data.isEmpty else { return nil }
         return (data, totalVertices, totalFaces)
     }
 

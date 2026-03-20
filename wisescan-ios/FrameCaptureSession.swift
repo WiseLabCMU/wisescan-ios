@@ -258,65 +258,72 @@ class FrameCaptureSession {
                     
                     // Unproject face centers to 3D using depth map (only if depth available)
                     if !centers.isEmpty, let dMap = depthMap {
-                    let depthWidth = CVPixelBufferGetWidth(dMap)
-                    let depthHeight = CVPixelBufferGetHeight(dMap)
-                    let imgWidth = Float(camW)
-                    let imgHeight = Float(camH)
-                    
-                    CVPixelBufferLockBaseAddress(dMap, .readOnly)
-                    if let base = CVPixelBufferGetBaseAddress(dMap)?.assumingMemoryBound(to: Float32.self) {
-                        for uv in centers {
-                            let px = Int(uv.x * CGFloat(depthWidth))
-                            let py = Int(uv.y * CGFloat(depthHeight))
-                            
-                            // 3x3 kernel median for stable depth reading
-                            var samples: [Float] = []
-                            for dy in -1...1 {
-                                for dx in -1...1 {
-                                    let sx = min(max(px + dx, 0), depthWidth - 1)
-                                    let sy = min(max(py + dy, 0), depthHeight - 1)
-                                    let d = base[sy * depthWidth + sx]
-                                    if d > 0 && d < 10.0 {
-                                        samples.append(d)
+                        let depthWidth = CVPixelBufferGetWidth(dMap)
+                        let depthHeight = CVPixelBufferGetHeight(dMap)
+                        let imgWidth = Float(camW)
+                        let imgHeight = Float(camH)
+
+                        CVPixelBufferLockBaseAddress(dMap, .readOnly)
+                        if let base = CVPixelBufferGetBaseAddress(dMap)?.assumingMemoryBound(to: Float32.self) {
+                            // Accumulate into a local copy to avoid data race with main thread
+                            var localAnchors = self.faceAnchors
+                            for uv in centers {
+                                let px = Int(uv.x * CGFloat(depthWidth))
+                                let py = Int(uv.y * CGFloat(depthHeight))
+
+                                // 3x3 kernel median for stable depth reading
+                                var samples: [Float] = []
+                                for dy in -1...1 {
+                                    for dx in -1...1 {
+                                        let sx = min(max(px + dx, 0), depthWidth - 1)
+                                        let sy = min(max(py + dy, 0), depthHeight - 1)
+                                        let d = base[sy * depthWidth + sx]
+                                        if d > 0 && d < 10.0 {
+                                            samples.append(d)
+                                        }
                                     }
                                 }
-                            }
-                            samples.sort()
-                            guard !samples.isEmpty else { continue }
-                            let z = samples[samples.count / 2] // median
-                            
-                            let fx = intrinsics[0][0]
-                            let fy = intrinsics[1][1]
-                            let cx = intrinsics[2][0]
-                            let cy = intrinsics[2][1]
-                            
-                            let x_cam = (Float(uv.x) * imgWidth - cx) * z / fx
-                            let y_cam = (cy - Float(uv.y) * imgHeight) * z / fy
-                            let z_cam = -z
-                            
-                            let localPoint = SIMD4<Float>(x_cam, y_cam, z_cam, 1.0)
-                            let worldPoint = transform * localPoint
-                            let point3D = SIMD3<Float>(worldPoint.x, worldPoint.y, worldPoint.z)
-                            
-                            // Cluster merging — accumulate locally, assign to published property on main
-                            var found = false
-                            for i in 0..<self.faceAnchors.count {
-                                if simd_distance(self.faceAnchors[i], point3D) < AppDefaults.faceClusterThresholdMeters {
-                                    self.faceAnchors[i] = (self.faceAnchors[i] + point3D) * 0.5
-                                    found = true
-                                    break
+                                samples.sort()
+                                guard !samples.isEmpty else { continue }
+                                let z = samples[samples.count / 2] // median
+
+                                let fx = intrinsics[0][0]
+                                let fy = intrinsics[1][1]
+                                let cx = intrinsics[2][0]
+                                let cy = intrinsics[2][1]
+
+                                let x_cam = (Float(uv.x) * imgWidth - cx) * z / fx
+                                let y_cam = (cy - Float(uv.y) * imgHeight) * z / fy
+                                let z_cam = -z
+
+                                let localPoint = SIMD4<Float>(x_cam, y_cam, z_cam, 1.0)
+                                let worldPoint = transform * localPoint
+                                let point3D = SIMD3<Float>(worldPoint.x, worldPoint.y, worldPoint.z)
+
+                                // Cluster merging
+                                var found = false
+                                for i in 0..<localAnchors.count {
+                                    if simd_distance(localAnchors[i], point3D) < AppDefaults.faceClusterThresholdMeters {
+                                        localAnchors[i] = (localAnchors[i] + point3D) * 0.5
+                                        found = true
+                                        break
+                                    }
+                                }
+                                if !found {
+                                    localAnchors.append(point3D)
                                 }
                             }
-                            if !found {
-                                self.faceAnchors.append(point3D)
+                            // Publish updated anchors on main thread
+                            let updatedAnchors = localAnchors
+                            DispatchQueue.main.async {
+                                self.faceAnchors = updatedAnchors
                             }
                         }
+                        CVPixelBufferUnlockBaseAddress(dMap, .readOnly)
                     }
-                    CVPixelBufferUnlockBaseAddress(dMap, .readOnly)
                 }
+                finalJpegData = tempJpegData
             }
-            finalJpegData = tempJpegData
-        }
             
         let index = self.frames.count
             let paddedIndex = String(format: "%05d", index)

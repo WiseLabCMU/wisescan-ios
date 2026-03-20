@@ -90,6 +90,10 @@ iOSInjectionProject/
 
 `.env`
 
+# Scan4D temp/export artifacts
+staging_*/
+scan4d_*.zip
+
 # macOS
 .DS_Store
 .AppleDouble
