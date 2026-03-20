@@ -502,8 +502,9 @@ struct CaptureView: View {
             saveMessage = "Coloring mesh..."
         }
 
-        // Run vertex coloring in background using saved camera frames
-        DispatchQueue.global(qos: .userInitiated).async {
+        // Run vertex coloring in background using saved camera frames (.utility QoS
+        // so the name-prompt keyboard stays responsive while coloring runs)
+        DispatchQueue.global(qos: .utility).async {
             let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
                 objData: result.data,
                 rawDataDir: rawDataPath
