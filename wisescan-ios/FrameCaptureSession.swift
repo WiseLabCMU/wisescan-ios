@@ -40,6 +40,12 @@ class FrameCaptureSession {
     // Metadata dependencies
     private var locationManager: LocationManager?
     private var activeLocationId: UUID?
+    private var hardwareDeviceModel: String = "Native iOS"
+    
+    // Cached for export on background queue
+    private var cachedDeviceName: String = "Unknown"
+    private var cachedOSName: String = "iOS"
+    private var cachedOSVersion: String = "Unknown"
 
     private let ioQueue = DispatchQueue(label: "com.wisescan.capture.io", qos: .userInitiated)
     private let ciContext = CIContext()  // Reuse across frames to avoid GPU pipeline re-init
@@ -68,6 +74,7 @@ class FrameCaptureSession {
         privacyFilter: Bool = false,
         locationManager: LocationManager? = nil,
         activeLocationId: UUID? = nil,
+        hardwareDeviceModel: String = "Native iOS",
         testIMU: Bool = false,
         testCameraImages: Bool = false,
         testDepthMaps: Bool = false
@@ -105,6 +112,14 @@ class FrameCaptureSession {
         self.lastCaptureTime = 0
         self.locationManager = locationManager
         self.activeLocationId = activeLocationId
+        self.hardwareDeviceModel = hardwareDeviceModel
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.cachedDeviceName = UIDevice.current.name
+            self.cachedOSName = UIDevice.current.systemName
+            self.cachedOSVersion = UIDevice.current.systemVersion
+        }
 
         self.isTestingIMU = testIMU
         self.isTestingImages = testCameraImages
@@ -460,9 +475,10 @@ class FrameCaptureSession {
 
         var metadata: [String: Any] = [
             "timestamp": Date().timeIntervalSince1970,
-            "device": UIDevice.current.name,
-            "os_name": UIDevice.current.systemName,
-            "os_version": UIDevice.current.systemVersion,
+            "device": self.cachedDeviceName,
+            "hardware_device_model": hardwareDeviceModel,
+            "os_name": self.cachedOSName,
+            "os_version": self.cachedOSVersion,
             "app_version": appVersion,
             "build_type": buildType
         ]

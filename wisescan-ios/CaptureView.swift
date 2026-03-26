@@ -425,6 +425,7 @@ struct CaptureView: View {
                 privacyFilter: isPrivacyFilterOn, // Applied during export
                 locationManager: locationManager,
                 activeLocationId: scanStore.activeLocationForScan,
+                hardwareDeviceModel: UIDevice.current.name,
                 testIMU: developerMode && testIMU,
                 testCameraImages: developerMode && testCameraImages,
                 testDepthMaps: developerMode && testDepthMaps
@@ -585,6 +586,7 @@ struct CaptureView: View {
             meshData: pending.meshData,
             vertexCount: pending.vertexCount,
             faceCount: pending.faceCount,
+            hardwareDeviceModel: UIDevice.current.name,
             rawDataPath: pending.rawDataPath,
             vertexColors: pending.vertexColors,
             worldMapURL: pending.worldMapURL,

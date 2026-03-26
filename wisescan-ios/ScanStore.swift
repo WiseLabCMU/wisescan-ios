@@ -11,6 +11,7 @@ class CapturedScan {
     var capturedAt: Date
     var vertexCount: Int
     var faceCount: Int
+    var hardwareDeviceModel: String
     var selectedFormatStr: String
     var uploadStatusStr: String
     var uploadProgress: Double
@@ -18,12 +19,13 @@ class CapturedScan {
     @Relationship(inverse: \ScanLocation.scans)
     var location: ScanLocation?
 
-    init(id: UUID = UUID(), name: String, capturedAt: Date = Date(), vertexCount: Int, faceCount: Int) {
+    init(id: UUID = UUID(), name: String, capturedAt: Date = Date(), vertexCount: Int, faceCount: Int, hardwareDeviceModel: String = "Native iOS") {
         self.id = id
         self.name = name
         self.capturedAt = capturedAt
         self.vertexCount = vertexCount
         self.faceCount = faceCount
+        self.hardwareDeviceModel = hardwareDeviceModel
         self.selectedFormatStr = ExportFormat.scan4d.rawValue
         self.uploadStatusStr = "pending"
         self.uploadProgress = 0.0
@@ -316,6 +318,7 @@ class ScanFileManager {
         meshData: Data,
         vertexCount: Int,
         faceCount: Int,
+        hardwareDeviceModel: String = "Native iOS",
         rawDataPath: URL?,
         vertexColors: Data?,
         worldMapURL: URL?,
@@ -344,7 +347,8 @@ class ScanFileManager {
         let newScan = CapturedScan(
             name: scanName,
             vertexCount: vertexCount,
-            faceCount: faceCount
+            faceCount: faceCount,
+            hardwareDeviceModel: hardwareDeviceModel
         )
 
         targetLocation.scans.append(newScan)

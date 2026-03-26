@@ -4,6 +4,7 @@ struct DashboardView: View {
     @AppStorage(AppDefaults.Key.uploadURL) private var uploadURL = AppDefaults.uploadURL
     @State private var showSettings = false
     @State private var serverStatus: ServerStatus = .unknown
+    @State private var wearableManager = MetaWearableManager.shared
 
     enum ServerStatus {
         case unknown, checking, available, unavailable
@@ -86,31 +87,43 @@ struct DashboardView: View {
                         ServerCard(name: "Lab_Scanner_Beta", model: "Beta-3 | 192.168.1.115", isConnected: false, isDisabled: true)
                         */
 
-                        Text("WEARABLE DEVICES (COMING SOON)")
+                        Text("WEARABLE DEVICES (PROXY SCAN)")
                             .font(.subheadline)
                             .foregroundColor(.gray)
                             .padding(.horizontal)
                             .padding(.top, 16)
 
-                        WearableCard(name: "Vision Glass S", deviceId: "VG-S02948", isPaired: true, isDisabled: true)
+                        if wearableManager.connectedDevices.isEmpty {
+                            Text("No paired devices found")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                                .padding(.horizontal)
+                        } else {
+                            ForEach(wearableManager.connectedDevices) { device in
+                                WearableCard(name: device.name, deviceId: device.id, isPaired: device.isConnected, isDisabled: false)
+                            }
+                        }
 
-                        Button(action: {}) {
+                        Button(action: { wearableManager.toggleScanning() }) {
                             HStack {
-                                Image(systemName: "plus")
-                                Text("Add Smart Glasses (Wearables)")
+                                if wearableManager.isScanning {
+                                    ProgressView().tint(.white).padding(.trailing, 4)
+                                } else {
+                                    Image(systemName: "plus")
+                                }
+                                Text(wearableManager.isScanning ? "Scanning..." : "Add Smart Glasses (Wearables)")
                             }
                             .frame(maxWidth: .infinity)
                             .padding()
                             .background(.ultraThinMaterial)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 16)
-                                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                                    .stroke(wearableManager.isScanning ? Color.cyan.opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
                             )
                             .cornerRadius(16)
                             .foregroundColor(.white)
                         }
                         .padding(.horizontal)
-                        .disabled(true)
                     }
                     .padding(.vertical)
                 }

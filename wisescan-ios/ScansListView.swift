@@ -283,6 +283,9 @@ struct ScanCard: View {
                         }
                         .font(.caption)
                         .foregroundColor(.gray)
+                        Text(scan.hardwareDeviceModel)
+                            .font(.caption2)
+                            .foregroundColor(.cyan)
                     }
                     Spacer()
                     statusBadge
@@ -323,7 +326,7 @@ struct ScanCard: View {
                         .foregroundColor(isEditing ? .gray : .white)
                         .cornerRadius(10)
                     }
-                    .disabled(isEditing)
+                    .disabled(isEditing || scan.hardwareDeviceModel.localizedCaseInsensitiveContains("ray ban") || scan.hardwareDeviceModel.localizedCaseInsensitiveContains("glass"))
 
                     HStack(spacing: 10) {
                         // Save to Files button

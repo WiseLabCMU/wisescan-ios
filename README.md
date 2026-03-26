@@ -9,19 +9,17 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 
 ## Device Support
 
-| Capability | Full Mode (LiDAR) | Lite Mode (No LiDAR) |
-| :--- | :--- | :--- |
-| **Devices** | iPhone Pro, iPad Pro | iPhone 16, older iPhones/iPads |
-| **RGB Frames** | ✅ | ✅ |
-| **Camera Poses** | ✅ ARKit tracking | ✅ ARKit tracking |
-| **Depth Maps** | ✅ LiDAR depth | ❌ |
-| **Real-time Mesh** | ✅ Scene reconstruction | ❌ |
-| **Coverage Overlay** | ✅ Wireframe | ❌ |
-| **Privacy Markers** | ✅ 3D face anchors | ❌ (2D blur only) |
-| **Mesh Preview** | ✅ Colored 3D model | ❌ |
-| **Server Reconstruction** | Full pipeline | Photogrammetry only |
-
-> **Future:** Wearable glasses (e.g., Meta Ray-Ban) will add a frames-only mode with no ARKit — server-side visual SLAM for reconstruction.
+| Capability | Full Mode (LiDAR) | Lite Mode (No LiDAR) | Proxy Mode |
+| :--- | :--- | :--- | :--- |
+| **Devices** | iPhone Pro, iPad Pro | iPhone 16, older iPhones/iPads | Meta Ray-Ban, Glasses |
+| **RGB Frames** | ✅ | ✅ | ✅ Streamed via Bluetooth |
+| **Camera Poses** | ✅ ARKit tracking | ✅ ARKit tracking | ❌ |
+| **Depth Maps** | ✅ LiDAR depth | ❌ | ❌ |
+| **Real-time Mesh** | ✅ Scene reconstruction | ❌ | ❌ |
+| **Coverage Overlay** | ✅ Wireframe | ❌ | ❌ |
+| **Privacy Markers** | ✅ 3D face anchors | ❌ (2D blur only) | ❌ |
+| **Mesh Preview** | ✅ Colored 3D model | ❌ | ❌ |
+| **Server Reconstruction** | Full pipeline | Photogrammetry only | Photogrammetry only |
 
 ## Features
 
@@ -72,7 +70,7 @@ Each export format includes **only** the data relevant to that format. The filen
 ### Example: Scan4D Export
 ```
 scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
-├── scan4d_metadata.json    # GPS tags, Location ID, `export_format`, & `face_anchors`
+├── scan4d_metadata.json    # GPS tags, Location ID, `export_format`, `hardware_device_model`, & `face_anchors`
 ├── relocalization.worldmap # ARKit spatial anchor for Scan4D rescanning
 ├── images/                 # RGB frames (JPEG, ~2fps adaptive)
 │   ├── frame_00000.jpg

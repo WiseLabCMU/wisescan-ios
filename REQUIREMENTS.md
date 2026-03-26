@@ -180,8 +180,8 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | ✅ Complete (Phase 1 — Local) |
-| **Description** | Enable two complementary scanning workflows via a single "Extend Scan" button, both powered by `ARWorldMap` relocalization and a ghost-mesh overlay. |
-| **Details** | **Use Case 1 — Time-Series Re-Scan:** Scan the same space again at a later time. The red ghost overlay shows the original capture area; the user re-scans the identical region. The backend pipeline can diff or merge these scans to track changes over time. **Use Case 2 — Adjacent-Space Stitching:** Extend a scan into an adjacent area. The user moves to the edge of the red ghost overlay and begins recording, overlapping slightly with the previous scan. The backend pipeline stitches the chunks together (via COLMAP, RealityCapture, or ICP) to build a single unified model from multiple adjacent sessions. Both use cases share identical device-side mechanics: (1) **Relocalization Setup:** Tapping "Extend Scan" on any scan card loads that scan's `ARWorldMap` as the AR session initialization target. (2) **Ghost Visualization:** The selected scan's mesh renders as a 0.3-opacity red overlay (`UnlitMaterial`). (3) **UI Prompting:** A dismissable toast instructs the user to either re-scan the red region (time-series) or move to its edge (adjacent stitching). (4) **Session Stability:** Destructive configurations like `.resetTracking` are strictly bypassed, guaranteeing that the ghost overlay anchors flawlessly without natively drifting out of phase between clips. (5) **Server-Side Focus:** No on-device mesh merging. The backend receives individual chunked scans with shared ARKit coordinate frames, visual overlap, and raw image data for downstream alignment. |
+| **Description** | Enable two complementary scanning workflows via a single "Extend Scan" button, both powered by `ARWorldMap` relocalization and a ghost-mesh overlay. Provide conditional UI for specific capture sources. |
+| **Details** | **Use Case 1 — Time-Series Re-Scan:** Scan the same space again at a later time. The red ghost overlay shows the original capture area; the user re-scans the identical region. The backend pipeline can diff or merge these scans to track changes over time. **Use Case 2 — Adjacent-Space Stitching:** Extend a scan into an adjacent area. The user moves to the edge of the red ghost overlay and begins recording, overlapping slightly with the previous scan. The backend pipeline stitches the chunks together (via COLMAP, RealityCapture, or ICP) to build a single unified model from multiple adjacent sessions. Both use cases share identical device-side mechanics: (1) **Relocalization Setup:** Tapping "Extend Scan" on any scan card loads that scan's `ARWorldMap` as the AR session initialization target. (2) **Ghost Visualization:** The selected scan's mesh renders as a 0.3-opacity red overlay (`UnlitMaterial`). (3) **UI Prompting:** A dismissable toast instructs the user to either re-scan the red region (time-series) or move to its edge (adjacent stitching). (4) **Session Stability:** Destructive configurations like `.resetTracking` are strictly bypassed, guaranteeing that the ghost overlay anchors flawlessly without natively drifting out of phase between clips. (5) **Server-Side Focus:** No on-device mesh merging. The backend receives individual chunked scans with shared ARKit coordinate frames, visual overlap, and raw image data for downstream alignment. (6) **Wearables Constraint:** The "Extend Scan" functionality is explicitly disabled in the UI for proxy scans (e.g., Meta Ray-Ban glasses) because they lack ARKit spatial localization capabilities to place a ghost overlay or track device motion natively. |
 
 ```mermaid
 sequenceDiagram
@@ -307,7 +307,7 @@ sequenceDiagram
 | ID | Feature | Description | Priority |
 |:---|:--------|:------------|:---------|
 | REQ-016 | Server Discovery | Detect local Prefect servers via mDNS/Bonjour | Medium |
-| REQ-017 | Wearable Proxy | Bridge data from Meta/Ray-Ban glasses | Low |
+| REQ-017 | Wearable Proxy | **Proxy Mode Data Collection:** Connect to Meta Ray-Ban glasses using the Meta Wearables DAT SDK. Connections are managed in the background via the dashboard's connection card. Listen for hardware shutter button presses to start/stop recordings. Stream RGB frames gracefully into the app. Save these as standard `CapturedScan` items without AR maps. Note: App relies completely on iOS local client SDK, eliminating the need for a Python/WebRTC receiver loop. | High |
 | REQ-018 | Streaming Mode | Real-time lower-res tracking data to server | Medium |
 | REQ-019 | Workflow Orchestration | Select preset server pipelines (Mesh, Splat, Spatial Indexing) | High |
 | REQ-020 | Job Observability | Display remote Prefect job status locally | Medium |
@@ -333,6 +333,7 @@ classDiagram
         +UUID id
         +String name
         +Date capturedAt
+        +String hardwareDeviceModel
         +URL meshFileURL
         +Int vertexCount
         +Int faceCount
