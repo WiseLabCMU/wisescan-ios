@@ -8,6 +8,7 @@
 import SwiftUI
 import SwiftData
 import UIKit
+import MWDATCore
 
 /// UIApplicationDelegate for orientation locking support.
 /// CaptureView sets `orientationLocked = true` on appear to lock portrait during scanning.
@@ -23,6 +24,14 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 @main
 struct Scan4DApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
+    init() {
+        do {
+            try Wearables.configure()
+        } catch {
+            print("Failed to configure Meta Wearables SDK: \(error)")
+        }
+    }
 
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([

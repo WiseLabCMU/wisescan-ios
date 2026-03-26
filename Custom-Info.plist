@@ -11,5 +11,17 @@
 		<key>UIImageRespectsSafeAreaInsets</key>
 		<true/>
 	</dict>
+	<key>MetaAppID</key>
+	<string></string>
+	<key>ClientToken</key>
+	<string></string>
+	<key>TeamID</key>
+	<string></string>
+	<key>AppLinkURLScheme</key>
+	<string>wisescandat</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>meta-ai</string>
+	</array>
 </dict>
 </plist>
