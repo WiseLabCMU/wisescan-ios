@@ -84,7 +84,15 @@ class MetaWearableManager {
     func toggleScanning() {
         isScanning.toggle()
         if isScanning {
-            setupDeviceObservation()
+            Task {
+                do {
+                    // Deep-link to the Meta AI App for registration pairing
+                    try await Wearables.shared.startRegistration()
+                } catch {
+                    print("Registration error: \(error)")
+                }
+                setupDeviceObservation()
+            }
         }
     }
 
