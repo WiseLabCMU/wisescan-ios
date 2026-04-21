@@ -5,6 +5,7 @@ struct LocationDetailView: View {
     let location: ScanLocation
     @Environment(\.modelContext) private var modelContext
     @Environment(ScanStore.self) private var scanStore
+    @Environment(\.dismiss) private var dismiss
     @Binding var selectedTab: Int // Pass through to allow "Extend Scan" to switch tabs
     @State private var isEditing = false
     @State private var showSettings = false
@@ -73,9 +74,11 @@ struct LocationDetailView: View {
                                     onUpdate: { _ in try? modelContext.save() },
                                     onDelete: { scanToDelete in
                                         ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
-                                        // Auto-exit edit mode if no scans remain
+                                        // Auto-delete location if no scans remain
                                         if location.scans.isEmpty {
-                                            isEditing = false
+                                            modelContext.delete(location)
+                                            try? modelContext.save()
+                                            dismiss()
                                         }
                                     },
                                     onExtend: { scanToExtend in
