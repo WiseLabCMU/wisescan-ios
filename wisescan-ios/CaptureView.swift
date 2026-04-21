@@ -38,6 +38,7 @@ struct CaptureView: View {
     @State private var showExtendPrompt = false
 
     struct PendingScanData {
+        let locationId: UUID?
         let meshData: Data
         let vertexCount: Int
         let faceCount: Int
@@ -507,6 +508,8 @@ struct CaptureView: View {
             saveMessage = "Coloring mesh..."
         }
 
+        let capturedLocationId = scanStore.activeLocationForScan
+
         // Run vertex coloring in background using saved camera frames (.utility QoS
         // so the name-prompt keyboard stays responsive while coloring runs)
         DispatchQueue.global(qos: .utility).async {
@@ -533,6 +536,7 @@ struct CaptureView: View {
                         }
 
                         self.pendingScan = PendingScanData(
+                            locationId: capturedLocationId,
                             meshData: result.data,
                             vertexCount: result.vertexCount,
                             faceCount: result.faceCount,
@@ -567,11 +571,10 @@ struct CaptureView: View {
     private func savePendingScan() {
         guard let pending = pendingScan else { return }
 
-        // Determine the location ID
         let locationId: UUID?
         var finalName = "New Space"
 
-        if let activeLocationId = scanStore.activeLocationForScan {
+        if let activeLocationId = pending.locationId {
             locationId = activeLocationId
         } else {
             let trimmedName = newLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
