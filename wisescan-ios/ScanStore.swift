@@ -11,7 +11,7 @@ class CapturedScan {
     var capturedAt: Date
     var vertexCount: Int
     var faceCount: Int
-    var hardwareDeviceModel: String
+    var hardwareDeviceModel: String = "Native iOS"
     var selectedFormatStr: String
     var uploadStatusStr: String
     var uploadProgress: Double
