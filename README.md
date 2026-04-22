@@ -106,3 +106,24 @@ When enabled (toggle on Capture screen):
 4. Configure the upload URL in Settings (gear icon)
 5. Go to Capture → tap record → scan → tap stop → name your space to save it
 6. In the Scans tab, tap **Extend Scan** on any scan card to either re-scan the same space (time-series) or scan adjacent areas (stitching). The red overlay shows the previous scan boundary.
+
+## Testing Guidelines (Meta Wearables)
+
+The Meta Wearables DAT SDK relies on specific Xcode build configurations that cannot be safely executed automatically via typical text edits, as it will corrupt the `.pbxproj`. You will need to manually perform these setup steps in Xcode:
+
+1. **Add the Swift Package**
+   In Xcode, go to `File > Add Package Dependencies...` and enter the repository URL: `https://github.com/facebook/meta-wearables-dat-ios`. Add the `meta-wearables-dat-ios` library to the `wisescan-ios` target.
+
+2. **Gather Meta Credentials (Optional)**
+   Ensure you have your `MetaAppID`, `ClientToken`, and `TeamID` registered from the Meta Wearables Developer Center. Inject these into `Custom-Info.plist` (or keep them blank to function in Developer Mode). 
+
+3. **Enable Developer Mode in Meta View App**
+   If you are testing without registered production credentials:
+   - Open the official **Meta View** companion app on your testing iPhone.
+   - Navigate to Settings > Developer Mode and toggle it **ON**.
+   - When you tap "Connect" in Scan4D, it will deep-link to Meta View. You must explicitly tap "Allow" on the developer prompt to authorize the local stream.
+
+4. **Verification Steps**
+   - **Compilation Check**: The project should compile cleanly with SPM dependencies linked.
+   - **Pairing Check**: `DashboardView` should automatically list the Meta Ray-Bans once the Meta View companion app broadcasts their availability.
+   - **Hardware Trigger Check**: Clicking the capture button on the physical glasses should instantly initiate the frame drop into `scan4d_metadata.json` proxy packages, and the glasses' LED should illuminate.

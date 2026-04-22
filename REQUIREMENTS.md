@@ -300,6 +300,13 @@ sequenceDiagram
 | **Description** | In Edit mode, location group names become tappable (orange with pencil icon) to trigger a rename alert with text field. Saves directly to SwiftData. |
 | **Source** | [ScansListView.swift](wisescan-ios/ScansListView.swift) — `showRenameAlert`, `locationToRename` |
 
+### REQ-017: Wearable Proxy
+| | |
+|:--|:--|
+| **Status** | ✅ Complete |
+| **Description** | Proxy Mode Data Collection connects to Meta Ray-Ban glasses using the Meta Wearables DAT SDK. Connections are managed in the background via the dashboard's connection card. Listens for hardware shutter button presses to start/stop recordings and streams RGB frames natively into the app, eliminating the need for a WebRTC receiver loop. Includes a 15 FPS manual rate limiter to prevent massive proxy image bloat, strict frame-isolation by saving Wearable frames to a separate `proxy_images/` directory in the export payload, and an immediate session teardown mechanism when unregistering to prevent stale UI state. |
+| **Source** | `MetaWearableManager.swift` (SDK Lifecycle) · `FrameCaptureSession.swift` (Frame Ingestion) · `ScansListView.swift` (Zipping/Export Management) |
+
 ---
 
 ## Planned Features
@@ -307,7 +314,6 @@ sequenceDiagram
 | ID | Feature | Description | Priority |
 |:---|:--------|:------------|:---------|
 | REQ-016 | Server Discovery | Detect local Prefect servers via mDNS/Bonjour | Medium |
-| REQ-017 | Wearable Proxy | **Proxy Mode Data Collection:** Connect to Meta Ray-Ban glasses using the Meta Wearables DAT SDK. Connections are managed in the background via the dashboard's connection card. Listen for hardware shutter button presses to start/stop recordings. Stream RGB frames gracefully into the app. Save these as standard `CapturedScan` items without AR maps. Note: App relies completely on iOS local client SDK, eliminating the need for a Python/WebRTC receiver loop. | High |
 | REQ-018 | Streaming Mode | Real-time lower-res tracking data to server | Medium |
 | REQ-019 | Workflow Orchestration | Select preset server pipelines (Mesh, Splat, Spatial Indexing) | High |
 | REQ-020 | Job Observability | Display remote Prefect job status locally | Medium |
