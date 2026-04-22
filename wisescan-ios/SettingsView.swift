@@ -15,6 +15,7 @@ struct SettingsView: View {
     @AppStorage(AppDefaults.Key.testIMU) private var testIMU: Bool = AppDefaults.testIMU
     @AppStorage(AppDefaults.Key.testCameraImages) private var testCameraImages: Bool = AppDefaults.testCameraImages
     @AppStorage(AppDefaults.Key.testDepthMaps) private var testDepthMaps: Bool = AppDefaults.testDepthMaps
+    @AppStorage(AppDefaults.Key.mockWearable) private var mockWearable: Bool = AppDefaults.mockWearable
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -183,6 +184,18 @@ struct SettingsView: View {
                                     Text("Test Depth Maps")
                                         .foregroundColor(.white)
                                     Text("Injects synthetic depth maps matching the virtual test images.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+                            
+                            Toggle(isOn: $mockWearable) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Simulate Meta Wearable")
+                                        .foregroundColor(.white)
+                                    Text("Uses MockDeviceKit to simulate paired Meta Ray-Ban glasses without needing physical hardware.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

@@ -3,6 +3,9 @@ import Observation
 import Combine
 import MWDATCore
 import MWDATCamera
+#if canImport(MWDATMockDevice)
+import MWDATMockDevice
+#endif
 import CoreMedia
 import UIKit
 
@@ -33,12 +36,18 @@ class MetaWearableManager {
     private var stateToken: Any?
     private var frameToken: Any?
     
+    #if canImport(MWDATMockDevice)
+    private var mockDevice: MockRaybanMeta?
+    private var isMockWearableEnabled = false
+    #endif
+    
     // Inject this from CaptureView or proxy handler
     var activeCaptureSession: FrameCaptureSession?
 
     private init() {
         setupDeviceObservation()
         checkPermissions()
+        syncMockWearable()
         
         // Refresh devices when returning to foreground in case the deep-link failed to bounce back
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -47,6 +56,39 @@ class MetaWearableManager {
                 self?.setupDeviceObservation()
             }
         }
+        
+        NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.syncMockWearable()
+            }
+        }
+    }
+    
+    private func syncMockWearable() {
+        #if canImport(MWDATMockDevice)
+        let isEnabled = UserDefaults.standard.bool(forKey: AppDefaults.Key.mockWearable)
+        guard isEnabled != isMockWearableEnabled else { return }
+        isMockWearableEnabled = isEnabled
+        
+        if isEnabled {
+            let device = MockDeviceKit.shared.pairRaybanMeta()
+            self.mockDevice = device
+            Task {
+                await device.powerOn()
+                await device.unfold()
+                await device.don()
+                await MainActor.run {
+                    self.setupDeviceObservation()
+                }
+            }
+        } else {
+            if let device = self.mockDevice {
+                MockDeviceKit.shared.unpairDevice(device)
+            }
+            self.mockDevice = nil
+            self.setupDeviceObservation()
+        }
+        #endif
     }
 
     func checkPermissions() {

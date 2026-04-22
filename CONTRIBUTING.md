@@ -25,6 +25,10 @@ Any new computer vision exports or data pipelines must respect user privacy. We 
 
 **All dependencies must use exact, pegged versions** (no `^`, `~`, or `*` ranges). This prevents version drift across environments and ensures reproducible builds for security.
 
+### 5. Magic Numbers & Constants
+
+**No magic numbers allowed inline.** Any numerical layout properties, structural modifiers (like opacities, heights, constraints), and complex configurations (duration bounds, bitrates) must be formally extracted and organized into the `AppConstants.swift` structure. This guarantees centralized governance of our UI aesthetics and networking policies.
+
 ## Build & Test
 
 To build the project locally, open `wisescan-ios.xcodeproj` with Xcode.
