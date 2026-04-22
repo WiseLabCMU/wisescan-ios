@@ -218,6 +218,7 @@ struct ScanCard: View {
     @State private var exportItem: ZipExportItem? = nil
     @State private var showExportError = false
     @State private var showDeleteConfirm = false
+    @State private var itemCounts: (images: Int, proxy: Int, depth: Int, cameras: Int)? = nil
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
@@ -286,6 +287,12 @@ struct ScanCard: View {
                         Text(scan.hardwareDeviceModel)
                             .font(.caption2)
                             .foregroundColor(.cyan)
+                        
+                        if let counts = itemCounts {
+                            Text("\(counts.images) images · \(counts.proxy) proxy · \(counts.depth) depth · \(counts.cameras) cameras")
+                                .font(.caption2)
+                                .foregroundColor(.gray.opacity(0.8))
+                        }
                     }
                     Spacer()
                     statusBadge
@@ -393,6 +400,18 @@ struct ScanCard: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text("The scan data may have been deleted.")
+        }
+        .task(id: scan.id) {
+            let rawDir = scan.rawDataPath
+            let fm = FileManager.default
+            // Use detached task for I/O to avoid main thread stutter
+            itemCounts = await Task.detached(priority: .utility) {
+                let iCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("images").path))?.count ?? 0
+                let pCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("proxy_images").path))?.count ?? 0
+                let dCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("depth").path))?.count ?? 0
+                let cCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("cameras").path))?.count ?? 0
+                return (iCount, pCount, dCount, cCount)
+            }.value
         }
     }
 
@@ -573,9 +592,9 @@ struct ScanCard: View {
             return nil
         }
 
-        // Stage Polycam payload: images/, depth/, cameras/, mesh_info.json
+        // Stage Polycam payload: images/, depth/, cameras/, mesh_info.json, proxy_images/
         func stagePolycamPayload(to dir: URL) {
-            let items = ["images", "depth", "cameras", "mesh_info.json"]
+            let items = ["images", "proxy_images", "depth", "cameras", "mesh_info.json"]
             for item in items {
                 let src = rawDataDir.appendingPathComponent(item)
                 let dst = dir.appendingPathComponent(item)
@@ -651,9 +670,9 @@ struct ScanCard: View {
             }
 
         case .raw:
-            // Nerfstudio format: images/, depth/, transforms.json
+            // Nerfstudio format: images/, proxy_images/, depth/, transforms.json
             return withStagingDir { stagingDir in
-                let copyItems = [("images", "images"), ("depth", "depth"), ("transforms.json", "transforms.json")]
+                let copyItems = [("images", "images"), ("proxy_images", "proxy_images"), ("depth", "depth"), ("transforms.json", "transforms.json")]
                 for (src, dst) in copyItems {
                     do {
                         try fm.copyItem(

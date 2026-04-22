@@ -13,18 +13,35 @@
 	</dict>
 	<key>MWDAT</key>
 	<dict>
-		<key>MetaAppID</key>
-		<string></string>
-		<key>ClientToken</key>
-		<string></string>
-		<key>TeamID</key>
-		<string></string>
 		<key>AppLinkURLScheme</key>
-		<string>wisescandat</string>
+		<string>wisescandat://</string>
 	</dict>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
+		<string>fb-viewapp</string>
 		<string>meta-ai</string>
+	</array>
+	<key>UISupportedExternalAccessoryProtocols</key>
+	<array>
+		<string>com.meta.ar.wearable</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-peripheral</string>
+		<string>external-accessory</string>
+	</array>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Needed to connect to Meta Wearables</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.wisescan.dat</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>wisescandat</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>

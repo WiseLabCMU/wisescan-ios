@@ -56,6 +56,15 @@ struct Scan4DApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .onOpenURL { url in
+                    Task {
+                        do {
+                            _ = try await Wearables.shared.handleUrl(url)
+                        } catch {
+                            print("Error handling Wearables URL: \(error)")
+                        }
+                    }
+                }
         }
         .modelContainer(sharedModelContainer)
     }

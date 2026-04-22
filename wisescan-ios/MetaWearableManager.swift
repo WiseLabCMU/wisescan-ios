@@ -3,6 +3,8 @@ import Observation
 import Combine
 import MWDATCore
 import MWDATCamera
+import CoreMedia
+import UIKit
 
 /// Manages background Bluetooth connections and data streaming for Meta Ray-Ban proxy devices
 /// using the Meta Wearables Device Access Toolkit (DAT) SDK.
@@ -37,6 +39,14 @@ class MetaWearableManager {
     private init() {
         setupDeviceObservation()
         checkPermissions()
+        
+        // Refresh devices when returning to foreground in case the deep-link failed to bounce back
+        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.isScanning = false
+                self?.setupDeviceObservation()
+            }
+        }
     }
 
     func checkPermissions() {
@@ -82,16 +92,18 @@ class MetaWearableManager {
     }
 
     func toggleScanning() {
-        isScanning.toggle()
-        if isScanning {
-            Task {
-                do {
-                    // Deep-link to the Meta AI App for registration pairing
-                    try await Wearables.shared.startRegistration()
-                } catch {
-                    print("Registration error: \(error)")
-                }
-                setupDeviceObservation()
+        if isScanning { return }
+        isScanning = true
+        Task {
+            do {
+                // Deep-link to the Meta AI App for registration pairing
+                try await Wearables.shared.startRegistration()
+            } catch {
+                print("Registration error: \(error)")
+            }
+            Task { @MainActor [weak self] in
+                self?.isScanning = false
+                self?.setupDeviceObservation()
             }
         }
     }
@@ -111,28 +123,38 @@ class MetaWearableManager {
             self.streamSession = nil
         }
     }
+    
+    func unregister() {
+        Task {
+            // Drop stream and clear local devices list to ensure SDK fully releases
+            await self.streamSession?.stop()
+            self.streamSession = nil
+            
+            Task { @MainActor in
+                self.connectedDevices = []
+            }
+            
+            do {
+                try await Wearables.shared.startUnregistration()
+            } catch {
+                print("Failed to unregister: \(error)")
+            }
+        }
+    }
 
     private func setupStreamSession(for deviceId: String) {
         Task { [weak self] in
             guard let self = self else { return }
             guard self.streamSession == nil else { return }
             
-            // Safely bypass compiler mismatch if String doesn't implement DeviceSelector directly
-            guard let selector = deviceId as? DeviceSelector else {
-                print("Error: deviceId does not conform to DeviceSelector in this SDK version.")
-                return
-            }
+            let selector = AutoDeviceSelector(wearables: Wearables.shared)
             
             // MWDAT initializer doesn't throw, and .start() is an async but NON-throwing function
             let session = StreamSession(deviceSelector: selector)
             self.streamSession = session
             
             // --- MWDAT ANNOUNCER SUBSCRIPTION ---
-            // Depending on the exact iteration of the MWDAT headers, `any Announcer` exposes 
-            // block-based observers natively (e.g. .subscribe, .addListener, .observe).
-            // Once identified, uncomment the below blocks to map the Shutter button logic:
-            /*
-            self.stateToken = session.statePublisher.subscribe { state in
+            self.stateToken = session.statePublisher.listen { state in
                 Task { @MainActor [weak self] in
                     guard let self = self else { return }
                     let stateStr = String(describing: state).lowercased()
@@ -140,16 +162,26 @@ class MetaWearableManager {
                         self.isStreaming = true
                     } else {
                         self.isStreaming = false
-                        self.activeCaptureSession?.stop()
+                        _ = self.activeCaptureSession?.stop()
                     }
                 }
             }
 
-            // Subscribe to actual camera frame output (e.g. session.frameAnnouncer / session.cameraPublisher)
-            self.frameToken = session.videoFramePublisher?.subscribe { frame in
-                // hook.captureProxyFrame(pixelBuffer: frame.pixelBuffer)
+            // Subscribe to actual camera frame output
+            self.frameToken = session.videoFramePublisher.listen { [weak self] frame in
+                if let pixelBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer) {
+                    
+                    // Wrap the non-Sendable CVPixelBuffer to safely cross the boundary to the MainActor
+                    struct SendableBuffer: @unchecked Sendable {
+                        let buffer: CVPixelBuffer
+                    }
+                    let sendableBuf = SendableBuffer(buffer: pixelBuffer)
+                    
+                    Task { @MainActor [weak self] in
+                        self?.activeCaptureSession?.captureProxyFrame(pixelBuffer: sendableBuf.buffer)
+                    }
+                }
             }
-            */
             
             await session.start()
         }

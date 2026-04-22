@@ -302,16 +302,28 @@ struct WearableCard: View {
             }
             Spacer()
 
-            Button(action: {}) {
-                Text("Configure")
-                    .font(.subheadline).bold()
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(isDisabled ? Color.gray.opacity(0.3) : Color.green.opacity(0.8))
-                    .foregroundColor(isDisabled ? .gray : .black)
-                    .cornerRadius(8)
+            VStack(spacing: 8) {
+                Button(action: {
+                    MetaWearableManager.shared.connect(to: deviceId)
+                }) {
+                    Text("Configure")
+                        .font(.subheadline).bold()
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(isDisabled ? Color.gray.opacity(0.3) : Color.green.opacity(0.8))
+                        .foregroundColor(isDisabled ? .gray : .black)
+                        .cornerRadius(8)
+                }
+                .disabled(isDisabled)
+
+                Button(action: {
+                    MetaWearableManager.shared.unregister()
+                }) {
+                    Text("Disconnect")
+                        .font(.caption).bold()
+                        .foregroundColor(.red)
+                }
             }
-            .disabled(isDisabled)
         }
         .padding()
         .background(.ultraThinMaterial)

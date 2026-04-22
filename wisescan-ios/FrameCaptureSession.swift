@@ -10,6 +10,7 @@ class FrameCaptureSession {
     private(set) var captureDir: URL?
     private var timer: Timer?
     private var imagesDir: URL?
+    private var proxyImagesDir: URL?
     private var depthDir: URL?
     private var camerasDir: URL?
     private var confidenceDir: URL?
@@ -28,6 +29,10 @@ class FrameCaptureSession {
     private var isTestingImages: Bool = false
     private var isTestingDepth: Bool = false
     private var testSequenceIndex: Int = 0
+    
+    // Wearables proxy
+    private var proxyFrameCount: Int = 0
+    private var lastProxyCaptureTime: TimeInterval = 0
 
     // Blur Warning logic
     private(set) var isBlurWarningActive: Bool = false
@@ -83,17 +88,20 @@ class FrameCaptureSession {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("scan4d_raw_\(UUID().uuidString)", isDirectory: true)
         let imagesPath = tempDir.appendingPathComponent("images", isDirectory: true)
+        let proxyImagesPath = tempDir.appendingPathComponent("proxy_images", isDirectory: true)
         let depthPath = tempDir.appendingPathComponent("depth", isDirectory: true)
         let camerasPath = tempDir.appendingPathComponent("cameras", isDirectory: true)
         let confidencePath = tempDir.appendingPathComponent("confidence", isDirectory: true)
 
         try? FileManager.default.createDirectory(at: imagesPath, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: proxyImagesPath, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: depthPath, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: camerasPath, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: confidencePath, withIntermediateDirectories: true)
 
         self.captureDir = tempDir
         self.imagesDir = imagesPath
+        self.proxyImagesDir = proxyImagesPath
         self.depthDir = depthPath
         self.camerasDir = camerasPath
         self.confidenceDir = confidencePath
@@ -241,6 +249,55 @@ class FrameCaptureSession {
         let currentIndex = self.testSequenceIndex
         self.testSequenceIndex += 1 // Increment sequence index for synthetic progression
 
+        processAndSaveFrame(
+            pixelBuffer: pixelBuffer,
+            camW: camW,
+            camH: camH,
+            transform: transform,
+            intrinsics: intrinsics,
+            depthMap: depthMap,
+            segBuffer: segBuffer,
+            currentIndex: currentIndex
+        )
+    }
+
+    /// Injects a pixel buffer from a proxy capture device (e.g., Meta Ray-Ban stream).
+    func captureProxyFrame(pixelBuffer: CVPixelBuffer) {
+        guard let proxyDir = self.proxyImagesDir else { return }
+        
+        let now = Date().timeIntervalSince1970
+        // Limit to ~15 FPS to prevent massive proxy image bloat
+        guard now - lastProxyCaptureTime >= (1.0 / 15.0) else { return }
+        lastProxyCaptureTime = now
+        
+        ioQueue.async { [weak self] in
+            guard let self = self else { return }
+            guard let jpegData = self.pixelBufferToJPEG(pixelBuffer) else { return }
+            
+            let index = self.proxyFrameCount
+            self.proxyFrameCount += 1
+            
+            let paddedIndex = String(format: "%05d", index)
+            let rgbPath = proxyDir.appendingPathComponent("frame_\(paddedIndex).jpg")
+            
+            do {
+                try jpegData.write(to: rgbPath, options: .atomic)
+            } catch {
+                print("[FrameCapture] Failed to save proxy frame: \(error)")
+            }
+        }
+    }
+
+    private func processAndSaveFrame(
+        pixelBuffer: CVPixelBuffer?,
+        camW: Int,
+        camH: Int,
+        transform: simd_float4x4,
+        intrinsics: simd_float3x3,
+        depthMap: CVPixelBuffer?,
+        segBuffer: CVPixelBuffer?,
+        currentIndex: Int
+    ) {
         ioQueue.async { [weak self] in
             guard let self = self, let imagesDir = self.imagesDir else { return }
 

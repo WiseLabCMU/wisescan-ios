@@ -58,3 +58,16 @@ We need to update the [Info.plist](file:///Users/mwfarb/git/wisescan-ios/Custom-
 - **Compilation Check**: The project should compile cleanly with SPM dependencies linked.
 - **Pairing Check**: `DashboardView` should automatically list the Meta Ray-Bans once the Meta AI companion app broadcasts their availability.
 - **Hardware Trigger Check**: Clicking the capture button on the physical glasses should instantly initiate the frame drop into `scan4d_metadata.json` proxy packages.
+
+## Remaining Tasks (Next Session)
+> [!NOTE]
+> The scaffolding is in place, but these final wiring steps remain:
+
+**1. MWDAT Announcer Subscriptions (`MetaWearableManager.swift`)** - [x]
+- [x] Identify the exact Combine publisher syntax for the linked version of the MWDAT SDK. (It uses `listen` from a custom `Announcer` protocol).
+- [x] Uncomment and implement `session.statePublisher` to listen for the hardware shutter button and toggle `isStreaming`.
+- [x] Uncomment and implement `session.videoFramePublisher` to extract `frame.pixelBuffer` and pipe it into `activeCaptureSession`.
+
+**2. Dashboard UI Wiring (`DashboardView.swift`)** - [x]
+- [x] Wire up the currently empty `Button(action: {})` on the `WearableCard`.
+- [x] Have it invoke `MetaWearableManager.shared.connect(to: deviceId)`, ensuring permissions are checked and the stream session observation begins.

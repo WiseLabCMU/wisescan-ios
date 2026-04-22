@@ -348,6 +348,9 @@ struct CaptureView: View {
             if !developerMode || !flipCameraEnabled {
                 usingFrontCamera = false
             }
+
+            // Bind wearable proxy frame session
+            MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
         }
         .onDisappear {
             // Unlock orientation when leaving capture
@@ -359,6 +362,9 @@ struct CaptureView: View {
 
             // Stop GPS/heading updates to save battery (#12)
             locationManager.stopUpdating()
+
+            // Unbind wearable proxy frame session
+            MetaWearableManager.shared.activeCaptureSession = nil
 
             if isRecording {
                 stopRecording()
@@ -490,6 +496,7 @@ struct CaptureView: View {
         guard let result = finalMeshResult, !result.data.isEmpty else {
             saveMessage = "No Mesh Data"
             frameCaptureSession = FrameCaptureSession()
+            MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
             clearMessage()
             return
         }
@@ -548,6 +555,7 @@ struct CaptureView: View {
 
                         // Release frame capture session memory
                         self.frameCaptureSession = FrameCaptureSession()
+                        MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
                         self.isProcessingMesh = false
 
                         // If user already tapped save in the alert, OR if this is a background extension
