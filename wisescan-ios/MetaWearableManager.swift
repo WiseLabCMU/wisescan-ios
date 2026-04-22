@@ -39,10 +39,18 @@ class MetaWearableManager {
     #if canImport(MWDATMockDevice)
     private var mockDevice: MockRaybanMeta?
     private var isMockWearableEnabled = false
+    private var mockTimer: Timer?
+    private var mockFrameIndex = 0
     #endif
     
     // Inject this from CaptureView or proxy handler
     var activeCaptureSession: FrameCaptureSession?
+    
+    // CoreImage context for real-time PiP conversion
+    private let ciContext = CIContext()
+    
+    // Published image for UI overlays
+    var latestProxyImage: UIImage?
 
     private init() {
         setupDeviceObservation()
@@ -66,22 +74,47 @@ class MetaWearableManager {
     
     private func syncMockWearable() {
         #if canImport(MWDATMockDevice)
-        let isEnabled = UserDefaults.standard.bool(forKey: AppDefaults.Key.mockWearable)
+        let isEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.mockWearable)
         guard isEnabled != isMockWearableEnabled else { return }
         isMockWearableEnabled = isEnabled
         
         if isEnabled {
+            print("[MockWearable] Enabling mock wearable...")
             let device = MockDeviceKit.shared.pairRaybanMeta()
             self.mockDevice = device
-            Task {
-                await device.powerOn()
-                await device.unfold()
-                await device.don()
-                await MainActor.run {
-                    self.setupDeviceObservation()
+            print("[MockWearable] Paired mock device: \(device.deviceIdentifier)")
+            
+            device.powerOn()
+            device.unfold()
+            device.don()
+            print("[MockWearable] Device lifecycle: powerOn → unfold → don")
+            
+            self.setupDeviceObservation()
+            self.isStreaming = true
+            
+            // Directly feed synthetic frames to PiP at ~2 FPS (SDK setCameraFeed requires HEVC video)
+            self.mockFrameIndex = 0
+            self.mockTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self = self else { return }
+                    let idx = self.mockFrameIndex % TestDataGenerator.totalFrames
+                    let (transform, intrinsics) = TestDataGenerator.generatePoseAndIntrinsics(for: idx)
+                    let jpegData = TestDataGenerator.generateImage(for: idx, transform: transform, intrinsics: intrinsics)
+                    if let uiImage = UIImage(data: jpegData) {
+                        self.latestProxyImage = uiImage
+                    }
+                    // Persist mock proxy frames to disk
+                    self.activeCaptureSession?.captureProxyFrameData(jpegData)
+                    self.mockFrameIndex += 1
                 }
             }
+            print("[MockWearable] Started mock frame timer")
         } else {
+            print("[MockWearable] Disabling mock wearable...")
+            self.mockTimer?.invalidate()
+            self.mockTimer = nil
+            self.latestProxyImage = nil
+            self.isStreaming = false
             if let device = self.mockDevice {
                 MockDeviceKit.shared.unpairDevice(device)
             }
@@ -118,6 +151,7 @@ class MetaWearableManager {
     private func setupDeviceObservation() {
         // Wearables.shared.devices exposes an array of identifiers
         let deviceIds = Wearables.shared.devices
+        print("[MetaWearable] setupDeviceObservation — found \(deviceIds.count) devices: \(deviceIds)")
         self.connectedDevices = deviceIds.map { deviceId in
             WearableDevice(
                 id: deviceId,
@@ -129,8 +163,17 @@ class MetaWearableManager {
         }
         
         if let firstConnected = deviceIds.first {
+            print("[MetaWearable] Setting up stream session for device: \(firstConnected)")
             self.setupStreamSession(for: firstConnected)
+        } else {
+            print("[MetaWearable] No devices found — stream session will NOT be created")
         }
+    }
+
+    /// Public entry point for views to refresh wearable state (e.g., on tab switch).
+    func refreshDevices() {
+        syncMockWearable()
+        setupDeviceObservation()
     }
 
     func toggleScanning() {
@@ -187,23 +230,30 @@ class MetaWearableManager {
     private func setupStreamSession(for deviceId: String) {
         Task { [weak self] in
             guard let self = self else { return }
-            guard self.streamSession == nil else { return }
+            guard self.streamSession == nil else {
+                print("[MetaWearable] Stream session already exists, skipping setup")
+                return
+            }
             
             let selector = AutoDeviceSelector(wearables: Wearables.shared)
             
             // MWDAT initializer doesn't throw, and .start() is an async but NON-throwing function
             let session = StreamSession(deviceSelector: selector)
             self.streamSession = session
+            print("[MetaWearable] StreamSession created, subscribing to publishers...")
             
             // --- MWDAT ANNOUNCER SUBSCRIPTION ---
             self.stateToken = session.statePublisher.listen { state in
+                let stateStr = String(describing: state)
+                print("[MetaWearable] State changed: \(stateStr)")
                 Task { @MainActor [weak self] in
                     guard let self = self else { return }
-                    let stateStr = String(describing: state).lowercased()
-                    if stateStr.contains("captur") || stateStr.contains("stream") {
+                    let lower = stateStr.lowercased()
+                    if lower.contains("captur") || lower.contains("stream") {
                         self.isStreaming = true
                     } else {
                         self.isStreaming = false
+                        self.latestProxyImage = nil
                         _ = self.activeCaptureSession?.stop()
                     }
                 }
@@ -211,6 +261,7 @@ class MetaWearableManager {
 
             // Subscribe to actual camera frame output
             self.frameToken = session.videoFramePublisher.listen { [weak self] frame in
+                print("[MetaWearable] Received video frame")
                 if let pixelBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer) {
                     
                     // Wrap the non-Sendable CVPixelBuffer to safely cross the boundary to the MainActor
@@ -219,13 +270,27 @@ class MetaWearableManager {
                     }
                     let sendableBuf = SendableBuffer(buffer: pixelBuffer)
                     
+                    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+                    let cgImage = self?.ciContext.createCGImage(ciImage, from: ciImage.extent)
+                    
                     Task { @MainActor [weak self] in
+                        self?.isStreaming = true
+                        if let cgImage = cgImage {
+                            self?.latestProxyImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
+                            print("[MetaWearable] PiP image updated: \(cgImage.width)x\(cgImage.height)")
+                        } else {
+                            print("[MetaWearable] Failed to create CGImage from pixel buffer")
+                        }
                         self?.activeCaptureSession?.captureProxyFrame(pixelBuffer: sendableBuf.buffer)
                     }
+                } else {
+                    print("[MetaWearable] Frame had no pixel buffer")
                 }
             }
             
+            print("[MetaWearable] Starting stream session...")
             await session.start()
+            print("[MetaWearable] Stream session started")
         }
     }
 }

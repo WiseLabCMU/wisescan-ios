@@ -297,6 +297,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Custom-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Scan4D;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Camera is required for AR capture and streaming.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Local Network is required to connect to Scan4D servers.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Scan4D requires Location data to assign a ground truth position (GPS coordinates) to your scans so they can be accurately aligned in the real world later.";
@@ -306,7 +307,6 @@
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -337,6 +337,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Custom-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Scan4D;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Camera is required for AR capture and streaming.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Local Network is required to connect to Scan4D servers.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Scan4D requires Location data to assign a ground truth position (GPS coordinates) to your scans so they can be accurately aligned in the real world later.";
@@ -346,7 +347,6 @@
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

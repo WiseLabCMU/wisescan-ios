@@ -25,9 +25,9 @@ class FrameCaptureSession {
     private var lastCaptureTime: TimeInterval = 0
 
     // Test modes
-    private var isTestingIMU: Bool = false
-    private var isTestingImages: Bool = false
-    private var isTestingDepth: Bool = false
+    private var isMockingIMU: Bool = false
+    private var isMockingImages: Bool = false
+    private var isMockingDepth: Bool = false
     private var testSequenceIndex: Int = 0
     
     // Wearables proxy
@@ -80,9 +80,9 @@ class FrameCaptureSession {
         locationManager: LocationManager? = nil,
         activeLocationId: UUID? = nil,
         hardwareDeviceModel: String = "Native iOS",
-        testIMU: Bool = false,
-        testCameraImages: Bool = false,
-        testDepthMaps: Bool = false
+        mockIMU: Bool = false,
+        mockCameraImages: Bool = false,
+        mockDepthMaps: Bool = false
     ) {
         // Create temp directory for this capture
         let tempDir = FileManager.default.temporaryDirectory
@@ -129,9 +129,9 @@ class FrameCaptureSession {
             self.cachedOSVersion = UIDevice.current.systemVersion
         }
 
-        self.isTestingIMU = testIMU
-        self.isTestingImages = testCameraImages
-        self.isTestingDepth = testDepthMaps
+        self.isMockingIMU = mockIMU
+        self.isMockingImages = mockCameraImages
+        self.isMockingDepth = mockDepthMaps
         self.testSequenceIndex = 0
 
         // Check for new frames at 10fps, but only capture when sufficient movement
@@ -149,7 +149,7 @@ class FrameCaptureSession {
 
         // Block to ensure ongoing frame captures complete and write their JSONs
         ioQueue.sync {
-            print("[FrameCapture] Stopping — \(self.frames.count) frames captured (testIMU=\(self.isTestingIMU) testImages=\(self.isTestingImages) testDepth=\(self.isTestingDepth))")
+            print("[FrameCapture] Stopping — \(self.frames.count) frames captured (mockIMU=\(self.isMockingIMU) mockImages=\(self.isMockingImages) mockDepth=\(self.isMockingDepth))")
 
             // Write Nerfstudio transforms.json
             self.writeTransformsJSON(to: captureDir)
@@ -165,14 +165,14 @@ class FrameCaptureSession {
     }
 
     private func captureFrame(from session: ARSession) {
-        let fullyTest = isTestingIMU && isTestingImages && isTestingDepth
+        let fullyTest = isMockingIMU && isMockingImages && isMockingDepth
         let currentFrame = session.currentFrame
 
         // On Simulator, currentFrame is always nil. Allow fully-synthetic capture to proceed.
         guard currentFrame != nil || fullyTest else { return }
 
         // Cap test captures at one full 360° loop — no redundant duplicate poses
-        if isTestingIMU && testSequenceIndex >= TestDataGenerator.totalFrames { return }
+        if isMockingIMU && testSequenceIndex >= TestDataGenerator.totalFrames { return }
 
         // Resolve image dimensions: real camera if available, else test defaults
         let pixelBuffer = currentFrame?.capturedImage
@@ -183,14 +183,14 @@ class FrameCaptureSession {
         var intrinsics = currentFrame?.camera.intrinsics ?? simd_float3x3(1)
         let depthMap = currentFrame?.sceneDepth?.depthMap
 
-        if isTestingIMU {
+        if isMockingIMU {
             let (testTransform, testIntrinsics) = TestDataGenerator.generatePoseAndIntrinsics(for: testSequenceIndex, w: camW, h: camH)
             transform = testTransform
             intrinsics = testIntrinsics
         }
 
         // Reject blurred frames based on camera tracking quality
-        if rejectBlur && !isTestingIMU {
+        if rejectBlur && !isMockingIMU {
             var isBlurred = false
             
             // Skip if tracking is not normal (e.g. limited, excessive motion)
@@ -204,7 +204,7 @@ class FrameCaptureSession {
                 if timeDelta > 0 {
                     let movement = cameraMovement(from: lastTransform, to: transform)
                     let velocity = movement / Float(timeDelta)
-                    if velocity > AppDefaults.motionBlurVelocity {
+                    if velocity > AppConstants.motionBlurVelocity {
                         isBlurred = true
                     }
                 }
@@ -215,7 +215,7 @@ class FrameCaptureSession {
                 consecutiveBlurredFrames += 1
                 
                 // If we get several blurred frames in a row, trigger the warning
-                if consecutiveBlurredFrames >= AppDefaults.consecutiveBlurThreshold && !isBlurWarningActive {
+                if consecutiveBlurredFrames >= AppConstants.consecutiveBlurThreshold && !isBlurWarningActive {
                     DispatchQueue.main.async {
                         self.isBlurWarningActive = true
                         self.resetBlurWarningTimer()
@@ -234,8 +234,8 @@ class FrameCaptureSession {
             // Higher overlap = smaller movement threshold = more frames
             // overlapMax 100% → threshold ~0.01m (capture almost everything)
             // overlapMax 10%  → threshold ~0.15m (only distinct views)
-            let threshold = Float(Double(AppDefaults.overlapBaseThreshold) * (1.0 - overlapMax / 100.0)) + AppDefaults.overlapMinThreshold
-            if !isTestingIMU && movement < threshold {
+            let threshold = Float(Double(AppConstants.overlapBaseThreshold) * (1.0 - overlapMax / 100.0)) + AppConstants.overlapMinThreshold
+            if !isMockingIMU && movement < threshold {
                 return // skip — too much overlap with previous frame
             }
         }
@@ -288,6 +288,31 @@ class FrameCaptureSession {
         }
     }
 
+    /// Injects pre-encoded JPEG data as a proxy frame (used by mock wearable mode).
+    func captureProxyFrameData(_ jpegData: Data) {
+        guard let proxyDir = self.proxyImagesDir else { return }
+        
+        let now = Date().timeIntervalSince1970
+        guard now - lastProxyCaptureTime >= (1.0 / 15.0) else { return }
+        lastProxyCaptureTime = now
+        
+        ioQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            let index = self.proxyFrameCount
+            self.proxyFrameCount += 1
+            
+            let paddedIndex = String(format: "%05d", index)
+            let rgbPath = proxyDir.appendingPathComponent("frame_\(paddedIndex).jpg")
+            
+            do {
+                try jpegData.write(to: rgbPath, options: .atomic)
+            } catch {
+                print("[FrameCapture] Failed to save mock proxy frame: \(error)")
+            }
+        }
+    }
+
     private func processAndSaveFrame(
         pixelBuffer: CVPixelBuffer?,
         camW: Int,
@@ -303,7 +328,7 @@ class FrameCaptureSession {
 
             // Depth is optional — LiDAR devices get depth, others just capture images + poses
             var validDepthData: Data? = nil
-            if self.isTestingDepth {
+            if self.isMockingDepth {
                 validDepthData = TestDataGenerator.generateDepthMap(for: currentIndex, w: camW, h: camH)
             } else if let dMap = depthMap {
                 let depthFormat = CVPixelBufferGetPixelFormatType(dMap)
@@ -315,7 +340,7 @@ class FrameCaptureSession {
             }
 
             var finalJpegData: Data
-            if self.isTestingImages {
+            if self.isMockingImages {
                 finalJpegData = TestDataGenerator.generateImage(for: currentIndex, w: camW, h: camH, transform: transform, intrinsics: intrinsics)
             } else {
                 guard let pBuf = pixelBuffer, let jpegData = self.pixelBufferToJPEG(pBuf) else {
@@ -375,7 +400,7 @@ class FrameCaptureSession {
                                 // Cluster merging
                                 var found = false
                                 for i in 0..<localAnchors.count {
-                                    if simd_distance(localAnchors[i], point3D) < AppDefaults.faceClusterThresholdMeters {
+                                    if simd_distance(localAnchors[i], point3D) < AppConstants.faceClusterThresholdMeters {
                                         localAnchors[i] = (localAnchors[i] + point3D) * 0.5
                                         found = true
                                         break
@@ -571,7 +596,7 @@ class FrameCaptureSession {
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return nil }
         let uiImage = UIImage(cgImage: cgImage)
-        return uiImage.jpegData(compressionQuality: AppDefaults.jpegCompressionQuality)
+        return uiImage.jpegData(compressionQuality: AppConstants.jpegCompressionQuality)
     }
 
     private func depthMapToPNG16(_ depthBuffer: CVPixelBuffer, personMask: CVPixelBuffer? = nil) -> Data? {
@@ -668,7 +693,7 @@ class FrameCaptureSession {
     
     private func resetBlurWarningTimer() {
         blurWarningTimer?.invalidate()
-        blurWarningTimer = Timer.scheduledTimer(withTimeInterval: AppDefaults.blurWarningTimeout, repeats: false) { [weak self] _ in
+        blurWarningTimer = Timer.scheduledTimer(withTimeInterval: AppConstants.blurWarningTimeout, repeats: false) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.isBlurWarningActive = false
             }

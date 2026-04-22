@@ -214,7 +214,7 @@ struct ScanCard: View {
     var onDelete: (CapturedScan) -> Void
     var onExtend: (CapturedScan) -> Void
 
-    @AppStorage(AppDefaults.Key.selectedExportFormat) private var selectedFormatStr: String = AppDefaults.selectedExportFormat
+    @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
     @State private var exportItem: ZipExportItem? = nil
     @State private var showExportError = false
     @State private var showDeleteConfirm = false

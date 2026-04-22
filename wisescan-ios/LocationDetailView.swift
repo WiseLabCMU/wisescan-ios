@@ -12,7 +12,7 @@ struct LocationDetailView: View {
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
 
-    @AppStorage(AppDefaults.Key.uploadURL) private var uploadURL = AppDefaults.uploadURL
+    @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
 
     var body: some View {
         ZStack {

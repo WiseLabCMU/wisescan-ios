@@ -161,6 +161,6 @@ enum FaceBlurUtil {
         }
 
         guard let cgImage = context.createCGImage(outputImage, from: imageSize) else { return (imageData, faceCenters) }
-        return (UIImage(cgImage: cgImage).jpegData(compressionQuality: AppDefaults.jpegCompressionQuality), faceCenters)
+        return (UIImage(cgImage: cgImage).jpegData(compressionQuality: AppConstants.jpegCompressionQuality), faceCenters)
     }
 }

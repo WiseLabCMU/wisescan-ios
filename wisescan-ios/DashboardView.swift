@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct DashboardView: View {
-    @AppStorage(AppDefaults.Key.uploadURL) private var uploadURL = AppDefaults.uploadURL
+    @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @State private var showSettings = false
     @State private var serverStatus: ServerStatus = .unknown
     @State private var wearableManager = MetaWearableManager.shared
@@ -141,7 +141,11 @@ struct DashboardView: View {
                 SettingsView()
             }
             .preferredColorScheme(.dark)
-            .onAppear { checkServer() }
+            .onAppear {
+                checkServer()
+                // Refresh wearable state when returning to this tab
+                wearableManager.refreshDevices()
+            }
         }
     }
 

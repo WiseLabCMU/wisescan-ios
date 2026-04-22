@@ -26,6 +26,7 @@ struct Scan4DApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     init() {
+        print("Application directory: \(NSHomeDirectory())")
         do {
             try Wearables.configure()
         } catch {

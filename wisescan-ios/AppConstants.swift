@@ -1,9 +1,20 @@
 import Foundation
+import CoreGraphics
 
-/// Central source of truth for all @AppStorage keys and default values.
-/// Usage: `@AppStorage(AppDefaults.Key.uploadURL) private var uploadURL = AppDefaults.uploadURL`
-enum AppDefaults {
-    // MARK: - Keys
+/// Centralized repository for UI constants, app defaults, and magic numbers
+/// to ensure unified aesthetics and layout calculations across the app.
+enum AppConstants {
+    enum UI {
+        // Picture-in-Picture Wearable Stream Overlay
+        static let pipWidth: CGFloat = 100
+        static let pipHeight: CGFloat = 150
+        static let pipCornerRadius: CGFloat = 12
+        static let pipBorderWidth: CGFloat = 2
+        static let pipPaddingX: CGFloat = 16
+        static let pipPaddingY: CGFloat = 80 // To clear the REC indicator safely
+    }
+
+    // MARK: - AppStorage Keys
     enum Key {
         static let uploadURL = "uploadURL"
         static let rawOverlapMax = "rawOverlapMax"
@@ -11,9 +22,9 @@ enum AppDefaults {
         static let developerMode = "developerMode"
         static let flipCameraEnabled = "flipCameraEnabled"
         static let debugVertexMapping = "debugVertexMapping"
-        static let testIMU = "testIMU"
-        static let testCameraImages = "testCameraImages"
-        static let testDepthMaps = "testDepthMaps"
+        static let mockIMU = "mockIMU"
+        static let mockCameraImages = "mockCameraImages"
+        static let mockDepthMaps = "mockDepthMaps"
         static let privacyFilter = "privacyFilter"
         static let mockWearable = "mockWearable"
         static let selectedExportFormat = "selectedExportFormat"
@@ -26,9 +37,9 @@ enum AppDefaults {
     static let developerMode: Bool = false
     static let flipCameraEnabled: Bool = false
     static let debugVertexMapping: Bool = false
-    static let testIMU: Bool = false
-    static let testCameraImages: Bool = false
-    static let testDepthMaps: Bool = false
+    static let mockIMU: Bool = false
+    static let mockCameraImages: Bool = false
+    static let mockDepthMaps: Bool = false
     static let privacyFilter: Bool = true
     static let mockWearable: Bool = false
     static let selectedExportFormat = "Scan4D" // ExportFormat.scan4d.rawValue

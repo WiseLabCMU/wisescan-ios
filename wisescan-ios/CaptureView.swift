@@ -7,12 +7,12 @@ struct CaptureView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var scanStats = ScanStats()
     @State private var locationManager = LocationManager()
-    @AppStorage(AppDefaults.Key.privacyFilter) private var isPrivacyFilterOn = AppDefaults.privacyFilter
-    @AppStorage(AppDefaults.Key.developerMode) private var developerMode: Bool = AppDefaults.developerMode
-    @AppStorage(AppDefaults.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppDefaults.flipCameraEnabled
-    @AppStorage(AppDefaults.Key.testIMU) private var testIMU: Bool = AppDefaults.testIMU
-    @AppStorage(AppDefaults.Key.testCameraImages) private var testCameraImages: Bool = AppDefaults.testCameraImages
-    @AppStorage(AppDefaults.Key.testDepthMaps) private var testDepthMaps: Bool = AppDefaults.testDepthMaps
+    @AppStorage(AppConstants.Key.privacyFilter) private var isPrivacyFilterOn = AppConstants.privacyFilter
+    @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
+    @AppStorage(AppConstants.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppConstants.flipCameraEnabled
+    @AppStorage(AppConstants.Key.mockIMU) private var mockIMU: Bool = AppConstants.mockIMU
+    @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
+    @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
     // Stream mode removed — fixed to Capture (Stream is a future feature)
     @State private var usingFrontCamera = false
     @State private var currentARSession: ARSession? = nil
@@ -22,8 +22,8 @@ struct CaptureView: View {
     @State private var recordingTimer: Timer? = nil
     @State private var frameCaptureSession = FrameCaptureSession()
     // colorAccumulator removed — vertex coloring now deferred to post-processing
-    @AppStorage(AppDefaults.Key.rawOverlapMax) private var overlapMax: Double = AppDefaults.overlapMax
-    @AppStorage(AppDefaults.Key.rawRejectBlur) private var rejectBlur: Bool = AppDefaults.rejectBlur
+    @AppStorage(AppConstants.Key.rawOverlapMax) private var overlapMax: Double = AppConstants.overlapMax
+    @AppStorage(AppConstants.Key.rawRejectBlur) private var rejectBlur: Bool = AppConstants.rejectBlur
     @Binding var selectedTab: Int
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
 
@@ -197,7 +197,24 @@ struct CaptureView: View {
 
                 }
                 .padding()
-                .padding(.top, developerMode ? 16 : 0) // Leave room for dev banner
+                
+                // Picture-in-Picture Overlay
+                if let pipImage = MetaWearableManager.shared.latestProxyImage {
+                    HStack {
+                        Spacer()
+                        Image(uiImage: pipImage)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: AppConstants.UI.pipWidth, height: AppConstants.UI.pipHeight)
+                            .clipShape(RoundedRectangle(cornerRadius: AppConstants.UI.pipCornerRadius))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: AppConstants.UI.pipCornerRadius)
+                                    .stroke(Color.white.opacity(0.5), lineWidth: AppConstants.UI.pipBorderWidth)
+                            )
+                            .shadow(radius: 5)
+                            .padding(.trailing, AppConstants.UI.pipPaddingX)
+                    }
+                }
 
                 Spacer()
 
@@ -433,9 +450,9 @@ struct CaptureView: View {
                 locationManager: locationManager,
                 activeLocationId: scanStore.activeLocationForScan,
                 hardwareDeviceModel: UIDevice.current.name,
-                testIMU: developerMode && testIMU,
-                testCameraImages: developerMode && testCameraImages,
-                testDepthMaps: developerMode && testDepthMaps
+                mockIMU: developerMode && mockIMU,
+                mockCameraImages: developerMode && mockCameraImages,
+                mockDepthMaps: developerMode && mockDepthMaps
             )
         }
 
@@ -468,13 +485,13 @@ struct CaptureView: View {
             let context = CIContext()
             if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
                 let uiImage = UIImage(cgImage: cgImage)
-                let maxW = AppDefaults.thumbnailMaxWidth
+                let maxW = AppConstants.thumbnailMaxWidth
                 let targetSize = CGSize(width: maxW, height: maxW * (uiImage.size.height / uiImage.size.width))
                 UIGraphicsBeginImageContextWithOptions(targetSize, false, 1.0)
                 UIImage(cgImage: cgImage, scale: 1.0, orientation: .right).draw(in: CGRect(origin: .zero, size: targetSize))
                 let resizedImage = UIGraphicsGetImageFromCurrentImageContext()
                 UIGraphicsEndImageContext()
-                thumbnailData = resizedImage?.jpegData(compressionQuality: AppDefaults.thumbnailJpegQuality)
+                thumbnailData = resizedImage?.jpegData(compressionQuality: AppConstants.thumbnailJpegQuality)
             }
         }
 
@@ -485,7 +502,7 @@ struct CaptureView: View {
 
         // If test modes are active and no mesh was generated (e.g. Simulator), inject a dummy mesh
         if finalMeshResult == nil || finalMeshResult!.data.isEmpty {
-            if developerMode && (testCameraImages || testIMU || testDepthMaps) {
+            if developerMode && (mockCameraImages || mockIMU || mockDepthMaps) {
                 let dummyObj = "v -0.5 -0.5 -0.5\nv 0.5 -0.5 -0.5\nv 0.5 0.5 -0.5\nf 1 2 3\n"
                 if let dummyObjData = dummyObj.data(using: .utf8) {
                     finalMeshResult = (dummyObjData, 3, 1)

@@ -5,7 +5,7 @@ struct ContentView: View {
     @State private var scanStore = ScanStore()
     @State private var selectedTab = 0
     @State private var showLiDARWarning = false
-    @AppStorage(AppDefaults.Key.developerMode) private var developerMode: Bool = AppDefaults.developerMode
+    @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
     @State private var showDevSettings = false
 
     private var hasLiDAR: Bool {
@@ -34,30 +34,6 @@ struct ContentView: View {
                     .tag(2)
             }
             .environment(scanStore)
-
-            // Persistent Developer Mode Banner
-            if developerMode {
-                Button(action: { showDevSettings = true }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "hammer.fill")
-                            .font(.caption2)
-                        Text("Developer Mode")
-                            .font(.caption2)
-                        Spacer()
-                        Text("Tap to disable")
-                            .font(.system(size: 9))
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 9))
-                    }
-                    .foregroundColor(.orange)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 4)
-                    .background(.ultraThinMaterial)
-                }
-                .sheet(isPresented: $showDevSettings) {
-                    SettingsView(scrollToDevMode: true)
-                }
-            }
         }
         .preferredColorScheme(.dark)
         .onAppear {

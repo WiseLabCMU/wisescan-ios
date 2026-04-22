@@ -6,16 +6,16 @@ struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var locations: [ScanLocation]
 
-    @AppStorage(AppDefaults.Key.rawOverlapMax) private var overlapMax: Double = AppDefaults.overlapMax
-    @AppStorage(AppDefaults.Key.rawRejectBlur) private var rejectBlur: Bool = AppDefaults.rejectBlur
-    @AppStorage(AppDefaults.Key.uploadURL) private var uploadURL = AppDefaults.uploadURL
-    @AppStorage(AppDefaults.Key.developerMode) private var developerMode: Bool = AppDefaults.developerMode
-    @AppStorage(AppDefaults.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppDefaults.flipCameraEnabled
-    @AppStorage(AppDefaults.Key.debugVertexMapping) private var debugVertexMapping: Bool = AppDefaults.debugVertexMapping
-    @AppStorage(AppDefaults.Key.testIMU) private var testIMU: Bool = AppDefaults.testIMU
-    @AppStorage(AppDefaults.Key.testCameraImages) private var testCameraImages: Bool = AppDefaults.testCameraImages
-    @AppStorage(AppDefaults.Key.testDepthMaps) private var testDepthMaps: Bool = AppDefaults.testDepthMaps
-    @AppStorage(AppDefaults.Key.mockWearable) private var mockWearable: Bool = AppDefaults.mockWearable
+    @AppStorage(AppConstants.Key.rawOverlapMax) private var overlapMax: Double = AppConstants.overlapMax
+    @AppStorage(AppConstants.Key.rawRejectBlur) private var rejectBlur: Bool = AppConstants.rejectBlur
+    @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
+    @AppStorage(AppConstants.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppConstants.flipCameraEnabled
+    @AppStorage(AppConstants.Key.debugVertexMapping) private var debugVertexMapping: Bool = AppConstants.debugVertexMapping
+    @AppStorage(AppConstants.Key.mockIMU) private var mockIMU: Bool = AppConstants.mockIMU
+    @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
+    @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
+    @AppStorage(AppConstants.Key.mockWearable) private var mockWearable: Bool = AppConstants.mockWearable
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -118,7 +118,21 @@ struct SettingsView: View {
 
                     // MARK: - Developer Mode
                     Section {
-                        Toggle(isOn: $developerMode) {
+                        Toggle(isOn: Binding(
+                            get: { self.developerMode },
+                            set: { newValue in
+                                self.developerMode = newValue
+                                if !newValue {
+                                    // Reset all dev options to defaults when disabled
+                                    self.flipCameraEnabled = AppConstants.flipCameraEnabled
+                                    self.debugVertexMapping = AppConstants.debugVertexMapping
+                                    self.mockIMU = AppConstants.mockIMU
+                                    self.mockCameraImages = AppConstants.mockCameraImages
+                                    self.mockDepthMaps = AppConstants.mockDepthMaps
+                                    self.mockWearable = AppConstants.mockWearable
+                                }
+                            }
+                        )) {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Developer Mode")
                                     .foregroundColor(.white)
@@ -155,9 +169,9 @@ struct SettingsView: View {
                             .tint(.orange)
                             .padding(.vertical, 4)
 
-                            Toggle(isOn: $testIMU) {
+                            Toggle(isOn: $mockIMU) {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Test IMU & Poses")
+                                    Text("Simulate IMU & Poses")
                                         .foregroundColor(.white)
                                     Text("Simulates a continuous 360° circular trajectory to bypass overlap thresholds and test capture.")
                                         .font(.caption)
@@ -167,9 +181,9 @@ struct SettingsView: View {
                             .tint(.orange)
                             .padding(.vertical, 4)
 
-                            Toggle(isOn: $testCameraImages) {
+                            Toggle(isOn: $mockCameraImages) {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Test Camera Images")
+                                    Text("Simulate Camera Images")
                                         .foregroundColor(.white)
                                     Text("Injects a dynamically rendered synthetic frame sequence (a mid-air green box) instead of live camera.")
                                         .font(.caption)
@@ -179,9 +193,9 @@ struct SettingsView: View {
                             .tint(.orange)
                             .padding(.vertical, 4)
 
-                            Toggle(isOn: $testDepthMaps) {
+                            Toggle(isOn: $mockDepthMaps) {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Test Depth Maps")
+                                    Text("Simulate Depth Maps")
                                         .foregroundColor(.white)
                                     Text("Injects synthetic depth maps matching the virtual test images.")
                                         .font(.caption)

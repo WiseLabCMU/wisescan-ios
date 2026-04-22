@@ -86,7 +86,7 @@ enum VertexColorAccumulator {
         guard !cameraFiles.isEmpty else { return nil }
 
         // Sample up to maxColorizationFrames evenly-spaced frames for high coverage
-        let maxFrames = min(cameraFiles.count, AppDefaults.maxColorizationFrames)
+        let maxFrames = min(cameraFiles.count, AppConstants.maxColorizationFrames)
         let stride = max(1, cameraFiles.count / maxFrames)
         let sampledFiles = Swift.stride(from: 0, to: cameraFiles.count, by: stride).prefix(maxFrames).map { cameraFiles[$0] }
 
@@ -135,7 +135,7 @@ enum VertexColorAccumulator {
             let world2Cam = cam2World.inverse
 
             // Developer Diagnostic Test (runs once per coloring pass if enabled)
-            if UserDefaults.standard.bool(forKey: AppDefaults.Key.developerMode) && UserDefaults.standard.bool(forKey: AppDefaults.Key.debugVertexMapping) && !hasRunDeveloperTest {
+            if UserDefaults.standard.bool(forKey: AppConstants.Key.developerMode) && UserDefaults.standard.bool(forKey: AppConstants.Key.debugVertexMapping) && !hasRunDeveloperTest {
                 runDeveloperMappingTest(fx: fx, fy: fy, cx: cx, cy: cy, cam2World: cam2World, world2Cam: world2Cam)
                 hasRunDeveloperTest = true
             }
@@ -237,7 +237,7 @@ enum VertexColorAccumulator {
                         if depthMM == 0 { continue }
                         
                         // If expected distance is > tolerance farther than what the depth sensor saw, we are occluded
-                        if expectedMM > depthMM + AppDefaults.depthOcclusionToleranceMM { continue }
+                        if expectedMM > depthMM + AppConstants.depthOcclusionToleranceMM { continue }
                     }
                 }
 
