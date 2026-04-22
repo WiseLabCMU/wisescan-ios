@@ -14,6 +14,7 @@ Scan4D is a time-series reality capture application built on the WiSEScan resear
 graph LR
     subgraph "Reality Capture Devices"
         Phone["📱 Scan4D"]
+        MetaAI["📱 Meta AI App"]
         Glasses["🕶️ Meta/Ray-Ban"]
         Cam360["📷 360 Camera"]
     end
@@ -32,7 +33,9 @@ graph LR
         Hloc["hloc Cloud"]
     end
 
-    Glasses -->|Proxy| Phone
+    Glasses -.->|Paired| MetaAI
+    MetaAI -.->|Auth/Permissions| Phone
+    Glasses -->|DAT SDK Proxy| Phone
     Cam360 -->|Stream| Server
     Phone -->|Pose/Depth/RGB| Server
     Server -.->|mDNS| Phone

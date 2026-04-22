@@ -43,6 +43,9 @@ class MetaWearableManager {
     private var mockFrameIndex = 0
     #endif
     
+    private var deviceObservationTask: Task<Void, Never>?
+    private var registrationObservationTask: Task<Void, Never>?
+    
     // Inject this from CaptureView or proxy handler
     var activeCaptureSession: FrameCaptureSession?
     
@@ -53,6 +56,7 @@ class MetaWearableManager {
     var latestProxyImage: UIImage?
 
     private init() {
+        setupRegistrationObservation()
         setupDeviceObservation()
         checkPermissions()
         syncMockWearable()
@@ -148,10 +152,42 @@ class MetaWearableManager {
         }
     }
 
+    private func setupRegistrationObservation() {
+        registrationObservationTask?.cancel()
+        registrationObservationTask = Task { [weak self] in
+            for await state in Wearables.shared.registrationStateStream() {
+                let stateStr = String(describing: state).lowercased()
+                print("[MetaWearable] Registration state: \(stateStr)")
+                await MainActor.run {
+                    if stateStr.contains("registered") && !stateStr.contains("unregistered") {
+                        self?.permissionGranted = true
+                    } else if stateStr.contains("unregistered") {
+                        self?.permissionGranted = false
+                    }
+                }
+            }
+        }
+    }
+
     private func setupDeviceObservation() {
-        // Wearables.shared.devices exposes an array of identifiers
+        deviceObservationTask?.cancel()
+        deviceObservationTask = Task { [weak self] in
+            for await deviceIds in Wearables.shared.devicesStream() {
+                await MainActor.run {
+                    guard let self = self else { return }
+                    print("[MetaWearable] setupDeviceObservation stream — found \(deviceIds.count) devices: \(deviceIds)")
+                    self.updateConnectedDevices(deviceIds)
+                }
+            }
+        }
+        
+        // Initial fetch
         let deviceIds = Wearables.shared.devices
-        print("[MetaWearable] setupDeviceObservation — found \(deviceIds.count) devices: \(deviceIds)")
+        print("[MetaWearable] setupDeviceObservation initial — found \(deviceIds.count) devices: \(deviceIds)")
+        self.updateConnectedDevices(deviceIds)
+    }
+    
+    private func updateConnectedDevices(_ deviceIds: [String]) {
         self.connectedDevices = deviceIds.map { deviceId in
             WearableDevice(
                 id: deviceId,
@@ -163,17 +199,28 @@ class MetaWearableManager {
         }
         
         if let firstConnected = deviceIds.first {
-            print("[MetaWearable] Setting up stream session for device: \(firstConnected)")
-            self.setupStreamSession(for: firstConnected)
+            if self.streamSession == nil {
+                print("[MetaWearable] Setting up stream session for device: \(firstConnected)")
+                self.setupStreamSession(for: firstConnected)
+            }
         } else {
-            print("[MetaWearable] No devices found — stream session will NOT be created")
+            print("[MetaWearable] No devices found")
+            if !self.isMockWearableEnabled {
+                // Device went away, stop stream and clear session
+                Task {
+                    await self.streamSession?.stop()
+                    self.streamSession = nil
+                }
+            }
         }
     }
 
     /// Public entry point for views to refresh wearable state (e.g., on tab switch).
     func refreshDevices() {
         syncMockWearable()
-        setupDeviceObservation()
+        // Our deviceObservationTask will automatically handle changes, 
+        // but we can manually trigger an update just in case.
+        self.updateConnectedDevices(Wearables.shared.devices)
     }
 
     func toggleScanning() {
@@ -237,10 +284,16 @@ class MetaWearableManager {
             
             let selector = AutoDeviceSelector(wearables: Wearables.shared)
             
+            let config = StreamSessionConfig(
+                videoCodec: .raw,
+                resolution: .medium,
+                frameRate: 15
+            )
+            
             // MWDAT initializer doesn't throw, and .start() is an async but NON-throwing function
-            let session = StreamSession(deviceSelector: selector)
+            let session = StreamSession(streamSessionConfig: config, deviceSelector: selector)
             self.streamSession = session
-            print("[MetaWearable] StreamSession created, subscribing to publishers...")
+            print("[MetaWearable] StreamSession created (medium res, 15fps), subscribing to publishers...")
             
             // --- MWDAT ANNOUNCER SUBSCRIPTION ---
             self.stateToken = session.statePublisher.listen { state in
@@ -251,10 +304,19 @@ class MetaWearableManager {
                     let lower = stateStr.lowercased()
                     if lower.contains("captur") || lower.contains("stream") {
                         self.isStreaming = true
-                    } else {
+                    } else if lower.contains("paused") {
+                        print("[MetaWearable] Session PAUSED — keeping connection alive, holding work")
+                        self.isStreaming = false
+                        // DO NOT teardown capture session or session object here, wait for resume or stop
+                    } else if lower.contains("stop") {
+                        print("[MetaWearable] Session STOPPED — releasing resources")
                         self.isStreaming = false
                         self.latestProxyImage = nil
                         _ = self.activeCaptureSession?.stop()
+                        self.streamSession = nil // Allow a new session to be created when device is ready
+                    } else {
+                        // starting, waitingForDevice, etc.
+                        self.isStreaming = false
                     }
                 }
             }
