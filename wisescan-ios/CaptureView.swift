@@ -78,9 +78,9 @@ struct CaptureView: View {
             )
                 .ignoresSafeArea()
 
-            // Face blur overlay (shown when privacy filter is on AND recording)
+            // Privacy blur overlay (shown when privacy filter is on AND recording)
             if isPrivacyFilterOn && isRecording {
-                FaceBlurOverlay(arSession: currentARSession)
+                PrivacyBlurOverlay(arSession: currentARSession)
                     .ignoresSafeArea()
             }
 
@@ -345,14 +345,6 @@ struct CaptureView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
-            // Lock to portrait during capture for stable intrinsics & tracking
-            AppDelegate.orientationLocked = true
-            // Force UIKit to re-query supported orientations from the delegate
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-                windowScene.windows.first?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-            }
-            UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
-
             // Load ghost mesh once into @State cache (avoids recomputing on every body eval)
             loadGhostMeshData()
 
@@ -370,13 +362,6 @@ struct CaptureView: View {
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
         }
         .onDisappear {
-            // Unlock orientation when leaving capture
-            AppDelegate.orientationLocked = false
-            // Allow rotation again
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-                windowScene.windows.first?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-            }
-
             // Stop GPS/heading updates to save battery (#12)
             locationManager.stopUpdating()
 

@@ -245,6 +245,7 @@ class FrameCaptureSession {
             lastCaptureTime = frame.timestamp
         }
         let segBuffer = self.privacyFilter ? currentFrame?.segmentationBuffer : nil
+        let currentOrientation = UIApplication.shared.currentInterfaceOrientation
 
         let currentIndex = self.testSequenceIndex
         self.testSequenceIndex += 1 // Increment sequence index for synthetic progression
@@ -257,7 +258,8 @@ class FrameCaptureSession {
             intrinsics: intrinsics,
             depthMap: depthMap,
             segBuffer: segBuffer,
-            currentIndex: currentIndex
+            currentIndex: currentIndex,
+            orientation: currentOrientation
         )
     }
 
@@ -321,7 +323,8 @@ class FrameCaptureSession {
         intrinsics: simd_float3x3,
         depthMap: CVPixelBuffer?,
         segBuffer: CVPixelBuffer?,
-        currentIndex: Int
+        currentIndex: Int,
+        orientation: UIInterfaceOrientation
     ) {
         ioQueue.async { [weak self] in
             guard let self = self, let imagesDir = self.imagesDir else { return }
@@ -348,7 +351,7 @@ class FrameCaptureSession {
                 }
                 var tempJpegData = jpegData
                 if self.privacyFilter {
-                    let (blurredData, centers) = FaceBlurUtil.blurFacesAndGetCenters(in: jpegData)
+                    let (blurredData, centers) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: jpegData, orientation: orientation)
                     if let bData = blurredData {
                         tempJpegData = bData
                     }

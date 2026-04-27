@@ -29,6 +29,13 @@ Any new computer vision exports or data pipelines must respect user privacy. We 
 
 **No magic numbers allowed inline.** Any numerical layout properties, structural modifiers (like opacities, heights, constraints), and complex configurations (duration bounds, bitrates) must be formally extracted and organized into the `AppConstants.swift` structure. This guarantees centralized governance of our UI aesthetics and networking policies.
 
+### 6. Camera Coordinate Space & Orientations
+
+To ensure exported data (images, depth maps, camera intrinsics, and Scan4D metadata) produces accurate results for server-side processing (e.g., COLMAP), **never hardcode `.right` or `.up` for Vision requests or CoreImage filters.**
+- ARKit and AVFoundation natively output raw buffers in **LandscapeRight**.
+- **Data Export:** Exported JPEGs, PNG depth maps, and their corresponding intrinsics must remain in this native, unrotated LandscapeRight format. Do not pre-rotate images to match the UI, as this breaks the alignment between the image pixels and the intrinsic matrix parameters (`cx`, `cy`).
+- **Computer Vision & UI:** When running `VNImageRequestHandler` or rendering overlays in SwiftUI, you must dynamically read `UIApplication.shared.currentInterfaceOrientation` to compute the required rotation. Vision needs to know the physical orientation relative to gravity to detect humans accurately, and SwiftUI needs `UIImage.Orientation` to correctly align the overlay with the AR background.
+
 ## Build & Test
 
 To build the project locally, open `wisescan-ios.xcodeproj` with Xcode.
