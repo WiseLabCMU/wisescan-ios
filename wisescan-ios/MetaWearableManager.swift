@@ -45,6 +45,7 @@ class MetaWearableManager {
     
     private var deviceObservationTask: Task<Void, Never>?
     private var registrationObservationTask: Task<Void, Never>?
+    private var hasLoggedNoDevices = false
     
     // Inject this from CaptureView or proxy handler
     var activeCaptureSession: FrameCaptureSession?
@@ -175,7 +176,9 @@ class MetaWearableManager {
             for await deviceIds in Wearables.shared.devicesStream() {
                 await MainActor.run {
                     guard let self = self else { return }
-                    print("[MetaWearable] setupDeviceObservation stream — found \(deviceIds.count) devices: \(deviceIds)")
+                    if !deviceIds.isEmpty {
+                        print("[MetaWearable] setupDeviceObservation stream — found \(deviceIds.count) devices: \(deviceIds)")
+                    }
                     self.updateConnectedDevices(deviceIds)
                 }
             }
@@ -183,7 +186,9 @@ class MetaWearableManager {
         
         // Initial fetch
         let deviceIds = Wearables.shared.devices
-        print("[MetaWearable] setupDeviceObservation initial — found \(deviceIds.count) devices: \(deviceIds)")
+        if !deviceIds.isEmpty {
+            print("[MetaWearable] setupDeviceObservation initial — found \(deviceIds.count) devices: \(deviceIds)")
+        }
         self.updateConnectedDevices(deviceIds)
     }
     
@@ -204,7 +209,10 @@ class MetaWearableManager {
                 self.setupStreamSession(for: firstConnected)
             }
         } else {
-            print("[MetaWearable] No devices found")
+            if !hasLoggedNoDevices {
+                print("[MetaWearable] No devices found")
+                hasLoggedNoDevices = true
+            }
             if !self.isMockWearableEnabled {
                 // Device went away, stop stream and clear session
                 Task {
