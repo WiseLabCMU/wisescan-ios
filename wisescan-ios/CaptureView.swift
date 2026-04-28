@@ -345,6 +345,14 @@ struct CaptureView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
+            // Lock UI to portrait during capture — the controls and privacy overlay
+            // are designed for portrait. The raw sensor data and Vision pipeline
+            // remain orientation-aware regardless of this UI lock.
+            AppDelegate.orientationLocked = true
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                windowScene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
+            }
+
             // Load ghost mesh once into @State cache (avoids recomputing on every body eval)
             loadGhostMeshData()
 
@@ -362,6 +370,12 @@ struct CaptureView: View {
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
         }
         .onDisappear {
+            // Unlock orientation when leaving capture
+            AppDelegate.orientationLocked = false
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                windowScene.requestGeometryUpdate(.iOS(interfaceOrientations: .all))
+            }
+
             // Stop GPS/heading updates to save battery (#12)
             locationManager.stopUpdating()
 
