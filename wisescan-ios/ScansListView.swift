@@ -350,11 +350,11 @@ struct ScanCard: View {
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
-                            .background(isEditing || scan.uploadStatus.isUploading ? Color.gray.opacity(0.3) : Color.blue)
+                            .background(isEditing || uploadURL.isEmpty || scan.uploadStatus.isUploading ? Color.gray.opacity(0.3) : Color.blue)
                             .foregroundColor(isEditing ? .gray : .white)
                             .cornerRadius(10)
                         }
-                        .disabled(isEditing || scan.uploadStatus.isUploading)
+                        .disabled(isEditing || uploadURL.isEmpty || scan.uploadStatus.isUploading)
                     }
                 }
             }
@@ -438,6 +438,7 @@ struct ScanCard: View {
     }
 
     private func uploadScan() {
+        guard !uploadURL.isEmpty else { return }
         scan.uploadStatus = .zipping
         onUpdate(scan)
 

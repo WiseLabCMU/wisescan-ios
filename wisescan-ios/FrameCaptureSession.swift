@@ -41,7 +41,7 @@ class FrameCaptureSession {
     private var locationManager: LocationManager?
     private var activeLocationId: UUID?
 
-    private let ioQueue = DispatchQueue(label: "com.wisescan.capture.io", qos: .userInitiated)
+    private let ioQueue = DispatchQueue(label: "com.scan4d.capture.io", qos: .userInitiated)
     private let ciContext = CIContext()  // Reuse across frames to avoid GPU pipeline re-init
 
     struct FrameData {

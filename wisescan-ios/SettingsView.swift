@@ -47,7 +47,7 @@ struct SettingsView: View {
                     // MARK: - General Settings
                     Section {
                         VStack(alignment: .leading, spacing: 8) {
-                            TextField("Upload URL", text: $uploadURL)
+                            TextField("https://your-server.example.com/uploads/", text: $uploadURL)
                                 .foregroundColor(.white)
                                 .autocapitalization(.none)
                                 .disableAutocorrection(true)
