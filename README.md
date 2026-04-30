@@ -62,7 +62,7 @@ Each export format includes **only** the data relevant to that format. The filen
 | :--- | :--- | :--- | :--- |
 | **Scan4D** | `.zip` | `scan4d_metadata.json`, `relocalization.worldmap`, + full Polycam payload | Scan4D server workflows |
 | **Polycam** | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
-| **RAW** | `.zip` | `images/`, `depth/`, `transforms.json` | Nerfstudio, COLMAP |
+| **RAW** | `.zip` | `images/`, `depth/`, `confidence/`, `transforms.json` | Nerfstudio, COLMAP |
 | **OBJ** | `.obj` | Single mesh file (no vertex colors) | MeshLab, Blender |
 | **PLY** | `.ply` | Converted mesh with embedded vertex colors | MeshLab, CloudCompare |
 | **USDZ** | `.usdz` | Converted mesh via ModelIO | iOS Quick Look (native) |
@@ -76,6 +76,9 @@ scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
 │   ├── frame_00000.jpg
 │   └── ...
 ├── depth/                  # 16-bit PNG depth maps (millimeters)
+│   ├── frame_00000.png
+│   └── ...
+├── confidence/             # 8-bit PNG ARKit depth confidence maps (0=Low, 1=Med, 2=High)
 │   ├── frame_00000.png
 │   └── ...
 ├── cameras/                # Per-frame Polycam JSON configs

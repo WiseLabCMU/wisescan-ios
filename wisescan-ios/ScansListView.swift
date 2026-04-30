@@ -593,9 +593,9 @@ struct ScanCard: View {
             return nil
         }
 
-        // Stage Polycam payload: images/, depth/, cameras/, mesh_info.json, proxy_images/
+        // Stage Polycam payload: images/, depth/, confidence/, cameras/, mesh_info.json, proxy_images/
         func stagePolycamPayload(to dir: URL) {
-            let items = ["images", "proxy_images", "depth", "cameras", "mesh_info.json"]
+            let items = ["images", "proxy_images", "depth", "confidence", "cameras", "mesh_info.json"]
             for item in items {
                 let src = rawDataDir.appendingPathComponent(item)
                 let dst = dir.appendingPathComponent(item)
@@ -671,9 +671,9 @@ struct ScanCard: View {
             }
 
         case .raw:
-            // Nerfstudio format: images/, proxy_images/, depth/, transforms.json
+            // Nerfstudio format: images/, proxy_images/, depth/, confidence/, transforms.json
             return withStagingDir { stagingDir in
-                let copyItems = [("images", "images"), ("proxy_images", "proxy_images"), ("depth", "depth"), ("transforms.json", "transforms.json")]
+                let copyItems = [("images", "images"), ("proxy_images", "proxy_images"), ("depth", "depth"), ("confidence", "confidence"), ("transforms.json", "transforms.json")]
                 for (src, dst) in copyItems {
                     do {
                         try fm.copyItem(

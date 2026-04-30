@@ -182,6 +182,7 @@ class FrameCaptureSession {
         var transform = currentFrame?.camera.transform ?? matrix_identity_float4x4
         var intrinsics = currentFrame?.camera.intrinsics ?? simd_float3x3(1)
         let depthMap = currentFrame?.sceneDepth?.depthMap
+        let confidenceMap = currentFrame?.sceneDepth?.confidenceMap
 
         if isMockingIMU {
             let (testTransform, testIntrinsics) = TestDataGenerator.generatePoseAndIntrinsics(for: testSequenceIndex, w: camW, h: camH)
@@ -257,6 +258,7 @@ class FrameCaptureSession {
             transform: transform,
             intrinsics: intrinsics,
             depthMap: depthMap,
+            confidenceMap: confidenceMap,
             segBuffer: segBuffer,
             currentIndex: currentIndex,
             orientation: currentOrientation
@@ -322,6 +324,7 @@ class FrameCaptureSession {
         transform: simd_float4x4,
         intrinsics: simd_float3x3,
         depthMap: CVPixelBuffer?,
+        confidenceMap: CVPixelBuffer?,
         segBuffer: CVPixelBuffer?,
         currentIndex: Int,
         orientation: UIInterfaceOrientation
@@ -351,7 +354,7 @@ class FrameCaptureSession {
                 }
                 var tempJpegData = jpegData
                 if self.privacyFilter {
-                    let (blurredData, centers) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: jpegData, orientation: orientation)
+                    let (blurredData, centers) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: jpegData, orientation: orientation.visionPropertyOrientation)
                     if let bData = blurredData {
                         tempJpegData = bData
                     }
@@ -436,6 +439,11 @@ class FrameCaptureSession {
                     try depthData.write(to: depthPath, options: .atomic)
                 }
                 
+                if let confMap = confidenceMap, let confData = self.confidenceMapToPNG(confMap), let confDir = self.confidenceDir {
+                    let confPath = confDir.appendingPathComponent("frame_\(paddedIndex).png")
+                    try confData.write(to: confPath, options: .atomic)
+                }
+                
                 if self.globalIntrinsics == nil {
                     self.imageWidth = camW
                     self.imageHeight = camH
@@ -475,6 +483,7 @@ class FrameCaptureSession {
             let entry: [String: Any] = [
                 "file_path": "images/frame_\(paddedIndex).jpg",
                 "depth_file_path": "depth/frame_\(paddedIndex).png",
+                "confidence_file_path": "confidence/frame_\(paddedIndex).png",
                 "transform_matrix": [
                     [mat.columns.0.x, mat.columns.0.y, mat.columns.0.z, mat.columns.0.w],
                     [mat.columns.1.x, mat.columns.1.y, mat.columns.1.z, mat.columns.1.w],
@@ -526,7 +535,8 @@ class FrameCaptureSession {
                 "height": imageHeight,
                 "blur_score": 1.0, // frames passed blur rejection are assumed sharp
                 "image_path": "images/frame_\(paddedIndex).jpg",
-                "depth_path": "depth/frame_\(paddedIndex).png"
+                "depth_path": "depth/frame_\(paddedIndex).png",
+                "confidence_path": "confidence/frame_\(paddedIndex).png"
             ]
 
             let jsonPath = camerasDir.appendingPathComponent("frame_\(paddedIndex).json")
@@ -600,6 +610,13 @@ class FrameCaptureSession {
         guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return nil }
         let uiImage = UIImage(cgImage: cgImage)
         return uiImage.jpegData(compressionQuality: AppConstants.jpegCompressionQuality)
+    }
+
+    private func confidenceMapToPNG(_ confidenceBuffer: CVPixelBuffer) -> Data? {
+        let ciImage = CIImage(cvPixelBuffer: confidenceBuffer)
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+        let uiImage = UIImage(cgImage: cgImage)
+        return uiImage.pngData()
     }
 
     private func depthMapToPNG16(_ depthBuffer: CVPixelBuffer, personMask: CVPixelBuffer? = nil) -> Data? {
