@@ -1,0 +1,27 @@
+# Snapfile — App Store screenshot generation
+# Run: bundle exec fastlane screenshots
+
+# Required device classes for App Store
+# iPhone: 6.9" (covers 6.7" and 6.5")
+# iPad: 13" (covers 12.9" and 11")
+devices([
+  "iPhone 17 Pro Max",
+  "iPad Pro 13-inch (M5)",
+])
+
+languages([
+  "en-US"
+])
+
+# Output
+output_directory("./fastlane/screenshots")
+clear_previous_screenshots(false)
+
+# Build
+scheme("wisescan-iosUITests")
+clean(false)
+stop_after_first_error(true)
+
+# Don't reinstall or erase — we need the imported app data to persist
+reinstall_app(false)
+erase_simulator(false)

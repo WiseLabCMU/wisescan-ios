@@ -52,7 +52,7 @@ class FrameCaptureSession {
     private var cachedOSName: String = "iOS"
     private var cachedOSVersion: String = "Unknown"
 
-    private let ioQueue = DispatchQueue(label: "com.wisescan.capture.io", qos: .userInitiated)
+    private let ioQueue = DispatchQueue(label: "com.scan4d.capture.io", qos: .userInitiated)
     private let ciContext = CIContext()  // Reuse across frames to avoid GPU pipeline re-init
 
     struct FrameData {

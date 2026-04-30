@@ -1,6 +1,6 @@
 //
 //  AppDelegate.swift
-//  wisescan-ios
+//  scan4d
 //
 //  Created by mwfarb on 3/2/26.
 //

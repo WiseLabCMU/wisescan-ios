@@ -1,7 +1,9 @@
 import SwiftUI
+import SwiftData
 import ARKit
 
 struct ContentView: View {
+    @Environment(\.modelContext) private var modelContext
     @State private var scanStore = ScanStore()
     @State private var selectedTab = 0
     @State private var showLiDARWarning = false
@@ -37,6 +39,7 @@ struct ContentView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
+            DemoDataSeeder.seedIfNeeded(context: modelContext)
             if !hasLiDAR {
                 showLiDARWarning = true
             }

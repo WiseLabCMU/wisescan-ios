@@ -52,16 +52,16 @@ struct DashboardView: View {
                                     }
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 8)
-                                    .background(Color.cyan.opacity(0.2))
-                                    .foregroundColor(.cyan)
+                                    .background(uploadURL.isEmpty ? Color.gray.opacity(0.2) : Color.cyan.opacity(0.2))
+                                    .foregroundColor(uploadURL.isEmpty ? .gray : .cyan)
                                     .cornerRadius(8)
                                 }
-                                .disabled(serverStatus == .checking)
+                                .disabled(serverStatus == .checking || uploadURL.isEmpty)
                             }
 
-                            Text(uploadURL)
+                            Text(uploadURL.isEmpty ? "No upload server configured — set in Settings" : uploadURL)
                                 .font(.caption2)
-                                .foregroundColor(.gray)
+                                .foregroundColor(uploadURL.isEmpty ? .orange : .gray)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
@@ -142,7 +142,7 @@ struct DashboardView: View {
             }
             .preferredColorScheme(.dark)
             .onAppear {
-                checkServer()
+                if !uploadURL.isEmpty { checkServer() }
                 // Refresh wearable state when returning to this tab
                 wearableManager.refreshDevices()
             }
@@ -187,8 +187,8 @@ struct DashboardView: View {
     }
 
     private func checkServer() {
-        guard let url = URL(string: uploadURL) else {
-            serverStatus = .unavailable
+        guard !uploadURL.isEmpty, let url = URL(string: uploadURL) else {
+            serverStatus = .unknown
             return
         }
 
