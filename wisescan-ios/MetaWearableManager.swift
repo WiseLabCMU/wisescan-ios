@@ -352,6 +352,19 @@ class MetaWearableManager {
             // Subscribe to actual camera frame output
             self.frameToken = stream.videoFramePublisher.listen { [weak self] frame in
                 print("[MetaWearable] Received video frame")
+                
+                // TODO(Hardware Test): The DAT SDK 0.6.0 does not explicitly expose camera intrinsics.
+                // However, AVFoundation sometimes silently injects metadata (like kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix)
+                // directly into the sample buffer. When testing on physical glasses, check these logs.
+                // If intrinsics exist, extract them to package with the Scan4D/Polycam export proxy data.
+                // If empty, we may need to hardcode a fallback FOV matrix.
+                if let attachments = CMCopyDictionaryOfAttachments(allocator: kCFAllocatorDefault, target: frame.sampleBuffer, attachmentMode: kCMAttachmentMode_ShouldPropagate) {
+                    print("[MetaWearable] Sample buffer attachments (propagate): \(attachments)")
+                }
+                if let attachments = CMCopyDictionaryOfAttachments(allocator: kCFAllocatorDefault, target: frame.sampleBuffer, attachmentMode: kCMAttachmentMode_ShouldNotPropagate) {
+                    print("[MetaWearable] Sample buffer attachments (non-propagate): \(attachments)")
+                }
+
                 if let pixelBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer) {
                     
                     // Wrap the non-Sendable CVPixelBuffer to safely cross the boundary to the MainActor
