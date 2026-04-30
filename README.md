@@ -127,3 +127,7 @@ The Meta Wearables DAT SDK relies on specific Xcode build configurations that ca
    - **Compilation Check**: The project should compile cleanly with SPM dependencies linked.
    - **Pairing Check**: `DashboardView` should automatically list the Meta Ray-Bans once the Meta View companion app broadcasts their availability.
    - **Hardware Trigger Check**: Clicking the capture button on the physical glasses should instantly initiate the frame drop into `scan4d_metadata.json` proxy packages, and the glasses' LED should illuminate.
+
+## License
+
+This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
