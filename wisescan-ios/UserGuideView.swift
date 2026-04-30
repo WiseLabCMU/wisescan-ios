@@ -71,6 +71,20 @@ struct UserGuideView: View {
                 }
                 .listRowBackground(Color.white.opacity(0.05))
 
+                // MARK: - Supported Wearables
+                Section {
+                    appRow(name: "Meta Ray-Ban Smart Glasses", icon: "eyeglasses", color: .indigo,
+                           desc: "Stream proxy frames directly from your Meta Ray-Bans via the Device Access Toolkit (DAT).",
+                           appStore: nil, website: "https://developers.meta.com/wearables")
+                } header: {
+                    Text("SUPPORTED WEARABLES")
+                } footer: {
+                    Text("Follow the Meta Wearables developer documentation to enable developer mode and pair your smart glasses.")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                }
+                .listRowBackground(Color.white.opacity(0.05))
+
                 // MARK: - Recommended Viewers
                 Section {
                     appRow(name: "Files", icon: "folder.fill", color: .blue,
