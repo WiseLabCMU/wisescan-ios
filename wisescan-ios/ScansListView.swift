@@ -208,11 +208,11 @@ struct ZipExportItem: Identifiable {
 
 struct ScanCard: View {
     @Bindable var scan: CapturedScan
+    var isLatest: Bool
     var uploadURL: String
     var isEditing: Bool
     var onUpdate: (CapturedScan) -> Void
     var onDelete: (CapturedScan) -> Void
-    var onExtend: (CapturedScan) -> Void
 
     @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
     @State private var exportItem: ZipExportItem? = nil
@@ -225,22 +225,44 @@ struct ScanCard: View {
         nonmutating set { selectedFormatStr = newValue.rawValue }
     }
 
-    init(scan: CapturedScan, uploadURL: String, isEditing: Bool, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void, onExtend: @escaping (CapturedScan) -> Void) {
+    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void) {
         self.scan = scan
+        self.isLatest = isLatest
         self.uploadURL = uploadURL
         self.isEditing = isEditing
         self.onUpdate = onUpdate
         self.onDelete = onDelete
-        self.onExtend = onExtend
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // 3D mesh preview (interactive: rotate/zoom)
-            MeshPreviewContainer(meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory)
-                .frame(height: 200)
-                .clipped()
-                .overlay(
+            // Conditionally load the 3D mesh preview for performance
+            Group {
+                if isLatest {
+                    MeshPreviewContainer(meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory)
+                        .frame(height: 200)
+                        .clipped()
+                } else {
+                    AsyncImage(url: scan.thumbnailURL) { phase in
+                        if let image = phase.image {
+                            image
+                                .resizable()
+                                .scaledToFill()
+                                .frame(height: 200)
+                                .clipped()
+                        } else {
+                            ZStack {
+                                Color.black.opacity(0.3)
+                                Image(systemName: "photo")
+                                    .font(.largeTitle)
+                                    .foregroundColor(.gray.opacity(0.5))
+                            }
+                            .frame(height: 200)
+                        }
+                    }
+                }
+            }
+            .overlay(
                     Group {
                         if isEditing {
                             ZStack {
@@ -298,42 +320,7 @@ struct ScanCard: View {
                     statusBadge
                 }
 
-                // Format picker
-                HStack {
-                    Text("Export Format")
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                    Spacer()
-                    Picker("Format", selection: $selectedFormatStr) {
-                        ForEach(ExportFormat.allCases, id: \.self) { format in
-                            Text(format.rawValue).tag(format.rawValue)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .tint(.cyan)
-                    .disabled(isEditing)
-                    .onChange(of: selectedFormatStr) { _, newValue in
-                        scan.selectedFormat = ExportFormat(rawValue: newValue) ?? .scan4d
-                        onUpdate(scan)
-                    }
-                }
-
                 // Action buttons
-                VStack(spacing: 12) {
-                    // Extend Scan button
-                    Button(action: { onExtend(scan) }) {
-                        HStack {
-                            Image(systemName: "plus.viewfinder")
-                            Text("Extend Scan")
-                                .font(.subheadline).bold()
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(isEditing ? Color.gray.opacity(0.3) : Color.indigo.opacity(0.8))
-                        .foregroundColor(isEditing ? .gray : .white)
-                        .cornerRadius(10)
-                    }
-                    .disabled(isEditing || scan.hardwareDeviceModel.localizedCaseInsensitiveContains("ray ban") || scan.hardwareDeviceModel.localizedCaseInsensitiveContains("glass"))
 
                     HStack(spacing: 10) {
                         // Save to Files button
@@ -366,7 +353,6 @@ struct ScanCard: View {
                         }
                         .disabled(isEditing || uploadURL.isEmpty || scan.uploadStatus.isUploading)
                     }
-                }
             }
             .padding()
         }
@@ -449,15 +435,6 @@ struct ScanCard: View {
         return "\(count)"
     }
 
-    /// Generates a consistent export filename for both upload and save-to-files.
-    private func makeExportFilename(format: ExportFormat) -> String {
-        let locationName = scan.location?.name.replacingOccurrences(of: " ", with: "_") ?? "Unknown_Location"
-        let scanName = scan.name.replacingOccurrences(of: " ", with: "_")
-        let formatStr = format.rawValue.lowercased()
-        let timestamp = Int(scan.capturedAt.timeIntervalSince1970)
-        let fileExt = format.fileExtension
-        return "scan4d_\(locationName)_\(scanName)_\(formatStr)_\(timestamp)_\(scan.id.uuidString.prefix(8)).\(fileExt)"
-    }
 
     private func uploadScan() {
         guard !uploadURL.isEmpty else { return }
@@ -465,7 +442,7 @@ struct ScanCard: View {
         onUpdate(scan)
 
         let format = selectedFormat
-        let filename = makeExportFilename(format: format)
+        let filename = scan.makeExportFilename(format: format)
 
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         guard let url = URL(string: baseURLString + filename) else {
@@ -484,7 +461,7 @@ struct ScanCard: View {
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let exportURL = self.prepareExport(filename: filename, scanDir: scanDir, format: format) else {
+            guard let exportURL = ScanExportManager.prepareExport(filename: filename, scanDir: scanDir, format: format) else {
                 DispatchQueue.main.async {
                     self.scan.selectedFormat = self.selectedFormat
                     self.scan.uploadStatus = .failed("Export failed")
@@ -542,7 +519,7 @@ struct ScanCard: View {
         onUpdate(scan)
 
         let format = selectedFormat
-        let filename = makeExportFilename(format: format)
+        let filename = scan.makeExportFilename(format: format)
 
         let scanDir = scan.scanDirectory
         print("[SaveToFiles] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
@@ -559,7 +536,7 @@ struct ScanCard: View {
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            if let exportURL = self.prepareExport(filename: filename, scanDir: scanDir, format: format) {
+            if let exportURL = ScanExportManager.prepareExport(filename: filename, scanDir: scanDir, format: format) {
                 DispatchQueue.main.async {
                     self.exportItem = ZipExportItem(url: exportURL)
                 }
@@ -573,159 +550,7 @@ struct ScanCard: View {
         }
     }
 
-    // MARK: - Export Preparation
 
-    private func prepareExport(filename: String, scanDir: URL, format: ExportFormat) -> URL? {
-        let fm = FileManager.default
-        let rawDataDir = scanDir.appendingPathComponent("raw_data")
-
-        // Locate scan4d_metadata.json
-        func findMetadata() -> URL? {
-            let candidates = [
-                rawDataDir.appendingPathComponent("scan4d_metadata.json"),
-                scanDir.appendingPathComponent("scan4d_metadata.json")
-            ]
-            for url in candidates {
-                if fm.fileExists(atPath: url.path) {
-                    return url
-                }
-            }
-            return nil
-        }
-
-        // Stage Polycam payload: images/, depth/, confidence/, cameras/, mesh_info.json, proxy_images/
-        func stagePolycamPayload(to dir: URL) {
-            let items = ["images", "proxy_images", "depth", "confidence", "cameras", "mesh_info.json"]
-            for item in items {
-                let src = rawDataDir.appendingPathComponent(item)
-                let dst = dir.appendingPathComponent(item)
-                if fm.fileExists(atPath: src.path) {
-                    do {
-                        try fm.copyItem(at: src, to: dst)
-                        print("[prepareExport] ✓ copied \(item)")
-                    } catch {
-                        print("[prepareExport] ✗ failed to copy \(item): \(error.localizedDescription)")
-                    }
-                } else {
-                    print("[prepareExport] ✗ missing \(item) at \(src.path)")
-                }
-            }
-        }
-
-        // Zip a staging directory and return the zip URL
-        func zipStaging(_ stagingDir: URL) -> URL? {
-            let zipURL = fm.temporaryDirectory.appendingPathComponent(filename)
-            try? fm.removeItem(at: zipURL)
-            
-            var error: NSError?
-            let coordinator = NSFileCoordinator()
-            coordinator.coordinate(readingItemAt: stagingDir, options: .forUploading, error: &error) { zipTempURL in
-                try? fm.copyItem(at: zipTempURL, to: zipURL)
-            }
-            
-            if let zipAttr = try? fm.attributesOfItem(atPath: zipURL.path),
-               let zipSize = zipAttr[.size] as? Int64 {
-                print("[prepareExport] \(format.rawValue) zipSize=\(zipSize) bytes")
-            } else {
-                print("[prepareExport] \(format.rawValue) error=\(error?.localizedDescription ?? "none")")
-            }
-            return error == nil ? zipURL : nil
-        }
-
-        // Create and auto-clean staging directory
-        func withStagingDir(_ block: (URL) -> URL?) -> URL? {
-            let stagingDir = fm.temporaryDirectory.appendingPathComponent("staging_\(UUID().uuidString)")
-            try? fm.createDirectory(at: stagingDir, withIntermediateDirectories: true)
-            defer { try? fm.removeItem(at: stagingDir) }
-            return block(stagingDir)
-        }
-
-        switch format {
-        case .scan4d:
-            // scan4d_metadata.json + relocalization.worldmap + full Polycam payload
-            return withStagingDir { stagingDir in
-                if let metaURL = findMetadata() {
-                    do {
-                        try fm.copyItem(at: metaURL, to: stagingDir.appendingPathComponent("scan4d_metadata.json"))
-                    } catch {
-                        print("[prepareExport] Failed to copy metadata: \(error.localizedDescription)")
-                    }
-                }
-                do {
-                    try fm.copyItem(
-                        at: scanDir.appendingPathComponent("arworldmap.map"),
-                        to: stagingDir.appendingPathComponent("relocalization.worldmap")
-                    )
-                } catch {
-                    print("[prepareExport] Failed to copy worldmap: \(error.localizedDescription)")
-                }
-                stagePolycamPayload(to: stagingDir)
-                return zipStaging(stagingDir)
-            }
-
-        case .polycam:
-            // Polycam raw data import: images/, depth/, cameras/, mesh_info.json
-            return withStagingDir { stagingDir in
-                stagePolycamPayload(to: stagingDir)
-                return zipStaging(stagingDir)
-            }
-
-        case .raw:
-            // Nerfstudio format: images/, proxy_images/, depth/, confidence/, transforms.json
-            return withStagingDir { stagingDir in
-                let copyItems = [("images", "images"), ("proxy_images", "proxy_images"), ("depth", "depth"), ("confidence", "confidence"), ("transforms.json", "transforms.json")]
-                for (src, dst) in copyItems {
-                    do {
-                        try fm.copyItem(
-                            at: rawDataDir.appendingPathComponent(src),
-                            to: stagingDir.appendingPathComponent(dst)
-                        )
-                    } catch {
-                        print("[prepareExport] RAW: failed to copy \(src): \(error.localizedDescription)")
-                    }
-                }
-                return zipStaging(stagingDir)
-            }
-
-        case .obj:
-            // Single mesh file
-            let outputURL = fm.temporaryDirectory.appendingPathComponent(filename)
-            try? fm.removeItem(at: outputURL)
-            do {
-                try fm.copyItem(at: scanDir.appendingPathComponent("mesh.obj"), to: outputURL)
-                print("[prepareExport] OBJ copied to \(outputURL.lastPathComponent)")
-                return outputURL
-            } catch {
-                print("[prepareExport] OBJ copy failed: \(error)")
-                return nil
-            }
-
-        case .ply:
-            // Convert OBJ + colors.bin → PLY
-            let outputURL = fm.temporaryDirectory.appendingPathComponent(filename)
-            try? fm.removeItem(at: outputURL)
-            if MeshConverter.objToPLY(
-                objURL: scanDir.appendingPathComponent("mesh.obj"),
-                colorsURL: scanDir.appendingPathComponent("colors.bin"),
-                outputURL: outputURL
-            ) {
-                return outputURL
-            }
-            return nil
-
-        case .usdz:
-            // Convert OBJ → USDZ via ModelIO
-            let outputURL = fm.temporaryDirectory.appendingPathComponent(filename)
-            try? fm.removeItem(at: outputURL)
-            if MeshConverter.objToUSDZ(
-                objURL: scanDir.appendingPathComponent("mesh.obj"),
-                outputURL: outputURL
-            ) {
-                return outputURL
-            }
-            return nil
-        }
-    }
 }
 
 // MARK: - Share Sheet
@@ -769,13 +594,13 @@ struct ShareSheet: UIViewControllerRepresentable {
 
 #Preview("ScanCard") {
     let sampleScan = CapturedScan(name: "Sample Scan 1", vertexCount: 1500, faceCount: 2000)
-    return ScanCard(
+    ScanCard(
         scan: sampleScan,
+        isLatest: true,
         uploadURL: "https://example.com/upload",
         isEditing: false,
         onUpdate: { _ in },
-        onDelete: { _ in },
-        onExtend: { _ in }
+        onDelete: { _ in }
     )
     .padding()
     .background(Color.black)

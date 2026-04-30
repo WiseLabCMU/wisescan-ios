@@ -13,6 +13,10 @@ struct LocationDetailView: View {
     @State private var showRenameAlert = false
 
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.selectedExportFormat) private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
+    @State private var isBulkExporting = false
+    @State private var exportItems: [ZipExportItem] = []
+    @State private var showExportSheet = false
 
     var body: some View {
         ZStack {
@@ -22,6 +26,7 @@ struct LocationDetailView: View {
                 .ignoresSafeArea()
 
             ScrollView {
+                let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
                 VStack(spacing: 24) {
                     // MARK: - Header Actions
                     VStack(spacing: 16) {
@@ -47,12 +52,97 @@ struct LocationDetailView: View {
                                 )
                             }
                         }
+
+                        if !isEditing && !sortedScans.isEmpty {
+                            // Extend Latest Scan
+                            if let latestScan = sortedScans.first, 
+                               !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("ray ban") && 
+                               !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("glass") {
+                                Button(action: {
+                                    scanStore.activeLocationForScan = location.id
+                                    scanStore.activeRelocalizationMap = latestScan.worldMapURL
+                                    scanStore.activeScanToExtend = latestScan.id
+                                    selectedTab = 1 // Switch to Capture Tab
+                                }) {
+                                    HStack {
+                                        Image(systemName: "plus.viewfinder")
+                                        Text("Extend Latest Scan")
+                                            .font(.headline)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 14)
+                                    .background(Color.indigo.opacity(0.8))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(12)
+                                }
+                            }
+
+                            // Global Export Settings
+                            VStack(spacing: 12) {
+                                HStack {
+                                    Text("Global Export Format")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                    Spacer()
+                                    Picker("Format", selection: $globalSelectedFormatStr) {
+                                        ForEach(ExportFormat.allCases, id: \.self) { format in
+                                            Text(format.rawValue).tag(format.rawValue)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .tint(.cyan)
+                                    .onChange(of: globalSelectedFormatStr) { _, newValue in
+                                        for scan in location.scans {
+                                            scan.selectedFormat = ExportFormat(rawValue: newValue) ?? .scan4d
+                                        }
+                                        try? modelContext.save()
+                                    }
+                                }
+
+                                HStack(spacing: 10) {
+                                    Button(action: { bulkSaveToFiles(scans: sortedScans) }) {
+                                        HStack {
+                                            if isBulkExporting {
+                                                ProgressView().tint(.white)
+                                            } else {
+                                                Image(systemName: "square.and.arrow.down.on.square")
+                                            }
+                                            Text("Save All")
+                                                .font(.subheadline).bold()
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 12)
+                                        .background(isBulkExporting ? Color.gray : Color.cyan.opacity(0.8))
+                                        .foregroundColor(.white)
+                                        .cornerRadius(10)
+                                    }
+                                    .disabled(isBulkExporting)
+
+                                    Button(action: { bulkUpload(scans: sortedScans) }) {
+                                        HStack {
+                                            Image(systemName: "icloud.and.arrow.up")
+                                            Text("Upload All")
+                                                .font(.subheadline).bold()
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 12)
+                                        .background(uploadURL.isEmpty ? Color.gray.opacity(0.3) : Color.blue)
+                                        .foregroundColor(uploadURL.isEmpty ? .gray : .white)
+                                        .cornerRadius(10)
+                                    }
+                                    .disabled(uploadURL.isEmpty)
+                                }
+                            }
+                            .padding()
+                            .background(Color.white.opacity(0.05))
+                            .cornerRadius(12)
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                        }
                     }
                     .padding(.horizontal)
                     .padding(.top, 16)
 
                     // MARK: - Scan Cards
-                    let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
                     if sortedScans.isEmpty {
                         VStack(spacing: 16) {
                             Image(systemName: "tray")
@@ -66,9 +156,10 @@ struct LocationDetailView: View {
                         // LazyVStack defers mesh preview creation until cards scroll into view.
                         // Most recent scan is first (sorted descending) so it renders immediately.
                         LazyVStack(spacing: 16) {
-                            ForEach(sortedScans) { scan in
+                            ForEach(Array(sortedScans.enumerated()), id: \.element.id) { index, scan in
                                 ScanCard(
                                     scan: scan,
+                                    isLatest: index == 0,
                                     uploadURL: uploadURL,
                                     isEditing: isEditing,
                                     onUpdate: { _ in try? modelContext.save() },
@@ -80,12 +171,6 @@ struct LocationDetailView: View {
                                             try? modelContext.save()
                                             dismiss()
                                         }
-                                    },
-                                    onExtend: { scanToExtend in
-                                        scanStore.activeLocationForScan = location.id
-                                        scanStore.activeRelocalizationMap = scanToExtend.worldMapURL
-                                        scanStore.activeScanToExtend = scanToExtend.id
-                                        selectedTab = 1 // Switch to Capture Tab
                                     }
                                 )
                                 .padding(.horizontal)
@@ -160,6 +245,12 @@ struct LocationDetailView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .sheet(isPresented: $showExportSheet) {
+            ShareSheet(activityItems: exportItems.map { $0.url }) { _, _, _, _ in
+                // Cleanup
+                isBulkExporting = false
+            }
+        }
         .alert("Rename Location", isPresented: $showRenameAlert) {
             TextField("New Name", text: $newLocationName)
             Button("Save") {
@@ -169,6 +260,75 @@ struct LocationDetailView: View {
                 }
             }
             Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    // MARK: - Bulk Actions
+
+    private func bulkSaveToFiles(scans: [CapturedScan]) {
+        guard !scans.isEmpty else { return }
+        isBulkExporting = true
+        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            var urls: [ZipExportItem] = []
+            for scan in scans {
+                DispatchQueue.main.async { scan.uploadStatus = .zipping }
+                let filename = scan.makeExportFilename(format: format)
+                if let url = ScanExportManager.prepareExport(filename: filename, scanDir: scan.scanDirectory, format: format) {
+                    urls.append(ZipExportItem(url: url))
+                    DispatchQueue.main.async { scan.uploadStatus = .savedLocally }
+                } else {
+                    DispatchQueue.main.async { scan.uploadStatus = .failed("Export failed") }
+                }
+            }
+            
+            DispatchQueue.main.async {
+                self.exportItems = urls
+                self.showExportSheet = true
+                self.isBulkExporting = false
+            }
+        }
+    }
+
+    private func bulkUpload(scans: [CapturedScan]) {
+        guard !scans.isEmpty, !uploadURL.isEmpty else { return }
+        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
+        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
+        
+        // Process each scan concurrently to save time, but cap it?
+        // Let's just spawn an async task for each one
+        for scan in scans {
+            guard let url = URL(string: baseURLString + scan.makeExportFilename(format: format)) else { continue }
+            scan.uploadStatus = .zipping
+            
+            DispatchQueue.global(qos: .userInitiated).async {
+                let filename = scan.makeExportFilename(format: format)
+                guard let exportURL = ScanExportManager.prepareExport(filename: filename, scanDir: scan.scanDirectory, format: format) else {
+                    DispatchQueue.main.async { scan.uploadStatus = .failed("Export failed") }
+                    return
+                }
+                
+                DispatchQueue.main.async { scan.uploadStatus = .uploading(progress: 0.0) }
+                
+                var request = URLRequest(url: url)
+                request.httpMethod = "PUT"
+                request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
+                
+                let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
+                    try? FileManager.default.removeItem(at: exportURL)
+                    DispatchQueue.main.async {
+                        if let error = error {
+                            scan.uploadStatus = .failed(error.localizedDescription)
+                        } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
+                            scan.uploadStatus = .success
+                        } else {
+                            scan.uploadStatus = .failed("Server error")
+                        }
+                    }
+                }
+                task.resume()
+            }
         }
     }
 }
