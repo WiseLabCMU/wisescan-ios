@@ -1,6 +1,6 @@
 # Scan4D Privacy Policy
 
-*Last updated: April 29, 2026*
+*Last updated: April 30, 2026*
 
 ## Data Collection
 
@@ -10,7 +10,23 @@ All scan data (images, depth maps, meshes, and camera poses) is stored locally o
 
 ## Camera & LiDAR
 
-The app uses the device camera and LiDAR sensor for 3D scanning. When Privacy Filtering is enabled, detected faces are blurred locally and person regions are removed from exported data before any upload occurs.
+The app uses the rear-facing device camera and LiDAR sensor (when available) for 3D environment scanning. The primary capture mode uses `ARWorldTrackingConfiguration` to reconstruct the physical environment as a 3D mesh.
+
+## TrueDepth API & Face Data
+
+Scan4D includes a Developer Mode feature that allows switching to the front-facing (TrueDepth) camera using `ARFaceTrackingConfiguration`. This feature is intended solely for testing the app's privacy filtering pipeline (face blurring and person segmentation) during development.
+
+**What is collected:** When the front-camera mode is activated, the TrueDepth camera provides a live camera feed and face geometry data via ARKit's `ARFaceTrackingConfiguration`. This data is used to render a camera preview on-screen and to test the privacy filter's face detection accuracy.
+
+**How it is used:** The TrueDepth data is used exclusively for real-time, on-device rendering and privacy filter validation. No face geometry, face mesh, facial expression, or face-related data is saved to disk, written to any file, transmitted over any network, or included in any scan export.
+
+**Data sharing:** No TrueDepth or face data is shared with any third party. The data exists only in volatile memory during the active AR session and is discarded when the user switches back to the rear camera or leaves the Capture screen.
+
+**Data retention:** Face data from the TrueDepth API is never persisted. It is held in memory only for the duration of the front-camera session and is released immediately when the session ends.
+
+## Privacy Filtering
+
+When Privacy Filtering is enabled, detected faces are blurred locally using Apple's Vision framework, and person regions are removed from exported mesh data using ARKit's person segmentation. All privacy processing occurs entirely on-device before any data is saved or uploaded.
 
 ## Location Data
 
