@@ -30,6 +30,7 @@ class MetaWearableManager {
     }
 
     private var cancellables = Set<AnyCancellable>()
+    private var deviceSession: DeviceSession?
     private var streamSession: StreamSession?
     
     // Store SDK Announcer subscription tokens if required by the interface
@@ -49,9 +50,6 @@ class MetaWearableManager {
     
     // Inject this from CaptureView or proxy handler
     var activeCaptureSession: FrameCaptureSession?
-    
-    // CoreImage context for real-time PiP conversion
-    private let ciContext = CIContext()
     
     // Published image for UI overlays
     var latestProxyImage: UIImage?
@@ -85,6 +83,7 @@ class MetaWearableManager {
         
         if isEnabled {
             print("[MockWearable] Enabling mock wearable...")
+            MockDeviceKit.shared.enable()
             let device = MockDeviceKit.shared.pairRaybanMeta()
             self.mockDevice = device
             print("[MockWearable] Paired mock device: \(device.deviceIdentifier)")
@@ -124,6 +123,7 @@ class MetaWearableManager {
                 MockDeviceKit.shared.unpairDevice(device)
             }
             self.mockDevice = nil
+            MockDeviceKit.shared.disable()
             self.setupDeviceObservation()
         }
         #endif
@@ -218,6 +218,8 @@ class MetaWearableManager {
                 Task {
                     await self.streamSession?.stop()
                     self.streamSession = nil
+                    self.deviceSession?.stop()
+                    self.deviceSession = nil
                 }
             }
         }
@@ -261,6 +263,8 @@ class MetaWearableManager {
             // SDK handles disconnect implicitly; simply teardown our active stream
             await self.streamSession?.stop()
             self.streamSession = nil
+            self.deviceSession?.stop()
+            self.deviceSession = nil
         }
     }
     
@@ -269,6 +273,8 @@ class MetaWearableManager {
             // Drop stream and clear local devices list to ensure SDK fully releases
             await self.streamSession?.stop()
             self.streamSession = nil
+            self.deviceSession?.stop()
+            self.deviceSession = nil
             
             Task { @MainActor in
                 self.connectedDevices = []
@@ -292,19 +298,32 @@ class MetaWearableManager {
             
             let selector = AutoDeviceSelector(wearables: Wearables.shared)
             
+            // 0.6.0: Create a DeviceSession first, then add a stream to it
+            let devSession: DeviceSession
+            do {
+                devSession = try Wearables.shared.createSession(deviceSelector: selector)
+            } catch {
+                print("[MetaWearable] Failed to create device session: \(error)")
+                return
+            }
+            self.deviceSession = devSession
+            
             let config = StreamSessionConfig(
                 videoCodec: .raw,
                 resolution: .medium,
                 frameRate: 15
             )
             
-            // MWDAT initializer doesn't throw, and .start() is an async but NON-throwing function
-            let session = StreamSession(streamSessionConfig: config, deviceSelector: selector)
-            self.streamSession = session
+            // Add a camera stream to the device session
+            guard let stream = try? devSession.addStream(config: config) else {
+                print("[MetaWearable] Failed to add stream to device session")
+                return
+            }
+            self.streamSession = stream
             print("[MetaWearable] StreamSession created (medium res, 15fps), subscribing to publishers...")
             
             // --- MWDAT ANNOUNCER SUBSCRIPTION ---
-            self.stateToken = session.statePublisher.listen { state in
+            self.stateToken = stream.statePublisher.listen { state in
                 let stateStr = String(describing: state)
                 print("[MetaWearable] State changed: \(stateStr)")
                 Task { @MainActor [weak self] in
@@ -322,6 +341,7 @@ class MetaWearableManager {
                         self.latestProxyImage = nil
                         _ = self.activeCaptureSession?.stop()
                         self.streamSession = nil // Allow a new session to be created when device is ready
+                        self.deviceSession = nil
                     } else {
                         // starting, waitingForDevice, etc.
                         self.isStreaming = false
@@ -330,7 +350,7 @@ class MetaWearableManager {
             }
 
             // Subscribe to actual camera frame output
-            self.frameToken = session.videoFramePublisher.listen { [weak self] frame in
+            self.frameToken = stream.videoFramePublisher.listen { [weak self] frame in
                 print("[MetaWearable] Received video frame")
                 if let pixelBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer) {
                     
@@ -340,16 +360,16 @@ class MetaWearableManager {
                     }
                     let sendableBuf = SendableBuffer(buffer: pixelBuffer)
                     
-                    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-                    let cgImage = self?.ciContext.createCGImage(ciImage, from: ciImage.extent)
+                    // Use SDK convenience to convert frame to UIImage (replaces manual CIImage pipeline)
+                    let uiImage = frame.makeUIImage()
                     
                     Task { @MainActor [weak self] in
                         self?.isStreaming = true
-                        if let cgImage = cgImage {
-                            self?.latestProxyImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
-                            print("[MetaWearable] PiP image updated: \(cgImage.width)x\(cgImage.height)")
+                        if let uiImage = uiImage {
+                            self?.latestProxyImage = uiImage
+                            print("[MetaWearable] PiP image updated")
                         } else {
-                            print("[MetaWearable] Failed to create CGImage from pixel buffer")
+                            print("[MetaWearable] Failed to create UIImage from frame")
                         }
                         self?.activeCaptureSession?.captureProxyFrame(pixelBuffer: sendableBuf.buffer)
                     }
@@ -358,8 +378,15 @@ class MetaWearableManager {
                 }
             }
             
+            // Start the device session, then the stream
+            do {
+                try devSession.start()
+            } catch {
+                print("[MetaWearable] Failed to start device session: \(error)")
+                return
+            }
             print("[MetaWearable] Starting stream session...")
-            await session.start()
+            await stream.start()
             print("[MetaWearable] Stream session started")
         }
     }

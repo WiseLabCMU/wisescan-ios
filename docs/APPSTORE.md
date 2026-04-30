@@ -163,13 +163,3 @@ https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md
 > Already set via `AppIcon` in `Assets.xcassets`. Ensure it meets the 1024×1024 requirement with no transparency.
 
 ---
-
-## Checklist Before Submit
-
-- [ ] Privacy Policy URL is live and accessible
-- [ ] Support URL is live and accessible
-- [ ] At least 3 screenshots per device class uploaded
-- [ ] App description reviewed for accuracy
-- [ ] Age rating questionnaire completed
-- [ ] Build `0.2.1 (3)` selected in the Version section
-- [ ] Export compliance (encryption) set to NO ✅ (already in Info.plist)
