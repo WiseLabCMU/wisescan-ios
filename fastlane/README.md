@@ -31,6 +31,14 @@ Build and upload to TestFlight
 
 Build only (no upload) — for local validation
 
+### ios screenshots
+
+```sh
+[bundle exec] fastlane ios screenshots
+```
+
+Generate App Store screenshots via Simulator UI tests
+
 ----
 
 This README.md is auto-generated and will be re-generated every time [_fastlane_](https://fastlane.tools) is run.

@@ -6,8 +6,19 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		C99422442FA29616004526C4 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C93B8BC62F568A6F00785D6B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C93B8BCD2F568A6F00785D6B;
+			remoteInfo = "wisescan-ios";
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		C93B8BCE2F568A6F00785D6B /* wisescan-ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "wisescan-ios.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		C994223E2FA29616004526C4 /* wisescan-iosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "wisescan-iosUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -16,10 +27,22 @@
 			path = "wisescan-ios";
 			sourceTree = "<group>";
 		};
+		C994223F2FA29616004526C4 /* wisescan-iosUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "wisescan-iosUITests";
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		C93B8BCB2F568A6F00785D6B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C994223B2FA29616004526C4 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -33,6 +56,7 @@
 			isa = PBXGroup;
 			children = (
 				C93B8BD02F568A6F00785D6B /* wisescan-ios */,
+				C994223F2FA29616004526C4 /* wisescan-iosUITests */,
 				C93B8BCF2F568A6F00785D6B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +65,7 @@
 			isa = PBXGroup;
 			children = (
 				C93B8BCE2F568A6F00785D6B /* wisescan-ios.app */,
+				C994223E2FA29616004526C4 /* wisescan-iosUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -71,6 +96,29 @@
 			productReference = C93B8BCE2F568A6F00785D6B /* wisescan-ios.app */;
 			productType = "com.apple.product-type.application";
 		};
+		C994223D2FA29616004526C4 /* wisescan-iosUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C99422482FA29616004526C4 /* Build configuration list for PBXNativeTarget "wisescan-iosUITests" */;
+			buildPhases = (
+				C994223A2FA29616004526C4 /* Sources */,
+				C994223B2FA29616004526C4 /* Frameworks */,
+				C994223C2FA29616004526C4 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				C99422452FA29616004526C4 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				C994223F2FA29616004526C4 /* wisescan-iosUITests */,
+			);
+			name = "wisescan-iosUITests";
+			packageProductDependencies = (
+			);
+			productName = "wisescan-iosUITests";
+			productReference = C994223E2FA29616004526C4 /* wisescan-iosUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -78,11 +126,15 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 2630;
+				LastSwiftUpdateCheck = 2640;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
 					C93B8BCD2F568A6F00785D6B = {
 						CreatedOnToolsVersion = 26.3;
+					};
+					C994223D2FA29616004526C4 = {
+						CreatedOnToolsVersion = 26.4.1;
+						TestTargetID = C93B8BCD2F568A6F00785D6B;
 					};
 				};
 			};
@@ -101,12 +153,20 @@
 			projectRoot = "";
 			targets = (
 				C93B8BCD2F568A6F00785D6B /* wisescan-ios */,
+				C994223D2FA29616004526C4 /* wisescan-iosUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		C93B8BCC2F568A6F00785D6B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C994223C2FA29616004526C4 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -145,7 +205,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C994223A2FA29616004526C4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		C99422452FA29616004526C4 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C93B8BCD2F568A6F00785D6B /* wisescan-ios */;
+			targetProxy = C99422442FA29616004526C4 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		C93B8BD72F568A7000785D6B /* Debug */ = {
@@ -282,6 +357,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Custom-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Scan4D;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Camera is required for AR capture and streaming.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Local Network is required to connect to Scan4D servers.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Scan4D requires Location data to assign a ground truth position (GPS coordinates) to your scans so they can be accurately aligned in the real world later.";
@@ -291,7 +367,6 @@
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -322,6 +397,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Custom-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Scan4D;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Camera is required for AR capture and streaming.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Local Network is required to connect to Scan4D servers.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Scan4D requires Location data to assign a ground truth position (GPS coordinates) to your scans so they can be accurately aligned in the real world later.";
@@ -331,7 +407,6 @@
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -346,6 +421,48 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		C99422462FA29616004526C4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 24D5JLAEA3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.wisescan-iosUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "wisescan-ios";
+			};
+			name = Debug;
+		};
+		C99422472FA29616004526C4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 24D5JLAEA3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.wisescan-iosUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "wisescan-ios";
 			};
 			name = Release;
 		};
@@ -366,6 +483,15 @@
 			buildConfigurations = (
 				C93B8BDA2F568A7000785D6B /* Debug */,
 				C93B8BDB2F568A7000785D6B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C99422482FA29616004526C4 /* Build configuration list for PBXNativeTarget "wisescan-iosUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C99422462FA29616004526C4 /* Debug */,
+				C99422472FA29616004526C4 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

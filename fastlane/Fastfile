@@ -45,4 +45,14 @@ platform :ios do
     )
   end
 
+  desc "Generate App Store screenshots via Simulator UI tests"
+  lane :screenshots do
+    snapshot(
+      scheme: "wisescan-iosUITests",
+      output_directory: "./fastlane/screenshots",
+      clean: false,
+      stop_after_first_error: true
+    )
+  end
+
 end

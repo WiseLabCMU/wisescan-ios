@@ -123,11 +123,6 @@ Requires ARKit-capable device. LiDAR-equipped iPhone or iPad Pro recommended for
 
 ## Support URL
 
-> [!IMPORTANT]
-> You need a live URL here. Options:
-> - GitHub repo README: `https://github.com/WiseLabCMU/wisescan-ios`
-> - WiseLab website: `https://wise.ece.cmu.edu/` (if applicable)
-> - A dedicated support page
 
 ```
 https://github.com/WiseLabCMU/wisescan-ios
@@ -136,10 +131,6 @@ https://github.com/WiseLabCMU/wisescan-ios
 ---
 
 ## Privacy Policy URL
-
-> [!IMPORTANT]
-> **Required for all App Store submissions.** Host [PRIVACY.md](PRIVACY.md) at a public URL and link it here.
-> For example: `https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md`
 
 ```
 https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md
