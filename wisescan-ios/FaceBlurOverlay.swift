@@ -126,11 +126,11 @@ struct PrivacyBlurOverlay: View {
 
 enum PrivacyBlurUtil {
     /// Applies pixelation to person regions and returns their normalized face center coordinates.
-    static func pixelatePersonsAndGetFaceCenters(in imageData: Data, orientation: UIInterfaceOrientation = .portrait) -> (Data?, [CGPoint]) {
+    nonisolated static func pixelatePersonsAndGetFaceCenters(in imageData: Data, orientation: CGImagePropertyOrientation = .up) -> (Data?, [CGPoint]) {
         guard let uiImage = UIImage(data: imageData),
               let ciImage = CIImage(image: uiImage) else { return (imageData, []) }
 
-        let handler = VNImageRequestHandler(ciImage: ciImage, orientation: orientation.visionPropertyOrientation, options: [:])
+        let handler = VNImageRequestHandler(ciImage: ciImage, orientation: orientation, options: [:])
         
         // 1. Face detection for 3D anchors
         let faceRequest = VNDetectFaceRectanglesRequest()

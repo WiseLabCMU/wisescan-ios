@@ -373,41 +373,44 @@ class MetaWearableManager {
                     }
                     let sendableBuf = SendableBuffer(buffer: pixelBuffer)
 
-                    // Use SDK convenience to convert frame to UIImage
                     var finalUIImage = frame.makeUIImage()
                     var finalJpegData: Data? = nil
                     
-                    // Check user preferences
-                    let isPrivacyEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.privacyFilter)
-                    
-                    if let img = finalUIImage, let rawJpeg = img.jpegData(compressionQuality: AppConstants.jpegCompressionQuality) {
-                        finalJpegData = rawJpeg
+                    // Capture MainActor properties safely without capturing self in the outer task
+                    Task {
+                        let isPrivacyEnabled = await MainActor.run { UserDefaults.standard.bool(forKey: AppConstants.Key.privacyFilter) }
+                        let compression = await MainActor.run { AppConstants.jpegCompressionQuality }
                         
-                        if isPrivacyEnabled {
-                            // Wearables stream is natively landscape right
-                            let (blurredData, _) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: rawJpeg, orientation: .landscapeRight)
-                            if let bData = blurredData {
-                                finalJpegData = bData
-                                finalUIImage = UIImage(data: bData)
+                        if let img = finalUIImage, let rawJpeg = img.jpegData(compressionQuality: compression) {
+                            finalJpegData = rawJpeg
+                            
+                            if isPrivacyEnabled {
+                                // Wearables stream is natively landscape right, which corresponds to vision orientation .up
+                                let (blurredData, _) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: rawJpeg, orientation: .up)
+                                if let bData = blurredData {
+                                    finalJpegData = bData
+                                    finalUIImage = UIImage(data: bData)
+                                }
                             }
                         }
-                    }
-                    
-                    let safeJpegData = finalJpegData
-
-                    Task { @MainActor [weak self] in
-                        self?.isStreaming = true
-                        if let uiImage = finalUIImage {
-                            self?.latestProxyImage = uiImage
-                            print("[MetaWearable] PiP image updated")
-                        } else {
-                            print("[MetaWearable] Failed to create UIImage from frame")
-                        }
                         
-                        if let jpeg = safeJpegData {
-                            self?.activeCaptureSession?.captureProxyFrameData(jpeg)
-                        } else {
-                            self?.activeCaptureSession?.captureProxyFrame(pixelBuffer: sendableBuf.buffer)
+                        let safeJpegData = finalJpegData
+                        let safeUIImage = finalUIImage
+
+                        Task { @MainActor [weak self] in
+                            self?.isStreaming = true
+                            if let uiImage = safeUIImage {
+                                self?.latestProxyImage = uiImage
+                                print("[MetaWearable] PiP image updated")
+                            } else {
+                                print("[MetaWearable] Failed to create UIImage from frame")
+                            }
+                            
+                            if let jpeg = safeJpegData {
+                                self?.activeCaptureSession?.captureProxyFrameData(jpeg)
+                            } else {
+                                self?.activeCaptureSession?.captureProxyFrame(pixelBuffer: sendableBuf.buffer)
+                            }
                         }
                     }
                 } else {
