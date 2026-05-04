@@ -34,6 +34,7 @@ struct CaptureView: View {
     @State private var isProcessingMesh = false
     @State private var isWaitingToSave = false
     @State private var cachedGhostMeshData: Data? = nil
+    @State private var isARSessionReady = false
 
     @State private var showExtendPrompt = false
 
@@ -70,6 +71,7 @@ struct CaptureView: View {
             ARCoverageView(
                 arSession: $currentARSession,
                 isRecording: $isRecording,
+                isSessionReady: $isARSessionReady,
                 scanStats: scanStats,
                 privacyFilter: isPrivacyFilterOn,
                 useFrontCamera: usingFrontCamera,
@@ -77,6 +79,22 @@ struct CaptureView: View {
                 initialGhostMeshData: cachedGhostMeshData
             )
                 .ignoresSafeArea()
+
+            // Loading overlay while AR session initializes (camera + privacy models + depth pipeline)
+            if !isARSessionReady {
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                            .tint(.cyan)
+                        Text("Initializing AR Session…")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                    }
+                }
+                .transition(.opacity)
+            }
 
             // Privacy blur overlay (shown when privacy filter is on AND recording)
             if isPrivacyFilterOn && isRecording {
@@ -358,14 +376,16 @@ struct CaptureView: View {
                 usingFrontCamera = false
             }
 
-            // Bind wearable proxy frame session
+            // Bind wearable proxy frame session and start stream
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
+            MetaWearableManager.shared.startStreaming()
         }
         .onDisappear {
             // Stop GPS/heading updates to save battery (#12)
             locationManager.stopUpdating()
 
-            // Unbind wearable proxy frame session
+            // Stop wearable stream and unbind proxy frame session
+            MetaWearableManager.shared.stopStreaming()
             MetaWearableManager.shared.activeCaptureSession = nil
 
             if isRecording {
@@ -376,6 +396,7 @@ struct CaptureView: View {
             scanStore.activeRelocalizationMap = nil
             scanStore.activeScanToExtend = nil
             cachedGhostMeshData = nil
+            isARSessionReady = false
         }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)

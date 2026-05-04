@@ -20,6 +20,8 @@ class MetaWearableManager {
     var connectedDevices: [WearableDevice] = []
     var isStreaming = false
     var permissionGranted = false
+    /// Whether the capture screen has requested streaming — prevents auto-start from device discovery
+    private var isStreamingRequested = false
 
     struct WearableDevice: Identifiable {
         let id: String
@@ -204,7 +206,8 @@ class MetaWearableManager {
         }
 
         if let firstConnected = deviceIds.first {
-            if self.streamSession == nil {
+            // Only auto-start stream if the capture screen has requested it
+            if self.streamSession == nil && self.isStreamingRequested {
                 print("[MetaWearable] Setting up stream session for device: \(firstConnected)")
                 self.setupStreamSession(for: firstConnected)
             }
@@ -231,6 +234,30 @@ class MetaWearableManager {
         // Our deviceObservationTask will automatically handle changes,
         // but we can manually trigger an update just in case.
         self.updateConnectedDevices(Wearables.shared.devices)
+    }
+
+    /// Called by CaptureView.onAppear — starts the camera stream if a device is connected.
+    func startStreaming() {
+        isStreamingRequested = true
+        // If a device is already connected but stream not started, start it now
+        if let firstDevice = connectedDevices.first, streamSession == nil {
+            print("[MetaWearable] CaptureView requested stream start")
+            setupStreamSession(for: firstDevice.id)
+        }
+    }
+
+    /// Called by CaptureView.onDisappear — stops the camera stream to save resources.
+    func stopStreaming() {
+        isStreamingRequested = false
+        Task {
+            if let stream = self.streamSession {
+                print("[MetaWearable] CaptureView dismissed — stopping stream")
+                await stream.stop()
+            }
+            self.streamSession = nil
+            self.isStreaming = false
+            self.latestProxyImage = nil
+        }
     }
 
     func toggleScanning() {

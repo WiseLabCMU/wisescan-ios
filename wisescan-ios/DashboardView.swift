@@ -111,7 +111,7 @@ struct DashboardView: View {
                                 } else {
                                     Image(systemName: "plus")
                                 }
-                                Text(wearableManager.isScanning ? "Scanning..." : "Add Smart Glasses (Wearables)")
+                                Text(wearableManager.isScanning ? "Scanning..." : "Add Meta Smart Glasses")
                             }
                             .frame(maxWidth: .infinity)
                             .padding()
