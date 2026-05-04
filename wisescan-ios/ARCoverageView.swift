@@ -5,6 +5,7 @@ import ARKit
 struct ARCoverageView: UIViewRepresentable {
     @Binding var arSession: ARSession?
     @Binding var isRecording: Bool
+    @Binding var isSessionReady: Bool
     var scanStats: ScanStats
     var privacyFilter: Bool
     var useFrontCamera: Bool = false
@@ -34,6 +35,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.arView = arView
         context.coordinator.privacyFilter = privacyFilter
         context.coordinator.isRecording = false
+        context.coordinator.isSessionReadyBinding = $isSessionReady
 
         arView.session.delegate = context.coordinator
         // No debug options in nominal mode (no wireframe overlay)
@@ -54,6 +56,15 @@ struct ARCoverageView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.privacyFilter = privacyFilter
+
+        // If the session is already running (e.g. tab switch back) but isSessionReady
+        // was reset in onDisappear, re-signal readiness immediately.
+        if !isSessionReady && uiView.session.currentFrame != nil {
+            DispatchQueue.main.async {
+                self.isSessionReady = true
+            }
+            context.coordinator.hasSetSessionReady = true
+        }
 
         // Detect ghost mesh data changes (e.g., user tapped "Extend Scan" after initial view creation)
         let newGhostCount = initialGhostMeshData?.count
@@ -210,6 +221,8 @@ struct ARCoverageView: UIViewRepresentable {
         var privacyFilter: Bool = true
         var isUsingFrontCamera: Bool = false
         var isRecording: Bool = false
+        var isSessionReadyBinding: Binding<Bool>?
+        var hasSetSessionReady = false
         private var anchorUpdateCounts: [UUID: Int] = [:]
 
         // Session capacity tracking
@@ -255,6 +268,19 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Watch for relocalization success and track drift
         func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+            // Signal to CaptureView that the AR session is ready (dismiss loading overlay)
+            if !hasSetSessionReady {
+                switch camera.trackingState {
+                case .normal, .limited:
+                    hasSetSessionReady = true
+                    DispatchQueue.main.async { [weak self] in
+                        self?.isSessionReadyBinding?.wrappedValue = true
+                    }
+                default:
+                    break
+                }
+            }
+
             if camera.trackingState == .normal && !hasAddedGhostMesh {
                 if let ghostAnchor = ghostAnchorEntity, let arView = arView {
                     print("AR session relocalized successfully. Adding Ghost Mesh overlay.")
