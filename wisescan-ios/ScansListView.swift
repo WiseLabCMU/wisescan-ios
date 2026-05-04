@@ -219,6 +219,7 @@ struct ScanCard: View {
     @State private var showExportError = false
     @State private var showDeleteConfirm = false
     @State private var itemCounts: (images: Int, proxy: Int, depth: Int, cameras: Int)? = nil
+    @State private var showMeshPreview = false
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
@@ -243,23 +244,26 @@ struct ScanCard: View {
                         .frame(height: 200)
                         .clipped()
                 } else {
-                    AsyncImage(url: scan.thumbnailURL) { phase in
-                        if let image = phase.image {
-                            image
-                                .resizable()
-                                .scaledToFill()
+                    Button(action: { showMeshPreview = true }) {
+                        AsyncImage(url: scan.thumbnailURL) { phase in
+                            if let image = phase.image {
+                                image
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(height: 200)
+                                    .clipped()
+                            } else {
+                                ZStack {
+                                    Color.black.opacity(0.3)
+                                    Image(systemName: "photo")
+                                        .font(.largeTitle)
+                                        .foregroundColor(.gray.opacity(0.5))
+                                }
                                 .frame(height: 200)
-                                .clipped()
-                        } else {
-                            ZStack {
-                                Color.black.opacity(0.3)
-                                Image(systemName: "photo")
-                                    .font(.largeTitle)
-                                    .foregroundColor(.gray.opacity(0.5))
                             }
-                            .frame(height: 200)
                         }
                     }
+                    .buttonStyle(.plain)
                 }
             }
             .overlay(
@@ -380,6 +384,20 @@ struct ScanCard: View {
                     scan.uploadStatus = .pending
                 }
                 onUpdate(scan)
+            }
+        }
+        .fullScreenCover(isPresented: $showMeshPreview) {
+            NavigationView {
+                MeshPreviewContainer(meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory)
+                    .ignoresSafeArea()
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("Done") {
+                                showMeshPreview = false
+                            }
+                        }
+                    }
             }
         }
         .alert("No Data Available", isPresented: $showExportError) {

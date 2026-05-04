@@ -169,6 +169,11 @@ enum UploadStatus: Equatable {
     }
 }
 
+enum ScanCase: String, Codable, CaseIterable {
+    case rescan = "Rescan"
+    case extend = "Extend"
+}
+
 // MARK: - Scan Hierarchy Model
 
 @Model
@@ -177,15 +182,22 @@ class ScanLocation {
     var name: String
     var updatedAt: Date = Date()
     var remoteLocationId: String?
+    var scanCaseStr: String = ScanCase.rescan.rawValue
 
     @Relationship(deleteRule: .cascade)
     var scans: [CapturedScan] = []
 
-    init(id: UUID = UUID(), name: String, updatedAt: Date = Date(), remoteLocationId: String? = nil) {
+    init(id: UUID = UUID(), name: String, updatedAt: Date = Date(), remoteLocationId: String? = nil, scanCase: ScanCase = .rescan) {
         self.id = id
         self.name = name
         self.updatedAt = updatedAt
         self.remoteLocationId = remoteLocationId
+        self.scanCaseStr = scanCase.rawValue
+    }
+
+    @Transient var scanCase: ScanCase {
+        get { ScanCase(rawValue: scanCaseStr) ?? .rescan }
+        set { scanCaseStr = newValue.rawValue }
     }
 }
 
@@ -322,7 +334,8 @@ class ScanFileManager {
         rawDataPath: URL?,
         vertexColors: Data?,
         worldMapURL: URL?,
-        thumbnailData: Data? = nil
+        thumbnailData: Data? = nil,
+        scanCase: ScanCase = .rescan
     ) -> CapturedScan {
         let targetLocation: ScanLocation
 
@@ -331,12 +344,12 @@ class ScanFileManager {
             if let existing = try? context.fetch(descriptor).first {
                 targetLocation = existing
             } else {
-                targetLocation = ScanLocation(name: "Default Location")
+                targetLocation = ScanLocation(name: "Default Location", scanCase: scanCase)
                 context.insert(targetLocation)
             }
         } else {
             // Create a new location with the provided name
-            targetLocation = ScanLocation(name: name.isEmpty ? "New Space" : name)
+            targetLocation = ScanLocation(name: name.isEmpty ? "New Space" : name, scanCase: scanCase)
             context.insert(targetLocation)
         }
 

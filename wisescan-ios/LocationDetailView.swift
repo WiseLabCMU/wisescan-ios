@@ -32,24 +32,39 @@ struct LocationDetailView: View {
                     VStack(spacing: 16) {
                         // Rename Button (edit mode only)
                         if isEditing {
-                            Button(action: {
-                                newLocationName = location.name
-                                showRenameAlert = true
-                            }) {
-                                HStack {
-                                    Image(systemName: "pencil")
-                                    Text("Rename Location")
+                            VStack(spacing: 12) {
+                                Button(action: {
+                                    newLocationName = location.name
+                                    showRenameAlert = true
+                                }) {
+                                    HStack {
+                                        Image(systemName: "pencil")
+                                        Text("Rename Location")
+                                    }
+                                    .font(.subheadline)
+                                    .foregroundColor(.orange)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .background(Color.orange.opacity(0.1))
+                                    .cornerRadius(12)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                                    )
                                 }
-                                .font(.subheadline)
-                                .foregroundColor(.orange)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .background(Color.orange.opacity(0.1))
-                                .cornerRadius(12)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                                )
+
+                                Picker("Use Case", selection: Binding(
+                                    get: { location.scanCase },
+                                    set: { newValue in
+                                        location.scanCase = newValue
+                                        try? modelContext.save()
+                                    }
+                                )) {
+                                    Text("Time-Series").tag(ScanCase.rescan)
+                                    Text("Space Extension").tag(ScanCase.extend)
+                                }
+                                .pickerStyle(.segmented)
+                                .colorScheme(.dark)
                             }
                         }
 
@@ -66,7 +81,7 @@ struct LocationDetailView: View {
                                 }) {
                                     HStack {
                                         Image(systemName: "plus.viewfinder")
-                                        Text("Extend Latest Scan")
+                                        Text(location.scanCase == .rescan ? "Rescan Location" : "Extend Latest Scan")
                                             .font(.headline)
                                     }
                                     .frame(maxWidth: .infinity)
