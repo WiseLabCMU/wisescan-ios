@@ -119,15 +119,22 @@ struct ARCoverageView: UIViewRepresentable {
                     Self.loadGhostMesh(data: ghostData, coordinator: context.coordinator, arView: uiView)
                 }
             } else {
-                // Downgrade to nominal: camera passthrough only
+                // Downgrade to nominal: pure camera passthrough — no overlays
                 context.coordinator.resetForNominal()
+
+                // Remove ghost mesh from scene (will be re-added on next recording if needed)
+                if let ghostAnchor = context.coordinator.ghostAnchorEntity {
+                    ghostAnchor.removeFromParent()
+                }
+
                 let config = ARWorldTrackingConfiguration()
                 if Self.supportsLiDAR {
                     config.sceneReconstruction = []
                 }
                 config.environmentTexturing = .automatic
                 uiView.session.run(config)
-                uiView.debugOptions.remove(.showSceneUnderstanding)
+                // Clear ALL debug options for pure passthrough
+                uiView.debugOptions = []
             }
         }
 
