@@ -70,8 +70,8 @@ struct LocationDetailView: View {
 
                         if !isEditing && !sortedScans.isEmpty {
                             // Extend Latest Scan
-                            if let latestScan = sortedScans.first, 
-                               !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("ray ban") && 
+                            if let latestScan = sortedScans.first,
+                               !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("ray ban") &&
                                !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("glass") {
                                 Button(action: {
                                     scanStore.activeLocationForScan = location.id
@@ -284,7 +284,7 @@ struct LocationDetailView: View {
         guard !scans.isEmpty else { return }
         isBulkExporting = true
         let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
-        
+
         DispatchQueue.global(qos: .userInitiated).async {
             var urls: [ZipExportItem] = []
             for scan in scans {
@@ -297,7 +297,7 @@ struct LocationDetailView: View {
                     DispatchQueue.main.async { scan.uploadStatus = .failed("Export failed") }
                 }
             }
-            
+
             DispatchQueue.main.async {
                 self.exportItems = urls
                 self.showExportSheet = true
@@ -310,26 +310,26 @@ struct LocationDetailView: View {
         guard !scans.isEmpty, !uploadURL.isEmpty else { return }
         let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
-        
+
         // Process each scan concurrently to save time, but cap it?
         // Let's just spawn an async task for each one
         for scan in scans {
             guard let url = URL(string: baseURLString + scan.makeExportFilename(format: format)) else { continue }
             scan.uploadStatus = .zipping
-            
+
             DispatchQueue.global(qos: .userInitiated).async {
                 let filename = scan.makeExportFilename(format: format)
                 guard let exportURL = ScanExportManager.prepareExport(filename: filename, scanDir: scan.scanDirectory, format: format) else {
                     DispatchQueue.main.async { scan.uploadStatus = .failed("Export failed") }
                     return
                 }
-                
+
                 DispatchQueue.main.async { scan.uploadStatus = .uploading(progress: 0.0) }
-                
+
                 var request = URLRequest(url: url)
                 request.httpMethod = "PUT"
                 request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
-                
+
                 let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
                     try? FileManager.default.removeItem(at: exportURL)
                     DispatchQueue.main.async {

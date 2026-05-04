@@ -52,10 +52,6 @@ struct ARCoverageView: UIViewRepresentable {
         return arView
     }
 
-
-
-
-
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.privacyFilter = privacyFilter
 
@@ -94,19 +90,27 @@ struct ARCoverageView: UIViewRepresentable {
         if isRecording != wasRecording {
             context.coordinator.isRecording = isRecording
             if isRecording {
-                // Upgrade to full scene reconstruction
+                // Upgrade to full scene reconstruction — preserve world map for coordinate continuity
                 let config = ARWorldTrackingConfiguration()
                 if Self.supportsLiDAR {
                     config.sceneReconstruction = .mesh
                 }
                 config.environmentTexturing = .automatic
+                // Preserve the relocalized coordinate system by keeping the world map
+                if let mapURL = initialWorldMapURL,
+                   let data = try? Data(contentsOf: mapURL),
+                   let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
+                    config.initialWorldMap = worldMap
+                }
                 if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
                     config.frameSemantics.insert(.personSegmentationWithDepth)
                 }
                 if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
                     config.frameSemantics.insert(.sceneDepth)
                 }
+                // Don't reset tracking — preserve the current relocalized coordinate frame
                 uiView.session.run(config)
+                // Use RealityKit's built-in wireframe for active scan visualization
                 uiView.debugOptions.insert(.showSceneUnderstanding)
                 context.coordinator.resetForRecording()
 
@@ -161,13 +165,23 @@ struct ARCoverageView: UIViewRepresentable {
 
     // MARK: - Ghost Mesh Helper
 
-    /// Loads ghost mesh OBJ data on a background queue, adds it to the AR scene when ready.
+    /// Loads ghost mesh OBJ data on a background queue, builds procedural wireframe geometry,
+    /// and adds it to the AR scene when ready.
+    /// Uses procedural edge geometry + opaque UnlitMaterial — no CustomMaterial, no transparency.
+    /// CustomMaterial is fundamentally incompatible with RealityKit's AR video compositing
+    /// pipeline (fsSurfaceMeshShadowCasterProgrammableBlending crashes due to missing
+    /// videoRuntimeFunctionConstants buffer bindings).
     private static func loadGhostMesh(data: Data, coordinator: Coordinator, arView: ARView) {
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let resource = MeshParser.generateMeshResource(from: data) else { return }
+            // Build procedural wireframe: thin 3D quads for each unique edge
+            guard let resource = MeshParser.generateWireframeMeshResource(from: data) else { return }
             DispatchQueue.main.async {
-                var material = UnlitMaterial(color: .red)
-                material.blending = .transparent(opacity: 0.3)
+                let ghostColorStr = UserDefaults.standard.string(forKey: AppConstants.Key.ghostMeshColor) ?? AppConstants.ghostMeshColor
+                let c = ghostColorStr.toSIMD4Color
+                // Fully opaque UnlitMaterial — the only stable material in ARView
+                let material = UnlitMaterial(color: UIColor(
+                    red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1.0
+                ))
                 let modelEntity = ModelEntity(mesh: resource, materials: [material])
                 let anchorEntity = AnchorEntity(world: .zero)
                 anchorEntity.addChild(modelEntity)

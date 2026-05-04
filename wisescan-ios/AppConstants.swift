@@ -46,7 +46,7 @@ enum AppConstants {
     static let mockWearable: Bool = false
     static let selectedExportFormat = "Scan4D" // ExportFormat.scan4d.rawValue
     static let activeMeshColor: String = "Green"
-    static let ghostMeshColor: String = "Red"
+    static let ghostMeshColor: String = "Magenta"
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 0.5      // merge distance for face anchors (~head diameter)
@@ -72,6 +72,8 @@ extension String {
         case "cyan": return SIMD4<Float>(0, 1, 1, 1)
         case "magenta": return SIMD4<Float>(1, 0, 1, 1)
         case "white": return SIMD4<Float>(1, 1, 1, 1)
+        case "gray": return SIMD4<Float>(0.5, 0.5, 0.5, 1)
+        case "black": return SIMD4<Float>(0, 0, 0, 1)
         default: return SIMD4<Float>(0, 1, 0, 1)
         }
     }

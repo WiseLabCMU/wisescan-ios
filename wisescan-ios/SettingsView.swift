@@ -16,6 +16,8 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
     @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
     @AppStorage(AppConstants.Key.mockWearable) private var mockWearable: Bool = AppConstants.mockWearable
+    @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
+    @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -91,6 +93,56 @@ struct SettingsView: View {
                             }
                         }
                         .tint(.cyan)
+                        .padding(.vertical, 4)
+
+                        // Mesh Visualization Colors
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Mesh Visualization")
+                                .font(.headline)
+                                .foregroundColor(.white)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Active Scan Wireframe")
+                                    .font(.subheadline)
+                                    .foregroundColor(.white)
+                                Picker("", selection: $activeMeshColor) {
+                                    ForEach(meshColorOptions, id: \.self) { color in
+                                        HStack {
+                                            Circle()
+                                                .fill(color.swiftUIColor)
+                                                .frame(width: 12, height: 12)
+                                            Text(color)
+                                        }.tag(color)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                .colorScheme(.dark)
+                                Text("Color of the live depth mesh shown during scanning.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Ghost Scan Wireframe")
+                                    .font(.subheadline)
+                                    .foregroundColor(.white)
+                                Picker("", selection: $ghostMeshColor) {
+                                    ForEach(meshColorOptions, id: \.self) { color in
+                                        HStack {
+                                            Circle()
+                                                .fill(color.swiftUIColor)
+                                                .frame(width: 12, height: 12)
+                                            Text(color)
+                                        }.tag(color)
+                                    }
+                                }
+                                .pickerStyle(.segmented)
+                                .colorScheme(.dark)
+                                Text("Color of the previous scan overlay used for alignment.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
+                        }
                         .padding(.vertical, 4)
                     } header: {
                         Text("SCAN CAPTURE")
@@ -297,6 +349,28 @@ struct SettingsView: View {
         try? modelContext.save()
     }
 
+    /// Available mesh wireframe color options
+    private var meshColorOptions: [String] {
+        ["Red", "Green", "Blue", "Yellow", "Cyan", "Magenta", "White", "Gray", "Black"]
+    }
+}
+
+// MARK: - Color name → SwiftUI Color helper
+extension String {
+    var swiftUIColor: Color {
+        switch self.lowercased() {
+        case "red": return .red
+        case "green": return .green
+        case "blue": return .blue
+        case "yellow": return .yellow
+        case "cyan": return .cyan
+        case "magenta": return Color(.magenta)
+        case "white": return .white
+        case "gray": return .gray
+        case "black": return .black
+        default: return .green
+        }
+    }
 }
 
 #Preview {
