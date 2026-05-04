@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.3.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.2.1...v0.3.0) (2026-05-04)
+
+
+### Features
+
+* **confidence:** support depth confidenceMap export ([14c944b](https://github.com/WiseLabCMU/wisescan-ios/commit/14c944b2a12e50082003b01cdcaee4a178b8a757))
+* **glasses:** add mock wearables dev mode setting for testing ([1744a8d](https://github.com/WiseLabCMU/wisescan-ios/commit/1744a8df993a8eabb6afab62f9e4c69ea0cb93e0))
+* **glasses:** add PiP wearable stream on capture, mock wearables ([e055cdb](https://github.com/WiseLabCMU/wisescan-ios/commit/e055cdbdd27cf75c2e24ff301ecacf9e0329f3cd))
+* **glasses:** add scaffolding to manage meta ray ban connect ([4b66558](https://github.com/WiseLabCMU/wisescan-ios/commit/4b66558632da22153e00cca5bbca0db7f0e1338a))
+* **glasses:** added full meta rayban streaming glasses lifecycle ([90e9fc3](https://github.com/WiseLabCMU/wisescan-ios/commit/90e9fc303a662fa45c8a0ae2205f63feec981ee4))
+* **glasses:** apply 7 fps privacy filter to wearable frames ([50bfdec](https://github.com/WiseLabCMU/wisescan-ios/commit/50bfdecf93ed5ec21cb8a5e08eb8a10f0d3b2471))
+* **glasses:** integrated meta ray ban wearables ([31da78e](https://github.com/WiseLabCMU/wisescan-ios/commit/31da78e39d72cd4d02d41c9853d3e5dd68db7453))
+* project test with automated screenshots ([1969966](https://github.com/WiseLabCMU/wisescan-ios/commit/1969966f1cc302e4b6fda0da184249194a14f034))
+* setup scan cases (rescan/extend) user choice ([dda2238](https://github.com/WiseLabCMU/wisescan-ios/commit/dda22389a5283a8a015921213a3ddd66d9c69144))
+
+
+### Bug Fixes
+
+* add ghost mesh wireframe, color user customizable ([251656d](https://github.com/WiseLabCMU/wisescan-ios/commit/251656d1ba2c93b554530f4705b70f25b8ee399e))
+* add init progress when starting ar session on capture view ([dd500d3](https://github.com/WiseLabCMU/wisescan-ios/commit/dd500d38c34f82e2eca13ecf7fb750e5dd5fe170))
+* correct issue that forces a new space after 2 scans ([719c0f4](https://github.com/WiseLabCMU/wisescan-ios/commit/719c0f48137988bae1032ef77649937f6a005bbf))
+* ensure ar overlay renders end at stop recording ([99ac528](https://github.com/WiseLabCMU/wisescan-ios/commit/99ac52881c44406cac8c5e28457541ce0614748f))
+* fixed inability to delete new space ([0041ff3](https://github.com/WiseLabCMU/wisescan-ios/commit/0041ff33d5f6d31eeb4ef7cdecd82246f3867e9a))
+* fixed store migration to hardwareDeviceModel ([340e24c](https://github.com/WiseLabCMU/wisescan-ios/commit/340e24c6ce28f96d8aead2c59b6f6eb672ce6a3d))
+* **glasses:** add wearables models supported in user guide ([a82ea4a](https://github.com/WiseLabCMU/wisescan-ios/commit/a82ea4acfe509e464e19c964edee6a01d78a694d))
+* **glasses:** handle meta pause, stop, reactive state ([75f3944](https://github.com/WiseLabCMU/wisescan-ios/commit/75f39442fc32ea7b61b8b7af21c0e9d41d28f3db))
+* **glasses:** trigger deep link glasses registration ([fb6e211](https://github.com/WiseLabCMU/wisescan-ios/commit/fb6e21130113f82aeafc3191d274cdfa8db841b8))
+* hardcode version 0.2.1 for off-tag release ([0b4ad97](https://github.com/WiseLabCMU/wisescan-ios/commit/0b4ad9745428ab13d06ec74a6e127be8f03ca07b))
+* include proper export and bluetooth plist keys ([92d99b2](https://github.com/WiseLabCMU/wisescan-ios/commit/92d99b2ae3b948d04b41009b891f1b9c37e89e75))
+* prevent glasses streaming when not on capture tab ([d4cc6f2](https://github.com/WiseLabCMU/wisescan-ios/commit/d4cc6f225380c9f5526f4dadd525ba4c6038aa90))
+* privacy overlay modified to use full body ([30c7204](https://github.com/WiseLabCMU/wisescan-ios/commit/30c72045c0d4929a6fee198a18c65d7a41cd8abe))
+* reduce wearables status logging ([39ac01b](https://github.com/WiseLabCMU/wisescan-ios/commit/39ac01bfb537981ad1753e0f3c281e4d5730d8e4))
+* refactor location detail list for perf., bulk operations ([1eae8b8](https://github.com/WiseLabCMU/wisescan-ios/commit/1eae8b870a9d3f72d9523b619fed888f412d632b))
+* **release:** configure release-please via config file instead of ios type ([2e6a9a8](https://github.com/WiseLabCMU/wisescan-ios/commit/2e6a9a81f3871b773b179e6b858ee6ea06f2f33b))
+* relocalization reworked, warn user when saving low featrure points ([24f951a](https://github.com/WiseLabCMU/wisescan-ios/commit/24f951a5ad140f06f046e6d7934dc3ffcf693b5d))
+* remove default upload url ([718cff9](https://github.com/WiseLabCMU/wisescan-ios/commit/718cff954fb36708e77f7b0611eff04feda3fcc5))
+* support wearables v0.6.0 ([717f29d](https://github.com/WiseLabCMU/wisescan-ios/commit/717f29d8237e788b93ab2e03237ee7a44a0a0638))
+
 ## [0.2.1](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.2.0...v0.2.1) (2026-03-20)
 
 
