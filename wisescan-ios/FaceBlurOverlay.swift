@@ -62,8 +62,11 @@ struct PrivacyBlurOverlay: View {
     }
 
     private func detectAndPixelatePersons() {
-        guard let frame = arSession?.currentFrame else { return }
-        let pixelBuffer = frame.capturedImage
+        // Extract the pixel buffer immediately and release the ARFrame reference.
+        // This prevents ARKit's "retaining N ARFrames" warning caused by holding
+        // strong refs while Vision segmentation runs on a background queue.
+        guard let pixelBuffer = arSession?.currentFrame?.capturedImage else { return }
+        // ARFrame is now released — only the CVPixelBuffer is retained
         
         let orientation = UIApplication.shared.currentInterfaceOrientation
 

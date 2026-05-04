@@ -231,6 +231,7 @@ class ScanStats {
     var memoryUsageMB: Double = 0
     var baselineMemoryMB: Double = 0 // Captured at session start
     var driftEstimate: Double = 0 // 0.0 to 1.0
+    var mappingStatus: String = "notAvailable" // ARFrame.WorldMappingStatus for cumulative relocalization quality
 
     // Capacity thresholds (tunable)
     private let maxPolygons: Double = 2_000_000
@@ -293,6 +294,23 @@ class ScanStats {
         if driftEstimate < 0.5 { return "Med" }
         if driftEstimate < 0.8 { return "High" }
         return "Critical"
+    }
+
+    // MARK: - Relocalization Quality
+
+    /// Whether the session has accumulated a robust enough map for relocalization.
+    var hasEnoughFeaturesForRelocalization: Bool {
+        // ARFrame.WorldMappingStatus: .mapped is the most reliable, .extending is usually acceptable
+        mappingStatus == "mapped" || mappingStatus == "extending"
+    }
+
+    var relocalizationLabel: String {
+        switch mappingStatus {
+        case "mapped": return "Good"
+        case "extending": return "Fair"
+        case "limited": return "Poor"
+        default: return "None"
+        }
     }
 
     var formattedDuration: String {

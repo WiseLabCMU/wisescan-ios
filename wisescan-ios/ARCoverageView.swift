@@ -36,6 +36,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.privacyFilter = privacyFilter
         context.coordinator.isRecording = false
         context.coordinator.isSessionReadyBinding = $isSessionReady
+        context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
 
         arView.session.delegate = context.coordinator
         // No debug options in nominal mode (no wireframe overlay)
@@ -89,6 +90,8 @@ struct ARCoverageView: UIViewRepresentable {
                     config.initialWorldMap = worldMap
                 }
                 let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
+                context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
+                context.coordinator.hasSeenRelocalizing = false
                 uiView.session.run(config, options: runOptions)
 
                 // Background parse the new ghost mesh
@@ -205,7 +208,11 @@ struct ARCoverageView: UIViewRepresentable {
                 anchorEntity.addChild(modelEntity)
                 coordinator.ghostAnchorEntity = anchorEntity
 
-                if arView.session.currentFrame?.camera.trackingState == .normal && !coordinator.hasAddedGhostMesh {
+                // Only add immediately if no world map is loaded (no relocalization needed)
+                // or if the session has already relocalized.
+                let canAdd = !coordinator.hasWorldMap || coordinator.hasSeenRelocalizing
+                if canAdd && arView.session.currentFrame?.camera.trackingState == .normal && !coordinator.hasAddedGhostMesh {
+                    print("Ghost mesh ready, adding immediately (hasWorldMap=\(coordinator.hasWorldMap), relocalized=\(coordinator.hasSeenRelocalizing))")
                     arView.scene.addAnchor(anchorEntity)
                     coordinator.hasAddedGhostMesh = true
                 }
@@ -234,6 +241,8 @@ struct ARCoverageView: UIViewRepresentable {
         // Ghost Mesh properties
         var ghostAnchorEntity: AnchorEntity?
         var hasAddedGhostMesh = false
+        var hasWorldMap = false
+        var hasSeenRelocalizing = false
         var lastGhostMeshDataCount: Int? = nil // Track changes to ghost mesh data
 
         /// Reset coordinator state when entering recording mode.
@@ -281,11 +290,23 @@ struct ARCoverageView: UIViewRepresentable {
                 }
             }
 
+            // Track relocalization state for ghost mesh placement
+            if case .limited(.relocalizing) = camera.trackingState {
+                if !hasSeenRelocalizing {
+                    hasSeenRelocalizing = true
+                    print("[GhostMesh] Session entered relocalizing state — will wait for .normal before placing ghost mesh")
+                }
+            }
+
+            // Only add ghost mesh after confirmed relocalization (if world map was loaded)
             if camera.trackingState == .normal && !hasAddedGhostMesh {
-                if let ghostAnchor = ghostAnchorEntity, let arView = arView {
-                    print("AR session relocalized successfully. Adding Ghost Mesh overlay.")
+                let canAdd = !hasWorldMap || hasSeenRelocalizing
+                if canAdd, let ghostAnchor = ghostAnchorEntity, let arView = arView {
+                    print("[GhostMesh] Session relocalized (hasWorldMap=\(hasWorldMap), sawRelocalizing=\(hasSeenRelocalizing)). Adding Ghost Mesh overlay.")
                     arView.scene.addAnchor(ghostAnchor)
                     hasAddedGhostMesh = true
+                } else if hasWorldMap && !hasSeenRelocalizing {
+                    print("[GhostMesh] Tracking is .normal but relocalization not yet confirmed — deferring ghost mesh placement")
                 }
             }
 
@@ -358,15 +379,35 @@ struct ARCoverageView: UIViewRepresentable {
 
 
         private func updateStats(in session: ARSession) {
-            guard let scanStats = scanStats,
-                  let currentFrame = session.currentFrame else { return }
+            guard let scanStats = scanStats else { return }
+
+            // Extract all data from the frame immediately, then release the reference.
+            // This prevents ARKit's "retaining N ARFrames" warning caused by holding
+            // strong references to ARFrame while dispatching to main thread.
+            let frame = session.currentFrame
+            guard let anchors = frame?.anchors else { return }
+            
+            // Extract ARKit's cumulative assessment of the map
+            var statusStr = "notAvailable"
+            if #available(iOS 12.0, *) {
+                if let status = frame?.worldMappingStatus {
+                    switch status {
+                    case .mapped: statusStr = "mapped"
+                    case .extending: statusStr = "extending"
+                    case .limited: statusStr = "limited"
+                    case .notAvailable: statusStr = "notAvailable"
+                    @unknown default: statusStr = "notAvailable"
+                    }
+                }
+            }
+            // ARFrame reference is now released — only extracted values are retained
 
             var totalVerts = 0
             var totalFaces = 0
             var totalUpdates = 0
             var anchorCount = 0
 
-            for anchor in currentFrame.anchors {
+            for anchor in anchors {
                 guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
                 totalVerts += meshAnchor.geometry.vertices.count
                 totalFaces += meshAnchor.geometry.faces.count
@@ -390,6 +431,7 @@ struct ARCoverageView: UIViewRepresentable {
                 scanStats.memoryUsageMB = memoryMB
                 scanStats.baselineMemoryMB = self?.baselineMemoryMB ?? memoryMB
                 scanStats.driftEstimate = drift
+                scanStats.mappingStatus = statusStr
                 if anchorCount > 0 {
                     let avgUpdates = Double(totalUpdates) / Double(anchorCount)
                     scanStats.averageQuality = min(avgUpdates / 10.0, 1.0)

@@ -166,23 +166,34 @@ class FrameCaptureSession {
 
     private func captureFrame(from session: ARSession) {
         let fullyTest = isMockingIMU && isMockingImages && isMockingDepth
-        let currentFrame = session.currentFrame
+
+        // Grab the frame and extract everything we need in one shot.
+        // Releasing the ARFrame reference ASAP prevents ARKit's
+        // "retaining N ARFrames" warning caused by holding strong refs
+        // while heavy IO / Vision work runs asynchronously.
+        let frame = session.currentFrame
 
         // On Simulator, currentFrame is always nil. Allow fully-synthetic capture to proceed.
-        guard currentFrame != nil || fullyTest else { return }
+        guard frame != nil || fullyTest else { return }
 
         // Cap test captures at one full 360° loop — no redundant duplicate poses
         if isMockingIMU && testSequenceIndex >= TestDataGenerator.totalFrames { return }
 
-        // Resolve image dimensions: real camera if available, else test defaults
-        let pixelBuffer = currentFrame?.capturedImage
+        // Extract all needed data from the frame immediately
+        let pixelBuffer = frame?.capturedImage
         let camW = pixelBuffer.map { CVPixelBufferGetWidth($0) } ?? TestDataGenerator.defaultW
         let camH = pixelBuffer.map { CVPixelBufferGetHeight($0) } ?? TestDataGenerator.defaultH
+        var transform = frame?.camera.transform ?? matrix_identity_float4x4
+        var intrinsics = frame?.camera.intrinsics ?? simd_float3x3(1)
+        let depthMap = frame?.sceneDepth?.depthMap
+        let confidenceMap = frame?.sceneDepth?.confidenceMap
+        let trackingState = frame?.camera.trackingState
+        let frameTimestamp = frame?.timestamp ?? 0
+        let segBuffer = self.privacyFilter ? frame?.segmentationBuffer : nil
 
-        var transform = currentFrame?.camera.transform ?? matrix_identity_float4x4
-        var intrinsics = currentFrame?.camera.intrinsics ?? simd_float3x3(1)
-        let depthMap = currentFrame?.sceneDepth?.depthMap
-        let confidenceMap = currentFrame?.sceneDepth?.confidenceMap
+        // ⚡ ARFrame reference is now released — only extracted values are retained
+        // (The local `frame` will be released when this scope exits, but we avoid
+        // passing it to any async closures or storing it longer than necessary.)
 
         if isMockingIMU {
             let (testTransform, testIntrinsics) = TestDataGenerator.generatePoseAndIntrinsics(for: testSequenceIndex, w: camW, h: camH)
@@ -195,13 +206,13 @@ class FrameCaptureSession {
             var isBlurred = false
             
             // Skip if tracking is not normal (e.g. limited, excessive motion)
-            if let frame = currentFrame, frame.camera.trackingState != .normal {
+            if let state = trackingState, state != .normal {
                 isBlurred = true
             }
             
             // Skip if camera moved too fast since last capture (motion blur likely)
-            if !isBlurred, let lastTransform = lastCaptureTransform, let frame = currentFrame {
-                let timeDelta = frame.timestamp - lastCaptureTime
+            if !isBlurred, let lastTransform = lastCaptureTransform {
+                let timeDelta = frameTimestamp - lastCaptureTime
                 if timeDelta > 0 {
                     let movement = cameraMovement(from: lastTransform, to: transform)
                     let velocity = movement / Float(timeDelta)
@@ -242,10 +253,7 @@ class FrameCaptureSession {
         }
 
         lastCaptureTransform = transform
-        if let frame = currentFrame {
-            lastCaptureTime = frame.timestamp
-        }
-        let segBuffer = self.privacyFilter ? currentFrame?.segmentationBuffer : nil
+        lastCaptureTime = frameTimestamp
         let currentOrientation = UIApplication.shared.currentInterfaceOrientation
 
         let currentIndex = self.testSequenceIndex

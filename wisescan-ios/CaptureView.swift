@@ -269,6 +269,9 @@ struct CaptureView: View {
                                     Label("\(scanStats.anchorCount)", systemImage: "square.grid.3x3")
                                         .font(.caption2)
                                         .foregroundColor(.white)
+                                    Label(scanStats.relocalizationLabel, systemImage: "map")
+                                        .font(.caption2)
+                                        .foregroundColor(scanStats.hasEnoughFeaturesForRelocalization ? .white : .red)
                                     Label(scanStats.driftLabel, systemImage: "location.slash")
                                         .font(.caption2)
                                         .foregroundColor(scanStats.driftEstimate > 0.5 ? .orange : .white)
@@ -477,7 +480,36 @@ struct CaptureView: View {
 
         // ── Extract all AR data BEFORE switching to nominal mode ──
         // (Setting isRecording = false triggers ARCoverageView to drop mesh anchors)
+        // Validate mapping status before allowing save
+        if !scanStats.hasEnoughFeaturesForRelocalization {
+            // Give user a choice: discard or save anyway (knowing relocalization will fail)
+            let alert = UIAlertController(
+                title: "Insufficient Tracking",
+                message: "This scan has a poor mapping status (\(scanStats.mappingStatus)). Successful relocalization later requires 'mapped' or 'extending' status. Would you like to save it anyway?",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in
+                self.performStopRecording()
+            })
+            alert.addAction(UIAlertAction(title: "Discard Scan", style: .destructive) { _ in
+                self.isRecording = false
+                self.frameCaptureSession = FrameCaptureSession()
+                MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
+                self.clearMessage()
+                // Session tracking resets naturally when starting a new scan
+            })
+            
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let rootVC = windowScene.windows.first?.rootViewController {
+                rootVC.present(alert, animated: true)
+            }
+            return
+        }
 
+        performStopRecording()
+    }
+
+    private func performStopRecording() {
         // Stop frame capture and get raw data path
         let rawDataPath = frameCaptureSession.stop()
 
