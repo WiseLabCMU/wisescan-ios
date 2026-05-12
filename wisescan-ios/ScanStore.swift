@@ -88,6 +88,7 @@ class CapturedScan {
     @Transient var meshFileURL: URL { scanDirectory.appendingPathComponent("mesh.obj") }
     @Transient var colorsFileURL: URL { scanDirectory.appendingPathComponent("colors.bin") }
     @Transient var worldMapURL: URL { scanDirectory.appendingPathComponent("arworldmap.map") }
+    @Transient var modelPreviewURL: URL { scanDirectory.appendingPathComponent("model_preview.jpg") }
     @Transient var thumbnailURL: URL { scanDirectory.appendingPathComponent("thumbnail.jpg") }
     @Transient var rawDataPath: URL { scanDirectory.appendingPathComponent("raw_data") }
 
@@ -183,6 +184,7 @@ class ScanLocation {
     var updatedAt: Date = Date()
     var remoteLocationId: String?
     var scanCaseStr: String = ScanCase.rescan.rawValue
+    var imagingPoseMatrix: [Float]? = nil
 
     @Relationship(deleteRule: .cascade)
     var scans: [CapturedScan] = []
@@ -414,9 +416,24 @@ class ScanFileManager {
             try? FileManager.default.removeItem(at: newScan.rawDataPath)
             do {
                 try FileManager.default.moveItem(at: raw, to: newScan.rawDataPath)
+                
+                // Extract first RGB frame to thumbnailURL
+                let imagesDir = newScan.rawDataPath.appendingPathComponent("images")
+                if let files = try? FileManager.default.contentsOfDirectory(atPath: imagesDir.path),
+                   let firstImage = files.sorted().first(where: { $0.hasSuffix(".jpg") || $0.hasSuffix(".png") }) {
+                    let firstImageURL = imagesDir.appendingPathComponent(firstImage)
+                    try? FileManager.default.removeItem(at: newScan.thumbnailURL) // Remove existing if any
+                    try? FileManager.default.copyItem(at: firstImageURL, to: newScan.thumbnailURL)
+                }
             } catch {
                 print("[ScanFileManager] Failed to move raw data: \(error)")
             }
+        }
+        
+        // Generate 2D model preview if pose is available or default
+        if let img = MeshPreviewView.generateSnapshot(meshURL: newScan.meshFileURL, colorsURL: newScan.colorsFileURL, poseMatrix: targetLocation.imagingPoseMatrix),
+           let data = img.jpegData(compressionQuality: 0.8) {
+            try? data.write(to: newScan.modelPreviewURL)
         }
 
         try? context.save()

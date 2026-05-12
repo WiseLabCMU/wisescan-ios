@@ -1,35 +1,109 @@
 import SwiftUI
+import SwiftData
 import SceneKit
 import Combine
 
 /// Wrapper that overlays 2D privacy markers on the SceneKit mesh preview.
 /// Face anchor 3D positions are projected to screen coordinates each frame.
 struct MeshPreviewContainer: View {
+    var location: ScanLocation?
     var meshFileURL: URL?
     var colorsFileURL: URL?
     var scanDirectoryURL: URL?
 
     @StateObject private var markerState = MarkerProjectionState()
+    @State private var isUpdating = false
+    @State private var isViewerReady = false
+    @Environment(\.modelContext) private var modelContext
 
     var body: some View {
         ZStack {
-            MeshPreviewView(
-                meshFileURL: meshFileURL,
-                colorsFileURL: colorsFileURL,
-                scanDirectoryURL: scanDirectoryURL,
-                markerState: markerState
-            )
+            if isViewerReady {
+                MeshPreviewView(
+                    meshFileURL: meshFileURL,
+                    colorsFileURL: colorsFileURL,
+                    scanDirectoryURL: scanDirectoryURL,
+                    markerState: markerState
+                )
 
-            // 2D overlay icons projected from 3D face anchor positions
-            ForEach(markerState.screenPositions.indices, id: \.self) { i in
-                let pos = markerState.screenPositions[i]
-                if pos.isVisible {
-                    Image(systemName: "eye.slash.fill")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundColor(.red)
-                        .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
-                        .position(x: pos.point.x, y: pos.point.y)
+                // 2D overlay icons projected from 3D face anchor positions
+                ForEach(markerState.screenPositions.indices, id: \.self) { i in
+                    let pos = markerState.screenPositions[i]
+                    if pos.isVisible {
+                        Image(systemName: "eye.slash.fill")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundColor(.red)
+                            .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
+                            .position(x: pos.point.x, y: pos.point.y)
+                    }
                 }
+            } else {
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .gray))
+                        .scaleEffect(1.5)
+                    Text("Loading Mesh Data...")
+                        .font(.headline)
+                        .foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(white: 0.15))
+            }
+            
+            if isUpdating {
+                VStack {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                    Text("Updating Previews...")
+                        .foregroundColor(.white)
+                        .font(.caption)
+                }
+                .padding()
+                .background(Color.black.opacity(0.8))
+                .cornerRadius(12)
+            }
+        }
+        .toolbar {
+            if location != nil {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: savePoseAndUpdate) {
+                        HStack {
+                            Image(systemName: "camera.viewfinder")
+                            Text("Set Default Pose")
+                        }
+                    }
+                    .disabled(isUpdating || !isViewerReady)
+                }
+            }
+        }
+        .onAppear {
+            // Defer the heavy OBJ parsing to ensure the fullScreenCover animation completes smoothly
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                isViewerReady = true
+            }
+        }
+    }
+    
+    private func savePoseAndUpdate() {
+        guard let location = location, let pose = markerState.currentPoseMatrix() else { return }
+        location.imagingPoseMatrix = pose
+        try? modelContext.save()
+        isUpdating = true
+        
+        Task {
+            let scans = location.scans
+            for scan in scans {
+                // Ensure mesh exists
+                guard FileManager.default.fileExists(atPath: scan.meshFileURL.path) else { continue }
+                if let img = await Task.detached(priority: .userInitiated, operation: {
+                    MeshPreviewView.generateSnapshot(meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL, poseMatrix: pose)
+                }).value, let data = img.jpegData(compressionQuality: 0.8) {
+                    try? data.write(to: scan.modelPreviewURL)
+                }
+            }
+            await MainActor.run {
+                location.updatedAt = Date()
+                isUpdating = false
             }
         }
     }
@@ -66,6 +140,16 @@ class MarkerProjectionState: ObservableObject {
             }
             self.screenPositions = newPositions
         }
+    }
+    
+    func currentPoseMatrix() -> [Float]? {
+        guard let transform = scnView?.pointOfView?.transform else { return nil }
+        return [
+            transform.m11, transform.m12, transform.m13, transform.m14,
+            transform.m21, transform.m22, transform.m23, transform.m24,
+            transform.m31, transform.m32, transform.m33, transform.m34,
+            transform.m41, transform.m42, transform.m43, transform.m44
+        ]
     }
 }
 
@@ -143,7 +227,7 @@ struct MeshPreviewView: UIViewRepresentable {
                 }
             }
 
-            if let md = meshData, let (geometry, _) = self.buildGeometry(from: md, vertexColors: colorsData) {
+            if let md = meshData, let (geometry, _) = Self.buildGeometry(from: md, vertexColors: colorsData) {
                 DispatchQueue.main.async {
                     let node = SCNNode(geometry: geometry)
 
@@ -211,7 +295,7 @@ struct MeshPreviewView: UIViewRepresentable {
 
 
     /// Parses OBJ data and creates geometry with vertex colors (camera-sampled or height-based fallback).
-    private func buildGeometry(from data: Data, vertexColors: Data?) -> (SCNGeometry, Int)? {
+    nonisolated static func buildGeometry(from data: Data, vertexColors: Data?) -> (SCNGeometry, Int)? {
         guard let parsed = MeshParser.parseOBJ(from: data) else { return nil }
 
         let vertices: [SCNVector3] = parsed.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
@@ -351,7 +435,7 @@ struct MeshPreviewView: UIViewRepresentable {
         return (geometry, vertices.count)
     }
 
-    private func heightGradientColors(vertices: [SCNVector3], minY: Float, maxY: Float) -> [SIMD4<Float>] {
+    nonisolated static func heightGradientColors(vertices: [SCNVector3], minY: Float, maxY: Float) -> [SIMD4<Float>] {
         let yRange = maxY - minY
         return vertices.map { v in
             let t = yRange > 0 ? (v.y - minY) / yRange : 0.5
@@ -360,5 +444,81 @@ struct MeshPreviewView: UIViewRepresentable {
             let b: Float = max(1.0 - t * 1.5, 0.2)
             return SIMD4<Float>(r, g, b, 1.0)
         }
+    }
+    
+    /// Generates a 2D snapshot of the mesh using an offscreen renderer.
+    nonisolated static func generateSnapshot(meshURL: URL, colorsURL: URL?, poseMatrix: [Float]? = nil) -> UIImage? {
+        guard let meshData = try? Data(contentsOf: meshURL) else { return nil }
+        let colorsData = colorsURL.flatMap { try? Data(contentsOf: $0) }
+        guard let (geometry, _) = buildGeometry(from: meshData, vertexColors: colorsData) else { return nil }
+        
+        let node = SCNNode(geometry: geometry)
+        let (minBound, maxBound) = node.boundingBox
+        let center = SCNVector3((minBound.x + maxBound.x) / 2, (minBound.y + maxBound.y) / 2, (minBound.z + maxBound.z) / 2)
+        node.position = SCNVector3(-center.x, -center.y, -center.z)
+        
+        let containerNode = SCNNode()
+        containerNode.addChildNode(node)
+        
+        let scene = SCNScene()
+        scene.background.contents = UIColor.black
+        scene.rootNode.addChildNode(containerNode)
+        
+        // Lighting
+        let ambientLight = SCNNode()
+        ambientLight.light = SCNLight()
+        ambientLight.light?.type = .ambient
+        ambientLight.light?.color = UIColor(white: 0.4, alpha: 1.0)
+        scene.rootNode.addChildNode(ambientLight)
+
+        let directionalLight = SCNNode()
+        directionalLight.light = SCNLight()
+        directionalLight.light?.type = .directional
+        directionalLight.light?.color = UIColor(white: 0.8, alpha: 1.0)
+        directionalLight.light?.castsShadow = true
+        directionalLight.eulerAngles = SCNVector3(-Float.pi / 3, Float.pi / 4, 0)
+        scene.rootNode.addChildNode(directionalLight)
+
+        let fillLight = SCNNode()
+        fillLight.light = SCNLight()
+        fillLight.light?.type = .directional
+        fillLight.light?.color = UIColor(white: 0.3, alpha: 1.0)
+        fillLight.eulerAngles = SCNVector3(Float.pi / 4, -Float.pi / 3, 0)
+        scene.rootNode.addChildNode(fillLight)
+        
+        let cameraNode = SCNNode()
+        cameraNode.camera = SCNCamera()
+        cameraNode.camera?.automaticallyAdjustsZRange = true
+        
+        if let matrix = poseMatrix, matrix.count == 16 {
+            let m = SCNMatrix4(
+                m11: matrix[0], m12: matrix[1], m13: matrix[2], m14: matrix[3],
+                m21: matrix[4], m22: matrix[5], m23: matrix[6], m24: matrix[7],
+                m31: matrix[8], m32: matrix[9], m33: matrix[10], m34: matrix[11],
+                m41: matrix[12], m42: matrix[13], m43: matrix[14], m44: matrix[15]
+            )
+            cameraNode.transform = m
+        } else {
+            let size = SCNVector3(maxBound.x - minBound.x, maxBound.y - minBound.y, maxBound.z - minBound.z)
+            let maxDimension = max(size.x, max(size.y, size.z))
+            cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 1.5)
+            cameraNode.look(at: SCNVector3Zero)
+        }
+        scene.rootNode.addChildNode(cameraNode)
+        
+        let renderer = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
+        renderer.scene = scene
+        renderer.pointOfView = cameraNode
+        renderer.autoenablesDefaultLighting = false
+        
+        let size = CGSize(width: 512, height: 512)
+        return renderer.snapshot(atTime: 0, with: size, antialiasingMode: .multisampling4X)
+    }
+}
+
+#Preview {
+    NavigationView {
+        MeshPreviewContainer()
+            .ignoresSafeArea()
     }
 }

@@ -114,7 +114,59 @@ struct ScansListView: View {
                 Text("This will permanently delete \"\(locToDelete.name)\" and all scans inside it.")
             }
             .preferredColorScheme(.dark)
+            .overlay {
+                if isMigrating {
+                    VStack {
+                        ProgressView(value: migrationProgress)
+                            .progressViewStyle(LinearProgressViewStyle())
+                            .padding()
+                        Text("Migrating Scans... \(Int(migrationProgress * 100))%")
+                            .foregroundColor(.white)
+                            .font(.caption)
+                    }
+                    .padding()
+                    .background(Color.black.opacity(0.8))
+                    .cornerRadius(12)
+                }
+            }
+            .task {
+                await performMigration()
+            }
         }
+    }
+
+    @State private var isMigrating = false
+    @State private var migrationProgress = 0.0
+
+    private func performMigration() async {
+        let allScans = locations.flatMap { $0.scans }
+        let scansToMigrate = allScans.filter { scan in
+            FileManager.default.fileExists(atPath: scan.meshFileURL.path) &&
+            !FileManager.default.fileExists(atPath: scan.modelPreviewURL.path)
+        }
+        
+        guard !scansToMigrate.isEmpty else { return }
+        isMigrating = true
+        
+        for (index, scan) in scansToMigrate.enumerated() {
+            let fm = FileManager.default
+            
+            // Migrate model preview
+            if !fm.fileExists(atPath: scan.modelPreviewURL.path) {
+                let pose = scan.location?.imagingPoseMatrix
+                if let img = await Task.detached(priority: .utility, operation: {
+                    MeshPreviewView.generateSnapshot(meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL, poseMatrix: pose)
+                }).value, let data = img.jpegData(compressionQuality: 0.8) {
+                    try? data.write(to: scan.modelPreviewURL)
+                }
+            }
+            
+            migrationProgress = Double(index + 1) / Double(scansToMigrate.count)
+        }
+        
+        // Let progress show briefly before hiding
+        try? await Task.sleep(for: .seconds(1))
+        isMigrating = false
     }
 
     private func deleteLocation(_ loc: ScanLocation) {
@@ -180,14 +232,24 @@ struct LocationGridTile: View {
             .background(Color.white.opacity(0.05))
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(Color.white.opacity(0.1), lineWidth: 1)
-        )
-        .task(id: latestScan?.id) {
+        .overlay(alignment: .topLeading) {
+            if location.scans.contains(where: { !FileManager.default.fileExists(atPath: $0.worldMapURL.path) }) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundColor(.yellow)
+                    .padding(6)
+                    .background(Color.black.opacity(0.5))
+                    .clipShape(Circle())
+                    .padding(8)
+            }
+        }
+        .task(id: location.updatedAt) {
             // Load thumbnail asynchronously to avoid main-thread I/O (#7)
             guard let latest = latestScan else { thumbnailImage = nil; return }
-            let url = latest.thumbnailURL
+            let urls = [latest.modelPreviewURL, latest.thumbnailURL]
+            let fm = FileManager.default
+            let url = urls.first(where: { fm.fileExists(atPath: $0.path) }) ?? latest.thumbnailURL
+            
             thumbnailImage = await Task.detached(priority: .utility) {
                 guard FileManager.default.fileExists(atPath: url.path),
                       let data = try? Data(contentsOf: url) else { return nil as UIImage? }
@@ -220,6 +282,7 @@ struct ScanCard: View {
     @State private var showDeleteConfirm = false
     @State private var itemCounts: (images: Int, proxy: Int, depth: Int, cameras: Int)? = nil
     @State private var showMeshPreview = false
+    @State private var showMissingRelocAlert = false
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
@@ -237,36 +300,37 @@ struct ScanCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Conditionally load the 3D mesh preview for performance
             Group {
-                if isLatest {
-                    MeshPreviewContainer(meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory)
-                        .frame(height: 200)
-                        .clipped()
-                } else {
-                    Button(action: { showMeshPreview = true }) {
-                        AsyncImage(url: scan.thumbnailURL) { phase in
-                            if let image = phase.image {
-                                image
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(height: 200)
-                                    .clipped()
-                            } else {
-                                ZStack {
-                                    Color.black.opacity(0.3)
-                                    Image(systemName: "photo")
-                                        .font(.largeTitle)
-                                        .foregroundColor(.gray.opacity(0.5))
-                                }
+                Button(action: { showMeshPreview = true }) {
+                    let previewURL: URL = {
+                        let fm = FileManager.default
+                        if fm.fileExists(atPath: scan.modelPreviewURL.path) { return scan.modelPreviewURL }
+                        return scan.thumbnailURL
+                    }()
+                    
+                    AsyncImage(url: previewURL) { phase in
+                        if let image = phase.image {
+                            image
+                                .resizable()
+                                .scaledToFill()
                                 .frame(height: 200)
+                                .clipped()
+                        } else {
+                            ZStack {
+                                Color.black.opacity(0.3)
+                                Image(systemName: "photo")
+                                    .font(.largeTitle)
+                                    .foregroundColor(.gray.opacity(0.5))
                             }
+                            .frame(height: 200)
                         }
                     }
-                    .buttonStyle(.plain)
                 }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .id(scan.location?.updatedAt)
             }
-            .overlay(
+                .overlay(
                     Group {
                         if isEditing {
                             ZStack {
@@ -284,6 +348,19 @@ struct ScanCard: View {
                         }
                     }
                 )
+                .overlay(alignment: .topLeading) {
+                    if !FileManager.default.fileExists(atPath: scan.worldMapURL.path) {
+                        Button(action: { showMissingRelocAlert = true }) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.title2)
+                                .foregroundColor(.yellow)
+                                .padding(8)
+                                .background(Color.black.opacity(0.5))
+                                .clipShape(Circle())
+                        }
+                        .padding(8)
+                    }
+                }
                 .confirmationDialog(
                     "Delete Scan",
                     isPresented: $showDeleteConfirm
@@ -388,7 +465,7 @@ struct ScanCard: View {
         }
         .fullScreenCover(isPresented: $showMeshPreview) {
             NavigationView {
-                MeshPreviewContainer(meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory)
+                MeshPreviewContainer(location: scan.location, meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory)
                     .ignoresSafeArea()
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
@@ -399,6 +476,11 @@ struct ScanCard: View {
                         }
                     }
             }
+        }
+        .alert("Missing Data", isPresented: $showMissingRelocAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("This scan is missing relocalization data (arworldmap.map). It cannot be reliably extended or aligned in the future.")
         }
         .alert("No Data Available", isPresented: $showExportError) {
             Button("OK", role: .cancel) { }
