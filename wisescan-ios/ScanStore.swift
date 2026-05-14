@@ -106,9 +106,11 @@ class CapturedScan {
 
     @Transient var timeSinceCapture: String {
         let interval = Date().timeIntervalSince(capturedAt)
-        if interval < 60 { return "\(Int(interval))s ago" }
+        if interval < 60 { return "\(max(0, Int(interval)))s ago" }
         if interval < 3600 { return "\(Int(interval / 60))m ago" }
-        return "\(Int(interval / 3600))h ago"
+        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
+        if interval < 31536000 { return "\(Int(interval / 86400))d ago" }
+        return "\(Int(interval / 31536000))y ago"
     }
 }
 

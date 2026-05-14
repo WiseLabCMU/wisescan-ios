@@ -412,10 +412,18 @@ struct WorkflowCard: View {
 #Preview {
     let config = ModelConfiguration(isStoredInMemoryOnly: true)
     let container = try! ModelContainer(for: ScanLocation.self, CapturedScan.self, configurations: config)
+    let ctx = container.mainContext
     let sampleLocation = ScanLocation(name: "Sample Location")
-    let sampleScan = CapturedScan(name: "Sample Scan 1", vertexCount: 1500, faceCount: 2000)
-    sampleLocation.scans.append(sampleScan)
-    container.mainContext.insert(sampleLocation)
+    ctx.insert(sampleLocation)
+    
+    let scan1 = CapturedScan(name: "Morning Scan", capturedAt: Date().addingTimeInterval(-3600), vertexCount: 1500, faceCount: 2000)
+    let scan2 = CapturedScan(name: "Afternoon Scan", capturedAt: Date().addingTimeInterval(-86400 * 3), vertexCount: 4200, faceCount: 8100)
+    let scan3 = CapturedScan(name: "Evening Scan", capturedAt: Date().addingTimeInterval(-86400 * 45), vertexCount: 9800, faceCount: 19200)
+    ctx.insert(scan1)
+    ctx.insert(scan2)
+    ctx.insert(scan3)
+    sampleLocation.scans.append(contentsOf: [scan1, scan2, scan3])
+    try? ctx.save()
 
     return LocationDetailView(location: sampleLocation, selectedTab: .constant(2))
         .modelContainer(container)

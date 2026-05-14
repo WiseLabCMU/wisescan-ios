@@ -75,20 +75,18 @@ struct ScansListView: View {
                 LocationDetailView(location: loc, selectedTab: $selectedTab)
             }
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    HStack {
-                        if !locations.isEmpty {
-                            Button(action: { isEditing.toggle() }) {
-                                Text(isEditing ? "Done" : "Edit")
-                                    .bold(isEditing)
-                                    .foregroundColor(isEditing ? .red : .cyan)
-                            }
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    if !locations.isEmpty {
+                        Button(action: { isEditing.toggle() }) {
+                            Text(isEditing ? "Done" : "Edit")
+                                .bold(isEditing)
+                                .foregroundColor(isEditing ? .red : .cyan)
                         }
-                        Button(action: { showSettings = true }) {
-                            Image(systemName: "gearshape")
-                        }
-                        .disabled(isEditing)
                     }
+                    Button(action: { showSettings = true }) {
+                        Image(systemName: "gearshape")
+                    }
+                    .disabled(isEditing)
                 }
             }
             .onChange(of: selectedTab) {
@@ -298,144 +296,16 @@ struct ScanCard: View {
         self.onDelete = onDelete
     }
 
+    private var previewURL: URL {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: scan.modelPreviewURL.path) { return scan.modelPreviewURL }
+        return scan.thumbnailURL
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Group {
-                Button(action: { showMeshPreview = true }) {
-                    let previewURL: URL = {
-                        let fm = FileManager.default
-                        if fm.fileExists(atPath: scan.modelPreviewURL.path) { return scan.modelPreviewURL }
-                        return scan.thumbnailURL
-                    }()
-                    
-                    AsyncImage(url: previewURL) { phase in
-                        if let image = phase.image {
-                            image
-                                .resizable()
-                                .scaledToFill()
-                                .frame(height: 200)
-                                .clipped()
-                        } else {
-                            ZStack {
-                                Color.black.opacity(0.3)
-                                Image(systemName: "photo")
-                                    .font(.largeTitle)
-                                    .foregroundColor(.gray.opacity(0.5))
-                            }
-                            .frame(height: 200)
-                        }
-                    }
-                }
-                .buttonStyle(.plain)
-                .contentShape(Rectangle())
-                .id(scan.location?.updatedAt)
-            }
-                .overlay(
-                    Group {
-                        if isEditing {
-                            ZStack {
-                                Color.black.opacity(0.6)
-                                Button(action: { showDeleteConfirm = true }) {
-                                    VStack(spacing: 8) {
-                                        Image(systemName: "trash.circle.fill")
-                                            .font(.system(size: 44))
-                                        Text("Delete Scan")
-                                            .font(.headline)
-                                    }
-                                    .foregroundColor(.red)
-                                }
-                            }
-                        }
-                    }
-                )
-                .overlay(alignment: .topLeading) {
-                    if !FileManager.default.fileExists(atPath: scan.worldMapURL.path) {
-                        Button(action: { showMissingRelocAlert = true }) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.title2)
-                                .foregroundColor(.yellow)
-                                .padding(8)
-                                .background(Color.black.opacity(0.5))
-                                .clipShape(Circle())
-                        }
-                        .padding(8)
-                    }
-                }
-                .confirmationDialog(
-                    "Delete Scan",
-                    isPresented: $showDeleteConfirm
-                ) {
-                    Button("Delete \"\(scan.name)\"", role: .destructive) {
-                        onDelete(scan)
-                    }
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text("This will permanently delete this scan and its data.")
-                }
-
-            VStack(alignment: .leading, spacing: 12) {
-                // Scan info
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(scan.name)
-                            .font(.subheadline).bold()
-                            .foregroundColor(.white)
-                        HStack(spacing: 12) {
-                            Text(String(format: "%.1f MB", scan.estimatedSizeMB))
-                            Text("\(formattedCount(scan.faceCount)) polys")
-                            Text(scan.timeSinceCapture)
-                        }
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                        Text(scan.hardwareDeviceModel)
-                            .font(.caption2)
-                            .foregroundColor(.cyan)
-                        
-                        if let counts = itemCounts {
-                            Text("\(counts.images) images · \(counts.proxy) proxy · \(counts.depth) depth · \(counts.cameras) cameras")
-                                .font(.caption2)
-                                .foregroundColor(.gray.opacity(0.8))
-                        }
-                    }
-                    Spacer()
-                    statusBadge
-                }
-
-                // Action buttons
-
-                    HStack(spacing: 10) {
-                        // Save to Files button
-                        Button(action: { saveToFiles() }) {
-                            HStack {
-                                Image(systemName: "square.and.arrow.down")
-                                Text("Save")
-                                    .font(.subheadline).bold()
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
-                            .foregroundColor(isEditing ? .gray : .white)
-                            .cornerRadius(10)
-                        }
-                        .disabled(isEditing)
-
-                        // Upload button
-                        Button(action: { uploadScan() }) {
-                            HStack {
-                                Image(systemName: "icloud.and.arrow.up")
-                                Text("Upload")
-                                    .font(.subheadline).bold()
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(isEditing || uploadURL.isEmpty || scan.uploadStatus.isUploading ? Color.gray.opacity(0.3) : Color.blue)
-                            .foregroundColor(isEditing ? .gray : .white)
-                            .cornerRadius(10)
-                        }
-                        .disabled(isEditing || uploadURL.isEmpty || scan.uploadStatus.isUploading)
-                    }
-            }
-            .padding()
+        HStack(alignment: .top, spacing: 0) {
+            previewImageSection
+            infoSection
         }
         .background(.ultraThinMaterial)
         .cornerRadius(16)
@@ -499,6 +369,172 @@ struct ScanCard: View {
                 return (iCount, pCount, dCount, cCount)
             }.value
         }
+    }
+
+    @ViewBuilder
+    private var previewImageSection: some View {
+        Button(action: { showMeshPreview = true }) {
+            AsyncImage(url: previewURL) { phase in
+                if let image = phase.image {
+                    image
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    ZStack {
+                        Color.black.opacity(0.3)
+                        Image(systemName: "photo")
+                            .font(.largeTitle)
+                            .foregroundColor(.gray.opacity(0.5))
+                    }
+                }
+            }
+            .frame(minWidth: 120, maxWidth: .infinity, maxHeight: 180)
+            .clipped()
+        }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .id(scan.location?.updatedAt)
+        .overlay(editingOverlay)
+        .overlay(alignment: .topLeading) { relocWarningOverlay }
+        .confirmationDialog(
+            "Delete Scan",
+            isPresented: $showDeleteConfirm
+        ) {
+            Button("Delete \"\(scan.name)\"", role: .destructive) {
+                onDelete(scan)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will permanently delete this scan and its data.")
+        }
+    }
+
+    @ViewBuilder
+    private var editingOverlay: some View {
+        if isEditing {
+            ZStack {
+                Color.black.opacity(0.6)
+                Button(action: { showDeleteConfirm = true }) {
+                    VStack(spacing: 8) {
+                        Image(systemName: "trash.circle.fill")
+                            .font(.system(size: 44))
+                        Text("Delete Scan")
+                            .font(.headline)
+                    }
+                    .foregroundColor(.red)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var relocWarningOverlay: some View {
+        if !FileManager.default.fileExists(atPath: scan.worldMapURL.path) {
+            Button(action: { showMissingRelocAlert = true }) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title2)
+                    .foregroundColor(.yellow)
+                    .padding(8)
+                    .background(Color.black.opacity(0.5))
+                    .clipShape(Circle())
+            }
+            .padding(8)
+        }
+    }
+
+    @ViewBuilder
+    private var infoSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            scanInfoBlock
+            actionButtonsBlock
+        }
+        .padding(12)
+        .frame(minWidth: 180, idealWidth: 220, maxWidth: 260, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var scanInfoBlock: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(scan.name)
+                    .font(.subheadline).bold()
+                    .foregroundColor(.white)
+                HStack(spacing: 8) {
+                    Text(String(format: "%.1f MB", scan.estimatedSizeMB))
+                    Text("\(formattedCount(scan.faceCount)) polys")
+                }
+                .font(.caption)
+                .foregroundColor(.gray)
+                Text(scan.timeSinceCapture)
+                    .font(.caption)
+                    .foregroundColor(.gray)
+                Text(scan.hardwareDeviceModel)
+                    .font(.caption2)
+                    .foregroundColor(.cyan)
+
+                if let counts = itemCounts {
+                    itemCountsText(counts)
+                }
+            }
+            Spacer()
+            statusBadge
+        }
+    }
+
+    @ViewBuilder
+    private func itemCountsText(_ counts: (images: Int, proxy: Int, depth: Int, cameras: Int)) -> some View {
+        let parts = buildItemCountParts(counts)
+        if !parts.isEmpty {
+            Text(parts.joined(separator: " · "))
+                .font(.caption2)
+                .foregroundColor(.gray.opacity(0.8))
+        }
+    }
+
+    private func buildItemCountParts(_ counts: (images: Int, proxy: Int, depth: Int, cameras: Int)) -> [String] {
+        var parts: [String] = []
+        if counts.images > 0 { parts.append("\(counts.images) images") }
+        if counts.proxy > 0 { parts.append("\(counts.proxy) proxy") }
+        if counts.depth > 0 { parts.append("\(counts.depth) depth") }
+        if counts.cameras > 0 { parts.append("\(counts.cameras) cameras") }
+        return parts
+    }
+
+    @ViewBuilder
+    private var actionButtonsBlock: some View {
+        HStack(spacing: 10) {
+            Button(action: { saveToFiles() }) {
+                HStack {
+                    Image(systemName: "square.and.arrow.down")
+                    Text("Save")
+                        .font(.subheadline).bold()
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
+                .foregroundColor(isEditing ? .gray : .white)
+                .cornerRadius(10)
+            }
+            .disabled(isEditing)
+
+            Button(action: { uploadScan() }) {
+                HStack {
+                    Image(systemName: "icloud.and.arrow.up")
+                    Text("Upload")
+                        .font(.subheadline).bold()
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(uploadButtonDisabled ? Color.gray.opacity(0.3) : Color.blue)
+                .foregroundColor(isEditing ? .gray : .white)
+                .cornerRadius(10)
+            }
+            .disabled(uploadButtonDisabled)
+        }
+    }
+
+    private var uploadButtonDisabled: Bool {
+        isEditing || uploadURL.isEmpty || scan.uploadStatus.isUploading
     }
 
     @ViewBuilder
@@ -672,10 +708,18 @@ struct ShareSheet: UIViewControllerRepresentable {
 #Preview("ScansListView") {
     let config = ModelConfiguration(isStoredInMemoryOnly: true)
     let container = try! ModelContainer(for: ScanLocation.self, CapturedScan.self, configurations: config)
-    let sampleLocation = ScanLocation(name: "Sample Location")
-    let sampleScan = CapturedScan(name: "Sample Scan 1", vertexCount: 1500, faceCount: 2000)
-    sampleLocation.scans.append(sampleScan)
-    container.mainContext.insert(sampleLocation)
+    
+    let loc1 = ScanLocation(name: "Living Room")
+    loc1.scans.append(CapturedScan(name: "Scan A", capturedAt: Date().addingTimeInterval(-3600), vertexCount: 1500, faceCount: 2000))
+    container.mainContext.insert(loc1)
+    
+    let loc2 = ScanLocation(name: "Kitchen")
+    loc2.scans.append(CapturedScan(name: "Scan B", capturedAt: Date().addingTimeInterval(-86400 * 3), vertexCount: 4200, faceCount: 8100))
+    container.mainContext.insert(loc2)
+    
+    let loc3 = ScanLocation(name: "Garage")
+    loc3.scans.append(CapturedScan(name: "Scan C", capturedAt: Date().addingTimeInterval(-86400 * 45), vertexCount: 9800, faceCount: 19200))
+    container.mainContext.insert(loc3)
     
     return ScansListView(selectedTab: .constant(2))
         .modelContainer(container)
