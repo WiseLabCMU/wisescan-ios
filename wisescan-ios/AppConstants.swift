@@ -30,6 +30,7 @@ enum AppConstants {
         static let selectedExportFormat = "selectedExportFormat"
         static let activeMeshColor = "activeMeshColor"
         static let ghostMeshColor = "ghostMeshColor"
+        static let metaWearablesFPS = "metaWearablesFPS"
     }
 
     // MARK: - Default Values
@@ -47,6 +48,7 @@ enum AppConstants {
     static let selectedExportFormat = "Scan4D" // ExportFormat.scan4d.rawValue
     static let activeMeshColor: String = "Green"
     static let ghostMeshColor: String = "Magenta"
+    static let metaWearablesFPS: Double = 7.0
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 0.5      // merge distance for face anchors (~head diameter)

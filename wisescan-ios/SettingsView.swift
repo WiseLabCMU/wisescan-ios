@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.mockWearable) private var mockWearable: Bool = AppConstants.mockWearable
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
+    @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -78,6 +79,23 @@ struct SettingsView: View {
                             Slider(value: $overlapMax, in: 10...100, step: 5)
                                 .tint(.cyan)
                             Text("Controls maximum overlap between consecutive captured frames. Lower values capture fewer, more distinct frames. Higher values capture more frames with greater overlap.")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                        .padding(.vertical, 4)
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Text("Meta Wearables Stream FPS")
+                                    .foregroundColor(.white)
+                                Spacer()
+                                Text("\(Int(metaWearablesFPS)) FPS")
+                                    .foregroundColor(.cyan)
+                                    .font(.headline)
+                            }
+                            Slider(value: $metaWearablesFPS, in: 1...15, step: 1)
+                                .tint(.cyan)
+                            Text("Limits the incoming streaming frame rate to save battery and processing power.")
                                 .font(.caption)
                                 .foregroundColor(.gray)
                         }
