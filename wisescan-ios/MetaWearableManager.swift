@@ -62,8 +62,16 @@ class MetaWearableManager {
         func shouldProcess() -> Bool {
             os_unfair_lock_lock(&lock)
             defer { os_unfair_lock_unlock(&lock) }
+            
+            // Fast read of cached setting
+            let defaultFps = UserDefaults.standard.object(forKey: AppConstants.Key.metaWearablesFPS) != nil
+                ? UserDefaults.standard.double(forKey: AppConstants.Key.metaWearablesFPS)
+                : AppConstants.metaWearablesFPS
+            let targetFps = max(1.0, min(30.0, defaultFps))
+            let interval = 1.0 / targetFps
+            
             let now = CFAbsoluteTimeGetCurrent()
-            if now - lastTime < (1.0 / 7.0) { return false }
+            if now - lastTime < interval { return false }
             lastTime = now
             return true
         }
@@ -111,7 +119,7 @@ class MetaWearableManager {
 
     private func syncMockWearable() {
         #if canImport(MWDATMockDevice)
-        print("[MockWearable] Mock wearables are disabled for SDK 0.5.0 compatibility testing.")
+        // print("[MockWearable] Mock wearables are disabled for SDK 0.5.0 compatibility testing.")
         #endif
     }
 
@@ -396,7 +404,7 @@ class MetaWearableManager {
                 // Throttle to ~7 FPS
                 guard self.throttle.shouldProcess() else { return }
                 
-                print("[MetaWearable] Received video frame (Throttled to 7FPS)")
+                // print("[MetaWearable] Received video frame")
 
                 // TODO(Hardware Test): The DAT SDK 0.6.0 does not explicitly expose camera intrinsics.
                 // However, AVFoundation sometimes silently injects metadata (like kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix)
@@ -446,7 +454,7 @@ class MetaWearableManager {
                             self?.isStreaming = true
                             if let uiImage = safeUIImage {
                                 self?.latestProxyImage = uiImage
-                                print("[MetaWearable] PiP image updated")
+                                // print("[MetaWearable] PiP image updated")
                             } else {
                                 print("[MetaWearable] Failed to create UIImage from frame")
                             }
