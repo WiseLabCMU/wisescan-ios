@@ -55,6 +55,21 @@ class MetaWearableManager {
     private var stateToken: Any?
     private var frameToken: Any?
 
+    // Timestamp for frame throttling (thread-safe for background video publisher)
+    private final class FrameThrottle: @unchecked Sendable {
+        private var lock = os_unfair_lock()
+        private var lastTime: CFAbsoluteTime = 0
+        func shouldProcess() -> Bool {
+            os_unfair_lock_lock(&lock)
+            defer { os_unfair_lock_unlock(&lock) }
+            let now = CFAbsoluteTimeGetCurrent()
+            if now - lastTime < (1.0 / 7.0) { return false }
+            lastTime = now
+            return true
+        }
+    }
+    private let throttle = FrameThrottle()
+
     #if canImport(MWDATMockDevice)
     private var mockDevice: MockRaybanMeta?
     private var isMockWearableEnabled = false
@@ -377,7 +392,11 @@ class MetaWearableManager {
 
             // Subscribe to actual camera frame output
             self.frameToken = session.videoFramePublisher.listen { [weak self] frame in
-                print("[MetaWearable] Received video frame")
+                guard let self = self else { return }
+                // Throttle to ~7 FPS
+                guard self.throttle.shouldProcess() else { return }
+                
+                print("[MetaWearable] Received video frame (Throttled to 7FPS)")
 
                 // TODO(Hardware Test): The DAT SDK 0.6.0 does not explicitly expose camera intrinsics.
                 // However, AVFoundation sometimes silently injects metadata (like kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix)
