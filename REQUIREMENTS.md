@@ -51,7 +51,8 @@ graph LR
 **Related docs:**
 - [Platform Architecture](../wiselab-scan/ARCHITECTURE.md) — Full system design
 - [PlantUML Diagram](../wiselab-scan/wisescan-architecture.puml) — Rendered system diagram
-- [iOS Design Spec](Design/DESIGN.md) — Original UI/UX design document
+- [iOS Design Spec](docs/design/DESIGN.md) — Original UI/UX design document
+- [Troubleshooting Guide](docs/TROUBLESHOOTING.md) — Hardware quirks and recovery steps
 
 ---
 
@@ -294,7 +295,7 @@ sequenceDiagram
 | **Status** | ✅ Complete |
 | **Description** | Live HUD showing polygon count, anchor count (~area), drift level, and session duration. Composite capacity score (0–1) using `max(polygonPressure, memoryPressure, anchorPressure, driftEstimate)`. Color-coded progress bar (green→yellow→red). Warning banners at >80% and >95% capacity. Memory tracks delta from session baseline, not absolute footprint. |
 | **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanStats.capacityScore`, `currentMemoryUsageMB()` · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `Coordinator.updateStats()`, drift tracking · [CaptureView.swift](wisescan-ios/CaptureView.swift) — redesigned HUD |
-| **Design Doc** | [Scan4D_Architecture.md](Design/Scan4D_Architecture.md) — "Large-Space Scanning & Map Stitching" section |
+| **Design Doc** | [Scan4D_Architecture.md](docs/design/Scan4D_Architecture.md) — "Large-Space Scanning & Map Stitching" section |
 
 ### REQ-015: Location Rename
 | | |
@@ -385,7 +386,7 @@ classDiagram
 | OpenFLAME | Server-Assisted UI | ⭐⭐⭐ | Future upgrade for live UI guiding, streaming visual features to backend. |
 | RoomPlan API | Deprioritized | ⭐⭐⭐ | Apple-locked semantic tracking; better handled off-device by the server. |
 
-**Current implementation:** `ARWorldMap` is saved categorically and used for Edge UI relocalization. See [Design/Scan4D_Architecture.md](Design/Scan4D_Architecture.md) for full rationale on the Backend-First philosophy.
+**Current implementation:** `ARWorldMap` is saved categorically and used for Edge UI relocalization. See [Design/Scan4D_Architecture.md](docs/design/Scan4D_Architecture.md) for full rationale on the Backend-First philosophy.
 
 ---
 
@@ -401,5 +402,104 @@ Each format includes only its own payload — no universal base.
 | OBJ | `.obj` | Single mesh file (no vertex colors) | MeshLab, Blender |
 | PLY | `.ply` | Converted mesh with embedded vertex colors | MeshLab, CloudCompare |
 | USDZ | `.usdz` | Converted mesh via ModelIO | iOS Quick Look |
+
+---
+
+## Physical Layer Prerequisites & Failure Guards
+
+The app operates across multiple physical channels (Bluetooth, WiFi Direct, ARKit, on-device sensors). Each channel has prerequisites that can fail independently. This section documents every prerequisite, the failure mode, and how the app guards against it.
+
+### Prerequisite Matrix
+
+| # | Layer | Prerequisite | Failure Mode | App Guard | Status |
+|:--|:------|:-------------|:-------------|:----------|:-------|
+| P-01 | iOS | Camera permission (`NSCameraUsageDescription`) | ARKit session refuses to start; no video feed | System prompt on first launch; required for any capture | ✅ Handled |
+| P-02 | iOS | Location permission (`NSLocationWhenInUseUsageDescription`) | No GPS coordinates embedded in scan metadata | System prompt; scans still work without GPS but lack ground-truth anchoring | ✅ Handled |
+| P-03 | iOS | Local Network permission (`NSLocalNetworkUsageDescription`) | Cannot reach self-hosted backend for upload/mDNS discovery | System prompt; offline capture still works | ✅ Handled |
+| P-04 | iOS | ARKit hardware support | App cannot capture 3D data | Runtime `ARWorldTrackingConfiguration.isSupported` check | ✅ Handled |
+| P-05 | iOS | LiDAR hardware | No mesh, depth, or coverage overlay | Runtime `supportsLiDAR` check → Lite Mode banner | ✅ Handled |
+| P-06 | Wearable | Meta AI app installed + glasses paired | `Wearables.shared.devices` returns empty | Dashboard shows "No devices found"; device observation stream auto-retries | ✅ Handled |
+| P-07 | Wearable | Developer Mode enabled on glasses | SDK registration may fail; streaming unavailable | Logged via registration state observation; user directed to Meta AI app | ⚠️ Logged only |
+| P-08 | Wearable | DAT SDK app registration (via Meta AI OAuth) | `registrationState` remains unregistered | `openRegistration()` called from Dashboard; state monitored via `registrationStateStream()` | ✅ Handled |
+| P-09 | Wearable | DAT SDK camera permission (granted via Meta AI) | `checkPermissionStatus(.camera)` returns denied | Warning banner: "Meta App Permission Required"; re-checks on foreground | ✅ Handled |
+| P-10 | Wearable | Glasses firmware compatibility | `device.compatibility()` returns `.deviceUpdateRequired`; `DeviceSession.start()` throws `noEligibleDevice` | `deviceUpdateRequired` flag → orange CaptureView banner: "Glasses firmware update required — open Meta AI app to update" | ✅ Handled |
+| P-11 | Wearable | Bluetooth connection (`linkState`) | `device.linkState` is `.disconnected` or `.connecting` | `addLinkStateListener` waits for `.connected` before creating session | ✅ Handled |
+| P-12 | Wearable | WiFi Direct side-channel (SDK-managed) | Video frames cannot be delivered over Bluetooth alone; SDK internally establishes WiFi Direct for media transfer | SDK handles this transparently; phone auto-joins glasses WiFi network (e.g., "RBMeta 08NR -2") when streaming starts. Failure manifests as `noEligibleDevice` or nil frames | ⚠️ SDK-managed |
+| P-13 | Wearable | Meta AI app version ≥ v254 | SDK initialization or registration may fail silently | Logged; no direct version check available in SDK | ⚠️ Logged only |
+| P-14 | Wearable | SDK version ↔ firmware version match | `device.compatibility()` returns `.sdkUpdateRequired` | Logged; developer must update the SDK package | ⚠️ Logged only |
+| P-15 | Wearable | `DeviceSession` reaches `.started` state | Session may hang in `.starting` or error via `errorStream` | `stateStream()` + `errorStream()` racing pattern (from official sample); timeout and cleanup on failure | ✅ Handled |
+| P-16 | Wearable | `addStream()` returns non-nil | Stream cannot be created even with valid session | Logged with session state; session stopped and cleaned up | ✅ Handled |
+
+### Wearable Streaming Lifecycle
+
+The DAT SDK enforces a strict lifecycle. Each step must succeed before the next can proceed:
+
+```mermaid
+sequenceDiagram
+    participant App as Scan4D
+    participant SDK as DAT SDK
+    participant AI as Meta AI App
+    participant HW as Ray-Ban Glasses
+
+    Note over App,HW: ── Prerequisites ──
+    App->>SDK: Wearables.configure()
+    App->>AI: openRegistration()
+    AI-->>App: registrationState → registered
+    App->>SDK: requestPermission(.camera)
+    SDK-->>AI: OAuth flow
+    AI-->>App: permissionStatus → granted
+
+    Note over App,HW: ── Device Discovery ──
+    App->>SDK: devicesStream()
+    SDK-->>App: [deviceId]
+    App->>SDK: deviceForIdentifier(id)
+    SDK-->>App: Device (linkState, compatibility, type)
+
+    Note over App,HW: ── Compatibility Gate ──
+    alt compatibility == .deviceUpdateRequired
+        App-->>App: ⚠️ Show firmware update banner
+        Note right of App: STOP — streaming not possible
+    else compatibility == .compatible
+        App-->>App: ✅ Proceed
+    end
+
+    Note over App,HW: ── Session Setup ──
+    App->>SDK: createSession(SpecificDeviceSelector)
+    App->>SDK: session.start()
+    SDK->>HW: Establish WiFi Direct
+    HW-->>SDK: WiFi handshake
+    SDK-->>App: stateStream → .started
+
+    Note over App,HW: ── Stream Setup ──
+    App->>SDK: session.addStream(config)
+    SDK-->>App: MWDATCamera.Stream
+    App->>SDK: stream.start()
+    SDK->>HW: Begin video capture
+    HW-->>SDK: Video frames (WiFi Direct)
+    SDK-->>App: videoFramePublisher → VideoFrame
+    App->>App: makeUIImage() → PiP overlay
+```
+
+### iOS Permission Keys
+
+Configured in the Xcode project (`project.pbxproj` Info.plist keys):
+
+| Key | Value | Required For |
+|:----|:------|:-------------|
+| `NSCameraUsageDescription` | "Camera is required for AR capture and streaming." | ARKit session, wearable proxy |
+| `NSLocationWhenInUseUsageDescription` | "Scan4D requires Location data to assign a ground truth position..." | GPS metadata in scans |
+| `NSLocalNetworkUsageDescription` | "Local Network is required to connect to Scan4D servers." | Backend upload, mDNS |
+
+### Wearable Hardware Requirements
+
+| Requirement | Minimum | Notes |
+|:------------|:--------|:------|
+| Glasses model | Ray-Ban Meta Gen 1/2 or Meta Ray-Ban Display | `device.deviceType()` returns `.rayBanMeta` |
+| Glasses firmware | v20+ (Ray-Ban Meta), v21+ (Display) | Check via `device.compatibility()` |
+| Meta AI app | v254+ | Required for registration and permission flows |
+| iOS version | 15.2+ | DAT SDK minimum |
+| Developer Mode | Enabled on glasses | Toggle in Meta AI app settings |
+
+**Source:** [MetaWearableManager.swift](wisescan-ios/MetaWearableManager.swift) — `setupStreamSession()`, `updateConnectedDevices()`, `deviceUpdateRequired`
 
 ---

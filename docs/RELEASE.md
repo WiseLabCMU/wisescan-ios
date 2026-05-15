@@ -95,6 +95,14 @@ After the build finishes processing on App Store Connect (~10-20 min):
 2. Add release notes for testers
 3. Enable the build for your test groups
 
+### 6. App Store Submission & Privacy Docs
+
+If this release is going to production (App Store), ensure the following are updated before submitting for review:
+1. **Automated Screenshots:** Run `bundle exec fastlane snapshot` to automatically capture updated UI screenshots for the App Store using your UI tests.
+2. **App Store Listing:** Update "What's New" and Promotional Text. Ensure your newly generated screenshots accurately reflect significant UI changes.
+3. **Privacy Labels:** If new SDKs (like Meta Wearables DAT) or tracking features were added, update the App Privacy section in App Store Connect to declare new data types (e.g., Bluetooth, Local Network, Camera).
+4. **Privacy Policy Document:** Ensure any external hosted privacy policies correctly reflect new data usage, especially regarding third-party wearables or AR features.
+
 ## Quick Reference
 
 | Step | Command / Action | What Happens |
@@ -104,6 +112,7 @@ After the build finishes processing on App Store Connect (~10-20 min):
 | Sync | `git pull origin main --tags` | Local repo has the new tag |
 | Ship | `bundle exec fastlane beta` | Archive → TestFlight upload |
 | Distribute | App Store Connect UI | Enable build for testers |
+| App Store | App Store Connect UI | Update metadata, privacy labels, and submit |
 
 ## Troubleshooting
 
