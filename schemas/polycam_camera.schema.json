@@ -51,6 +51,10 @@
     "depth_path": {
       "type": "string",
       "description": "Relative path to the associated depth map."
+    },
+    "confidence_path": {
+      "type": "string",
+      "description": "Relative path to the associated depth confidence map."
     }
   },
   "required": [

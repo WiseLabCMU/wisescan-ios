@@ -10,7 +10,11 @@
     },
     "device": {
       "type": "string",
-      "description": "The device name capturing the scan (e.g., iPhone 15 Pro, Pixel 8)."
+      "description": "The custom user-defined name of the device capturing the scan (e.g., Jane's iPhone)."
+    },
+    "hardware_device_model": {
+      "type": "string",
+      "description": "The specific hardware model capturing the scan (e.g., iPhone 15 Pro, Ray-Ban Meta)."
     },
     "os_name": {
       "type": "string",
@@ -53,6 +57,19 @@
     "compass_heading": {
       "type": "number",
       "description": "True heading (or magnetic if true isn't available) in degrees 0-359.9."
+    },
+    "face_anchors": {
+      "type": "array",
+      "description": "3D locations of detected faces for privacy filtering.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "x": { "type": "number" },
+          "y": { "type": "number" },
+          "z": { "type": "number" }
+        },
+        "required": ["x", "y", "z"]
+      }
     }
   },
   "required": [

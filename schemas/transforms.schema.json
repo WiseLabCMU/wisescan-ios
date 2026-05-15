@@ -46,6 +46,10 @@
             "type": "string",
             "description": "Relative path to the associated depth map."
           },
+          "confidence_file_path": {
+            "type": "string",
+            "description": "Relative path to the associated depth confidence map."
+          },
           "transform_matrix": {
             "type": "array",
             "description": "A 4x4 matrix representing the camera-to-world transform.",
