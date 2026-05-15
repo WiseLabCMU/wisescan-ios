@@ -19,7 +19,24 @@ class MetaWearableManager {
     var isScanning = false
     var connectedDevices: [WearableDevice] = []
     var isStreaming = false
-    var permissionGranted = false
+    var deviceUpdateRequired = false
+    var permissionGranted = false {
+        didSet {
+            guard permissionGranted, isStreamingRequested, let firstDevice = connectedDevices.first else { return }
+            if streamSession != nil {
+                // Tear down stale session created before we had permission
+                print("[MetaWearable] Permissions granted late — tearing down stale session")
+                Task {
+                    await self.streamSession?.stop()
+                    self.streamSession = nil
+                    self.setupStreamSession(for: firstDevice.id)
+                }
+            } else {
+                print("[MetaWearable] Permissions granted late, starting stream")
+                setupStreamSession(for: firstDevice.id)
+            }
+        }
+    }
     /// Whether the capture screen has requested streaming — prevents auto-start from device discovery
     private var isStreamingRequested = false
 
@@ -33,7 +50,7 @@ class MetaWearableManager {
 
     private var cancellables = Set<AnyCancellable>()
     private var deviceSession: DeviceSession?
-    private var streamSession: StreamSession?
+    private var streamSession: MWDATCamera.Stream?
 
     // Store SDK Announcer subscription tokens if required by the interface
     private var stateToken: Any?
@@ -62,10 +79,11 @@ class MetaWearableManager {
         checkPermissions()
         syncMockWearable()
 
-        // Refresh devices when returning to foreground in case the deep-link failed to bounce back
+        // Refresh devices and permissions when returning to foreground (e.g., after granting permission in Meta AI)
         NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.isScanning = false
+                self?.checkPermissions()
                 self?.setupDeviceObservation()
             }
         }
@@ -136,9 +154,11 @@ class MetaWearableManager {
             do {
                 let status = try await Wearables.shared.checkPermissionStatus(.camera)
                 let statusStr = String(describing: status).lowercased()
-                self.permissionGranted = statusStr.contains("grant") || statusStr.contains("authoriz")
+                let granted = statusStr.contains("grant") || statusStr.contains("authoriz")
+                print("[MetaWearable] Permission check result: '\(statusStr)' → granted=\(granted)")
+                self.permissionGranted = granted
             } catch {
-                print("DAT Permission check failed: \(error)")
+                print("[MetaWearable] Permission check failed: \(error) — will retry on next foreground")
             }
         }
     }
@@ -196,20 +216,36 @@ class MetaWearableManager {
 
     private func updateConnectedDevices(_ deviceIds: [String]) {
         self.connectedDevices = deviceIds.map { deviceId in
-            WearableDevice(
+            let device = Wearables.shared.deviceForIdentifier(deviceId)
+            let name = device?.nameOrId() ?? "Meta Ray-Ban (\(deviceId.prefix(4)))"
+            return WearableDevice(
                 id: deviceId,
-                name: "Meta Ray-Ban (\(deviceId.prefix(4)))",
+                name: name,
                 model: "Meta Ray-Ban",
                 isConnected: true,
                 underlyingDevice: deviceId
             )
         }
 
+        // Check compatibility for all connected devices
+        for deviceId in deviceIds {
+            if let device = Wearables.shared.deviceForIdentifier(deviceId) {
+                let compat = device.compatibility()
+                if compat == .deviceUpdateRequired {
+                    self.deviceUpdateRequired = true
+                } else if compat == .compatible {
+                    self.deviceUpdateRequired = false
+                }
+            }
+        }
+
         if let firstConnected = deviceIds.first {
-            // Only auto-start stream if the capture screen has requested it
-            if self.streamSession == nil && self.isStreamingRequested {
+            // Only auto-start stream if the capture screen has requested it AND we have permission
+            if self.streamSession == nil && self.isStreamingRequested && self.permissionGranted {
                 print("[MetaWearable] Setting up stream session for device: \(firstConnected)")
                 self.setupStreamSession(for: firstConnected)
+            } else if self.streamSession == nil && self.isStreamingRequested && !self.permissionGranted {
+                print("[MetaWearable] Device found but camera permission not yet granted — deferring stream setup")
             }
         } else {
             if !hasLoggedNoDevices {
@@ -323,54 +359,171 @@ class MetaWearableManager {
                 return
             }
 
-            let selector = AutoDeviceSelector(wearables: Wearables.shared)
+            // Get the device object and log its full state
+            guard let device = Wearables.shared.deviceForIdentifier(deviceId) else {
+                print("[MetaWearable] deviceForIdentifier returned nil for \(deviceId)")
+                return
+            }
+            print("[MetaWearable] Device: \(device.nameOrId())")
+            print("[MetaWearable] Device linkState: \(device.linkState)")
+            print("[MetaWearable] Device compatibility: \(device.compatibility())")
+            print("[MetaWearable] Device type: \(device.deviceType())")
 
-            // 0.6.0: Create a DeviceSession first, then add a stream to it
+            // Check firmware compatibility — surface to UI but still attempt streaming
+            // (SDK 0.7.0 may report deviceUpdateRequired even when glasses firmware is current)
+            let compat = device.compatibility()
+            if compat == .deviceUpdateRequired {
+                self.deviceUpdateRequired = true
+                print("[MetaWearable] ⚠️ Device reports compatibility: deviceUpdateRequired — will still attempt session")
+            } else if compat == .sdkUpdateRequired {
+                self.deviceUpdateRequired = true
+                print("[MetaWearable] ⚠️ Device reports compatibility: sdkUpdateRequired — will still attempt session")
+            } else {
+                self.deviceUpdateRequired = false
+            }
+
+            // Wait for device to be connected if not already
+            if device.linkState != .connected {
+                print("[MetaWearable] Device not connected (linkState: \(device.linkState)), waiting...")
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    var token: (any AnyListenerToken)?
+                    token = device.addLinkStateListener { state in
+                        print("[MetaWearable] Device linkState changed: \(state)")
+                        if state == .connected {
+                            Task { await token?.cancel() }
+                            continuation.resume()
+                        }
+                    }
+                    // Check again in case it changed during setup
+                    if device.linkState == .connected {
+                        Task { await token?.cancel() }
+                        continuation.resume()
+                    }
+                }
+                print("[MetaWearable] Device connected!")
+            }
+
+            // Use SpecificDeviceSelector (AutoDeviceSelector.activeDevice is always nil for this device)
+            let selector = SpecificDeviceSelector(device: deviceId)
+
+            // Create the DeviceSession
             let devSession: DeviceSession
             do {
                 devSession = try Wearables.shared.createSession(deviceSelector: selector)
+                print("[MetaWearable] DeviceSession created")
             } catch {
                 print("[MetaWearable] Failed to create device session: \(error)")
                 return
             }
             self.deviceSession = devSession
 
-            let config = StreamSessionConfig(
-                videoCodec: .raw,
-                resolution: .medium,
-                frameRate: 7
-            )
+            // Start the session and wait for it to reach .started state
+            let stateStream = devSession.stateStream()
+            let errorStream = devSession.errorStream()
+            do {
+                try devSession.start()
+                print("[MetaWearable] DeviceSession.start() called, state: \(devSession.state)")
+            } catch let error as DeviceSessionError {
+                if error == .datAppOnTheGlassesUpdateRequired {
+                    self.deviceUpdateRequired = true
+                    print("[MetaWearable] Failed to start device session: datAppOnTheGlassesUpdateRequired")
+                } else if error == .noEligibleDevice {
+                    print("[MetaWearable] Failed to start device session: noEligibleDevice (Glasses likely need firmware update)")
+                    self.deviceUpdateRequired = true // Treat noEligibleDevice as an update required in 0.7.0 if compatibility is already flagging it
+                } else if error == .dwaUnavailable {
+                    print("[MetaWearable] Failed to start device session: WiFi Direct (DWA) unavailable")
+                } else {
+                    print("[MetaWearable] Failed to start device session: \(error)")
+                }
+                self.deviceSession = nil
+                return
+            } catch {
+                print("[MetaWearable] Failed to start device session (Unknown): \(error)")
+                self.deviceSession = nil
+                return
+            }
 
-            // Add a camera stream to the device session
+            // Wait for .started state (may have already transitioned)
+            if devSession.state != .started {
+                print("[MetaWearable] Waiting for DeviceSession to reach .started state...")
+                do {
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        group.addTask {
+                            for await state in stateStream {
+                                print("[MetaWearable] DeviceSession state: \(state)")
+                                if state == .started { return }
+                                if state == .stopped {
+                                    throw DeviceSessionError.unexpectedError(description: "Session stopped before starting")
+                                }
+                            }
+                        }
+                        group.addTask {
+                            for await error in errorStream {
+                                print("[MetaWearable] DeviceSession error: \(error)")
+                                throw error
+                            }
+                        }
+                        _ = try await group.next()
+                        group.cancelAll()
+                    }
+                } catch let error as DeviceSessionError {
+                    if error == .datAppOnTheGlassesUpdateRequired {
+                        self.deviceUpdateRequired = true
+                        print("[MetaWearable] DeviceSession failed to start async: datAppOnTheGlassesUpdateRequired")
+                    } else if error == .noEligibleDevice {
+                        print("[MetaWearable] DeviceSession failed to start async: noEligibleDevice")
+                        self.deviceUpdateRequired = true
+                    } else {
+                        print("[MetaWearable] DeviceSession failed to start async: \(error)")
+                    }
+                    devSession.stop()
+                    self.deviceSession = nil
+                    return
+                } catch {
+                    print("[MetaWearable] DeviceSession failed to reach .started: \(error)")
+                    devSession.stop()
+                    self.deviceSession = nil
+                    return
+                }
+            }
+            print("[MetaWearable] DeviceSession is .started — adding stream")
+
+            // Add a camera stream (matching the official sample: low res, 24fps)
+            let config = StreamConfiguration(
+                videoCodec: .raw,
+                resolution: .low,
+                frameRate: 24
+            )
             guard let stream = try? devSession.addStream(config: config) else {
-                print("[MetaWearable] Failed to add stream to device session")
+                print("[MetaWearable] addStream returned nil")
+                print("[MetaWearable] DeviceSession state: \(devSession.state)")
+                devSession.stop()
+                self.deviceSession = nil
                 return
             }
             self.streamSession = stream
-            print("[MetaWearable] StreamSession created (medium res, 15fps), subscribing to publishers...")
+            print("[MetaWearable] Stream created, subscribing to publishers...")
 
             // --- MWDAT ANNOUNCER SUBSCRIPTION ---
             self.stateToken = stream.statePublisher.listen { state in
-                let stateStr = String(describing: state)
-                print("[MetaWearable] State changed: \(stateStr)")
+                print("[MetaWearable] Stream state changed: \(state)")
                 Task { @MainActor [weak self] in
                     guard let self = self else { return }
-                    let lower = stateStr.lowercased()
-                    if lower.contains("captur") || lower.contains("stream") {
+                    switch state {
+                    case .streaming:
                         self.isStreaming = true
-                    } else if lower.contains("paused") {
-                        print("[MetaWearable] Session PAUSED — keeping connection alive, holding work")
+                    case .paused:
+                        print("[MetaWearable] Stream PAUSED — keeping connection alive")
                         self.isStreaming = false
-                        // DO NOT teardown capture session or session object here, wait for resume or stop
-                    } else if lower.contains("stop") {
-                        print("[MetaWearable] Session STOPPED — releasing resources")
+                    case .stopped:
+                        print("[MetaWearable] Stream STOPPED — releasing resources")
                         self.isStreaming = false
                         self.latestProxyImage = nil
                         _ = self.activeCaptureSession?.stop()
-                        self.streamSession = nil // Allow a new session to be created when device is ready
-                        self.deviceSession = nil
-                    } else {
-                        // starting, waitingForDevice, etc.
+                        self.streamSession = nil
+                    case .waitingForDevice, .starting, .stopping:
+                        self.isStreaming = false
+                    @unknown default:
                         self.isStreaming = false
                     }
                 }
@@ -402,15 +555,15 @@ class MetaWearableManager {
 
                     var finalUIImage = frame.makeUIImage()
                     var finalJpegData: Data? = nil
-                    
+
                     // Capture MainActor properties safely without capturing self in the outer task
                     Task {
                         let isPrivacyEnabled = await MainActor.run { UserDefaults.standard.bool(forKey: AppConstants.Key.privacyFilter) }
                         let compression = await MainActor.run { AppConstants.jpegCompressionQuality }
-                        
+
                         if let img = finalUIImage, let rawJpeg = img.jpegData(compressionQuality: compression) {
                             finalJpegData = rawJpeg
-                            
+
                             if isPrivacyEnabled {
                                 // Wearables stream is natively landscape right, which corresponds to vision orientation .up
                                 let (blurredData, _) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: rawJpeg, orientation: .up)
@@ -420,7 +573,7 @@ class MetaWearableManager {
                                 }
                             }
                         }
-                        
+
                         let safeJpegData = finalJpegData
                         let safeUIImage = finalUIImage
 
@@ -432,7 +585,7 @@ class MetaWearableManager {
                             } else {
                                 print("[MetaWearable] Failed to create UIImage from frame")
                             }
-                            
+
                             if let jpeg = safeJpegData {
                                 self?.activeCaptureSession?.captureProxyFrameData(jpeg)
                             } else {
@@ -445,16 +598,11 @@ class MetaWearableManager {
                 }
             }
 
-            // Start the device session, then the stream
-            do {
-                try devSession.start()
-            } catch {
-                print("[MetaWearable] Failed to start device session: \(error)")
-                return
-            }
-            print("[MetaWearable] Starting stream session...")
+            // Start the camera stream
+            print("[MetaWearable] Starting stream...")
             await stream.start()
-            print("[MetaWearable] Stream session started")
+            print("[MetaWearable] Stream started")
         }
     }
 }
+

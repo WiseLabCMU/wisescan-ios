@@ -216,21 +216,75 @@ struct CaptureView: View {
                 }
                 .padding()
                 
-                // Picture-in-Picture Overlay
-                if let pipImage = MetaWearableManager.shared.latestProxyImage {
+                // Wearable PiP Overlay and Status Warnings
+                let wearableManager = MetaWearableManager.shared
+                if let firstDevice = wearableManager.connectedDevices.first {
                     HStack {
                         Spacer()
-                        Image(uiImage: pipImage)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: AppConstants.UI.pipWidth, height: AppConstants.UI.pipHeight)
-                            .clipShape(RoundedRectangle(cornerRadius: AppConstants.UI.pipCornerRadius))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: AppConstants.UI.pipCornerRadius)
-                                    .stroke(Color.white.opacity(0.5), lineWidth: AppConstants.UI.pipBorderWidth)
-                            )
-                            .shadow(radius: 5)
-                            .padding(.trailing, AppConstants.UI.pipPaddingX)
+                        VStack(alignment: .trailing, spacing: 6) {
+                            // Device Name Title
+                            Text(firstDevice.name)
+                                .font(.caption2).bold()
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(6)
+                                .padding(.trailing, AppConstants.UI.pipPaddingX)
+
+                            // Firmware compatibility warning (may be false positive in SDK 0.7.0)
+                            if wearableManager.deviceUpdateRequired {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
+                                    Text("Device update may be needed — check Meta AI app")
+                                }
+                                .font(.caption2).bold()
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.orange.opacity(0.7))
+                                .cornerRadius(8)
+                                .padding(.trailing, AppConstants.UI.pipPaddingX)
+                            }
+
+                            // Status warnings when connected but no proxy image is flowing
+                            if wearableManager.latestProxyImage == nil {
+                                HStack(spacing: 6) {
+                                    if !wearableManager.permissionGranted {
+                                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
+                                        Text("Meta App Permission Required")
+                                    } else if !wearableManager.isStreaming {
+                                        ProgressView().scaleEffect(0.7).tint(.white)
+                                        Text("Starting stream...")
+                                    } else {
+                                        ProgressView().scaleEffect(0.7).tint(.white)
+                                        Text("Waiting for frames...")
+                                    }
+                                }
+                                .font(.caption2).bold()
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(8)
+                                .padding(.trailing, AppConstants.UI.pipPaddingX)
+                            }
+
+                            // The actual PiP video feed
+                            if let pipImage = wearableManager.latestProxyImage {
+                                Image(uiImage: pipImage)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: AppConstants.UI.pipWidth, height: AppConstants.UI.pipHeight)
+                                    .clipShape(RoundedRectangle(cornerRadius: AppConstants.UI.pipCornerRadius))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: AppConstants.UI.pipCornerRadius)
+                                            .stroke(Color.white.opacity(0.5), lineWidth: AppConstants.UI.pipBorderWidth)
+                                    )
+                                    .shadow(radius: 5)
+                                    .padding(.trailing, AppConstants.UI.pipPaddingX)
+                            }
+                        }
                     }
                 }
 
