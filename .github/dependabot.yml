@@ -9,3 +9,5 @@ updates:
     directory: "/" # Location of the Xcode project/workspace containing Package.resolved
     schedule:
       interval: "monthly"
+    cooldown:
+      default-days: 7
