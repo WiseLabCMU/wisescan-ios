@@ -29,6 +29,8 @@ class MetaWearableManager {
                 Task {
                     await self.streamSession?.stop()
                     self.streamSession = nil
+                    self.deviceSession?.stop()
+                    self.deviceSession = nil
                     self.setupStreamSession(for: firstDevice.id)
                 }
             } else {
@@ -49,7 +51,8 @@ class MetaWearableManager {
     }
 
     private var cancellables = Set<AnyCancellable>()
-    private var streamSession: StreamSession?
+    private var deviceSession: DeviceSession?
+    private var streamSession: MWDATCamera.Stream?
 
     // Store SDK Announcer subscription tokens if required by the interface
     private var stateToken: Any?
@@ -231,6 +234,8 @@ class MetaWearableManager {
                 Task {
                     await self.streamSession?.stop()
                     self.streamSession = nil
+                    self.deviceSession?.stop()
+                    self.deviceSession = nil
                 }
             }
         }
@@ -263,6 +268,8 @@ class MetaWearableManager {
                 await stream.stop()
             }
             self.streamSession = nil
+            self.deviceSession?.stop()
+            self.deviceSession = nil
             self.isStreaming = false
             self.latestProxyImage = nil
         }
@@ -298,6 +305,8 @@ class MetaWearableManager {
             // SDK handles disconnect implicitly; simply teardown our active stream
             await self.streamSession?.stop()
             self.streamSession = nil
+            self.deviceSession?.stop()
+            self.deviceSession = nil
         }
     }
 
@@ -306,6 +315,8 @@ class MetaWearableManager {
             // Drop stream and clear local devices list to ensure SDK fully releases
             await self.streamSession?.stop()
             self.streamSession = nil
+            self.deviceSession?.stop()
+            self.deviceSession = nil
 
             Task { @MainActor in
                 self.connectedDevices = []
@@ -371,13 +382,32 @@ class MetaWearableManager {
                 print("[MetaWearable] Device connected!")
             }
 
-            // Use AutoDeviceSelector for SDK 0.5.0
+            // Create DeviceSession via AutoDeviceSelector (SDK 0.7.0 pattern)
             let selector = AutoDeviceSelector(wearables: Wearables.shared)
+            let devSession: DeviceSession
+            do {
+                devSession = try Wearables.shared.createSession(deviceSelector: selector)
+                try devSession.start()
+            } catch {
+                print("[MetaWearable] Failed to create/start DeviceSession: \(error)")
+                return
+            }
+            self.deviceSession = devSession
 
-            // Create the StreamSession
-            let session = StreamSession(deviceSelector: selector)
+            // Add camera stream to the DeviceSession
+            let session: MWDATCamera.Stream
+            do {
+                guard let stream = try devSession.addStream() else {
+                    print("[MetaWearable] addStream returned nil")
+                    return
+                }
+                session = stream
+            } catch {
+                print("[MetaWearable] Failed to add stream: \(error)")
+                return
+            }
             self.streamSession = session
-            print("[MetaWearable] StreamSession created")
+            print("[MetaWearable] DeviceSession + Stream created")
 
             // --- MWDAT ANNOUNCER SUBSCRIPTION ---
             self.stateToken = session.statePublisher.listen { state in
@@ -394,6 +424,8 @@ class MetaWearableManager {
                     if stateStr.contains("stop") {
                         self.latestProxyImage = nil
                         self.streamSession = nil
+                        self.deviceSession?.stop()
+                        self.deviceSession = nil
                     }
                 }
             }
@@ -427,7 +459,7 @@ class MetaWearableManager {
                     let sendableBuf = SendableBuffer(buffer: pixelBuffer)
 
                     var finalUIImage = frame.makeUIImage()
-                    var finalJpegData: Data? = nil
+                    var finalJpegData: Data?
 
                     // Capture MainActor properties safely without capturing self in the outer task
                     Task {
