@@ -87,6 +87,24 @@ struct ScanExportManager {
                     print("[prepareExport] Failed to copy worldmap: \(error.localizedDescription)")
                 }
                 stagePolycamPayload(to: stagingDir)
+
+                // Include stitching.json from the parent location directory if it exists.
+                // Path: scanDir is Documents/Scans/{locationId}/{scanId}/
+                // So scanDir.deletingLastPathComponent() is the location directory.
+                let locationDir = scanDir.deletingLastPathComponent()
+                let stitchingURL = locationDir.appendingPathComponent(StitchingMetadataManager.filename)
+                if fm.fileExists(atPath: stitchingURL.path) {
+                    let destURL = stagingDir.appendingPathComponent(StitchingMetadataManager.filename)
+                    do {
+                        // Remove existing destination if present (copyItem fails on overwrite)
+                        try? fm.removeItem(at: destURL)
+                        try fm.copyItem(at: stitchingURL, to: destURL)
+                        print("[prepareExport] ✓ included stitching.json")
+                    } catch {
+                        print("[prepareExport] ✗ failed to copy stitching.json: \(error.localizedDescription)")
+                    }
+                }
+
                 return zipStaging(stagingDir)
             }
 

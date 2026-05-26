@@ -2,42 +2,50 @@ import SwiftUI
 import ARKit
 import SwiftData
 
+// swiftlint:disable file_length type_body_length
 struct CaptureView: View {
-    @Environment(ScanStore.self) private var scanStore
-    @Environment(\.modelContext) private var modelContext
-    @State private var scanStats = ScanStats()
-    @State private var locationManager = LocationManager()
-    @AppStorage(AppConstants.Key.privacyFilter) private var isPrivacyFilterOn = AppConstants.privacyFilter
-    @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
+    @Environment(ScanStore.self) var scanStore
+    @Environment(\.modelContext) var modelContext
+    @State var scanStats = ScanStats()
+    @State var locationManager = LocationManager()
+    @AppStorage(AppConstants.Key.privacyFilter) var isPrivacyFilterOn = AppConstants.privacyFilter
+    @AppStorage(AppConstants.Key.developerMode) var developerMode: Bool = AppConstants.developerMode
     @AppStorage(AppConstants.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppConstants.flipCameraEnabled
-    @AppStorage(AppConstants.Key.mockIMU) private var mockIMU: Bool = AppConstants.mockIMU
-    @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
-    @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
+    @AppStorage(AppConstants.Key.mockIMU) var mockIMU: Bool = AppConstants.mockIMU
+    @AppStorage(AppConstants.Key.mockCameraImages) var mockCameraImages: Bool = AppConstants.mockCameraImages
+    @AppStorage(AppConstants.Key.mockDepthMaps) var mockDepthMaps: Bool = AppConstants.mockDepthMaps
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     // Stream mode removed — fixed to Capture (Stream is a future feature)
     @State private var usingFrontCamera = false
-    @State private var currentARSession: ARSession? = nil
-    @State private var saveMessage: String? = nil
-    @State private var isRecording = false
-    @State private var recordingSeconds = 0
-    @State private var recordingTimer: Timer? = nil
-    @State private var frameCaptureSession = FrameCaptureSession()
+    @State var currentARSession: ARSession? = nil
+    @State var saveMessage: String? = nil
+    @State var isRecording = false
+    @State var recordingSeconds = 0
+    @State var recordingTimer: Timer? = nil
+    @State var frameCaptureSession = FrameCaptureSession()
     // colorAccumulator removed — vertex coloring now deferred to post-processing
-    @AppStorage(AppConstants.Key.rawOverlapMax) private var overlapMax: Double = AppConstants.overlapMax
-    @AppStorage(AppConstants.Key.rawRejectBlur) private var rejectBlur: Bool = AppConstants.rejectBlur
+    @AppStorage(AppConstants.Key.rawOverlapMax) var overlapMax: Double = AppConstants.overlapMax
+    @AppStorage(AppConstants.Key.rawRejectBlur) var rejectBlur: Bool = AppConstants.rejectBlur
     @Binding var selectedTab: Int
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
 
     // Scan4D properties
-    @State private var showNamePrompt = false
-    @State private var newLocationName = ""
-    @State private var pendingScan: PendingScanData? = nil
-    @State private var isProcessingMesh = false
-    @State private var isWaitingToSave = false
-    @State private var cachedGhostMeshData: Data? = nil
+    @State var showNamePrompt = false
+    @State var newLocationName = ""
+    @State var pendingScan: PendingScanData? = nil
+    @State var isProcessingMesh = false
+    @State var isWaitingToSave = false
+    @State var cachedGhostMeshData: Data? = nil
     @State private var isARSessionReady = false
+    @State var messageVersion = 0
+    @State var hapticGenerator = UIImpactFeedbackGenerator(style: .medium)
 
-    @State private var showExtendPrompt = false
+    @State var showExtendPrompt = false
+    @State var showExtendOverlay = false // Semi-transparent overlay during Pin & Extend save
+    @State var extendPhaseText = "" // Text shown in the extend overlay
+    @State var showInsufficientTrackingAlert = false // SwiftUI alert for poor mapping status
+    @State var sessionStabilizationTask: Task<Void, Never>? // Cancellable task for AR session warm-up after extend
+    @State var isConfirmingAlignment = false // Re-entry guard for confirmAlignment double-tap
 
     struct PendingScanData {
         let locationId: UUID?
@@ -78,9 +86,19 @@ struct CaptureView: View {
                 activeMeshColor: activeMeshColor,
                 useFrontCamera: usingFrontCamera,
                 initialWorldMapURL: scanStore.activeRelocalizationMap,
-                initialGhostMeshData: cachedGhostMeshData
+                initialGhostMeshData: cachedGhostMeshData,
+                scanStore: scanStore
             )
                 .ignoresSafeArea()
+                // Fix phase race: set .loadingWorldMap before the AR session starts
+                // loading the world map. onAppear fires AFTER the first render, so
+                // the AR view could detect a boundary anchor before the phase is set.
+                .onAppear {
+                    if scanStore.activeScanCase == .linkAdjacent && scanStore.activeScanToExtend != nil
+                        && scanStore.capturePhase == .idle {
+                        scanStore.capturePhase = .loadingWorldMap
+                    }
+                }
 
             // Loading overlay while AR session initializes (camera + privacy models + depth pipeline)
             if !isARSessionReady {
@@ -137,14 +155,24 @@ struct CaptureView: View {
             }
 
             VStack {
-                // Extend Scan Prompt (transient)
+                // Scan Mode Prompt (transient)
                 if showExtendPrompt {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Extend Scan")
+                            Text(scanStore.activeScanCase == .linkAdjacent ? "Link Adjacent Space" : "Rescan Space")
                                 .font(.headline)
                                 .foregroundColor(.white)
-                            Text("Re-scan the red area to update it over time, or move to its edge and scan new ground to stitch a larger space.")
+                            Text(scanStore.activeScanCase == .linkAdjacent
+                                 ? """
+                                   Link Adjacent Space: Move to the edge of \
+                                   the previous scan. Drop a boundary pin at \
+                                   a door or threshold to relationally link \
+                                   this adjacent space.
+                                   """
+                                 : """
+                                   Rescan Space: Re-scan the previous area \
+                                   to capture changes over time.
+                                   """)
                                 .font(.subheadline)
                                 .foregroundColor(.white.opacity(0.8))
                         }
@@ -338,6 +366,25 @@ struct CaptureView: View {
                     .padding(.horizontal)
                 }
 
+                // Pin & Extend Button — available during any recording session
+                if isRecording && scanStore.capturePhase == .recording && scanStats.hasEnoughFeaturesForRelocalization {
+                    Button(action: { pinAndExtend() }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "mappin.and.ellipse")
+                                .font(.title3)
+                            Text("Pin & Extend")
+                                .font(.subheadline).bold()
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(Color.orange.opacity(0.85))
+                        .cornerRadius(20)
+                        .shadow(radius: 5)
+                    }
+                    .padding(.horizontal)
+                }
+
                 // Bottom HUD and Capture Button
                 VStack {
                     ZStack(alignment: .bottom) {
@@ -446,6 +493,37 @@ struct CaptureView: View {
                 }
                 .padding(.bottom, 20)
             }
+            // Extend transition overlay (semi-transparent over live AR)
+            if showExtendOverlay {
+                ZStack {
+                    Color.black.opacity(0.6).ignoresSafeArea()
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                            .tint(.green)
+                        Text(extendPhaseText)
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                        Text("Do not move")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                }
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.3), value: showExtendOverlay)
+            }
+
+            // Alignment overlay for cross-session resume (Flow B)
+            if scanStore.capturePhase == .loadingWorldMap
+                || scanStore.capturePhase == .aligning
+                || scanStore.capturePhase == .alignedReady {
+                AlignmentOverlayView(
+                    scanStats: scanStats,
+                    onConfirm: { confirmAlignment() },
+                    onCancel: { cancelAlignment() }
+                )
+            }
         }
         .preferredColorScheme(.dark)
         .onAppear {
@@ -456,6 +534,9 @@ struct CaptureView: View {
             locationManager.startUpdating()
 
             showExtendPrompt = (scanStore.activeScanToExtend != nil)
+
+            // Prepare haptic engine for pin drop
+            hapticGenerator.prepare()
 
             // Auto-revert to back camera when developer mode is disabled
             if !developerMode || !flipCameraEnabled {
@@ -475,14 +556,20 @@ struct CaptureView: View {
             MetaWearableManager.shared.activeCaptureSession = nil
 
             if isRecording {
-                stopRecording()
+                stopRecording(force: true)
             }
-            // Always clear ghost state when leaving Capture
-            scanStore.activeLocationForScan = nil
-            scanStore.activeRelocalizationMap = nil
-            scanStore.activeScanToExtend = nil
+            // Always clear ghost state when leaving Capture.
+            // Preserve pendingStitchLink for in-flight saves — the async pipeline
+            // needs it to write stitching.json. It's consumed and nilled out by
+            // writeStitchingLinkIfPending when the save completes.
+            let inflightStitchLink = scanStore.pendingStitchLink
+            scanStore.resetCaptureState()
+            scanStore.pendingStitchLink = inflightStitchLink
             cachedGhostMeshData = nil
+            showExtendOverlay = false
             isARSessionReady = false
+            sessionStabilizationTask?.cancel()
+            sessionStabilizationTask = nil
         }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
@@ -501,268 +588,57 @@ struct CaptureView: View {
                 isWaitingToSave = false
             }
         } message: {
-            Text("Enter a unique name for this space so you can efficiently 'Extend Scan' later.")
+            Text("Enter a unique name for this space so you can add scans later.")
+        }
+        .alert("Insufficient Tracking", isPresented: $showInsufficientTrackingAlert) {
+            Button("Save Anyway") {
+                recordingTimer?.invalidate()
+                recordingTimer = nil
+                performStopRecording()
+            }
+            Button("Discard Scan", role: .destructive) {
+                recordingTimer?.invalidate()
+                recordingTimer = nil
+                isRecording = false
+                frameCaptureSession = FrameCaptureSession()
+                MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
+                clearMessage()
+                
+                // Clean up any empty location created for this flow
+                if let locId = scanStore.activeLocationForScan {
+                    let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
+                    if let location = try? modelContext.fetch(descriptor).first, location.scans.isEmpty {
+                        modelContext.delete(location)
+                        try? modelContext.save()
+                    }
+                }
+                
+                // Reset capture/stitching state so a stale pendingStitchLink
+                // from a prior extend flow doesn't corrupt the next save.
+                scanStore.resetCaptureState()
+            }
+        } message: {
+            Text("This scan has a poor mapping status (\(scanStats.mappingStatus)). Successful relocalization later requires 'mapped' or 'extending' status. Would you like to save it anyway?")
         }
     }
 
     private var qualityColor: Color {
-        let q = scanStats.averageQuality
-        if q < 0.3 { return .red }
-        if q < 0.6 { return .yellow }
+        let quality = scanStats.averageQuality
+        if quality < 0.3 { return .red }
+        if quality < 0.6 { return .yellow }
         return .green
     }
 
-    private var formattedTime: String {
+    var formattedTime: String {
         let minutes = recordingSeconds / 60
         let seconds = recordingSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
     }
 
-    private func toggleRecording() {
-        if isRecording {
-            stopRecording()
-        } else {
-            startRecording()
-        }
-    }
-
-    private func startRecording() {
-        isRecording = true
-        recordingSeconds = 0
-        saveMessage = nil
-
-        // Start frame capture for raw data export
-        if let session = currentARSession {
-            // Provide LocationManager to frame capture session so it can grab metadata
-            frameCaptureSession.start(
-                session: session,
-                overlapMax: overlapMax,
-                rejectBlur: rejectBlur,
-                privacyFilter: isPrivacyFilterOn, // Applied during export
-                locationManager: locationManager,
-                activeLocationId: scanStore.activeLocationForScan,
-                hardwareDeviceModel: UIDevice.current.name,
-                mockIMU: developerMode && mockIMU,
-                mockCameraImages: developerMode && mockCameraImages,
-                mockDepthMaps: developerMode && mockDepthMaps
-            )
-        }
-
-        // Start a timer to track recording duration
-        recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            recordingSeconds += 1
-            if recordingSeconds > 4 {
-                showExtendPrompt = false // Auto-dismiss after recording starts
-            }
-        }
-    }
-
-    private func stopRecording() {
-        recordingTimer?.invalidate()
-        recordingTimer = nil
-
-        // ── Extract all AR data BEFORE switching to nominal mode ──
-        // (Setting isRecording = false triggers ARCoverageView to drop mesh anchors)
-        // Validate mapping status before allowing save
-        if !scanStats.hasEnoughFeaturesForRelocalization {
-            // Give user a choice: discard or save anyway (knowing relocalization will fail)
-            let alert = UIAlertController(
-                title: "Insufficient Tracking",
-                message: "This scan has a poor mapping status (\(scanStats.mappingStatus)). Successful relocalization later requires 'mapped' or 'extending' status. Would you like to save it anyway?",
-                preferredStyle: .alert
-            )
-            alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in
-                self.performStopRecording()
-            })
-            alert.addAction(UIAlertAction(title: "Discard Scan", style: .destructive) { _ in
-                self.isRecording = false
-                self.frameCaptureSession = FrameCaptureSession()
-                MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
-                self.clearMessage()
-                // Session tracking resets naturally when starting a new scan
-            })
-            
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController {
-                rootVC.present(alert, animated: true)
-            }
-            return
-        }
-
-        performStopRecording()
-    }
-
-    private func performStopRecording() {
-        // Stop frame capture and get raw data path
-        let rawDataPath = frameCaptureSession.stop()
-
-        // Export mesh from the still-active AR session
-        let meshResult = ARCoverageView.exportMeshOBJ(from: currentARSession, privacyFilter: isPrivacyFilterOn)
-
-        // Capture a 2D thumbnail from the current camera frame
-        var thumbnailData: Data? = nil
-        if let currentFrame = currentARSession?.currentFrame {
-            let ciImage = CIImage(cvPixelBuffer: currentFrame.capturedImage)
-            let context = CIContext()
-            if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
-                let uiImage = UIImage(cgImage: cgImage)
-                let maxW = AppConstants.thumbnailMaxWidth
-                let targetSize = CGSize(width: maxW, height: maxW * (uiImage.size.height / uiImage.size.width))
-                UIGraphicsBeginImageContextWithOptions(targetSize, false, 1.0)
-                UIImage(cgImage: cgImage, scale: 1.0, orientation: .right).draw(in: CGRect(origin: .zero, size: targetSize))
-                let resizedImage = UIGraphicsGetImageFromCurrentImageContext()
-                UIGraphicsEndImageContext()
-                thumbnailData = resizedImage?.jpegData(compressionQuality: AppConstants.thumbnailJpegQuality)
-            }
-        }
-
-        // ── Now switch to nominal mode (drops mesh anchors, frees AR memory) ──
-        isRecording = false
-
-        var finalMeshResult = meshResult
-
-        // If test modes are active and no mesh was generated (e.g. Simulator), inject a dummy mesh
-        if finalMeshResult == nil || finalMeshResult!.data.isEmpty {
-            if developerMode && (mockCameraImages || mockIMU || mockDepthMaps) {
-                let dummyObj = "v -0.5 -0.5 -0.5\nv 0.5 -0.5 -0.5\nv 0.5 0.5 -0.5\nf 1 2 3\n"
-                if let dummyObjData = dummyObj.data(using: .utf8) {
-                    finalMeshResult = (dummyObjData, 3, 1)
-                }
-            }
-        }
-
-        guard let result = finalMeshResult, !result.data.isEmpty else {
-            saveMessage = "No Mesh Data"
-            frameCaptureSession = FrameCaptureSession()
-            MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
-            clearMessage()
-            return
-        }
-
-        // Prompt the user for a name IMMEDIATELY while mesh processes
-        isProcessingMesh = true
-        isWaitingToSave = false
-        
-        if scanStore.activeLocationForScan == nil {
-            newLocationName = ""
-            showNamePrompt = true
-            // saveMessage is left nil or minimally intrusive so user focuses on typing
-        } else {
-            // Already extending a scan; user won't be prompted. Wait for processing to save.
-            isWaitingToSave = true
-            saveMessage = "Coloring mesh..."
-        }
-
-        let capturedLocationId = scanStore.activeLocationForScan
-
-        // Run vertex coloring in background using saved camera frames (.utility QoS
-        // so the name-prompt keyboard stays responsive while coloring runs)
-        DispatchQueue.global(qos: .utility).async {
-            let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
-                objData: result.data,
-                rawDataDir: rawDataPath
-            )
-
-            DispatchQueue.main.async {
-                self.saveMessage = "Saving World Map..."
-
-                // Export ARWorldMap for Scan4D relocalization
-                VertexColorAccumulator.exportWorldMap(from: self.currentARSession) { mapURL in
-                    DispatchQueue.main.async {
-                        // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping
-                        if let rawDir = rawDataPath {
-                            let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
-                            try? result.data.write(to: meshFileURL)
-
-                            if let mapURL = mapURL {
-                                let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
-                                try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
-                            }
-                        }
-
-                        self.pendingScan = PendingScanData(
-                            locationId: capturedLocationId,
-                            meshData: result.data,
-                            vertexCount: result.vertexCount,
-                            faceCount: result.faceCount,
-                            rawDataPath: rawDataPath,
-                            vertexColors: vertexColors,
-                            worldMapURL: mapURL,
-                            thumbnailData: thumbnailData
-                        )
-
-                        // Release frame capture session memory
-                        self.frameCaptureSession = FrameCaptureSession()
-                        MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
-                        self.isProcessingMesh = false
-
-                        // If user already tapped save in the alert, OR if this is a background extension
-                        if self.isWaitingToSave {
-                            self.savePendingScan()
-                        } else if self.scanStore.activeLocationForScan != nil {
-                            self.savePendingScan()
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func clearMessage() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            saveMessage = nil
-        }
-    }
-
-    private func savePendingScan() {
-        guard let pending = pendingScan else { return }
-
-        let locationId: UUID?
-        var finalName = "New Space"
-
-        if let activeLocationId = pending.locationId {
-            locationId = activeLocationId
-        } else {
-            let trimmedName = newLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
-            finalName = trimmedName.isEmpty ? "New Space" : trimmedName
-            locationId = nil // ScanFileManager will create a new location with this name
-        }
-
-        let savedScan = ScanFileManager.shared.saveScan(
-            context: modelContext,
-            locationId: locationId,
-            name: finalName,
-            meshData: pending.meshData,
-            vertexCount: pending.vertexCount,
-            faceCount: pending.faceCount,
-            hardwareDeviceModel: UIDevice.current.name,
-            rawDataPath: pending.rawDataPath,
-            vertexColors: pending.vertexColors,
-            worldMapURL: pending.worldMapURL,
-            thumbnailData: pending.thumbnailData
-        )
-
-        saveMessage = "Scan Saved!"
-        pendingScan = nil
-
-        // Reset the active state so subsequent scans don't default to this location
-        scanStore.activeLocationForScan = nil
-        scanStore.activeRelocalizationMap = nil
-
-        // Programmatically navigate to the created LocationDetailView
-        let savedLoc = savedScan.location
-
-        // Switch to Scans tab after a brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            selectedTab = 2
-            if let loc = savedLoc {
-                // Clear any existing path and append the new/updated location
-                scanStore.navigationPath.removeLast(scanStore.navigationPath.count)
-                scanStore.navigationPath.append(loc)
-            }
-            saveMessage = nil
-        }
-    }
+    // Methods are organized into extension files:
+    //   CaptureView+Recording.swift  — toggleRecording, startRecording, stopRecording, performStopRecording, savePendingScan, etc.
+    //   CaptureView+Extend.swift     — pinAndExtend (Flow A: mid-session extend)
+    //   CaptureView+Alignment.swift  — confirmAlignment, cancelAlignment (Flow B: cross-session alignment)
 }
 
 #Preview {

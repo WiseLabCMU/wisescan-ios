@@ -1,6 +1,7 @@
 import SwiftUI
 import Observation
 import SwiftData
+import simd
 
 // MARK: - Captured Scan Model
 
@@ -173,8 +174,8 @@ enum UploadStatus: Equatable {
 }
 
 enum ScanCase: String, Codable, CaseIterable {
-    case rescan = "Rescan"
-    case extend = "Extend"
+    case rescanSpace = "RescanSpace"
+    case linkAdjacent = "LinkAdjacent"
 }
 
 // MARK: - Scan Hierarchy Model
@@ -185,13 +186,13 @@ class ScanLocation {
     var name: String
     var updatedAt: Date = Date()
     var remoteLocationId: String?
-    var scanCaseStr: String = ScanCase.rescan.rawValue
+    var scanCaseStr: String = ScanCase.rescanSpace.rawValue
     var imagingPoseMatrix: [Float]? = nil
 
     @Relationship(deleteRule: .cascade)
     var scans: [CapturedScan] = []
 
-    init(id: UUID = UUID(), name: String, updatedAt: Date = Date(), remoteLocationId: String? = nil, scanCase: ScanCase = .rescan) {
+    init(id: UUID = UUID(), name: String, updatedAt: Date = Date(), remoteLocationId: String? = nil, scanCase: ScanCase = .rescanSpace) {
         self.id = id
         self.name = name
         self.updatedAt = updatedAt
@@ -200,25 +201,138 @@ class ScanLocation {
     }
 
     @Transient var scanCase: ScanCase {
-        get { ScanCase(rawValue: scanCaseStr) ?? .rescan }
+        get {
+            // Legacy database compatibility: map old raw values to new enum cases.
+            // The stored string is normalized on the next write (via the setter).
+            // Reads must be pure to avoid SwiftData mutations during SwiftUI view evaluation.
+            if scanCaseStr == "Rescan" { return .rescanSpace }
+            if scanCaseStr == "Extend" { return .linkAdjacent }
+            return ScanCase(rawValue: scanCaseStr) ?? .rescanSpace
+        }
         set { scanCaseStr = newValue.rawValue }
     }
+}
+
+// MARK: - Capture Phase State Machine
+
+/// Tracks the current phase of the capture flow for both mid-session
+/// extend (Flow A) and cross-session alignment resume (Flow B).
+enum CapturePhase: Equatable {
+    case idle                          // Camera passthrough, not recording
+    case recording                     // Active scan capture
+    case extending                     // Pin dropped, save in progress, session restart pending
+    case saving                        // Auto-saving (extend flow: between pin drop and session restart)
+    case loadingWorldMap               // Cross-session: loading old world map (read-only) for relocalization
+    case aligning                      // Cross-session: guiding user to old anchor
+    case alignedReady                  // Cross-session: user is at anchor, can confirm
+
+    /// Whether scene reconstruction should be active (mesh capture).
+    /// Only true during recording and extending (we need the session alive for world map export).
+    var isRecording: Bool {
+        switch self {
+        case .recording, .extending: return true
+        default: return false
+        }
+    }
+}
+
+/// Holds both source and target anchor info for the two-phase extend flow.
+/// Created incrementally during pin drop / alignment; consumed when the target
+/// scan is saved and the real `targetScanId` is known.
+struct PendingStitchLink {
+    // Source (the original scan/location that was extended FROM)
+    let sourceLocationId: UUID
+    let sourceScanId: UUID
+    let sourceAnchorId: UUID
+    let sourceAnchorTransform: simd_float4x4
+    let sourceAnchorCompassHeading: Double?
+
+    // Target anchor (placed in the new session — scan ID is unknown until saved)
+    let targetLocationId: UUID
+    let targetAnchorId: UUID
+    let targetAnchorTransform: simd_float4x4
+    let targetAnchorCompassHeading: Double?
+    let linkType: StitchingLink.LinkType
 }
 
 // MARK: - Scan Store (Runtime State for Capture)
 
 @Observable
 class ScanStore {
-    // Scan4D state for initiating a new scan of an existing location
-    var activeRelocalizationMap: URL? = nil
-    var activeLocationForScan: UUID? = nil
-    var activeScanToExtend: UUID? = nil
-    
-    // Shared navigation state to allow programmatic pushes
+
+    // MARK: Relocalization State
+
+    /// URL to the ARWorldMap archive for scan-to-scan relocalization.
+    var activeRelocalizationMap: URL?
+    /// The location being scanned into (nil = new location).
+    var activeLocationForScan: UUID?
+    /// The scan whose world map we loaded for extend/alignment.
+    var activeScanToExtend: UUID?
+    /// Whether the user chose "Rescan Space" or "Link Adjacent Space".
+    var activeScanCase: ScanCase = .rescanSpace
+
+    // MARK: Capture Phase
+
+    /// State machine tracking the current phase of the capture flow.
+    var capturePhase: CapturePhase = .idle
+
+    // MARK: Boundary Anchor State
+
+    /// World transform of the boundary anchor (set by AR delegate or pin drop).
+    var boundaryAnchorTransform: simd_float4x4?
+    /// ARAnchor identifier for the boundary anchor.
+    var boundaryAnchorId: UUID?
+    /// Distance from camera to boundary anchor (published by ARCoverageView for alignment UI).
+    var distanceToBoundaryAnchor: Float?
+
+    // MARK: Stitching State
+
+    /// Pending stitch link built up during the extend flow; consumed when the target scan is saved.
+    var pendingStitchLink: PendingStitchLink?
+
+    // MARK: Navigation
+
+    /// Shared navigation path to allow programmatic pushes from capture to scan detail.
     var navigationPath = NavigationPath()
+
+    // MARK: - State Reset
+
+    /// Resets all capture-related state to idle defaults.
+    /// Call from `onDisappear`, `cancelAlignment`, or any flow that abandons the current capture.
+    func resetCaptureState() {
+        activeLocationForScan = nil
+        activeRelocalizationMap = nil
+        activeScanToExtend = nil
+        activeScanCase = .rescanSpace
+        capturePhase = .idle
+        boundaryAnchorTransform = nil
+        boundaryAnchorId = nil
+        distanceToBoundaryAnchor = nil
+        pendingStitchLink = nil
+    }
 }
 
+
 // MARK: - Live Scan Stats (updated by ARCoverageView)
+
+/// Typed representation of ARKit's ARCamera.TrackingState for use in
+/// SwiftUI views and stats display — avoids fragile string comparisons.
+enum TrackingStatus: Equatable {
+    case notAvailable
+    case normal
+    case limited(reason: LimitedReason)
+
+    enum LimitedReason: String {
+        case excessiveMotion = "Excessive Motion"
+        case insufficientFeatures = "Insufficient Features"
+        case initializing = "Initializing"
+        case relocalizing = "Relocalizing"
+        case unknown = "Unknown"
+    }
+
+    /// Whether the session has full positional tracking.
+    var isNormal: Bool { self == .normal }
+}
 
 @Observable
 class ScanStats {
@@ -229,9 +343,9 @@ class ScanStats {
 
     // New capacity metrics
     var anchorCount: Int = 0
-    var trackingState: String = "notAvailable"
-    var trackingReason: String = ""
+    var trackingStatus: TrackingStatus = .notAvailable
     var sessionDuration: TimeInterval = 0
+    var hasBoundaryAnchor: Bool = false
     var memoryUsageMB: Double = 0
     var baselineMemoryMB: Double = 0 // Captured at session start
     var driftEstimate: Double = 0 // 0.0 to 1.0
@@ -345,6 +459,7 @@ class ScanFileManager {
 
     private init() {}
 
+    // swiftlint:disable:next function_parameter_count
     func saveScan(
         context: ModelContext,
         locationId: UUID?,
@@ -357,7 +472,7 @@ class ScanFileManager {
         vertexColors: Data?,
         worldMapURL: URL?,
         thumbnailData: Data? = nil,
-        scanCase: ScanCase = .rescan
+        scanCase: ScanCase = .rescanSpace
     ) -> CapturedScan {
         let targetLocation: ScanLocation
 

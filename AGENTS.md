@@ -12,13 +12,15 @@
 # Device validation (CI / no signing)
 xcodebuild -scheme wisescan-ios -destination 'generic/platform=iOS' build CODE_SIGNING_ALLOWED=NO
 
-# Simulator (local iteration) — Xcode 26 iPad simulators
-xcodebuild -scheme wisescan-ios -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5)' build
+# Simulator (local iteration) — list available destinations first
+xcodebuild -scheme wisescan-ios -showdestinations | grep 'platform:iOS Simulator'
+# Then use a destination from the list, e.g.:
+xcodebuild -scheme wisescan-ios -destination 'platform=iOS Simulator,name=iPad Air 13-inch (M4)' build
 ```
-- `generic/platform=iOS` compiles for arm64 — correct for M5 iPad Pro, no device-specific flag needed
+- `generic/platform=iOS` compiles for arm64 — correct for iPad Pro, no device-specific flag needed
 - `CODE_SIGNING_ALLOWED=NO` skips provisioning profiles (CI/local validation only)
 - For actual device deploy, use Xcode with automatic signing
-- **Simulator names changed in Xcode 26**: iPad simulators are `iPad Pro 13-inch (M5)`, `iPad Pro 11-inch (M5)`, `iPad Air 13-inch (M4)`, etc. — run `xcodebuild -scheme wisescan-ios -destination 'bad-name' build` to see the full available list
+- Simulator names change across Xcode versions — always verify with `-showdestinations` before scripting builds
 
 ## Lint
 ```bash
@@ -60,7 +62,7 @@ swiftlint lint --quiet wisescan-ios/
 
 ### `StitchingMetadataManager` — async I/O
 - `write()` and `addLink()` dispatch to a private serial `ioQueue` — do not block on their return value for correctness; use the optional `completion` handler if you need confirmation
-- `read()` and `hasLinks()` remain synchronous (files are tiny JSON; called from SwiftUI view bodies)
+- `read()` and `hasLinks()` remain synchronous (files are tiny JSON) but should be loaded via `.task` into `@State` rather than called directly in SwiftUI `body` to avoid repeated I/O on every re-render
 
 ### `LocationManager.bestHeading`
 - Use `locationManager.bestHeading: Double?` everywhere instead of inline `trueHeading > 0 ? trueHeading : magneticHeading` — it encapsulates the true-north fallback
