@@ -519,7 +519,7 @@
 			repositoryURL = "https://github.com/facebook/meta-wearables-dat-ios";
 			requirement = {
 				kind = exactVersion;
-				version = 0.5.0;
+				version = 0.7.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
