@@ -234,16 +234,20 @@ struct CaptureView: View {
 
                             // Firmware compatibility warning (may be false positive in SDK 0.7.0)
                             if wearableManager.deviceUpdateRequired {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
-                                    Text("Device update may be needed — check Meta AI app")
+                                Button(action: {
+                                    wearableManager.openFirmwareUpdate()
+                                }) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
+                                        Text("Device update needed — tap to open Meta App")
+                                    }
+                                    .font(.caption2).bold()
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.orange.opacity(0.8))
+                                    .cornerRadius(8)
                                 }
-                                .font(.caption2).bold()
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(Color.orange.opacity(0.7))
-                                .cornerRadius(8)
                                 .padding(.trailing, AppConstants.UI.pipPaddingX)
                             }
 

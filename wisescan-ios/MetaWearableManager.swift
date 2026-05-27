@@ -136,6 +136,7 @@ class MetaWearableManager {
                 self.permissionGranted = granted
             } catch {
                 print("[MetaWearable] Permission check failed: \(error) — will retry on next foreground")
+                self.permissionGranted = false
             }
         }
     }
@@ -158,12 +159,9 @@ class MetaWearableManager {
             for await state in Wearables.shared.registrationStateStream() {
                 let stateStr = String(describing: state).lowercased()
                 print("[MetaWearable] Registration state: \(stateStr)")
+                // Re-evaluate actual camera permissions when registration changes
                 await MainActor.run {
-                    if stateStr.contains("registered") && !stateStr.contains("unregistered") {
-                        self?.permissionGranted = true
-                    } else if stateStr.contains("unregistered") {
-                        self?.permissionGranted = false
-                    }
+                    self?.checkPermissions()
                 }
             }
         }
@@ -254,8 +252,12 @@ class MetaWearableManager {
         isStreamingRequested = true
         // If a device is already connected but stream not started, start it now
         if let firstDevice = connectedDevices.first, streamSession == nil {
-            print("[MetaWearable] CaptureView requested stream start")
-            setupStreamSession(for: firstDevice.id)
+            if permissionGranted {
+                print("[MetaWearable] CaptureView requested stream start")
+                setupStreamSession(for: firstDevice.id)
+            } else {
+                print("[MetaWearable] CaptureView requested stream start, but deferred due to missing permissions")
+            }
         }
     }
 
@@ -330,9 +332,25 @@ class MetaWearableManager {
         }
     }
 
+    func openFirmwareUpdate() {
+        Task {
+            do {
+                // Try the specific DAT app update first to fix noEligibleDevice
+                try await Wearables.shared.openDATGlassesAppUpdate()
+            } catch {
+                // Fallback to regular firmware update
+                try? await Wearables.shared.openFirmwareUpdate()
+            }
+        }
+    }
+
     private func setupStreamSession(for deviceId: String) {
         Task { [weak self] in
             guard let self = self else { return }
+            guard self.permissionGranted else {
+                print("[MetaWearable] Blocked stream setup: permissions not granted")
+                return
+            }
             guard self.streamSession == nil else {
                 print("[MetaWearable] Stream session already exists, skipping setup")
                 return
@@ -382,16 +400,31 @@ class MetaWearableManager {
                 print("[MetaWearable] Device connected!")
             }
 
-            // Create DeviceSession via AutoDeviceSelector (SDK 0.7.0 pattern)
-            let selector = AutoDeviceSelector(wearables: Wearables.shared)
+            // Create DeviceSession via SpecificDeviceSelector to avoid race conditions
+            let selector = SpecificDeviceSelector(device: deviceId)
             let devSession: DeviceSession
             do {
                 devSession = try Wearables.shared.createSession(deviceSelector: selector)
                 try devSession.start()
             } catch {
                 print("[MetaWearable] Failed to create/start DeviceSession: \(error)")
+                let errStr = String(describing: error).lowercased()
+                if errStr.contains("noeligibledevice") || errStr.contains("datappontheglassesupdaterequired") {
+                    Task { @MainActor [weak self] in
+                        self?.deviceUpdateRequired = true
+                    }
+                }
                 return
             }
+            
+            print("[MetaWearable] Waiting for DeviceSession to start...")
+            for await state in devSession.stateStream() {
+                if state == .started {
+                    print("[MetaWearable] DeviceSession started!")
+                    break
+                }
+            }
+
             self.deviceSession = devSession
 
             // Add camera stream to the DeviceSession

@@ -93,6 +93,42 @@ struct DashboardView: View {
                             .padding(.horizontal)
                             .padding(.top, 16)
 
+                        if wearableManager.deviceUpdateRequired {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundColor(.orange)
+                                    Text("Firmware Update Required")
+                                        .font(.headline)
+                                        .foregroundColor(.white)
+                                }
+                                Text("Your glasses firmware needs an update before they can be used reliably.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                                
+                                Button(action: {
+                                    wearableManager.openFirmwareUpdate()
+                                }) {
+                                    Text("Update in Meta View App")
+                                        .font(.subheadline).bold()
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                        .background(Color.orange.opacity(0.8))
+                                        .foregroundColor(.black)
+                                        .cornerRadius(8)
+                                }
+                                .padding(.top, 4)
+                            }
+                            .padding()
+                            .background(Color.orange.opacity(0.2))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .stroke(Color.orange.opacity(0.5), lineWidth: 1)
+                            )
+                            .cornerRadius(16)
+                            .padding(.horizontal)
+                        }
+
                         if wearableManager.connectedDevices.isEmpty {
                             Text("No paired devices found")
                                 .font(.caption)

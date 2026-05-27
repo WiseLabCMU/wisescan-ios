@@ -18,14 +18,22 @@ The Meta Wearables Device Access Toolkit (DAT) SDK enforces strict lifecycle req
 This is a known bug in the DAT SDK (specifically highlighted in SDK v0.7.0). The SDK gets out of sync with the physical companion app (`datApp`) installed on the glasses, even if the primary firmware is current. The SDK strictly blocks the `DeviceSession` from starting.
 
 **Recovery Steps:**
-Because this is a hard SDK block, you must force the glasses and the Meta AI app to renegotiate their handshake:
-1. **Force Companion App Update:** Plug the glasses case into a wall charger and place the glasses inside with the lid open. Leave them for 15+ minutes. This triggers background downloads for the hidden `datApp` over Wi-Fi.
+Because this is a hard SDK block, you must update the DAT app on the glasses to match the SDK. As of SDK 0.7.0, there are two ways to do this:
+
+**Method A: Direct Update (Recommended)**
+1. Open the **Meta View** companion app.
+2. Navigate to **Settings -> App Info**.
+3. Look for a pending DAT install under your glasses (e.g., "DAT SDK version: 0.7.0.10.0").
+4. Tap the pending install and confirm to update the background app.
+
+**Method B: Force Re-sync (If Method A is unavailable)**
+1. **Force Companion App Update:** Plug the glasses case into a wall charger and place the glasses inside with the lid open. Leave them for 15+ minutes. This triggers background downloads over Wi-Fi.
 2. **Unpair & Re-pair:** 
-   - Open the Meta AI app -> Settings -> Your Glasses -> **Unpair**.
+   - Open the Meta View app -> Settings -> Your Glasses -> **Unpair**.
    - Put the glasses in their case, hold the back pairing button until the LED pulses blue, and pair them again.
-   - You **must** re-enable Developer Mode (tap the version number 5 times in the Meta AI app).
+   - You **must** re-enable Developer Mode (tap the version number 5 times in the Meta View app).
 3. **Revoke and Re-grant:**
-   - In the Meta AI app -> Settings -> Developer -> **Revoke Third-Party Access**.
+   - In the Meta View app -> Settings -> Developer -> **Revoke Third-Party Access**.
    - Open Scan4D to trigger the OAuth permission flow again.
 
 ### 2. "Meta App Permission Required" Banner Stuck
