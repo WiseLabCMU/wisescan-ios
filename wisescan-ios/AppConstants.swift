@@ -34,7 +34,13 @@ enum AppConstants {
     }
 
     // MARK: - Default Values
-    static let uploadURL = ""
+    static var isTestFlight: Bool {
+        Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
+    }
+
+    static var uploadURL: String {
+        isTestFlight ? "https://wiselambda4.lan.cmu.edu/wisescan-uploads/" : ""
+    }
     static let overlapMax: Double = 60.0
     static let rejectBlur: Bool = true
     static let developerMode: Bool = false
