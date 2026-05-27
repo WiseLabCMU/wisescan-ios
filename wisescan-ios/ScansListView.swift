@@ -287,13 +287,18 @@ struct ScanCard: View {
         nonmutating set { selectedFormatStr = newValue.rawValue }
     }
 
-    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void) {
+    var isSelected: Bool = false
+    var onSelect: (() -> Void)? = nil
+
+    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
         self.scan = scan
         self.isLatest = isLatest
         self.uploadURL = uploadURL
         self.isEditing = isEditing
+        self.isSelected = isSelected
         self.onUpdate = onUpdate
         self.onDelete = onDelete
+        self.onSelect = onSelect
     }
 
     private var previewURL: URL {
@@ -303,13 +308,33 @@ struct ScanCard: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            previewImageSection
-            infoSection
+        HStack(spacing: 0) {
+            if isEditing {
+                Button(action: {
+                    onSelect?()
+                }) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.title2)
+                        .foregroundColor(isSelected ? .cyan : .gray)
+                        .padding(.leading, 12)
+                        .padding(.trailing, 8)
+                }
+                .buttonStyle(.plain)
+            }
+            
+            HStack(alignment: .top, spacing: 0) {
+                previewImageSection
+                infoSection
+            }
+            .background(.ultraThinMaterial)
+            .cornerRadius(16)
+            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))
+            .onTapGesture {
+                if isEditing {
+                    onSelect?()
+                }
+            }
         }
-        .background(.ultraThinMaterial)
-        .cornerRadius(16)
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))
         .padding(.horizontal)
         .sheet(item: $exportItem, onDismiss: {
             // Safety net: if dismissed via swipe-down before completion handler fires, reset.
@@ -412,18 +437,7 @@ struct ScanCard: View {
     @ViewBuilder
     private var editingOverlay: some View {
         if isEditing {
-            ZStack {
-                Color.black.opacity(0.6)
-                Button(action: { showDeleteConfirm = true }) {
-                    VStack(spacing: 8) {
-                        Image(systemName: "trash.circle.fill")
-                            .font(.system(size: 44))
-                        Text("Delete Scan")
-                            .font(.headline)
-                    }
-                    .foregroundColor(.red)
-                }
-            }
+            Color.black.opacity(0.2)
         }
     }
 

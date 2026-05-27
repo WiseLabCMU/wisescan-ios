@@ -8,6 +8,8 @@ struct LocationDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var selectedTab: Int // Pass through to allow "Extend Scan" to switch tabs
     @State private var isEditing = false
+    @State private var selectedScans: Set<PersistentIdentifier> = []
+    @State private var showBulkDeleteConfirm = false
     @State private var showSettings = false
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
@@ -100,7 +102,7 @@ struct LocationDetailView: View {
                                         .foregroundColor(.gray)
                                     Spacer()
                                     Picker("Format", selection: $globalSelectedFormatStr) {
-                                        ForEach(ExportFormat.allCases, id: \.self) { format in
+                                        ForEach(ExportFormat.allCases, id: \.self) { (format: ExportFormat) in
                                             Text(format.rawValue).tag(format.rawValue)
                                         }
                                     }
@@ -114,39 +116,7 @@ struct LocationDetailView: View {
                                     }
                                 }
 
-                                HStack(spacing: 10) {
-                                    Button(action: { bulkSaveToFiles(scans: sortedScans) }) {
-                                        HStack {
-                                            if isBulkExporting {
-                                                ProgressView().tint(.white)
-                                            } else {
-                                                Image(systemName: "square.and.arrow.down.on.square")
-                                            }
-                                            Text("Save All")
-                                                .font(.subheadline).bold()
-                                        }
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 12)
-                                        .background(isBulkExporting ? Color.gray : Color.cyan.opacity(0.8))
-                                        .foregroundColor(.white)
-                                        .cornerRadius(10)
-                                    }
-                                    .disabled(isBulkExporting)
-
-                                    Button(action: { bulkUpload(scans: sortedScans) }) {
-                                        HStack {
-                                            Image(systemName: "icloud.and.arrow.up")
-                                            Text("Upload All")
-                                                .font(.subheadline).bold()
-                                        }
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 12)
-                                        .background(uploadURL.isEmpty ? Color.gray.opacity(0.3) : Color.blue)
-                                        .foregroundColor(uploadURL.isEmpty ? .gray : .white)
-                                        .cornerRadius(10)
-                                    }
-                                    .disabled(uploadURL.isEmpty)
-                                }
+                                // Bulk actions moved to bottom toolbar in edit mode
                             }
                             .padding()
                             .background(Color.white.opacity(0.05))
@@ -177,6 +147,7 @@ struct LocationDetailView: View {
                                     isLatest: index == 0,
                                     uploadURL: uploadURL,
                                     isEditing: isEditing,
+                                    isSelected: selectedScans.contains(scan.id),
                                     onUpdate: { _ in try? modelContext.save() },
                                     onDelete: { scanToDelete in
                                         ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
@@ -185,6 +156,13 @@ struct LocationDetailView: View {
                                             modelContext.delete(location)
                                             try? modelContext.save()
                                             dismiss()
+                                        }
+                                    },
+                                    onSelect: {
+                                        if selectedScans.contains(scan.id) {
+                                            selectedScans.remove(scan.id)
+                                        } else {
+                                            selectedScans.insert(scan.id)
                                         }
                                     }
                                 )
@@ -237,15 +215,39 @@ struct LocationDetailView: View {
                     Spacer().frame(height: 100)
                 }
             }
+            
+            if isEditing {
+                VStack {
+                    Spacer()
+                    bottomActionToolbar(sortedScans: location.scans.sorted { $0.capturedAt > $1.capturedAt })
+                }
+            }
         }
         .navigationTitle(location.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                if isEditing {
+                    Button(action: {
+                        if selectedScans.count == location.scans.count {
+                            selectedScans.removeAll()
+                        } else {
+                            selectedScans = Set(location.scans.map { $0.id })
+                        }
+                    }) {
+                        Text(selectedScans.count == location.scans.count ? "Deselect All" : "Select All")
+                            .font(.subheadline)
+                    }
+                }
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 HStack {
                     if !location.scans.isEmpty {
-                        Button(action: { isEditing.toggle() }) {
-                            Text(isEditing ? "Done" : "Edit")
+                        Button(action: {
+                            isEditing.toggle()
+                            if !isEditing { selectedScans.removeAll() }
+                        }) {
+                            Text(isEditing ? "Done" : "Select")
                                 .bold(isEditing)
                                 .foregroundColor(isEditing ? .red : .cyan)
                         }
@@ -276,9 +278,38 @@ struct LocationDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+        .confirmationDialog(
+            "Delete Scans",
+            isPresented: $showBulkDeleteConfirm
+        ) {
+            Button("Delete \(selectedScans.count) Scan\(selectedScans.count == 1 ? "" : "s")", role: .destructive) {
+                bulkDelete()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will permanently delete the selected scans and their data.")
+        }
     }
 
     // MARK: - Bulk Actions
+
+    private func bulkDelete() {
+        let scansToDelete = location.scans.filter { selectedScans.contains($0.id) }
+        for scan in scansToDelete {
+            ScanFileManager.shared.deleteScan(scan, context: modelContext)
+        }
+        
+        selectedScans.removeAll()
+        isEditing = false
+        
+        if location.scans.isEmpty {
+            modelContext.delete(location)
+            try? modelContext.save()
+            dismiss()
+        } else {
+            try? modelContext.save()
+        }
+    }
 
     private func bulkSaveToFiles(scans: [CapturedScan]) {
         guard !scans.isEmpty else { return }
@@ -311,8 +342,6 @@ struct LocationDetailView: View {
         let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
 
-        // Process each scan concurrently to save time, but cap it?
-        // Let's just spawn an async task for each one
         for scan in scans {
             guard let url = URL(string: baseURLString + scan.makeExportFilename(format: format)) else { continue }
             scan.uploadStatus = .zipping
@@ -345,6 +374,59 @@ struct LocationDetailView: View {
                 task.resume()
             }
         }
+    }
+
+    // MARK: - Bottom Action Toolbar
+    @ViewBuilder
+    private func bottomActionToolbar(sortedScans: [CapturedScan]) -> some View {
+        HStack(spacing: 20) {
+            Button(action: {
+                showBulkDeleteConfirm = true
+            }) {
+                Image(systemName: "trash")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(selectedScans.isEmpty ? Color.gray.opacity(0.3) : Color.red.opacity(0.8))
+                    .foregroundColor(selectedScans.isEmpty ? .gray : .white)
+                    .cornerRadius(10)
+            }
+            .disabled(selectedScans.isEmpty)
+            
+            Button(action: {
+                let scansToUpload = sortedScans.filter { selectedScans.contains($0.id) }
+                bulkUpload(scans: scansToUpload)
+                isEditing = false
+                selectedScans.removeAll()
+            }) {
+                Text("Upload")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(selectedScans.isEmpty || uploadURL.isEmpty ? Color.gray.opacity(0.3) : Color.blue)
+                    .foregroundColor(selectedScans.isEmpty || uploadURL.isEmpty ? .gray : .white)
+                    .cornerRadius(10)
+            }
+            .disabled(selectedScans.isEmpty || uploadURL.isEmpty)
+            
+            Button(action: {
+                let scansToSave = sortedScans.filter { selectedScans.contains($0.id) }
+                bulkSaveToFiles(scans: scansToSave)
+                isEditing = false
+                selectedScans.removeAll()
+            }) {
+                Text("Save")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(selectedScans.isEmpty || isBulkExporting ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
+                    .foregroundColor(selectedScans.isEmpty || isBulkExporting ? .gray : .white)
+                    .cornerRadius(10)
+            }
+            .disabled(selectedScans.isEmpty || isBulkExporting)
+        }
+        .padding()
+        .background(.ultraThinMaterial)
     }
 }
 
