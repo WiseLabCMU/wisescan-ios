@@ -8,6 +8,7 @@ struct ARCoverageView: UIViewRepresentable {
     @Binding var isSessionReady: Bool
     var scanStats: ScanStats
     var privacyFilter: Bool
+    var activeMeshColor: String = AppConstants.activeMeshColor
     var useFrontCamera: Bool = false
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
     var initialGhostMeshData: Data? = nil // Raw OBJ data from the previous scan
@@ -34,6 +35,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.scanStats = scanStats
         context.coordinator.arView = arView
         context.coordinator.privacyFilter = privacyFilter
+        context.coordinator.activeMeshColor = activeMeshColor
         context.coordinator.isRecording = false
         context.coordinator.isSessionReadyBinding = $isSessionReady
         context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
@@ -57,6 +59,12 @@ struct ARCoverageView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.privacyFilter = privacyFilter
+
+        // Live active mesh color update — recolor all existing wireframe entities
+        if activeMeshColor != context.coordinator.activeMeshColor {
+            context.coordinator.activeMeshColor = activeMeshColor
+            context.coordinator.recolorActiveMeshEntities()
+        }
 
         // If the session is already running (e.g. tab switch back) but isSessionReady
         // was reset in onDisappear, re-signal readiness immediately.
@@ -124,8 +132,8 @@ struct ARCoverageView: UIViewRepresentable {
                 }
                 // Don't reset tracking — preserve the current relocalized coordinate frame
                 uiView.session.run(config)
-                // Use RealityKit's built-in wireframe for active scan visualization
-                uiView.debugOptions.insert(.showSceneUnderstanding)
+                // Active wireframe is now rendered via procedural geometry (not .showSceneUnderstanding)
+                // Entities are built incrementally in session(_:didAdd:) and session(_:didUpdate:)
                 context.coordinator.resetForRecording()
 
                 // Background parse the ghost mesh if we didn't already load it in nominal mode
@@ -173,9 +181,7 @@ struct ARCoverageView: UIViewRepresentable {
                     config.frameSemantics.insert(.sceneDepth)
                 }
                 uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
-                if isRecording {
-                    uiView.debugOptions.insert(.showSceneUnderstanding)
-                }
+                // Active wireframe entities are rebuilt automatically by anchor delegate callbacks
             }
         }
     }
@@ -226,6 +232,7 @@ struct ARCoverageView: UIViewRepresentable {
         var scanStats: ScanStats?
         weak var arView: ARView?
         var privacyFilter: Bool = true
+        var activeMeshColor: String = AppConstants.activeMeshColor
         var isUsingFrontCamera: Bool = false
         var isRecording: Bool = false
         var isSessionReadyBinding: Binding<Bool>?
@@ -237,6 +244,14 @@ struct ARCoverageView: UIViewRepresentable {
         private var baselineMemoryMB: Double = ScanStats.currentMemoryUsageMB()
         private var trackingDegradationCount: Int = 0
         private var totalTrackingUpdates: Int = 0
+
+        // Active Mesh Wireframe properties
+        /// One wireframe entity per ARMeshAnchor, keyed by anchor UUID.
+        private var activeMeshEntities: [UUID: (anchor: AnchorEntity, model: ModelEntity)] = [:]
+        /// Throttle: last time wireframe was rebuilt for each anchor.
+        private var lastAnchorWireframeTime: [UUID: Date] = [:]
+        /// Minimum interval between wireframe rebuilds for the same anchor (seconds).
+        private let wireframeThrottleInterval: TimeInterval = 0.5
 
         // Ghost Mesh properties
         var ghostAnchorEntity: AnchorEntity?
@@ -252,6 +267,8 @@ struct ARCoverageView: UIViewRepresentable {
             totalTrackingUpdates = 0
             sessionStartTime = Date()
             baselineMemoryMB = ScanStats.currentMemoryUsageMB()
+            // Clear any stale wireframe entities from a previous recording
+            removeAllActiveMeshEntities()
         }
 
         /// Reset coordinator state when returning to nominal (idle) mode.
@@ -259,6 +276,9 @@ struct ARCoverageView: UIViewRepresentable {
             anchorUpdateCounts.removeAll()
             trackingDegradationCount = 0
             totalTrackingUpdates = 0
+
+            // Remove all active mesh wireframe entities from the scene
+            removeAllActiveMeshEntities()
 
             DispatchQueue.main.async { [weak self] in
                 // Zero out scan stats
@@ -272,6 +292,113 @@ struct ARCoverageView: UIViewRepresentable {
                 self?.scanStats?.averageQuality = 0
                 self?.scanStats?.trackingState = "notAvailable"
                 self?.scanStats?.trackingReason = ""
+            }
+        }
+
+        // MARK: - Active Mesh Wireframe
+
+        /// Removes all active mesh wireframe entities from the AR scene.
+        private func removeAllActiveMeshEntities() {
+            for (_, entry) in activeMeshEntities {
+                entry.anchor.removeFromParent()
+            }
+            activeMeshEntities.removeAll()
+            lastAnchorWireframeTime.removeAll()
+        }
+
+        /// Recolors all existing active mesh wireframe entities with the current activeMeshColor.
+        /// Uses entity replacement (not in-place mutation) to avoid render thread races.
+        func recolorActiveMeshEntities() {
+            let c = activeMeshColor.toSIMD4Color
+            let material = UnlitMaterial(color: UIColor(
+                red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1.0
+            ))
+            for (anchorId, entry) in activeMeshEntities {
+                guard let mesh = entry.model.model?.mesh else { continue }
+                entry.model.removeFromParent()
+                let newModel = ModelEntity(mesh: mesh, materials: [material])
+                entry.anchor.addChild(newModel)
+                activeMeshEntities[anchorId] = (anchor: entry.anchor, model: newModel)
+            }
+        }
+
+        /// Builds or updates the wireframe entity for a single ARMeshAnchor.
+        /// Extracts geometry data synchronously to avoid retaining ARFrame references,
+        /// then runs wireframe generation on a background queue.
+        /// Vertices are transformed to world space (matching exportMeshOBJ) so the
+        /// entity can be anchored at the origin — avoids AnchorEntity transform issues.
+        private func buildWireframeForAnchor(_ meshAnchor: ARMeshAnchor) {
+            let anchorId = meshAnchor.identifier
+            let colorStr = activeMeshColor
+
+            // Throttle: skip if we rebuilt this anchor's wireframe too recently
+            if let lastTime = lastAnchorWireframeTime[anchorId],
+               Date().timeIntervalSince(lastTime) < wireframeThrottleInterval {
+                return
+            }
+            lastAnchorWireframeTime[anchorId] = Date()
+
+            // ── Extract geometry data synchronously to release ARFrame references ──
+            // ARMeshAnchor.geometry buffers hold references to internal ARFrame memory.
+            // Dispatching the anchor itself to a background queue retains those frames,
+            // triggering "retaining N ARFrames" warnings and starving the SLAM pipeline.
+            let geometry = meshAnchor.geometry
+            let vertices = geometry.vertices
+            let faces = geometry.faces
+            let anchorTransform = meshAnchor.transform
+
+            guard faces.bytesPerIndex == 4, faces.indexCountPerPrimitive == 3 else { return }
+
+            // Transform vertices to world space (same math as exportMeshOBJ)
+            var worldPositions = [SIMD3<Float>]()
+            worldPositions.reserveCapacity(vertices.count)
+            for i in 0..<vertices.count {
+                let ptr = vertices.buffer.contents().advanced(by: i * vertices.stride)
+                let local = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
+                let worldPos = anchorTransform * SIMD4<Float>(local.x, local.y, local.z, 1.0)
+                worldPositions.append(SIMD3<Float>(worldPos.x, worldPos.y, worldPos.z))
+            }
+
+            let faceStride = faces.bytesPerIndex * faces.indexCountPerPrimitive
+            var faceIndices = [(UInt32, UInt32, UInt32)]()
+            faceIndices.reserveCapacity(faces.count)
+            for i in 0..<faces.count {
+                let ptr = faces.buffer.contents().advanced(by: i * faceStride)
+                faceIndices.append(ptr.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee)
+            }
+            // ── ARMeshAnchor reference is now released — geometry buffers won't retain ARFrame ──
+
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let resource = MeshParser.buildWireframeMesh(
+                    vertices: worldPositions, faces: faceIndices, thickness: 0.001
+                ) else { return }
+
+                DispatchQueue.main.async {
+                    guard let self = self, let arView = self.arView, self.isRecording else { return }
+
+                    let c = colorStr.toSIMD4Color
+                    let material = UnlitMaterial(color: UIColor(
+                        red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1.0
+                    ))
+
+                    if let existing = self.activeMeshEntities[anchorId] {
+                        // Replace the model entity entirely to avoid RealityKit render
+                        // thread race conditions. In-place mesh mutation (model.model?.mesh = ...)
+                        // can crash because the render thread may read the old index buffer
+                        // against the new vertex buffer mid-swap.
+                        existing.model.removeFromParent()
+                        let newModel = ModelEntity(mesh: resource, materials: [material])
+                        existing.anchor.addChild(newModel)
+                        self.activeMeshEntities[anchorId] = (anchor: existing.anchor, model: newModel)
+                    } else {
+                        // Create new entity at world origin (vertices are world-space)
+                        let modelEntity = ModelEntity(mesh: resource, materials: [material])
+                        let anchorEntity = AnchorEntity(world: .zero)
+                        anchorEntity.addChild(modelEntity)
+                        arView.scene.addAnchor(anchorEntity)
+                        self.activeMeshEntities[anchorId] = (anchor: anchorEntity, model: modelEntity)
+                    }
+                }
             }
         }
 
@@ -346,12 +473,13 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
-        // Track anchor update counts via delegate
+        // Track anchor update counts via delegate + build active mesh wireframe
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
             guard isRecording else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     anchorUpdateCounts[mesh.identifier] = 1
+                    buildWireframeForAnchor(mesh)
                 }
             }
             updateStats(in: session)
@@ -362,6 +490,7 @@ struct ARCoverageView: UIViewRepresentable {
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     anchorUpdateCounts[mesh.identifier, default: 0] += 1
+                    buildWireframeForAnchor(mesh)
                 }
             }
             updateStats(in: session)
@@ -372,6 +501,11 @@ struct ARCoverageView: UIViewRepresentable {
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     anchorUpdateCounts.removeValue(forKey: mesh.identifier)
+                    // Remove wireframe entity for this anchor
+                    if let entry = activeMeshEntities.removeValue(forKey: mesh.identifier) {
+                        entry.anchor.removeFromParent()
+                    }
+                    lastAnchorWireframeTime.removeValue(forKey: mesh.identifier)
                 }
             }
             updateStats(in: session)

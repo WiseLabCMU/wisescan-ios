@@ -24,11 +24,13 @@
 //   regardless of whether personSegmentationWithDepth is enabled. The bug is in
 //   RealityKit's internal render graph — any CustomMaterial in an ARView triggers it.
 //
-// WORKAROUND:
-//   Ghost mesh wireframe is rendered using procedural geometry (thin 3D quads for
-//   each unique edge) with standard opaque UnlitMaterial. See MeshParser.swift
-//   generateWireframeMeshResource(). Active scan wireframe uses RealityKit's built-in
-//   .showSceneUnderstanding debug option.
+// CURRENT WORKAROUND (ACTIVE for both active scan and ghost mesh):
+//   Both active and ghost mesh wireframes are rendered using procedural geometry
+//   (thin 3D quads for each unique edge) with standard opaque UnlitMaterial.
+//   See MeshParser.swift buildWireframeMesh() / generateWireframeMeshResource().
+//   Active scan: per-ARMeshAnchor entities built incrementally in ARCoverageView.
+//   Ghost mesh: one-shot OBJ parse via loadGhostMesh() in ARCoverageView.
+//   Color is user-controllable via Settings (activeMeshColor / ghostMeshColor).
 //
 // FUTURE PATH — ARSCNView Migration (Option 2):
 //   SceneKit's ARSCNView does NOT have this compositing bug. SCNShadable /
@@ -42,7 +44,7 @@
 //      ghost and active meshes
 //   3. Convert ARMeshAnchor geometry to SCNGeometry instead of MeshResource
 //   4. Convert AnchorEntity usage to SCNNode with SCNMatrix4 transforms
-//   5. Replace .showSceneUnderstanding with custom SCNNode wireframe overlays
+//   5. Replace procedural wireframe with custom SCNNode wireframe overlays
 //   6. Update session delegate from ARSessionDelegate to ARSCNViewDelegate
 //
 //   Benefits: Full shader control, per-mesh color, true wireframe for both active

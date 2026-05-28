@@ -88,7 +88,7 @@ enum MeshParser {
 
     /// Builds wireframe geometry from vertices and triangle faces.
     /// For each unique edge, creates a thin quad (2 triangles) oriented perpendicular to the edge.
-    private static func buildWireframeMesh(vertices: [SIMD3<Float>], faces: [(UInt32, UInt32, UInt32)], thickness: Float) -> MeshResource? {
+    static func buildWireframeMesh(vertices: [SIMD3<Float>], faces: [(UInt32, UInt32, UInt32)], thickness: Float) -> MeshResource? {
 
         // Collect unique edges using a sorted pair key to avoid duplicates
         struct Edge: Hashable {
@@ -152,6 +152,33 @@ enum MeshParser {
         desc.primitives = .triangles(indices)
 
         return try? MeshResource.generate(from: [desc])
+    }
+
+    /// Generates wireframe geometry directly from an ARMeshAnchor's live geometry.
+    /// Used for active scan wireframe rendering without OBJ serialization round-trip.
+    static func generateWireframeMeshResource(from meshAnchor: ARMeshAnchor, thickness: Float = 0.001) -> MeshResource? {
+        let geometry = meshAnchor.geometry
+        let vertices = geometry.vertices
+        let faces = geometry.faces
+
+        guard faces.bytesPerIndex == 4, faces.indexCountPerPrimitive == 3 else { return nil }
+
+        var positions: [SIMD3<Float>] = []
+        positions.reserveCapacity(vertices.count)
+        for i in 0..<vertices.count {
+            let ptr = vertices.buffer.contents().advanced(by: i * vertices.stride)
+            positions.append(ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee)
+        }
+
+        let faceStride = faces.bytesPerIndex * faces.indexCountPerPrimitive
+        var faceIndices: [(UInt32, UInt32, UInt32)] = []
+        faceIndices.reserveCapacity(faces.count)
+        for i in 0..<faces.count {
+            let ptr = faces.buffer.contents().advanced(by: i * faceStride)
+            faceIndices.append(ptr.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee)
+        }
+
+        return buildWireframeMesh(vertices: positions, faces: faceIndices, thickness: thickness)
     }
 
     // MARK: - Un-indexed mesh generation (for wireframe shader with barycentric UVs)

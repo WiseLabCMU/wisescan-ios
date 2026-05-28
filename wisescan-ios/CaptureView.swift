@@ -13,6 +13,7 @@ struct CaptureView: View {
     @AppStorage(AppConstants.Key.mockIMU) private var mockIMU: Bool = AppConstants.mockIMU
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
     @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
+    @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     // Stream mode removed — fixed to Capture (Stream is a future feature)
     @State private var usingFrontCamera = false
     @State private var currentARSession: ARSession? = nil
@@ -74,6 +75,7 @@ struct CaptureView: View {
                 isSessionReady: $isARSessionReady,
                 scanStats: scanStats,
                 privacyFilter: isPrivacyFilterOn,
+                activeMeshColor: activeMeshColor,
                 useFrontCamera: usingFrontCamera,
                 initialWorldMapURL: scanStore.activeRelocalizationMap,
                 initialGhostMeshData: cachedGhostMeshData
