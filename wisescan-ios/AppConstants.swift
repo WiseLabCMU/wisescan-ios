@@ -31,6 +31,7 @@ enum AppConstants {
         static let activeMeshColor = "activeMeshColor"
         static let ghostMeshColor = "ghostMeshColor"
         static let metaWearablesFPS = "metaWearablesFPS"
+        static let metaWearablesPermissionGranted = "metaWearablesPermissionGranted"
     }
 
     // MARK: - Default Values

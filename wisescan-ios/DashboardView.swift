@@ -129,6 +129,45 @@ struct DashboardView: View {
                             .padding(.horizontal)
                         }
 
+                        // Show permission banner only if we've never been granted
+                        // (reads from cache to avoid false flash on cold launch before SDK IPC resolves)
+                        let cachedPermission = UserDefaults.standard.bool(forKey: AppConstants.Key.metaWearablesPermissionGranted)
+                        if !wearableManager.connectedDevices.isEmpty && !cachedPermission && !wearableManager.permissionGranted {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundColor(.yellow)
+                                    Text("Meta App Permission Required")
+                                        .font(.headline)
+                                        .foregroundColor(.white)
+                                }
+                                Text("Camera access must be granted in the Meta AI companion app before streaming can start.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                                
+                                Button(action: {
+                                    wearableManager.requestPermissions()
+                                }) {
+                                    Text("Grant Permission in Meta AI")
+                                        .font(.subheadline).bold()
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 8)
+                                        .background(Color.yellow.opacity(0.8))
+                                        .foregroundColor(.black)
+                                        .cornerRadius(8)
+                                }
+                                .padding(.top, 4)
+                            }
+                            .padding()
+                            .background(Color.yellow.opacity(0.15))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .stroke(Color.yellow.opacity(0.4), lineWidth: 1)
+                            )
+                            .cornerRadius(16)
+                            .padding(.horizontal)
+                        }
+
                         if wearableManager.connectedDevices.isEmpty {
                             Text("No paired devices found")
                                 .font(.caption)

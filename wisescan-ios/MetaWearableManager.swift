@@ -22,6 +22,8 @@ class MetaWearableManager {
     var deviceUpdateRequired = false
     var permissionGranted = false {
         didSet {
+            // Cache for Dashboard UI banner (so it doesn't flash on cold launch)
+            UserDefaults.standard.set(permissionGranted, forKey: AppConstants.Key.metaWearablesPermissionGranted)
             guard permissionGranted, isStreamingRequested, let firstDevice = connectedDevices.first else { return }
             if streamSession != nil {
                 // Tear down stale session created before we had permission
@@ -81,6 +83,22 @@ class MetaWearableManager {
     }
     private let throttle = FrameThrottle()
 
+    private final class TokenBox: @unchecked Sendable {
+        var token: (any AnyListenerToken)?
+    }
+    
+    private final class ResumeFlag: @unchecked Sendable {
+        private var lock = os_unfair_lock()
+        private var resumed = false
+        func tryResume() -> Bool {
+            os_unfair_lock_lock(&lock)
+            defer { os_unfair_lock_unlock(&lock) }
+            if resumed { return false }
+            resumed = true
+            return true
+        }
+    }
+
     #if canImport(MWDATMockDevice)
     private var mockDevice: MockRaybanMeta?
     private var isMockWearableEnabled = false
@@ -91,6 +109,7 @@ class MetaWearableManager {
     private var deviceObservationTask: Task<Void, Never>?
     private var registrationObservationTask: Task<Void, Never>?
     private var hasLoggedNoDevices = false
+    private var isSettingUpStream = false
 
     // Inject this from CaptureView or proxy handler
     var activeCaptureSession: FrameCaptureSession?
@@ -127,6 +146,7 @@ class MetaWearableManager {
     }
 
     func checkPermissions() {
+        guard !permissionGranted else { return } // Already confirmed this session
         Task {
             do {
                 let status = try await Wearables.shared.checkPermissionStatus(.camera)
@@ -135,8 +155,9 @@ class MetaWearableManager {
                 print("[MetaWearable] Permission check result: '\(statusStr)' → granted=\(granted)")
                 self.permissionGranted = granted
             } catch {
-                print("[MetaWearable] Permission check failed: \(error) — will retry on next foreground")
-                self.permissionGranted = false
+                print("[MetaWearable] Permission check threw: \(error) — retrying in 3s")
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                self.checkPermissions()
             }
         }
     }
@@ -274,6 +295,7 @@ class MetaWearableManager {
             self.deviceSession = nil
             self.isStreaming = false
             self.latestProxyImage = nil
+            self.isSettingUpStream = false
         }
     }
 
@@ -345,8 +367,20 @@ class MetaWearableManager {
     }
 
     private func setupStreamSession(for deviceId: String) {
+        // Synchronous guard prevents concurrent setup attempts
+        guard !isSettingUpStream else {
+            print("[MetaWearable] Stream setup already in progress, skipping")
+            return
+        }
+        guard streamSession == nil else {
+            print("[MetaWearable] Stream session already exists, skipping setup")
+            return
+        }
+        isSettingUpStream = true
+
         Task { [weak self] in
             guard let self = self else { return }
+            defer { self.isSettingUpStream = false }
             guard self.permissionGranted else {
                 print("[MetaWearable] Blocked stream setup: permissions not granted")
                 return
@@ -383,18 +417,25 @@ class MetaWearableManager {
             if device.linkState != .connected {
                 print("[MetaWearable] Device not connected (linkState: \(device.linkState)), waiting...")
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                    var token: (any AnyListenerToken)?
-                    token = device.addLinkStateListener { state in
+                    let box = TokenBox()
+                    let flag = ResumeFlag()
+                    box.token = device.addLinkStateListener { state in
                         print("[MetaWearable] Device linkState changed: \(state)")
                         if state == .connected {
-                            Task { await token?.cancel() }
-                            continuation.resume()
+                            let t = box.token
+                            Task { await t?.cancel() }
+                            if flag.tryResume() {
+                                continuation.resume()
+                            }
                         }
                     }
                     // Check again in case it changed during setup
                     if device.linkState == .connected {
-                        Task { await token?.cancel() }
-                        continuation.resume()
+                        let t = box.token
+                        Task { await t?.cancel() }
+                        if flag.tryResume() {
+                            continuation.resume()
+                        }
                     }
                 }
                 print("[MetaWearable] Device connected!")
@@ -405,11 +446,24 @@ class MetaWearableManager {
             let devSession: DeviceSession
             do {
                 devSession = try Wearables.shared.createSession(deviceSelector: selector)
+            } catch {
+                print("[MetaWearable] Failed to create DeviceSession: \(error)")
+                return
+            }
+            
+            let stateStream = devSession.stateStream()
+            
+            do {
                 try devSession.start()
             } catch {
-                print("[MetaWearable] Failed to create/start DeviceSession: \(error)")
+                print("[MetaWearable] Failed to start DeviceSession: \(error)")
                 let errStr = String(describing: error).lowercased()
-                if errStr.contains("noeligibledevice") || errStr.contains("datappontheglassesupdaterequired") {
+                if errStr.contains("sessionalreadyexists") || errStr.contains("inprogress") {
+                    print("[MetaWearable] Orphaned session detected! Attempting to force-stop...")
+                    Task { @MainActor [weak self] in
+                        self?.deviceUpdateRequired = true // trigger UI warning
+                    }
+                } else if errStr.contains("noeligibledevice") || errStr.contains("datappontheglassesupdaterequired") {
                     Task { @MainActor [weak self] in
                         self?.deviceUpdateRequired = true
                     }
@@ -418,11 +472,32 @@ class MetaWearableManager {
             }
             
             print("[MetaWearable] Waiting for DeviceSession to start...")
-            for await state in devSession.stateStream() {
-                if state == .started {
-                    print("[MetaWearable] DeviceSession started!")
-                    break
+            if devSession.state == .started {
+                print("[MetaWearable] DeviceSession started (synchronous check)!")
+            } else {
+                let started = await withTaskGroup(of: Bool.self) { group in
+                    group.addTask {
+                        for await state in stateStream {
+                            if state == .started { return true }
+                            if state == .stopped { return false }
+                        }
+                        return false
+                    }
+                    group.addTask {
+                        try? await Task.sleep(nanoseconds: 10_000_000_000) // 10s timeout
+                        return false
+                    }
+                    let result = await group.next() ?? false
+                    group.cancelAll()
+                    return result
                 }
+
+                guard started else {
+                    print("[MetaWearable] DeviceSession failed to start within timeout — tearing down (possible bad hardware state)")
+                    devSession.stop()
+                    return
+                }
+                print("[MetaWearable] DeviceSession started!")
             }
 
             self.deviceSession = devSession
@@ -464,10 +539,11 @@ class MetaWearableManager {
             }
 
             // Subscribe to actual camera frame output
+            let localThrottle = self.throttle
             self.frameToken = session.videoFramePublisher.listen { [weak self] frame in
                 guard let self = self else { return }
                 // Throttle to ~7 FPS
-                guard self.throttle.shouldProcess() else { return }
+                guard localThrottle.shouldProcess() else { return }
                 
                 // print("[MetaWearable] Received video frame")
 
