@@ -25,6 +25,12 @@ extension CaptureView {
         // Pin A: camera pose in Map A's coordinate system.
         let pinACameraPose = frame.camera.transform
         let compassHeading = locationManager.bestHeading
+        
+        // Create and record a real anchor so it goes into the source scan's metadata
+        let anchor = ARAnchor(name: ARCoverageView.boundaryAnchorName, transform: pinACameraPose)
+        currentARSession?.add(anchor: anchor)
+        let sourceAnchorId = anchor.identifier
+        frameCaptureSession.recordBoundaryAnchor(transform: pinACameraPose, id: sourceAnchorId, compassHeading: compassHeading)
 
         // Show extend overlay and start save
         scanStore.capturePhase = .extending
@@ -75,6 +81,7 @@ extension CaptureView {
             // Reset AR session to fresh using the shared helper
             // Note: updateUIView will re-enable sceneReconstruction = .mesh when isRecording becomes true
             let config = ARCoverageView.makeFreshConfiguration()
+            let preResetTimestamp = self.currentARSession?.currentFrame?.timestamp ?? 0
             self.currentARSession?.run(config, options: [.resetTracking, .removeExistingAnchors])
             self.cachedGhostMeshData = nil
 
@@ -90,8 +97,8 @@ extension CaptureView {
             // its transform is expressed in mapB's actual coordinate space,
             // including rotation — not a hardcoded identity.
 
-            // Wait for the new AR session to stabilize before auto-starting recording.
-            // Uses structured concurrency so it can be cancelled if the user navigates away.
+            // Wait for the new AR session to stabilize, place Pin B, and start recording.
+            // Uses the shared stabilization helper (CaptureView+Recording.swift).
             self.sessionStabilizationTask = Task { @MainActor in
                 // Clean up orphaned location on any abort path (cancel, timeout, no-frame).
                 var didLinkSuccessfully = false
@@ -99,83 +106,30 @@ extension CaptureView {
                     if !didLinkSuccessfully {
                         self.modelContext.delete(newLocation)
                         try? self.modelContext.save()
-                        // Clear stale activeLocationForScan (was set to newLocation.id)
-                        // and other capture state so the next scan starts fresh.
                         self.scanStore.resetCaptureState()
                     }
                 }
-                for _ in 0..<25 { // 5s timeout (25 × 200ms)
-                    try? await Task.sleep(for: .milliseconds(200))
-                    if Task.isCancelled { return }
-                    if self.currentARSession?.currentFrame?.camera.trackingState == .normal {
-                        break
-                    }
-                }
-                guard !Task.isCancelled else { return }
 
-                // Abort if tracking never stabilized — placing an anchor with degraded
-                // tracking would produce an unreliable stitch transform.
-                guard self.currentARSession?.currentFrame?.camera.trackingState == .normal else {
-                    print("[BoundaryAnchor] Stabilization timeout — tracking not normal, aborting link")
-                    self.showExtendOverlay = false
-                    self.scanStore.capturePhase = .idle
-                    self.showTransientMessage("Tracking unstable — move to a well-lit area and try again", duration: 4)
-                    return
-                }
-
-                // Place pinB in mapB's coordinate space using the camera's current transform.
-                // This captures both position (near origin after reset) and rotation
-                // (device orientation in the new coordinate frame).
-                let pinBTransform: simd_float4x4
-                let pinBId: UUID
-                // Capture fresh compass heading at Pin B time (may differ from Pin A)
-                let pinBCompassHeading = self.locationManager.bestHeading
-
-                if let frame = self.currentARSession?.currentFrame {
-                    let anchor = ARAnchor(
-                        name: ARCoverageView.boundaryAnchorName,
-                        transform: frame.camera.transform
-                    )
-                    self.currentARSession?.add(anchor: anchor)
-                    pinBTransform = frame.camera.transform
-                    pinBId = anchor.identifier
-                    print("[BoundaryAnchor] Placed pinB in mapB at \(frame.camera.transform.columns.3)")
-                } else {
-                    // Hard failure: no frame means we can't place a real anchor.
-                    // Abort the link (but the new session is still usable for standalone recording).
-                    print("[BoundaryAnchor] ERROR: No frame available for pinB — aborting link")
-                    self.showExtendOverlay = false
-                    self.scanStore.capturePhase = .idle
-                    self.showTransientMessage("Link failed — no AR frame. Start a new scan.", duration: 4)
-                    return
-                }
+                guard let pinB = await self.awaitStabilizationAndPlacePinB(
+                    preResetTimestamp: preResetTimestamp,
+                    failureMessage: "Link"
+                ) else { return }
 
                 self.scanStore.pendingStitchLink = PendingStitchLink(
                     sourceLocationId: actualSourceLocationId,
                     sourceScanId: savedScan.id,
-                    sourceAnchorId: UUID(),
+                    sourceAnchorId: sourceAnchorId,
                     sourceAnchorTransform: pinACameraPose,
                     sourceAnchorCompassHeading: compassHeading,
                     targetLocationId: newLocation.id,
-                    targetAnchorId: pinBId,
-                    targetAnchorTransform: pinBTransform,
-                    targetAnchorCompassHeading: pinBCompassHeading,
+                    targetAnchorId: pinB.anchorId,
+                    targetAnchorTransform: pinB.transform,
+                    targetAnchorCompassHeading: pinB.compassHeading,
                     linkType: .midSession
                 )
 
                 didLinkSuccessfully = true
                 self.showExtendOverlay = false
-                self.scanStore.capturePhase = .recording
-                self.startRecording()
-
-                // Record Pin B AFTER startRecording() — FrameCaptureSession.start()
-                // clears boundary anchor state, so recording must begin first.
-                self.frameCaptureSession.recordBoundaryAnchor(
-                    transform: pinBTransform,
-                    id: pinBId,
-                    compassHeading: pinBCompassHeading
-                )
-
                 self.showTransientMessage("📍 Linked! Scanning new space...", duration: 3)
             }
         }

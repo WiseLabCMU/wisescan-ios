@@ -154,7 +154,7 @@ enum UploadStatus: Equatable {
         switch self {
         case .pending: return "Ready"
         case .zipping: return "Converting..."
-        case .uploading(let p): return "Uploading (\(Int(p * 100))%)..."
+        case .uploading(let progress): return "Uploading (\(Int(progress * 100))%)..."
         case .savedLocally: return "Saved Locally"
         case .success: return "Uploaded"
         case .failed(let msg): return "Failed: \(msg)"
@@ -275,6 +275,8 @@ class ScanStore {
 
     /// State machine tracking the current phase of the capture flow.
     var capturePhase: CapturePhase = .idle
+    /// Whether the cross-session world map failed to load
+    var mapLoadFailed: Bool = false
 
     // MARK: Boundary Anchor State
 

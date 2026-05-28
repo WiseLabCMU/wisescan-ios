@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 
+// swiftlint:disable type_body_length
 struct LocationDetailView: View {
     let location: ScanLocation
     @Environment(\.modelContext) private var modelContext

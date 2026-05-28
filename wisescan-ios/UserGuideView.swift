@@ -23,7 +23,9 @@ struct UserGuideView: View {
                     guideRow(
                         icon: "3.circle.fill",
                         title: "Rescan Space / Link Adjacent Space",
-                        text: "Tap 'Rescan Space' on any location to re-scan the identical area over time — a red ghost overlay shows your previous scan for reference. Tap 'Link Adjacent Space' to scan a neighboring room: drop a Boundary Pin at the doorway or threshold, then start the next session from the same point to relationally link the two spaces."
+                        text: "Tap 'Rescan Space' on any location to re-scan the identical area over time — a red ghost overlay shows your previous scan for reference. " +
+                              "Tap 'Link Adjacent Space' to scan a neighboring room: relocalize with your previous scan, walk to the boundary threshold, " +
+                              "and confirm to relationally link the two spaces."
                     )
                     guideRow(
                         icon: "4.circle.fill",

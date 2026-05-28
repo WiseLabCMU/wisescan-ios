@@ -56,6 +56,7 @@ struct CaptureView: View {
         let vertexColors: Data?
         let worldMapURL: URL?
         let thumbnailData: Data?
+        let scanCase: ScanCase
     }
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State.
@@ -164,10 +165,10 @@ struct CaptureView: View {
                                 .foregroundColor(.white)
                             Text(scanStore.activeScanCase == .linkAdjacent
                                  ? """
-                                   Link Adjacent Space: Move to the edge of \
-                                   the previous scan. Drop a boundary pin at \
-                                   a door or threshold to relationally link \
-                                   this adjacent space.
+                                   Link Adjacent Space: Relocalize with the \
+                                   previous scan, walk to the boundary, and \
+                                   confirm to relationally link this adjacent \
+                                   space.
                                    """
                                  : """
                                    Rescan Space: Re-scan the previous area \
@@ -546,6 +547,19 @@ struct CaptureView: View {
             // Bind wearable proxy frame session and start stream
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
             MetaWearableManager.shared.startStreaming()
+        }
+        .onChange(of: scanStore.mapLoadFailed) { failed in
+            if failed {
+                showTransientMessage("Failed to load map for adjacent link.", duration: 4)
+
+                // Abort the adjacent-link capture flow so stale source/scan state
+                // cannot be reused after the error message is shown.
+                let inflightStitchLink = scanStore.pendingStitchLink
+                scanStore.resetCaptureState()
+                scanStore.pendingStitchLink = inflightStitchLink
+
+                scanStore.mapLoadFailed = false // reset
+            }
         }
         .onDisappear {
             // Stop GPS/heading updates to save battery (#12)

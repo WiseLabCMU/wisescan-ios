@@ -53,6 +53,7 @@ extension CaptureView {
 
         // Tear down old world map, start fresh session (mapB)
         let config = ARCoverageView.makeFreshConfiguration()
+        let preResetTimestamp = currentARSession?.currentFrame?.timestamp ?? 0
         currentARSession?.run(config, options: [.resetTracking, .removeExistingAnchors])
 
         // Set up for new recording
@@ -68,8 +69,8 @@ extension CaptureView {
         hapticGenerator.impactOccurred()
         showTransientMessage("📍 Aligning — hold still...", duration: 3)
 
-        // Wait for the new session (mapB) to stabilize, then place pinB as a real anchor
-        // in mapB's coordinate space and start recording.
+        // Wait for the new session (mapB) to stabilize, place pinB, and start recording.
+        // Uses the shared stabilization helper (CaptureView+Recording.swift).
         sessionStabilizationTask = Task { @MainActor in
             defer { self.isConfirmingAlignment = false }
             // Clean up orphaned location on any abort path (cancel, timeout, no-frame).
@@ -81,43 +82,11 @@ extension CaptureView {
                     self.scanStore.resetCaptureState()
                 }
             }
-            for _ in 0..<25 { // 5s timeout (25 × 200ms)
-                try? await Task.sleep(for: .milliseconds(200))
-                if Task.isCancelled { return }
-                if self.currentARSession?.currentFrame?.camera.trackingState == .normal {
-                    break
-                }
-            }
-            guard !Task.isCancelled else { return }
 
-            guard self.currentARSession?.currentFrame?.camera.trackingState == .normal else {
-                print("[BoundaryAnchor] Stabilization timeout — tracking not normal, aborting alignment")
-                self.scanStore.capturePhase = .idle
-                self.showTransientMessage("Tracking unstable — move to a well-lit area and try again", duration: 4)
-                return
-            }
-
-            // Pin B: camera pose in Map B's coordinate space.
-            // User hasn't moved — same physical point as Pin A.
-            let pinBTransform: simd_float4x4
-            let pinBId: UUID
-            let pinBCompassHeading = self.locationManager.bestHeading
-
-            if let frame = self.currentARSession?.currentFrame {
-                let anchor = ARAnchor(
-                    name: ARCoverageView.boundaryAnchorName,
-                    transform: frame.camera.transform
-                )
-                self.currentARSession?.add(anchor: anchor)
-                pinBTransform = frame.camera.transform
-                pinBId = anchor.identifier
-                print("[BoundaryAnchor] Placed pinB in mapB at \(frame.camera.transform.columns.3)")
-            } else {
-                print("[BoundaryAnchor] ERROR: No frame available for pinB — aborting alignment")
-                self.scanStore.capturePhase = .idle
-                self.showTransientMessage("Alignment failed — no AR frame. Try again.", duration: 4)
-                return
-            }
+            guard let pinB = await self.awaitStabilizationAndPlacePinB(
+                preResetTimestamp: preResetTimestamp,
+                failureMessage: "Alignment"
+            ) else { return }
 
             // Build PendingStitchLink with camera poses from both coordinate spaces.
             self.scanStore.pendingStitchLink = PendingStitchLink(
@@ -127,35 +96,33 @@ extension CaptureView {
                 sourceAnchorTransform: pinACameraPose,
                 sourceAnchorCompassHeading: pinACompassHeading,
                 targetLocationId: newLocation.id,
-                targetAnchorId: pinBId,
-                targetAnchorTransform: pinBTransform,
-                targetAnchorCompassHeading: pinBCompassHeading,
+                targetAnchorId: pinB.anchorId,
+                targetAnchorTransform: pinB.transform,
+                targetAnchorCompassHeading: pinB.compassHeading,
                 linkType: .crossSession
             )
 
             didLinkSuccessfully = true
-            self.scanStore.capturePhase = .recording
-            self.startRecording()
-
-            // Record Pin B AFTER startRecording() — FrameCaptureSession.start()
-            // clears boundary anchor state, so recording must begin first.
-            self.frameCaptureSession.recordBoundaryAnchor(
-                transform: pinBTransform,
-                id: pinBId,
-                compassHeading: pinBCompassHeading
-            )
-
             self.showTransientMessage("📍 Aligned & linked! Scanning new space...", duration: 3)
         }
     }
 
     /// Flow B: User cancelled alignment — return to idle.
+    /// Resets both app state AND the AR session so the next scan starts
+    /// in a fresh coordinate frame (not the source world map's).
     func cancelAlignment() {
         sessionStabilizationTask?.cancel()
         sessionStabilizationTask = nil
         isConfirmingAlignment = false
         scanStore.resetCaptureState()
         cachedGhostMeshData = nil
+
+        // Reset AR session to a clean coordinate space — without this,
+        // the session continues running with the source world map loaded,
+        // and a subsequent standalone scan would inherit the old frame.
+        let freshConfig = ARCoverageView.makeFreshConfiguration()
+        currentARSession?.run(freshConfig, options: [.resetTracking, .removeExistingAnchors])
+
         showTransientMessage("Alignment cancelled — start a new scan without linking", duration: 4)
     }
 }

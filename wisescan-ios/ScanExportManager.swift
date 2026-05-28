@@ -2,6 +2,7 @@ import Foundation
 import SwiftData
 
 struct ScanExportManager {
+    // swiftlint:disable:next function_body_length cyclomatic_complexity
     static func prepareExport(filename: String, scanDir: URL, format: ExportFormat) -> URL? {
         let fm = FileManager.default
         let rawDataDir = scanDir.appendingPathComponent("raw_data")
@@ -88,12 +89,21 @@ struct ScanExportManager {
                 }
                 stagePolycamPayload(to: stagingDir)
 
-                // Include stitching.json from the parent location directory if it exists.
-                // Path: scanDir is Documents/Scans/{locationId}/{scanId}/
-                // So scanDir.deletingLastPathComponent() is the location directory.
-                let locationDir = scanDir.deletingLastPathComponent()
-                let stitchingURL = locationDir.appendingPathComponent(StitchingMetadataManager.filename)
-                if fm.fileExists(atPath: stitchingURL.path) {
+                // Include stitching.json from the location directory if it exists.
+                // Resolve the location directory canonically via StitchingMetadataManager
+                // instead of relying on parent-path arithmetic on scanDir.
+                // scanDir layout: Documents/Scans/{locationId}/{scanId}/
+                let locationDirName = scanDir.deletingLastPathComponent().lastPathComponent
+                let stitchingURL: URL? = {
+                    if let locId = UUID(uuidString: locationDirName),
+                       let locDir = StitchingMetadataManager.locationDirectory(for: locId) {
+                        return StitchingMetadataManager.url(forLocationDir: locDir)
+                    }
+                    // Fallback: parent directory (preserves behavior if path format changes)
+                    return scanDir.deletingLastPathComponent()
+                        .appendingPathComponent(StitchingMetadataManager.filename)
+                }()
+                if let stitchingURL, fm.fileExists(atPath: stitchingURL.path) {
                     let destURL = stagingDir.appendingPathComponent(StitchingMetadataManager.filename)
                     do {
                         // Remove existing destination if present (copyItem fails on overwrite)

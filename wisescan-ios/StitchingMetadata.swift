@@ -9,7 +9,7 @@ import simd
 /// uploaded zip is self-contained.
 struct StitchingManifest: Codable, Sendable {
     var version: Int = 1
-    var layout: String = "row_major"
+    var layout: MatrixLayout = .columnMajor
     var links: [StitchingLink]
 
     init(links: [StitchingLink] = []) {
@@ -31,7 +31,7 @@ struct StitchingLink: Codable, Identifiable, Sendable {
     let sourceAnchorCompassHeading: Double?
 
     // Target (the new scan in THIS location)
-    let targetLocationId: UUID?
+    let targetLocationId: UUID
     let targetScanId: UUID
     let targetAnchorId: UUID
     let targetAnchorTransform: CodableMatrix4x4
@@ -47,9 +47,19 @@ struct StitchingLink: Codable, Identifiable, Sendable {
     }
 }
 
+/// Matrix layout convention for serialized 4×4 transforms.
+enum MatrixLayout: String, Codable, Sendable {
+    case columnMajor = "column_major"
+    case rowMajor = "row_major"
+}
+
 // MARK: - Codable 4x4 Matrix
 
 /// Wraps `simd_float4x4` for JSON serialization as a 4×4 array of floats.
+///
+/// Uses **column-major** layout: each inner array is one column of the matrix.
+/// This matches the convention used by `transforms.json` and `scan4d_metadata.json`
+/// so all matrix formats within a single export zip are consistent.
 struct CodableMatrix4x4: Codable, Sendable {
     let matrix: simd_float4x4
 
@@ -59,37 +69,31 @@ struct CodableMatrix4x4: Codable, Sendable {
 
     init(from decoder: Decoder) throws {
         var container = try decoder.unkeyedContainer()
-        var rows: [[Float]] = []
+        // Column-major: each inner array is one column.
+        // cols[col][row] → columns[col] = SIMD4(row0, row1, row2, row3)
+        var cols: [SIMD4<Float>] = []
         for _ in 0..<4 {
-            var rowContainer = try container.nestedUnkeyedContainer()
-            var row: [Float] = []
+            var colContainer = try container.nestedUnkeyedContainer()
+            var elements: [Float] = []
             for _ in 0..<4 {
-                row.append(try rowContainer.decode(Float.self))
+                elements.append(try colContainer.decode(Float.self))
             }
-            rows.append(row)
+            cols.append(SIMD4<Float>(elements[0], elements[1], elements[2], elements[3]))
         }
-        // Column-major: rows[row][col] → columns[col][row]
-        self.matrix = simd_float4x4(columns: (
-            SIMD4<Float>(rows[0][0], rows[1][0], rows[2][0], rows[3][0]),
-            SIMD4<Float>(rows[0][1], rows[1][1], rows[2][1], rows[3][1]),
-            SIMD4<Float>(rows[0][2], rows[1][2], rows[2][2], rows[3][2]),
-            SIMD4<Float>(rows[0][3], rows[1][3], rows[2][3], rows[3][3])
-        ))
+        self.matrix = simd_float4x4(columns: (cols[0], cols[1], cols[2], cols[3]))
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.unkeyedContainer()
-        let m = matrix
-        // Row-major 4×4 array: each inner array is one ROW of the matrix.
-        // NOTE: This differs from transforms.json / scan4d_metadata.json which use
-        // column-major (each inner array = one column). The decoder above handles
-        // the transpose correctly. If standardizing later, a migration is needed.
-        for row in 0..<4 {
-            var rowContainer = container.nestedUnkeyedContainer()
-            try rowContainer.encode(m.columns.0[row])
-            try rowContainer.encode(m.columns.1[row])
-            try rowContainer.encode(m.columns.2[row])
-            try rowContainer.encode(m.columns.3[row])
+        // Column-major: each inner array is one COLUMN of the matrix.
+        // Matches transforms.json / scan4d_metadata.json convention.
+        let cols = [matrix.columns.0, matrix.columns.1, matrix.columns.2, matrix.columns.3]
+        for col in cols {
+            var colContainer = container.nestedUnkeyedContainer()
+            try colContainer.encode(col.x)
+            try colContainer.encode(col.y)
+            try colContainer.encode(col.z)
+            try colContainer.encode(col.w)
         }
     }
 }
@@ -119,8 +123,8 @@ enum StitchingMetadataManager {
     }
 
     /// Reads the stitching manifest for a location, returning nil if it doesn't exist.
-    /// Synchronous — acceptable for small JSON files. Prefer `readAsync` from SwiftUI `.task` modifiers.
-    static func read(locationId: UUID) -> StitchingManifest? {
+    /// Private — external callers should use `readAsync` to avoid blocking the main thread.
+    private static func read(locationId: UUID) -> StitchingManifest? {
         guard let locDir = locationDirectory(for: locationId) else { return nil }
         let fileURL = url(forLocationDir: locDir)
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
@@ -187,8 +191,8 @@ enum StitchingMetadataManager {
     }
 
     /// Checks whether a location has any stitching links.
-    /// Synchronous — reads a small JSON file. Prefer `hasLinksAsync` from SwiftUI `.task` modifiers.
-    static func hasLinks(locationId: UUID) -> Bool {
+    /// Private — external callers should use `hasLinksAsync` to avoid blocking the main thread.
+    private static func hasLinks(locationId: UUID) -> Bool {
         guard let manifest = read(locationId: locationId) else { return false }
         return !manifest.links.isEmpty
     }

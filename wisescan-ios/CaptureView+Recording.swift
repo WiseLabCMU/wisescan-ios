@@ -156,6 +156,7 @@ extension CaptureView {
         }
 
         let capturedLocationId = scanStore.activeLocationForScan
+        let capturedScanCase = scanStore.activeScanCase
 
         // Run vertex coloring in background using saved camera frames (.utility QoS
         // so the name-prompt keyboard stays responsive while coloring runs)
@@ -197,7 +198,7 @@ extension CaptureView {
                                 vertexColors: vertexColors,
                                 worldMapURL: mapURL,
                                 thumbnailData: thumbnailData,
-                                scanCase: self.scanStore.activeScanCase
+                                scanCase: capturedScanCase
                             )
                             self.frameCaptureSession = FrameCaptureSession()
                             MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
@@ -217,7 +218,8 @@ extension CaptureView {
                                 rawDataPath: rawDataPath,
                                 vertexColors: vertexColors,
                                 worldMapURL: mapURL,
-                                thumbnailData: thumbnailData
+                                thumbnailData: thumbnailData,
+                                scanCase: capturedScanCase
                             )
 
                             // Release frame capture session memory
@@ -261,6 +263,7 @@ extension CaptureView {
                 print("[StitchingMetadata] Wrote stitching.json with targetScanId=\(targetScanId.uuidString)")
             } else {
                 print("[StitchingMetadata] WARNING: Failed to write stitching.json for targetScanId=\(targetScanId.uuidString)")
+                self.showTransientMessage("⚠️ Scan saved but spatial link failed to write", duration: 5)
             }
         }
         scanStore.pendingStitchLink = nil
@@ -315,7 +318,7 @@ extension CaptureView {
             vertexColors: pending.vertexColors,
             worldMapURL: pending.worldMapURL,
             thumbnailData: pending.thumbnailData,
-            scanCase: scanStore.activeScanCase
+            scanCase: pending.scanCase
         )
 
         // Write deferred stitching.json now that we have the real target scan ID
@@ -342,5 +345,92 @@ extension CaptureView {
             }
             saveMessage = nil
         }
+    }
+
+    // MARK: - Shared Stabilization Helper
+
+    /// Result of a successful Pin B placement after session stabilization.
+    struct PinBResult {
+        let transform: simd_float4x4
+        let anchorId: UUID
+        let compassHeading: Double?
+    }
+
+    /// Waits for the AR session to stabilize after a reset, places Pin B as a real
+    /// ARAnchor, starts recording, and records the boundary anchor.
+    ///
+    /// Shared by both mid-session extend (Flow A) and cross-session alignment (Flow B)
+    /// to avoid duplicating the stabilization → anchor → record sequence.
+    ///
+    /// - Parameters:
+    ///   - preResetTimestamp: Timestamp of the last AR frame before the session reset.
+    ///     Used to detect that we're looking at a post-reset frame.
+    ///   - failureMessage: User-facing prefix for error messages (e.g., "Link" vs "Alignment").
+    /// - Returns: `PinBResult` on success, `nil` on timeout / no-frame / cancellation.
+    func awaitStabilizationAndPlacePinB(
+        preResetTimestamp: TimeInterval,
+        failureMessage: String
+    ) async -> PinBResult? {
+        // Poll for tracking to reach .normal after the session reset.
+        // Track whether we actually observed a valid post-reset frame to avoid
+        // passing the post-loop guard on a stale pre-reset `.normal` frame.
+        var didStabilize = false
+        for _ in 0..<AppConstants.stabilizationMaxPolls {
+            try? await Task.sleep(for: .milliseconds(AppConstants.stabilizationPollIntervalMs))
+            if Task.isCancelled { return nil }
+            if let currentFrame = self.currentARSession?.currentFrame,
+               currentFrame.timestamp > preResetTimestamp,
+               currentFrame.camera.trackingState == .normal {
+                didStabilize = true
+                break
+            }
+        }
+        guard !Task.isCancelled else { return nil }
+
+        // Abort if tracking never stabilized — placing an anchor with degraded
+        // tracking would produce an unreliable stitch transform.
+        guard didStabilize else {
+            print("[BoundaryAnchor] Stabilization timeout — no valid post-reset frame observed")
+            self.showExtendOverlay = false
+            self.scanStore.capturePhase = .idle
+            self.showTransientMessage("Tracking unstable — move to a well-lit area and try again", duration: 4)
+            return nil
+        }
+
+        // Place Pin B in Map B's coordinate space using the camera's current transform.
+        let pinBCompassHeading = self.locationManager.bestHeading
+        guard let frame = self.currentARSession?.currentFrame else {
+            print("[BoundaryAnchor] ERROR: No frame available for pinB")
+            self.showExtendOverlay = false
+            self.scanStore.capturePhase = .idle
+            self.showTransientMessage("\(failureMessage) failed — no AR frame. Start a new scan.", duration: 4)
+            return nil
+        }
+
+        let anchor = ARAnchor(
+            name: ARCoverageView.boundaryAnchorName,
+            transform: frame.camera.transform
+        )
+        self.currentARSession?.add(anchor: anchor)
+        let pinBTransform = frame.camera.transform
+        let pinBId = anchor.identifier
+        print("[BoundaryAnchor] Placed pinB in mapB at \(frame.camera.transform.columns.3)")
+
+        // Start recording and then record Pin B (order matters:
+        // FrameCaptureSession.start() clears boundary anchor state).
+        self.scanStore.capturePhase = .recording
+        self.startRecording()
+
+        self.frameCaptureSession.recordBoundaryAnchor(
+            transform: pinBTransform,
+            id: pinBId,
+            compassHeading: pinBCompassHeading
+        )
+
+        return PinBResult(
+            transform: pinBTransform,
+            anchorId: pinBId,
+            compassHeading: pinBCompassHeading
+        )
     }
 }

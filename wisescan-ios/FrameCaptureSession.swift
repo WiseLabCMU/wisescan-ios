@@ -622,8 +622,7 @@ class FrameCaptureSession {
             var boundaryDict: [String: Any] = [
                 "id": anchorId.uuidString,
                 // Column-major layout: each inner array is one column of the 4×4 matrix.
-                // This matches transforms.json convention. Note: stitching.json uses
-                // row-major via CodableMatrix4x4 — consumers must check the source format.
+                // This matches the transform export convention used by the app.
                 "transform": [
                     [anchorTransform.columns.0.x, anchorTransform.columns.0.y, anchorTransform.columns.0.z, anchorTransform.columns.0.w],
                     [anchorTransform.columns.1.x, anchorTransform.columns.1.y, anchorTransform.columns.1.z, anchorTransform.columns.1.w],
@@ -734,11 +733,11 @@ class FrameCaptureSession {
     /// Records a boundary anchor's transform along with the compass heading at pin-drop time.
     /// Called when the user drops a boundary pin during recording.
     /// GPS is intentionally omitted — indoor accuracy (~5-15m) is useless for
-    /// doorway-level alignment. The ARKit transform provides sub-cm precision,
+    /// doorway-level alignment. The recorded camera pose provides sub-cm precision,
     /// and session-level GPS already covers coarse "which building" context.
     ///
     /// - Parameters:
-    ///   - transform: The anchor's world transform from ARKit raycast.
+    ///   - transform: The camera's world transform at the moment the boundary pin is dropped.
     ///   - id: The ARAnchor identifier.
     ///   - compassHeading: Best available compass heading (true north preferred) at pin-drop time.
     func recordBoundaryAnchor(transform: simd_float4x4, id: UUID, compassHeading: Double?) {

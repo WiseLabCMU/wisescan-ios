@@ -479,6 +479,21 @@ struct ARCoverageView: UIViewRepresentable {
             }
 
             let isTrackingNormal = frame.camera.trackingState == .normal
+            // In Link Adjacent, `.loadingWorldMap` means this flow expects relocalization
+            // against a source scan. If loading failed and `hasWorldMap` is false, do not
+            // treat that the same as a no-world-map flow.
+            let worldMapWasRequested = phase == .loadingWorldMap || hasWorldMap
+            
+            if phase == .loadingWorldMap && !hasWorldMap {
+                // The world map file was missing or corrupted and failed to load
+                DispatchQueue.main.async { [weak self] in
+                    self?.scanStore?.mapLoadFailed = true
+                    self?.scanStore?.capturePhase = .idle
+                }
+                return
+            }
+            
+            let isRelocalized = isTrackingNormal && (!worldMapWasRequested || hasSeenRelocalizing)
 
             // Optionally update distance to boundary anchor if one exists (visual only)
             if let anchorTransform = scanStore?.boundaryAnchorTransform {
@@ -491,15 +506,19 @@ struct ARCoverageView: UIViewRepresentable {
             }
 
             DispatchQueue.main.async { [weak self] in
+                // Re-read capturePhase inside the main-queue block to avoid stale
+                // values overwriting a user-initiated cancel/reset that occurred
+                // between the ARKit delegate call and this dispatch.
+                guard let currentPhase = self?.scanStore?.capturePhase else { return }
                 // Drive capturePhase transitions based on tracking state:
-                // .loadingWorldMap → .aligning: ARKit has relocalized (tracking normal)
+                // .loadingWorldMap → .aligning: ARKit has relocalized
                 // .aligning → .alignedReady: tracking is stable, user can confirm
                 // .alignedReady → .aligning: tracking degraded, revert
-                if phase == .loadingWorldMap && isTrackingNormal {
+                if currentPhase == .loadingWorldMap && isRelocalized {
                     self?.scanStore?.capturePhase = .aligning
-                } else if phase == .aligning && isTrackingNormal {
+                } else if currentPhase == .aligning && isRelocalized {
                     self?.scanStore?.capturePhase = .alignedReady
-                } else if phase == .alignedReady && !isTrackingNormal {
+                } else if currentPhase == .alignedReady && !isRelocalized {
                     self?.scanStore?.capturePhase = .aligning
                 }
             }
