@@ -19,6 +19,7 @@ class MetaWearableManager {
     var isScanning = false
     var connectedDevices: [WearableDevice] = []
     var isStreaming = false
+    var connectionFailed = false
     var deviceUpdateRequired = false
     var permissionGranted = false {
         didSet {
@@ -108,7 +109,11 @@ class MetaWearableManager {
 
     private var deviceObservationTask: Task<Void, Never>?
     private var registrationObservationTask: Task<Void, Never>?
+    private var permissionCheckTask: Task<Void, Never>?
     private var hasLoggedNoDevices = false
+    private var hasLoggedPermissionRetry = false
+    private var lastKnownDeviceIds: [String] = []
+    private var lastRegistrationState: String = ""
     private var isSettingUpStream = false
 
     // Inject this from CaptureView or proxy handler
@@ -129,6 +134,11 @@ class MetaWearableManager {
                 self?.isScanning = false
                 self?.checkPermissions()
                 self?.setupDeviceObservation()
+                // Staggered retry: SDK may not have emitted newly registered devices yet
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                self?.setupDeviceObservation()
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                self?.setupDeviceObservation()
             }
         }
 
@@ -147,17 +157,30 @@ class MetaWearableManager {
 
     func checkPermissions() {
         guard !permissionGranted else { return } // Already confirmed this session
-        Task {
-            do {
-                let status = try await Wearables.shared.checkPermissionStatus(.camera)
-                let statusStr = String(describing: status).lowercased()
-                let granted = statusStr.contains("grant") || statusStr.contains("authoriz")
-                print("[MetaWearable] Permission check result: '\(statusStr)' → granted=\(granted)")
-                self.permissionGranted = granted
-            } catch {
-                print("[MetaWearable] Permission check threw: \(error) — retrying in 3s")
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                self.checkPermissions()
+        // Cancel any existing permission check loop to prevent concurrent retry storms
+        permissionCheckTask?.cancel()
+        hasLoggedPermissionRetry = false
+        permissionCheckTask = Task { [weak self] in
+            var retryCount = 0
+            let maxRetries = 10
+            while retryCount < maxRetries {
+                guard !Task.isCancelled else { return }
+                guard let self = self, !self.permissionGranted else { return }
+                do {
+                    let status = try await Wearables.shared.checkPermissionStatus(.camera)
+                    let statusStr = String(describing: status).lowercased()
+                    let granted = statusStr.contains("grant") || statusStr.contains("authoriz")
+                    print("[MetaWearable] Permission check result: '\(statusStr)' → granted=\(granted)")
+                    await MainActor.run { self.permissionGranted = granted }
+                    return // Success — exit loop
+                } catch {
+                    if !self.hasLoggedPermissionRetry {
+                        print("[MetaWearable] Permission check threw: \(error) — will retry (max \(maxRetries)x)")
+                        await MainActor.run { self.hasLoggedPermissionRetry = true }
+                    }
+                    retryCount += 1
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                }
             }
         }
     }
@@ -179,10 +202,15 @@ class MetaWearableManager {
         registrationObservationTask = Task { [weak self] in
             for await state in Wearables.shared.registrationStateStream() {
                 let stateStr = String(describing: state).lowercased()
-                print("[MetaWearable] Registration state: \(stateStr)")
-                // Re-evaluate actual camera permissions when registration changes
                 await MainActor.run {
-                    self?.checkPermissions()
+                    guard let self = self else { return }
+                    // Only log when registration state actually changes
+                    if stateStr != self.lastRegistrationState {
+                        self.lastRegistrationState = stateStr
+                        print("[MetaWearable] Registration state: \(stateStr)")
+                    }
+                    // Re-evaluate actual camera permissions when registration changes
+                    self.checkPermissions()
                 }
             }
         }
@@ -194,8 +222,13 @@ class MetaWearableManager {
             for await deviceIds in Wearables.shared.devicesStream() {
                 await MainActor.run {
                     guard let self = self else { return }
-                    if !deviceIds.isEmpty {
-                        print("[MetaWearable] setupDeviceObservation stream — found \(deviceIds.count) devices: \(deviceIds)")
+                    // Only log when device list actually changes
+                    if deviceIds != self.lastKnownDeviceIds {
+                        self.lastKnownDeviceIds = deviceIds
+                        if !deviceIds.isEmpty {
+                            print("[MetaWearable] Devices changed: \(deviceIds.count) device(s)")
+                        }
+                        self.hasLoggedNoDevices = false // Reset so "No devices" logs once if they disconnect
                     }
                     self.updateConnectedDevices(deviceIds)
                 }
@@ -204,8 +237,11 @@ class MetaWearableManager {
 
         // Initial fetch
         let deviceIds = Wearables.shared.devices
-        if !deviceIds.isEmpty {
-            print("[MetaWearable] setupDeviceObservation initial — found \(deviceIds.count) devices: \(deviceIds)")
+        if deviceIds != lastKnownDeviceIds {
+            lastKnownDeviceIds = deviceIds
+            if !deviceIds.isEmpty {
+                print("[MetaWearable] Initial devices: \(deviceIds.count) device(s)")
+            }
         }
         self.updateConnectedDevices(deviceIds)
     }
@@ -283,19 +319,24 @@ class MetaWearableManager {
     }
 
     /// Called by CaptureView.onDisappear — stops the camera stream to save resources.
+    /// Synchronously clears session state to prevent startStreaming() race conditions.
     func stopStreaming() {
         isStreamingRequested = false
-        Task {
-            if let stream = self.streamSession {
-                print("[MetaWearable] CaptureView dismissed — stopping stream")
-                await stream.stop()
+        // Capture references before clearing — clear synchronously to prevent races
+        let stream = self.streamSession
+        let devSession = self.deviceSession
+        self.streamSession = nil
+        self.deviceSession = nil
+        self.isStreaming = false
+        self.latestProxyImage = nil
+        self.isSettingUpStream = false
+        // Async teardown of SDK resources
+        if stream != nil || devSession != nil {
+            print("[MetaWearable] CaptureView dismissed — stopping stream")
+            Task {
+                await stream?.stop()
+                devSession?.stop()
             }
-            self.streamSession = nil
-            self.deviceSession?.stop()
-            self.deviceSession = nil
-            self.isStreaming = false
-            self.latestProxyImage = nil
-            self.isSettingUpStream = false
         }
     }
 
@@ -377,6 +418,7 @@ class MetaWearableManager {
             return
         }
         isSettingUpStream = true
+        connectionFailed = false
 
         Task { [weak self] in
             guard let self = self else { return }
@@ -395,10 +437,7 @@ class MetaWearableManager {
                 print("[MetaWearable] deviceForIdentifier returned nil for \(deviceId)")
                 return
             }
-            print("[MetaWearable] Device: \(device.nameOrId())")
-            print("[MetaWearable] Device linkState: \(device.linkState)")
-            print("[MetaWearable] Device compatibility: \(device.compatibility())")
-            print("[MetaWearable] Device type: \(device.deviceType())")
+            print("[MetaWearable] Device: \(device.nameOrId()) linkState=\(device.linkState) compat=\(device.compatibility()) type=\(device.deviceType())")
 
             // Check firmware compatibility — surface to UI but still attempt streaming
             // (SDK 0.7.0 may report deviceUpdateRequired even when glasses firmware is current)
@@ -447,8 +486,22 @@ class MetaWearableManager {
             do {
                 devSession = try Wearables.shared.createSession(deviceSelector: selector)
             } catch {
-                print("[MetaWearable] Failed to create DeviceSession: \(error)")
-                return
+                let errStr = String(describing: error).lowercased()
+                if errStr.contains("sessionalreadyexists") || errStr.contains("inprogress") {
+                    print("[MetaWearable] Session conflict (​\(error)) — waiting 2s for SDK cleanup")
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    // Retry once
+                    do {
+                        devSession = try Wearables.shared.createSession(deviceSelector: selector)
+                    } catch {
+                        print("[MetaWearable] Retry failed: \(error)")
+                        self.connectionFailed = true
+                        return
+                    }
+                } else {
+                    print("[MetaWearable] Failed to create DeviceSession: \(error)")
+                    return
+                }
             }
             
             let stateStream = devSession.stateStream()
@@ -495,6 +548,7 @@ class MetaWearableManager {
                 guard started else {
                     print("[MetaWearable] DeviceSession failed to start within timeout — tearing down (possible bad hardware state)")
                     devSession.stop()
+                    self.connectionFailed = true
                     return
                 }
                 print("[MetaWearable] DeviceSession started!")
@@ -552,12 +606,12 @@ class MetaWearableManager {
                 // directly into the sample buffer. When testing on physical glasses, check these logs.
                 // If intrinsics exist, extract them to package with the Scan4D/Polycam export proxy data.
                 // If empty, we may need to hardcode a fallback FOV matrix.
-                if let attachments = CMCopyDictionaryOfAttachments(allocator: kCFAllocatorDefault, target: frame.sampleBuffer, attachmentMode: kCMAttachmentMode_ShouldPropagate) {
-                    print("[MetaWearable] Sample buffer attachments (propagate): \(attachments)")
-                }
-                if let attachments = CMCopyDictionaryOfAttachments(allocator: kCFAllocatorDefault, target: frame.sampleBuffer, attachmentMode: kCMAttachmentMode_ShouldNotPropagate) {
-                    print("[MetaWearable] Sample buffer attachments (non-propagate): \(attachments)")
-                }
+                // if let attachments = CMCopyDictionaryOfAttachments(allocator: kCFAllocatorDefault, target: frame.sampleBuffer, attachmentMode: kCMAttachmentMode_ShouldPropagate) {
+                //     print("[MetaWearable] Sample buffer attachments (propagate): \(attachments)")
+                // }
+                // if let attachments = CMCopyDictionaryOfAttachments(allocator: kCFAllocatorDefault, target: frame.sampleBuffer, attachmentMode: kCMAttachmentMode_ShouldNotPropagate) {
+                //     print("[MetaWearable] Sample buffer attachments (non-propagate): \(attachments)")
+                // }
 
                 if let pixelBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer) {
 

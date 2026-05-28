@@ -255,25 +255,48 @@ struct CaptureView: View {
 
                             // Status warnings when connected but no proxy image is flowing
                             if wearableManager.latestProxyImage == nil {
-                                HStack(spacing: 6) {
-                                    if !wearableManager.permissionGranted {
-                                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
-                                        Text("Meta App Permission Required")
-                                    } else if !wearableManager.isStreaming {
-                                        ProgressView().scaleEffect(0.7).tint(.white)
-                                        Text("Starting stream...")
-                                    } else {
-                                        ProgressView().scaleEffect(0.7).tint(.white)
-                                        Text("Waiting for frames...")
+                                if wearableManager.connectionFailed {
+                                    // DeviceSession timed out — show retry action
+                                    Button(action: {
+                                        wearableManager.connectionFailed = false
+                                        wearableManager.stopStreaming()
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                            wearableManager.startStreaming()
+                                        }
+                                    }) {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: "arrow.clockwise.circle.fill").foregroundColor(.orange)
+                                            Text("Connection failed — tap to retry")
+                                        }
+                                        .font(.caption2).bold()
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(Color.orange.opacity(0.7))
+                                        .cornerRadius(8)
                                     }
+                                    .padding(.trailing, AppConstants.UI.pipPaddingX)
+                                } else {
+                                    HStack(spacing: 6) {
+                                        if !wearableManager.permissionGranted {
+                                            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
+                                            Text("Meta App Permission Required")
+                                        } else if !wearableManager.isStreaming {
+                                            ProgressView().scaleEffect(0.7).tint(.white)
+                                            Text("Starting stream...")
+                                        } else {
+                                            ProgressView().scaleEffect(0.7).tint(.white)
+                                            Text("Waiting for frames...")
+                                        }
+                                    }
+                                    .font(.caption2).bold()
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(.ultraThinMaterial)
+                                    .cornerRadius(8)
+                                    .padding(.trailing, AppConstants.UI.pipPaddingX)
                                 }
-                                .font(.caption2).bold()
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(.ultraThinMaterial)
-                                .cornerRadius(8)
-                                .padding(.trailing, AppConstants.UI.pipPaddingX)
                             }
 
                             // The actual PiP video feed
