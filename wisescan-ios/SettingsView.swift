@@ -8,6 +8,7 @@ struct SettingsView: View {
 
     @AppStorage(AppConstants.Key.rawOverlapMax) private var overlapMax: Double = AppConstants.overlapMax
     @AppStorage(AppConstants.Key.rawRejectBlur) private var rejectBlur: Bool = AppConstants.rejectBlur
+    @AppStorage(AppConstants.Key.captureMode) private var captureMode: String = AppConstants.captureMode
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
     @AppStorage(AppConstants.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppConstants.flipCameraEnabled
@@ -79,6 +80,22 @@ struct SettingsView: View {
                             Slider(value: $overlapMax, in: 10...100, step: 5)
                                 .tint(.cyan)
                             Text("Controls maximum overlap between consecutive captured frames. Lower values capture fewer, more distinct frames. Higher values capture more frames with greater overlap.")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                        .padding(.vertical, 4)
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Capture View Mode")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            Picker("Capture Mode", selection: $captureMode) {
+                                Text("AR (Camera Feed)").tag(AppConstants.CaptureMode.ar.rawValue)
+                                Text("VR (Live Point Cloud)").tag(AppConstants.CaptureMode.vr.rawValue)
+                            }
+                            .pickerStyle(.segmented)
+                            .colorScheme(.dark)
+                            Text("Switch between augmented reality (ARKit passthrough) and virtual reality (live depth point cloud) capture modes.")
                                 .font(.caption)
                                 .foregroundColor(.gray)
                         }

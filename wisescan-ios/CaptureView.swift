@@ -14,6 +14,7 @@ struct CaptureView: View {
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
     @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
+    @AppStorage(AppConstants.Key.captureMode) private var captureModeStr: String = AppConstants.captureMode
     // Stream mode removed — fixed to Capture (Stream is a future feature)
     @State private var usingFrontCamera = false
     @State private var currentARSession: ARSession? = nil
@@ -76,6 +77,7 @@ struct CaptureView: View {
                 scanStats: scanStats,
                 privacyFilter: isPrivacyFilterOn,
                 activeMeshColor: activeMeshColor,
+                captureMode: AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar,
                 useFrontCamera: usingFrontCamera,
                 initialWorldMapURL: scanStore.activeRelocalizationMap,
                 initialGhostMeshData: cachedGhostMeshData

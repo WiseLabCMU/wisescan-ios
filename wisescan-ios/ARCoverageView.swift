@@ -9,6 +9,7 @@ struct ARCoverageView: UIViewRepresentable {
     var scanStats: ScanStats
     var privacyFilter: Bool
     var activeMeshColor: String = AppConstants.activeMeshColor
+    var captureMode: AppConstants.CaptureMode
     var useFrontCamera: Bool = false
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
     var initialGhostMeshData: Data? = nil // Raw OBJ data from the previous scan
@@ -36,9 +37,14 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.arView = arView
         context.coordinator.privacyFilter = privacyFilter
         context.coordinator.activeMeshColor = activeMeshColor
+        context.coordinator.captureMode = captureMode
         context.coordinator.isRecording = false
         context.coordinator.isSessionReadyBinding = $isSessionReady
         context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
+
+        // Always start with the live camera feed — even in VR mode.
+        // The VR point cloud + skybox are activated only when recording starts (in updateUIView).
+        arView.environment.background = .cameraFeed()
 
         arView.session.delegate = context.coordinator
         // No debug options in nominal mode (no wireframe overlay)
@@ -64,6 +70,52 @@ struct ARCoverageView: UIViewRepresentable {
         if activeMeshColor != context.coordinator.activeMeshColor {
             context.coordinator.activeMeshColor = activeMeshColor
             context.coordinator.recolorActiveMeshEntities()
+        }
+        
+        let modeChanged = (captureMode != context.coordinator.captureMode)
+        let recordingChanged = (isRecording != context.coordinator.isRecording)
+        
+        if modeChanged {
+            context.coordinator.captureMode = captureMode
+        }
+
+        let shouldShowVR = (captureMode == .vr && isRecording)
+        let wasShowingVR = (context.coordinator.pointCloudManager != nil)
+        
+        if shouldShowVR && !wasShowingVR {
+            uiView.environment.background = .color(.black)
+            context.coordinator.pointCloudManager = PointCloudManager(arView: uiView)
+            context.coordinator.pointCloudManager?.setup(
+                in: context.coordinator.rootEntity,
+                activeMeshColor: activeMeshColor
+            )
+            let vrAnchor = AnchorEntity(world: .zero)
+            vrAnchor.addChild(context.coordinator.rootEntity)
+            uiView.scene.addAnchor(vrAnchor)
+            context.coordinator.vrAnchorEntity = vrAnchor
+            
+            // Re-configure session for sceneDepth if needed
+            if let config = uiView.session.configuration as? ARWorldTrackingConfiguration {
+                if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+                    config.frameSemantics.insert(.sceneDepth)
+                }
+                uiView.session.run(config)
+            }
+            context.coordinator.removeAllMeshEntities()
+        } else if !shouldShowVR && wasShowingVR {
+            uiView.environment.background = .cameraFeed()
+            context.coordinator.pointCloudManager?.destroy()
+            context.coordinator.pointCloudManager = nil
+            context.coordinator.vrAnchorEntity?.removeFromParent()
+            context.coordinator.vrAnchorEntity = nil
+            
+            if captureMode == .vr {
+                context.coordinator.removeAllMeshEntities()
+            }
+        }
+        
+        if modeChanged && captureMode == .vr {
+            context.coordinator.removeAllMeshEntities()
         }
 
         // If the session is already running (e.g. tab switch back) but isSessionReady
@@ -108,8 +160,7 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         // Detect recording state change → switch AR session config
-        let wasRecording = context.coordinator.isRecording
-        if isRecording != wasRecording {
+        if recordingChanged {
             context.coordinator.isRecording = isRecording
             if isRecording {
                 // Upgrade to full scene reconstruction — preserve world map for coordinate continuity
@@ -155,7 +206,7 @@ struct ARCoverageView: UIViewRepresentable {
                 }
                 config.environmentTexturing = .automatic
                 uiView.session.run(config)
-                // Clear ALL debug options for pure passthrough
+                // Clear ALL debug options for pure passthrough (or VR background)
                 uiView.debugOptions = []
             }
         }
@@ -179,6 +230,9 @@ struct ARCoverageView: UIViewRepresentable {
                 }
                 if isRecording, ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
                     config.frameSemantics.insert(.sceneDepth)
+                }
+                if captureMode == .vr, ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+                    config.frameSemantics.insert(.sceneDepth) // Always need sceneDepth in VR mode
                 }
                 uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
                 // Active wireframe entities are rebuilt automatically by anchor delegate callbacks
@@ -229,15 +283,22 @@ struct ARCoverageView: UIViewRepresentable {
     // MARK: - Coordinator
 
     class Coordinator: NSObject, ARSessionDelegate {
-        var scanStats: ScanStats?
         weak var arView: ARView?
+        var scanStats: ScanStats?
+        let rootEntity = Entity()
         var privacyFilter: Bool = true
         var activeMeshColor: String = AppConstants.activeMeshColor
+        var captureMode: AppConstants.CaptureMode = .ar
+        var pointCloudManager: PointCloudManager?
+        var vrAnchorEntity: AnchorEntity?
         var isUsingFrontCamera: Bool = false
         var isRecording: Bool = false
         var isSessionReadyBinding: Binding<Bool>?
         var hasSetSessionReady = false
         private var anchorUpdateCounts: [UUID: Int] = [:]
+        /// Coalescing flag: prevents queuing multiple main-actor dispatches
+        /// that each hold CVPixelBuffer references → ARFrame retention.
+        private var pendingVRUpdate = false
 
         // Session capacity tracking
         private var sessionStartTime: Date = Date()
@@ -328,6 +389,8 @@ struct ARCoverageView: UIViewRepresentable {
         /// Vertices are transformed to world space (matching exportMeshOBJ) so the
         /// entity can be anchored at the origin — avoids AnchorEntity transform issues.
         private func buildWireframeForAnchor(_ meshAnchor: ARMeshAnchor) {
+            if captureMode == .vr { return } // No wireframes in VR mode
+            
             let anchorId = meshAnchor.identifier
             let colorStr = activeMeshColor
 
@@ -473,6 +536,39 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
+        func session(_ session: ARSession, didUpdate frame: ARFrame) {
+            // Update PointCloudManager in VR mode.
+            // IMPORTANT: Extract pixel buffers and camera data HERE (on the delegate queue)
+            // so the ARFrame reference is released immediately. Do NOT forward the ARFrame
+            // to the main actor — that queues work and holds references to 10+ frames.
+            guard captureMode == .vr, let pcm = pointCloudManager else { return }
+            
+            // Coalesce: if a main-actor dispatch is already pending, skip this frame.
+            // This limits retained CVPixelBuffers to at most 2 (one in-flight GPU + one pending).
+            guard !pendingVRUpdate else { return }
+            
+            let depthMap = frame.sceneDepth?.depthMap
+            let capturedImage = frame.capturedImage
+            let segBuffer = privacyFilter ? frame.segmentationBuffer : nil
+            let cameraTransform = frame.camera.transform
+            let intrinsics = frame.camera.intrinsics
+            let privFilter = privacyFilter
+            // ARFrame reference is now released — only CVPixelBuffers are retained
+            
+            pendingVRUpdate = true
+            DispatchQueue.main.async { [weak self] in
+                self?.pendingVRUpdate = false
+                pcm.update(
+                    depthMap: depthMap,
+                    capturedImage: capturedImage,
+                    segBuffer: segBuffer,
+                    cameraTransform: cameraTransform,
+                    intrinsics: intrinsics,
+                    privacyFilter: privFilter
+                )
+            }
+        }
+
         // Track anchor update counts via delegate + build active mesh wireframe
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
             guard isRecording else { return }
@@ -511,6 +607,14 @@ struct ARCoverageView: UIViewRepresentable {
             updateStats(in: session)
         }
 
+        func removeAllMeshEntities() {
+            for (_, entry) in activeMeshEntities {
+                entry.anchor.removeFromParent()
+            }
+            activeMeshEntities.removeAll()
+            lastAnchorWireframeTime.removeAll()
+            anchorUpdateCounts.removeAll()
+        }
 
         private func updateStats(in session: ARSession) {
             guard let scanStats = scanStats else { return }

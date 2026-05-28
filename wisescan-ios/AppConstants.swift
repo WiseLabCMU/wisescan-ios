@@ -4,6 +4,11 @@ import CoreGraphics
 /// Centralized repository for UI constants, app defaults, and magic numbers
 /// to ensure unified aesthetics and layout calculations across the app.
 enum AppConstants {
+    enum CaptureMode: String, CaseIterable {
+        case ar = "AR"
+        case vr = "VR"
+    }
+
     enum UI {
         // Picture-in-Picture Wearable Stream Overlay
         static let pipWidth: CGFloat = 100
@@ -32,6 +37,7 @@ enum AppConstants {
         static let ghostMeshColor = "ghostMeshColor"
         static let metaWearablesFPS = "metaWearablesFPS"
         static let metaWearablesPermissionGranted = "metaWearablesPermissionGranted"
+        static let captureMode = "captureMode"
     }
 
     // MARK: - Default Values
@@ -56,6 +62,7 @@ enum AppConstants {
     static let activeMeshColor: String = "Green"
     static let ghostMeshColor: String = "Magenta"
     static let metaWearablesFPS: Double = 7.0
+    static let captureMode: String = CaptureMode.ar.rawValue
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 0.5      // merge distance for face anchors (~head diameter)
