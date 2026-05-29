@@ -548,6 +548,7 @@ struct ARCoverageView: UIViewRepresentable {
             guard !pendingVRUpdate else { return }
             
             let depthMap = frame.sceneDepth?.depthMap
+            let confidenceMap = frame.sceneDepth?.confidenceMap
             let capturedImage = frame.capturedImage
             let segBuffer = privacyFilter ? frame.segmentationBuffer : nil
             let cameraTransform = frame.camera.transform
@@ -562,6 +563,7 @@ struct ARCoverageView: UIViewRepresentable {
                     depthMap: depthMap,
                     capturedImage: capturedImage,
                     segBuffer: segBuffer,
+                    confidenceMap: confidenceMap,
                     cameraTransform: cameraTransform,
                     intrinsics: intrinsics,
                     privacyFilter: privFilter

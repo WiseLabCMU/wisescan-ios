@@ -40,6 +40,7 @@ void projectPointCloud(uint2 id [[thread_position_in_grid]],
                        texture2d<float, access::sample> imageCbCrTexture [[texture(2)]],
                        texture2d<float, access::sample> segTexture [[texture(3)]],
                        texture2d<float, access::write> colorOutput [[texture(4)]],
+                       texture2d<uint, access::read> confidenceTexture [[texture(5)]],
                        device float* vertices [[buffer(0)]],
                        constant PointCloudUniforms& uniforms [[buffer(1)]]) {
 
@@ -70,6 +71,17 @@ void projectPointCloud(uint2 id [[thread_position_in_grid]],
     float2 zero_uv = float2(0, 0);
 
     if (isnan(depth) || depth <= 0.0 || depth > 5.0) {
+        colorOutput.write(float4(0, 0, 0, 0), id);
+        writeVertex(vertices, baseVertex + 0, zero_pos, zero_uv);
+        writeVertex(vertices, baseVertex + 1, zero_pos, zero_uv);
+        writeVertex(vertices, baseVertex + 2, zero_pos, zero_uv);
+        writeVertex(vertices, baseVertex + 3, zero_pos, zero_uv);
+        return;
+    }
+
+    // Confidence filter: 0=Low, 1=Medium, 2=High. Only keep High confidence.
+    uint conf = confidenceTexture.read(id).r;
+    if (conf < 2) {
         colorOutput.write(float4(0, 0, 0, 0), id);
         writeVertex(vertices, baseVertex + 0, zero_pos, zero_uv);
         writeVertex(vertices, baseVertex + 1, zero_pos, zero_uv);

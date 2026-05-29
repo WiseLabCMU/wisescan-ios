@@ -217,6 +217,7 @@ class PointCloudManager {
         depthMap: CVPixelBuffer?,
         capturedImage: CVPixelBuffer,
         segBuffer: CVPixelBuffer?,
+        confidenceMap: CVPixelBuffer?,
         cameraTransform: simd_float4x4,
         intrinsics: simd_float3x3,
         privacyFilter: Bool
@@ -263,12 +264,20 @@ class PointCloudManager {
         if let seg = segMap {
             segTexture = makeTexture(from: seg, pixelFormat: .r8Unorm)
         }
+        
+        var confTexture: MTLTexture? = nil
+        if let conf = confidenceMap {
+            confTexture = makeTexture(from: conf, pixelFormat: .r8Uint)
+        }
 
         computeEncoder.setTexture(depthTexture, index: 0)
         computeEncoder.setTexture(imageYTexture, index: 1)
         computeEncoder.setTexture(imageCbCrTexture, index: 2)
         if let st = segTexture {
             computeEncoder.setTexture(st, index: 3)
+        }
+        if let ct = confTexture {
+            computeEncoder.setTexture(ct, index: 5)
         }
 
         // Color output texture — compute kernel writes RGBA here, UnlitMaterial reads via UV
