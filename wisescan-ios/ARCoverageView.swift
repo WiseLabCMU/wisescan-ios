@@ -174,7 +174,9 @@ struct ARCoverageView: UIViewRepresentable {
     private static func loadGhostMesh(data: Data, coordinator: Coordinator, arView: ARView) {
         DispatchQueue.global(qos: .userInitiated).async {
             // Build procedural wireframe: thin 3D quads for each unique edge
-            guard let resource = MeshParser.generateWireframeMeshResource(from: data) else { return }
+            let descriptors = MeshParser.generateWireframeDescriptors(from: data)
+            guard !descriptors.isEmpty else { return }
+            
             DispatchQueue.main.async {
                 let ghostColorStr = UserDefaults.standard.string(forKey: AppConstants.Key.ghostMeshColor) ?? AppConstants.ghostMeshColor
                 let color = ghostColorStr.toSIMD4Color
@@ -182,9 +184,20 @@ struct ARCoverageView: UIViewRepresentable {
                 let material = UnlitMaterial(color: UIColor(
                     red: CGFloat(color.x), green: CGFloat(color.y), blue: CGFloat(color.z), alpha: 1.0
                 ))
-                let modelEntity = ModelEntity(mesh: resource, materials: [material])
+                
+                let containerEntity = Entity()
+                
+                // Generating resources on the main thread, 1 chunk per MeshResource.
+                // This bypasses RealityKit's multi-part internal buffers and concurrent background generation crashes.
+                for desc in descriptors {
+                    if let resource = try? MeshResource.generate(from: [desc]) {
+                        let chunkModel = ModelEntity(mesh: resource, materials: [material])
+                        containerEntity.addChild(chunkModel)
+                    }
+                }
+                
                 let anchorEntity = AnchorEntity(world: .zero)
-                anchorEntity.addChild(modelEntity)
+                anchorEntity.addChild(containerEntity)
                 coordinator.ghostAnchorEntity = anchorEntity
 
                 // Only add immediately if no world map is loaded (no relocalization needed)
@@ -211,6 +224,10 @@ struct ARCoverageView: UIViewRepresentable {
         var isSessionReadyBinding: Binding<Bool>?
         var hasSetSessionReady = false
         private var anchorUpdateCounts: [UUID: Int] = [:]
+        /// Per-anchor vertex/face counts — avoids reading geometry from session.currentFrame
+        /// which pins ARFrame memory alive and triggers "retaining N ARFrames" warnings.
+        private var anchorVertexCounts: [UUID: Int] = [:]
+        private var anchorFaceCounts: [UUID: Int] = [:]
 
         // Session capacity tracking
         private var sessionStartTime: Date = Date()
@@ -220,7 +237,7 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Active Mesh Wireframe properties
         /// One wireframe entity per ARMeshAnchor, keyed by anchor UUID.
-        private var activeMeshEntities: [UUID: (anchor: AnchorEntity, model: ModelEntity)] = [:]
+        private var activeMeshEntities: [UUID: (anchor: AnchorEntity, model: Entity)] = [:]
         /// Throttle: last time wireframe was rebuilt for each anchor.
         private var lastAnchorWireframeTime: [UUID: Date] = [:]
         /// Minimum interval between wireframe rebuilds for the same anchor (seconds).
@@ -241,6 +258,8 @@ struct ARCoverageView: UIViewRepresentable {
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
             anchorUpdateCounts.removeAll()
+            anchorVertexCounts.removeAll()
+            anchorFaceCounts.removeAll()
             trackingDegradationCount = 0
             totalTrackingUpdates = 0
             sessionStartTime = Date()
@@ -262,6 +281,8 @@ struct ARCoverageView: UIViewRepresentable {
         /// Reset coordinator state when returning to nominal (idle) mode.
         func resetForNominal() {
             anchorUpdateCounts.removeAll()
+            anchorVertexCounts.removeAll()
+            anchorFaceCounts.removeAll()
             trackingDegradationCount = 0
             totalTrackingUpdates = 0
 
@@ -308,12 +329,15 @@ struct ARCoverageView: UIViewRepresentable {
             let material = UnlitMaterial(color: UIColor(
                 red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1.0
             ))
-            for (anchorId, entry) in activeMeshEntities {
-                guard let mesh = entry.model.model?.mesh else { continue }
-                entry.model.removeFromParent()
-                let newModel = ModelEntity(mesh: mesh, materials: [material])
-                entry.anchor.addChild(newModel)
-                activeMeshEntities[anchorId] = (anchor: entry.anchor, model: newModel)
+            for (_, entry) in activeMeshEntities {
+                // The stored `model` is a container Entity. Iterate its children (the chunks).
+                let children = entry.model.children.map { $0 }
+                for child in children {
+                    guard let modelEntity = child as? ModelEntity, let mesh = modelEntity.model?.mesh else { continue }
+                    modelEntity.removeFromParent()
+                    let newModel = ModelEntity(mesh: mesh, materials: [material])
+                    entry.model.addChild(newModel)
+                }
             }
         }
 
@@ -357,16 +381,24 @@ struct ARCoverageView: UIViewRepresentable {
             let faceStride = faces.bytesPerIndex * faces.indexCountPerPrimitive
             var faceIndices = [(UInt32, UInt32, UInt32)]()
             faceIndices.reserveCapacity(faces.count)
+            let vertexCount = worldPositions.count
             for i in 0..<faces.count {
                 let ptr = faces.buffer.contents().advanced(by: i * faceStride)
-                faceIndices.append(ptr.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee)
+                let face = ptr.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
+                // Validate indices are within vertex bounds — corrupted geometry
+                // from recycled ARFrame buffers can produce wild index values.
+                guard Int(face.0) < vertexCount && Int(face.1) < vertexCount && Int(face.2) < vertexCount else {
+                    continue
+                }
+                faceIndices.append(face)
             }
             // ── ARMeshAnchor reference is now released — geometry buffers won't retain ARFrame ──
 
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let resource = MeshParser.buildWireframeMesh(
+                let descriptors = MeshParser.buildWireframeDescriptors(
                     vertices: worldPositions, faces: faceIndices, thickness: 0.001
-                ) else { return }
+                )
+                guard !descriptors.isEmpty else { return }
 
                 DispatchQueue.main.async {
                     guard let self = self, let arView = self.arView, self.isRecording else { return }
@@ -376,22 +408,28 @@ struct ARCoverageView: UIViewRepresentable {
                         red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1.0
                     ))
 
+                    let containerEntity = Entity()
+                    for desc in descriptors {
+                        if let res = try? MeshResource.generate(from: [desc]) {
+                            let model = ModelEntity(mesh: res, materials: [material])
+                            containerEntity.addChild(model)
+                        }
+                    }
+
                     if let existing = self.activeMeshEntities[anchorId] {
                         // Replace the model entity entirely to avoid RealityKit render
                         // thread race conditions. In-place mesh mutation (model.model?.mesh = ...)
                         // can crash because the render thread may read the old index buffer
                         // against the new vertex buffer mid-swap.
                         existing.model.removeFromParent()
-                        let newModel = ModelEntity(mesh: resource, materials: [material])
-                        existing.anchor.addChild(newModel)
-                        self.activeMeshEntities[anchorId] = (anchor: existing.anchor, model: newModel)
+                        existing.anchor.addChild(containerEntity)
+                        self.activeMeshEntities[anchorId] = (anchor: existing.anchor, model: containerEntity)
                     } else {
                         // Create new entity at world origin (vertices are world-space)
-                        let modelEntity = ModelEntity(mesh: resource, materials: [material])
                         let anchorEntity = AnchorEntity(world: .zero)
-                        anchorEntity.addChild(modelEntity)
+                        anchorEntity.addChild(containerEntity)
                         arView.scene.addAnchor(anchorEntity)
-                        self.activeMeshEntities[anchorId] = (anchor: anchorEntity, model: modelEntity)
+                        self.activeMeshEntities[anchorId] = (anchor: anchorEntity, model: containerEntity)
                     }
                 }
             }
@@ -550,6 +588,8 @@ struct ARCoverageView: UIViewRepresentable {
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     anchorUpdateCounts[mesh.identifier] = 1
+                    anchorVertexCounts[mesh.identifier] = mesh.geometry.vertices.count
+                    anchorFaceCounts[mesh.identifier] = mesh.geometry.faces.count
                     buildWireframeForAnchor(mesh)
                 }
             }
@@ -576,6 +616,8 @@ struct ARCoverageView: UIViewRepresentable {
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     anchorUpdateCounts[mesh.identifier, default: 0] += 1
+                    anchorVertexCounts[mesh.identifier] = mesh.geometry.vertices.count
+                    anchorFaceCounts[mesh.identifier] = mesh.geometry.faces.count
                     buildWireframeForAnchor(mesh)
                 }
             }
@@ -587,6 +629,8 @@ struct ARCoverageView: UIViewRepresentable {
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     anchorUpdateCounts.removeValue(forKey: mesh.identifier)
+                    anchorVertexCounts.removeValue(forKey: mesh.identifier)
+                    anchorFaceCounts.removeValue(forKey: mesh.identifier)
                     // Remove wireframe entity for this anchor
                     if let entry = activeMeshEntities.removeValue(forKey: mesh.identifier) {
                         entry.anchor.removeFromParent()
@@ -601,40 +645,29 @@ struct ARCoverageView: UIViewRepresentable {
         private func updateStats(in session: ARSession) {
             guard let scanStats = scanStats else { return }
 
-            // Extract all data from the frame immediately, then release the reference.
-            // This prevents ARKit's "retaining N ARFrames" warning caused by holding
-            // strong references to ARFrame while dispatching to main thread.
-            let frame = session.currentFrame
-            guard let anchors = frame?.anchors else { return }
-            
-            // Extract ARKit's cumulative assessment of the map
+            // ── Extract worldMappingStatus in a tight scope ──
+            // Only read the enum value; do NOT iterate frame.anchors or access
+            // ARMeshAnchor.geometry — those buffers pin ARFrame memory alive and
+            // cause "retaining N ARFrames" warnings that starve the SLAM pipeline.
             var statusStr = "notAvailable"
-            if #available(iOS 12.0, *) {
-                if let status = frame?.worldMappingStatus {
-                    switch status {
-                    case .mapped: statusStr = "mapped"
-                    case .extending: statusStr = "extending"
-                    case .limited: statusStr = "limited"
-                    case .notAvailable: statusStr = "notAvailable"
-                    @unknown default: statusStr = "notAvailable"
-                    }
+            if let status = session.currentFrame?.worldMappingStatus {
+                switch status {
+                case .mapped: statusStr = "mapped"
+                case .extending: statusStr = "extending"
+                case .limited: statusStr = "limited"
+                case .notAvailable: statusStr = "notAvailable"
+                @unknown default: statusStr = "notAvailable"
                 }
             }
-            // ARFrame reference is now released — only extracted values are retained
+            // session.currentFrame released — no geometry buffers accessed
 
-            var totalVerts = 0
-            var totalFaces = 0
-            var totalUpdates = 0
-            var anchorCount = 0
-
-            for anchor in anchors {
-                guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
-                totalVerts += meshAnchor.geometry.vertices.count
-                totalFaces += meshAnchor.geometry.faces.count
-                anchorCount += 1
-
-                totalUpdates += anchorUpdateCounts[meshAnchor.identifier] ?? 0
-            }
+            // Use pre-tracked per-anchor counts from delegate callbacks.
+            // These are maintained in didAdd/didUpdate/didRemove where anchor
+            // data is valid for the callback duration — no extra retention.
+            let totalVerts = anchorVertexCounts.values.reduce(0, +)
+            let totalFaces = anchorFaceCounts.values.reduce(0, +)
+            let anchorCount = anchorVertexCounts.count
+            let totalUpdates = anchorUpdateCounts.values.reduce(0, +)
 
             // Compute capacity metrics
             let duration = Date().timeIntervalSince(sessionStartTime)

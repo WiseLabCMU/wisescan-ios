@@ -62,64 +62,50 @@ struct PrivacyBlurOverlay: View {
     }
 
     private func detectAndPixelatePersons() {
-        // Extract the pixel buffer immediately and release the ARFrame reference.
-        // This prevents ARKit's "retaining N ARFrames" warning caused by holding
-        // strong refs while Vision segmentation runs on a background queue.
-        guard let pixelBuffer = arSession?.currentFrame?.capturedImage else { return }
-        // ARFrame is now released — only the CVPixelBuffer is retained
+        guard let frame = arSession?.currentFrame,
+              let segmentationBuffer = frame.segmentationBuffer else { return }
+        let pixelBuffer = frame.capturedImage
+        // ARFrame is now released — only the CVPixelBuffers are retained
         
         let orientation = UIApplication.shared.currentInterfaceOrientation
-
-        let request = VNGeneratePersonSegmentationRequest()
-        request.qualityLevel = .fast
-        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
-
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation.visionPropertyOrientation, options: [:])
         
         DispatchQueue.global(qos: .userInteractive).async {
-            do {
-                try handler.perform([request])
-                guard let maskObservation = request.results?.first as? VNPixelBufferObservation else { return }
-                
-                // Keep everything in original landscape coordinates
-                let originalCI = CIImage(cvPixelBuffer: pixelBuffer)
-                let maskCI = CIImage(cvPixelBuffer: maskObservation.pixelBuffer)
+            // Keep everything in original landscape coordinates
+            let originalCI = CIImage(cvPixelBuffer: pixelBuffer)
+            let maskCI = CIImage(cvPixelBuffer: segmentationBuffer)
 
-                // Scale mask to original image size
-                let scaleX = originalCI.extent.width / maskCI.extent.width
-                let scaleY = originalCI.extent.height / maskCI.extent.height
-                let scaledMask = maskCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+            // Scale mask to original image size
+            let scaleX = originalCI.extent.width / maskCI.extent.width
+            let scaleY = originalCI.extent.height / maskCI.extent.height
+            let scaledMask = maskCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
 
-                // Apply pixelation
-                guard let pixelateFilter = CIFilter(name: "CIPixellate") else { return }
-                pixelateFilter.setValue(originalCI, forKey: kCIInputImageKey)
-                pixelateFilter.setValue(30.0, forKey: kCIInputScaleKey)
-                guard let pixelatedCI = pixelateFilter.outputImage else { return }
+            // Apply pixelation
+            guard let pixelateFilter = CIFilter(name: "CIPixellate") else { return }
+            pixelateFilter.setValue(originalCI, forKey: kCIInputImageKey)
+            pixelateFilter.setValue(30.0, forKey: kCIInputScaleKey)
+            guard let pixelatedCI = pixelateFilter.outputImage else { return }
 
-                // Blend with clear background
-                let clearBg = CIImage(color: .clear).cropped(to: originalCI.extent)
-                
-                guard let blendFilter = CIFilter(name: "CIBlendWithMask") else { return }
-                blendFilter.setValue(pixelatedCI, forKey: kCIInputImageKey)
-                blendFilter.setValue(clearBg, forKey: kCIInputBackgroundImageKey)
-                blendFilter.setValue(scaledMask, forKey: kCIInputMaskImageKey)
-                
-                guard let outputCI = blendFilter.outputImage else { return }
-                
-                // Physically rotate the blended image before creating CGImage 
-                // so SwiftUI's .resizable() doesn't strip the orientation metadata.
-                let rotatedCI = outputCI.oriented(orientation.visionPropertyOrientation)
-                
-                let context = CIContext(options: [.useSoftwareRenderer: false])
-                guard let cgImage = context.createCGImage(rotatedCI, from: rotatedCI.extent) else { return }
-                
-                let uiImage = UIImage(cgImage: cgImage)
-                
-                DispatchQueue.main.async {
-                    self.overlayImage = uiImage
-                }
-            } catch {
-                print("Person segmentation failed: \(error)")
+            // Blend with clear background
+            let clearBg = CIImage(color: .clear).cropped(to: originalCI.extent)
+            
+            guard let blendFilter = CIFilter(name: "CIBlendWithMask") else { return }
+            blendFilter.setValue(pixelatedCI, forKey: kCIInputImageKey)
+            blendFilter.setValue(clearBg, forKey: kCIInputBackgroundImageKey)
+            blendFilter.setValue(scaledMask, forKey: kCIInputMaskImageKey)
+            
+            guard let outputCI = blendFilter.outputImage else { return }
+            
+            // Physically rotate the blended image before creating CGImage 
+            // so SwiftUI's .resizable() doesn't strip the orientation metadata.
+            let rotatedCI = outputCI.oriented(orientation.visionPropertyOrientation)
+            
+            let context = CIContext(options: [.useSoftwareRenderer: false])
+            guard let cgImage = context.createCGImage(rotatedCI, from: rotatedCI.extent) else { return }
+            
+            let uiImage = UIImage(cgImage: cgImage)
+            
+            DispatchQueue.main.async {
+                self.overlayImage = uiImage
             }
         }
     }

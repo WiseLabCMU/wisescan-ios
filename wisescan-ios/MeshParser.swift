@@ -78,17 +78,18 @@ enum MeshParser {
     /// - Parameters:
     ///   - objData: Raw OBJ file data
     ///   - thickness: Width of the wireframe lines in meters (default 0.001 = 1mm)
-    static func generateWireframeMeshResource(from objData: Data, thickness: Float = 0.001) -> MeshResource? {
+    static func generateWireframeDescriptors(from objData: Data, thickness: Float = 0.001) -> [MeshDescriptor] {
         guard let parsed = parseOBJ(from: objData) else {
             print("MeshParser: wireframe: Found 0 vertices or 0 faces.")
-            return nil
+            return []
         }
-        return buildWireframeMesh(vertices: parsed.vertices, faces: parsed.faces, thickness: thickness)
+        return buildWireframeDescriptors(vertices: parsed.vertices, faces: parsed.faces, thickness: thickness)
     }
 
-    /// Builds wireframe geometry from vertices and triangle faces.
+    /// Builds wireframe geometry descriptors from vertices and triangle faces.
     /// For each unique edge, creates a thin quad (2 triangles) oriented perpendicular to the edge.
-    static func buildWireframeMesh(vertices: [SIMD3<Float>], faces: [(UInt32, UInt32, UInt32)], thickness: Float) -> MeshResource? {
+    /// Chunks the descriptors to prevent 16-bit index overflows in RealityKit.
+    static func buildWireframeDescriptors(vertices: [SIMD3<Float>], faces: [(UInt32, UInt32, UInt32)], thickness: Float) -> [MeshDescriptor] {
 
         // Collect unique edges using a sorted pair key to avoid duplicates
         struct Edge: Hashable {
@@ -106,80 +107,65 @@ enum MeshParser {
             uniqueEdges.insert(Edge(i2, i0))
         }
 
-        // Pre-allocate: 4 verts and 6 indices (2 triangles) per edge
-        var positions = [SIMD3<Float>]()
-        positions.reserveCapacity(uniqueEdges.count * 4)
-        var indices = [UInt32]()
-        indices.reserveCapacity(uniqueEdges.count * 6)
+        let edgesArray = Array(uniqueEdges)
+        let maxEdgesPerChunk = 16000 // 64,000 vertices per chunk (keeps under 16-bit index limit)
+        var descriptors = [MeshDescriptor]()
 
         let halfT = thickness * 0.5
-        var idx: UInt32 = 0
 
-        for edge in uniqueEdges {
-            let p0 = vertices[Int(edge.a)]
-            let p1 = vertices[Int(edge.b)]
+        for chunkStart in stride(from: 0, to: edgesArray.count, by: maxEdgesPerChunk) {
+            let chunkEnd = min(chunkStart + maxEdgesPerChunk, edgesArray.count)
+            let chunk = edgesArray[chunkStart..<chunkEnd]
 
-            let dir = p1 - p0
-            let len = simd_length(dir)
-            guard len > 1e-8 else { continue }
+            var positions = [SIMD3<Float>]()
+            positions.reserveCapacity(chunk.count * 4)
+            var indices = [UInt32]()
+            indices.reserveCapacity(chunk.count * 6)
+            
+            var idx: UInt32 = 0
+            
+            for edge in chunk {
+                guard Int(edge.a) < vertices.count && Int(edge.b) < vertices.count else { continue }
+                let p0 = vertices[Int(edge.a)]
+                let p1 = vertices[Int(edge.b)]
 
-            // Find a perpendicular offset vector
-            let up = SIMD3<Float>(0, 1, 0)
-            var perp = simd_cross(dir, up)
-            if simd_length(perp) < 1e-6 {
-                // Edge is parallel to up — use a different reference
-                perp = simd_cross(dir, SIMD3<Float>(1, 0, 0))
+                let dir = p1 - p0
+                let len = simd_length(dir)
+                guard len > 1e-8 else { continue }
+
+                // Find a perpendicular offset vector
+                let up = SIMD3<Float>(0, 1, 0)
+                var perp = simd_cross(dir, up)
+                if simd_length(perp) < 1e-6 {
+                    // Edge is parallel to up — use a different reference
+                    perp = simd_cross(dir, SIMD3<Float>(1, 0, 0))
+                }
+                perp = simd_normalize(perp) * halfT
+
+                // Build a thin quad: 4 corners
+                let v0 = p0 - perp
+                let v1 = p0 + perp
+                let v2 = p1 + perp
+                let v3 = p1 - perp
+
+                positions.append(contentsOf: [v0, v1, v2, v3])
+
+                // Two triangles: (0,1,2) and (0,2,3)
+                indices.append(contentsOf: [idx, idx+1, idx+2, idx, idx+2, idx+3])
+                idx += 4
             }
-            perp = simd_normalize(perp) * halfT
-
-            // Build a thin quad: 4 corners
-            let v0 = p0 - perp
-            let v1 = p0 + perp
-            let v2 = p1 + perp
-            let v3 = p1 - perp
-
-            positions.append(contentsOf: [v0, v1, v2, v3])
-
-            // Two triangles: (0,1,2) and (0,2,3)
-            indices.append(contentsOf: [idx, idx+1, idx+2, idx, idx+2, idx+3])
-            idx += 4
+            
+            if !positions.isEmpty {
+                var desc = MeshDescriptor(name: "WireframeChunk_\(chunkStart)")
+                desc.positions = MeshBuffer(positions)
+                desc.primitives = .triangles(indices)
+                descriptors.append(desc)
+            }
         }
 
-        guard !positions.isEmpty else { return nil }
-
-        var desc = MeshDescriptor(name: "WireframeMesh")
-        desc.positions = MeshBuffer(positions)
-        desc.primitives = .triangles(indices)
-
-        return try? MeshResource.generate(from: [desc])
+        return descriptors
     }
 
-    /// Generates wireframe geometry directly from an ARMeshAnchor's live geometry.
-    /// Used for active scan wireframe rendering without OBJ serialization round-trip.
-    static func generateWireframeMeshResource(from meshAnchor: ARMeshAnchor, thickness: Float = 0.001) -> MeshResource? {
-        let geometry = meshAnchor.geometry
-        let vertices = geometry.vertices
-        let faces = geometry.faces
-
-        guard faces.bytesPerIndex == 4, faces.indexCountPerPrimitive == 3 else { return nil }
-
-        var positions: [SIMD3<Float>] = []
-        positions.reserveCapacity(vertices.count)
-        for i in 0..<vertices.count {
-            let ptr = vertices.buffer.contents().advanced(by: i * vertices.stride)
-            positions.append(ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee)
-        }
-
-        let faceStride = faces.bytesPerIndex * faces.indexCountPerPrimitive
-        var faceIndices: [(UInt32, UInt32, UInt32)] = []
-        faceIndices.reserveCapacity(faces.count)
-        for i in 0..<faces.count {
-            let ptr = faces.buffer.contents().advanced(by: i * faceStride)
-            faceIndices.append(ptr.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee)
-        }
-
-        return buildWireframeMesh(vertices: positions, faces: faceIndices, thickness: thickness)
-    }
 
     // MARK: - Un-indexed mesh generation (for wireframe shader with barycentric UVs)
 
