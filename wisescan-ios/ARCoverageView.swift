@@ -91,6 +91,7 @@ struct ARCoverageView: UIViewRepresentable {
                     enableMeshReconstruction: isRecording,
                     worldMapURL: initialWorldMapURL
                 )
+
                 let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
                 context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
                 context.coordinator.hasSeenRelocalizing = false
@@ -195,7 +196,11 @@ struct ARCoverageView: UIViewRepresentable {
                         containerEntity.addChild(chunkModel)
                     }
                 }
-                
+                // The ghost OBJ is already baked in the world frame of the source
+                // scan's ARWorldMap (mesh + map are captured together at save time;
+                // see performStopRecording). After relocalization the live session
+                // adopts that same map coordinate frame, so the mesh overlays the
+                // real space correctly at identity — no per-anchor transform needed.
                 let anchorEntity = AnchorEntity(world: .zero)
                 anchorEntity.addChild(containerEntity)
                 coordinator.ghostAnchorEntity = anchorEntity
@@ -204,9 +209,11 @@ struct ARCoverageView: UIViewRepresentable {
                 // or if the session has already relocalized.
                 let canAdd = !coordinator.hasWorldMap || coordinator.hasSeenRelocalizing
                 if canAdd && arView.session.currentFrame?.camera.trackingState == .normal && !coordinator.hasAddedGhostMesh {
-                    print("Ghost mesh ready, adding immediately (hasWorldMap=\(coordinator.hasWorldMap), relocalized=\(coordinator.hasSeenRelocalizing))")
-                    arView.scene.addAnchor(anchorEntity)
-                    coordinator.hasAddedGhostMesh = true
+                    if let ghostAnchor = coordinator.ghostAnchorEntity {
+                        print("Ghost mesh ready, adding immediately (hasWorldMap=\(coordinator.hasWorldMap), relocalized=\(coordinator.hasSeenRelocalizing))")
+                        arView.scene.addAnchor(ghostAnchor)
+                        coordinator.hasAddedGhostMesh = true
+                    }
                 }
             }
         }
@@ -597,18 +604,20 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-            // Always refresh boundary anchor transform — ARKit refines anchor
-            // positions during relocalization, and the alignment UI needs the
-            // latest position even before recording starts.
-            for anchor in anchors where anchor.name == ARCoverageView.boundaryAnchorName {
-                let transform = anchor.transform
-                DispatchQueue.main.async { [weak self] in
-                    self?.scanStore?.boundaryAnchorTransform = transform
-                    // Move the visual marker to match the refined anchor position
-                    let pos = SIMD3<Float>(transform.columns.3.x,
-                                           transform.columns.3.y,
-                                           transform.columns.3.z)
-                    self?.boundaryAnchorEntity?.transform.translation = pos
+            for anchor in anchors {
+                // Always refresh boundary anchor transform — ARKit refines anchor
+                // positions during relocalization, and the alignment UI needs the
+                // latest position even before recording starts.
+                if anchor.name == ARCoverageView.boundaryAnchorName {
+                    let transform = anchor.transform
+                    DispatchQueue.main.async { [weak self] in
+                        self?.scanStore?.boundaryAnchorTransform = transform
+                        // Move the visual marker to match the refined anchor position
+                        let pos = SIMD3<Float>(transform.columns.3.x,
+                                               transform.columns.3.y,
+                                               transform.columns.3.z)
+                        self?.boundaryAnchorEntity?.transform.translation = pos
+                    }
                 }
             }
 

@@ -21,7 +21,8 @@ struct AlignmentOverlayView: View {
         scanStore.capturePhase == .alignedReady && isTracking
     }
 
-    /// Distance to boundary anchor (optional visual aid — may be nil).
+    /// Distance to the PREVIOUS link's boundary pin baked into the loaded map
+    /// (relocalization-confidence cue, not the boundary being created — may be nil).
     private var distance: Float? {
         scanStore.distanceToBoundaryAnchor
     }
@@ -31,7 +32,7 @@ struct AlignmentOverlayView: View {
         case .loadingWorldMap:
             return "Relocalizing with previous scan..."
         case .aligning:
-            return "Relocalized — walk to your boundary position"
+            return "Relocalized — walk to where the new boundary should be, then confirm"
         case .alignedReady:
             return "Ready — confirm to start scanning adjacent space"
         default:
@@ -63,13 +64,19 @@ struct AlignmentOverlayView: View {
                         .multilineTextAlignment(.center)
                 }
 
-                // Optional distance indicator (only shown if a boundary anchor exists)
+                // Previous-link reference (only shown if the loaded map already had a
+                // boundary anchor from an earlier extend). This is NOT the boundary
+                // you're about to create — it marks where this scan was previously
+                // linked. Shown as a neutral, informational relocalization cue (a
+                // reading near the marker confirms ARKit locked onto the map), not a
+                // target to walk toward — hence no green/proximity coloring.
                 if scanStore.capturePhase != .loadingWorldMap, let dist = distance {
-                    VStack(spacing: 8) {
-                        Text(String(format: "%.1fm from boundary pin", dist))
-                            .font(.system(size: 20, weight: .semibold, design: .rounded))
-                            .foregroundColor(dist < 1.0 ? .green : dist < 2.0 ? .yellow : .white.opacity(0.6))
+                    HStack(spacing: 6) {
+                        Image(systemName: "link")
+                        Text(String(format: "Previous link · %.1f m away", dist))
                     }
+                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                    .foregroundColor(.white.opacity(0.6))
                 }
 
                 // Tracking state warning

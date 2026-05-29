@@ -96,9 +96,6 @@ extension CaptureView {
             }
         }
 
-        // ── Now switch to nominal mode (drops mesh anchors, frees AR memory) ──
-        isRecording = false
-
         var finalMeshResult = meshResult
 
         // If test modes are active and no mesh was generated (e.g. Simulator), inject a dummy mesh
@@ -112,10 +109,12 @@ extension CaptureView {
         }
 
         guard let result = finalMeshResult, !result.data.isEmpty else {
+            // Switch to nominal mode (drops mesh anchors, frees AR memory)
+            isRecording = false
             saveMessage = "No Mesh Data"
             frameCaptureSession = FrameCaptureSession()
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
-            
+
             // Clean up any empty location created for this flow
             if let locId = scanStore.activeLocationForScan {
                 let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
@@ -124,13 +123,13 @@ extension CaptureView {
                     try? modelContext.save()
                 }
             }
-            
+
             if completion == nil {
                 scanStore.resetCaptureState()
             } else {
                 scanStore.pendingStitchLink = nil
             }
-            
+
             clearMessage()
             completion?(nil)
             return
@@ -158,19 +157,38 @@ extension CaptureView {
         let capturedLocationId = scanStore.activeLocationForScan
         let capturedScanCase = scanStore.activeScanCase
 
-        // Run vertex coloring in background using saved camera frames (.utility QoS
-        // so the name-prompt keyboard stays responsive while coloring runs)
-        DispatchQueue.global(qos: .utility).async {
-            let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
-                objData: result.data,
-                rawDataDir: rawDataPath
-            )
+        // ── Capture the ARWorldMap co-framed with the OBJ, BEFORE coloring ──
+        // mesh.obj was just baked from the live world frame above. The world map
+        // must be grabbed before the seconds-long vertex coloring step: across a
+        // long gap ARKit can apply a loop-closure/drift correction that shifts the
+        // world origin, and when it does the reloaded map relocalizes dead-on (its
+        // anchors moved with the correction) while the ghost mesh — frozen in the
+        // pre-correction frame — renders misaligned. That was the alignment bug.
+        //
+        // Disable scene reconstruction first via a direct run (NOT the isRecording
+        // binding, to avoid a second session.run racing getCurrentWorldMap). This
+        // drops the mesh anchors so they don't bloat the map, while preserving the
+        // world origin (no resetTracking) so the map stays co-framed with the OBJ.
+        // The identity-transform origin anchor marks that shared frame's origin.
+        currentARSession?.run(ARCoverageView.makeConfiguration())
+        saveMessage = "Saving World Map..."
+        let originAnchor = ARAnchor(name: "Scan4D_Mesh_Origin", transform: matrix_identity_float4x4)
+        currentARSession?.add(anchor: originAnchor)
 
+        VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL in
             DispatchQueue.main.async {
-                self.saveMessage = "Saving World Map..."
+                // Map captured. Sync the isRecording binding so SwiftUI's updateUIView
+                // reflects nominal mode (reconstruction was already disabled above).
+                self.isRecording = false
 
-                // Export ARWorldMap for Scan4D relocalization
-                VertexColorAccumulator.exportWorldMap(from: self.currentARSession) { mapURL in
+                // Run vertex coloring in background using saved camera frames (.utility QoS
+                // so the name-prompt keyboard stays responsive while coloring runs)
+                DispatchQueue.global(qos: .utility).async {
+                    let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
+                        objData: result.data,
+                        rawDataDir: rawDataPath
+                    )
+
                     DispatchQueue.main.async {
                         // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping
                         if let rawDir = rawDataPath {
