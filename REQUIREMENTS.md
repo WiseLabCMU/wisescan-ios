@@ -62,25 +62,41 @@ graph LR
 graph TD
     subgraph "App Shell"
         AD[AppDelegate.swift]
+        AC[AppConstants.swift]
         CV[ContentView.swift]
     end
 
     subgraph "Tab Views"
         DV[DashboardView.swift]
         CAP[CaptureView.swift]
+        LDV[LocationDetailView.swift]
         WV[ScansListView.swift]
     end
 
-    subgraph "AR Engine"
+    subgraph "AR/VR Engine"
         ARC[ARCoverageView.swift]
+        PCM[PointCloudManager.swift]
         FBO[FaceBlurOverlay.swift]
         FCS[FrameCaptureSession.swift]
+        VCA[VertexColorAccumulator.swift]
     end
 
     subgraph "Data Layer"
         SS[ScanStore.swift]
+        SEM[ScanExportManager.swift]
         MP[MeshPreviewView.swift]
+        MC[MeshConverter.swift]
+        MPR[MeshParser.swift]
+    end
+
+    subgraph "Peripherals"
+        MWM[MetaWearableManager.swift]
+        LM[LocationManager.swift]
+    end
+
+    subgraph "Settings & Guides"
         SV[SettingsView.swift]
+        UG[UserGuideView.swift]
     end
 
     AD --> CV
@@ -91,28 +107,49 @@ graph TD
     CAP --> FBO
     CAP --> FCS
     CAP --> SS
+    ARC --> PCM
+    ARC --> VCA
     WV --> SS
-    WV --> MP
-    WV --> SV
+    WV --> LDV
+    LDV --> SEM
+    LDV --> MP
+    LDV --> SV
     ARC --> SS
+    DV --> MWM
+    MWM --> FCS
+    CAP --> LM
 ```
 
 ### Source File Index
 
 | File | Role | Key Types / Functions |
 |:-----|:-----|:----------------------|
-| [AppDelegate.swift](wisescan-ios/AppDelegate.swift) | App lifecycle, splash screen | `AppDelegate` |
-| [ContentView.swift](wisescan-ios/ContentView.swift) | Root TabView, LiDAR check, Developer Mode banner | `ContentView`, `hasLiDAR`, `developerMode` |
+| [AppDelegate.swift](wisescan-ios/AppDelegate.swift) | App lifecycle, orientation locking | `AppDelegate`, `orientationLocked` |
+| [AppConstants.swift](wisescan-ios/AppConstants.swift) | Centralized constants, defaults, pipeline tuning | `AppConstants`, `CaptureMode`, `Key`, `UI` |
+| [ContentView.swift](wisescan-ios/ContentView.swift) | Root TabView (Dashboard, Capture, Scans), LiDAR check | `ContentView`, `hasLiDAR` |
 | [DashboardView.swift](wisescan-ios/DashboardView.swift) | Server status, wearable pairing | `DashboardView` |
-| [CaptureView.swift](wisescan-ios/CaptureView.swift) | Live capture UI, recording, Scan4D naming, capacity HUD, flip camera | `CaptureView`, `startRecording()`, `stopRecording()`, `savePendingScan()` |
-| [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) | ARKit session, mesh export | `ARCoverageView`, `Coordinator`, `exportMeshOBJ()`, `exportWorldMap()` |
-| [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) | Live face detection + blur for exports | `FaceBlurOverlay`, `FaceBlurUtil.blurFaces()` |
+| [CaptureView.swift](wisescan-ios/CaptureView.swift) | Live capture UI, recording, Scan4D naming, capacity HUD | `CaptureView`, `startRecording()`, `stopRecording()`, `savePendingScan()` |
+| [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) | ARKit session, mesh wireframe (AR), point cloud (VR), mesh export | `ARCoverageView`, `Coordinator`, `exportMeshOBJ()`, `PointCloudManager` |
+| [PointCloudManager.swift](wisescan-ios/PointCloudManager.swift) | VR mode: live depth point cloud rendering via Metal | `PointCloudManager`, `setup()`, `updatePointCloud()` |
+| [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) | Privacy segmentation overlay + pixelation utility for exports | `PrivacyBlurOverlay`, `PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters()` |
 | [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) | RAW data capture (RGB, depth, poses) | `FrameCaptureSession`, `start()`, `stop()`, `writeTransformsJSON()`, `writePolycamCameras()` |
+| [LocationDetailView.swift](wisescan-ios/LocationDetailView.swift) | Per-location scan management, export, upload, preview | `LocationDetailView` |
 | [ScansListView.swift](wisescan-ios/ScansListView.swift) | Scan cards, location groups, rename, upload | `ScansListView`, `ScanCard` |
 | [MeshPreviewView.swift](wisescan-ios/MeshPreviewView.swift) | SceneKit 3D preview with vertex colors | `MeshPreviewView` |
 | [ScanStore.swift](wisescan-ios/ScanStore.swift) | Data models, location hierarchy, capacity scoring | `ScanStore`, `ScanLocation`, `CapturedScan`, `ScanStats`, `capacityScore` |
+| [ScanExportManager.swift](wisescan-ios/ScanExportManager.swift) | Export packaging for all formats | `ScanExportManager`, `prepareExport()` |
 | [MeshConverter.swift](wisescan-ios/MeshConverter.swift) | OBJ→PLY and OBJ→USDZ mesh conversion | `MeshConverter.objToPLY()`, `MeshConverter.objToUSDZ()` |
-| [SettingsView.swift](wisescan-ios/SettingsView.swift) | Upload URL, RAW settings, Developer Mode, in-app guide | `SettingsView`, `developerMode`, `flipCameraEnabled` |
+| [MeshParser.swift](wisescan-ios/MeshParser.swift) | Wavefront OBJ parser | `MeshParser`, `OBJData`, `parseOBJ()` |
+| [VertexColorAccumulator.swift](wisescan-ios/VertexColorAccumulator.swift) | Post-scan vertex coloring + ARWorldMap export | `VertexColorAccumulator`, `exportWorldMap()` |
+| [MetaWearableManager.swift](wisescan-ios/MetaWearableManager.swift) | Meta Wearables DAT SDK lifecycle, streaming, proxy frames | `MetaWearableManager` |
+| [LocationManager.swift](wisescan-ios/LocationManager.swift) | GPS/heading updates for scan metadata | `LocationManager` |
+| [PermissionsOverlay.swift](wisescan-ios/PermissionsOverlay.swift) | Camera/AR permission request UI | `PermissionsOverlay` |
+| [SettingsView.swift](wisescan-ios/SettingsView.swift) | Upload URL, RAW settings, capture mode, Developer Mode | `SettingsView`, `developerMode`, `flipCameraEnabled` |
+| [UserGuideView.swift](wisescan-ios/UserGuideView.swift) | In-app workflow guide | `UserGuideView` |
+| [DemoDataSeeder.swift](wisescan-ios/DemoDataSeeder.swift) | Orphan scan discovery + SwiftData seeding | `DemoDataSeeder`, `seedIfNeeded()` |
+| [TestDataGenerator.swift](wisescan-ios/TestDataGenerator.swift) | Mock camera intrinsics for testing | `TestDataGenerator` |
+| [Shaders/PointCloud.metal](wisescan-ios/Shaders/PointCloud.metal) | VR point cloud vertex/fragment shaders | Metal GPU pipeline |
+| [Shaders/Wireframe.metal](wisescan-ios/Shaders/Wireframe.metal) | AR wireframe rendering shaders | Metal GPU pipeline |
 
 ---
 
@@ -157,7 +194,7 @@ sequenceDiagram
     U->>CV: Tap Record
     Note over U,FCS: ── Recording (live) ──
     CV->>AR: sceneReconstruction = .mesh + .sceneDepth
-    CV->>FCS: start(session, privacyFilter: false)
+    CV->>FCS: start(session, privacyFilter: true)
     Note right of AR: LIVE: Scene reconstruction<br/>LIVE: Face blur overlay (Vision 0.1s)<br/>LIVE: Stats tracking
     Note right of FCS: LIVE: Frame capture (RGB + depth + pose)<br/>Face blur DEFERRED to export
 
@@ -221,8 +258,8 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Person segmentation removes humans from mesh. Face detection blurs faces live and in exports. Detected 2D bounding boxes are unprojected against the 16-bit depth buffer to dynamically cluster `[SIMD3]` markers representing captured human heads. These `face_anchors` bypass mesh inclusion and orbit the final preview mesh as red indicators before the server deletes the bodies downstream. Depth maps zero out person regions. Persistent toggle via `@AppStorage`. |
-| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `privacyFilter`, person segmentation · [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) — `detectFaces()`, `FaceBlurUtil.blurFaces()` · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — privacy-aware frame capture |
+| **Description** | Person segmentation removes humans from mesh. Vision-based person segmentation pixelates detected persons in the live camera feed and in exported frames. Detected 2D face bounding boxes are unprojected against the 16-bit depth buffer to dynamically cluster `[SIMD3]` markers representing captured human heads. These `face_anchors` bypass mesh inclusion and orbit the final preview mesh as red indicators before the server deletes the bodies downstream. Depth maps zero out person regions. Persistent toggle via `@AppStorage`. The capture view is locked to portrait to ensure consistent orientation alignment between the RealityKit scene, the privacy overlay, and the mesh/point cloud geometry (see REQ-026). |
+| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `privacyFilter`, person segmentation · [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) — `PrivacyBlurOverlay.detectAndPixelatePersons()`, `PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters()` · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — privacy-aware frame capture |
 
 ### REQ-005: 3D Scan Preview
 | | |
@@ -311,6 +348,21 @@ sequenceDiagram
 | **Description** | Proxy Mode Data Collection connects to Meta Ray-Ban glasses using the Meta Wearables DAT SDK. Connections are managed in the background via the dashboard's connection card. Listens for hardware shutter button presses to start/stop recordings and streams RGB frames natively into the app, eliminating the need for a WebRTC receiver loop. Includes a 15 FPS manual rate limiter to prevent massive proxy image bloat, strict frame-isolation by saving Wearable frames to a separate `proxy_images/` directory in the export payload, and an immediate session teardown mechanism when unregistering to prevent stale UI state. |
 | **Source** | `MetaWearableManager.swift` (SDK Lifecycle) · `FrameCaptureSession.swift` (Frame Ingestion) · `ScansListView.swift` (Zipping/Export Management) |
 
+### REQ-025: VR Capture Mode
+| | |
+|:--|:--|
+| **Status** | ✅ Complete |
+| **Description** | Alternative capture mode that replaces the AR camera passthrough with a live depth point cloud rendered on a black background using Metal shaders. Toggled via `CaptureMode` enum in Settings (AR vs VR). In VR mode: ARView background is set to `.color(.black)`, `PointCloudManager` creates billboard quads from LiDAR `sceneDepth` at 256×192 resolution, colored by the camera feed via a GPU compute kernel. Mesh wireframes are disabled; point cloud entities replace them as the scene geometry layer. Privacy segmentation overlay still operates identically (same orientation architecture applies). Requires LiDAR hardware and `ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)`. |
+| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `captureMode`, VR setup/teardown · [PointCloudManager.swift](wisescan-ios/PointCloudManager.swift) — `setup()`, `updatePointCloud()` · [Shaders/PointCloud.metal](wisescan-ios/Shaders/PointCloud.metal) — vertex/fragment shaders · [AppConstants.swift](wisescan-ios/AppConstants.swift) — `CaptureMode` enum · [SettingsView.swift](wisescan-ios/SettingsView.swift) — capture mode picker |
+
+### REQ-026: Orientation Locking
+| | |
+|:--|:--|
+| **Status** | ✅ Complete |
+| **Description** | The capture view is locked to portrait orientation during scanning to ensure consistent alignment between three independent rendering layers: (1) the RealityKit scene (camera feed in AR or point cloud in VR), (2) the privacy segmentation overlay (SwiftUI), and (3) scene geometry (mesh wireframe in AR, point cloud in VR). Without this lock, the privacy overlay can appear rotated 90°/180° relative to the actual person position because ARKit's `capturedImage` is always in landscape-right sensor coordinates regardless of device orientation. The lock is implemented via `AppDelegate.orientationLocked` (runtime `supportedInterfaceOrientations`) and portrait-only `UISupportedInterfaceOrientations` in the project settings. iPadOS Stage Manager can override this lock, but the overlay handles it gracefully via `scaledToFill().clipped()`. |
+| **Source** | [CaptureView.swift](wisescan-ios/CaptureView.swift) — `onAppear`/`onDisappear` orientation lock · [AppDelegate.swift](wisescan-ios/AppDelegate.swift) — `orientationLocked` · [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) — full orientation architecture documentation |
+| **TODO** | Apple will eventually require all-orientation support on iPad (`UIRequiresFullScreen` deprecation). See FaceBlurOverlay.swift orientation architecture comments for migration plan. |
+
 ---
 
 ## Planned Features
@@ -325,6 +377,8 @@ sequenceDiagram
 | REQ-022 | Scan4D Ground Truth Offset | Capture GPS or AprilTag data alongside scans for backend alignment seeding | High |
 | REQ-023 | OpenFLAME Live Relocalization | Use backend server to stream visual localization back to device, bypassing ARKit maps | Low |
 | ~~REQ-024~~ | ~~Large-Space Map Stitching~~ | ✅ **Implemented (client-side)** — Extend Scan supports adjacent chunking with shared coordinate frames; server-side alignment is a downstream concern | — |
+| REQ-025 | VR Capture Mode | ✅ **Implemented** — see REQ-025 below | — |
+| REQ-026 | Orientation Locking | ✅ **Implemented** — see REQ-026 below | — |
 
 ---
 
