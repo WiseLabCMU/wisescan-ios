@@ -254,7 +254,6 @@ class FrameCaptureSession {
 
         lastCaptureTransform = transform
         lastCaptureTime = frameTimestamp
-        let currentOrientation = UIApplication.shared.currentInterfaceOrientation
 
         let currentIndex = self.testSequenceIndex
         self.testSequenceIndex += 1 // Increment sequence index for synthetic progression
@@ -268,8 +267,7 @@ class FrameCaptureSession {
             depthMap: depthMap,
             confidenceMap: confidenceMap,
             segBuffer: segBuffer,
-            currentIndex: currentIndex,
-            orientation: currentOrientation
+            currentIndex: currentIndex
         )
     }
 
@@ -334,8 +332,7 @@ class FrameCaptureSession {
         depthMap: CVPixelBuffer?,
         confidenceMap: CVPixelBuffer?,
         segBuffer: CVPixelBuffer?,
-        currentIndex: Int,
-        orientation: UIInterfaceOrientation
+        currentIndex: Int
     ) {
         ioQueue.async { [weak self] in
             guard let self = self, let imagesDir = self.imagesDir else { return }
@@ -362,7 +359,11 @@ class FrameCaptureSession {
                 }
                 var tempJpegData = jpegData
                 if self.privacyFilter {
-                    let (blurredData, centers) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: jpegData, orientation: orientation.visionPropertyOrientation)
+                    // Capture view is portrait-locked; sensor image is always landscape-right → .right.
+                    // See FaceBlurOverlay.swift for full orientation architecture documentation.
+                    // TODO: If Apple enforces all-orientation support on iPad, this will need
+                    // to use the runtime device orientation instead of hardcoded .right.
+                    let (blurredData, centers) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: jpegData, orientation: .right)
                     if let bData = blurredData {
                         tempJpegData = bData
                     }

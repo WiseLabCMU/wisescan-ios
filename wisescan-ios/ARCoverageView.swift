@@ -698,6 +698,12 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         let camera = currentFrame.camera
+        // .landscapeRight is correct here because we're projecting mesh vertices into the
+        // segmentation buffer's coordinate space, which is always in native sensor orientation
+        // (landscape-right). This is independent of the device's display orientation or
+        // capture mode. (This method is used for AR mode mesh export; VR mode uses
+        // PointCloudManager for its own geometry pipeline.)
+        // See FaceBlurOverlay.swift for full orientation architecture documentation.
         let viewMatrix = camera.viewMatrix(for: .landscapeRight)
         let imageRes = camera.imageResolution
         let projMatrix = camera.projectionMatrix(for: .landscapeRight, viewportSize: imageRes, zNear: 0.001, zFar: 100)

@@ -451,6 +451,27 @@ struct CaptureView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
+            // Lock to portrait during capture to ensure consistent orientation
+            // for privacy segmentation, depth maps, and frame export.
+            //
+            // Three independent rendering layers must agree on orientation:
+            //   1. RealityKit scene (AR camera feed or VR point cloud — auto-rotates)
+            //   2. Privacy segmentation overlay (SwiftUI — WE must rotate)
+            //   3. Scene geometry (mesh wireframe in AR, point cloud in VR — auto-rotates)
+            // Locking to portrait eliminates orientation mismatches between them.
+            // See FaceBlurOverlay.swift for the full orientation architecture docs.
+            //
+            // TODO: Apple will eventually require all-orientation support on iPad
+            // (iPadOS logs warn "UIRequiresFullScreen will soon be ignored" and
+            // "Support for all orientations will soon be required"). When that
+            // happens, replace this lock with dynamic orientation handling across
+            // all layers and both capture modes (AR + VR).
+            // See the TODO section in FaceBlurOverlay.swift.
+            AppDelegate.orientationLocked = true
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                windowScene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
+            }
+
             // Load ghost mesh once into @State cache (avoids recomputing on every body eval)
             loadGhostMeshData()
 
@@ -469,6 +490,12 @@ struct CaptureView: View {
             MetaWearableManager.shared.startStreaming()
         }
         .onDisappear {
+            // Unlock orientation when leaving capture
+            AppDelegate.orientationLocked = false
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                windowScene.requestGeometryUpdate(.iOS(interfaceOrientations: .all))
+            }
+
             // Stop GPS/heading updates to save battery (#12)
             locationManager.stopUpdating()
 

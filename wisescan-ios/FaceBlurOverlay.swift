@@ -3,35 +3,71 @@ import ARKit
 import Vision
 import CoreImage.CIFilterBuiltins
 
-extension UIInterfaceOrientation {
-    var cameraImageOrientation: UIImage.Orientation {
-        switch self {
-        case .portrait: return .right
-        case .portraitUpsideDown: return .left
-        case .landscapeLeft: return .down
-        case .landscapeRight: return .up
-        default: return .right
-        }
-    }
-    
-    var visionPropertyOrientation: CGImagePropertyOrientation {
-        switch self {
-        case .portrait: return .right
-        case .portraitUpsideDown: return .left
-        case .landscapeLeft: return .down
-        case .landscapeRight: return .up
-        default: return .right
-        }
-    }
-}
-
-extension UIApplication {
-    var currentInterfaceOrientation: UIInterfaceOrientation {
-        return (connectedScenes.first as? UIWindowScene)?.interfaceOrientation ?? .portrait
-    }
-}
-
 /// Overlay that detects persons in the AR camera feed and draws a pixelated overlay over them.
+///
+/// # Orientation Architecture
+///
+/// Getting the privacy overlay to align correctly is non-trivial because THREE independent
+/// rendering layers must agree on orientation, and each has its own coordinate system:
+///
+/// 1. **RealityKit scene** — In AR mode, this is the camera passthrough feed; in VR mode,
+///    it's a black background with a live depth point cloud. In both cases, RealityKit
+///    internally handles rotation to match the device's interface orientation via
+///    `ARCamera.viewMatrix(for:)`.
+///
+/// 2. **Privacy segmentation overlay** (this view) — Built from the raw `capturedImage`
+///    pixel buffer, which is ALWAYS in landscape-right sensor coordinates regardless of
+///    device orientation or capture mode (AR/VR). We must rotate the composited mask to
+///    match what RealityKit displays.
+///
+/// 3. **Scene geometry overlays** — In AR mode, these are the mesh wireframe entities;
+///    in VR mode, these are the point cloud entities rendered by `PointCloudManager`.
+///    Both are world-space RealityKit entities that auto-rotate with the scene.
+///
+/// The key insight: layers 1 and 3 are handled by RealityKit and auto-rotate in both
+/// AR and VR modes. Layer 2 is a SwiftUI overlay on top, so WE must rotate it to match.
+/// Getting this wrong causes the pixelation mask to appear offset by 90°/180° from the
+/// actual person position.
+///
+/// ## Current approach (portrait-locked)
+///
+/// We lock the capture view to portrait via `AppDelegate.orientationLocked` and restrict
+/// supported orientations to portrait-only in Info.plist. This means:
+/// - Vision processes the raw sensor buffer with `.up` orientation (no reinterpretation)
+/// - The mask is composited in sensor-native landscape-right coordinates
+/// - `UIImage(orientation: .right)` handles the rotation to portrait for display
+///
+/// This is the same proven approach used for thumbnail generation in CaptureView.
+///
+/// ## Important: CIImage.oriented() vs UIImage orientation
+///
+/// `CIImage.oriented(.right)` physically rotates the pixel data, but its semantics are
+/// "correct FROM .right TO .up" — which is 90° CCW, NOT 90° CW. This caused the mask
+/// to appear 90° off. Using `UIImage(cgImage:, orientation: .right)` instead lets
+/// UIKit/SwiftUI handle the rotation via EXIF metadata, which is more reliable and matches
+/// how the rest of the app (thumbnails, exports) handles the sensor→display rotation.
+///
+/// ## TODO: Apple is deprecating portrait-only on iPad
+///
+/// iPadOS logs warn:
+///   1. "UIRequiresFullScreen will soon be ignored"
+///   2. "Support for all orientations will soon be required"
+///
+/// When Apple enforces this, we will need to:
+///   - Re-add runtime orientation detection (UIWindowScene.interfaceOrientation)
+///   - Map device orientation → UIImage.Orientation for the overlay rotation
+///   - Map device orientation → CGImagePropertyOrientation for Vision (if detection
+///     accuracy is affected) and for frame export privacy blurring
+///   - Test all four orientations × all rendering layers × both capture modes (AR + VR)
+///
+/// Additionally, iPadOS Stage Manager allows users to window the app even with
+/// UIRequiresFullScreen = YES. This can cause the app to run in a non-standard
+/// aspect ratio. The current `.scaledToFill().clipped()` approach handles this
+/// gracefully by filling and cropping, but if Apple forces all-orientation support,
+/// the overlay rotation will need to adapt dynamically.
+///
+/// The capture view is locked to portrait, so the sensor image is always landscape-right
+/// and we use `UIImage(orientation: .right)` to rotate it for portrait display.
 struct PrivacyBlurOverlay: View {
     var arSession: ARSession?
     @State private var overlayImage: UIImage? = nil
@@ -44,6 +80,7 @@ struct PrivacyBlurOverlay: View {
                     .resizable()
                     .scaledToFill()
                     .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
             }
         }
         .onAppear { startDetection() }
@@ -67,21 +104,22 @@ struct PrivacyBlurOverlay: View {
         // strong refs while Vision segmentation runs on a background queue.
         guard let pixelBuffer = arSession?.currentFrame?.capturedImage else { return }
         // ARFrame is now released — only the CVPixelBuffer is retained
-        
-        let orientation = UIApplication.shared.currentInterfaceOrientation
 
         let request = VNGeneratePersonSegmentationRequest()
         request.qualityLevel = .fast
         request.outputPixelFormat = kCVPixelFormatType_OneComponent8
 
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation.visionPropertyOrientation, options: [:])
+        // Pass .up so Vision processes in the raw sensor coordinate space.
+        // The mask will be in the same coordinate system as the source pixel buffer,
+        // ensuring correct alignment during compositing.
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
         
         DispatchQueue.global(qos: .userInteractive).async {
             do {
                 try handler.perform([request])
                 guard let maskObservation = request.results?.first as? VNPixelBufferObservation else { return }
                 
-                // Keep everything in original landscape coordinates
+                // Everything operates in the original sensor landscape-right coordinates
                 let originalCI = CIImage(cvPixelBuffer: pixelBuffer)
                 let maskCI = CIImage(cvPixelBuffer: maskObservation.pixelBuffer)
 
@@ -106,14 +144,15 @@ struct PrivacyBlurOverlay: View {
                 
                 guard let outputCI = blendFilter.outputImage else { return }
                 
-                // Physically rotate the blended image before creating CGImage 
-                // so SwiftUI's .resizable() doesn't strip the orientation metadata.
-                let rotatedCI = outputCI.oriented(orientation.visionPropertyOrientation)
-                
+                // Render the composite in sensor-native (landscape-right) coordinates,
+                // then use UIImage orientation metadata to rotate for portrait display.
+                // This is the same proven approach used for thumbnail generation.
                 let context = CIContext(options: [.useSoftwareRenderer: false])
-                guard let cgImage = context.createCGImage(rotatedCI, from: rotatedCI.extent) else { return }
+                guard let cgImage = context.createCGImage(outputCI, from: outputCI.extent) else { return }
                 
-                let uiImage = UIImage(cgImage: cgImage)
+                // .right orientation tells UIKit/SwiftUI to rotate the landscape-right
+                // pixels 90° for correct portrait display
+                let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
                 
                 DispatchQueue.main.async {
                     self.overlayImage = uiImage
