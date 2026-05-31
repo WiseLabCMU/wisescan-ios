@@ -264,7 +264,7 @@ struct MeshPreviewView: UIViewRepresentable {
                     let cameraNode = SCNNode()
                     cameraNode.camera = SCNCamera()
                     cameraNode.camera?.automaticallyAdjustsZRange = true
-                    cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 1.5)
+                    cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 0.4)
                     cameraNode.look(at: SCNVector3Zero)
                     scene.rootNode.addChildNode(cameraNode)
                 }
@@ -501,7 +501,7 @@ struct MeshPreviewView: UIViewRepresentable {
         } else {
             let size = SCNVector3(maxBound.x - minBound.x, maxBound.y - minBound.y, maxBound.z - minBound.z)
             let maxDimension = max(size.x, max(size.y, size.z))
-            cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 1.5)
+            cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 0.4)
             cameraNode.look(at: SCNVector3Zero)
         }
         scene.rootNode.addChildNode(cameraNode)
