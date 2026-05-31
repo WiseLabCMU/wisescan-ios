@@ -100,8 +100,9 @@ struct CaptureView: View {
                 .transition(.opacity)
             }
 
-            // Privacy blur overlay (shown when privacy filter is on AND recording)
-            if isPrivacyFilterOn && isRecording {
+            // Privacy blur overlay (shown when privacy filter is on AND recording in AR mode).
+            // In VR mode the point cloud already shows person-shaped holes as the privacy indicator.
+            if isPrivacyFilterOn && isRecording && (AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar) != .vr {
                 PrivacyBlurOverlay(arSession: currentARSession)
                     .ignoresSafeArea()
             }

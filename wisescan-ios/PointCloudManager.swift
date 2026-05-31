@@ -26,10 +26,43 @@ class PointCloudManager {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let pipelineState: MTLComputePipelineState
+    private let integratePipelineState: MTLComputePipelineState
+    // Bloom post-processing
+    private var bloomThresholdPipeline: MTLComputePipelineState?
+    private var bloomCompositePipeline: MTLComputePipelineState?
+    private var bloomIntermediateTexture: MTLTexture?
     /// Cached texture cache — creating one per frame retains old ARFrames
     private var textureCache: CVMetalTextureCache?
     /// Track in-flight GPU work so we don't queue faster than the GPU processes
     private var gpuBusy = false
+    /// True after the first frame has been dispatched to the GPU.
+    /// The coordinator uses this to defer the camera→black background transition.
+    private(set) var hasRenderedFirstFrame = false
+
+    // Voxel accumulation properties
+    private var voxelGrid: VoxelGrid?
+    private var voxelEntity: ModelEntity?
+    private var voxelLowLevelMesh: LowLevelMesh?
+    private var voxelColorTexture: LowLevelTexture?
+    private var lastExtractionTime: CFAbsoluteTime = 0
+    private var lastIntegrationTransform: simd_float4x4?
+    private var lastIntegrationIntrinsics: simd_float3x3?
+    private var lastIntegrationDepthMap: CVPixelBuffer?
+    private var extractionInProgress = false
+    private var voxelSetupComplete = false
+    private var integrationFrameCounter: UInt32 = 0
+    /// Parent entity for adding voxel cloud entity lazily
+    private weak var parentEntity: Entity?
+    /// Voxel color texture dimensions (1024×512 = 524,288 texels, covers 350K voxels)
+    private let voxelTexWidth = 1024
+    private let voxelTexHeight = 512
+    /// Vertices per voxel: 1 camera-facing quad × 4 vertices = 4
+    private let vertsPerVoxel = 4
+    /// Indices per voxel: 1 quad × 2 triangles × 3 = 6
+    private let indicesPerVoxel = 6
+    /// Shared sort group for layering: voxels behind live points.
+    /// postPass = draw color in order, then depth — last drawn (live) always wins at same depth.
+    private let pointCloudSortGroup = ModelSortGroup(depthPass: .postPass)
 
     init?(arView: ARView) {
         self.arView = arView
@@ -41,7 +74,7 @@ class PointCloudManager {
         self.device = mtlDevice
         self.commandQueue = queue
 
-        // Load compute shader for fast point cloud projection
+        // Load compute shaders
         guard let library = mtlDevice.makeDefaultLibrary(),
               let function = library.makeFunction(name: "projectPointCloud"),
               let pipeline = try? mtlDevice.makeComputePipelineState(function: function) else {
@@ -50,6 +83,23 @@ class PointCloudManager {
         }
         self.pipelineState = pipeline
 
+        guard let integrateFunction = library.makeFunction(name: "integrateVoxels"),
+              let integratePipeline = try? mtlDevice.makeComputePipelineState(function: integrateFunction) else {
+            print("[PointCloudManager] Failed to load voxel integration compute shader")
+            return nil
+        }
+        self.integratePipelineState = integratePipeline
+
+        // Bloom post-processing pipeline states (optional — fail gracefully)
+        if let bloomThresholdFn = library.makeFunction(name: "bloomThresholdAndBlurH"),
+           let bloomCompositeFn = library.makeFunction(name: "bloomBlurVAndComposite") {
+            self.bloomThresholdPipeline = try? mtlDevice.makeComputePipelineState(function: bloomThresholdFn)
+            self.bloomCompositePipeline = try? mtlDevice.makeComputePipelineState(function: bloomCompositeFn)
+        }
+
+        // Create VoxelGrid for accumulated point cloud
+        self.voxelGrid = VoxelGrid(device: mtlDevice)
+
         // Create CVMetalTextureCache once — reuse across frames
         var cache: CVMetalTextureCache?
         CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, mtlDevice, nil, &cache)
@@ -57,11 +107,20 @@ class PointCloudManager {
     }
 
     func setup(in parentEntity: Entity, activeMeshColor: String) {
+        // Store reference for lazy voxel setup
+        self.parentEntity = parentEntity
+
         // 1. Skybox — procedural grid texture on an inverted sphere
         setupSkybox(in: parentEntity, activeMeshColor: activeMeshColor)
 
         // 2. Point Cloud — billboard quads (4 verts + 6 indices per depth pixel)
         setupPointCloud(in: parentEntity)
+
+        // 3. Voxel Cloud — deferred to first keyframe to avoid 84MB allocation
+        //    spike at launch that causes ARFrame retention floods.
+
+        // 4. Bloom post-process — hooks into ARView’s render pipeline
+        setupBloomPostProcess()
     }
 
     // MARK: - Skybox
@@ -75,6 +134,7 @@ class PointCloudManager {
             let fallback = UnlitMaterial(color: UIColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1.0))
             let skybox = ModelEntity(mesh: .generateSphere(radius: 50.0), materials: [fallback])
             skybox.scale = SIMD3<Float>(-1, 1, 1) // Invert to view from inside
+            skybox.isEnabled = false  // Hidden until first voxel frame
             parentEntity.addChild(skybox)
             self.skyboxEntity = skybox
             return
@@ -86,6 +146,7 @@ class PointCloudManager {
             material.color = .init(tint: .white, texture: .init(textureResource))
             let skybox = ModelEntity(mesh: .generateSphere(radius: 50.0), materials: [material])
             skybox.scale = SIMD3<Float>(-1, 1, 1)
+            skybox.isEnabled = false  // Hidden until first voxel frame
             parentEntity.addChild(skybox)
             self.skyboxEntity = skybox
         } catch {
@@ -93,6 +154,7 @@ class PointCloudManager {
             let fallback = UnlitMaterial(color: UIColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1.0))
             let skybox = ModelEntity(mesh: .generateSphere(radius: 50.0), materials: [fallback])
             skybox.scale = SIMD3<Float>(-1, 1, 1)
+            skybox.isEnabled = false  // Hidden until first voxel frame
             parentEntity.addChild(skybox)
             self.skyboxEntity = skybox
         }
@@ -203,11 +265,90 @@ class PointCloudManager {
 
             let resource = try MeshResource(from: llm)
             let entity = ModelEntity(mesh: resource, materials: [material])
+            entity.isEnabled = false  // Hidden until first voxel frame
+            // Live points render ON TOP of accumulated voxels (order 2 > order 1)
+            entity.components.set(ModelSortGroupComponent(group: pointCloudSortGroup, order: 2))
             parentEntity.addChild(entity)
             self.pointCloudEntity = entity
 
         } catch {
             print("[PointCloudManager] Failed to create LowLevelMesh: \(error)")
+        }
+    }
+
+    // MARK: - Bloom Post-Processing
+
+    /// Install a two-pass bloom effect on the ARView's render pipeline.
+    /// Pass 1: Threshold bright pixels + horizontal Gaussian blur → intermediate texture
+    /// Pass 2: Vertical blur + additive composite → output
+    /// Only affects colored pixels (point cloud), black background passes through unchanged.
+    private func setupBloomPostProcess() {
+        guard let arView = arView,
+              let thresholdPipeline = bloomThresholdPipeline,
+              let compositePipeline = bloomCompositePipeline else {
+            print("[PointCloudManager] Bloom pipelines not available, skipping bloom setup")
+            return
+        }
+
+        print("[PointCloudManager] Setting up bloom post-process effect")
+
+        // Capture device and pipelines directly — the postProcess closure runs
+        // on the render thread, not MainActor, so we can't capture `self`.
+        let device = self.device
+        var intermediateTexture: MTLTexture? = nil
+
+        arView.renderCallbacks.postProcess = { context in
+            let source = context.sourceColorTexture
+            let dest = context.targetColorTexture
+            let width = source.width
+            let height = source.height
+
+            // Lazily create/recreate intermediate texture
+            if intermediateTexture == nil ||
+               intermediateTexture!.width != width ||
+               intermediateTexture!.height != height {
+                let desc = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: source.pixelFormat,
+                    width: width,
+                    height: height,
+                    mipmapped: false
+                )
+                desc.usage = [.shaderRead, .shaderWrite]
+                desc.storageMode = .private
+                intermediateTexture = device.makeTexture(descriptor: desc)
+                intermediateTexture?.label = "BloomIntermediate"
+                print("[PointCloudManager] Bloom intermediate texture created: \(width)×\(height) format=\(source.pixelFormat.rawValue)")
+            }
+
+            guard let intermediate = intermediateTexture else { return }
+
+            let commandBuffer = context.commandBuffer
+
+            let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
+            let threadGroups = MTLSize(
+                width: (width + 15) / 16,
+                height: (height + 15) / 16,
+                depth: 1
+            )
+
+            // Pass 1: Threshold + Horizontal blur (source → intermediate)
+            if let encoder = commandBuffer.makeComputeCommandEncoder() {
+                encoder.setComputePipelineState(thresholdPipeline)
+                encoder.setTexture(source, index: 0)
+                encoder.setTexture(intermediate, index: 1)
+                encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+                encoder.endEncoding()
+            }
+
+            // Pass 2: Vertical blur + Composite (source + intermediate → dest)
+            if let encoder = commandBuffer.makeComputeCommandEncoder() {
+                encoder.setComputePipelineState(compositePipeline)
+                encoder.setTexture(source, index: 0)
+                encoder.setTexture(intermediate, index: 1)
+                encoder.setTexture(dest, index: 2)
+                encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+                encoder.endEncoding()
+            }
         }
     }
 
@@ -317,12 +458,37 @@ class PointCloudManager {
         )
 
         computeEncoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+
+        // Voxel integration: encode in same command buffer if keyframe gate passes.
+        // Textures and uniforms are still bound from projectPointCloud.
+        let integrateThisFrame = shouldIntegrate(currentTransform: cameraTransform)
+        var didDispatchIntegration = false
+        if integrateThisFrame {
+            // Store intrinsics and depth map for confidence decay in handleVoxelCompletion
+            lastIntegrationIntrinsics = scaledIntrinsics
+            lastIntegrationDepthMap = depthMap
+            // Lazy voxel setup: allocate on first keyframe, not at app launch.
+            // Skip integration on the setup frame — the 6.3M index pre-fill
+            // is expensive and we don't want to also run the GPU kernel.
+            if !voxelSetupComplete, let parent = parentEntity {
+                setupVoxelCloud(in: parent)
+                voxelSetupComplete = true
+                // Don't integrate this frame — setup just happened
+            } else if voxelSetupComplete {
+                encodeVoxelIntegration(encoder: computeEncoder, width: width, height: height)
+                didDispatchIntegration = true
+            }
+        }
+
         computeEncoder.endEncoding()
 
         gpuBusy = true
         commandBuffer.addCompletedHandler { [weak self] _ in
             DispatchQueue.main.async {
                 self?.gpuBusy = false
+                if didDispatchIntegration {
+                    self?.handleVoxelCompletion()
+                }
             }
         }
         commandBuffer.commit()
@@ -339,15 +505,297 @@ class PointCloudManager {
         ])
     }
 
+    // MARK: - Voxel Cloud Setup
+
+    private func setupVoxelCloud(in parentEntity: Entity) {
+        let maxVoxels = VoxelGrid.maxVoxels
+        let maxVerts = maxVoxels * vertsPerVoxel
+        let maxIdx = maxVoxels * indicesPerVoxel
+
+        var desc = LowLevelMesh.Descriptor()
+        desc.vertexCapacity = maxVerts
+        desc.vertexAttributes = [
+            LowLevelMesh.Attribute(semantic: .position, format: .float3, offset: 0),
+            LowLevelMesh.Attribute(semantic: .uv0, format: .float2, offset: MemoryLayout<Float>.stride * 3)
+        ]
+        desc.vertexLayouts = [
+            LowLevelMesh.Layout(bufferIndex: 0, bufferStride: MemoryLayout<Float>.stride * 5)
+        ]
+        desc.indexCapacity = maxIdx
+        desc.indexType = .uint32
+
+        do {
+            let llm = try LowLevelMesh(descriptor: desc)
+
+            // Pre-fill indices for camera-facing quad pattern:
+            // Each voxel = 1 quad × 2 triangles.
+            // Per quad: vertices [0,1,2,3] → triangles (0,1,2) and (2,1,3)
+            llm.withUnsafeMutableIndices { buffer in
+                let indices = buffer.bindMemory(to: UInt32.self)
+                for v in 0..<maxVoxels {
+                    let vertBase = UInt32(v * vertsPerVoxel)
+                    let idxBase = v * indicesPerVoxel
+                    indices[idxBase + 0] = vertBase + 0
+                    indices[idxBase + 1] = vertBase + 1
+                    indices[idxBase + 2] = vertBase + 2
+                    indices[idxBase + 3] = vertBase + 2
+                    indices[idxBase + 4] = vertBase + 1
+                    indices[idxBase + 5] = vertBase + 3
+                }
+            }
+
+            // Start with zero rendered voxels
+            llm.parts.replaceAll([
+                LowLevelMesh.Part(
+                    indexCount: 0,
+                    topology: .triangle,
+                    materialIndex: 0,
+                    bounds: BoundingBox(min: [-100, -100, -100], max: [100, 100, 100])
+                )
+            ])
+            self.voxelLowLevelMesh = llm
+
+            // Color texture for voxel cloud (1024×512 = 524K texels)
+            let texDesc = LowLevelTexture.Descriptor(
+                pixelFormat: .rgba8Unorm,
+                width: voxelTexWidth,
+                height: voxelTexHeight,
+                textureUsage: [.shaderRead, .shaderWrite]
+            )
+            let voxelTex = try LowLevelTexture(descriptor: texDesc)
+            self.voxelColorTexture = voxelTex
+
+            let textureResource = try TextureResource(from: voxelTex)
+            var material = UnlitMaterial()
+            material.color = .init(tint: .white, texture: .init(textureResource))
+            material.blending = .transparent(opacity: .init(floatLiteral: 1.0))
+
+            let resource = try MeshResource(from: llm)
+            let entity = ModelEntity(mesh: resource, materials: [material])
+            entity.isEnabled = false  // Hidden until first voxel frame
+            // Accumulated voxels render BEHIND live points (order 1 < order 2)
+            entity.components.set(ModelSortGroupComponent(group: pointCloudSortGroup, order: 1))
+            parentEntity.addChild(entity)
+            self.voxelEntity = entity
+
+        } catch {
+            print("[PointCloudManager] Failed to create voxel LowLevelMesh: \(error)")
+        }
+    }
+
+    // MARK: - Keyframe Gating
+
+    /// Check if camera has moved enough to justify a new voxel integration.
+    /// Returns true if translation ≥ 5cm or rotation ≥ 3°.
+    private func shouldIntegrate(currentTransform: simd_float4x4) -> Bool {
+        guard let last = lastIntegrationTransform else {
+            lastIntegrationTransform = currentTransform
+            return true
+        }
+
+        // Translation delta
+        let lastPos = SIMD3<Float>(last.columns.3.x, last.columns.3.y, last.columns.3.z)
+        let curPos = SIMD3<Float>(currentTransform.columns.3.x, currentTransform.columns.3.y, currentTransform.columns.3.z)
+        let translationDelta = simd_length(curPos - lastPos)
+
+        // Rotation delta (angle between forward vectors)
+        let lastForward = SIMD3<Float>(last.columns.2.x, last.columns.2.y, last.columns.2.z)
+        let curForward = SIMD3<Float>(currentTransform.columns.2.x, currentTransform.columns.2.y, currentTransform.columns.2.z)
+        let dotProduct = simd_clamp(simd_dot(simd_normalize(lastForward), simd_normalize(curForward)), -1.0, 1.0)
+        let angleDelta = acos(dotProduct) * (180.0 / .pi)  // degrees
+
+        if translationDelta >= 0.05 || angleDelta >= 3.0 {
+            lastIntegrationTransform = currentTransform
+            return true
+        }
+        return false
+    }
+
+    /// Dispatch voxel integration in the same command buffer as the live point cloud.
+    /// Called from update() only when keyframe gate passes.
+    private func encodeVoxelIntegration(
+        encoder: MTLComputeCommandEncoder,
+        width: Int,
+        height: Int
+    ) {
+        guard let grid = voxelGrid else { return }
+
+        // Reset append counter before dispatch
+        grid.resetAppendBuffer()
+
+        encoder.setComputePipelineState(integratePipelineState)
+
+        // Textures are already bound at indices 0-5 from projectPointCloud.
+        // Uniforms are already bound at buffer index 1.
+        // We only need to bind the append buffer and counter.
+        encoder.setBuffer(grid.appendBuffer, offset: 0, index: 2)
+        encoder.setBuffer(grid.appendCounter, offset: 0, index: 3)
+
+        let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(
+            width: (width + threadGroupSize.width - 1) / threadGroupSize.width,
+            height: (height + threadGroupSize.height - 1) / threadGroupSize.height,
+            depth: 1
+        )
+
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+    }
+
+    /// Merge GPU results and trigger extraction if due.
+    /// Called from the command buffer completion handler.
+    private func handleVoxelCompletion() {
+        guard let grid = voxelGrid else { return }
+
+        // Increment integration frame counter
+        integrationFrameCounter += 1
+
+        // CPU merge: read append buffer → update hash map (~1ms)
+        grid.mergeAppendBuffer(frameCounter: integrationFrameCounter)
+
+        // Confidence decay: check existing voxels against live depth
+        if let transform = lastIntegrationTransform,
+           let intrinsics = lastIntegrationIntrinsics,
+           let depthMap = lastIntegrationDepthMap {
+            let depthW = CVPixelBufferGetWidth(depthMap)
+            let depthH = CVPixelBufferGetHeight(depthMap)
+            grid.decayContradictedVoxels(
+                cameraTransform: transform,
+                intrinsics: intrinsics,
+                depthMap: depthMap,
+                depthWidth: depthW,
+                depthHeight: depthH
+            )
+        }
+        // Release the depth map reference to avoid retaining the parent ARFrame.
+        // It will be re-set on the next integration dispatch.
+        lastIntegrationDepthMap = nil
+
+        // Check extraction rate limiter (2Hz — 350K voxels × 28MB vertex writes is ~33ms)
+        let now = CACurrentMediaTime()
+        guard now - lastExtractionTime > 0.5, !extractionInProgress else { return }
+        guard let llm = voxelLowLevelMesh, let colorTex = voxelColorTexture else { return }
+
+        extractionInProgress = true
+        lastExtractionTime = now
+
+        let texW = voxelTexWidth
+        let texH = voxelTexHeight
+        let iPerVoxel = indicesPerVoxel
+
+        // Allocate CPU staging buffer for color data (4 bytes per texel, RGBA8).
+        // Size must be row-aligned for the blit copy: ceil(maxVoxels / texW) * texW * 4.
+        // Using maxVoxels * 4 alone overflows when the last row is partial.
+        let rowAlignedTexels = ((VoxelGrid.maxVoxels + texW - 1) / texW) * texW
+        let colorBufferSize = rowAlignedTexels * 4
+        guard let colorStagingBuffer = device.makeBuffer(length: colorBufferSize, options: .storageModeShared) else {
+            extractionInProgress = false
+            return
+        }
+
+        // Extract on main thread — LowLevelMesh is @MainActor-isolated.
+        // At 2Hz with ~33ms per extraction (28MB vertex data),
+        // the stutter is tolerable for a preview display.
+        let camTransform: simd_float4x4
+        if let t = lastIntegrationTransform {
+            camTransform = t
+        } else {
+            camTransform = matrix_identity_float4x4
+        }
+        var voxelCount = 0
+        llm.withUnsafeMutableBytes(bufferIndex: 0) { rawBuffer in
+            voxelCount = grid.extractMesh(
+                vertexBuffer: rawBuffer.baseAddress!,
+                colorBuffer: colorStagingBuffer.contents(),
+                texWidth: texW,
+                texHeight: texH,
+                cameraTransform: camTransform
+            )
+        }
+
+        // Upload color data to the LowLevelTexture via blit encoder.
+        // The underlying MTLTexture uses .private storage mode (GPU-only),
+        // so CPU-side replace() is not allowed. Use a blit to copy from
+        // the staging MTLBuffer (.storageModeShared) to the private texture.
+        if voxelCount > 0, let cmdBuf = commandQueue.makeCommandBuffer() {
+            let mtlTexture = colorTex.replace(using: cmdBuf)
+            let rowsUsed = min((voxelCount + texW - 1) / texW, texH)
+            let bytesPerRow = texW * 4  // RGBA8 = 4 bytes per texel
+
+            if let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
+                blitEncoder.copy(
+                    from: colorStagingBuffer,
+                    sourceOffset: 0,
+                    sourceBytesPerRow: bytesPerRow,
+                    sourceBytesPerImage: bytesPerRow * rowsUsed,
+                    sourceSize: MTLSize(width: texW, height: rowsUsed, depth: 1),
+                    to: mtlTexture,
+                    destinationSlice: 0,
+                    destinationLevel: 0,
+                    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+                )
+                blitEncoder.endEncoding()
+            }
+            cmdBuf.commit()
+        }
+
+        // Update mesh part to render the correct number of voxels
+        let indexCount = voxelCount * iPerVoxel
+        llm.parts.replaceAll([
+            LowLevelMesh.Part(
+                indexCount: indexCount,
+                topology: .triangle,
+                materialIndex: 0,
+                bounds: BoundingBox(min: [-100, -100, -100], max: [100, 100, 100])
+            )
+        ])
+        extractionInProgress = false
+        if !hasRenderedFirstFrame && voxelCount > 0 {
+            hasRenderedFirstFrame = true
+            // Show all VR entities now that content is ready
+            skyboxEntity?.isEnabled = true
+            pointCloudEntity?.isEnabled = true
+            voxelEntity?.isEnabled = true
+        }
+    }
+
+    // MARK: - Voxel Reset
+
+    /// Clear all accumulated voxels without destroying the manager.
+    /// Called when ARKit's coordinate system shifts (re-initialization, relocalizing)
+    /// to prevent ghost voxels at wrong world positions.
+    func resetVoxels() {
+        voxelGrid?.reset()
+        lastIntegrationTransform = nil
+        lastIntegrationIntrinsics = nil
+        lastIntegrationDepthMap = nil
+        integrationFrameCounter = 0
+    }
+
     // MARK: - Cleanup
 
     func destroy() {
+        // Remove bloom post-process callback
+        arView?.renderCallbacks.postProcess = nil
+        bloomIntermediateTexture = nil
+
         pointCloudEntity?.removeFromParent()
         skyboxEntity?.removeFromParent()
+        voxelEntity?.removeFromParent()
         pointCloudEntity = nil
         skyboxEntity = nil
+        voxelEntity = nil
         lowLevelMesh = nil
         colorTexture = nil
+        voxelLowLevelMesh = nil
+        voxelColorTexture = nil
+        voxelGrid?.reset()
+        lastIntegrationTransform = nil
+        lastIntegrationIntrinsics = nil
+        lastIntegrationDepthMap = nil
+        extractionInProgress = false
+        voxelSetupComplete = false
+        integrationFrameCounter = 0
+        parentEntity = nil
     }
 
     // MARK: - Helpers

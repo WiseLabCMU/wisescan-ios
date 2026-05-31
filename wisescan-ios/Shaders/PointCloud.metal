@@ -10,6 +10,25 @@ struct PointCloudUniforms {
     uint useSegmentation;
 };
 
+// GPU → CPU append buffer entry for voxel integration.
+// Must match Swift VoxelGrid.VoxelEntry layout exactly (10 bytes).
+struct VoxelEntry {
+    short gridX;   // 2 bytes
+    short gridY;   // 2 bytes
+    short gridZ;   // 2 bytes
+    uchar r;       // 1 byte
+    uchar g;       // 1 byte
+    uchar b;       // 1 byte
+    uchar _pad;    // 1 byte — align to even size
+};
+
+// Voxel grid constants — must match VoxelGrid.swift
+constant float3 voxelOrigin = float3(-4.0, -4.0, -4.0);
+constant float voxelCellSize = 0.02;
+constant int voxelGridDim = 400;        // cells per axis
+constant int voxelHalfDim = 200;        // gridDim / 2
+constant uint voxelAppendCapacity = 49152; // 256 × 192
+
 // YCbCr to RGB conversion constants (BT.601 full-range)
 constant float4x4 ycbcrToRGBTransform = float4x4(
     float4(+1.0000f, +1.0000f, +1.0000f, +0.0000f),
@@ -150,3 +169,101 @@ void projectPointCloud(uint2 id [[thread_position_in_grid]],
     writeVertex(vertices, baseVertex + 2, center + (-camRight + camUp) * halfSize, vertexUV);
     writeVertex(vertices, baseVertex + 3, center + ( camRight + camUp) * halfSize, vertexUV);
 }
+
+// MARK: - Voxel Integration Kernel
+//
+// Runs on the same depth/camera data as projectPointCloud but writes to a
+// GPU append buffer instead of vertex positions. The CPU reads back the buffer
+// and merges observations into the sparse voxel hash map.
+
+[[kernel]]
+void integrateVoxels(uint2 id [[thread_position_in_grid]],
+                     texture2d<float, access::read> depthTexture [[texture(0)]],
+                     texture2d<float, access::sample> imageYTexture [[texture(1)]],
+                     texture2d<float, access::sample> imageCbCrTexture [[texture(2)]],
+                     texture2d<float, access::sample> segTexture [[texture(3)]],
+                     texture2d<uint, access::read> confidenceTexture [[texture(5)]],
+                     device VoxelEntry* appendBuffer [[buffer(2)]],
+                     device atomic_uint* appendCounter [[buffer(3)]],
+                     constant PointCloudUniforms& uniforms [[buffer(1)]]) {
+
+    uint depthW = depthTexture.get_width();
+    uint depthH = depthTexture.get_height();
+
+    if (id.x >= depthW || id.y >= depthH) {
+        return;
+    }
+
+    float depth = depthTexture.read(id).r;
+
+    // Same filter chain as projectPointCloud
+    if (isnan(depth) || depth <= 0.0 || depth > 5.0) {
+        return;
+    }
+
+    // Confidence filter: only high confidence (2)
+    uint conf = confidenceTexture.read(id).r;
+    if (conf < 2) {
+        return;
+    }
+
+    // Segmentation filter (privacy)
+    if (uniforms.useSegmentation > 0) {
+        float2 cameraUV = float2((float(id.x) + 0.5) / float(depthW),
+                                 (float(id.y) + 0.5) / float(depthH));
+        constexpr sampler s(address::clamp_to_edge, filter::linear);
+        float segValue = segTexture.sample(s, cameraUV).r;
+        if (segValue > 0.5) {
+            return;
+        }
+    }
+
+    // Unproject depth pixel to camera-local 3D position
+    float x = (float(id.x) - uniforms.intrinsics[2][0]) * depth / uniforms.intrinsics[0][0];
+    float y_pos = (float(id.y) - uniforms.intrinsics[2][1]) * depth / uniforms.intrinsics[1][1];
+    float3 cameraPos = float3(x, -y_pos, -depth);
+
+    // Transform to world space
+    float4 worldPos4 = uniforms.cameraTransform * float4(cameraPos, 1.0);
+    float3 worldPos = worldPos4.xyz;
+
+    // Quantize to voxel grid coordinates
+    short gridX = short(floor((worldPos.x - voxelOrigin.x) / voxelCellSize)) - short(voxelHalfDim);
+    short gridY = short(floor((worldPos.y - voxelOrigin.y) / voxelCellSize)) - short(voxelHalfDim);
+    short gridZ = short(floor((worldPos.z - voxelOrigin.z) / voxelCellSize)) - short(voxelHalfDim);
+
+    // Range check: must fit in grid (-200 to +199)
+    if (gridX < -short(voxelHalfDim) || gridX >= short(voxelHalfDim) ||
+        gridY < -short(voxelHalfDim) || gridY >= short(voxelHalfDim) ||
+        gridZ < -short(voxelHalfDim) || gridZ >= short(voxelHalfDim)) {
+        return;
+    }
+
+    // Sample camera color (YCbCr → RGB)
+    float2 cameraUV = float2((float(id.x) + 0.5) / float(depthW),
+                             (float(id.y) + 0.5) / float(depthH));
+    constexpr sampler s2(address::clamp_to_edge, filter::linear);
+    float y = imageYTexture.sample(s2, cameraUV).r;
+    float2 cbcr = imageCbCrTexture.sample(s2, cameraUV).rg;
+    float4 ycbcr = float4(y, cbcr.x, cbcr.y, 1.0);
+    float4 rgb = ycbcrToRGBTransform * ycbcr;
+    rgb = clamp(rgb, 0.0, 1.0);
+
+    // Atomically claim a slot in the append buffer
+    uint writeIndex = atomic_fetch_add_explicit(appendCounter, 1, memory_order_relaxed);
+    if (writeIndex >= voxelAppendCapacity) {
+        return;  // Buffer full — skip this pixel
+    }
+
+    // Write VoxelEntry
+    VoxelEntry entry;
+    entry.gridX = gridX;
+    entry.gridY = gridY;
+    entry.gridZ = gridZ;
+    entry.r = uchar(rgb.r * 255.0);
+    entry.g = uchar(rgb.g * 255.0);
+    entry.b = uchar(rgb.b * 255.0);
+    entry._pad = 0;
+    appendBuffer[writeIndex] = entry;
+}
+

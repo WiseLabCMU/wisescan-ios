@@ -83,7 +83,9 @@ struct ARCoverageView: UIViewRepresentable {
         let wasShowingVR = (context.coordinator.pointCloudManager != nil)
         
         if shouldShowVR && !wasShowingVR {
-            uiView.environment.background = .color(.black)
+            // Keep cameraFeed() background during setup — switch to black
+            // only after the first point cloud frame renders (see session(_:didUpdate:)).
+            context.coordinator.vrBackgroundSet = false
             context.coordinator.pointCloudManager = PointCloudManager(arView: uiView)
             context.coordinator.pointCloudManager?.setup(
                 in: context.coordinator.rootEntity,
@@ -306,6 +308,8 @@ struct ARCoverageView: UIViewRepresentable {
         var vrAnchorEntity: AnchorEntity?
         var isUsingFrontCamera: Bool = false
         var isRecording: Bool = false
+        /// Whether the VR black background has been applied (deferred until first frame)
+        var vrBackgroundSet: Bool = false
         var isSessionReadyBinding: Binding<Bool>?
         var hasSetSessionReady = false
         private var anchorUpdateCounts: [UUID: Int] = [:]
@@ -580,6 +584,23 @@ struct ARCoverageView: UIViewRepresentable {
             // so the ARFrame reference is released immediately. Do NOT forward the ARFrame
             // to the main actor — that queues work and holds references to 10+ frames.
             guard captureMode == .vr, let pcm = pointCloudManager else { return }
+
+            // Skip VR updates when tracking is degraded — prevents accumulating
+            // voxels with wrong coordinates during SLAM re-initialization.
+            guard frame.camera.trackingState == .normal else {
+                // If tracking just went to relocalizing/initializing, the coordinate
+                // system may have shifted. Clear accumulated voxels to prevent ghosting.
+                if case .limited(let reason) = frame.camera.trackingState,
+                   (reason == .initializing || reason == .relocalizing) {
+                    DispatchQueue.main.async { [weak self] in
+                        if let pcm = self?.pointCloudManager {
+                            pcm.resetVoxels()
+                            print("[VR] Tracking degraded (\(reason)) — cleared accumulated voxels")
+                        }
+                    }
+                }
+                return
+            }
             
             // Coalesce: if a main-actor dispatch is already pending, skip this frame.
             // This limits retained CVPixelBuffers to at most 2 (one in-flight GPU + one pending).
@@ -606,6 +627,14 @@ struct ARCoverageView: UIViewRepresentable {
                     intrinsics: intrinsics,
                     privacyFilter: privFilter
                 )
+                // Seamless transition: flip camera feed → black background on first rendered frame.
+                // This avoids showing an empty black scene before points appear.
+                if !(self?.vrBackgroundSet ?? true),
+                   pcm.hasRenderedFirstFrame,
+                   let arView = self?.arView {
+                    arView.environment.background = .color(.black)
+                    self?.vrBackgroundSet = true
+                }
             }
         }
 
