@@ -14,6 +14,7 @@ struct MeshPreviewContainer: View {
     @StateObject private var markerState = MarkerProjectionState()
     @State private var isUpdating = false
     @State private var isViewerReady = false
+    @State private var isMeshLoaded = false
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
@@ -23,7 +24,8 @@ struct MeshPreviewContainer: View {
                     meshFileURL: meshFileURL,
                     colorsFileURL: colorsFileURL,
                     scanDirectoryURL: scanDirectoryURL,
-                    markerState: markerState
+                    markerState: markerState,
+                    isMeshLoaded: $isMeshLoaded
                 )
 
                 // 2D overlay icons projected from 3D face anchor positions
@@ -37,17 +39,21 @@ struct MeshPreviewContainer: View {
                             .position(x: pos.point.x, y: pos.point.y)
                     }
                 }
-            } else {
+            }
+
+            // Show loading indicator until mesh is fully parsed and rendered
+            if !isMeshLoaded {
                 VStack(spacing: 16) {
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle(tint: .gray))
                         .scaleEffect(1.5)
-                    Text("Loading Mesh Data...")
+                    Text("Loading Mesh...")
                         .font(.headline)
                         .foregroundColor(.gray)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(white: 0.15))
+                .transition(.opacity)
             }
             
             if isUpdating {
@@ -72,13 +78,13 @@ struct MeshPreviewContainer: View {
                             Text("Set Default Pose")
                         }
                     }
-                    .disabled(isUpdating || !isViewerReady)
+                    .disabled(isUpdating || !isMeshLoaded)
                 }
             }
         }
         .onAppear {
             // Defer the heavy OBJ parsing to ensure the fullScreenCover animation completes smoothly
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 isViewerReady = true
             }
         }
@@ -159,6 +165,7 @@ struct MeshPreviewView: UIViewRepresentable {
     var colorsFileURL: URL?
     var scanDirectoryURL: URL?
     var markerState: MarkerProjectionState
+    @Binding var isMeshLoaded: Bool
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -267,6 +274,9 @@ struct MeshPreviewView: UIViewRepresentable {
                     cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 0.4)
                     cameraNode.look(at: SCNVector3Zero)
                     scene.rootNode.addChildNode(cameraNode)
+
+                    // Signal that mesh is ready
+                    self.isMeshLoaded = true
                 }
             }
         }
