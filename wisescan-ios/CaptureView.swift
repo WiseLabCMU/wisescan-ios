@@ -40,6 +40,14 @@ struct CaptureView: View {
 
     @State private var showExtendPrompt = false
 
+    // Ghost mesh relocalization controls
+    @State private var showRelocDialog = false
+    @State private var showManualAdjust = false
+    @State private var ghostYRotation: Float = 0
+    @State private var ghostXOffset: Float = 0
+    @State private var ghostZOffset: Float = 0
+    @State private var dismissGhostMesh = false
+
     struct PendingScanData {
         let locationId: UUID?
         let meshData: Data
@@ -80,7 +88,11 @@ struct CaptureView: View {
                 captureMode: AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar,
                 useFrontCamera: usingFrontCamera,
                 initialWorldMapURL: scanStore.activeRelocalizationMap,
-                initialGhostMeshData: cachedGhostMeshData
+                initialGhostMeshData: cachedGhostMeshData,
+                ghostYRotation: ghostYRotation,
+                ghostXOffset: ghostXOffset,
+                ghostZOffset: ghostZOffset,
+                dismissGhostMesh: dismissGhostMesh
             )
                 .ignoresSafeArea()
 
@@ -449,6 +461,144 @@ struct CaptureView: View {
                 }
                 .padding(.bottom, 20)
             }
+
+            // Relocalization status chip (bottom-left) — visible when ghost mesh is loaded
+            if cachedGhostMeshData != nil && !dismissGhostMesh {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Button(action: { showRelocDialog = true }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "location.magnifyingglass")
+                                    .font(.caption)
+                                Text("Ghost Mesh")
+                                    .font(.caption2.bold())
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial)
+                            .cornerRadius(20)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 20)
+                                    .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                            )
+                        }
+                        Spacer()
+                    }
+                    .padding(.leading, 16)
+                    .padding(.bottom, 100)
+                }
+            }
+
+            // Manual alignment slider overlay
+            if showManualAdjust && cachedGhostMeshData != nil && !dismissGhostMesh {
+                VStack {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        HStack {
+                            Text("Manual Alignment")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            Spacer()
+                            Button("Done") {
+                                showManualAdjust = false
+                            }
+                            .font(.subheadline.bold())
+                            .foregroundColor(.cyan)
+                        }
+
+                        VStack(spacing: 8) {
+                            HStack {
+                                Image(systemName: "rotate.3d")
+                                    .frame(width: 24)
+                                Text("Y Rotation")
+                                    .font(.caption)
+                                    .frame(width: 70, alignment: .leading)
+                                Slider(value: Binding(
+                                    get: { Double(ghostYRotation) },
+                                    set: { ghostYRotation = Float($0) }
+                                ), in: -0.524...0.524) // ±30°
+                                Text("\(Int(ghostYRotation * 180 / .pi))°")
+                                    .font(.caption.monospacedDigit())
+                                    .frame(width: 40, alignment: .trailing)
+                            }
+                            .foregroundColor(.white)
+
+                            HStack {
+                                Image(systemName: "arrow.left.and.right")
+                                    .frame(width: 24)
+                                Text("X Position")
+                                    .font(.caption)
+                                    .frame(width: 70, alignment: .leading)
+                                Slider(value: Binding(
+                                    get: { Double(ghostXOffset) },
+                                    set: { ghostXOffset = Float($0) }
+                                ), in: -1.0...1.0)
+                                Text(String(format: "%.2fm", ghostXOffset))
+                                    .font(.caption.monospacedDigit())
+                                    .frame(width: 50, alignment: .trailing)
+                            }
+                            .foregroundColor(.white)
+
+                            HStack {
+                                Image(systemName: "arrow.up.and.down")
+                                    .frame(width: 24)
+                                Text("Z Position")
+                                    .font(.caption)
+                                    .frame(width: 70, alignment: .leading)
+                                Slider(value: Binding(
+                                    get: { Double(ghostZOffset) },
+                                    set: { ghostZOffset = Float($0) }
+                                ), in: -1.0...1.0)
+                                Text(String(format: "%.2fm", ghostZOffset))
+                                    .font(.caption.monospacedDigit())
+                                    .frame(width: 50, alignment: .trailing)
+                            }
+                            .foregroundColor(.white)
+                        }
+
+                        Button(action: {
+                            ghostYRotation = 0
+                            ghostXOffset = 0
+                            ghostZOffset = 0
+                        }) {
+                            Text("Reset to Default")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        }
+                    }
+                    .padding()
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(16)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 160)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .animation(.spring(), value: showManualAdjust)
+            }
+        }
+        .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
+            Button("Re-relocalize") {
+                // Reset transform and reload world map by toggling ghost data
+                ghostYRotation = 0
+                ghostXOffset = 0
+                ghostZOffset = 0
+                let savedData = cachedGhostMeshData
+                cachedGhostMeshData = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    cachedGhostMeshData = savedData
+                }
+            }
+            Button("Manual Adjust") {
+                showManualAdjust = true
+            }
+            Button("Dismiss Ghost Mesh", role: .destructive) {
+                dismissGhostMesh = true
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The ghost mesh from your previous scan may not be accurately aligned. Choose an option:")
         }
         .preferredColorScheme(.dark)
         .onAppear {
@@ -472,6 +622,14 @@ struct CaptureView: View {
             if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
                 windowScene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
             }
+
+            // Reset ghost mesh alignment state for this session
+            dismissGhostMesh = false
+            showManualAdjust = false
+            showRelocDialog = false
+            ghostYRotation = 0
+            ghostXOffset = 0
+            ghostZOffset = 0
 
             // Load ghost mesh once into @State cache (avoids recomputing on every body eval)
             loadGhostMeshData()

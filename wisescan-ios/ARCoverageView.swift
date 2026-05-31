@@ -14,6 +14,12 @@ struct ARCoverageView: UIViewRepresentable {
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
     var initialGhostMeshData: Data? = nil // Raw OBJ data from the previous scan
 
+    // Ghost mesh manual alignment
+    var ghostYRotation: Float = 0       // Radians, applied as Y-axis rotation offset
+    var ghostXOffset: Float = 0         // Meters, X-axis position offset
+    var ghostZOffset: Float = 0         // Meters, Z-axis position offset
+    var dismissGhostMesh: Bool = false  // When true, remove ghost mesh from scene
+
     /// Whether this device has LiDAR for scene reconstruction and depth capture.
     static let supportsLiDAR = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
 
@@ -159,6 +165,20 @@ struct ARCoverageView: UIViewRepresentable {
                 // Background parse the new ghost mesh
                 Self.loadGhostMesh(data: ghostData, coordinator: context.coordinator, arView: uiView)
             }
+        }
+
+        // Dismiss ghost mesh if requested
+        if dismissGhostMesh, let ghostAnchor = context.coordinator.ghostAnchorEntity {
+            uiView.scene.removeAnchor(ghostAnchor)
+            context.coordinator.ghostAnchorEntity = nil
+            context.coordinator.hasAddedGhostMesh = false
+        }
+
+        // Apply manual alignment transform offset to ghost mesh
+        if let ghostAnchor = context.coordinator.ghostAnchorEntity {
+            let rotation = simd_quatf(angle: ghostYRotation, axis: [0, 1, 0])
+            let translation = SIMD3<Float>(ghostXOffset, 0, ghostZOffset)
+            ghostAnchor.transform = Transform(rotation: rotation, translation: translation)
         }
 
         // Detect recording state change → switch AR session config
