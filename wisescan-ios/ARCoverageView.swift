@@ -188,6 +188,10 @@ struct ARCoverageView: UIViewRepresentable {
                 // Active wireframe is now rendered via procedural geometry (not .showSceneUnderstanding)
                 // Entities are built incrementally in session(_:didAdd:) and session(_:didUpdate:)
                 context.coordinator.resetForRecording()
+                // Add coverage overlay green quad in AR mode
+                if captureMode == .ar {
+                    context.coordinator.addCoverageGreenQuad(to: uiView)
+                }
 
                 // Background parse the ghost mesh if we didn't already load it in nominal mode
                 if let ghostData = initialGhostMeshData, context.coordinator.ghostAnchorEntity == nil {
@@ -196,6 +200,7 @@ struct ARCoverageView: UIViewRepresentable {
             } else {
                 // Downgrade to nominal: pure camera passthrough — no overlays
                 context.coordinator.resetForNominal()
+                context.coordinator.removeCoverageGreenQuad()
 
                 // Remove ghost mesh from scene (will be re-added on next recording if needed)
                 if let ghostAnchor = context.coordinator.ghostAnchorEntity {
@@ -335,6 +340,11 @@ struct ARCoverageView: UIViewRepresentable {
         /// Minimum interval between wireframe rebuilds for the same anchor (seconds).
         private let wireframeThrottleInterval: TimeInterval = 0.5
 
+        // Coverage Overlay: 3D occlusion-based negative rendering
+        /// The green background quad entity (far plane). Mesh occlusion punches holes.
+        private var coverageGreenQuadAnchor: AnchorEntity?
+
+
         // Ghost Mesh properties
         var ghostAnchorEntity: AnchorEntity?
         var hasAddedGhostMesh = false
@@ -472,6 +482,18 @@ struct ARCoverageView: UIViewRepresentable {
                 )
                 guard !descriptors.isEmpty else { return }
 
+                // Build filled triangle mesh for occlusion (coverage overlay hole punch)
+                var filledDescriptor = MeshDescriptor(name: "occlusion_fill")
+                filledDescriptor.positions = MeshBuffers.Positions(worldPositions)
+                var flatIndices = [UInt32]()
+                flatIndices.reserveCapacity(faceIndices.count * 3)
+                for face in faceIndices {
+                    flatIndices.append(face.0)
+                    flatIndices.append(face.1)
+                    flatIndices.append(face.2)
+                }
+                filledDescriptor.primitives = .triangles(flatIndices)
+
                 DispatchQueue.main.async {
                     guard let self = self, let arView = self.arView, self.isRecording else { return }
 
@@ -481,11 +503,23 @@ struct ARCoverageView: UIViewRepresentable {
                     ))
 
                     let containerEntity = Entity()
+
+                    // Add wireframe edges
                     for desc in descriptors {
                         if let res = try? MeshResource.generate(from: [desc]) {
                             let model = ModelEntity(mesh: res, materials: [material])
                             containerEntity.addChild(model)
                         }
+                    }
+
+                    // Add filled occlusion mesh (invisible, writes depth to punch holes in green quad)
+                    if self.captureMode == .ar,
+                       let occlusionRes = try? MeshResource.generate(from: [filledDescriptor]) {
+                        let occlusionEntity = ModelEntity(
+                            mesh: occlusionRes,
+                            materials: [OcclusionMaterial()]
+                        )
+                        containerEntity.addChild(occlusionEntity)
                     }
 
                     if let existing = self.activeMeshEntities[anchorId] {
@@ -505,6 +539,36 @@ struct ARCoverageView: UIViewRepresentable {
                     }
                 }
             }
+        }
+
+        // MARK: - Coverage Overlay (3D Occlusion)
+
+        /// Creates the full-screen green background quad at a far distance.
+        /// Mesh occlusion entities will punch holes through it.
+        func addCoverageGreenQuad(to arView: ARView) {
+            guard coverageGreenQuadAnchor == nil else { return }
+            // Create a large quad far behind real-world geometry.
+            // generatePlane(width:height:) creates an XY plane with normal +Z (facing camera).
+            // 200m × 200m at 50m distance covers the full camera frustum generously.
+            let mesh = MeshResource.generatePlane(width: 200, height: 200)
+            let c = activeMeshColor.toSIMD4Color
+            var material = UnlitMaterial(color: UIColor(
+                red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 0.3
+            ))
+            material.blending = .transparent(opacity: 1.0)
+            let model = ModelEntity(mesh: mesh, materials: [material])
+            // Place 50m ahead of camera (in camera-local space, -Z is forward)
+            model.position = [0, 0, -50]
+            let anchor = AnchorEntity(.camera)
+            anchor.addChild(model)
+            arView.scene.addAnchor(anchor)
+            coverageGreenQuadAnchor = anchor
+        }
+
+        /// Removes the green coverage quad.
+        func removeCoverageGreenQuad() {
+            coverageGreenQuadAnchor?.removeFromParent()
+            coverageGreenQuadAnchor = nil
         }
 
         // Watch for relocalization success and track drift
@@ -579,7 +643,7 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
-            // Update PointCloudManager in VR mode.
+            // ── VR Mode: update point cloud ──
             // IMPORTANT: Extract pixel buffers and camera data HERE (on the delegate queue)
             // so the ARFrame reference is released immediately. Do NOT forward the ARFrame
             // to the main actor — that queues work and holds references to 10+ frames.
@@ -672,6 +736,7 @@ struct ARCoverageView: UIViewRepresentable {
                     anchorUpdateCounts.removeValue(forKey: mesh.identifier)
                     anchorVertexCounts.removeValue(forKey: mesh.identifier)
                     anchorFaceCounts.removeValue(forKey: mesh.identifier)
+
                     // Remove wireframe entity for this anchor
                     if let entry = activeMeshEntities.removeValue(forKey: mesh.identifier) {
                         entry.anchor.removeFromParent()
@@ -689,6 +754,7 @@ struct ARCoverageView: UIViewRepresentable {
             activeMeshEntities.removeAll()
             lastAnchorWireframeTime.removeAll()
             anchorUpdateCounts.removeAll()
+
         }
 
         private func updateStats(in session: ARSession) {
