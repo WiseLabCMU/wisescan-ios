@@ -26,6 +26,13 @@ struct ARCoverageView: UIViewRepresentable {
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
 
+        // Disable RealityKit's automatic person occlusion rendering.
+        // We enable personSegmentationWithDepth for the raw buffer data only —
+        // privacy masking is handled in our compute shaders and FaceBlurOverlay.
+        // Without this, RealityKit composites black silhouettes over people,
+        // which creates stuck artifacts in VR mode (black background).
+        arView.renderOptions.insert(.disablePersonOcclusion)
+
         // Start in nominal mode: camera passthrough only, no scene reconstruction
         // EXCEPT if we are extending a scan, in which case we load the map right away
         let config = ARWorldTrackingConfiguration()
@@ -197,7 +204,7 @@ struct ARCoverageView: UIViewRepresentable {
                    let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
                     config.initialWorldMap = worldMap
                 }
-                if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
+                if privacyFilter, ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
                     config.frameSemantics.insert(.personSegmentationWithDepth)
                 }
                 if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
@@ -252,7 +259,7 @@ struct ARCoverageView: UIViewRepresentable {
                 let config = ARWorldTrackingConfiguration()
                 config.sceneReconstruction = (Self.supportsLiDAR && isRecording) ? .mesh : []
                 config.environmentTexturing = .automatic
-                if isRecording, ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
+                if isRecording, privacyFilter, ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
                     config.frameSemantics.insert(.personSegmentationWithDepth)
                 }
                 if isRecording, ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
