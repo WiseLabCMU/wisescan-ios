@@ -298,17 +298,28 @@ class PointCloudManager {
         var intermediateTexture: MTLTexture? = nil
 
         arView.renderCallbacks.postProcess = { context in
+            #if targetEnvironment(simulator)
+            // Metal compute shaders cannot reliably write to RealityKit's targetColorTexture
+            // on Simulator because it uses an sRGB format and lacks the shaderWrite usage flag.
+            return
+            #else
             let source = context.sourceColorTexture
             let dest = context.targetColorTexture
+            
+            // Check if RealityKit provided a texture we can actually write to with a compute shader
+            guard dest.usage.contains(.shaderWrite) else {
+                return
+            }
+            
             let width = source.width
             let height = source.height
 
-            // Lazily create/recreate intermediate texture
+            // Lazily create/recreate intermediate texture (always linear)
             if intermediateTexture == nil ||
                intermediateTexture!.width != width ||
                intermediateTexture!.height != height {
                 let desc = MTLTextureDescriptor.texture2DDescriptor(
-                    pixelFormat: source.pixelFormat,
+                    pixelFormat: .bgra8Unorm,
                     width: width,
                     height: height,
                     mipmapped: false
@@ -317,7 +328,7 @@ class PointCloudManager {
                 desc.storageMode = .private
                 intermediateTexture = device.makeTexture(descriptor: desc)
                 intermediateTexture?.label = "BloomIntermediate"
-                print("[PointCloudManager] Bloom intermediate texture created: \(width)×\(height) format=\(source.pixelFormat.rawValue)")
+                print("[PointCloudManager] Bloom intermediate texture created: \(width)×\(height)")
             }
 
             guard let intermediate = intermediateTexture else { return }
@@ -349,6 +360,7 @@ class PointCloudManager {
                 encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
                 encoder.endEncoding()
             }
+            #endif
         }
     }
 
