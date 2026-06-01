@@ -32,6 +32,7 @@ struct CaptureView: View {
     // Scan4D properties
     @State private var showNamePrompt = false
     @State private var newLocationName = ""
+    @State private var newLocationScanCase: ScanCase = .rescan
     @State private var cachedGhostMeshData: Data? = nil
     @State private var isARSessionReady = false
 
@@ -693,22 +694,65 @@ struct CaptureView: View {
             cachedGhostMeshData = nil
             isARSessionReady = false
         }
-        .alert("Name this Space", isPresented: $showNamePrompt) {
-            TextField("Location Name (e.g., Living Room)", text: $newLocationName)
-            Button("Save", action: { 
-                if let data = pendingProcessingData {
-                    let trimmedName = newLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let finalName = trimmedName.isEmpty ? "New Space" : trimmedName
-                    startBackgroundProcessing(name: finalName, locationId: nil, data: data)
-                    pendingProcessingData = nil
+        .overlay {
+            if showNamePrompt {
+                ZStack {
+                    Color.black.opacity(0.4).ignoresSafeArea()
+                    
+                    VStack(spacing: 20) {
+                        Text("Name this Space")
+                            .font(.headline)
+                            .foregroundColor(.primary)
+                        Text("Enter a unique name for this space so you can efficiently 'Extend Scan' later.")
+                            .font(.caption)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                            .foregroundColor(.secondary)
+                        
+                        TextField("Location Name (e.g., Living Room)", text: $newLocationName)
+                            .textFieldStyle(.roundedBorder)
+                            .padding(.horizontal)
+                        
+                        Picker("Use Case", selection: $newLocationScanCase) {
+                            Text("Time-Series").tag(ScanCase.rescan)
+                            Text("Space Extension").tag(ScanCase.extend)
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.horizontal)
+                        
+                        HStack {
+                            Button("Cancel") {
+                                showNamePrompt = false
+                                pendingProcessingData = nil
+                                saveMessage = nil
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            
+                            Button("Save") {
+                                showNamePrompt = false
+                                if let data = pendingProcessingData {
+                                    let trimmedName = newLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                    let finalName = trimmedName.isEmpty ? "New Space" : trimmedName
+                                    startBackgroundProcessing(name: finalName, locationId: nil, scanCase: newLocationScanCase, data: data)
+                                    pendingProcessingData = nil
+                                }
+                            }
+                            .fontWeight(.bold)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                        }
+                    }
+                    .padding(.top, 24)
+                    .padding(.bottom, 8)
+                    .background(Color(UIColor.secondarySystemBackground))
+                    .cornerRadius(16)
+                    .shadow(radius: 20)
+                    .padding(40)
                 }
-            })
-            Button("Cancel", role: .cancel) {
-                pendingProcessingData = nil
-                saveMessage = nil
+                .transition(.opacity)
+                .zIndex(100)
             }
-        } message: {
-            Text("Enter a unique name for this space so you can efficiently 'Extend Scan' later.")
         }
     }
 
@@ -850,15 +894,16 @@ struct CaptureView: View {
 
         if scanStore.activeLocationForScan == nil {
             newLocationName = ""
+            newLocationScanCase = .rescan
             pendingProcessingData = processingData
-            showNamePrompt = true
+            withAnimation { showNamePrompt = true }
         } else {
             // Already extending a scan; user won't be prompted. Start processing immediately.
-            startBackgroundProcessing(name: "Extended Scan", locationId: scanStore.activeLocationForScan, data: processingData)
+            startBackgroundProcessing(name: "Extended Scan", locationId: scanStore.activeLocationForScan, scanCase: .extend, data: processingData)
         }
     }
 
-    private func startBackgroundProcessing(name: String, locationId: UUID?, data: ProcessingData) {
+    private func startBackgroundProcessing(name: String, locationId: UUID?, scanCase: ScanCase = .rescan, data: ProcessingData) {
         // Change to Scans tab immediately
         selectedTab = 2
         scanStore.isProcessingScan = true
@@ -904,7 +949,8 @@ struct CaptureView: View {
                             rawDataPath: rawDataPath,
                             vertexColors: vertexColors,
                             worldMapURL: mapURL,
-                            thumbnailData: thumbnailData
+                            thumbnailData: thumbnailData,
+                            scanCase: scanCase
                         )
 
                         // Release frame capture session memory
