@@ -93,7 +93,6 @@ enum VertexColorAccumulator {
         // Initialize color array (gray default for unsampled vertices)
         var colors = [SIMD3<Float>](repeating: SIMD3<Float>(0.5, 0.5, 0.5), count: vertices.count)
         var colored = [Bool](repeating: false, count: vertices.count)
-        var hasRunDeveloperTest = false
 
         // Downscale factor — vertex coloring doesn't need full-res images
         let downscaleFactor = 2
@@ -133,12 +132,6 @@ enum VertexColorAccumulator {
             ))
             // World-to-camera
             let world2Cam = cam2World.inverse
-
-            // Developer Diagnostic Test (runs once per coloring pass if enabled)
-            if UserDefaults.standard.bool(forKey: AppConstants.Key.developerMode) && UserDefaults.standard.bool(forKey: AppConstants.Key.debugVertexMapping) && !hasRunDeveloperTest {
-                runDeveloperMappingTest(fx: fx, fy: fy, cx: cx, cy: cy, cam2World: cam2World, world2Cam: world2Cam)
-                hasRunDeveloperTest = true
-            }
 
             // Load corresponding image
             guard let imagePath = json["image_path"] as? String else { continue }
@@ -259,35 +252,5 @@ enum VertexColorAccumulator {
         // Convert to SIMD4<Float> with alpha=1 (matches buildColorData format)
         let rgba = colors.map { SIMD4<Float>($0.x, $0.y, $0.z, 1.0) }
         return Data(bytes: rgba, count: rgba.count * MemoryLayout<SIMD4<Float>>.stride)
-    }
-    
-    /// Validates 3D-to-2D image math by projecting test vertices into camera bounds
-    static func runDeveloperMappingTest(fx: Float, fy: Float, cx: Float, cy: Float, cam2World: simd_float4x4, world2Cam: simd_float4x4) {
-        print("\n[VertexColor Debug] --- RUNNING VERTEX MAPPING DIAGNOSTIC ---")
-        print("[VertexColor Debug] Intrinsics -> fx:\(fx) fy:\(fy) cx:\(cx) cy:\(cy)")
-        
-        // Create test vertices 2 meters directly in front of the camera
-        let testVerts: [(String, SIMD4<Float>)] = [
-            ("Center", SIMD4<Float>(0, 0, -2.0, 1.0)),
-            ("Right", SIMD4<Float>(1.0, 0, -2.0, 1.0)),
-            ("Left", SIMD4<Float>(-1.0, 0, -2.0, 1.0)),
-            ("Up", SIMD4<Float>(0, 1.0, -2.0, 1.0)),
-            ("Down", SIMD4<Float>(0, -1.0, -2.0, 1.0))
-        ]
-        
-        for (name, camPos) in testVerts {
-            let worldPos = cam2World * camPos
-            let simulatedCamPos = world2Cam * worldPos // should equal camPos
-            
-            let invZ = -1.0 / simulatedCamPos.z
-            let px = Int(fx * simulatedCamPos.x * invZ + cx)
-            let py = Int(cy - fy * simulatedCamPos.y * invZ)
-            
-            let yPlacement = py > Int(cy) ? "BOTTOM HALF" : (py < Int(cy) ? "TOP HALF" : "MIDDLE")
-            let xPlacement = px > Int(cx) ? "RIGHT HALF" : (px < Int(cx) ? "LEFT HALF" : "MIDDLE")
-            
-            print("[VertexColor Debug] '\(name)' vertex at world (\(String(format: "%.2f", worldPos.x)), \(String(format: "%.2f", worldPos.y)), \(String(format: "%.2f", worldPos.z))) -> projected to px:\(px), py:\(py) (\(xPlacement), \(yPlacement))")
-        }
-        print("[VertexColor Debug] -----------------------------------------\n")
     }
 }

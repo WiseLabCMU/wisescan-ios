@@ -12,7 +12,6 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
     @AppStorage(AppConstants.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppConstants.flipCameraEnabled
-    @AppStorage(AppConstants.Key.debugVertexMapping) private var debugVertexMapping: Bool = AppConstants.debugVertexMapping
     @AppStorage(AppConstants.Key.mockIMU) private var mockIMU: Bool = AppConstants.mockIMU
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
     @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
@@ -212,7 +211,6 @@ struct SettingsView: View {
                                 if !newValue {
                                     // Reset all dev options to defaults when disabled
                                     self.flipCameraEnabled = AppConstants.flipCameraEnabled
-                                    self.debugVertexMapping = AppConstants.debugVertexMapping
                                     self.mockIMU = AppConstants.mockIMU
                                     self.mockCameraImages = AppConstants.mockCameraImages
                                     self.mockDepthMaps = AppConstants.mockDepthMaps
@@ -237,18 +235,6 @@ struct SettingsView: View {
                                     Text("Flip Camera")
                                         .foregroundColor(.white)
                                     Text("Adds a button on the Capture screen to switch between front and back cameras. Useful for testing privacy features with the front-facing camera.")
-                                        .font(.caption)
-                                        .foregroundColor(.gray)
-                                }
-                            }
-                            .tint(.orange)
-                            .padding(.vertical, 4)
-
-                            Toggle(isOn: $debugVertexMapping) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Test Vertex Mapping")
-                                        .foregroundColor(.white)
-                                    Text("Runs and logs a diagnostic projection test during mesh coloring to verify 3D-to-2D image math accuracy.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

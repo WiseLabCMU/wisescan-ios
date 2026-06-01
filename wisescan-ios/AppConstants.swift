@@ -26,7 +26,6 @@ enum AppConstants {
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"
         static let flipCameraEnabled = "flipCameraEnabled"
-        static let debugVertexMapping = "debugVertexMapping"
         static let mockIMU = "mockIMU"
         static let mockCameraImages = "mockCameraImages"
         static let mockDepthMaps = "mockDepthMaps"
@@ -52,7 +51,6 @@ enum AppConstants {
     static let rejectBlur: Bool = true
     static let developerMode: Bool = false
     static let flipCameraEnabled: Bool = false
-    static let debugVertexMapping: Bool = false
     static let mockIMU: Bool = false
     static let mockCameraImages: Bool = false
     static let mockDepthMaps: Bool = false
