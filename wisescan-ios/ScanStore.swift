@@ -15,11 +15,12 @@ class CapturedScan {
     var selectedFormatStr: String
     var uploadStatusStr: String
     var uploadProgress: Double
+    var isColored: Bool = false
 
     @Relationship(inverse: \ScanLocation.scans)
     var location: ScanLocation?
 
-    init(id: UUID = UUID(), name: String, capturedAt: Date = Date(), vertexCount: Int, faceCount: Int, hardwareDeviceModel: String = "Native iOS") {
+    init(id: UUID = UUID(), name: String, capturedAt: Date = Date(), vertexCount: Int, faceCount: Int, hardwareDeviceModel: String = "Native iOS", isColored: Bool = false) {
         self.id = id
         self.name = name
         self.capturedAt = capturedAt
@@ -29,6 +30,7 @@ class CapturedScan {
         self.selectedFormatStr = ExportFormat.scan4d.rawValue
         self.uploadStatusStr = "pending"
         self.uploadProgress = 0.0
+        self.isColored = isColored
     }
 
     @Transient var selectedFormat: ExportFormat {

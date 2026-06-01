@@ -954,13 +954,10 @@ struct CaptureView: View {
             }
 
             DispatchQueue.main.async {
-                self.scanStore.processingMessage = "Coloring mesh..."
+                self.scanStore.processingMessage = "Saving scan..."
             }
 
-            let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
-                objData: result.data,
-                rawDataDir: rawDataPath
-            )
+            let vertexColors = VertexColorAccumulator.generateNormalsColors(objData: result.data)
 
             DispatchQueue.main.async {
                 self.scanStore.processingMessage = "Saving World Map..."

@@ -60,6 +60,54 @@ enum VertexColorAccumulator {
         }
     }
 
+    /// Generate normals-based vertex colors (fast, no image I/O).
+    /// Uses the standard tangent-space normal mapping convention where normals
+    /// are remapped from [-1,1] to [0,1] via (normal + 1) / 2:
+    ///   R = X axis, G = Y axis, B = Z axis.
+    /// This preserves directional information and produces the familiar
+    /// blue/purple/green visualization used in 3D workflows.
+    /// Used as the default coloring when a scan is first saved, before camera-based coloring.
+    static func generateNormalsColors(objData: Data) -> Data? {
+        guard let parsed = MeshParser.parseOBJ(from: objData) else { return nil }
+        let vertices = parsed.vertices
+        guard !vertices.isEmpty else { return nil }
+
+        // Accumulate face normals per vertex
+        var normals = [SIMD3<Float>](repeating: .zero, count: vertices.count)
+
+        for face in parsed.faces {
+            let i0 = Int(face.0)
+            let i1 = Int(face.1)
+            let i2 = Int(face.2)
+            guard i0 < vertices.count, i1 < vertices.count, i2 < vertices.count else { continue }
+
+            let v0 = vertices[i0]
+            let v1 = vertices[i1]
+            let v2 = vertices[i2]
+
+            let edge1 = v1 - v0
+            let edge2 = v2 - v0
+            let normal = simd_cross(edge1, edge2)
+
+            normals[i0] += normal
+            normals[i1] += normal
+            normals[i2] += normal
+        }
+
+        // Normalize and remap to [0,1] using standard normal map convention: (n + 1) / 2
+        let rgba: [SIMD4<Float>] = normals.map { n in
+            let normalized = simd_length(n) > 0 ? simd_normalize(n) : SIMD3<Float>(0, 0, 1)
+            return SIMD4<Float>(
+                (normalized.x + 1) / 2,
+                (normalized.y + 1) / 2,
+                (normalized.z + 1) / 2,
+                1.0
+            )
+        }
+
+        return Data(bytes: rgba, count: rgba.count * MemoryLayout<SIMD4<Float>>.stride)
+    }
+
     /// Colorize OBJ mesh vertices using saved camera frames (post-processing).
     /// Reads saved JPEG images and camera JSON transforms from `rawDataDir`,
     /// parses vertices from `objData`, and projects each vertex into camera frames

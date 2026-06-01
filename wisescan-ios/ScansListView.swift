@@ -239,12 +239,15 @@ struct ScanCard: View {
     var onDelete: (CapturedScan) -> Void
 
     @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
+    @Environment(\.modelContext) private var modelContext
     @State private var exportItem: ZipExportItem? = nil
     @State private var showExportError = false
     @State private var showDeleteConfirm = false
     @State private var itemCounts: (images: Int, proxy: Int, depth: Int, cameras: Int)? = nil
     @State private var showMeshPreview = false
     @State private var showMissingRelocAlert = false
+    @State private var isColoring = false
+    @State private var coloringMessage: String? = nil
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
@@ -385,6 +388,21 @@ struct ScanCard: View {
         .id(scan.location?.updatedAt)
         .overlay(editingOverlay)
         .overlay(alignment: .topLeading) { relocWarningOverlay }
+        .overlay {
+            if isColoring {
+                ZStack {
+                    Color.black.opacity(0.5)
+                    VStack(spacing: 8) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(1.2)
+                        Text(coloringMessage ?? "Coloring...")
+                            .font(.caption2)
+                            .foregroundColor(.white)
+                    }
+                }
+            }
+        }
         .confirmationDialog(
             "Delete Scan",
             isPresented: $showDeleteConfirm
@@ -480,34 +498,52 @@ struct ScanCard: View {
 
     @ViewBuilder
     private var actionButtonsBlock: some View {
-        HStack(spacing: 10) {
-            Button(action: { saveToFiles() }) {
-                HStack {
-                    Image(systemName: "square.and.arrow.down")
-                    Text("Save")
-                        .font(.subheadline).bold()
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                Button(action: { saveToFiles() }) {
+                    HStack {
+                        Image(systemName: "square.and.arrow.down")
+                        Text("Save")
+                            .font(.subheadline).bold()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
+                    .foregroundColor(isEditing ? .gray : .white)
+                    .cornerRadius(10)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
-                .foregroundColor(isEditing ? .gray : .white)
-                .cornerRadius(10)
-            }
-            .disabled(isEditing)
+                .disabled(isEditing)
 
-            Button(action: { uploadScan() }) {
-                HStack {
-                    Image(systemName: "icloud.and.arrow.up")
-                    Text("Upload")
-                        .font(.subheadline).bold()
+                Button(action: { uploadScan() }) {
+                    HStack {
+                        Image(systemName: "icloud.and.arrow.up")
+                        Text("Upload")
+                            .font(.subheadline).bold()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(uploadButtonDisabled ? Color.gray.opacity(0.3) : Color.blue)
+                    .foregroundColor(isEditing ? .gray : .white)
+                    .cornerRadius(10)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(uploadButtonDisabled ? Color.gray.opacity(0.3) : Color.blue)
-                .foregroundColor(isEditing ? .gray : .white)
-                .cornerRadius(10)
+                .disabled(uploadButtonDisabled)
             }
-            .disabled(uploadButtonDisabled)
+
+            if !scan.isColored {
+                Button(action: { colorizeScan() }) {
+                    HStack {
+                        Image(systemName: "paintbrush.fill")
+                        Text("Color")
+                            .font(.subheadline).bold()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(isEditing || isColoring ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
+                    .foregroundColor(isEditing || isColoring ? .gray : .white)
+                    .cornerRadius(10)
+                }
+                .disabled(isEditing || isColoring)
+            }
         }
     }
 
@@ -660,6 +696,55 @@ struct ScanCard: View {
                     self.onUpdate(self.scan)
                     self.showExportError = true
                 }
+            }
+        }
+    }
+
+    private func colorizeScan() {
+        isColoring = true
+        coloringMessage = "Coloring..."
+
+        let meshURL = scan.meshFileURL
+        let rawDataDir = scan.rawDataPath
+        let colorsURL = scan.colorsFileURL
+        let previewURL = scan.modelPreviewURL
+        let pose = scan.location?.imagingPoseMatrix
+
+        DispatchQueue.global(qos: .utility).async {
+            guard let meshData = try? Data(contentsOf: meshURL) else {
+                DispatchQueue.main.async {
+                    self.isColoring = false
+                    self.coloringMessage = nil
+                }
+                return
+            }
+
+            let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
+                objData: meshData,
+                rawDataDir: rawDataDir
+            )
+
+            DispatchQueue.main.async {
+                self.coloringMessage = "Updating preview..."
+            }
+
+            // Write updated colors
+            if let colors = vertexColors {
+                try? colors.write(to: colorsURL)
+            }
+
+            // Regenerate 3D model preview
+            if let img = MeshPreviewView.generateSnapshot(meshURL: meshURL, colorsURL: colorsURL, poseMatrix: pose),
+               let data = img.jpegData(compressionQuality: 0.8) {
+                try? data.write(to: previewURL)
+            }
+
+            DispatchQueue.main.async {
+                self.scan.isColored = true
+                self.scan.location?.updatedAt = Date() // Trigger preview image reload
+                try? self.modelContext.save()
+                self.isColoring = false
+                self.coloringMessage = nil
             }
         }
     }
