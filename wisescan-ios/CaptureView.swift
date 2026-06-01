@@ -756,7 +756,7 @@ struct CaptureView: View {
             // Give user a choice: discard or save anyway (knowing relocalization will fail)
             let alert = UIAlertController(
                 title: "Insufficient Tracking",
-                message: "This scan has a poor mapping status (\(scanStats.mappingStatus)). Successful relocalization later requires 'mapped' or 'extending' status. Would you like to save it anyway?",
+                message: "This scan has an insufficient mapping status (\(scanStats.mappingStatus)). Successful relocalization later requires 'mapped' status. We suggest scanning more of the area to achieve 'mapped' status before saving. Would you like to save it anyway?",
                 preferredStyle: .alert
             )
             alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in

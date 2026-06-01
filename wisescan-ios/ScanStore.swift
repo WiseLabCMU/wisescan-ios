@@ -304,14 +304,14 @@ class ScanStats {
 
     /// Whether the session has accumulated a robust enough map for relocalization.
     var hasEnoughFeaturesForRelocalization: Bool {
-        // ARFrame.WorldMappingStatus: .mapped is the most reliable, .extending is usually acceptable
-        mappingStatus == "mapped" || mappingStatus == "extending"
+        // ARFrame.WorldMappingStatus: .mapped is the most reliable for consistent relocalization
+        mappingStatus == "mapped"
     }
 
     var relocalizationLabel: String {
         switch mappingStatus {
         case "mapped": return "Good"
-        case "extending": return "Fair"
+        case "extending": return "Poor"
         case "limited": return "Poor"
         default: return "None"
         }
