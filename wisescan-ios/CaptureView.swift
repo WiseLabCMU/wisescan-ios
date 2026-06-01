@@ -123,17 +123,45 @@ struct CaptureView: View {
             PermissionsOverlay(locationManager: locationManager)
                 .ignoresSafeArea()
 
-            if isRecording && frameCaptureSession.isBlurWarningActive {
-                Text("⚠️ Moving too fast! Slow down.")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 12)
-                    .background(Color.orange.opacity(0.85))
-                    .cornerRadius(20)
-                    .shadow(radius: 5)
-                    .transition(.scale.combined(with: .opacity))
-                    .animation(.easeInOut(duration: 0.2), value: frameCaptureSession.isBlurWarningActive)
+            VStack(spacing: 12) {
+                if isRecording && frameCaptureSession.isBlurWarningActive {
+                    Text("⚠️ Moving too fast! Slow down.")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(Color.orange.opacity(0.85))
+                        .cornerRadius(20)
+                        .shadow(radius: 5)
+                        .transition(.scale.combined(with: .opacity))
+                        .animation(.easeInOut(duration: 0.2), value: frameCaptureSession.isBlurWarningActive)
+                }
+
+                if cachedGhostMeshData != nil && scanStats.trackingState == "limited" && scanStats.trackingReason == "Relocalizing" {
+                    Text("🔄 Move camera to relocalize with previous scan")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(Color.blue.opacity(0.85))
+                        .cornerRadius(20)
+                        .shadow(radius: 5)
+                        .transition(.scale.combined(with: .opacity))
+                        .animation(.easeInOut(duration: 0.2), value: scanStats.trackingReason)
+                }
+
+                if isRecording && scanStats.totalVertices < 500 && scanStats.trackingReason != "Relocalizing" && !frameCaptureSession.isBlurWarningActive {
+                    Text("📷 Move camera slowly to scan environment")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(Color.indigo.opacity(0.85))
+                        .cornerRadius(20)
+                        .shadow(radius: 5)
+                        .transition(.scale.combined(with: .opacity))
+                        .animation(.easeInOut(duration: 0.2), value: scanStats.totalVertices < 500)
+                }
             }
 
             // Lite mode banner for non-LiDAR devices
