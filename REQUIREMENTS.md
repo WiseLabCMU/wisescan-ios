@@ -178,51 +178,48 @@ graph TD
 | **Description** | Tap to start scanning with timer, tap again to stop and save. Capture view starts in **nominal mode** (camera passthrough only, no scene reconstruction). Recording activates full AR processing (mesh overlay, depth capture, capacity tracking). Stopping or leaving the view silently resets to nominal mode. Auto-stop on view disappear. |
 | **Source** | [CaptureView.swift](wisescan-ios/CaptureView.swift) — `startRecording()`, `stopRecording()`, `.onDisappear` |
 
-#### Capture Lifecycle: Nominal → Recording → Post-Processing → Preview
+#### Capture Lifecycle: Nominal → Recording → User Prompt → Background Processing
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant CV as CaptureView
     participant AR as ARCoverageView
-    participant FCS as FrameCaptureSession
+    participant SS as ScanStore
+    participant BG as Background Queue
 
-    Note over U,FCS: ── Nominal Mode (idle) ──
+    Note over U,AR: ── Nominal Mode (idle) ──
     CV->>AR: sceneReconstruction = []
-    Note right of AR: Camera passthrough only<br/>No mesh, no depth, no timers
 
     U->>CV: Tap Record
-    Note over U,FCS: ── Recording (live) ──
+    Note over U,AR: ── Recording (live) ──
     CV->>AR: sceneReconstruction = .mesh + .sceneDepth
-    CV->>FCS: start(session, privacyFilter: true)
-    Note right of AR: LIVE: Scene reconstruction<br/>LIVE: Face blur overlay (Vision 0.1s)<br/>LIVE: Stats tracking
-    Note right of FCS: LIVE: Frame capture (RGB + depth + pose)<br/>Face blur DEFERRED to export
+    Note right of AR: LIVE: Scene reconstruction, Stats tracking, Guidance Banners
 
     U->>CV: Tap Stop
-    Note over U,FCS: ── Data Extraction (sync, before nominal) ──
-    CV->>FCS: stop() → rawDataPath
-    CV->>AR: exportMeshOBJ() → mesh.obj
-    CV->>CV: captureThumbnail()
+    Note over U,SS: ── User Input & Routing ──
+    CV->>U: Custom Overlay: Name & Use Case Picker
+    U->>CV: Tap "Save"
+    CV->>SS: isProcessingScan = true
+    CV->>U: Navigate instantly to Scans tab (Progress spinner shown)
 
-    CV->>AR: isRecording = false
-    Note over U,FCS: ── Post-Processing (background) ──
-    AR->>AR: resetForNominal(), sceneReconstruction = []
-    CV->>CV: colorizeFromSavedFrames(mesh, cameras/)
-    Note right of CV: DEFERRED: Vertex coloring<br/>Reads saved JPEGs + camera transforms<br/>Projects OBJ vertices into ~10 frames
-
-    CV->>AR: exportWorldMap() → .worldmap
-    CV->>CV: savePendingScan()
-
-    Note over U,FCS: ── Preview ──
-    CV->>U: Navigate to LocationDetailView
+    Note over CV,BG: ── Data Extraction & Processing (async) ──
+    CV-)BG: startBackgroundProcessing()
+    AR->>AR: resetForNominal()
+    BG->>BG: stop() frame capture → rawDataPath
+    BG->>BG: exportMeshOBJ() → mesh.obj
+    BG->>BG: colorizeFromSavedFrames(mesh, cameras/)
+    BG->>BG: exportWorldMap() → .worldmap
+    BG->>SS: saveScan(...)
+    BG->>SS: isProcessingScan = false (Dismisses spinner)
 ```
 
 ### REQ-003: Scan4D (Extend Scan — Time-Series & Adjacent Stitching)
 | | |
 |:--|:--|
 | **Status** | ✅ Complete (Phase 1 — Local) |
-| **Description** | Enable two complementary scanning workflows via a single "Extend Scan" button, both powered by `ARWorldMap` relocalization and a ghost-mesh overlay. Provide conditional UI for specific capture sources. |
-| **Details** | **Use Case 1 — Time-Series Re-Scan:** Scan the same space again at a later time. The red ghost overlay shows the original capture area; the user re-scans the identical region. The backend pipeline can diff or merge these scans to track changes over time. **Use Case 2 — Adjacent-Space Stitching:** Extend a scan into an adjacent area. The user moves to the edge of the red ghost overlay and begins recording, overlapping slightly with the previous scan. The backend pipeline stitches the chunks together (via COLMAP, RealityCapture, or ICP) to build a single unified model from multiple adjacent sessions. Both use cases share identical device-side mechanics: (1) **Relocalization Setup:** Tapping "Extend Scan" on any scan card loads that scan's `ARWorldMap` as the AR session initialization target. (2) **Ghost Visualization:** The selected scan's mesh renders as a 0.3-opacity red overlay (`UnlitMaterial`). (3) **UI Prompting:** A dismissable toast instructs the user to either re-scan the red region (time-series) or move to its edge (adjacent stitching). (4) **Session Stability:** Destructive configurations like `.resetTracking` are strictly bypassed, guaranteeing that the ghost overlay anchors flawlessly without natively drifting out of phase between clips. (5) **Server-Side Focus:** No on-device mesh merging. The backend receives individual chunked scans with shared ARKit coordinate frames, visual overlap, and raw image data for downstream alignment. (6) **Wearables Constraint:** The "Extend Scan" functionality is explicitly disabled in the UI for proxy scans (e.g., Meta Ray-Ban glasses) because they lack ARKit spatial localization capabilities to place a ghost overlay or track device motion natively. |
+| **Description** | Enable two complementary scanning workflows via a single "Extend Scan" mechanism, both powered by `ARWorldMap` relocalization and a ghost-mesh overlay. Provide conditional UI for specific capture sources. |
+| **Details** | **Use Case 1 — Time-Series Re-Scan:** Scan the same space again at a later time. The red ghost overlay shows the original capture area; the user re-scans the identical region. The backend pipeline can diff or merge these scans to track changes over time. **Use Case 2 — Adjacent-Space Stitching:** Extend a scan into an adjacent area. The user moves to the edge of the red ghost overlay and begins recording, overlapping slightly with the previous scan. The backend pipeline stitches the chunks together to build a single unified model. Both use cases share identical device-side mechanics: (1) **Intent Declaration:** The workflow intent (Time-Series vs Extend) is explicitly chosen by the user in the initial save dialog (`ScanCase` picker). (2) **Relocalization Setup:** Tapping "Extend Scan" on any scan card loads that scan's `ARWorldMap` as the AR session initialization target. (3) **Ghost Visualization:** The selected scan's mesh renders as a 0.3-opacity red overlay. (4) **UI Prompting:** Live tracking banners instruct the user to "Move camera to relocalize" until the world map successfully aligns. |
 
 ```mermaid
 sequenceDiagram
@@ -232,14 +229,12 @@ sequenceDiagram
     participant SS as ScanStore
 
     Note over U,SS: First Scan (New Location)
-    U->>Cap: Tap Record
-    Cap->>AR: Start ARSession
-    U->>Cap: Tap Stop
-    AR-->>Cap: worldMapURL
-    Cap->>U: "Name this Space" prompt (Async/Non-blocking)
-    U->>Cap: "Kitchen"
-    Cap->>SS: addLocation("Kitchen")
-    Cap->>SS: addScan("Scan 1", mesh, worldMap)
+    U->>Cap: Tap Record → Tap Stop
+    Cap->>U: Custom Overlay: "Name this Space" & "Use Case" Picker
+    U->>Cap: Selects "Time-Series", taps Save
+    Cap->>SS: Background Processing...
+    SS->>SS: addLocation("Kitchen", useCase: .rescan)
+    SS->>SS: addScan("Scan 1", mesh, worldMap)
 
     Note over U,SS: Extend Scan (Time-Series or Adjacent)
     U->>SS: Tap "Extend Scan" on Scan 1
@@ -247,11 +242,11 @@ sequenceDiagram
     Cap->>AR: updateUIView (ghost mesh + worldMap)
     AR->>AR: config.initialWorldMap = loaded map
     AR->>AR: Parse ghost mesh → red overlay
-    AR-->>U: Ghost overlay + relocalization
-    Note right of U: Option A: Re-scan same space (time-series)
-    Note right of U: Option B: Move to edge, scan adjacent area
+    AR-->>U: Banner: "Move camera to relocalize"
+    Note right of U: Relocalization succeeds.
     U->>Cap: Tap Record → Tap Stop
-    Cap->>SS: addScan("Scan 2", mesh, worldMap, locationId)
+    Cap->>SS: Background Processing...
+    SS->>SS: addScan("Scan 2", mesh, worldMap)
 ```
 
 ### REQ-004: Privacy Filtering
