@@ -1,6 +1,11 @@
 import SwiftUI
 import SwiftData
 
+enum LibraryViewMode {
+    case grid
+    case graph
+}
+
 struct ScansListView: View {
     @Environment(ScanStore.self) private var scanStore
     @Environment(\.modelContext) private var modelContext
@@ -10,6 +15,8 @@ struct ScansListView: View {
     @State private var locationToDelete: ScanLocation? = nil
     @State private var showDeleteLocationConfirm = false
     @State private var isEditing = false
+    @State private var viewMode: LibraryViewMode = .grid
+    @State private var renderRequest: ComponentRenderRequest? = nil
     @Binding var selectedTab: Int
 
     let columns = [
@@ -24,8 +31,8 @@ struct ScansListView: View {
                 LinearGradient(colors: [Color(white: 0.1), Color.black], startPoint: .topLeading, endPoint: .bottomTrailing)
                     .ignoresSafeArea()
 
-                ScrollView {
-                    if locations.isEmpty {
+                if locations.isEmpty {
+                    ScrollView {
                         VStack(spacing: 16) {
                             Image(systemName: "folder")
                                 .font(.system(size: 48))
@@ -39,7 +46,11 @@ struct ScansListView: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 60)
-                    } else {
+                    }
+                } else if viewMode == .graph {
+                    StitchGraphView(locations: locations, renderRequest: $renderRequest)
+                } else {
+                    ScrollView {
                         LazyVGrid(columns: columns, spacing: 16) {
                             ForEach(locations) { location in
                                 ZStack(alignment: .topTrailing) {
@@ -75,6 +86,17 @@ struct ScansListView: View {
                 LocationDetailView(location: loc, selectedTab: $selectedTab)
             }
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if !locations.isEmpty {
+                        Button(action: {
+                            withAnimation { viewMode = (viewMode == .grid) ? .graph : .grid }
+                        }) {
+                            Image(systemName: viewMode == .grid ? "point.3.connected.trianglepath.dotted" : "square.grid.2x2")
+                                .foregroundColor(.cyan)
+                        }
+                        .disabled(isEditing)
+                    }
+                }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
                     if !locations.isEmpty {
                         Button(action: { isEditing.toggle() }) {
@@ -96,6 +118,9 @@ struct ScansListView: View {
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView()
+            }
+            .fullScreenCover(item: $renderRequest) { req in
+                CombinedMeshScreen(title: req.title, items: req.items)
             }
             .confirmationDialog(
                 "Delete Location",
