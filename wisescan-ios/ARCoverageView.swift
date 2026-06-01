@@ -19,6 +19,7 @@ struct ARCoverageView: UIViewRepresentable {
     var ghostXOffset: Float = 0         // Meters, X-axis position offset
     var ghostZOffset: Float = 0         // Meters, Z-axis position offset
     var dismissGhostMesh: Bool = false  // When true, remove ghost mesh from scene
+    var bakedGhostTransform: simd_float4x4? = nil // Manual transform to bake into the session origin
 
     /// Whether this device has LiDAR for scene reconstruction and depth capture.
     static let supportsLiDAR = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
@@ -183,9 +184,14 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Apply manual alignment transform offset to ghost mesh
         if let ghostAnchor = context.coordinator.ghostAnchorEntity {
-            let rotation = simd_quatf(angle: ghostYRotation, axis: [0, 1, 0])
-            let translation = SIMD3<Float>(ghostXOffset, 0, ghostZOffset)
-            ghostAnchor.transform = Transform(rotation: rotation, translation: translation)
+            if isRecording {
+                // When recording, the offset is baked into the world origin, so the mesh stays at identity
+                ghostAnchor.transform = Transform.identity
+            } else {
+                let rotation = simd_quatf(angle: ghostYRotation, axis: [0, 1, 0])
+                let translation = SIMD3<Float>(ghostXOffset, 0, ghostZOffset)
+                ghostAnchor.transform = Transform(rotation: rotation, translation: translation)
+            }
         }
 
         // Detect recording state change → switch AR session config
@@ -212,6 +218,13 @@ struct ARCoverageView: UIViewRepresentable {
                 }
                 // Don't reset tracking — preserve the current relocalized coordinate frame
                 uiView.session.run(config)
+                
+                // If the user manually aligned the ghost mesh, bake that transform into the ARKit world origin
+                if let baked = bakedGhostTransform {
+                    uiView.session.setWorldOrigin(relativeTransform: baked)
+                    print("[ARCoverageView] Applied baked ghost transform to ARSession world origin.")
+                }
+                
                 // Active wireframe is now rendered via procedural geometry (not .showSceneUnderstanding)
                 // Entities are built incrementally in session(_:didAdd:) and session(_:didUpdate:)
                 context.coordinator.resetForRecording()

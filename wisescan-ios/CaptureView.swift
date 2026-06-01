@@ -1,5 +1,6 @@
 import SwiftUI
 import ARKit
+import RealityKit
 import SwiftData
 
 struct CaptureView: View {
@@ -46,6 +47,7 @@ struct CaptureView: View {
     @State private var ghostXOffset: Float = 0
     @State private var ghostZOffset: Float = 0
     @State private var dismissGhostMesh = false
+    @State private var bakedGhostTransform: simd_float4x4? = nil
 
     struct ProcessingData {
         let result: (data: Data, vertexCount: Int, faceCount: Int)
@@ -87,7 +89,8 @@ struct CaptureView: View {
                 ghostYRotation: ghostYRotation,
                 ghostXOffset: ghostXOffset,
                 ghostZOffset: ghostZOffset,
-                dismissGhostMesh: dismissGhostMesh
+                dismissGhostMesh: dismissGhostMesh,
+                bakedGhostTransform: bakedGhostTransform
             )
                 .ignoresSafeArea()
 
@@ -791,6 +794,20 @@ struct CaptureView: View {
     }
 
     private func startRecording() {
+        // Bake the manual offsets into a permanent state right before recording starts
+        if ghostXOffset != 0 || ghostYRotation != 0 || ghostZOffset != 0 {
+            let rotation = simd_quatf(angle: ghostYRotation, axis: [0, 1, 0])
+            let translation = SIMD3<Float>(ghostXOffset, 0, ghostZOffset)
+            bakedGhostTransform = Transform(rotation: rotation, translation: translation).matrix
+            
+            // Zero out sliders so the UI doesn't double-apply the visual offset
+            ghostYRotation = 0
+            ghostXOffset = 0
+            ghostZOffset = 0
+        } else {
+            bakedGhostTransform = nil
+        }
+
         isRecording = true
         recordingSeconds = 0
         saveMessage = nil
