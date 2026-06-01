@@ -35,6 +35,7 @@ struct CaptureView: View {
     @State private var newLocationScanCase: ScanCase = .rescan
     @State private var cachedGhostMeshData: Data? = nil
     @State private var isARSessionReady = false
+    @State private var showSettings = false
 
     @State private var showExtendPrompt = false
 
@@ -250,6 +251,15 @@ struct CaptureView: View {
                         .padding(.vertical, 8)
                         .background(Color.red.opacity(0.3))
                         .cornerRadius(20)
+                    } else {
+                        Button(action: { showSettings = true }) {
+                            Image(systemName: "gearshape.fill")
+                                .font(.title3)
+                                .foregroundColor(.white)
+                                .padding(10)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
                     }
 
                 }
@@ -753,6 +763,9 @@ struct CaptureView: View {
                 .transition(.opacity)
                 .zIndex(100)
             }
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
         }
     }
 
