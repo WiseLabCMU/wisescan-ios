@@ -852,8 +852,8 @@ struct ARCoverageView: UIViewRepresentable {
 
     // MARK: - Export
 
-    static func exportMeshOBJ(from session: ARSession?, privacyFilter: Bool = false) -> (data: Data, vertexCount: Int, faceCount: Int)? {
-        guard let session = session, let currentFrame = session.currentFrame else { return nil }
+    static func exportMeshOBJ(from currentFrame: ARFrame?, privacyFilter: Bool = false) -> (data: Data, vertexCount: Int, faceCount: Int)? {
+        guard let currentFrame = currentFrame else { return nil }
 
         // Get person segmentation for privacy filtering
         var personPixels: (buffer: CVPixelBuffer, width: Int, height: Int, stride: Int, base: UnsafeMutableRawPointer)?

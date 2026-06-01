@@ -113,19 +113,7 @@ struct ScansListView: View {
             }
             .preferredColorScheme(.dark)
             .overlay {
-                if isMigrating {
-                    VStack {
-                        ProgressView(value: migrationProgress)
-                            .progressViewStyle(LinearProgressViewStyle())
-                            .padding()
-                        Text("Migrating Scans... \(Int(migrationProgress * 100))%")
-                            .foregroundColor(.white)
-                            .font(.caption)
-                    }
-                    .padding()
-                    .background(Color.black.opacity(0.8))
-                    .cornerRadius(12)
-                } else if scanStore.isProcessingScan {
+                if scanStore.isProcessingScan {
                     VStack(spacing: 12) {
                         ProgressView()
                             .progressViewStyle(CircularProgressViewStyle(tint: .white))
@@ -140,44 +128,7 @@ struct ScansListView: View {
                     .shadow(radius: 10)
                 }
             }
-            .task {
-                await performMigration()
-            }
         }
-    }
-
-    @State private var isMigrating = false
-    @State private var migrationProgress = 0.0
-
-    private func performMigration() async {
-        let allScans = locations.flatMap { $0.scans }
-        let scansToMigrate = allScans.filter { scan in
-            FileManager.default.fileExists(atPath: scan.meshFileURL.path) &&
-            !FileManager.default.fileExists(atPath: scan.modelPreviewURL.path)
-        }
-        
-        guard !scansToMigrate.isEmpty else { return }
-        isMigrating = true
-        
-        for (index, scan) in scansToMigrate.enumerated() {
-            let fm = FileManager.default
-            
-            // Migrate model preview
-            if !fm.fileExists(atPath: scan.modelPreviewURL.path) {
-                let pose = scan.location?.imagingPoseMatrix
-                if let img = await Task.detached(priority: .utility, operation: {
-                    MeshPreviewView.generateSnapshot(meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL, poseMatrix: pose)
-                }).value, let data = img.jpegData(compressionQuality: 0.8) {
-                    try? data.write(to: scan.modelPreviewURL)
-                }
-            }
-            
-            migrationProgress = Double(index + 1) / Double(scansToMigrate.count)
-        }
-        
-        // Let progress show briefly before hiding
-        try? await Task.sleep(for: .seconds(1))
-        isMigrating = false
     }
 
     private func deleteLocation(_ loc: ScanLocation) {

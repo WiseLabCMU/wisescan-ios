@@ -15,6 +15,7 @@ struct CaptureView: View {
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
     @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
+    @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.captureMode) private var captureModeStr: String = AppConstants.captureMode
     // Stream mode removed — fixed to Capture (Stream is a future feature)
     @State private var usingFrontCamera = false
@@ -37,10 +38,6 @@ struct CaptureView: View {
     @State private var cachedGhostMeshData: Data? = nil
     @State private var isARSessionReady = false
     @State private var showSettings = false
-
-    @State private var showExtendPrompt = false
-
-    // Ghost mesh relocalization controls
     @State private var showRelocDialog = false
     @State private var showManualAdjust = false
     @State private var ghostYRotation: Float = 0
@@ -48,9 +45,10 @@ struct CaptureView: View {
     @State private var ghostZOffset: Float = 0
     @State private var dismissGhostMesh = false
     @State private var bakedGhostTransform: simd_float4x4? = nil
+    @State private var activeLocationName: String? = nil
 
     struct ProcessingData {
-        let result: (data: Data, vertexCount: Int, faceCount: Int)
+        let frame: ARFrame?
         let rawDataPath: URL?
         let thumbnailData: Data?
     }
@@ -136,7 +134,10 @@ struct CaptureView: View {
                 }
 
                 if cachedGhostMeshData != nil && scanStats.trackingState == "limited" && scanStats.trackingReason == "Relocalizing" {
-                    Text("🔄 Move camera to relocalize with previous scan")
+                    HStack(spacing: 8) {
+                        Text("🔄 Move camera to relocalize with previous scan")
+                        OctahedronIcon(color: ghostMeshColor.swiftUIColor)
+                    }
                         .font(.headline)
                         .foregroundColor(.white)
                         .padding(.horizontal, 20)
@@ -178,32 +179,6 @@ struct CaptureView: View {
             }
 
             VStack {
-                // Extend Scan Prompt (transient)
-                if showExtendPrompt {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Extend Scan")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                            Text("Re-scan the red area to update it over time, or move to its edge and scan new ground to stitch a larger space.")
-                                .font(.subheadline)
-                                .foregroundColor(.white.opacity(0.8))
-                        }
-                        Spacer()
-                        Button(action: { showExtendPrompt = false }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.title2)
-                                .foregroundColor(.white.opacity(0.6))
-                        }
-                    }
-                    .padding()
-                    .background(Color.indigo.opacity(0.9))
-                    .cornerRadius(16)
-                    .padding(.horizontal)
-                    .padding(.top, developerMode ? 60 : 20) // Leave room for top controls
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .animation(.spring(), value: showExtendPrompt)
-                }
 
                 // Top Controls
                 HStack {
@@ -267,6 +242,18 @@ struct CaptureView: View {
 
                 }
                 .padding()
+
+                if let locName = activeLocationName {
+                    let modeText = scanStore.activeScanToExtend != nil ? "Extend Scan" : "Rescan"
+                    Text("\(locName) — \(modeText)")
+                        .font(.caption.bold())
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(16)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
                 
                 // Wearable PiP Overlay and Status Warnings
                 let wearableManager = MetaWearableManager.shared
@@ -504,8 +491,7 @@ struct CaptureView: View {
                     HStack {
                         Button(action: { showRelocDialog = true }) {
                             HStack(spacing: 6) {
-                                Image(systemName: "location.magnifyingglass")
-                                    .font(.caption)
+                                OctahedronIcon(color: ghostMeshColor.swiftUIColor)
                                 Text("Ghost Mesh")
                                     .font(.caption2.bold())
                             }
@@ -637,6 +623,12 @@ struct CaptureView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
+            if let locId = scanStore.activeLocationForScan {
+                let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
+                if let loc = try? modelContext.fetch(descriptor).first {
+                    activeLocationName = loc.name
+                }
+            }
             // Lock to portrait during capture to ensure consistent orientation
             // for privacy segmentation, depth maps, and frame export.
             //
@@ -672,8 +664,6 @@ struct CaptureView: View {
             // Start GPS/heading updates for scan metadata
             locationManager.startUpdating()
 
-            showExtendPrompt = (scanStore.activeScanToExtend != nil)
-
             // Auto-revert to back camera when developer mode is disabled
             if !developerMode || !flipCameraEnabled {
                 usingFrontCamera = false
@@ -706,6 +696,7 @@ struct CaptureView: View {
             scanStore.activeScanToExtend = nil
             cachedGhostMeshData = nil
             isARSessionReady = false
+            activeLocationName = nil
         }
         .overlay {
             if showNamePrompt {
@@ -807,6 +798,8 @@ struct CaptureView: View {
         } else {
             bakedGhostTransform = nil
         }
+        
+        showManualAdjust = false // Dismiss manual adjustment dialog automatically
 
         isRecording = true
         recordingSeconds = 0
@@ -830,11 +823,13 @@ struct CaptureView: View {
         }
 
         // Start a timer to track recording duration
+        startRecordingTimer()
+    }
+    
+    private func startRecordingTimer() {
+        recordingTimer?.invalidate()
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             recordingSeconds += 1
-            if recordingSeconds > 4 {
-                showExtendPrompt = false // Auto-dismiss after recording starts
-            }
         }
     }
 
@@ -854,6 +849,9 @@ struct CaptureView: View {
             )
             alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in
                 self.performStopRecording()
+            })
+            alert.addAction(UIAlertAction(title: "Continue Scanning", style: .cancel) { _ in
+                self.startRecordingTimer()
             })
             alert.addAction(UIAlertAction(title: "Discard Scan", style: .destructive) { _ in
                 self.isRecording = false
@@ -877,12 +875,12 @@ struct CaptureView: View {
         // Stop frame capture and get raw data path
         let rawDataPath = frameCaptureSession.stop()
 
-        // Export mesh from the still-active AR session
-        let meshResult = ARCoverageView.exportMeshOBJ(from: currentARSession, privacyFilter: isPrivacyFilterOn)
+        // Capture the current frame for background mesh export
+        let currentFrame = currentARSession?.currentFrame
 
         // Capture a 2D thumbnail from the current camera frame
         var thumbnailData: Data? = nil
-        if let currentFrame = currentARSession?.currentFrame {
+        if let currentFrame = currentFrame {
             let ciImage = CIImage(cvPixelBuffer: currentFrame.capturedImage)
             let context = CIContext()
             if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
@@ -900,27 +898,7 @@ struct CaptureView: View {
         // ── Now switch to nominal mode (drops mesh anchors, frees AR memory) ──
         isRecording = false
 
-        var finalMeshResult = meshResult
-
-        // If test modes are active and no mesh was generated (e.g. Simulator), inject a dummy mesh
-        if finalMeshResult == nil || finalMeshResult!.data.isEmpty {
-            if developerMode && (mockCameraImages || mockIMU || mockDepthMaps) {
-                let dummyObj = "v -0.5 -0.5 -0.5\nv 0.5 -0.5 -0.5\nv 0.5 0.5 -0.5\nf 1 2 3\n"
-                if let dummyObjData = dummyObj.data(using: .utf8) {
-                    finalMeshResult = (dummyObjData, 3, 1)
-                }
-            }
-        }
-
-        guard let result = finalMeshResult, !result.data.isEmpty else {
-            saveMessage = "No Mesh Data"
-            frameCaptureSession = FrameCaptureSession()
-            MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
-            clearMessage()
-            return
-        }
-
-        let processingData = ProcessingData(result: result, rawDataPath: rawDataPath, thumbnailData: thumbnailData)
+        let processingData = ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData)
 
         if scanStore.activeLocationForScan == nil {
             newLocationName = ""
@@ -937,14 +915,48 @@ struct CaptureView: View {
         // Change to Scans tab immediately
         selectedTab = 2
         scanStore.isProcessingScan = true
-        scanStore.processingMessage = "Coloring mesh..."
+        scanStore.processingMessage = "Exporting Mesh..."
         
         let capturedLocationId = locationId
-        let result = data.result
+        let frame = data.frame
         let rawDataPath = data.rawDataPath
         let thumbnailData = data.thumbnailData
+        let developerMode = self.developerMode
+        let mockCameraImages = self.mockCameraImages
+        let mockIMU = self.mockIMU
+        let mockDepthMaps = self.mockDepthMaps
+        let privacyFilter = isPrivacyFilterOn
 
         DispatchQueue.global(qos: .utility).async {
+            // 1. Export Mesh OBJ
+            var finalMeshResult = ARCoverageView.exportMeshOBJ(from: frame, privacyFilter: privacyFilter)
+            
+            // If test modes are active and no mesh was generated (e.g. Simulator), inject a dummy mesh
+            if finalMeshResult == nil || finalMeshResult!.data.isEmpty {
+                if developerMode && (mockCameraImages || mockIMU || mockDepthMaps) {
+                    let dummyObj = "v -0.5 -0.5 -0.5\nv 0.5 -0.5 -0.5\nv 0.5 0.5 -0.5\nf 1 2 3\n"
+                    if let dummyObjData = dummyObj.data(using: .utf8) {
+                        finalMeshResult = (dummyObjData, 3, 1)
+                    }
+                }
+            }
+            
+            guard let result = finalMeshResult, !result.data.isEmpty else {
+                DispatchQueue.main.async {
+                    self.saveMessage = "No Mesh Data"
+                    self.frameCaptureSession = FrameCaptureSession()
+                    MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
+                    self.clearMessage()
+                    self.scanStore.isProcessingScan = false
+                    self.scanStore.processingMessage = nil
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.scanStore.processingMessage = "Coloring mesh..."
+            }
+
             let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
                 objData: result.data,
                 rawDataDir: rawDataPath
@@ -992,6 +1004,7 @@ struct CaptureView: View {
                         self.scanStore.activeRelocalizationMap = nil
                         self.scanStore.activeScanToExtend = nil
                         self.cachedGhostMeshData = nil
+                        self.activeLocationName = nil
 
                         self.scanStore.isProcessingScan = false
                         self.scanStore.processingMessage = nil
@@ -1017,4 +1030,49 @@ struct CaptureView: View {
 #Preview {
     CaptureView(selectedTab: .constant(1))
         .environment(ScanStore())
+}
+
+struct OctahedronIcon: View {
+    var color: Color
+    var body: some View {
+        Path { path in
+            let w: CGFloat = 16
+            let h: CGFloat = 16
+            let midX = w / 2
+            let midY = h / 2
+            let top = CGPoint(x: w * 0.5, y: h * 0.075)
+            let bottom = CGPoint(x: w * 0.5, y: h * 0.925)
+            let left = CGPoint(x: w * 0.075, y: h * 0.53)
+            let right = CGPoint(x: w * 0.925, y: h * 0.47)
+            let front = CGPoint(x: w * 0.61, y: h * 0.61)
+            let back = CGPoint(x: w * 0.39, y: h * 0.39)
+            
+            // Outline
+            path.move(to: top)
+            path.addLine(to: right)
+            path.addLine(to: bottom)
+            path.addLine(to: left)
+            path.closeSubpath()
+            
+            // Front edges
+            path.move(to: top)
+            path.addLine(to: front)
+            path.addLine(to: bottom)
+            
+            path.move(to: left)
+            path.addLine(to: front)
+            path.addLine(to: right)
+            
+            // Back edges (wireframe)
+            path.move(to: top)
+            path.addLine(to: back)
+            path.addLine(to: bottom)
+            
+            path.move(to: left)
+            path.addLine(to: back)
+            path.addLine(to: right)
+        }
+        .stroke(color, lineWidth: 1.5)
+        .frame(width: 16, height: 16)
+    }
 }
