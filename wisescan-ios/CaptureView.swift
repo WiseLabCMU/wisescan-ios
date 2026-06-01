@@ -32,9 +32,6 @@ struct CaptureView: View {
     // Scan4D properties
     @State private var showNamePrompt = false
     @State private var newLocationName = ""
-    @State private var pendingScan: PendingScanData? = nil
-    @State private var isProcessingMesh = false
-    @State private var isWaitingToSave = false
     @State private var cachedGhostMeshData: Data? = nil
     @State private var isARSessionReady = false
 
@@ -48,16 +45,12 @@ struct CaptureView: View {
     @State private var ghostZOffset: Float = 0
     @State private var dismissGhostMesh = false
 
-    struct PendingScanData {
-        let locationId: UUID?
-        let meshData: Data
-        let vertexCount: Int
-        let faceCount: Int
+    struct ProcessingData {
+        let result: (data: Data, vertexCount: Int, faceCount: Int)
         let rawDataPath: URL?
-        let vertexColors: Data?
-        let worldMapURL: URL?
         let thumbnailData: Data?
     }
+    @State private var pendingProcessingData: ProcessingData?
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State.
     private func loadGhostMeshData() {
@@ -703,18 +696,16 @@ struct CaptureView: View {
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
             Button("Save", action: { 
-                if isProcessingMesh {
-                    isWaitingToSave = true
-                    saveMessage = "Adding location details..." 
-                } else {
-                    savePendingScan()
+                if let data = pendingProcessingData {
+                    let trimmedName = newLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let finalName = trimmedName.isEmpty ? "New Space" : trimmedName
+                    startBackgroundProcessing(name: finalName, locationId: nil, data: data)
+                    pendingProcessingData = nil
                 }
             })
             Button("Cancel", role: .cancel) {
-                pendingScan = nil
+                pendingProcessingData = nil
                 saveMessage = nil
-                isProcessingMesh = false
-                isWaitingToSave = false
             }
         } message: {
             Text("Enter a unique name for this space so you can efficiently 'Extend Scan' later.")
@@ -855,24 +846,29 @@ struct CaptureView: View {
             return
         }
 
-        // Prompt the user for a name IMMEDIATELY while mesh processes
-        isProcessingMesh = true
-        isWaitingToSave = false
-        
+        let processingData = ProcessingData(result: result, rawDataPath: rawDataPath, thumbnailData: thumbnailData)
+
         if scanStore.activeLocationForScan == nil {
             newLocationName = ""
+            pendingProcessingData = processingData
             showNamePrompt = true
-            // saveMessage is left nil or minimally intrusive so user focuses on typing
         } else {
-            // Already extending a scan; user won't be prompted. Wait for processing to save.
-            isWaitingToSave = true
-            saveMessage = "Coloring mesh..."
+            // Already extending a scan; user won't be prompted. Start processing immediately.
+            startBackgroundProcessing(name: "Extended Scan", locationId: scanStore.activeLocationForScan, data: processingData)
         }
+    }
 
-        let capturedLocationId = scanStore.activeLocationForScan
+    private func startBackgroundProcessing(name: String, locationId: UUID?, data: ProcessingData) {
+        // Change to Scans tab immediately
+        selectedTab = 2
+        scanStore.isProcessingScan = true
+        scanStore.processingMessage = "Coloring mesh..."
+        
+        let capturedLocationId = locationId
+        let result = data.result
+        let rawDataPath = data.rawDataPath
+        let thumbnailData = data.thumbnailData
 
-        // Run vertex coloring in background using saved camera frames (.utility QoS
-        // so the name-prompt keyboard stays responsive while coloring runs)
         DispatchQueue.global(qos: .utility).async {
             let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
                 objData: result.data,
@@ -880,7 +876,7 @@ struct CaptureView: View {
             )
 
             DispatchQueue.main.async {
-                self.saveMessage = "Saving World Map..."
+                self.scanStore.processingMessage = "Saving World Map..."
 
                 // Export ARWorldMap for Scan4D relocalization
                 VertexColorAccumulator.exportWorldMap(from: self.currentARSession) { mapURL in
@@ -896,11 +892,15 @@ struct CaptureView: View {
                             }
                         }
 
-                        self.pendingScan = PendingScanData(
+                        // Save directly
+                        let savedScan = ScanFileManager.shared.saveScan(
+                            context: self.modelContext,
                             locationId: capturedLocationId,
+                            name: name,
                             meshData: result.data,
                             vertexCount: result.vertexCount,
                             faceCount: result.faceCount,
+                            hardwareDeviceModel: UIDevice.current.name,
                             rawDataPath: rawDataPath,
                             vertexColors: vertexColors,
                             worldMapURL: mapURL,
@@ -910,13 +910,20 @@ struct CaptureView: View {
                         // Release frame capture session memory
                         self.frameCaptureSession = FrameCaptureSession()
                         MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
-                        self.isProcessingMesh = false
 
-                        // If user already tapped save in the alert, OR if this is a background extension
-                        if self.isWaitingToSave {
-                            self.savePendingScan()
-                        } else if self.scanStore.activeLocationForScan != nil {
-                            self.savePendingScan()
+                        // Reset the active state so subsequent scans don't default to this location
+                        self.scanStore.activeLocationForScan = nil
+                        self.scanStore.activeRelocalizationMap = nil
+                        self.scanStore.activeScanToExtend = nil
+                        self.cachedGhostMeshData = nil
+
+                        self.scanStore.isProcessingScan = false
+                        self.scanStore.processingMessage = nil
+
+                        // Programmatically navigate to the created LocationDetailView
+                        if let loc = savedScan.location {
+                            self.scanStore.navigationPath.removeLast(self.scanStore.navigationPath.count)
+                            self.scanStore.navigationPath.append(loc)
                         }
                     }
                 }
@@ -926,56 +933,6 @@ struct CaptureView: View {
 
     private func clearMessage() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            saveMessage = nil
-        }
-    }
-
-    private func savePendingScan() {
-        guard let pending = pendingScan else { return }
-
-        let locationId: UUID?
-        var finalName = "New Space"
-
-        if let activeLocationId = pending.locationId {
-            locationId = activeLocationId
-        } else {
-            let trimmedName = newLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
-            finalName = trimmedName.isEmpty ? "New Space" : trimmedName
-            locationId = nil // ScanFileManager will create a new location with this name
-        }
-
-        let savedScan = ScanFileManager.shared.saveScan(
-            context: modelContext,
-            locationId: locationId,
-            name: finalName,
-            meshData: pending.meshData,
-            vertexCount: pending.vertexCount,
-            faceCount: pending.faceCount,
-            hardwareDeviceModel: UIDevice.current.name,
-            rawDataPath: pending.rawDataPath,
-            vertexColors: pending.vertexColors,
-            worldMapURL: pending.worldMapURL,
-            thumbnailData: pending.thumbnailData
-        )
-
-        saveMessage = "Scan Saved!"
-        pendingScan = nil
-
-        // Reset the active state so subsequent scans don't default to this location
-        scanStore.activeLocationForScan = nil
-        scanStore.activeRelocalizationMap = nil
-
-        // Programmatically navigate to the created LocationDetailView
-        let savedLoc = savedScan.location
-
-        // Switch to Scans tab after a brief delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            selectedTab = 2
-            if let loc = savedLoc {
-                // Clear any existing path and append the new/updated location
-                scanStore.navigationPath.removeLast(scanStore.navigationPath.count)
-                scanStore.navigationPath.append(loc)
-            }
             saveMessage = nil
         }
     }

@@ -214,6 +214,10 @@ class ScanStore {
     var activeLocationForScan: UUID? = nil
     var activeScanToExtend: UUID? = nil
     
+    // Global state for background scan processing
+    var isProcessingScan: Bool = false
+    var processingMessage: String? = nil
+    
     // Shared navigation state to allow programmatic pushes
     var navigationPath = NavigationPath()
 }

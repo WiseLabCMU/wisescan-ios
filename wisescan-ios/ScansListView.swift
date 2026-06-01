@@ -125,6 +125,19 @@ struct ScansListView: View {
                     .padding()
                     .background(Color.black.opacity(0.8))
                     .cornerRadius(12)
+                } else if scanStore.isProcessingScan {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(1.5)
+                        Text(scanStore.processingMessage ?? "Processing Scan...")
+                            .foregroundColor(.white)
+                            .font(.headline)
+                    }
+                    .padding(24)
+                    .background(Color.black.opacity(0.85))
+                    .cornerRadius(16)
+                    .shadow(radius: 10)
                 }
             }
             .task {
