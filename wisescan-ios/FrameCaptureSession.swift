@@ -2,6 +2,7 @@ import Foundation
 import ARKit
 import UIKit
 import Observation
+import os
 
 /// Captures RGB frames, depth maps, and camera poses during an AR recording session.
 @Observable
@@ -57,6 +58,11 @@ class FrameCaptureSession {
     /// Reusable 16-bit depth conversion buffer (depth resolution is fixed per session).
     /// Only touched inside depthMapToPNG16 on ioQueue, so no synchronization needed.
     private var depthScratch: [UInt16] = []
+
+    /// Perf diagnostics: number of frame-save closures queued/running on ioQueue. Growth means
+    /// retained CVPixelBuffers are piling up faster than encodes finish — the capture-side cause
+    /// of ARFrame-pool starvation. Incremented on the capture (main) timer, decremented on ioQueue.
+    private let inFlightSaves = OSAllocatedUnfairLock(initialState: 0)
 
     struct FrameData {
         let index: Int
@@ -337,7 +343,13 @@ class FrameCaptureSession {
         segBuffer: CVPixelBuffer?,
         currentIndex: Int
     ) {
+        // Perf diagnostics: track how deep the ioQueue backlog gets (retained-buffer pile-up).
+        // The counter is always maintained (cheap); only the logging is gated by the flag, so
+        // toggling the flag mid-session can never desync the increment/decrement pairing.
+        let depth = inFlightSaves.withLock { $0 += 1; return $0 }
+        if PerfDiag.enabled && depth > 2 { PerfDiag.log("capture I/O backlog: \(depth) frames in flight") }
         ioQueue.async { [weak self] in
+            defer { self?.inFlightSaves.withLock { $0 -= 1 } }
             guard let self = self, let imagesDir = self.imagesDir else { return }
 
             // Depth is optional — LiDAR devices get depth, others just capture images + poses
@@ -350,14 +362,15 @@ class FrameCaptureSession {
                     print("[FrameCapture] Unexpected depth format: \(depthFormat), skipping depth")
                     return
                 }
-                validDepthData = self.depthMapToPNG16(dMap, personMask: segBuffer)
+                validDepthData = PerfDiag.timed("depth_png16", warnOverMs: 50) { self.depthMapToPNG16(dMap, personMask: segBuffer) }
             }
 
             var finalJpegData: Data
             if self.isMockingImages {
                 finalJpegData = TestDataGenerator.generateImage(for: currentIndex, w: camW, h: camH, transform: transform, intrinsics: intrinsics)
             } else {
-                guard let pBuf = pixelBuffer, let jpegData = self.pixelBufferToJPEG(pBuf) else {
+                guard let pBuf = pixelBuffer,
+                      let jpegData = PerfDiag.timed("jpeg_encode", warnOverMs: 50, { self.pixelBufferToJPEG(pBuf) }) else {
                     return
                 }
                 var tempJpegData = jpegData
@@ -366,7 +379,7 @@ class FrameCaptureSession {
                     // See FaceBlurOverlay.swift for full orientation architecture documentation.
                     // TODO: If Apple enforces all-orientation support on iPad, this will need
                     // to use the runtime device orientation instead of hardcoded .right.
-                    let (blurredData, centers) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: jpegData, orientation: .right)
+                    let (blurredData, centers) = PerfDiag.timed("privacy_seg_accurate", warnOverMs: 50) { PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: jpegData, orientation: .right) }
                     if let bData = blurredData {
                         tempJpegData = bData
                     }
@@ -451,7 +464,7 @@ class FrameCaptureSession {
                     try depthData.write(to: depthPath, options: .atomic)
                 }
                 
-                if let confMap = confidenceMap, let confData = self.confidenceMapToPNG(confMap), let confDir = self.confidenceDir {
+                if let confMap = confidenceMap, let confData = PerfDiag.timed("confidence_png", warnOverMs: 40, { self.confidenceMapToPNG(confMap) }), let confDir = self.confidenceDir {
                     let confPath = confDir.appendingPathComponent("frame_\(paddedIndex).png")
                     try confData.write(to: confPath, options: .atomic)
                 }

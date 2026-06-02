@@ -25,6 +25,8 @@ struct CaptureView: View {
     @State private var recordingSeconds = 0
     @State private var recordingTimer: Timer? = nil
     @State private var frameCaptureSession = FrameCaptureSession()
+    // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
+    @State private var mainThreadWatchdog = MainThreadWatchdog()
     // colorAccumulator removed — vertex coloring now deferred to post-processing
     @AppStorage(AppConstants.Key.rawOverlapMax) private var overlapMax: Double = AppConstants.overlapMax
     @AppStorage(AppConstants.Key.rawRejectBlur) private var rejectBlur: Bool = AppConstants.rejectBlur
@@ -623,6 +625,11 @@ struct CaptureView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
+            // Pick up any Settings change to the diagnostics flag, then start the main-thread
+            // stall watchdog for this capture session (both no-ops unless Perf Diagnostics is on).
+            PerfDiag.refresh()
+            mainThreadWatchdog.start()
+
             if let locId = scanStore.activeLocationForScan {
                 let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
                 if let loc = try? modelContext.fetch(descriptor).first {
@@ -674,6 +681,8 @@ struct CaptureView: View {
             MetaWearableManager.shared.startStreaming()
         }
         .onDisappear {
+            mainThreadWatchdog.stop()
+
             // Unlock orientation when leaving capture
             AppDelegate.orientationLocked = false
             if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {

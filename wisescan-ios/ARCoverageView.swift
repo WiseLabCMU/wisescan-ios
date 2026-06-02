@@ -366,6 +366,10 @@ struct ARCoverageView: UIViewRepresentable {
         private var anchorVertexCounts: [UUID: Int] = [:]
         private var anchorFaceCounts: [UUID: Int] = [:]
 
+        /// Perf diagnostics: timestamp of the previous ARFrame, to detect gaps in frame
+        /// delivery (the signature of ARKit VIO being starved). Touched only on the delegate queue.
+        private var lastFrameTimestamp: TimeInterval = 0
+
         // Session capacity tracking
         private var sessionStartTime: Date = Date()
         private var baselineMemoryMB: Double = ScanStats.currentMemoryUsageMB()
@@ -684,6 +688,8 @@ struct ARCoverageView: UIViewRepresentable {
                 }
             }
 
+            PerfDiag.log("ARKit tracking → \(stateStr)\(reasonStr.isEmpty ? "" : " (\(reasonStr))")")
+
             DispatchQueue.main.async { [weak self] in
                 self?.scanStats?.trackingState = stateStr
                 self?.scanStats?.trackingReason = reasonStr
@@ -691,6 +697,20 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
+            // Perf diagnostics (both AR + VR, above the VR-only guard): log abnormal gaps in
+            // ARKit frame delivery — the direct signal that VIO was starved. Cheap when off.
+            if PerfDiag.enabled {
+                let ts = frame.timestamp
+                if lastFrameTimestamp > 0 {
+                    let gap = ts - lastFrameTimestamp
+                    if gap > 0.1 {
+                        let normal = frame.camera.trackingState == .normal
+                        PerfDiag.log("ARKit frame gap \(Int(gap * 1000))ms (tracking \(normal ? "normal" : "degraded"))")
+                    }
+                }
+                lastFrameTimestamp = ts
+            }
+
             // ── VR Mode: update point cloud ──
             // IMPORTANT: Extract pixel buffers and camera data HERE (on the delegate queue)
             // so the ARFrame reference is released immediately. Do NOT forward the ARFrame

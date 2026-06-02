@@ -38,6 +38,8 @@ enum AppConstants {
         static let metaWearablesPermissionGranted = "metaWearablesPermissionGranted"
         static let captureMode = "captureMode"
         static let hideLivePoints = "hideLivePoints"
+        static let perfDiagnostics = "perfDiagnostics"
+        static let pauseVRCompute = "pauseVRCompute"
     }
 
     // MARK: - Default Values
@@ -63,6 +65,8 @@ enum AppConstants {
     static let metaWearablesFPS: Double = 7.0
     static let captureMode: String = CaptureMode.ar.rawValue
     static let hideLivePoints: Bool = false
+    static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
+    static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 0.5      // merge distance for face anchors (~head diameter)

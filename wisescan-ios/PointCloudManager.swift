@@ -319,14 +319,18 @@ class PointCloudManager {
             // on Simulator because it uses an sRGB format and lacks the shaderWrite usage flag.
             return
             #else
+            // Developer isolation test: skip the bloom passes (the VR point-cloud GPU pipeline
+            // is gated separately in update()). Reading UserDefaults on the render thread is safe.
+            if UserDefaults.standard.bool(forKey: AppConstants.Key.pauseVRCompute) { return }
+
             let source = context.sourceColorTexture
             let dest = context.targetColorTexture
-            
+
             // Check if RealityKit provided a texture we can actually write to with a compute shader
             guard dest.usage.contains(.shaderWrite) else {
                 return
             }
-            
+
             let width = source.width
             let height = source.height
             // Bloom is low-frequency: run the threshold + horizontal-blur pass at half
@@ -401,6 +405,11 @@ class PointCloudManager {
         intrinsics: simd_float3x3,
         privacyFilter: Bool
     ) {
+        // Developer isolation test: skip the entire VR GPU pipeline (point-cloud projection +
+        // voxel integration). Bloom is gated separately in setupBloomPostProcess. If the freeze
+        // disappears with this on, the GPU pipeline is implicated.
+        if UserDefaults.standard.bool(forKey: AppConstants.Key.pauseVRCompute) { return }
+
         guard let llm = lowLevelMesh,
               let depthMap = depthMap else { return }
 
@@ -443,7 +452,7 @@ class PointCloudManager {
         if let seg = segMap {
             segTexture = makeTexture(from: seg, pixelFormat: .r8Unorm)
         }
-        
+
         var confTexture: MTLTexture? = nil
         if let conf = confidenceMap {
             confTexture = makeTexture(from: conf, pixelFormat: .r8Uint)
@@ -521,7 +530,15 @@ class PointCloudManager {
         computeEncoder.endEncoding()
 
         gpuBusy = true
-        commandBuffer.addCompletedHandler { [weak self] _ in
+        commandBuffer.addCompletedHandler { [weak self] cb in
+            // Perf diagnostics: report the on-GPU duration of the per-frame project(+integrate)
+            // pass when it spikes — this competes with ARKit's own depth/VIO GPU work.
+            if PerfDiag.enabled {
+                let gpuMs = (cb.gpuEndTime - cb.gpuStartTime) * 1000.0
+                if gpuMs > 8 {
+                    PerfDiag.log("VR GPU project\(didDispatchIntegration ? "+integrate" : "") \(Int(gpuMs))ms")
+                }
+            }
             DispatchQueue.main.async {
                 self?.gpuBusy = false
                 if didDispatchIntegration {
@@ -717,20 +734,22 @@ class PointCloudManager {
         // owns ALL hash-map access. Pack also runs there; the GPU dispatch (LowLevelMesh
         // is @MainActor) hops back to main.
         voxelQueue.async { [weak self] in
-            grid.mergeAppendBuffer(entries, frameCounter: frameCounter)
-            if let transform, let intrinsics, let depthMap {
-                grid.decayContradictedVoxels(
-                    cameraTransform: transform,
-                    intrinsics: intrinsics,
-                    depthMap: depthMap,
-                    depthWidth: CVPixelBufferGetWidth(depthMap),
-                    depthHeight: CVPixelBufferGetHeight(depthMap)
-                )
+            PerfDiag.timed("voxel_merge_decay", warnOverMs: 5) {
+                grid.mergeAppendBuffer(entries, frameCounter: frameCounter)
+                if let transform, let intrinsics, let depthMap {
+                    grid.decayContradictedVoxels(
+                        cameraTransform: transform,
+                        intrinsics: intrinsics,
+                        depthMap: depthMap,
+                        depthWidth: CVPixelBufferGetWidth(depthMap),
+                        depthHeight: CVPixelBufferGetHeight(depthMap)
+                    )
+                }
             }
 
             guard willExtract, let extractBuffer else { return }
             // Lightweight pack: unpack keys + copy color into the reused GPU buffer.
-            let count = grid.packForExtraction(into: extractBuffer.contents(), maxVoxels: VoxelGrid.maxVoxels)
+            let count = PerfDiag.timed("voxel_pack", warnOverMs: 3) { grid.packForExtraction(into: extractBuffer.contents(), maxVoxels: VoxelGrid.maxVoxels) }
 
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -793,7 +812,12 @@ class PointCloudManager {
         encoder.endEncoding()
 
         let iPerVoxel = indicesPerVoxel
-        cmdBuf.addCompletedHandler { [weak self] _ in
+        cmdBuf.addCompletedHandler { [weak self] cb in
+            // Perf diagnostics: on-GPU duration of the (up to 350K-thread) voxel extract pass.
+            if PerfDiag.enabled {
+                let gpuMs = (cb.gpuEndTime - cb.gpuStartTime) * 1000.0
+                PerfDiag.log("VR GPU extract \(voxelCount) voxels \(Int(gpuMs))ms")
+            }
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 // Set the visible index count to match the buffer the GPU just filled.
