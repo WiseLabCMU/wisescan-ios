@@ -324,22 +324,26 @@ class PointCloudManager {
             
             let width = source.width
             let height = source.height
+            // Bloom is low-frequency: run the threshold + horizontal-blur pass at half
+            // resolution (¼ the threads). The composite pass stays full-res.
+            let halfW = max(1, width / 2)
+            let halfH = max(1, height / 2)
 
-            // Lazily create/recreate intermediate texture (always linear)
+            // Lazily create/recreate the half-res intermediate texture (always linear)
             if intermediateTexture == nil ||
-               intermediateTexture!.width != width ||
-               intermediateTexture!.height != height {
+               intermediateTexture!.width != halfW ||
+               intermediateTexture!.height != halfH {
                 let desc = MTLTextureDescriptor.texture2DDescriptor(
                     pixelFormat: .bgra8Unorm,
-                    width: width,
-                    height: height,
+                    width: halfW,
+                    height: halfH,
                     mipmapped: false
                 )
                 desc.usage = [.shaderRead, .shaderWrite]
                 desc.storageMode = .private
                 intermediateTexture = device.makeTexture(descriptor: desc)
                 intermediateTexture?.label = "BloomIntermediate"
-                print("[PointCloudManager] Bloom intermediate texture created: \(width)×\(height)")
+                print("[PointCloudManager] Bloom intermediate texture created: \(halfW)×\(halfH) (half of \(width)×\(height))")
             }
 
             guard let intermediate = intermediateTexture else { return }
@@ -347,28 +351,34 @@ class PointCloudManager {
             let commandBuffer = context.commandBuffer
 
             let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
-            let threadGroups = MTLSize(
+            let halfGroups = MTLSize(
+                width: (halfW + 15) / 16,
+                height: (halfH + 15) / 16,
+                depth: 1
+            )
+            let fullGroups = MTLSize(
                 width: (width + 15) / 16,
                 height: (height + 15) / 16,
                 depth: 1
             )
 
-            // Pass 1: Threshold + Horizontal blur (source → intermediate)
+            // Pass 1: Threshold + Horizontal blur at half-res (source → half-res intermediate)
             if let encoder = commandBuffer.makeComputeCommandEncoder() {
                 encoder.setComputePipelineState(thresholdPipeline)
                 encoder.setTexture(source, index: 0)
                 encoder.setTexture(intermediate, index: 1)
-                encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+                encoder.dispatchThreadgroups(halfGroups, threadsPerThreadgroup: threadGroupSize)
                 encoder.endEncoding()
             }
 
-            // Pass 2: Vertical blur + Composite (source + intermediate → dest)
+            // Pass 2: Vertical blur (upsampling the half-res intermediate) + composite,
+            // at full-res (source + intermediate → dest)
             if let encoder = commandBuffer.makeComputeCommandEncoder() {
                 encoder.setComputePipelineState(compositePipeline)
                 encoder.setTexture(source, index: 0)
                 encoder.setTexture(intermediate, index: 1)
                 encoder.setTexture(dest, index: 2)
-                encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+                encoder.dispatchThreadgroups(fullGroups, threadsPerThreadgroup: threadGroupSize)
                 encoder.endEncoding()
             }
             #endif
