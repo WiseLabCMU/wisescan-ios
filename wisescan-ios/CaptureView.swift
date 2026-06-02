@@ -113,10 +113,13 @@ struct CaptureView: View {
                 .transition(.opacity)
             }
 
-            // Privacy blur overlay (shown when privacy filter is on AND recording in AR mode).
-            // In VR mode the point cloud already shows person-shaped holes as the privacy indicator.
+            // Live privacy indicator (shown when privacy filter is on AND recording in AR mode).
+            // A cheap red-eye marker over each person region, driven by ARKit's existing
+            // segmentation stencil — NOT the old per-tick Vision pass + pixelate render (which
+            // competed with VIO). Saved RGB frames are still blurred; this is just the live signal.
+            // In VR mode the point cloud already shows person-shaped holes as the indicator.
             if isPrivacyFilterOn && isRecording && (AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar) != .vr {
-                PrivacyBlurOverlay(arSession: currentARSession)
+                PrivacyEyeOverlay(arSession: currentARSession)
                     .ignoresSafeArea()
             }
 

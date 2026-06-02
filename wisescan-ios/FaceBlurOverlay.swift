@@ -3,7 +3,12 @@ import ARKit
 import Vision
 import CoreImage.CIFilterBuiltins
 
-/// Overlay that detects persons in the AR camera feed and draws a pixelated overlay over them.
+/// Cheap live privacy indicator: draws a red "eye" marker over each detected person region.
+/// Driven entirely by ARKit's already-computed `.personSegmentationWithDepth` stencil
+/// (`ARFrame.segmentationBuffer`) — NO Vision pass and NO CoreImage render (the old overlay
+/// ran a per-tick `.fast` `VNGeneratePersonSegmentationRequest` + pixelate/blend, which competed
+/// with VIO). The privacy *guarantee* is the saved-frame blur; this only signals, live, that a
+/// person is being detected and masked. AR-only — VR shows person-shaped point-cloud holes.
 ///
 /// # Orientation Architecture
 ///
@@ -68,121 +73,69 @@ import CoreImage.CIFilterBuiltins
 ///
 /// The capture view is locked to portrait, so the sensor image is always landscape-right
 /// and we use `UIImage(orientation: .right)` to rotate it for portrait display.
-struct PrivacyBlurOverlay: View {
+struct PrivacyEyeOverlay: View {
     var arSession: ARSession?
-    @State private var overlayImage: UIImage? = nil
+    /// Detected person regions as normalized PORTRAIT-screen rects (top-left origin), refreshed ~10 Hz.
+    @State private var regions: [CGRect] = []
     @State private var timer: Timer?
-    // Owns the reused Vision request + serializes work so overlapping timer ticks
-    // never share request state and never pile up. Retained for the view's lifetime.
-    @State private var processor = PrivacyOverlayProcessor()
+    @State private var isProcessing = false
 
     var body: some View {
         GeometryReader { geo in
-            if let img = overlayImage {
-                Image(uiImage: img)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: geo.size.width, height: geo.size.height)
-                    .clipped()
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(regions.enumerated()), id: \.offset) { _, r in
+                    // Scale the marker to the region, clamped so a tiny speck still reads and a
+                    // close-up person doesn't fill the screen.
+                    let dim = max(30, min(72, r.width * geo.size.width))
+                    Image(systemName: "eye.fill")
+                        .font(.system(size: dim * 0.7, weight: .bold))
+                        .foregroundStyle(.red)
+                        .shadow(color: .black.opacity(0.7), radius: 2)
+                        .position(x: r.midX * geo.size.width,
+                                  y: r.midY * geo.size.height)
+                }
             }
         }
-        .onAppear { startDetection() }
-        .onDisappear { stopDetection() }
+        .allowsHitTesting(false)
+        .onAppear { start() }
+        .onDisappear { stop() }
     }
 
-    private func startDetection() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-            detectAndPixelatePersons()
-        }
+    private func start() {
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in tick() }
     }
 
-    private func stopDetection() {
+    private func stop() {
         timer?.invalidate()
         timer = nil
     }
 
-    private func detectAndPixelatePersons() {
-        // Extract the pixel buffer immediately and release the ARFrame reference.
-        // This prevents ARKit's "retaining N ARFrames" warning caused by holding
-        // strong refs while Vision segmentation runs on a background queue.
-        guard let pixelBuffer = arSession?.currentFrame?.capturedImage else { return }
-        // ARFrame is now released — only the CVPixelBuffer is retained
-        processor.process(pixelBuffer: pixelBuffer) { uiImage in
-            self.overlayImage = uiImage
+    private func tick() {
+        guard !isProcessing else { return } // drop a tick rather than pile up
+        // Grab ARKit's existing person stencil and release the ARFrame immediately — only the
+        // CVPixelBuffer is retained across the scan (avoids "retaining N ARFrames").
+        guard let seg = arSession?.currentFrame?.segmentationBuffer else {
+            if !regions.isEmpty { regions = [] } // no person / privacy off → clear markers
+            return
         }
-    }
-}
-
-/// Drives the live privacy overlay segmentation off the main thread.
-///
-/// Reuses a single `VNGeneratePersonSegmentationRequest` and the shared
-/// `PrivacyBlurUtil.sharedContext` across ticks. A re-entrancy guard drops a tick
-/// if the previous segmentation is still running, which (a) prevents work from
-/// piling up faster than it completes and (b) guarantees only one thread touches
-/// the reused request at a time, making the reuse race-free.
-private final class PrivacyOverlayProcessor: @unchecked Sendable {
-    private let request: VNGeneratePersonSegmentationRequest = {
-        let r = VNGeneratePersonSegmentationRequest()
-        r.qualityLevel = .fast
-        r.outputPixelFormat = kCVPixelFormatType_OneComponent8
-        return r
-    }()
-    private let lock = NSLock()
-    private var isProcessing = false
-
-    func process(pixelBuffer: CVPixelBuffer, completion: @escaping (UIImage?) -> Void) {
-        lock.lock()
-        if isProcessing { lock.unlock(); return }
         isProcessing = true
-        lock.unlock()
-
-        DispatchQueue.global(qos: .userInteractive).async { [self] in
-            defer { lock.lock(); isProcessing = false; lock.unlock() }
-
-            // Pass .up so Vision processes in the raw sensor coordinate space.
-            // The mask will be in the same coordinate system as the source pixel buffer,
-            // ensuring correct alignment during compositing.
-            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
-            do {
-                try handler.perform([request])
-                guard let maskObservation = request.results?.first as? VNPixelBufferObservation else { return }
-
-                // Everything operates in the original sensor landscape-right coordinates
-                let originalCI = CIImage(cvPixelBuffer: pixelBuffer)
-                let maskCI = CIImage(cvPixelBuffer: maskObservation.pixelBuffer)
-
-                // Scale mask to original image size
-                let scaleX = originalCI.extent.width / maskCI.extent.width
-                let scaleY = originalCI.extent.height / maskCI.extent.height
-                let scaledMask = maskCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
-
-                // Apply pixelation (typed builtin avoids per-call string-registry lookup)
-                let pixelate = CIFilter.pixellate()
-                pixelate.inputImage = originalCI
-                pixelate.scale = 30.0
-                guard let pixelatedCI = pixelate.outputImage else { return }
-
-                // Blend with clear background
-                let clearBg = CIImage(color: .clear).cropped(to: originalCI.extent)
-
-                let blend = CIFilter.blendWithMask()
-                blend.inputImage = pixelatedCI
-                blend.backgroundImage = clearBg
-                blend.maskImage = scaledMask
-                guard let outputCI = blend.outputImage else { return }
-
-                // Render the composite in sensor-native (landscape-right) coordinates,
-                // then use UIImage orientation metadata to rotate for portrait display.
-                // This is the same proven approach used for thumbnail generation.
-                guard let cgImage = PrivacyBlurUtil.sharedContext.createCGImage(outputCI, from: outputCI.extent) else { return }
-
-                // .right orientation tells UIKit/SwiftUI to rotate the landscape-right
-                // pixels 90° for correct portrait display
-                let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
-
-                DispatchQueue.main.async { completion(uiImage) }
-            } catch {
-                print("Person segmentation failed: \(error)")
+        // The stencil is small (~256×192) so the scan is cheap, but keep it off the main thread
+        // to leave the capture timer + VIO untouched, then publish portrait-mapped rects.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let sensorRects = PrivacyBlurUtil.personRegions(in: seg)
+            // Map sensor (landscape-right) → portrait (.right, i.e. 90° CW): (u, v) → (1 - v, u).
+            // Same rotation the camera passthrough uses (see orientation notes above), so markers
+            // land over the person as displayed. Aspect-fill crop is ignored — fine for a coarse
+            // indicator, and the actual privacy guarantee is the saved-frame blur.
+            let mapped = sensorRects.map { s -> CGRect in
+                CGRect(x: 1 - (s.origin.y + s.height),
+                       y: s.origin.x,
+                       width: s.height,
+                       height: s.width)
+            }
+            DispatchQueue.main.async {
+                self.regions = mapped
+                self.isProcessing = false
             }
         }
     }
@@ -365,5 +318,82 @@ enum PrivacyBlurUtil {
             centers.append(CGPoint(x: CGFloat(ux), y: CGFloat(uy)))
         }
         return centers
+    }
+
+    /// Merged person regions (normalized sensor coords, top-left origin) from a segmentation
+    /// stencil — drives the live red-eye indicator. Bins person pixels into the same coarse grid
+    /// as `personCentroids`, then unions adjacent occupied cells (4-connectivity) so each physical
+    /// person yields roughly one region rather than a swarm of per-cell markers. Cheap: one strided
+    /// pass + a tiny connected-components merge over the ≤48-cell grid. No Vision, no render.
+    nonisolated static func personRegions(in mask: CVPixelBuffer) -> [CGRect] {
+        CVPixelBufferLockBaseAddress(mask, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(mask) else { return [] }
+        let w = CVPixelBufferGetWidth(mask)
+        let h = CVPixelBufferGetHeight(mask)
+        guard w > 0, h > 0 else { return [] }
+        let stride = CVPixelBufferGetBytesPerRow(mask)
+        let ptr = base.assumingMemoryBound(to: UInt8.self)
+
+        let cols = 6, rows = 8
+        var cnt = [Int](repeating: 0, count: cols * rows)
+        let step = 4 // sample every 4th pixel for speed
+        var y = 0
+        while y < h {
+            let row = ptr + y * stride
+            var x = 0
+            while x < w {
+                if row[x] > 128 {
+                    let cx = min(cols - 1, x * cols / w)
+                    let cy = min(rows - 1, y * rows / h)
+                    cnt[cy * cols + cx] += 1
+                }
+                x += step
+            }
+            y += step
+        }
+
+        let minCount = 8 // ignore tiny specks / noise
+        let occupied = (0..<(cols * rows)).map { cnt[$0] >= minCount }
+
+        // Union-find over occupied cells (4-connectivity) so one person = one region.
+        var parent = Array(0..<(cols * rows))
+        func find(_ a: Int) -> Int {
+            var r = a
+            while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }
+            return r
+        }
+        func union(_ a: Int, _ b: Int) {
+            let ra = find(a), rb = find(b)
+            if ra != rb { parent[ra] = rb }
+        }
+        for cy in 0..<rows {
+            for cx in 0..<cols {
+                let i = cy * cols + cx
+                guard occupied[i] else { continue }
+                if cx + 1 < cols, occupied[i + 1] { union(i, i + 1) }
+                if cy + 1 < rows, occupied[i + cols] { union(i, i + cols) }
+            }
+        }
+
+        // Bounding box (in grid space) per cluster.
+        var minCX = [Int: Int](), minCY = [Int: Int](), maxCX = [Int: Int](), maxCY = [Int: Int]()
+        for cy in 0..<rows {
+            for cx in 0..<cols {
+                let i = cy * cols + cx
+                guard occupied[i] else { continue }
+                let r = find(i)
+                minCX[r] = min(minCX[r] ?? cx, cx); maxCX[r] = max(maxCX[r] ?? cx, cx)
+                minCY[r] = min(minCY[r] ?? cy, cy); maxCY[r] = max(maxCY[r] ?? cy, cy)
+            }
+        }
+
+        return minCX.keys.map { r in
+            let x0 = CGFloat(minCX[r]!) / CGFloat(cols)
+            let y0 = CGFloat(minCY[r]!) / CGFloat(rows)
+            let x1 = CGFloat(maxCX[r]! + 1) / CGFloat(cols)
+            let y1 = CGFloat(maxCY[r]! + 1) / CGFloat(rows)
+            return CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+        }
     }
 }
