@@ -128,7 +128,7 @@ graph TD
 | [AppConstants.swift](wisescan-ios/AppConstants.swift) | Centralized constants, defaults, pipeline tuning | `AppConstants`, `CaptureMode`, `Key`, `UI` |
 | [ContentView.swift](wisescan-ios/ContentView.swift) | Root TabView (Dashboard, Capture, Scans), LiDAR check | `ContentView`, `hasLiDAR` |
 | [DashboardView.swift](wisescan-ios/DashboardView.swift) | Server status, wearable pairing | `DashboardView` |
-| [CaptureView.swift](wisescan-ios/CaptureView.swift) | Live capture UI, recording, Scan4D naming, capacity HUD | `CaptureView`, `startRecording()`, `stopRecording()`, `savePendingScan()` |
+| [CaptureView.swift](wisescan-ios/CaptureView.swift) | Live capture UI, recording, Scan4D naming, capacity HUD | `CaptureView`, `startRecording()`, `stopRecording()`, `performStopRecording()`, `startBackgroundProcessing()` |
 | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) | ARKit session, mesh wireframe (AR), point cloud (VR), mesh export | `ARCoverageView`, `Coordinator`, `exportMeshOBJ()`, `PointCloudManager` |
 | [PointCloudManager.swift](wisescan-ios/PointCloudManager.swift) | VR mode: live depth point cloud rendering via Metal | `PointCloudManager`, `setup()`, `updatePointCloud()` |
 | [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) | Privacy segmentation overlay + pixelation utility for exports | `PrivacyBlurOverlay`, `PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters()` |
@@ -140,7 +140,8 @@ graph TD
 | [ScanExportManager.swift](wisescan-ios/ScanExportManager.swift) | Export packaging for all formats | `ScanExportManager`, `prepareExport()` |
 | [MeshConverter.swift](wisescan-ios/MeshConverter.swift) | OBJ→PLY and OBJ→USDZ mesh conversion | `MeshConverter.objToPLY()`, `MeshConverter.objToUSDZ()` |
 | [MeshParser.swift](wisescan-ios/MeshParser.swift) | Wavefront OBJ parser | `MeshParser`, `OBJData`, `parseOBJ()` |
-| [VertexColorAccumulator.swift](wisescan-ios/VertexColorAccumulator.swift) | Post-scan vertex coloring + ARWorldMap export | `VertexColorAccumulator`, `exportWorldMap()` |
+| [VertexColorAccumulator.swift](wisescan-ios/VertexColorAccumulator.swift) | Normals-based default coloring, on-demand vertex coloring, ARWorldMap export | `VertexColorAccumulator`, `generateNormalsColors()`, `colorizeFromSavedFrames()`, `exportWorldMap()` |
+| [VoxelGrid.swift](wisescan-ios/VoxelGrid.swift) | Metal voxel grid for VR accumulated point cloud | `VoxelGrid` |
 | [MetaWearableManager.swift](wisescan-ios/MetaWearableManager.swift) | Meta Wearables DAT SDK lifecycle, streaming, proxy frames | `MetaWearableManager` |
 | [LocationManager.swift](wisescan-ios/LocationManager.swift) | GPS/heading updates for scan metadata | `LocationManager` |
 | [PermissionsOverlay.swift](wisescan-ios/PermissionsOverlay.swift) | Camera/AR permission request UI | `PermissionsOverlay` |
@@ -149,6 +150,7 @@ graph TD
 | [DemoDataSeeder.swift](wisescan-ios/DemoDataSeeder.swift) | Orphan scan discovery + SwiftData seeding | `DemoDataSeeder`, `seedIfNeeded()` |
 | [TestDataGenerator.swift](wisescan-ios/TestDataGenerator.swift) | Mock camera intrinsics for testing | `TestDataGenerator` |
 | [Shaders/PointCloud.metal](wisescan-ios/Shaders/PointCloud.metal) | VR point cloud vertex/fragment shaders | Metal GPU pipeline |
+| [Shaders/Bloom.metal](wisescan-ios/Shaders/Bloom.metal) | Bloom post-processing shader | Metal GPU pipeline |
 | [Shaders/Wireframe.metal](wisescan-ios/Shaders/Wireframe.metal) | AR wireframe rendering shaders | Metal GPU pipeline |
 
 ---
@@ -208,10 +210,16 @@ sequenceDiagram
     AR->>AR: resetForNominal()
     BG->>BG: stop() frame capture → rawDataPath
     BG->>BG: exportMeshOBJ() → mesh.obj
-    BG->>BG: colorizeFromSavedFrames(mesh, cameras/)
+    BG->>BG: generateNormalsColors(mesh) [fast, no I/O]
     BG->>BG: exportWorldMap() → .worldmap
     BG->>SS: saveScan(...)
     BG->>SS: isProcessingScan = false (Dismisses spinner)
+
+    Note over CV,BG: ── On-Demand Coloring (user-initiated) ──
+    Note right of BG: User taps "Color" button on ScanCard
+    BG->>BG: colorizeFromSavedFrames(mesh, cameras/)
+    BG->>BG: Regenerate 3D preview image
+    BG->>SS: isColored = true
 ```
 
 ### REQ-003: Scan4D (Extend Scan — Time-Series & Adjacent Stitching)
@@ -219,7 +227,7 @@ sequenceDiagram
 |:--|:--|
 | **Status** | ✅ Complete (Phase 1 — Local) |
 | **Description** | Enable two complementary scanning workflows via a single "Extend Scan" mechanism, both powered by `ARWorldMap` relocalization and a ghost-mesh overlay. Provide conditional UI for specific capture sources. |
-| **Details** | **Use Case 1 — Time-Series Re-Scan:** Scan the same space again at a later time. The red ghost overlay shows the original capture area; the user re-scans the identical region. The backend pipeline can diff or merge these scans to track changes over time. **Use Case 2 — Adjacent-Space Stitching:** Extend a scan into an adjacent area. The user moves to the edge of the red ghost overlay and begins recording, overlapping slightly with the previous scan. The backend pipeline stitches the chunks together to build a single unified model. Both use cases share identical device-side mechanics: (1) **Intent Declaration:** The workflow intent (Time-Series vs Extend) is explicitly chosen by the user in the initial save dialog (`ScanCase` picker). (2) **Relocalization Setup:** Tapping "Extend Scan" on any scan card loads that scan's `ARWorldMap` as the AR session initialization target. (3) **Ghost Visualization:** The selected scan's mesh renders as a 0.3-opacity red overlay. (4) **UI Prompting:** Live tracking banners instruct the user to "Move camera to relocalize" until the world map successfully aligns. |
+| **Details** | **Use Case 1 — Time-Series Re-Scan:** Scan the same space again at a later time. The ghost overlay shows the original capture area; the user re-scans the identical region. The backend pipeline can diff or merge these scans to track changes over time. **Use Case 2 — Adjacent-Space Stitching:** Extend a scan into an adjacent area. The user moves to the edge of the ghost overlay and begins recording, overlapping slightly with the previous scan. The backend pipeline stitches the chunks together to build a single unified model. Both use cases share identical device-side mechanics: (1) **Intent Declaration:** The workflow intent (Time-Series vs Extend) is explicitly chosen by the user in the initial save dialog (`ScanCase` picker). (2) **Relocalization Setup:** Tapping "Extend Scan" on any scan card loads that scan's `ARWorldMap` as the AR session initialization target. (3) **Ghost Visualization:** The selected scan's mesh renders as a configurable ghost-mesh overlay (default: magenta, adjustable in Settings). (4) **UI Prompting:** Live tracking banners instruct the user to "Move camera to relocalize" until the world map successfully aligns. |
 
 ```mermaid
 sequenceDiagram
@@ -260,8 +268,8 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Interactive SceneKit preview. Uses camera-sampled vertex coloring optimized with a dynamic 150-frame capacity and a precise 150mm *Depth Occlusion Culling* threshold to prevent color bleeding through walls. Parses `scan4d_metadata.json` to spawn 3D Privacy Markers. Falls back to height-gradient coloring. |
-| **Source** | [MeshPreviewView.swift](wisescan-ios/MeshPreviewView.swift) · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `VertexColorAccumulator` |
+| **Description** | Interactive SceneKit preview. Initially displays normals-based coloring (standard tangent-space mapping: R=X, G=Y, B=Z). On-demand "Color" button triggers camera-sampled vertex coloring using up to 150 frames with a 150mm Depth Occlusion Culling threshold to prevent color bleeding through walls. Parses `scan4d_metadata.json` to spawn 3D Privacy Markers. Falls back to height-gradient coloring when no colors.bin exists. |
+| **Source** | [MeshPreviewView.swift](wisescan-ios/MeshPreviewView.swift) · [VertexColorAccumulator.swift](wisescan-ios/VertexColorAccumulator.swift) — `generateNormalsColors()`, `colorizeFromSavedFrames()` |
 
 ### REQ-006: Export Formats & Backend Ingestion
 | | |
@@ -384,7 +392,10 @@ classDiagram
     class LocationModel {
         +UUID id
         +String name
+        +Date updatedAt
         +String? remoteLocationId
+        +String scanCaseStr
+        +Float[]? imagingPoseMatrix
         +ScanModel[] scans
     }
 
@@ -393,12 +404,15 @@ classDiagram
         +String name
         +Date capturedAt
         +String hardwareDeviceModel
+        +Bool isColored
         +URL meshFileURL
+        +URL colorsFileURL
+        +URL worldMapURL
+        +URL modelPreviewURL
+        +URL thumbnailURL
+        +URL rawDataPath
         +Int vertexCount
         +Int faceCount
-        +URL? rawDataPath
-        +URL? colorsFileURL
-        +URL? worldMapURL
         +LocationModel? location
         +String selectedFormatStr
         +Double uploadProgress
@@ -410,11 +424,15 @@ classDiagram
         +ModelContext modelContext
         +URL? activeRelocalizationMap
         +UUID? activeLocationForScan
+        +UUID? activeScanToExtend
+        +Bool isProcessingScan
+        +String? processingMessage
     }
 
     class ScanFileManager {
-        +saveScan(...) URL
-        +cleanupOldScans(for: LocationModel)
+        +saveScan(...) CapturedScan
+        +deleteScan(scan, context)
+        +addLocation(name, context) ScanLocation
     }
 
     LocationModel "1" --> "*" ScanModel

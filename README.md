@@ -26,7 +26,7 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 - **AR + VR Capture Modes:** AR mode uses camera passthrough with live wireframe mesh overlay; VR mode renders a live depth point cloud on a black background using Metal shaders. Toggle between modes in Settings.
 - **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay, capacity HUD, and real-time tracking guidance banners (LiDAR devices only).
 - **Lite Mode:** Non-LiDAR devices capture images + camera poses for server-side photogrammetry. A persistent banner indicates lite mode.
-- **Scan4D (Extend Scan):** Group scans by Location. Set your workflow intent (Time-Series vs Space Extension) when saving a new scan. Use "Extend Scan" with a red ghost-mesh overlay to re-scan the identical space or stitch adjacent areas.
+- **Scan4D (Extend Scan):** Group scans by Location. Set your workflow intent (Time-Series vs Space Extension) when saving a new scan. Use "Extend Scan" with a configurable ghost-mesh overlay (default: magenta) to re-scan the identical space or stitch adjacent areas.
 - **Privacy Filtering:** Person segmentation pixelates detected humans in the live camera feed, exported frames, and depth maps. 3D face anchors are unprojected from depth for red-alert privacy markers on mesh previews.
 - **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
 - **Developer Mode:** Toggleable debugging tools including front/back camera switching for testing privacy features, with a persistent banner across all views.
@@ -57,7 +57,8 @@ wisescan-ios/
 ├── ScanExportManager.swift      # Export packaging (Scan4D, Polycam, RAW, OBJ, PLY, USDZ)
 ├── MeshConverter.swift          # OBJ→PLY and OBJ→USDZ mesh conversion
 ├── MeshParser.swift             # Wavefront OBJ parser for RealityKit MeshResource
-├── VertexColorAccumulator.swift # Post-scan vertex coloring + ARWorldMap export
+├── VertexColorAccumulator.swift # Normals-based default coloring, on-demand vertex coloring, ARWorldMap export
+├── VoxelGrid.swift              # Metal voxel grid for VR accumulated point cloud
 ├── MetaWearableManager.swift    # Meta Ray-Ban DAT SDK lifecycle, streaming, proxy frames
 ├── LocationManager.swift        # GPS/heading updates for scan metadata
 ├── PermissionsOverlay.swift     # Camera/AR permission request UI
@@ -67,6 +68,7 @@ wisescan-ios/
 ├── TestDataGenerator.swift      # Mock camera intrinsics for testing
 └── Shaders/
     ├── PointCloud.metal         # VR point cloud vertex/fragment shaders
+    ├── Bloom.metal              # Bloom post-processing shader
     └── Wireframe.metal          # AR wireframe rendering shaders
 ```
 
@@ -125,8 +127,8 @@ When enabled (toggle on Capture screen):
 3. Build and deploy to an ARKit-capable device (LiDAR recommended for full mesh + depth capture)
 4. Configure the upload URL in Settings (gear icon)
 5. Go to Capture → tap record → scan → tap stop
-6. Name your space and select its workflow intent (Time-Series vs Space Extension) to save it. You will instantly be routed to the Scans tab with a progress overlay while mesh coloring and data extraction finishes in the background.
-7. In the Scans tab, tap **Extend Scan** on any scan card to either re-scan the same space (time-series) or scan adjacent areas (stitching). The red overlay shows the previous scan boundary.
+6. Name your space and select its workflow intent (Time-Series vs Space Extension) to save it. You will instantly be routed to the Scans tab with a progress overlay while mesh export and data extraction finishes in the background. The scan initially appears with normals-based coloring; tap the "Color" button on the scan card to apply camera-based vertex coloring.
+7. In the Scans tab, tap **Extend Scan** on any scan card to either re-scan the same space (time-series) or scan adjacent areas (stitching). A colored ghost-mesh overlay (default: magenta, configurable in Settings) shows the previous scan boundary.
 
 ## Testing Guidelines (Meta Wearables)
 
