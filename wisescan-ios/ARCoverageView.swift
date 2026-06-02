@@ -367,6 +367,9 @@ struct ARCoverageView: UIViewRepresentable {
         /// everything captured afterward is corrupt — so we trip the guard (halt + prompt) once.
         var vioCompromisedBinding: Binding<Bool>?
         private var vioGuardArmed = false
+        /// ARFrame timestamp when tracking first went degraded (0 = currently fine). Used to
+        /// measure *continuous* degradation for the VIO guard. Touched on the delegate queue.
+        private var vioDegradedSince: TimeInterval = 0
         private var anchorUpdateCounts: [UUID: Int] = [:]
         /// Coalescing flag: prevents queuing multiple main-actor dispatches
         /// that each hold CVPixelBuffer references → ARFrame retention.
@@ -424,8 +427,9 @@ struct ARCoverageView: UIViewRepresentable {
             baselineMemoryMB = ScanStats.currentMemoryUsageMB()
             lastStatsUpdateTime = .distantPast // let the first stats update publish immediately
             // VIO guard: arm immediately if tracking is already normal at record start; otherwise
-            // it arms on the first `.normal` transition (see cameraDidChangeTrackingState).
+            // it arms on the first `.normal` frame (see session(_:didUpdate:)).
             vioGuardArmed = (arView?.session.currentFrame?.camera.trackingState == .normal)
+            vioDegradedSince = 0
             // Clear any stale wireframe entities from a previous recording
             removeAllActiveMeshEntities()
         }
@@ -438,6 +442,7 @@ struct ARCoverageView: UIViewRepresentable {
             trackingDegradationCount = 0
             totalTrackingUpdates = 0
             vioGuardArmed = false
+            vioDegradedSince = 0
 
             // Remove all active mesh wireframe entities from the scene
             removeAllActiveMeshEntities()
@@ -703,32 +708,8 @@ struct ARCoverageView: UIViewRepresentable {
             }
 
             PerfDiag.log("ARKit tracking → \(stateStr)\(reasonStr.isEmpty ? "" : " (\(reasonStr))")")
-
-            // ── VIO starvation guard ──
-            // Once tracking has reached `.normal` during recording (armed), a drop to
-            // relocalizing/notAvailable means the world coordinate frame is broken and every
-            // frame captured after this is corrupt. Halt the scan and let the user decide. We
-            // ignore the initial startup relocalization (guard isn't armed until first normal),
-            // and transient excessiveMotion/insufficientFeatures (which usually self-recover).
-            if isRecording {
-                if case .normal = camera.trackingState {
-                    vioGuardArmed = true
-                } else if vioGuardArmed {
-                    let lostWorldFrame: Bool
-                    switch camera.trackingState {
-                    case .notAvailable: lostWorldFrame = true
-                    case .limited(.relocalizing): lostWorldFrame = true
-                    default: lostWorldFrame = false
-                    }
-                    if lostWorldFrame {
-                        vioGuardArmed = false // fire once per recording
-                        PerfDiag.log("⛔️ VIO guard tripped (\(stateStr) \(reasonStr)) — halting scan")
-                        DispatchQueue.main.async { [weak self] in
-                            self?.vioCompromisedBinding?.wrappedValue = true
-                        }
-                    }
-                }
-            }
+            // (VIO starvation guard lives in session(_:didUpdate:) — it needs per-frame
+            // timing to catch frame-delivery stalls + sustained degradation, not just transitions.)
 
             DispatchQueue.main.async { [weak self] in
                 self?.scanStats?.trackingState = stateStr
@@ -737,18 +718,49 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
-            // Perf diagnostics (both AR + VR, above the VR-only guard): log abnormal gaps in
-            // ARKit frame delivery — the direct signal that VIO was starved. Cheap when off.
-            if PerfDiag.enabled {
-                let ts = frame.timestamp
-                if lastFrameTimestamp > 0 {
-                    let gap = ts - lastFrameTimestamp
-                    if gap > 0.1 {
-                        let normal = frame.camera.trackingState == .normal
-                        PerfDiag.log("ARKit frame gap \(Int(gap * 1000))ms (tracking \(normal ? "normal" : "degraded"))")
+            // Per-frame ARKit timing (runs in AR + VR, above the VR-only guard). The frame-delivery
+            // gap is the direct signal that VIO was starved.
+            let ts = frame.timestamp
+            let frameGap = lastFrameTimestamp > 0 ? ts - lastFrameTimestamp : 0
+            lastFrameTimestamp = ts
+            if PerfDiag.enabled, frameGap > 0.1 {
+                let normal = frame.camera.trackingState == .normal
+                PerfDiag.log("ARKit frame gap \(Int(frameGap * 1000))ms (tracking \(normal ? "normal" : "degraded"))")
+            }
+
+            // ── VIO starvation guard ──
+            // Once tracking has been .normal during recording (armed), trip if EITHER ARKit just
+            // stalled (a large frame-delivery gap → VIO almost certainly diverged — the original
+            // freeze signature) OR tracking stayed degraded continuously past a threshold
+            // (excessiveMotion/insufficientFeatures/relocalizing/notAvailable). Data captured after
+            // VIO loss is corrupt, so we halt + prompt. Benign startup (initializing, and anything
+            // before the first .normal) is ignored. See CaptureView.handleVIOCompromised().
+            if isRecording {
+                switch frame.camera.trackingState {
+                case .normal:
+                    vioGuardArmed = true
+                    vioDegradedSince = 0
+                case .limited(.initializing):
+                    break // benign startup; neither arms nor accumulates
+                default:
+                    if vioGuardArmed && vioDegradedSince == 0 { vioDegradedSince = ts }
+                }
+                if vioGuardArmed {
+                    let sustainedDegraded = vioDegradedSince > 0 && (ts - vioDegradedSince) > AppConstants.vioDegradedTripSeconds
+                    let stalled = frameGap > AppConstants.vioFrameGapTripSeconds
+                    if sustainedDegraded || stalled {
+                        vioGuardArmed = false // fire once per recording
+                        vioDegradedSince = 0
+                        let why = stalled ? "frame gap \(Int(frameGap * 1000))ms" : "tracking degraded >\(AppConstants.vioDegradedTripSeconds)s"
+                        PerfDiag.log("⛔️ VIO guard tripped (\(why)) — halting scan")
+                        DispatchQueue.main.async { [weak self] in
+                            self?.vioCompromisedBinding?.wrappedValue = true
+                        }
                     }
                 }
-                lastFrameTimestamp = ts
+            } else {
+                vioGuardArmed = false
+                vioDegradedSince = 0
             }
 
             // ── VR Mode: update point cloud ──
