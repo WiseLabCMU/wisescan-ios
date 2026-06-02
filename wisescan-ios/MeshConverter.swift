@@ -24,46 +24,54 @@ enum MeshConverter {
         let stride = MemoryLayout<SIMD4<Float>>.stride
         let hasColors = colorData != nil && colorData!.count >= vertices.count * stride
 
-        // Write ASCII PLY
-        var ply = "ply\n"
-        ply += "format ascii 1.0\n"
-        ply += "element vertex \(vertices.count)\n"
-        ply += "property float x\n"
-        ply += "property float y\n"
-        ply += "property float z\n"
-        if hasColors {
-            ply += "property uchar red\n"
-            ply += "property uchar green\n"
-            ply += "property uchar blue\n"
-        }
-        ply += "element face \(faces.count)\n"
-        ply += "property list uchar int vertex_indices\n"
-        ply += "end_header\n"
+        // Write ASCII PLY into a single reserved Data buffer. Appending UTF-8 line
+        // fragments avoids growing one huge String (repeated reallocs) and the final
+        // String→Data re-encode that doubled peak memory. Output bytes are identical.
+        var out = Data()
+        out.reserveCapacity(vertices.count * (hasColors ? 64 : 48) + faces.count * 24 + 256)
+        func append(_ s: String) { out.append(contentsOf: s.utf8) }
 
-        // Vertex data
-        for (i, v) in vertices.enumerated() {
-            if hasColors, let colors = colorData {
-                // Read SIMD4<Float> and convert to UInt8 [0..255]
-                let offset = i * stride
-                let rgba: SIMD4<Float> = colors.withUnsafeBytes { buf in
-                    buf.load(fromByteOffset: offset, as: SIMD4<Float>.self)
+        append("ply\n")
+        append("format ascii 1.0\n")
+        append("element vertex \(vertices.count)\n")
+        append("property float x\n")
+        append("property float y\n")
+        append("property float z\n")
+        if hasColors {
+            append("property uchar red\n")
+            append("property uchar green\n")
+            append("property uchar blue\n")
+        }
+        append("element face \(faces.count)\n")
+        append("property list uchar int vertex_indices\n")
+        append("end_header\n")
+
+        // Vertex data — hoist the color buffer binding out of the loop (was a per-vertex
+        // withUnsafeBytes closure).
+        if hasColors, let colorData = colorData {
+            colorData.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                let colors = raw.bindMemory(to: SIMD4<Float>.self)
+                for (i, v) in vertices.enumerated() {
+                    let rgba = colors[i]
+                    let r = UInt8(min(max(rgba.x * 255.0, 0), 255))
+                    let g = UInt8(min(max(rgba.y * 255.0, 0), 255))
+                    let b = UInt8(min(max(rgba.z * 255.0, 0), 255))
+                    append("\(v.x) \(v.y) \(v.z) \(r) \(g) \(b)\n")
                 }
-                let r = UInt8(min(max(rgba.x * 255.0, 0), 255))
-                let g = UInt8(min(max(rgba.y * 255.0, 0), 255))
-                let b = UInt8(min(max(rgba.z * 255.0, 0), 255))
-                ply += "\(v.x) \(v.y) \(v.z) \(r) \(g) \(b)\n"
-            } else {
-                ply += "\(v.x) \(v.y) \(v.z)\n"
+            }
+        } else {
+            for v in vertices {
+                append("\(v.x) \(v.y) \(v.z)\n")
             }
         }
 
         // Face data
         for face in faces {
-            ply += "3 \(face.0) \(face.1) \(face.2)\n"
+            append("3 \(face.0) \(face.1) \(face.2)\n")
         }
 
         do {
-            try ply.write(to: outputURL, atomically: true, encoding: .utf8)
+            try out.write(to: outputURL, options: .atomic)
             print("[MeshConverter] PLY written: \(vertices.count) vertices, \(faces.count) faces, colors=\(hasColors)")
             return true
         } catch {
