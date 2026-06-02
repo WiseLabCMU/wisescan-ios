@@ -343,11 +343,21 @@ class FrameCaptureSession {
         segBuffer: CVPixelBuffer?,
         currentIndex: Int
     ) {
-        // Perf diagnostics: track how deep the ioQueue backlog gets (retained-buffer pile-up).
-        // The counter is always maintained (cheap); only the logging is gated by the flag, so
-        // toggling the flag mid-session can never desync the increment/decrement pairing.
-        let depth = inFlightSaves.withLock { $0 += 1; return $0 }
-        if PerfDiag.enabled && depth > 2 { PerfDiag.log("capture I/O backlog: \(depth) frames in flight") }
+        // Backlog guard: if frame encodes are falling behind, DROP this frame instead of piling
+        // up retained CVPixelBuffers. That pile-up is what starves ARKit's frame pool ("retaining
+        // N ARFrames") and ultimately stalls/loses VIO tracking — and any data captured after VIO
+        // loss is corrupt. Capture is movement-gated, so the next motion re-triggers a save.
+        // Admit-and-increment atomically; the ioQueue closure decrements in its defer.
+        let admittedDepth: Int? = inFlightSaves.withLock { count -> Int? in
+            guard count < AppConstants.maxFramesInFlight else { return nil }
+            count += 1
+            return count
+        }
+        guard let depth = admittedDepth else {
+            if PerfDiag.enabled { PerfDiag.log("capture frame DROPPED — backlog at cap (\(AppConstants.maxFramesInFlight))") }
+            return
+        }
+        if PerfDiag.enabled && depth > 1 { PerfDiag.log("capture I/O backlog: \(depth) frames in flight") }
         ioQueue.async { [weak self] in
             defer { self?.inFlightSaves.withLock { $0 -= 1 } }
             guard let self = self, let imagesDir = self.imagesDir else { return }
@@ -369,22 +379,19 @@ class FrameCaptureSession {
             if self.isMockingImages {
                 finalJpegData = TestDataGenerator.generateImage(for: currentIndex, w: camW, h: camH, transform: transform, intrinsics: intrinsics)
             } else {
-                guard let pBuf = pixelBuffer,
-                      let jpegData = PerfDiag.timed("jpeg_encode", warnOverMs: 50, { self.pixelBufferToJPEG(pBuf) }) else {
-                    return
-                }
-                var tempJpegData = jpegData
+                guard let pBuf = pixelBuffer else { return }
                 if self.privacyFilter, let segBuffer = segBuffer {
-                    // Blur the saved JPEG using ARKit's existing person-segmentation stencil
-                    // (the same buffer used for the depth cutout + live point-cloud holes) rather
-                    // than a second, expensive .accurate Vision pass. Profiling showed that pass
-                    // at 180–360ms/frame — the dominant cause of ioQueue backlog + ARFrame-pool
-                    // starvation. The mask is sensor-native, matching the JPEG, so no orientation
-                    // transform is needed. Also yields person-region centroids for 3D anchoring.
-                    let (blurredData, centers) = PerfDiag.timed("privacy_blur_mask", warnOverMs: 50) { PrivacyBlurUtil.pixelatePersonsWithMask(in: jpegData, mask: segBuffer) }
-                    if let bData = blurredData {
-                        tempJpegData = bData
+                    // Blur directly from the camera buffer and encode the JPEG ONCE (no plain
+                    // encode → decode → re-encode), using ARKit's existing person-segmentation
+                    // stencil — the same buffer behind the depth cutout + live point-cloud holes.
+                    // The redundant .accurate Vision pass (180–360ms/frame) is gone; it was the
+                    // dominant capture-side cause of ioQueue backlog + ARFrame-pool starvation.
+                    // Also yields person-region centroids for 3D anchoring.
+                    let (blurredData, centers) = PerfDiag.timed("privacy_blur_mask", warnOverMs: 50) {
+                        PrivacyBlurUtil.pixelatePersonsWithMask(pixelBuffer: pBuf, mask: segBuffer)
                     }
+                    guard let bData = blurredData else { return }
+                    finalJpegData = bData
 
                     // Unproject person-region centers to 3D using depth map (only if depth available)
                     if !centers.isEmpty, let dMap = depthMap {
@@ -451,8 +458,11 @@ class FrameCaptureSession {
                         }
                         CVPixelBufferUnlockBaseAddress(dMap, .readOnly)
                     }
+                } else {
+                    // No privacy filter: plain single JPEG encode.
+                    guard let jpegData = PerfDiag.timed("jpeg_encode", warnOverMs: 50, { self.pixelBufferToJPEG(pBuf) }) else { return }
+                    finalJpegData = jpegData
                 }
-                finalJpegData = tempJpegData
             }
             
         let index = self.frames.count

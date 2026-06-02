@@ -70,6 +70,7 @@ enum AppConstants {
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
+    static let maxFramesInFlight: Int = 2                    // cap on concurrent frame-save encodes; excess frames are dropped to keep retained CVPixelBuffers from starving ARKit's frame pool (VIO loss corrupts the scan)
     static let overlapBaseThreshold: Float = 0.15            // movement threshold base for frame capture
     static let overlapMinThreshold: Float = 0.01             // minimum movement threshold
     static let maxColorizationFrames: Int = 150              // max sampled frames for vertex coloring

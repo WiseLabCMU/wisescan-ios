@@ -269,11 +269,11 @@ enum PrivacyBlurUtil {
         return (UIImage(cgImage: cgImage).jpegData(compressionQuality: AppConstants.jpegCompressionQuality), faceCenters)
     }
 
-    /// Pixelates person regions in `imageData` using a PRE-COMPUTED segmentation stencil
-    /// (ARKit's `.personSegmentationWithDepth` buffer) instead of running a second, expensive
-    /// `.accurate` `VNGeneratePersonSegmentationRequest`. ARKit already produced this mask for
-    /// the live point-cloud exclusion and the saved depth-map cutout, so reusing it here is
-    /// effectively free and keeps coverage consistent across all three outputs.
+    /// Pixelates person regions in a camera `pixelBuffer` using a PRE-COMPUTED segmentation
+    /// stencil (ARKit's `.personSegmentationWithDepth` buffer) instead of running a second,
+    /// expensive `.accurate` `VNGeneratePersonSegmentationRequest`. ARKit already produced this
+    /// mask for the live point-cloud exclusion and the saved depth-map cutout, so reusing it
+    /// here is effectively free and keeps coverage consistent across all three outputs.
     ///
     /// Returns the blurred JPEG plus a sparse set of normalized person-region centroids
     /// (top-left origin) for 3D anchoring — the caller unprojects + clusters these into
@@ -281,10 +281,13 @@ enum PrivacyBlurUtil {
     ///
     /// The saved JPEG and the stencil are both in sensor-native (landscape-right) coordinates,
     /// so no orientation transform is needed; display rotation is handled downstream.
-    nonisolated static func pixelatePersonsWithMask(in imageData: Data, mask: CVPixelBuffer) -> (Data?, [CGPoint]) {
-        guard let uiImage = UIImage(data: imageData),
-              let ciImage = CIImage(image: uiImage) else { return (imageData, []) }
+    nonisolated static func pixelatePersonsWithMask(pixelBuffer: CVPixelBuffer, mask: CVPixelBuffer) -> (Data?, [CGPoint]) {
+        // Blur directly from the camera buffer and encode the JPEG ONCE — the capture path no
+        // longer does a plain-encode → decode → re-encode round trip when privacy is on.
+        return pixelatePersonsWithMask(ciImage: CIImage(cvPixelBuffer: pixelBuffer), mask: mask)
+    }
 
+    private nonisolated static func pixelatePersonsWithMask(ciImage: CIImage, mask: CVPixelBuffer) -> (Data?, [CGPoint]) {
         let imageSize = ciImage.extent
         let maskCI = CIImage(cvPixelBuffer: mask)
 
@@ -306,14 +309,14 @@ enum PrivacyBlurUtil {
         let pixelate = CIFilter.pixellate()
         pixelate.inputImage = ciImage
         pixelate.scale = 40.0
-        guard let pixelatedCI = pixelate.outputImage else { return (imageData, []) }
+        guard let pixelatedCI = pixelate.outputImage else { return (nil, []) }
 
         let blend = CIFilter.blendWithMask()
         blend.inputImage = pixelatedCI
         blend.backgroundImage = ciImage
         blend.maskImage = scaledMask
         guard let outputCI = blend.outputImage,
-              let cgImage = sharedContext.createCGImage(outputCI, from: imageSize) else { return (imageData, []) }
+              let cgImage = sharedContext.createCGImage(outputCI, from: imageSize) else { return (nil, []) }
 
         let centers = personCentroids(in: mask)
         return (UIImage(cgImage: cgImage).jpegData(compressionQuality: AppConstants.jpegCompressionQuality), centers)
