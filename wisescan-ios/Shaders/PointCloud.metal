@@ -22,6 +22,28 @@ struct VoxelEntry {
     uchar _pad;    // 1 byte — align to even size
 };
 
+// CPU → GPU packed occupied-voxel record for mesh extraction.
+// Must match Swift VoxelGrid.ExtractVoxel layout exactly (10 bytes).
+struct ExtractVoxel {
+    short gridX;   // 2 bytes
+    short gridY;   // 2 bytes
+    short gridZ;   // 2 bytes
+    uchar r;       // 1 byte
+    uchar g;       // 1 byte
+    uchar b;       // 1 byte
+    uchar a;       // 1 byte — confidence mapped to [0,255]
+};
+
+// Uniforms for extractVoxelQuads. Must match Swift VoxelExtractUniforms (64 bytes).
+struct VoxelExtractUniforms {
+    float3 camPos;     // camera world position
+    float3 right;      // camera-plane right axis (viewplane billboard)
+    float3 up;         // camera-plane up axis
+    uint texWidth;     // voxel color texture width
+    uint texHeight;    // voxel color texture height
+    uint voxelCount;   // number of packed voxels to emit
+};
+
 // Voxel grid constants — must match VoxelGrid.swift
 constant float3 voxelOrigin = float3(-4.0, -4.0, -4.0);
 constant float voxelCellSize = 0.02;
@@ -265,5 +287,65 @@ void integrateVoxels(uint2 id [[thread_position_in_grid]],
     entry.b = uchar(rgb.b * 255.0);
     entry._pad = 0;
     appendBuffer[writeIndex] = entry;
+}
+
+// MARK: - Voxel Mesh Extraction Kernel
+//
+// Emits one viewplane-aligned billboard quad per occupied voxel directly into the
+// LowLevelMesh vertex buffer, and writes each voxel's color into the voxel color
+// texture. Replaces the former CPU extractMesh loop (~33ms on the main thread for
+// 350K voxels); the CPU now only packs the occupied voxels into a flat buffer.
+// One thread per voxel.
+
+[[kernel]]
+void extractVoxelQuads(uint id [[thread_position_in_grid]],
+                       device const ExtractVoxel* voxels [[buffer(0)]],
+                       constant VoxelExtractUniforms& uniforms [[buffer(1)]],
+                       device float* vertices [[buffer(2)]],
+                       texture2d<float, access::write> colorOutput [[texture(0)]]) {
+    if (id >= uniforms.voxelCount) {
+        return;
+    }
+
+    ExtractVoxel vx = voxels[id];
+
+    // Voxel center in world space (matches VoxelGrid.worldPosition).
+    float halfDim = float(voxelHalfDim);
+    float3 center = float3(
+        voxelOrigin.x + (float(vx.gridX) + halfDim + 0.5) * voxelCellSize,
+        voxelOrigin.y + (float(vx.gridY) + halfDim + 0.5) * voxelCellSize,
+        voxelOrigin.z + (float(vx.gridZ) + halfDim + 0.5) * voxelCellSize
+    );
+
+    // Push the quad slightly away from the camera so live points always render in front.
+    float3 delta = uniforms.camPos - center;
+    float dist = length(delta);
+    float3 pushDir = dist > 0.001 ? delta / dist : float3(0.0);
+    float3 biasedCenter = center - pushDir * 0.002;
+
+    // Distance-based size so quads stay gap-free (cellSize near, larger far).
+    float halfSize = clamp(dist * 0.008, 0.01, 0.02);
+    float3 rightVec = uniforms.right * halfSize;
+    float3 upVec = uniforms.up * halfSize;
+
+    // One texel per voxel, laid out row-major in the color texture.
+    uint texX = id % uniforms.texWidth;
+    uint texY = id / uniforms.texWidth;
+    // Flip V for RealityKit's bottom-left UV origin.
+    float2 uv = float2((float(texX) + 0.5) / float(uniforms.texWidth),
+                       1.0 - (float(texY) + 0.5) / float(uniforms.texHeight));
+
+    // Quad vertices: BL, BR, TL, TR (all share the one texel's UV).
+    uint baseVertex = id * 4;
+    writeVertex(vertices, baseVertex + 0, biasedCenter - rightVec - upVec, uv);
+    writeVertex(vertices, baseVertex + 1, biasedCenter + rightVec - upVec, uv);
+    writeVertex(vertices, baseVertex + 2, biasedCenter - rightVec + upVec, uv);
+    writeVertex(vertices, baseVertex + 3, biasedCenter + rightVec + upVec, uv);
+
+    colorOutput.write(float4(float(vx.r) / 255.0,
+                             float(vx.g) / 255.0,
+                             float(vx.b) / 255.0,
+                             float(vx.a) / 255.0),
+                      uint2(texX, texY));
 }
 
