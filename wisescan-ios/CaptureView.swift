@@ -888,16 +888,23 @@ struct CaptureView: View {
     }
 
     private func performStopRecording() {
-        // Stop frame capture and get raw data path
-        let rawDataPath = frameCaptureSession.stop()
-        // Capture the current frame for background mesh export + a 2D thumbnail
+        // Grab the AR frame + thumbnail and tear down recording on the main thread first.
         let currentFrame = currentARSession?.currentFrame
         let thumbnailData = makeThumbnail(from: currentFrame)
+        frameCaptureSession.pauseCapture() // stop new frames immediately (cheap, main-safe)
 
         // ── Now switch to nominal mode (drops mesh anchors, frees AR memory) ──
         isRecording = false
 
-        beginProcessing(ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData))
+        // The capture flush writes one JSON per frame (O(frames)); run it OFF the main thread so
+        // ending a long scan doesn't freeze the UI or starve ARKit, then resume on main.
+        let session = frameCaptureSession
+        DispatchQueue.global(qos: .utility).async {
+            let rawDataPath = session.stop()
+            DispatchQueue.main.async {
+                self.beginProcessing(ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData))
+            }
+        }
     }
 
     /// Renders a downsampled JPEG thumbnail from the current camera frame (sensor→portrait via .right).
@@ -940,27 +947,33 @@ struct CaptureView: View {
         recordingTimer?.invalidate()
         recordingTimer = nil
 
-        // Halt capture now and finalize whatever was gathered before tracking was lost.
+        // Stop new frames immediately; grab the AR frame + thumbnail; tear down recording.
         let capturedCount = frameCaptureSession.frameCount
-        let rawDataPath = frameCaptureSession.stop()
         let currentFrame = currentARSession?.currentFrame
         let thumbnailData = makeThumbnail(from: currentFrame)
+        frameCaptureSession.pauseCapture()
         isRecording = false
 
         let alert: UIAlertController
         if capturedCount > 0 {
             // Some usable frames were captured before the loss — offer to keep them or rescan.
-            let processingData = ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData)
+            let session = frameCaptureSession
             alert = UIAlertController(
                 title: "Tracking Lost",
                 message: "AR tracking was interrupted during this scan, so anything captured after that point is unreliable. Save the \(capturedCount) frame\(capturedCount == 1 ? "" : "s") captured so far, or discard and rescan?",
                 preferredStyle: .alert
             )
             alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
-                self.discardCapturedData(at: rawDataPath)
+                self.discardCapturedData()
             })
             alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in
-                self.beginProcessing(processingData)
+                // Flush the capture off the main thread (per-frame JSONs), then process.
+                DispatchQueue.global(qos: .utility).async {
+                    let rawDataPath = session.stop()
+                    DispatchQueue.main.async {
+                        self.beginProcessing(ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData))
+                    }
+                }
             })
         } else {
             // Nothing usable was captured (tracking was lost almost immediately). Saving would
@@ -971,7 +984,7 @@ struct CaptureView: View {
                 preferredStyle: .alert
             )
             alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in
-                self.discardCapturedData(at: rawDataPath)
+                self.discardCapturedData()
             })
         }
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -982,10 +995,9 @@ struct CaptureView: View {
 
     /// Discards a partially-captured scan: removes its on-disk capture dir and resets the capture
     /// session so the next scan starts clean.
-    private func discardCapturedData(at rawDataPath: URL?) {
-        if let rawDataPath = rawDataPath {
-            try? FileManager.default.removeItem(at: rawDataPath)
-        }
+    private func discardCapturedData() {
+        // Stop + delete the in-progress capture dir (queued after in-flight saves), then reset.
+        frameCaptureSession.discardCapture()
         frameCaptureSession = FrameCaptureSession()
         MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
         clearMessage()

@@ -173,6 +173,25 @@ class FrameCaptureSession {
         return captureDir
     }
 
+    /// Immediately stop capturing new frames (cheap, main-thread safe). Call this on the main
+    /// thread before invoking `stop()` off-main, so no frames are saved after the scan ends and
+    /// the run-loop timer is invalidated on the thread it was scheduled on.
+    func pauseCapture() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    /// Abandon the in-progress capture without finalizing: stop the timer and delete the capture
+    /// directory (queued on ioQueue so it runs after any in-flight frame saves drain).
+    func discardCapture() {
+        timer?.invalidate()
+        timer = nil
+        let dir = captureDir
+        ioQueue.async {
+            if let dir = dir { try? FileManager.default.removeItem(at: dir) }
+        }
+    }
+
     private func captureFrame(from session: ARSession) {
         let fullyTest = isMockingIMU && isMockingImages && isMockingDepth
 
