@@ -621,43 +621,45 @@ class MetaWearableManager {
                     }
                     let sendableBuf = SendableBuffer(buffer: pixelBuffer)
 
-                    var finalUIImage = frame.makeUIImage()
-                    var finalJpegData: Data?
+                    // Decode the frame here (the SDK `frame` is not Sendable, so don't capture
+                    // it in the Task). Read settings directly — UserDefaults is thread-safe and
+                    // AppConstants is a plain constant, so no MainActor hop is needed.
+                    let rawImage = frame.makeUIImage()
+                    let isPrivacyEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.privacyFilter)
+                    let compression = AppConstants.jpegCompressionQuality
 
-                    // Capture MainActor properties safely without capturing self in the outer task
                     Task {
-                        let isPrivacyEnabled = await MainActor.run { UserDefaults.standard.bool(forKey: AppConstants.Key.privacyFilter) }
-                        let compression = await MainActor.run { AppConstants.jpegCompressionQuality }
+                        var finalJpegData: Data?
+                        var finalUIImage: UIImage?
 
-                        if let img = finalUIImage, let rawJpeg = img.jpegData(compressionQuality: compression) {
-                            finalJpegData = rawJpeg
-
-                            if isPrivacyEnabled {
-                                // Wearables stream is natively landscape right, which corresponds to vision orientation .up
-                                let (blurredData, _) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: rawJpeg, orientation: .up)
-                                if let bData = blurredData {
-                                    finalJpegData = bData
-                                    finalUIImage = UIImage(data: bData)
-                                }
-                            }
+                        if isPrivacyEnabled, let img = rawImage, let ciImage = CIImage(image: img) {
+                            // Run segmentation/pixelation on the decoded frame and encode JPEG
+                            // once — avoids encoding a raw JPEG only to decode + re-encode it.
+                            // The wearable stream is natively landscape-right → Vision .up.
+                            let (blurredData, _) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(ciImage: ciImage, orientation: .up)
+                            finalJpegData = blurredData
+                            finalUIImage = blurredData.flatMap { UIImage(data: $0) }
+                        } else {
+                            finalJpegData = rawImage?.jpegData(compressionQuality: compression)
+                            finalUIImage = rawImage
                         }
 
                         let safeJpegData = finalJpegData
                         let safeUIImage = finalUIImage
 
-                        Task { @MainActor [weak self] in
-                            self?.isStreaming = true
+                        await MainActor.run { [weak self] in
+                            guard let self = self else { return }
+                            self.isStreaming = true
                             if let uiImage = safeUIImage {
-                                self?.latestProxyImage = uiImage
-                                // print("[MetaWearable] PiP image updated")
+                                self.latestProxyImage = uiImage
                             } else {
                                 print("[MetaWearable] Failed to create UIImage from frame")
                             }
 
                             if let jpeg = safeJpegData {
-                                self?.activeCaptureSession?.captureProxyFrameData(jpeg)
+                                self.activeCaptureSession?.captureProxyFrameData(jpeg)
                             } else {
-                                self?.activeCaptureSession?.captureProxyFrame(pixelBuffer: sendableBuf.buffer)
+                                self.activeCaptureSession?.captureProxyFrame(pixelBuffer: sendableBuf.buffer)
                             }
                         }
                     }

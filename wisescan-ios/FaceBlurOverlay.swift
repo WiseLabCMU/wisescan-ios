@@ -197,16 +197,24 @@ enum PrivacyBlurUtil {
     /// is documented thread-safe, so sharing across the capture/export queues is safe.
     nonisolated(unsafe) static let sharedContext = CIContext(options: [.useSoftwareRenderer: false])
 
-    /// Applies pixelation to person regions and returns their normalized face center coordinates.
+    /// Applies pixelation to person regions of JPEG `imageData` and returns their normalized
+    /// face center coordinates. On any failure, returns the original `imageData` unchanged.
     nonisolated static func pixelatePersonsAndGetFaceCenters(in imageData: Data, orientation: CGImagePropertyOrientation = .up) -> (Data?, [CGPoint]) {
         guard let uiImage = UIImage(data: imageData),
               let ciImage = CIImage(image: uiImage) else { return (imageData, []) }
+        return pixelatePersonsAndGetFaceCenters(ciImage: ciImage, orientation: orientation, fallbackData: imageData)
+    }
 
+    /// Core pixelation: runs person segmentation + face detection on `ciImage`, pixelates
+    /// detected persons, and JPEG-encodes the result once. Callers that already hold a
+    /// CIImage (e.g. a camera/glasses frame) can use this to avoid an extra JPEG
+    /// encode→decode round trip. On any failure returns `fallbackData` (nil if none).
+    nonisolated static func pixelatePersonsAndGetFaceCenters(ciImage: CIImage, orientation: CGImagePropertyOrientation = .up, fallbackData: Data? = nil) -> (Data?, [CGPoint]) {
         let handler = VNImageRequestHandler(ciImage: ciImage, orientation: orientation, options: [:])
-        
+
         // 1. Face detection for 3D anchors
         let faceRequest = VNDetectFaceRectanglesRequest()
-        
+
         // 2. Person segmentation for pixelation
         let segRequest = VNGeneratePersonSegmentationRequest()
         segRequest.qualityLevel = .accurate
@@ -215,7 +223,7 @@ enum PrivacyBlurUtil {
         do {
             try handler.perform([faceRequest, segRequest])
         } catch {
-            return (imageData, [])
+            return (fallbackData, [])
         }
 
         // Get face centers
@@ -231,12 +239,12 @@ enum PrivacyBlurUtil {
 
         // Get person mask
         guard let maskObservation = segRequest.results?.first as? VNPixelBufferObservation else {
-            return (imageData, faceCenters) // no mask found, return original
+            return (fallbackData, faceCenters) // no mask found, return fallback
         }
-        
+
         let maskCI = CIImage(cvPixelBuffer: maskObservation.pixelBuffer)
         let imageSize = ciImage.extent
-        
+
         // Scale mask
         let scaleX = imageSize.width / maskCI.extent.width
         let scaleY = imageSize.height / maskCI.extent.height
@@ -246,17 +254,17 @@ enum PrivacyBlurUtil {
         let pixelate = CIFilter.pixellate()
         pixelate.inputImage = ciImage
         pixelate.scale = 40.0
-        guard let pixelatedCI = pixelate.outputImage else { return (imageData, faceCenters) }
+        guard let pixelatedCI = pixelate.outputImage else { return (fallbackData, faceCenters) }
 
         // Blend pixelated image over original using the person mask
         let blend = CIFilter.blendWithMask()
         blend.inputImage = pixelatedCI
         blend.backgroundImage = ciImage
         blend.maskImage = scaledMask
-        guard let outputCI = blend.outputImage else { return (imageData, faceCenters) }
+        guard let outputCI = blend.outputImage else { return (fallbackData, faceCenters) }
 
-        guard let cgImage = sharedContext.createCGImage(outputCI, from: imageSize) else { return (imageData, faceCenters) }
-        
+        guard let cgImage = sharedContext.createCGImage(outputCI, from: imageSize) else { return (fallbackData, faceCenters) }
+
         // The exported JPEG remains strictly .up (physical LandscapeRight)
         return (UIImage(cgImage: cgImage).jpegData(compressionQuality: AppConstants.jpegCompressionQuality), faceCenters)
     }
