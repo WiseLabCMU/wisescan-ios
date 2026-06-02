@@ -37,6 +37,7 @@ enum AppConstants {
         static let metaWearablesFPS = "metaWearablesFPS"
         static let metaWearablesPermissionGranted = "metaWearablesPermissionGranted"
         static let captureMode = "captureMode"
+        static let hideLivePoints = "hideLivePoints"
     }
 
     // MARK: - Default Values
@@ -61,6 +62,7 @@ enum AppConstants {
     static let ghostMeshColor: String = "Magenta"
     static let metaWearablesFPS: Double = 7.0
     static let captureMode: String = CaptureMode.ar.rawValue
+    static let hideLivePoints: Bool = false
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 0.5      // merge distance for face anchors (~head diameter)

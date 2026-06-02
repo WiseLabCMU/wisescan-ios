@@ -808,9 +808,12 @@ class PointCloudManager {
                 self.extractionInProgress = false
                 if !self.hasRenderedFirstFrame && voxelCount > 0 {
                     self.hasRenderedFirstFrame = true
-                    // Show all VR entities now that content is ready
+                    // Show all VR entities now that content is ready. The live point cloud
+                    // can be hidden via a Developer Mode toggle (read at first reveal) to
+                    // isolate and inspect the accumulated voxels on their own.
+                    let hideLivePoints = UserDefaults.standard.bool(forKey: AppConstants.Key.hideLivePoints)
                     self.skyboxEntity?.isEnabled = true
-                    self.pointCloudEntity?.isEnabled = true
+                    self.pointCloudEntity?.isEnabled = !hideLivePoints
                     self.voxelEntity?.isEnabled = true
                 }
             }
