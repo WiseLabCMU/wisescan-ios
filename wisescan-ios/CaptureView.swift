@@ -865,13 +865,21 @@ struct CaptureView: View {
     /// Routes captured scan data into background processing — prompting for a name if this is a
     /// new location, or extending the active one.
     private func beginProcessing(_ processingData: ProcessingData) {
-        // Leave the capture screen immediately: switch to the Scans tab so processing + the name
-        // keyboard run on a lightweight screen instead of over the live ARView (which made the
-        // keyboard take seconds to open). Do NOT touch the nav path here — mutating the Scans
-        // stack while it's still off-screen leaves a stale entry that shows up as an extra blank
-        // level. startBackgroundProcessing's completion is the single, atomic path mutator: it
-        // pops the stack to root and pushes the Location detail in one step (lands on [loc]).
+        // Leave the capture screen: switch to the Scans tab so processing + the name keyboard run
+        // on a lightweight screen instead of over the live ARView (which made the keyboard take
+        // seconds to open).
         selectedTab = 2
+
+        // Reset the Scans stack to the all-scans list so the processing overlay (anchored on the
+        // list root) is visible during processing — for BOTH new scans AND rescan/extend, which
+        // arrive here with the Location detail still on the stack. DEFERRED one runloop: we get
+        // here from the capture tab, and popping the Scans stack while it's still off-screen
+        // desyncs the NavigationStack and leaves a stale blank level (the bug just fixed). By the
+        // next runloop the Scans tab is active, so the pop is safe. startBackgroundProcessing's
+        // completion then pushes the Location detail back on (→ [loc], one back press to the list).
+        DispatchQueue.main.async {
+            scanStore.navigationPath.removeLast(scanStore.navigationPath.count)
+        }
 
         if scanStore.activeLocationForScan == nil {
             promptForScanName(processingData)
