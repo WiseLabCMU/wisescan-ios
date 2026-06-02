@@ -146,16 +146,20 @@ enum VertexColorAccumulator {
         let downscaleFactor = 2
 
         for cameraFile in sampledFiles {
+          // Bound peak memory: each frame decodes a UIImage/CGImage + a downsample
+          // context + a depth image, all autoreleased. Without a per-frame pool these
+          // accumulate across every sampled frame and can spike memory / trigger jetsam.
+          autoreleasepool {
             // Parse camera JSON (Polycam format with t_XX transform and intrinsics)
             guard let jsonData = try? Data(contentsOf: cameraFile),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { continue }
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { return }
 
             guard let fx = (json["fx"] as? NSNumber)?.floatValue,
                   let fy = (json["fy"] as? NSNumber)?.floatValue,
                   let cx = (json["cx"] as? NSNumber)?.floatValue,
                   let cy = (json["cy"] as? NSNumber)?.floatValue,
                   let imgW = (json["width"] as? NSNumber)?.intValue,
-                  let imgH = (json["height"] as? NSNumber)?.intValue else { continue }
+                  let imgH = (json["height"] as? NSNumber)?.intValue else { return }
 
             // Reconstruct 4x4 camera-to-world transform (row-major t_XX values)
             guard let t00 = (json["t_00"] as? NSNumber)?.floatValue,
@@ -169,7 +173,7 @@ enum VertexColorAccumulator {
                   let t20 = (json["t_20"] as? NSNumber)?.floatValue,
                   let t21 = (json["t_21"] as? NSNumber)?.floatValue,
                   let t22 = (json["t_22"] as? NSNumber)?.floatValue,
-                  let t23 = (json["t_23"] as? NSNumber)?.floatValue else { continue }
+                  let t23 = (json["t_23"] as? NSNumber)?.floatValue else { return }
 
             // Camera-to-world (row-major → column-major for simd)
             let cam2World = simd_float4x4(columns: (
@@ -182,11 +186,11 @@ enum VertexColorAccumulator {
             let world2Cam = cam2World.inverse
 
             // Load corresponding image
-            guard let imagePath = json["image_path"] as? String else { continue }
+            guard let imagePath = json["image_path"] as? String else { return }
             let imageURL = rawDir.appendingPathComponent(imagePath)
             guard let imageData = try? Data(contentsOf: imageURL),
                   let uiImage = UIImage(data: imageData),
-                  let cgImage = uiImage.cgImage else { continue }
+                  let cgImage = uiImage.cgImage else { return }
 
             // Downsample image to reduce memory peak (#9)
             let targetWidth = cgImage.width / downscaleFactor
@@ -200,13 +204,13 @@ enum VertexColorAccumulator {
                 bytesPerRow: targetWidth * 4,
                 space: colorSpace,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-            ) else { continue }
+            ) else { return }
             context.interpolationQuality = .low
             context.draw(cgImage, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
 
             guard let downsampled = context.makeImage(),
                   let pixelData = downsampled.dataProvider?.data,
-                  let ptr = CFDataGetBytePtr(pixelData) else { continue }
+                  let ptr = CFDataGetBytePtr(pixelData) else { return }
             let width = downsampled.width
             let height = downsampled.height
             let bytesPerRow = downsampled.bytesPerRow
@@ -292,6 +296,7 @@ enum VertexColorAccumulator {
                 colored[i] = true
             }
             _ = depthPixelDataBuffer // Silence compiler warning while ensuring CFData buffer outlives the pointer
+          } // autoreleasepool (per frame)
         }
 
         let coloredCount = colored.filter { $0 }.count

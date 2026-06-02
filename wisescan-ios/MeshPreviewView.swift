@@ -117,7 +117,7 @@ struct MeshPreviewContainer: View {
 
 /// Published state for projected 2D marker positions.
 class MarkerProjectionState: ObservableObject {
-    struct MarkerScreenPos {
+    struct MarkerScreenPos: Equatable {
         var point: CGPoint
         var isVisible: Bool
     }
@@ -128,9 +128,23 @@ class MarkerProjectionState: ObservableObject {
     var anchorPositions: [SCNVector3] = []
     /// Reference to the SCNView for projection
     weak var scnView: SCNView?
+    /// Tracks whether the last update had no markers, so the common (no-marker) case
+    /// doesn't dispatch to main or republish on every rendered frame.
+    private var lastWasEmpty = false
 
     func updateProjections() {
         guard let scnView = scnView else { return }
+
+        // Common case: no privacy markers. Clear once, then do nothing per frame.
+        // (updateProjections is called from the SceneKit render thread on every frame.)
+        if anchorPositions.isEmpty {
+            if lastWasEmpty { return }
+            lastWasEmpty = true
+            DispatchQueue.main.async { self.screenPositions = [] }
+            return
+        }
+        lastWasEmpty = false
+
         DispatchQueue.main.async {
             guard scnView.pointOfView != nil else { return }
             var newPositions: [MarkerScreenPos] = []
@@ -144,7 +158,10 @@ class MarkerProjectionState: ObservableObject {
                     && screenPoint.y >= 0 && screenPoint.y <= boundsHeight
                 newPositions.append(MarkerScreenPos(point: screenPoint, isVisible: visible))
             }
-            self.screenPositions = newPositions
+            // Skip the publish (and SwiftUI re-render) when nothing moved on screen.
+            if newPositions != self.screenPositions {
+                self.screenPositions = newPositions
+            }
         }
     }
     
