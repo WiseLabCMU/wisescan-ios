@@ -217,20 +217,22 @@ struct LocationGridTile: View {
                 hasMissingWorldMap = false
                 return
             }
+            let previewURL = latest.modelPreviewURL
             let fallbackURL = latest.thumbnailURL
-            let candidates = [latest.modelPreviewURL, fallbackURL]
             let worldMapPaths = location.scans.map { $0.worldMapURL.path }
 
-            let result = await Task.detached(priority: .utility) { () -> (UIImage?, Bool) in
+            // Missing-worldmap flag off-main.
+            hasMissingWorldMap = await Task.detached(priority: .utility) {
                 let fm = FileManager.default
-                let url = candidates.first(where: { fm.fileExists(atPath: $0.path) }) ?? fallbackURL
-                let image: UIImage? = (try? Data(contentsOf: url)).flatMap { UIImage(data: $0) }
-                let missing = worldMapPaths.contains(where: { !fm.fileExists(atPath: $0) })
-                return (image, missing)
+                return worldMapPaths.contains(where: { !fm.fileExists(atPath: $0) })
             }.value
 
-            thumbnailImage = result.0
-            hasMissingWorldMap = result.1
+            // Downsampled, cached thumbnail (prefer the colored model preview).
+            if let img = await ThumbnailCache.image(for: previewURL) {
+                thumbnailImage = img
+            } else {
+                thumbnailImage = await ThumbnailCache.image(for: fallbackURL)
+            }
         }
     }
 }
@@ -264,7 +266,7 @@ struct ScanCard: View {
     @State private var coloringMessage: String? = nil
     // Disk-derived values resolved off the main thread in `.task` (see below) so the
     // view body never performs synchronous FileManager I/O during layout/scroll.
-    @State private var resolvedPreviewURL: URL? = nil
+    @State private var previewImage: UIImage? = nil
     @State private var isRelocMissing = false
     @State private var sizeMB: Double = 0
 
@@ -368,8 +370,6 @@ struct ScanCard: View {
             // layout/scroll (previously: previewURL existence, reloc-warning existence,
             // and estimatedSizeMB's two attributesOfItem calls all ran inside body).
             let rawDir = scan.rawDataPath
-            let previewCandidate = scan.modelPreviewURL
-            let thumbURL = scan.thumbnailURL
             let meshPath = scan.meshFileURL.path
             let colorsPath = scan.colorsFileURL.path
             let worldMapPath = scan.worldMapURL.path
@@ -377,13 +377,12 @@ struct ScanCard: View {
             let fm = FileManager.default
 
             let resolved = await Task.detached(priority: .utility) {
-                () -> (counts: (Int, Int, Int, Int), preview: URL, relocMissing: Bool, sizeMB: Double) in
+                () -> (counts: (Int, Int, Int, Int), relocMissing: Bool, sizeMB: Double) in
                 let iCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("images").path))?.count ?? 0
                 let pCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("proxy_images").path))?.count ?? 0
                 let dCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("depth").path))?.count ?? 0
                 let cCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("cameras").path))?.count ?? 0
 
-                let preview = fm.fileExists(atPath: previewCandidate.path) ? previewCandidate : thumbURL
                 let relocMissing = !fm.fileExists(atPath: worldMapPath)
 
                 var bytes: Int64 = 0
@@ -391,22 +390,32 @@ struct ScanCard: View {
                 if let attr = try? fm.attributesOfItem(atPath: colorsPath) { bytes += attr[.size] as? Int64 ?? 0 }
                 let sizeMB = (bytes > 0 ? Double(bytes) : Double(fallbackBytes)) / (1024.0 * 1024.0)
 
-                return ((iCount, pCount, dCount, cCount), preview, relocMissing, sizeMB)
+                return ((iCount, pCount, dCount, cCount), relocMissing, sizeMB)
             }.value
 
             itemCounts = resolved.counts
-            resolvedPreviewURL = resolved.preview
             isRelocMissing = resolved.relocMissing
             sizeMB = resolved.sizeMB
+        }
+        // Load the preview as a downsampled, cached thumbnail. Keyed on the location's
+        // updatedAt so it refreshes after (re)coloring rewrites model_preview.jpg.
+        .task(id: scan.location?.updatedAt) {
+            let previewURL = scan.modelPreviewURL
+            let thumbURL = scan.thumbnailURL
+            if let img = await ThumbnailCache.image(for: previewURL) {
+                previewImage = img
+            } else {
+                previewImage = await ThumbnailCache.image(for: thumbURL)
+            }
         }
     }
 
     @ViewBuilder
     private var previewImageSection: some View {
         Button(action: { showMeshPreview = true }) {
-            AsyncImage(url: resolvedPreviewURL ?? scan.thumbnailURL) { phase in
-                if let image = phase.image {
-                    image
+            Group {
+                if let image = previewImage {
+                    Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
                 } else {
@@ -423,7 +432,6 @@ struct ScanCard: View {
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
-        .id(scan.location?.updatedAt)
         .overlay(editingOverlay)
         .overlay(alignment: .topLeading) { relocWarningOverlay }
         .overlay {
