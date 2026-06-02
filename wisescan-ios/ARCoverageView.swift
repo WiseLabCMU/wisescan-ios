@@ -767,7 +767,12 @@ struct ARCoverageView: UIViewRepresentable {
             // IMPORTANT: Extract pixel buffers and camera data HERE (on the delegate queue)
             // so the ARFrame reference is released immediately. Do NOT forward the ARFrame
             // to the main actor — that queues work and holds references to 10+ frames.
-            guard captureMode == .vr, let pcm = pointCloudManager else { return }
+            //
+            // Gate on `isRecording`: once the scan ends, stop the live point-cloud / voxel
+            // pipeline immediately. Otherwise it keeps projecting + integrating every frame while
+            // the AR view is still mounted (name prompt, post-scan processing), starving the main
+            // thread/GPU — that's what made the keyboard take seconds to open after stopping.
+            guard isRecording, captureMode == .vr, let pcm = pointCloudManager else { return }
 
             // Skip VR updates when tracking is degraded — prevents accumulating
             // voxels with wrong coordinates during SLAM re-initialization.
