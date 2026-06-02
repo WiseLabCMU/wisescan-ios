@@ -156,21 +156,27 @@ class VoxelGrid {
         ptr.pointee = 0
     }
 
-    /// Read back GPU-written VoxelEntry structs and merge into the hash map.
-    /// Called from the command buffer completion handler (~1ms for 49K entries).
-    func mergeAppendBuffer(frameCounter: UInt32) {
+    /// Copy the GPU-written VoxelEntry structs out of the append buffer into a CPU array.
+    ///
+    /// Call this on the thread that owns the append-buffer lifecycle (the command-buffer
+    /// completion handler, before the next integration resets/overwrites the buffer). The
+    /// returned snapshot can then be merged into the hash map off the main thread, since it
+    /// no longer references GPU memory. (~1ms for 49K entries.)
+    func snapshotAppendBuffer() -> [VoxelEntry] {
         let counterPtr = appendCounter.contents().bindMemory(to: UInt32.self, capacity: 1)
         let count = min(Int(counterPtr.pointee), Self.appendCapacity)
-        guard count > 0 else { return }
-
+        guard count > 0 else { return [] }
         let entriesPtr = appendBuffer.contents().bindMemory(to: VoxelEntry.self, capacity: count)
+        return Array(UnsafeBufferPointer(start: entriesPtr, count: count))
+    }
 
+    /// Merge a snapshot of GPU-written VoxelEntry structs into the hash map.
+    /// Touches `voxels`/`observedKeysThisFrame`, so it must run on the voxel serial queue.
+    func mergeAppendBuffer(_ entries: [VoxelEntry], frameCounter: UInt32) {
         // Track which voxels were observed this frame (for contradiction detection)
         observedKeysThisFrame.removeAll(keepingCapacity: true)
 
-        for i in 0..<count {
-            let entry = entriesPtr[i]
-
+        for entry in entries {
             // Validate grid bounds
             guard entry.gridX >= -Int16(Self.gridDim / 2) && entry.gridX < Int16(Self.gridDim / 2),
                   entry.gridY >= -Int16(Self.gridDim / 2) && entry.gridY < Int16(Self.gridDim / 2),

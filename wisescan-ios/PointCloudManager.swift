@@ -48,6 +48,11 @@ class PointCloudManager {
     /// Reused GPU buffer of packed occupied voxels (ExtractVoxel) for the extract kernel.
     /// Allocated once at voxel setup, sized to maxVoxels — no per-extraction allocation.
     private var voxelExtractBuffer: MTLBuffer?
+    /// Serial queue that owns ALL VoxelGrid hash-map access (merge / decay / pack / reset),
+    /// so the 350K-voxel decay no longer blocks the main thread. The GPU append buffer is
+    /// snapshotted on the main thread first, and the LowLevelMesh GPU dispatch hops back to
+    /// main (LowLevelMesh/LowLevelTexture are @MainActor).
+    private let voxelQueue = DispatchQueue(label: "com.scan4d.voxelGrid", qos: .userInitiated)
     private var lastExtractionTime: CFAbsoluteTime = 0
     private var lastIntegrationTransform: simd_float4x4?
     private var lastIntegrationIntrinsics: simd_float3x3?
@@ -686,50 +691,72 @@ class PointCloudManager {
 
         // Increment integration frame counter
         integrationFrameCounter += 1
+        let frameCounter = integrationFrameCounter
 
-        // CPU merge: read append buffer → update hash map (~1ms)
-        grid.mergeAppendBuffer(frameCounter: integrationFrameCounter)
+        // Snapshot the GPU append buffer on the MAIN thread now — before the next
+        // integration resets/overwrites it — then merge it into the hash map off-main.
+        let entries = grid.snapshotAppendBuffer()
 
-        // Confidence decay: check existing voxels against live depth
-        if let transform = lastIntegrationTransform,
-           let intrinsics = lastIntegrationIntrinsics,
-           let depthMap = lastIntegrationDepthMap {
-            let depthW = CVPixelBufferGetWidth(depthMap)
-            let depthH = CVPixelBufferGetHeight(depthMap)
-            grid.decayContradictedVoxels(
-                cameraTransform: transform,
-                intrinsics: intrinsics,
-                depthMap: depthMap,
-                depthWidth: depthW,
-                depthHeight: depthH
-            )
-        }
-        // Release the depth map reference to avoid retaining the parent ARFrame.
-        // It will be re-set on the next integration dispatch.
+        // Capture decay inputs, then release the ARFrame depth-map reference promptly.
+        let transform = lastIntegrationTransform
+        let intrinsics = lastIntegrationIntrinsics
+        let depthMap = lastIntegrationDepthMap
         lastIntegrationDepthMap = nil
 
-        // Check extraction rate limiter (2Hz). Quad + color-texel emission runs on the
-        // GPU (extractVoxelQuads); the CPU only packs the occupied voxels into a reused
-        // buffer, so this no longer blocks the main thread for ~33ms per extraction.
+        // Decide extraction timing on the main thread (it owns the gate + flag).
         let now = CACurrentMediaTime()
-        guard now - lastExtractionTime > 0.5, !extractionInProgress else { return }
+        let willExtract = now - lastExtractionTime > 0.5 && !extractionInProgress
+            && voxelLowLevelMesh != nil && voxelColorTexture != nil && voxelExtractBuffer != nil
+        let extractBuffer = voxelExtractBuffer
+        if willExtract {
+            extractionInProgress = true
+            lastExtractionTime = now
+        }
+
+        // Merge + the 350K-voxel decay run off the main thread on the serial queue that
+        // owns ALL hash-map access. Pack also runs there; the GPU dispatch (LowLevelMesh
+        // is @MainActor) hops back to main.
+        voxelQueue.async { [weak self] in
+            grid.mergeAppendBuffer(entries, frameCounter: frameCounter)
+            if let transform, let intrinsics, let depthMap {
+                grid.decayContradictedVoxels(
+                    cameraTransform: transform,
+                    intrinsics: intrinsics,
+                    depthMap: depthMap,
+                    depthWidth: CVPixelBufferGetWidth(depthMap),
+                    depthHeight: CVPixelBufferGetHeight(depthMap)
+                )
+            }
+
+            guard willExtract, let extractBuffer else { return }
+            // Lightweight pack: unpack keys + copy color into the reused GPU buffer.
+            let count = grid.packForExtraction(into: extractBuffer.contents(), maxVoxels: VoxelGrid.maxVoxels)
+
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if count > 0 {
+                    self.dispatchVoxelExtraction(voxelCount: count, camTransform: transform ?? matrix_identity_float4x4)
+                } else {
+                    self.extractionInProgress = false
+                }
+            }
+        }
+    }
+
+    /// GPU mesh extraction: emit one billboard quad + color texel per packed voxel via the
+    /// extractVoxelQuads kernel. Runs on the main thread because LowLevelMesh/LowLevelTexture
+    /// are @MainActor; the voxels were already packed into `voxelExtractBuffer` on the voxel
+    /// queue, and `extractionInProgress` (set when this was scheduled) is cleared here.
+    private func dispatchVoxelExtraction(voxelCount: Int, camTransform: simd_float4x4) {
         guard let llm = voxelLowLevelMesh,
               let colorTex = voxelColorTexture,
-              let extractBuffer = voxelExtractBuffer else { return }
-
-        extractionInProgress = true
-        lastExtractionTime = now
-
-        // Lightweight CPU pass: unpack keys + copy color into the reused GPU buffer.
-        let voxelCount = grid.packForExtraction(into: extractBuffer.contents(), maxVoxels: VoxelGrid.maxVoxels)
-        guard voxelCount > 0 else {
+              let extractBuffer = voxelExtractBuffer else {
             extractionInProgress = false
             return
         }
 
         // Viewplane billboard basis — computed once, all quads share it (kernel only
         // does per-voxel distance scaling).
-        let camTransform = lastIntegrationTransform ?? matrix_identity_float4x4
         let camPos = SIMD3<Float>(camTransform.columns.3.x, camTransform.columns.3.y, camTransform.columns.3.z)
         let right = simd_normalize(SIMD3<Float>(camTransform.columns.0.x, camTransform.columns.0.y, camTransform.columns.0.z))
         let up = simd_normalize(SIMD3<Float>(camTransform.columns.1.x, camTransform.columns.1.y, camTransform.columns.1.z))
@@ -797,7 +824,11 @@ class PointCloudManager {
     /// Called when ARKit's coordinate system shifts (re-initialization, relocalizing)
     /// to prevent ghost voxels at wrong world positions.
     func resetVoxels() {
-        voxelGrid?.reset()
+        // Route the hash-map reset through the voxel queue so it can't race an in-flight
+        // merge/decay. FIFO ordering means it lands after any already-queued work.
+        if let grid = voxelGrid {
+            voxelQueue.async { grid.reset() }
+        }
         lastIntegrationTransform = nil
         lastIntegrationIntrinsics = nil
         lastIntegrationDepthMap = nil
@@ -822,7 +853,11 @@ class PointCloudManager {
         voxelLowLevelMesh = nil
         voxelColorTexture = nil
         voxelExtractBuffer = nil
-        voxelGrid?.reset()
+        // Route the reset through the voxel queue so it can't race an in-flight
+        // merge/decay; the closure retains `grid` until it runs.
+        if let grid = voxelGrid {
+            voxelQueue.async { grid.reset() }
+        }
         lastIntegrationTransform = nil
         lastIntegrationIntrinsics = nil
         lastIntegrationDepthMap = nil
