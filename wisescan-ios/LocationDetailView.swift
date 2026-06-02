@@ -22,6 +22,10 @@ struct LocationDetailView: View {
     @State private var showExportSheet = false
 
     var body: some View {
+        // Sort once per body evaluation and reuse for both the scroll content and the
+        // bottom toolbar (which is a sibling of the ScrollView). Previously this sort ran
+        // twice per redraw — and redraws are frequent during uploads/selection toggles.
+        let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
         ZStack {
             Color.black.ignoresSafeArea()
 
@@ -29,7 +33,6 @@ struct LocationDetailView: View {
                 .ignoresSafeArea()
 
             ScrollView {
-                let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
                 VStack(spacing: 24) {
                     // MARK: - Header Actions
                     VStack(spacing: 16) {
@@ -220,7 +223,7 @@ struct LocationDetailView: View {
             if isEditing {
                 VStack {
                     Spacer()
-                    bottomActionToolbar(sortedScans: location.scans.sorted { $0.capturedAt > $1.capturedAt })
+                    bottomActionToolbar(sortedScans: sortedScans)
                 }
             }
         }

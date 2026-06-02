@@ -149,7 +149,9 @@ struct LocationGridTile: View {
     @State private var hasMissingWorldMap = false
 
     var latestScan: CapturedScan? {
-        location.scans.sorted(by: { $0.capturedAt > $1.capturedAt }).first
+        // Single O(n) pass with no intermediate sorted-array allocation; this is read
+        // multiple times per body evaluation.
+        location.scans.max(by: { $0.capturedAt < $1.capturedAt })
     }
 
     var body: some View {
