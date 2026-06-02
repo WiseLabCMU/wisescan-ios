@@ -7,8 +7,12 @@ enum MeshConverter {
 
     // MARK: - OBJ → PLY
 
-    /// Converts an OBJ mesh + colors.bin (per-vertex SIMD4<Float> RGBA) to an ASCII PLY file.
-    /// Returns `true` on success.
+    /// Converts an OBJ mesh + colors.bin (per-vertex SIMD4<Float> RGBA) to a binary PLY file
+    /// (`binary_little_endian 1.0`). Returns `true` on success.
+    ///
+    /// Binary PLY is read by all standard mesh tools (MeshLab, CloudCompare, Blender,
+    /// Open3D, …) and is ~3–5× smaller and far faster to write than ASCII (no per-value
+    /// decimal formatting). `binary_little_endian` matches all target platforms (iOS/macOS).
     static func objToPLY(objURL: URL, colorsURL: URL, outputURL: URL) -> Bool {
         guard let objData = try? Data(contentsOf: objURL),
               let parsed = MeshParser.parseOBJ(from: objData) else {
@@ -24,55 +28,67 @@ enum MeshConverter {
         let stride = MemoryLayout<SIMD4<Float>>.stride
         let hasColors = colorData != nil && colorData!.count >= vertices.count * stride
 
-        // Write ASCII PLY into a single reserved Data buffer. Appending UTF-8 line
-        // fragments avoids growing one huge String (repeated reallocs) and the final
-        // String→Data re-encode that doubled peak memory. Output bytes are identical.
-        var out = Data()
-        out.reserveCapacity(vertices.count * (hasColors ? 64 : 48) + faces.count * 24 + 256)
-        func append(_ s: String) { out.append(contentsOf: s.utf8) }
-
-        append("ply\n")
-        append("format ascii 1.0\n")
-        append("element vertex \(vertices.count)\n")
-        append("property float x\n")
-        append("property float y\n")
-        append("property float z\n")
+        // ASCII header (always text), then a little-endian binary data section.
+        var header = "ply\n"
+        header += "format binary_little_endian 1.0\n"
+        header += "element vertex \(vertices.count)\n"
+        header += "property float x\n"
+        header += "property float y\n"
+        header += "property float z\n"
         if hasColors {
-            append("property uchar red\n")
-            append("property uchar green\n")
-            append("property uchar blue\n")
+            header += "property uchar red\n"
+            header += "property uchar green\n"
+            header += "property uchar blue\n"
         }
-        append("element face \(faces.count)\n")
-        append("property list uchar int vertex_indices\n")
-        append("end_header\n")
+        header += "element face \(faces.count)\n"
+        header += "property list uchar int vertex_indices\n"
+        header += "end_header\n"
 
-        // Vertex data — hoist the color buffer binding out of the loop (was a per-vertex
-        // withUnsafeBytes closure).
+        var out = Data(header.utf8)
+        // vertex = 3 floats (+ 3 color bytes); face = 1 count byte + 3 int32 indices.
+        let vertexRecord = 12 + (hasColors ? 3 : 0)
+        out.reserveCapacity(out.count + vertices.count * vertexRecord + faces.count * 13)
+
+        // Append a value's little-endian bytes (correct on any host endianness).
+        func putFloat(_ f: Float) {
+            var le = f.bitPattern.littleEndian
+            Swift.withUnsafeBytes(of: &le) { out.append(contentsOf: $0) }
+        }
+        func putUInt32(_ u: UInt32) {
+            var le = u.littleEndian
+            Swift.withUnsafeBytes(of: &le) { out.append(contentsOf: $0) }
+        }
+
+        // Vertex data — hoist the color buffer binding out of the loop.
         if hasColors, let colorData = colorData {
             colorData.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
                 let colors = raw.bindMemory(to: SIMD4<Float>.self)
                 for (i, v) in vertices.enumerated() {
+                    putFloat(v.x); putFloat(v.y); putFloat(v.z)
                     let rgba = colors[i]
-                    let r = UInt8(min(max(rgba.x * 255.0, 0), 255))
-                    let g = UInt8(min(max(rgba.y * 255.0, 0), 255))
-                    let b = UInt8(min(max(rgba.z * 255.0, 0), 255))
-                    append("\(v.x) \(v.y) \(v.z) \(r) \(g) \(b)\n")
+                    out.append(UInt8(min(max(rgba.x * 255.0, 0), 255)))
+                    out.append(UInt8(min(max(rgba.y * 255.0, 0), 255)))
+                    out.append(UInt8(min(max(rgba.z * 255.0, 0), 255)))
                 }
             }
         } else {
             for v in vertices {
-                append("\(v.x) \(v.y) \(v.z)\n")
+                putFloat(v.x); putFloat(v.y); putFloat(v.z)
             }
         }
 
-        // Face data
+        // Face data: uchar count (3) + 3 int32 indices. The index bit patterns are written
+        // as-is; PLY "int" reads them back identically for in-range non-negative values.
         for face in faces {
-            append("3 \(face.0) \(face.1) \(face.2)\n")
+            out.append(UInt8(3))
+            putUInt32(face.0)
+            putUInt32(face.1)
+            putUInt32(face.2)
         }
 
         do {
             try out.write(to: outputURL, options: .atomic)
-            print("[MeshConverter] PLY written: \(vertices.count) vertices, \(faces.count) faces, colors=\(hasColors)")
+            print("[MeshConverter] PLY (binary) written: \(vertices.count) vertices, \(faces.count) faces, colors=\(hasColors)")
             return true
         } catch {
             print("[MeshConverter] Failed to write PLY: \(error)")
