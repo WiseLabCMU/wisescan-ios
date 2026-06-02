@@ -371,6 +371,13 @@ struct ARCoverageView: UIViewRepresentable {
         private var baselineMemoryMB: Double = ScanStats.currentMemoryUsageMB()
         private var trackingDegradationCount: Int = 0
         private var totalTrackingUpdates: Int = 0
+        /// Throttle for HUD stat recomputation/publishing. `updateStats` is invoked on
+        /// every anchor add/update/remove (very frequent during scanning); the HUD does
+        /// not need 60 Hz, so we recompute and publish at most ~10 Hz. This bounds both
+        /// the reduce passes + memory query here and the SwiftUI re-renders of CaptureView
+        /// that every @Observable ScanStats write triggers.
+        private var lastStatsUpdateTime: Date = .distantPast
+        private let statsUpdateInterval: TimeInterval = 0.1
 
         // Active Mesh Wireframe properties
         /// One wireframe entity per ARMeshAnchor, keyed by anchor UUID.
@@ -401,6 +408,7 @@ struct ARCoverageView: UIViewRepresentable {
             totalTrackingUpdates = 0
             sessionStartTime = Date()
             baselineMemoryMB = ScanStats.currentMemoryUsageMB()
+            lastStatsUpdateTime = .distantPast // let the first stats update publish immediately
             // Clear any stale wireframe entities from a previous recording
             removeAllActiveMeshEntities()
         }
@@ -799,6 +807,13 @@ struct ARCoverageView: UIViewRepresentable {
 
         private func updateStats(in session: ARSession) {
             guard let scanStats = scanStats else { return }
+
+            // Throttle to ~10 Hz. Delegate callbacks are serialized on the ARSession
+            // queue, so this timestamp needs no synchronization. Resets (on stop) write
+            // scanStats directly and bypass this path, so they remain immediate.
+            let now = Date()
+            guard now.timeIntervalSince(lastStatsUpdateTime) >= statsUpdateInterval else { return }
+            lastStatsUpdateTime = now
 
             // ── Extract worldMappingStatus in a tight scope ──
             // Only read the enum value; do NOT iterate frame.anchors or access

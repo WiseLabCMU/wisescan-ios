@@ -72,6 +72,9 @@ struct PrivacyBlurOverlay: View {
     var arSession: ARSession?
     @State private var overlayImage: UIImage? = nil
     @State private var timer: Timer?
+    // Owns the reused Vision request + serializes work so overlapping timer ticks
+    // never share request state and never pile up. Retained for the view's lifetime.
+    @State private var processor = PrivacyOverlayProcessor()
 
     var body: some View {
         GeometryReader { geo in
@@ -104,21 +107,46 @@ struct PrivacyBlurOverlay: View {
         // strong refs while Vision segmentation runs on a background queue.
         guard let pixelBuffer = arSession?.currentFrame?.capturedImage else { return }
         // ARFrame is now released — only the CVPixelBuffer is retained
+        processor.process(pixelBuffer: pixelBuffer) { uiImage in
+            self.overlayImage = uiImage
+        }
+    }
+}
 
-        let request = VNGeneratePersonSegmentationRequest()
-        request.qualityLevel = .fast
-        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+/// Drives the live privacy overlay segmentation off the main thread.
+///
+/// Reuses a single `VNGeneratePersonSegmentationRequest` and the shared
+/// `PrivacyBlurUtil.sharedContext` across ticks. A re-entrancy guard drops a tick
+/// if the previous segmentation is still running, which (a) prevents work from
+/// piling up faster than it completes and (b) guarantees only one thread touches
+/// the reused request at a time, making the reuse race-free.
+private final class PrivacyOverlayProcessor: @unchecked Sendable {
+    private let request: VNGeneratePersonSegmentationRequest = {
+        let r = VNGeneratePersonSegmentationRequest()
+        r.qualityLevel = .fast
+        r.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        return r
+    }()
+    private let lock = NSLock()
+    private var isProcessing = false
 
-        // Pass .up so Vision processes in the raw sensor coordinate space.
-        // The mask will be in the same coordinate system as the source pixel buffer,
-        // ensuring correct alignment during compositing.
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
-        
-        DispatchQueue.global(qos: .userInteractive).async {
+    func process(pixelBuffer: CVPixelBuffer, completion: @escaping (UIImage?) -> Void) {
+        lock.lock()
+        if isProcessing { lock.unlock(); return }
+        isProcessing = true
+        lock.unlock()
+
+        DispatchQueue.global(qos: .userInteractive).async { [self] in
+            defer { lock.lock(); isProcessing = false; lock.unlock() }
+
+            // Pass .up so Vision processes in the raw sensor coordinate space.
+            // The mask will be in the same coordinate system as the source pixel buffer,
+            // ensuring correct alignment during compositing.
+            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
             do {
                 try handler.perform([request])
                 guard let maskObservation = request.results?.first as? VNPixelBufferObservation else { return }
-                
+
                 // Everything operates in the original sensor landscape-right coordinates
                 let originalCI = CIImage(cvPixelBuffer: pixelBuffer)
                 let maskCI = CIImage(cvPixelBuffer: maskObservation.pixelBuffer)
@@ -128,35 +156,31 @@ struct PrivacyBlurOverlay: View {
                 let scaleY = originalCI.extent.height / maskCI.extent.height
                 let scaledMask = maskCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
 
-                // Apply pixelation
-                guard let pixelateFilter = CIFilter(name: "CIPixellate") else { return }
-                pixelateFilter.setValue(originalCI, forKey: kCIInputImageKey)
-                pixelateFilter.setValue(30.0, forKey: kCIInputScaleKey)
-                guard let pixelatedCI = pixelateFilter.outputImage else { return }
+                // Apply pixelation (typed builtin avoids per-call string-registry lookup)
+                let pixelate = CIFilter.pixellate()
+                pixelate.inputImage = originalCI
+                pixelate.scale = 30.0
+                guard let pixelatedCI = pixelate.outputImage else { return }
 
                 // Blend with clear background
                 let clearBg = CIImage(color: .clear).cropped(to: originalCI.extent)
-                
-                guard let blendFilter = CIFilter(name: "CIBlendWithMask") else { return }
-                blendFilter.setValue(pixelatedCI, forKey: kCIInputImageKey)
-                blendFilter.setValue(clearBg, forKey: kCIInputBackgroundImageKey)
-                blendFilter.setValue(scaledMask, forKey: kCIInputMaskImageKey)
-                
-                guard let outputCI = blendFilter.outputImage else { return }
-                
+
+                let blend = CIFilter.blendWithMask()
+                blend.inputImage = pixelatedCI
+                blend.backgroundImage = clearBg
+                blend.maskImage = scaledMask
+                guard let outputCI = blend.outputImage else { return }
+
                 // Render the composite in sensor-native (landscape-right) coordinates,
                 // then use UIImage orientation metadata to rotate for portrait display.
                 // This is the same proven approach used for thumbnail generation.
-                let context = CIContext(options: [.useSoftwareRenderer: false])
-                guard let cgImage = context.createCGImage(outputCI, from: outputCI.extent) else { return }
-                
+                guard let cgImage = PrivacyBlurUtil.sharedContext.createCGImage(outputCI, from: outputCI.extent) else { return }
+
                 // .right orientation tells UIKit/SwiftUI to rotate the landscape-right
                 // pixels 90° for correct portrait display
                 let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
-                
-                DispatchQueue.main.async {
-                    self.overlayImage = uiImage
-                }
+
+                DispatchQueue.main.async { completion(uiImage) }
             } catch {
                 print("Person segmentation failed: \(error)")
             }
@@ -167,16 +191,30 @@ struct PrivacyBlurOverlay: View {
 // MARK: - Privacy Blurring Utility for Image Export
 
 enum PrivacyBlurUtil {
-    /// Applies pixelation to person regions and returns their normalized face center coordinates.
+    /// Shared CoreImage context. Creating a `CIContext` builds the entire Metal render
+    /// pipeline + shader cache, which is very expensive, so we create it once and reuse
+    /// it across every privacy pass — the live overlay and frame export alike. `CIContext`
+    /// is documented thread-safe, so sharing across the capture/export queues is safe.
+    nonisolated(unsafe) static let sharedContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    /// Applies pixelation to person regions of JPEG `imageData` and returns their normalized
+    /// face center coordinates. On any failure, returns the original `imageData` unchanged.
     nonisolated static func pixelatePersonsAndGetFaceCenters(in imageData: Data, orientation: CGImagePropertyOrientation = .up) -> (Data?, [CGPoint]) {
         guard let uiImage = UIImage(data: imageData),
               let ciImage = CIImage(image: uiImage) else { return (imageData, []) }
+        return pixelatePersonsAndGetFaceCenters(ciImage: ciImage, orientation: orientation, fallbackData: imageData)
+    }
 
+    /// Core pixelation: runs person segmentation + face detection on `ciImage`, pixelates
+    /// detected persons, and JPEG-encodes the result once. Callers that already hold a
+    /// CIImage (e.g. a camera/glasses frame) can use this to avoid an extra JPEG
+    /// encode→decode round trip. On any failure returns `fallbackData` (nil if none).
+    nonisolated static func pixelatePersonsAndGetFaceCenters(ciImage: CIImage, orientation: CGImagePropertyOrientation = .up, fallbackData: Data? = nil) -> (Data?, [CGPoint]) {
         let handler = VNImageRequestHandler(ciImage: ciImage, orientation: orientation, options: [:])
-        
+
         // 1. Face detection for 3D anchors
         let faceRequest = VNDetectFaceRectanglesRequest()
-        
+
         // 2. Person segmentation for pixelation
         let segRequest = VNGeneratePersonSegmentationRequest()
         segRequest.qualityLevel = .accurate
@@ -185,7 +223,7 @@ enum PrivacyBlurUtil {
         do {
             try handler.perform([faceRequest, segRequest])
         } catch {
-            return (imageData, [])
+            return (fallbackData, [])
         }
 
         // Get face centers
@@ -201,34 +239,32 @@ enum PrivacyBlurUtil {
 
         // Get person mask
         guard let maskObservation = segRequest.results?.first as? VNPixelBufferObservation else {
-            return (imageData, faceCenters) // no mask found, return original
+            return (fallbackData, faceCenters) // no mask found, return fallback
         }
-        
+
         let maskCI = CIImage(cvPixelBuffer: maskObservation.pixelBuffer)
         let imageSize = ciImage.extent
-        
+
         // Scale mask
         let scaleX = imageSize.width / maskCI.extent.width
         let scaleY = imageSize.height / maskCI.extent.height
         let scaledMask = maskCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
 
-        // Pixelate original image
-        guard let pixelateFilter = CIFilter(name: "CIPixellate") else { return (imageData, faceCenters) }
-        pixelateFilter.setValue(ciImage, forKey: kCIInputImageKey)
-        pixelateFilter.setValue(40.0, forKey: kCIInputScaleKey) 
-        guard let pixelatedCI = pixelateFilter.outputImage else { return (imageData, faceCenters) }
+        // Pixelate original image (typed builtin avoids per-call string-registry lookup)
+        let pixelate = CIFilter.pixellate()
+        pixelate.inputImage = ciImage
+        pixelate.scale = 40.0
+        guard let pixelatedCI = pixelate.outputImage else { return (fallbackData, faceCenters) }
 
         // Blend pixelated image over original using the person mask
-        guard let blendFilter = CIFilter(name: "CIBlendWithMask") else { return (imageData, faceCenters) }
-        blendFilter.setValue(pixelatedCI, forKey: kCIInputImageKey)
-        blendFilter.setValue(ciImage, forKey: kCIInputBackgroundImageKey)
-        blendFilter.setValue(scaledMask, forKey: kCIInputMaskImageKey)
-        
-        guard let outputCI = blendFilter.outputImage else { return (imageData, faceCenters) }
+        let blend = CIFilter.blendWithMask()
+        blend.inputImage = pixelatedCI
+        blend.backgroundImage = ciImage
+        blend.maskImage = scaledMask
+        guard let outputCI = blend.outputImage else { return (fallbackData, faceCenters) }
 
-        let context = CIContext(options: [.useSoftwareRenderer: false])
-        guard let cgImage = context.createCGImage(outputCI, from: imageSize) else { return (imageData, faceCenters) }
-        
+        guard let cgImage = sharedContext.createCGImage(outputCI, from: imageSize) else { return (fallbackData, faceCenters) }
+
         // The exported JPEG remains strictly .up (physical LandscapeRight)
         return (UIImage(cgImage: cgImage).jpegData(compressionQuality: AppConstants.jpegCompressionQuality), faceCenters)
     }

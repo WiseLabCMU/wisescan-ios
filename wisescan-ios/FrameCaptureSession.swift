@@ -54,6 +54,9 @@ class FrameCaptureSession {
 
     private let ioQueue = DispatchQueue(label: "com.scan4d.capture.io", qos: .userInitiated)
     private let ciContext = CIContext()  // Reuse across frames to avoid GPU pipeline re-init
+    /// Reusable 16-bit depth conversion buffer (depth resolution is fixed per session).
+    /// Only touched inside depthMapToPNG16 on ioQueue, so no synchronization needed.
+    private var depthScratch: [UInt16] = []
 
     struct FrameData {
         let index: Int
@@ -649,27 +652,36 @@ class FrameCaptureSession {
             maskStride = CVPixelBufferGetBytesPerRow(mask)
         }
 
-        // Convert float meters to UInt16 millimeters, zeroing person regions
-        var uint16Buffer = [UInt16](repeating: 0, count: width * height)
-        for y in 0..<height {
-            for x in 0..<width {
-                let i = y * width + x
+        // Convert float meters to UInt16 millimeters, zeroing person regions.
+        // Reuse a session-scoped buffer to avoid a per-frame allocation. Every pixel is
+        // written exactly once below, so stale contents from the previous frame don't leak.
+        // (Kept scalar: vDSP float→uint16 mishandles NaN/inf/negative depth, and the
+        // per-pixel person mask isn't vectorizable; the PNG encode dominates this function.)
+        let count = width * height
+        if depthScratch.count != count {
+            depthScratch = [UInt16](repeating: 0, count: count)
+        }
+        depthScratch.withUnsafeMutableBufferPointer { out in
+            for y in 0..<height {
+                for x in 0..<width {
+                    let i = y * width + x
 
-                // Check person mask (scale coordinates if sizes differ)
-                if let mBase = maskBase {
-                    let mx = x * maskWidth / max(width, 1)
-                    let my = y * maskHeight / max(height, 1)
-                    if mx < maskWidth && my < maskHeight {
-                        let pixel = mBase.advanced(by: my * maskStride + mx).assumingMemoryBound(to: UInt8.self).pointee
-                        if pixel > 128 {
-                            uint16Buffer[i] = 0 // zero out person region
-                            continue
+                    // Check person mask (scale coordinates if sizes differ)
+                    if let mBase = maskBase {
+                        let mx = x * maskWidth / max(width, 1)
+                        let my = y * maskHeight / max(height, 1)
+                        if mx < maskWidth && my < maskHeight {
+                            let pixel = mBase.advanced(by: my * maskStride + mx).assumingMemoryBound(to: UInt8.self).pointee
+                            if pixel > 128 {
+                                out[i] = 0 // zero out person region
+                                continue
+                            }
                         }
                     }
-                }
 
-                let meters = floatBuffer[i]
-                uint16Buffer[i] = meters.isFinite ? UInt16(min(max(meters * 1000.0, 0), 65535)) : 0
+                    let meters = floatBuffer[i]
+                    out[i] = meters.isFinite ? UInt16(min(max(meters * 1000.0, 0), 65535)) : 0
+                }
             }
         }
 
@@ -678,7 +690,7 @@ class FrameCaptureSession {
         }
 
         // Create 16-bit grayscale CGImage
-        let data = Data(bytes: uint16Buffer, count: uint16Buffer.count * 2)
+        let data = Data(bytes: depthScratch, count: count * 2)
         guard let provider = CGDataProvider(data: data as CFData),
               let cgImage = CGImage(
                   width: width,

@@ -12,7 +12,8 @@ import ARKit
 /// 1. `resetAppendBuffer()` — zero the atomic counter before GPU dispatch
 /// 2. GPU `integrateVoxels` kernel writes `VoxelEntry` structs to the append buffer
 /// 3. `mergeAppendBuffer()` — CPU reads back and merges into the hash map (~1ms for 49K entries)
-/// 4. `extractMesh()` — writes camera-facing quads into vertex/color buffers at 2Hz
+/// 4. `packForExtraction()` — CPU packs occupied voxels into a flat buffer; the
+///    `extractVoxelQuads` GPU kernel then emits camera-facing quads + color texels at 2Hz
 ///
 /// ## Memory Budget
 /// - Hash map: 350K entries × ~20 bytes = ~7MB
@@ -93,6 +94,19 @@ class VoxelGrid {
         var _pad: UInt8 = 0
     }
 
+    /// CPU→GPU packed occupied-voxel record consumed by the `extractVoxelQuads` kernel.
+    /// Must match Metal `ExtractVoxel` layout exactly (10 bytes).
+    /// `a` carries confidence mapped to [0,255] (used as the quad's alpha).
+    struct ExtractVoxel {
+        var gridX: Int16
+        var gridY: Int16
+        var gridZ: Int16
+        var r: UInt8
+        var g: UInt8
+        var b: UInt8
+        var a: UInt8
+    }
+
     // MARK: - Properties
 
     /// Sparse hash map: packed grid coords → accumulated color.
@@ -142,21 +156,27 @@ class VoxelGrid {
         ptr.pointee = 0
     }
 
-    /// Read back GPU-written VoxelEntry structs and merge into the hash map.
-    /// Called from the command buffer completion handler (~1ms for 49K entries).
-    func mergeAppendBuffer(frameCounter: UInt32) {
+    /// Copy the GPU-written VoxelEntry structs out of the append buffer into a CPU array.
+    ///
+    /// Call this on the thread that owns the append-buffer lifecycle (the command-buffer
+    /// completion handler, before the next integration resets/overwrites the buffer). The
+    /// returned snapshot can then be merged into the hash map off the main thread, since it
+    /// no longer references GPU memory. (~1ms for 49K entries.)
+    func snapshotAppendBuffer() -> [VoxelEntry] {
         let counterPtr = appendCounter.contents().bindMemory(to: UInt32.self, capacity: 1)
         let count = min(Int(counterPtr.pointee), Self.appendCapacity)
-        guard count > 0 else { return }
-
+        guard count > 0 else { return [] }
         let entriesPtr = appendBuffer.contents().bindMemory(to: VoxelEntry.self, capacity: count)
+        return Array(UnsafeBufferPointer(start: entriesPtr, count: count))
+    }
 
+    /// Merge a snapshot of GPU-written VoxelEntry structs into the hash map.
+    /// Touches `voxels`/`observedKeysThisFrame`, so it must run on the voxel serial queue.
+    func mergeAppendBuffer(_ entries: [VoxelEntry], frameCounter: UInt32) {
         // Track which voxels were observed this frame (for contradiction detection)
         observedKeysThisFrame.removeAll(keepingCapacity: true)
 
-        for i in 0..<count {
-            let entry = entriesPtr[i]
-
+        for entry in entries {
             // Validate grid bounds
             guard entry.gridX >= -Int16(Self.gridDim / 2) && entry.gridX < Int16(Self.gridDim / 2),
                   entry.gridY >= -Int16(Self.gridDim / 2) && entry.gridY < Int16(Self.gridDim / 2),
@@ -276,87 +296,32 @@ class VoxelGrid {
 
     // MARK: - Mesh Extraction
 
-    /// Write viewplane-aligned billboard quads for all occupied voxels into the provided buffers.
+    /// Pack the occupied voxels into a flat buffer for the `extractVoxelQuads` GPU kernel.
     ///
-    /// Uses **viewplane billboarding**: all quads share the same camera-plane orientation,
-    /// computed once from the camera transform. Only distance-based scaling is per-voxel.
-    /// This is O(1) orientation + O(n) scaling vs O(n) orientation with spherical billboarding.
-    /// For 2cm voxels the visual difference is negligible.
+    /// This replaces the former CPU `extractMesh`, which built every billboard quad and
+    /// color texel on the main thread (~33ms for 350K voxels). All of that geometry math
+    /// now runs on the GPU; the CPU only does this lightweight pass — unpack each key and
+    /// copy color/confidence — so the main thread is no longer blocked per extraction.
     ///
     /// - Parameters:
-    ///   - vertexBuffer: Destination for position + UV data (20 bytes per vertex)
-    ///   - colorBuffer: Destination for RGBA8 texel data (4 bytes per voxel)
-    ///   - texWidth: Color texture width (for UV calculation)
-    ///   - texHeight: Color texture height (for UV calculation)
-    ///   - cameraTransform: Full 4×4 camera transform for viewplane orientation + position
-    /// - Returns: Number of voxels written (capped at maxVoxels)
-    func extractMesh(
-        vertexBuffer: UnsafeMutableRawPointer,
-        colorBuffer: UnsafeMutableRawPointer,
-        texWidth: Int,
-        texHeight: Int,
-        cameraTransform: simd_float4x4
-    ) -> Int {
-        let vertices = vertexBuffer.bindMemory(to: Float.self, capacity: Self.maxVoxels * 4 * 5)
-        let colors = colorBuffer.bindMemory(to: UInt8.self, capacity: Self.maxVoxels * 4)
-
-        // Precompute viewplane orientation ONCE for all voxels.
-        let camPos = SIMD3<Float>(cameraTransform.columns.3.x, cameraTransform.columns.3.y, cameraTransform.columns.3.z)
-
-        // Right = camera's X axis (already orthonormal in the transform)
-        let right = simd_normalize(SIMD3<Float>(cameraTransform.columns.0.x, cameraTransform.columns.0.y, cameraTransform.columns.0.z))
-        // Up = camera's Y axis
-        let up = simd_normalize(SIMD3<Float>(cameraTransform.columns.1.x, cameraTransform.columns.1.y, cameraTransform.columns.1.z))
-
+    ///   - buffer: Destination for `ExtractVoxel` records (must hold at least `maxVoxels`).
+    ///   - maxVoxels: Capacity of the destination buffer (the kernel's vertex-buffer cap).
+    /// - Returns: Number of voxels written (capped at `maxVoxels`).
+    func packForExtraction(into buffer: UnsafeMutableRawPointer, maxVoxels: Int) -> Int {
+        let out = buffer.bindMemory(to: ExtractVoxel.self, capacity: maxVoxels)
         var voxelIndex = 0
 
         for (key, data) in voxels {
-            if voxelIndex >= Self.maxVoxels { break }
+            if voxelIndex >= maxVoxels { break }
 
             let (gx, gy, gz) = Self.unpackKey(key)
-            let center = Self.worldPosition(gridX: gx, gridY: gy, gridZ: gz)
             let avg = data.averageColor
 
-            // Write color texel (one per voxel)
-            let colorOffset = voxelIndex * 4
-            colors[colorOffset + 0] = avg.r
-            colors[colorOffset + 1] = avg.g
-            colors[colorOffset + 2] = avg.b
-            colors[colorOffset + 3] = UInt8(min(max(data.confidence * 255.0, 0), 255))
-
-            // UV for this voxel's texel (center of the texel)
-            let texX = voxelIndex % texWidth
-            let texY = voxelIndex / texWidth
-            let u = (Float(texX) + 0.5) / Float(texWidth)
-            // Flip V for OpenGL convention (RealityKit UV origin at bottom-left)
-            let v = 1.0 - (Float(texY) + 0.5) / Float(texHeight)
-
-            // Per-voxel distance for size scaling (only per-voxel computation)
-            let delta = camPos - center
-            let dist = sqrtf(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z)
-
-            // Push voxel quad 2mm AWAY from camera so live points always render in front.
-            // More reliable than ModelSortGroup for coplanar geometry.
-            let pushDir = dist > 0.001 ? delta / dist : SIMD3<Float>(0, 0, 0)
-            let biasedCenter = center - pushDir * 0.002
-
-            // Scale quad size based on distance from camera.
-            // Minimum = cellSize (2cm half = 0.01) so quads always fill the grid with no gaps.
-            // Far away: larger (up to 4cm) to ensure gap-free coverage.
-            // At 0.5m → 0.01 (2cm quad = cell size), at 2.5m+ → 0.02 (4cm quad)
-            let half = min(max(dist * 0.008, 0.01), 0.02)
-
-            // Scale shared right/up vectors by per-voxel half-size
-            let r = right * half
-            let u_vec = up * half
-
-            let baseVertex = voxelIndex * 4 * 5  // 4 vertices × 5 floats each
-
-            // Quad vertices: bottom-left, bottom-right, top-left, top-right
-            writeVertex(vertices, baseVertex + 0,  biasedCenter - r - u_vec, u, v)
-            writeVertex(vertices, baseVertex + 5,  biasedCenter + r - u_vec, u, v)
-            writeVertex(vertices, baseVertex + 10, biasedCenter - r + u_vec, u, v)
-            writeVertex(vertices, baseVertex + 15, biasedCenter + r + u_vec, u, v)
+            out[voxelIndex] = ExtractVoxel(
+                gridX: gx, gridY: gy, gridZ: gz,
+                r: avg.r, g: avg.g, b: avg.b,
+                a: UInt8(min(max(data.confidence * 255.0, 0), 255))
+            )
 
             voxelIndex += 1
         }
@@ -395,15 +360,5 @@ class VoxelGrid {
             origin.y + (Float(gridY) + halfDim + 0.5) * cellSize,
             origin.z + (Float(gridZ) + halfDim + 0.5) * cellSize
         )
-    }
-
-    /// Write a single vertex (position + UV) into a float buffer
-    @inline(__always)
-    private func writeVertex(_ buf: UnsafeMutablePointer<Float>, _ offset: Int, _ pos: SIMD3<Float>, _ u: Float, _ v: Float) {
-        buf[offset + 0] = pos.x
-        buf[offset + 1] = pos.y
-        buf[offset + 2] = pos.z
-        buf[offset + 3] = u
-        buf[offset + 4] = v
     }
 }

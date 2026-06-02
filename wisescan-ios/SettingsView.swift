@@ -16,6 +16,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
     @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
     @AppStorage(AppConstants.Key.mockWearable) private var mockWearable: Bool = AppConstants.mockWearable
+    @AppStorage(AppConstants.Key.hideLivePoints) private var hideLivePoints: Bool = AppConstants.hideLivePoints
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
@@ -283,6 +284,18 @@ struct SettingsView: View {
                                     Text("Simulate Meta Wearable")
                                         .foregroundColor(.white)
                                     Text("Uses MockDeviceKit to simulate paired Meta Ray-Ban glasses without needing physical hardware.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $hideLivePoints) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Hide Live Points (VR)")
+                                        .foregroundColor(.white)
+                                    Text("Hides the live depth point cloud in VR capture so only the accumulated voxel cloud is shown. Applied when entering VR capture. Useful for inspecting how the accumulated voxels hold up.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

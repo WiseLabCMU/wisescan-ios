@@ -145,9 +145,13 @@ struct ScansListView: View {
 struct LocationGridTile: View {
     let location: ScanLocation
     @State private var thumbnailImage: UIImage? = nil
+    // Resolved off the main thread in `.task` so the body performs no FileManager I/O.
+    @State private var hasMissingWorldMap = false
 
     var latestScan: CapturedScan? {
-        location.scans.sorted(by: { $0.capturedAt > $1.capturedAt }).first
+        // Single O(n) pass with no intermediate sorted-array allocation; this is read
+        // multiple times per body evaluation.
+        location.scans.max(by: { $0.capturedAt < $1.capturedAt })
     }
 
     var body: some View {
@@ -195,7 +199,7 @@ struct LocationGridTile: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(alignment: .topLeading) {
-            if location.scans.contains(where: { !FileManager.default.fileExists(atPath: $0.worldMapURL.path) }) {
+            if hasMissingWorldMap {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundColor(.yellow)
@@ -206,17 +210,29 @@ struct LocationGridTile: View {
             }
         }
         .task(id: location.updatedAt) {
-            // Load thumbnail asynchronously to avoid main-thread I/O (#7)
-            guard let latest = latestScan else { thumbnailImage = nil; return }
-            let urls = [latest.modelPreviewURL, latest.thumbnailURL]
-            let fm = FileManager.default
-            let url = urls.first(where: { fm.fileExists(atPath: $0.path) }) ?? latest.thumbnailURL
-            
-            thumbnailImage = await Task.detached(priority: .utility) {
-                guard FileManager.default.fileExists(atPath: url.path),
-                      let data = try? Data(contentsOf: url) else { return nil as UIImage? }
-                return UIImage(data: data)
+            // Resolve thumbnail + missing-worldmap state off the main thread to avoid
+            // main-thread FileManager I/O during layout/scroll (#5/#7).
+            guard let latest = latestScan else {
+                thumbnailImage = nil
+                hasMissingWorldMap = false
+                return
+            }
+            let previewURL = latest.modelPreviewURL
+            let fallbackURL = latest.thumbnailURL
+            let worldMapPaths = location.scans.map { $0.worldMapURL.path }
+
+            // Missing-worldmap flag off-main.
+            hasMissingWorldMap = await Task.detached(priority: .utility) {
+                let fm = FileManager.default
+                return worldMapPaths.contains(where: { !fm.fileExists(atPath: $0) })
             }.value
+
+            // Downsampled, cached thumbnail (prefer the colored model preview).
+            if let img = await ThumbnailCache.image(for: previewURL) {
+                thumbnailImage = img
+            } else {
+                thumbnailImage = await ThumbnailCache.image(for: fallbackURL)
+            }
         }
     }
 }
@@ -248,6 +264,11 @@ struct ScanCard: View {
     @State private var showMissingRelocAlert = false
     @State private var isColoring = false
     @State private var coloringMessage: String? = nil
+    // Disk-derived values resolved off the main thread in `.task` (see below) so the
+    // view body never performs synchronous FileManager I/O during layout/scroll.
+    @State private var previewImage: UIImage? = nil
+    @State private var isRelocMissing = false
+    @State private var sizeMB: Double = 0
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
@@ -266,12 +287,6 @@ struct ScanCard: View {
         self.onUpdate = onUpdate
         self.onDelete = onDelete
         self.onSelect = onSelect
-    }
-
-    private var previewURL: URL {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: scan.modelPreviewURL.path) { return scan.modelPreviewURL }
-        return scan.thumbnailURL
     }
 
     var body: some View {
@@ -350,25 +365,57 @@ struct ScanCard: View {
             Text("The scan data may have been deleted.")
         }
         .task(id: scan.id) {
+            // Resolve all disk-derived values off the main thread in a single detached
+            // pass, so the view body performs no synchronous FileManager I/O during
+            // layout/scroll (previously: previewURL existence, reloc-warning existence,
+            // and estimatedSizeMB's two attributesOfItem calls all ran inside body).
             let rawDir = scan.rawDataPath
+            let meshPath = scan.meshFileURL.path
+            let colorsPath = scan.colorsFileURL.path
+            let worldMapPath = scan.worldMapURL.path
+            let fallbackBytes = scan.vertexCount * 12 + scan.faceCount * 12
             let fm = FileManager.default
-            // Use detached task for I/O to avoid main thread stutter
-            itemCounts = await Task.detached(priority: .utility) {
+
+            let resolved = await Task.detached(priority: .utility) {
+                () -> (counts: (Int, Int, Int, Int), relocMissing: Bool, sizeMB: Double) in
                 let iCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("images").path))?.count ?? 0
                 let pCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("proxy_images").path))?.count ?? 0
                 let dCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("depth").path))?.count ?? 0
                 let cCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("cameras").path))?.count ?? 0
-                return (iCount, pCount, dCount, cCount)
+
+                let relocMissing = !fm.fileExists(atPath: worldMapPath)
+
+                var bytes: Int64 = 0
+                if let attr = try? fm.attributesOfItem(atPath: meshPath) { bytes += attr[.size] as? Int64 ?? 0 }
+                if let attr = try? fm.attributesOfItem(atPath: colorsPath) { bytes += attr[.size] as? Int64 ?? 0 }
+                let sizeMB = (bytes > 0 ? Double(bytes) : Double(fallbackBytes)) / (1024.0 * 1024.0)
+
+                return ((iCount, pCount, dCount, cCount), relocMissing, sizeMB)
             }.value
+
+            itemCounts = resolved.counts
+            isRelocMissing = resolved.relocMissing
+            sizeMB = resolved.sizeMB
+        }
+        // Load the preview as a downsampled, cached thumbnail. Keyed on the location's
+        // updatedAt so it refreshes after (re)coloring rewrites model_preview.jpg.
+        .task(id: scan.location?.updatedAt) {
+            let previewURL = scan.modelPreviewURL
+            let thumbURL = scan.thumbnailURL
+            if let img = await ThumbnailCache.image(for: previewURL) {
+                previewImage = img
+            } else {
+                previewImage = await ThumbnailCache.image(for: thumbURL)
+            }
         }
     }
 
     @ViewBuilder
     private var previewImageSection: some View {
         Button(action: { showMeshPreview = true }) {
-            AsyncImage(url: previewURL) { phase in
-                if let image = phase.image {
-                    image
+            Group {
+                if let image = previewImage {
+                    Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
                 } else {
@@ -385,7 +432,6 @@ struct ScanCard: View {
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
-        .id(scan.location?.updatedAt)
         .overlay(editingOverlay)
         .overlay(alignment: .topLeading) { relocWarningOverlay }
         .overlay {
@@ -425,7 +471,7 @@ struct ScanCard: View {
 
     @ViewBuilder
     private var relocWarningOverlay: some View {
-        if !FileManager.default.fileExists(atPath: scan.worldMapURL.path) {
+        if isRelocMissing {
             Button(action: { showMissingRelocAlert = true }) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.title2)
@@ -456,7 +502,7 @@ struct ScanCard: View {
                     .font(.subheadline).bold()
                     .foregroundColor(.white)
                 HStack(spacing: 8) {
-                    Text(String(format: "%.1f MB", scan.estimatedSizeMB))
+                    Text(String(format: "%.1f MB", sizeMB))
                     Text("\(formattedCount(scan.faceCount)) polys")
                 }
                 .font(.caption)

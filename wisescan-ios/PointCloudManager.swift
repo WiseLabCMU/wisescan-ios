@@ -27,6 +27,7 @@ class PointCloudManager {
     private let commandQueue: MTLCommandQueue
     private let pipelineState: MTLComputePipelineState
     private let integratePipelineState: MTLComputePipelineState
+    private let extractPipelineState: MTLComputePipelineState
     // Bloom post-processing
     private var bloomThresholdPipeline: MTLComputePipelineState?
     private var bloomCompositePipeline: MTLComputePipelineState?
@@ -44,6 +45,14 @@ class PointCloudManager {
     private var voxelEntity: ModelEntity?
     private var voxelLowLevelMesh: LowLevelMesh?
     private var voxelColorTexture: LowLevelTexture?
+    /// Reused GPU buffer of packed occupied voxels (ExtractVoxel) for the extract kernel.
+    /// Allocated once at voxel setup, sized to maxVoxels — no per-extraction allocation.
+    private var voxelExtractBuffer: MTLBuffer?
+    /// Serial queue that owns ALL VoxelGrid hash-map access (merge / decay / pack / reset),
+    /// so the 350K-voxel decay no longer blocks the main thread. The GPU append buffer is
+    /// snapshotted on the main thread first, and the LowLevelMesh GPU dispatch hops back to
+    /// main (LowLevelMesh/LowLevelTexture are @MainActor).
+    private let voxelQueue = DispatchQueue(label: "com.scan4d.voxelGrid", qos: .userInitiated)
     private var lastExtractionTime: CFAbsoluteTime = 0
     private var lastIntegrationTransform: simd_float4x4?
     private var lastIntegrationIntrinsics: simd_float3x3?
@@ -89,6 +98,13 @@ class PointCloudManager {
             return nil
         }
         self.integratePipelineState = integratePipeline
+
+        guard let extractFunction = library.makeFunction(name: "extractVoxelQuads"),
+              let extractPipeline = try? mtlDevice.makeComputePipelineState(function: extractFunction) else {
+            print("[PointCloudManager] Failed to load voxel extraction compute shader")
+            return nil
+        }
+        self.extractPipelineState = extractPipeline
 
         // Bloom post-processing pipeline states (optional — fail gracefully)
         if let bloomThresholdFn = library.makeFunction(name: "bloomThresholdAndBlurH"),
@@ -313,22 +329,26 @@ class PointCloudManager {
             
             let width = source.width
             let height = source.height
+            // Bloom is low-frequency: run the threshold + horizontal-blur pass at half
+            // resolution (¼ the threads). The composite pass stays full-res.
+            let halfW = max(1, width / 2)
+            let halfH = max(1, height / 2)
 
-            // Lazily create/recreate intermediate texture (always linear)
+            // Lazily create/recreate the half-res intermediate texture (always linear)
             if intermediateTexture == nil ||
-               intermediateTexture!.width != width ||
-               intermediateTexture!.height != height {
+               intermediateTexture!.width != halfW ||
+               intermediateTexture!.height != halfH {
                 let desc = MTLTextureDescriptor.texture2DDescriptor(
                     pixelFormat: .bgra8Unorm,
-                    width: width,
-                    height: height,
+                    width: halfW,
+                    height: halfH,
                     mipmapped: false
                 )
                 desc.usage = [.shaderRead, .shaderWrite]
                 desc.storageMode = .private
                 intermediateTexture = device.makeTexture(descriptor: desc)
                 intermediateTexture?.label = "BloomIntermediate"
-                print("[PointCloudManager] Bloom intermediate texture created: \(width)×\(height)")
+                print("[PointCloudManager] Bloom intermediate texture created: \(halfW)×\(halfH) (half of \(width)×\(height))")
             }
 
             guard let intermediate = intermediateTexture else { return }
@@ -336,28 +356,34 @@ class PointCloudManager {
             let commandBuffer = context.commandBuffer
 
             let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
-            let threadGroups = MTLSize(
+            let halfGroups = MTLSize(
+                width: (halfW + 15) / 16,
+                height: (halfH + 15) / 16,
+                depth: 1
+            )
+            let fullGroups = MTLSize(
                 width: (width + 15) / 16,
                 height: (height + 15) / 16,
                 depth: 1
             )
 
-            // Pass 1: Threshold + Horizontal blur (source → intermediate)
+            // Pass 1: Threshold + Horizontal blur at half-res (source → half-res intermediate)
             if let encoder = commandBuffer.makeComputeCommandEncoder() {
                 encoder.setComputePipelineState(thresholdPipeline)
                 encoder.setTexture(source, index: 0)
                 encoder.setTexture(intermediate, index: 1)
-                encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+                encoder.dispatchThreadgroups(halfGroups, threadsPerThreadgroup: threadGroupSize)
                 encoder.endEncoding()
             }
 
-            // Pass 2: Vertical blur + Composite (source + intermediate → dest)
+            // Pass 2: Vertical blur (upsampling the half-res intermediate) + composite,
+            // at full-res (source + intermediate → dest)
             if let encoder = commandBuffer.makeComputeCommandEncoder() {
                 encoder.setComputePipelineState(compositePipeline)
                 encoder.setTexture(source, index: 0)
                 encoder.setTexture(intermediate, index: 1)
                 encoder.setTexture(dest, index: 2)
-                encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+                encoder.dispatchThreadgroups(fullGroups, threadsPerThreadgroup: threadGroupSize)
                 encoder.endEncoding()
             }
             #endif
@@ -524,6 +550,11 @@ class PointCloudManager {
         let maxVerts = maxVoxels * vertsPerVoxel
         let maxIdx = maxVoxels * indicesPerVoxel
 
+        // Reused buffer for packed voxels consumed by the extract kernel (allocated once).
+        let extractStride = MemoryLayout<VoxelGrid.ExtractVoxel>.stride
+        self.voxelExtractBuffer = device.makeBuffer(length: maxVoxels * extractStride, options: .storageModeShared)
+        self.voxelExtractBuffer?.label = "VoxelExtractBuffer"
+
         var desc = LowLevelMesh.Descriptor()
         desc.vertexCapacity = maxVerts
         desc.vertexAttributes = [
@@ -660,114 +691,134 @@ class PointCloudManager {
 
         // Increment integration frame counter
         integrationFrameCounter += 1
+        let frameCounter = integrationFrameCounter
 
-        // CPU merge: read append buffer → update hash map (~1ms)
-        grid.mergeAppendBuffer(frameCounter: integrationFrameCounter)
+        // Snapshot the GPU append buffer on the MAIN thread now — before the next
+        // integration resets/overwrites it — then merge it into the hash map off-main.
+        let entries = grid.snapshotAppendBuffer()
 
-        // Confidence decay: check existing voxels against live depth
-        if let transform = lastIntegrationTransform,
-           let intrinsics = lastIntegrationIntrinsics,
-           let depthMap = lastIntegrationDepthMap {
-            let depthW = CVPixelBufferGetWidth(depthMap)
-            let depthH = CVPixelBufferGetHeight(depthMap)
-            grid.decayContradictedVoxels(
-                cameraTransform: transform,
-                intrinsics: intrinsics,
-                depthMap: depthMap,
-                depthWidth: depthW,
-                depthHeight: depthH
-            )
-        }
-        // Release the depth map reference to avoid retaining the parent ARFrame.
-        // It will be re-set on the next integration dispatch.
+        // Capture decay inputs, then release the ARFrame depth-map reference promptly.
+        let transform = lastIntegrationTransform
+        let intrinsics = lastIntegrationIntrinsics
+        let depthMap = lastIntegrationDepthMap
         lastIntegrationDepthMap = nil
 
-        // Check extraction rate limiter (2Hz — 350K voxels × 28MB vertex writes is ~33ms)
+        // Decide extraction timing on the main thread (it owns the gate + flag).
         let now = CACurrentMediaTime()
-        guard now - lastExtractionTime > 0.5, !extractionInProgress else { return }
-        guard let llm = voxelLowLevelMesh, let colorTex = voxelColorTexture else { return }
+        let willExtract = now - lastExtractionTime > 0.5 && !extractionInProgress
+            && voxelLowLevelMesh != nil && voxelColorTexture != nil && voxelExtractBuffer != nil
+        let extractBuffer = voxelExtractBuffer
+        if willExtract {
+            extractionInProgress = true
+            lastExtractionTime = now
+        }
 
-        extractionInProgress = true
-        lastExtractionTime = now
+        // Merge + the 350K-voxel decay run off the main thread on the serial queue that
+        // owns ALL hash-map access. Pack also runs there; the GPU dispatch (LowLevelMesh
+        // is @MainActor) hops back to main.
+        voxelQueue.async { [weak self] in
+            grid.mergeAppendBuffer(entries, frameCounter: frameCounter)
+            if let transform, let intrinsics, let depthMap {
+                grid.decayContradictedVoxels(
+                    cameraTransform: transform,
+                    intrinsics: intrinsics,
+                    depthMap: depthMap,
+                    depthWidth: CVPixelBufferGetWidth(depthMap),
+                    depthHeight: CVPixelBufferGetHeight(depthMap)
+                )
+            }
 
-        let texW = voxelTexWidth
-        let texH = voxelTexHeight
-        let iPerVoxel = indicesPerVoxel
+            guard willExtract, let extractBuffer else { return }
+            // Lightweight pack: unpack keys + copy color into the reused GPU buffer.
+            let count = grid.packForExtraction(into: extractBuffer.contents(), maxVoxels: VoxelGrid.maxVoxels)
 
-        // Allocate CPU staging buffer for color data (4 bytes per texel, RGBA8).
-        // Size must be row-aligned for the blit copy: ceil(maxVoxels / texW) * texW * 4.
-        // Using maxVoxels * 4 alone overflows when the last row is partial.
-        let rowAlignedTexels = ((VoxelGrid.maxVoxels + texW - 1) / texW) * texW
-        let colorBufferSize = rowAlignedTexels * 4
-        guard let colorStagingBuffer = device.makeBuffer(length: colorBufferSize, options: .storageModeShared) else {
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if count > 0 {
+                    self.dispatchVoxelExtraction(voxelCount: count, camTransform: transform ?? matrix_identity_float4x4)
+                } else {
+                    self.extractionInProgress = false
+                }
+            }
+        }
+    }
+
+    /// GPU mesh extraction: emit one billboard quad + color texel per packed voxel via the
+    /// extractVoxelQuads kernel. Runs on the main thread because LowLevelMesh/LowLevelTexture
+    /// are @MainActor; the voxels were already packed into `voxelExtractBuffer` on the voxel
+    /// queue, and `extractionInProgress` (set when this was scheduled) is cleared here.
+    private func dispatchVoxelExtraction(voxelCount: Int, camTransform: simd_float4x4) {
+        guard let llm = voxelLowLevelMesh,
+              let colorTex = voxelColorTexture,
+              let extractBuffer = voxelExtractBuffer else {
             extractionInProgress = false
             return
         }
 
-        // Extract on main thread — LowLevelMesh is @MainActor-isolated.
-        // At 2Hz with ~33ms per extraction (28MB vertex data),
-        // the stutter is tolerable for a preview display.
-        let camTransform: simd_float4x4
-        if let t = lastIntegrationTransform {
-            camTransform = t
-        } else {
-            camTransform = matrix_identity_float4x4
-        }
-        var voxelCount = 0
-        llm.withUnsafeMutableBytes(bufferIndex: 0) { rawBuffer in
-            voxelCount = grid.extractMesh(
-                vertexBuffer: rawBuffer.baseAddress!,
-                colorBuffer: colorStagingBuffer.contents(),
-                texWidth: texW,
-                texHeight: texH,
-                cameraTransform: camTransform
-            )
+        // Viewplane billboard basis — computed once, all quads share it (kernel only
+        // does per-voxel distance scaling).
+        let camPos = SIMD3<Float>(camTransform.columns.3.x, camTransform.columns.3.y, camTransform.columns.3.z)
+        let right = simd_normalize(SIMD3<Float>(camTransform.columns.0.x, camTransform.columns.0.y, camTransform.columns.0.z))
+        let up = simd_normalize(SIMD3<Float>(camTransform.columns.1.x, camTransform.columns.1.y, camTransform.columns.1.z))
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer(),
+              let encoder = cmdBuf.makeComputeCommandEncoder() else {
+            extractionInProgress = false
+            return
         }
 
-        // Upload color data to the LowLevelTexture via blit encoder.
-        // The underlying MTLTexture uses .private storage mode (GPU-only),
-        // so CPU-side replace() is not allowed. Use a blit to copy from
-        // the staging MTLBuffer (.storageModeShared) to the private texture.
-        if voxelCount > 0, let cmdBuf = commandQueue.makeCommandBuffer() {
-            let mtlTexture = colorTex.replace(using: cmdBuf)
-            let rowsUsed = min((voxelCount + texW - 1) / texW, texH)
-            let bytesPerRow = texW * 4  // RGBA8 = 4 bytes per texel
+        // Double-buffered GPU resources: replace() hands back fresh backing that the
+        // LowLevelMesh/Texture swap in when the command buffer completes. The kernel
+        // writes vertices into the buffer and colors into the texture directly.
+        let vertexMTLBuffer = llm.replace(bufferIndex: 0, using: cmdBuf)
+        let colorMTLTexture = colorTex.replace(using: cmdBuf)
 
-            if let blitEncoder = cmdBuf.makeBlitCommandEncoder() {
-                blitEncoder.copy(
-                    from: colorStagingBuffer,
-                    sourceOffset: 0,
-                    sourceBytesPerRow: bytesPerRow,
-                    sourceBytesPerImage: bytesPerRow * rowsUsed,
-                    sourceSize: MTLSize(width: texW, height: rowsUsed, depth: 1),
-                    to: mtlTexture,
-                    destinationSlice: 0,
-                    destinationLevel: 0,
-                    destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                )
-                blitEncoder.endEncoding()
+        encoder.setComputePipelineState(extractPipelineState)
+        encoder.setBuffer(extractBuffer, offset: 0, index: 0)
+        var uniforms = VoxelExtractUniforms(
+            camPos: camPos,
+            right: right,
+            up: up,
+            texWidth: UInt32(voxelTexWidth),
+            texHeight: UInt32(voxelTexHeight),
+            voxelCount: UInt32(voxelCount)
+        )
+        encoder.setBytes(&uniforms, length: MemoryLayout<VoxelExtractUniforms>.stride, index: 1)
+        encoder.setBuffer(vertexMTLBuffer, offset: 0, index: 2)
+        encoder.setTexture(colorMTLTexture, index: 0)
+
+        let threadsPerGroup = min(extractPipelineState.maxTotalThreadsPerThreadgroup, 64)
+        let threadGroups = MTLSize(width: (voxelCount + threadsPerGroup - 1) / threadsPerGroup, height: 1, depth: 1)
+        encoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1))
+        encoder.endEncoding()
+
+        let iPerVoxel = indicesPerVoxel
+        cmdBuf.addCompletedHandler { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                // Set the visible index count to match the buffer the GPU just filled.
+                self.voxelLowLevelMesh?.parts.replaceAll([
+                    LowLevelMesh.Part(
+                        indexCount: voxelCount * iPerVoxel,
+                        topology: .triangle,
+                        materialIndex: 0,
+                        bounds: BoundingBox(min: [-100, -100, -100], max: [100, 100, 100])
+                    )
+                ])
+                self.extractionInProgress = false
+                if !self.hasRenderedFirstFrame && voxelCount > 0 {
+                    self.hasRenderedFirstFrame = true
+                    // Show all VR entities now that content is ready. The live point cloud
+                    // can be hidden via a Developer Mode toggle (read at first reveal) to
+                    // isolate and inspect the accumulated voxels on their own.
+                    let hideLivePoints = UserDefaults.standard.bool(forKey: AppConstants.Key.hideLivePoints)
+                    self.skyboxEntity?.isEnabled = true
+                    self.pointCloudEntity?.isEnabled = !hideLivePoints
+                    self.voxelEntity?.isEnabled = true
+                }
             }
-            cmdBuf.commit()
         }
-
-        // Update mesh part to render the correct number of voxels
-        let indexCount = voxelCount * iPerVoxel
-        llm.parts.replaceAll([
-            LowLevelMesh.Part(
-                indexCount: indexCount,
-                topology: .triangle,
-                materialIndex: 0,
-                bounds: BoundingBox(min: [-100, -100, -100], max: [100, 100, 100])
-            )
-        ])
-        extractionInProgress = false
-        if !hasRenderedFirstFrame && voxelCount > 0 {
-            hasRenderedFirstFrame = true
-            // Show all VR entities now that content is ready
-            skyboxEntity?.isEnabled = true
-            pointCloudEntity?.isEnabled = true
-            voxelEntity?.isEnabled = true
-        }
+        cmdBuf.commit()
     }
 
     // MARK: - Voxel Reset
@@ -776,7 +827,11 @@ class PointCloudManager {
     /// Called when ARKit's coordinate system shifts (re-initialization, relocalizing)
     /// to prevent ghost voxels at wrong world positions.
     func resetVoxels() {
-        voxelGrid?.reset()
+        // Route the hash-map reset through the voxel queue so it can't race an in-flight
+        // merge/decay. FIFO ordering means it lands after any already-queued work.
+        if let grid = voxelGrid {
+            voxelQueue.async { grid.reset() }
+        }
         lastIntegrationTransform = nil
         lastIntegrationIntrinsics = nil
         lastIntegrationDepthMap = nil
@@ -800,7 +855,12 @@ class PointCloudManager {
         colorTexture = nil
         voxelLowLevelMesh = nil
         voxelColorTexture = nil
-        voxelGrid?.reset()
+        voxelExtractBuffer = nil
+        // Route the reset through the voxel queue so it can't race an in-flight
+        // merge/decay; the closure retains `grid` until it runs.
+        if let grid = voxelGrid {
+            voxelQueue.async { grid.reset() }
+        }
         lastIntegrationTransform = nil
         lastIntegrationIntrinsics = nil
         lastIntegrationDepthMap = nil
@@ -822,6 +882,27 @@ class PointCloudManager {
 
         guard let cvTex = cvTexture, let texture = CVMetalTextureGetTexture(cvTex) else { return nil }
         return texture
+    }
+}
+
+/// Uniforms for the extractVoxelQuads kernel. Layout must match the Metal
+/// `VoxelExtractUniforms` struct (SIMD3<Float> is 16-byte aligned → 64 bytes total).
+struct VoxelExtractUniforms {
+    var camPos: SIMD3<Float>
+    var right: SIMD3<Float>
+    var up: SIMD3<Float>
+    var texWidth: UInt32
+    var texHeight: UInt32
+    var voxelCount: UInt32
+    private var _pad: UInt32 = 0
+
+    init(camPos: SIMD3<Float>, right: SIMD3<Float>, up: SIMD3<Float>, texWidth: UInt32, texHeight: UInt32, voxelCount: UInt32) {
+        self.camPos = camPos
+        self.right = right
+        self.up = up
+        self.texWidth = texWidth
+        self.texHeight = texHeight
+        self.voxelCount = voxelCount
     }
 }
 
