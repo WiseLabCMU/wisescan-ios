@@ -941,23 +941,39 @@ struct CaptureView: View {
         recordingTimer = nil
 
         // Halt capture now and finalize whatever was gathered before tracking was lost.
+        let capturedCount = frameCaptureSession.frameCount
         let rawDataPath = frameCaptureSession.stop()
         let currentFrame = currentARSession?.currentFrame
         let thumbnailData = makeThumbnail(from: currentFrame)
         isRecording = false
-        let processingData = ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData)
 
-        let alert = UIAlertController(
-            title: "Tracking Lost",
-            message: "AR tracking was interrupted during this scan, so anything captured after that point is unreliable. Save what was captured so far, or discard it and rescan?",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
-            self.discardCapturedData(at: rawDataPath)
-        })
-        alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in
-            self.beginProcessing(processingData)
-        })
+        let alert: UIAlertController
+        if capturedCount > 0 {
+            // Some usable frames were captured before the loss — offer to keep them or rescan.
+            let processingData = ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData)
+            alert = UIAlertController(
+                title: "Tracking Lost",
+                message: "AR tracking was interrupted during this scan, so anything captured after that point is unreliable. Save the \(capturedCount) frame\(capturedCount == 1 ? "" : "s") captured so far, or discard and rescan?",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
+                self.discardCapturedData(at: rawDataPath)
+            })
+            alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in
+                self.beginProcessing(processingData)
+            })
+        } else {
+            // Nothing usable was captured (tracking was lost almost immediately). Saving would
+            // produce an empty scan with no world map or mesh, so don't offer it — just discard.
+            alert = UIAlertController(
+                title: "Tracking Lost",
+                message: "AR tracking was lost before any usable data was captured, so nothing was saved. Reposition and rescan when ready.",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in
+                self.discardCapturedData(at: rawDataPath)
+            })
+        }
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
            let rootVC = windowScene.windows.first?.rootViewController {
             rootVC.present(alert, animated: true)
