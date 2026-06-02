@@ -862,11 +862,12 @@ struct CaptureView: View {
     /// Routes captured scan data into background processing — prompting for a name if this is a
     /// new location, or extending the active one.
     private func beginProcessing(_ processingData: ProcessingData) {
-        // Leave the capture screen immediately: pop the Scans nav stack back to the all-scans
-        // list and switch to the Scans tab, so processing + the name keyboard run on a
-        // lightweight screen instead of over the live ARView (which made the keyboard take
-        // seconds to open). On completion, startBackgroundProcessing pushes the Location detail.
-        scanStore.navigationPath.removeLast(scanStore.navigationPath.count)
+        // Leave the capture screen immediately: switch to the Scans tab so processing + the name
+        // keyboard run on a lightweight screen instead of over the live ARView (which made the
+        // keyboard take seconds to open). Do NOT touch the nav path here — mutating the Scans
+        // stack while it's still off-screen leaves a stale entry that shows up as an extra blank
+        // level. startBackgroundProcessing's completion is the single, atomic path mutator: it
+        // pops the stack to root and pushes the Location detail in one step (lands on [loc]).
         selectedTab = 2
 
         if scanStore.activeLocationForScan == nil {
