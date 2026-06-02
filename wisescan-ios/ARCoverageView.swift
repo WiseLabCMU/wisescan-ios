@@ -6,6 +6,10 @@ struct ARCoverageView: UIViewRepresentable {
     @Binding var arSession: ARSession?
     @Binding var isRecording: Bool
     @Binding var isSessionReady: Bool
+    /// Set true by the coordinator when ARKit tracking is lost mid‑recording (VIO starvation).
+    /// CaptureView observes this to halt the scan and prompt the user to save or rescan, since
+    /// any data captured after VIO loss is corrupt.
+    @Binding var vioCompromised: Bool
     var scanStats: ScanStats
     var privacyFilter: Bool
     var activeMeshColor: String = AppConstants.activeMeshColor
@@ -54,6 +58,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.captureMode = captureMode
         context.coordinator.isRecording = false
         context.coordinator.isSessionReadyBinding = $isSessionReady
+        context.coordinator.vioCompromisedBinding = $vioCompromised
         context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
 
         // Always start with the live camera feed — even in VR mode.
@@ -357,6 +362,11 @@ struct ARCoverageView: UIViewRepresentable {
         var vrBackgroundSet: Bool = false
         var isSessionReadyBinding: Binding<Bool>?
         var hasSetSessionReady = false
+        /// VIO starvation guard: becomes armed once tracking reaches `.normal` while recording.
+        /// Once armed, a drop to `.notAvailable`/`.relocalizing` means the world frame is lost and
+        /// everything captured afterward is corrupt — so we trip the guard (halt + prompt) once.
+        var vioCompromisedBinding: Binding<Bool>?
+        private var vioGuardArmed = false
         private var anchorUpdateCounts: [UUID: Int] = [:]
         /// Coalescing flag: prevents queuing multiple main-actor dispatches
         /// that each hold CVPixelBuffer references → ARFrame retention.
@@ -413,6 +423,9 @@ struct ARCoverageView: UIViewRepresentable {
             sessionStartTime = Date()
             baselineMemoryMB = ScanStats.currentMemoryUsageMB()
             lastStatsUpdateTime = .distantPast // let the first stats update publish immediately
+            // VIO guard: arm immediately if tracking is already normal at record start; otherwise
+            // it arms on the first `.normal` transition (see cameraDidChangeTrackingState).
+            vioGuardArmed = (arView?.session.currentFrame?.camera.trackingState == .normal)
             // Clear any stale wireframe entities from a previous recording
             removeAllActiveMeshEntities()
         }
@@ -424,6 +437,7 @@ struct ARCoverageView: UIViewRepresentable {
             anchorFaceCounts.removeAll()
             trackingDegradationCount = 0
             totalTrackingUpdates = 0
+            vioGuardArmed = false
 
             // Remove all active mesh wireframe entities from the scene
             removeAllActiveMeshEntities()
@@ -689,6 +703,32 @@ struct ARCoverageView: UIViewRepresentable {
             }
 
             PerfDiag.log("ARKit tracking → \(stateStr)\(reasonStr.isEmpty ? "" : " (\(reasonStr))")")
+
+            // ── VIO starvation guard ──
+            // Once tracking has reached `.normal` during recording (armed), a drop to
+            // relocalizing/notAvailable means the world coordinate frame is broken and every
+            // frame captured after this is corrupt. Halt the scan and let the user decide. We
+            // ignore the initial startup relocalization (guard isn't armed until first normal),
+            // and transient excessiveMotion/insufficientFeatures (which usually self-recover).
+            if isRecording {
+                if case .normal = camera.trackingState {
+                    vioGuardArmed = true
+                } else if vioGuardArmed {
+                    let lostWorldFrame: Bool
+                    switch camera.trackingState {
+                    case .notAvailable: lostWorldFrame = true
+                    case .limited(.relocalizing): lostWorldFrame = true
+                    default: lostWorldFrame = false
+                    }
+                    if lostWorldFrame {
+                        vioGuardArmed = false // fire once per recording
+                        PerfDiag.log("⛔️ VIO guard tripped (\(stateStr) \(reasonStr)) — halting scan")
+                        DispatchQueue.main.async { [weak self] in
+                            self?.vioCompromisedBinding?.wrappedValue = true
+                        }
+                    }
+                }
+            }
 
             DispatchQueue.main.async { [weak self] in
                 self?.scanStats?.trackingState = stateStr

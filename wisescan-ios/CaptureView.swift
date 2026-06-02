@@ -22,6 +22,9 @@ struct CaptureView: View {
     @State private var currentARSession: ARSession? = nil
     @State private var saveMessage: String? = nil
     @State private var isRecording = false
+    // Set true by ARCoverageView's coordinator when VIO tracking is lost mid‑recording; observed
+    // below to halt the scan and prompt save/rescan (data after VIO loss is corrupt).
+    @State private var vioCompromised = false
     @State private var recordingSeconds = 0
     @State private var recordingTimer: Timer? = nil
     @State private var frameCaptureSession = FrameCaptureSession()
@@ -79,6 +82,7 @@ struct CaptureView: View {
                 arSession: $currentARSession,
                 isRecording: $isRecording,
                 isSessionReady: $isARSessionReady,
+                vioCompromised: $vioCompromised,
                 scanStats: scanStats,
                 privacyFilter: isPrivacyFilterOn,
                 activeMeshColor: activeMeshColor,
@@ -93,6 +97,9 @@ struct CaptureView: View {
                 bakedGhostTransform: bakedGhostTransform
             )
                 .ignoresSafeArea()
+                .onChange(of: vioCompromised) { _, lost in
+                    if lost { handleVIOCompromised() }
+                }
 
             // Loading overlay while AR session initializes (camera + privacy models + depth pipeline)
             if !isARSessionReady {
@@ -883,32 +890,35 @@ struct CaptureView: View {
     private func performStopRecording() {
         // Stop frame capture and get raw data path
         let rawDataPath = frameCaptureSession.stop()
-
-        // Capture the current frame for background mesh export
+        // Capture the current frame for background mesh export + a 2D thumbnail
         let currentFrame = currentARSession?.currentFrame
-
-        // Capture a 2D thumbnail from the current camera frame
-        var thumbnailData: Data? = nil
-        if let currentFrame = currentFrame {
-            let ciImage = CIImage(cvPixelBuffer: currentFrame.capturedImage)
-            let context = CIContext()
-            if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
-                let uiImage = UIImage(cgImage: cgImage)
-                let maxW = AppConstants.thumbnailMaxWidth
-                let targetSize = CGSize(width: maxW, height: maxW * (uiImage.size.height / uiImage.size.width))
-                UIGraphicsBeginImageContextWithOptions(targetSize, false, 1.0)
-                UIImage(cgImage: cgImage, scale: 1.0, orientation: .right).draw(in: CGRect(origin: .zero, size: targetSize))
-                let resizedImage = UIGraphicsGetImageFromCurrentImageContext()
-                UIGraphicsEndImageContext()
-                thumbnailData = resizedImage?.jpegData(compressionQuality: AppConstants.thumbnailJpegQuality)
-            }
-        }
+        let thumbnailData = makeThumbnail(from: currentFrame)
 
         // ── Now switch to nominal mode (drops mesh anchors, frees AR memory) ──
         isRecording = false
 
-        let processingData = ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData)
+        beginProcessing(ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData))
+    }
 
+    /// Renders a downsampled JPEG thumbnail from the current camera frame (sensor→portrait via .right).
+    private func makeThumbnail(from currentFrame: ARFrame?) -> Data? {
+        guard let currentFrame = currentFrame else { return nil }
+        let ciImage = CIImage(cvPixelBuffer: currentFrame.capturedImage)
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+        let uiImage = UIImage(cgImage: cgImage)
+        let maxW = AppConstants.thumbnailMaxWidth
+        let targetSize = CGSize(width: maxW, height: maxW * (uiImage.size.height / uiImage.size.width))
+        UIGraphicsBeginImageContextWithOptions(targetSize, false, 1.0)
+        UIImage(cgImage: cgImage, scale: 1.0, orientation: .right).draw(in: CGRect(origin: .zero, size: targetSize))
+        let resizedImage = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        return resizedImage?.jpegData(compressionQuality: AppConstants.thumbnailJpegQuality)
+    }
+
+    /// Routes captured scan data into background processing — prompting for a name if this is a
+    /// new location, or extending the active one.
+    private func beginProcessing(_ processingData: ProcessingData) {
         if scanStore.activeLocationForScan == nil {
             newLocationName = ""
             newLocationScanCase = .rescan
@@ -918,6 +928,51 @@ struct CaptureView: View {
             // Already extending a scan; user won't be prompted. Start processing immediately.
             startBackgroundProcessing(name: "Extended Scan", locationId: scanStore.activeLocationForScan, scanCase: .extend, data: processingData)
         }
+    }
+
+    /// VIO starvation guard handler: ARKit tracking was lost mid‑recording, so frames captured
+    /// after that point are unreliable. Halt capture immediately, then let the user save what was
+    /// gathered so far or discard it and rescan.
+    private func handleVIOCompromised() {
+        vioCompromised = false // reset the latch so a later scan can trip the guard again
+        guard isRecording else { return }
+
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+
+        // Halt capture now and finalize whatever was gathered before tracking was lost.
+        let rawDataPath = frameCaptureSession.stop()
+        let currentFrame = currentARSession?.currentFrame
+        let thumbnailData = makeThumbnail(from: currentFrame)
+        isRecording = false
+        let processingData = ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData)
+
+        let alert = UIAlertController(
+            title: "Tracking Lost",
+            message: "AR tracking was interrupted during this scan, so anything captured after that point is unreliable. Save what was captured so far, or discard it and rescan?",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
+            self.discardCapturedData(at: rawDataPath)
+        })
+        alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in
+            self.beginProcessing(processingData)
+        })
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = windowScene.windows.first?.rootViewController {
+            rootVC.present(alert, animated: true)
+        }
+    }
+
+    /// Discards a partially-captured scan: removes its on-disk capture dir and resets the capture
+    /// session so the next scan starts clean.
+    private func discardCapturedData(at rawDataPath: URL?) {
+        if let rawDataPath = rawDataPath {
+            try? FileManager.default.removeItem(at: rawDataPath)
+        }
+        frameCaptureSession = FrameCaptureSession()
+        MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
+        clearMessage()
     }
 
     private func startBackgroundProcessing(name: String, locationId: UUID?, scanCase: ScanCase = .rescan, data: ProcessingData) {
