@@ -268,4 +268,99 @@ enum PrivacyBlurUtil {
         // The exported JPEG remains strictly .up (physical LandscapeRight)
         return (UIImage(cgImage: cgImage).jpegData(compressionQuality: AppConstants.jpegCompressionQuality), faceCenters)
     }
+
+    /// Pixelates person regions in `imageData` using a PRE-COMPUTED segmentation stencil
+    /// (ARKit's `.personSegmentationWithDepth` buffer) instead of running a second, expensive
+    /// `.accurate` `VNGeneratePersonSegmentationRequest`. ARKit already produced this mask for
+    /// the live point-cloud exclusion and the saved depth-map cutout, so reusing it here is
+    /// effectively free and keeps coverage consistent across all three outputs.
+    ///
+    /// Returns the blurred JPEG plus a sparse set of normalized person-region centroids
+    /// (top-left origin) for 3D anchoring — the caller unprojects + clusters these into
+    /// per-person anchors (see `AppConstants.faceClusterThresholdMeters`, now body-sized).
+    ///
+    /// The saved JPEG and the stencil are both in sensor-native (landscape-right) coordinates,
+    /// so no orientation transform is needed; display rotation is handled downstream.
+    nonisolated static func pixelatePersonsWithMask(in imageData: Data, mask: CVPixelBuffer) -> (Data?, [CGPoint]) {
+        guard let uiImage = UIImage(data: imageData),
+              let ciImage = CIImage(image: uiImage) else { return (imageData, []) }
+
+        let imageSize = ciImage.extent
+        let maskCI = CIImage(cvPixelBuffer: mask)
+
+        // Scale the (lower-res) stencil up to the image size.
+        let scaleX = imageSize.width / maskCI.extent.width
+        let scaleY = imageSize.height / maskCI.extent.height
+        var scaledMask = maskCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+
+        // Dilate slightly so we never UNDER-cover a person versus the old Vision mask. The
+        // region is pixelated anyway, so over-covering by a few px is harmless, and this guards
+        // against the stencil's coarser edges.
+        let dilate = CIFilter.morphologyMaximum()
+        dilate.inputImage = scaledMask
+        dilate.radius = 12
+        if let dilated = dilate.outputImage {
+            scaledMask = dilated.cropped(to: imageSize)
+        }
+
+        let pixelate = CIFilter.pixellate()
+        pixelate.inputImage = ciImage
+        pixelate.scale = 40.0
+        guard let pixelatedCI = pixelate.outputImage else { return (imageData, []) }
+
+        let blend = CIFilter.blendWithMask()
+        blend.inputImage = pixelatedCI
+        blend.backgroundImage = ciImage
+        blend.maskImage = scaledMask
+        guard let outputCI = blend.outputImage,
+              let cgImage = sharedContext.createCGImage(outputCI, from: imageSize) else { return (imageData, []) }
+
+        let centers = personCentroids(in: mask)
+        return (UIImage(cgImage: cgImage).jpegData(compressionQuality: AppConstants.jpegCompressionQuality), centers)
+    }
+
+    /// Sparse normalized centroids (top-left origin) of person-labeled regions in a
+    /// segmentation stencil. Bins person pixels into a coarse grid and emits one centroid per
+    /// occupied cell; the caller's 3D clustering then merges cells of the same person into a
+    /// single anchor at the body-sized threshold. Cheap — one strided pass over the stencil.
+    private nonisolated static func personCentroids(in mask: CVPixelBuffer) -> [CGPoint] {
+        CVPixelBufferLockBaseAddress(mask, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(mask) else { return [] }
+        let w = CVPixelBufferGetWidth(mask)
+        let h = CVPixelBufferGetHeight(mask)
+        guard w > 0, h > 0 else { return [] }
+        let stride = CVPixelBufferGetBytesPerRow(mask)
+        let ptr = base.assumingMemoryBound(to: UInt8.self)
+
+        let cols = 6, rows = 8
+        var sumX = [Float](repeating: 0, count: cols * rows)
+        var sumY = [Float](repeating: 0, count: cols * rows)
+        var cnt = [Int](repeating: 0, count: cols * rows)
+        let step = 4 // sample every 4th pixel for speed
+        var y = 0
+        while y < h {
+            let row = ptr + y * stride
+            var x = 0
+            while x < w {
+                if row[x] > 128 {
+                    let cx = min(cols - 1, x * cols / w)
+                    let cy = min(rows - 1, y * rows / h)
+                    let idx = cy * cols + cx
+                    sumX[idx] += Float(x); sumY[idx] += Float(y); cnt[idx] += 1
+                }
+                x += step
+            }
+            y += step
+        }
+
+        var centers: [CGPoint] = []
+        let minCount = 8 // ignore tiny specks / noise
+        for i in 0..<(cols * rows) where cnt[i] >= minCount {
+            let ux = (sumX[i] / Float(cnt[i])) / Float(w)
+            let uy = (sumY[i] / Float(cnt[i])) / Float(h)
+            centers.append(CGPoint(x: CGFloat(ux), y: CGFloat(uy)))
+        }
+        return centers
+    }
 }

@@ -69,7 +69,7 @@ enum AppConstants {
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
 
     // MARK: - Pipeline Constants
-    static let faceClusterThresholdMeters: Float = 0.5      // merge distance for face anchors (~head diameter)
+    static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
     static let overlapBaseThreshold: Float = 0.15            // movement threshold base for frame capture
     static let overlapMinThreshold: Float = 0.01             // minimum movement threshold
     static let maxColorizationFrames: Int = 150              // max sampled frames for vertex coloring

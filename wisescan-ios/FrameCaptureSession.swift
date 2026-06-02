@@ -374,17 +374,19 @@ class FrameCaptureSession {
                     return
                 }
                 var tempJpegData = jpegData
-                if self.privacyFilter {
-                    // Capture view is portrait-locked; sensor image is always landscape-right → .right.
-                    // See FaceBlurOverlay.swift for full orientation architecture documentation.
-                    // TODO: If Apple enforces all-orientation support on iPad, this will need
-                    // to use the runtime device orientation instead of hardcoded .right.
-                    let (blurredData, centers) = PerfDiag.timed("privacy_seg_accurate", warnOverMs: 50) { PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: jpegData, orientation: .right) }
+                if self.privacyFilter, let segBuffer = segBuffer {
+                    // Blur the saved JPEG using ARKit's existing person-segmentation stencil
+                    // (the same buffer used for the depth cutout + live point-cloud holes) rather
+                    // than a second, expensive .accurate Vision pass. Profiling showed that pass
+                    // at 180–360ms/frame — the dominant cause of ioQueue backlog + ARFrame-pool
+                    // starvation. The mask is sensor-native, matching the JPEG, so no orientation
+                    // transform is needed. Also yields person-region centroids for 3D anchoring.
+                    let (blurredData, centers) = PerfDiag.timed("privacy_blur_mask", warnOverMs: 50) { PrivacyBlurUtil.pixelatePersonsWithMask(in: jpegData, mask: segBuffer) }
                     if let bData = blurredData {
                         tempJpegData = bData
                     }
-                    
-                    // Unproject face centers to 3D using depth map (only if depth available)
+
+                    // Unproject person-region centers to 3D using depth map (only if depth available)
                     if !centers.isEmpty, let dMap = depthMap {
                         let depthWidth = CVPixelBufferGetWidth(dMap)
                         let depthHeight = CVPixelBufferGetHeight(dMap)
