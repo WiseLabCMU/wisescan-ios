@@ -94,18 +94,23 @@ enum VertexColorAccumulator {
             normals[i2] += normal
         }
 
-        // Normalize and remap to [0,1] using standard normal map convention: (n + 1) / 2
-        let rgba: [SIMD4<Float>] = normals.map { n in
-            let normalized = simd_length(n) > 0 ? simd_normalize(n) : SIMD3<Float>(0, 0, 1)
-            return SIMD4<Float>(
-                (normalized.x + 1) / 2,
-                (normalized.y + 1) / 2,
-                (normalized.z + 1) / 2,
-                1.0
-            )
+        // Normalize and remap to [0,1] using standard normal map convention: (n + 1) / 2.
+        // Fill the output Data in place to avoid an intermediate [SIMD4<Float>] allocation.
+        var data = Data(count: normals.count * MemoryLayout<SIMD4<Float>>.stride)
+        data.withUnsafeMutableBytes { raw in
+            let out = raw.bindMemory(to: SIMD4<Float>.self)
+            for i in normals.indices {
+                let n = normals[i]
+                let normalized = simd_length(n) > 0 ? simd_normalize(n) : SIMD3<Float>(0, 0, 1)
+                out[i] = SIMD4<Float>(
+                    (normalized.x + 1) / 2,
+                    (normalized.y + 1) / 2,
+                    (normalized.z + 1) / 2,
+                    1.0
+                )
+            }
         }
-
-        return Data(bytes: rgba, count: rgba.count * MemoryLayout<SIMD4<Float>>.stride)
+        return data
     }
 
     /// Colorize OBJ mesh vertices using saved camera frames (post-processing).
@@ -299,11 +304,19 @@ enum VertexColorAccumulator {
           } // autoreleasepool (per frame)
         }
 
-        let coloredCount = colored.filter { $0 }.count
+        let coloredCount = colored.reduce(0) { $0 + ($1 ? 1 : 0) }
         print("[VertexColor] Colored \(coloredCount)/\(vertices.count) vertices from \(sampledFiles.count) frames")
 
-        // Convert to SIMD4<Float> with alpha=1 (matches buildColorData format)
-        let rgba = colors.map { SIMD4<Float>($0.x, $0.y, $0.z, 1.0) }
-        return Data(bytes: rgba, count: rgba.count * MemoryLayout<SIMD4<Float>>.stride)
+        // Convert to SIMD4<Float> with alpha=1 (matches buildColorData format), filling the
+        // output Data in place to avoid an intermediate [SIMD4<Float>] allocation.
+        var data = Data(count: colors.count * MemoryLayout<SIMD4<Float>>.stride)
+        data.withUnsafeMutableBytes { raw in
+            let out = raw.bindMemory(to: SIMD4<Float>.self)
+            for i in colors.indices {
+                let c = colors[i]
+                out[i] = SIMD4<Float>(c.x, c.y, c.z, 1.0)
+            }
+        }
+        return data
     }
 }

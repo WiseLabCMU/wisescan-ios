@@ -54,8 +54,11 @@ enum MeshParser {
         }
 
         var indices: [UInt32] = []
+        indices.reserveCapacity(parsed.faces.count * 3)
         for face in parsed.faces {
-            indices.append(contentsOf: [face.0, face.1, face.2])
+            indices.append(face.0)
+            indices.append(face.1)
+            indices.append(face.2)
         }
 
         var descriptor = MeshDescriptor(name: "GhostMesh")
@@ -229,7 +232,9 @@ enum MeshParser {
             outUVs.append(SIMD2<Float>(0, 1))
             outUVs.append(SIMD2<Float>(0, 0))
 
-            outIndices.append(contentsOf: [idx, idx + 1, idx + 2])
+            outIndices.append(idx)
+            outIndices.append(idx + 1)
+            outIndices.append(idx + 2)
             idx += 3
         }
 
