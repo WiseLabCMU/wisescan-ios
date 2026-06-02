@@ -37,9 +37,6 @@ struct CaptureView: View {
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
 
     // Scan4D properties
-    @State private var showNamePrompt = false
-    @State private var newLocationName = ""
-    @State private var newLocationScanCase: ScanCase = .rescan
     @State private var cachedGhostMeshData: Data? = nil
     @State private var isARSessionReady = false
     @State private var showSettings = false
@@ -57,7 +54,6 @@ struct CaptureView: View {
         let rawDataPath: URL?
         let thumbnailData: Data?
     }
-    @State private var pendingProcessingData: ProcessingData?
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State.
     private func loadGhostMeshData() {
@@ -714,66 +710,6 @@ struct CaptureView: View {
             isARSessionReady = false
             activeLocationName = nil
         }
-        .overlay {
-            if showNamePrompt {
-                ZStack {
-                    Color.black.opacity(0.4).ignoresSafeArea()
-                    
-                    VStack(spacing: 20) {
-                        Text("Name this Space")
-                            .font(.headline)
-                            .foregroundColor(.primary)
-                        Text("Enter a unique name for this space so you can efficiently 'Extend Scan' later.")
-                            .font(.caption)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-                            .foregroundColor(.secondary)
-                        
-                        TextField("Location Name (e.g., Living Room)", text: $newLocationName)
-                            .textFieldStyle(.roundedBorder)
-                            .padding(.horizontal)
-                        
-                        Picker("Use Case", selection: $newLocationScanCase) {
-                            Text("Time-Series").tag(ScanCase.rescan)
-                            Text("Space Extension").tag(ScanCase.extend)
-                        }
-                        .pickerStyle(.segmented)
-                        .padding(.horizontal)
-                        
-                        HStack {
-                            Button("Cancel") {
-                                showNamePrompt = false
-                                pendingProcessingData = nil
-                                saveMessage = nil
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            
-                            Button("Save") {
-                                showNamePrompt = false
-                                if let data = pendingProcessingData {
-                                    let trimmedName = newLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    let finalName = trimmedName.isEmpty ? "New Space" : trimmedName
-                                    startBackgroundProcessing(name: finalName, locationId: nil, scanCase: newLocationScanCase, data: data)
-                                    pendingProcessingData = nil
-                                }
-                            }
-                            .fontWeight(.bold)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                        }
-                    }
-                    .padding(.top, 24)
-                    .padding(.bottom, 8)
-                    .background(Color(UIColor.secondarySystemBackground))
-                    .cornerRadius(16)
-                    .shadow(radius: 20)
-                    .padding(40)
-                }
-                .transition(.opacity)
-                .zIndex(100)
-            }
-        }
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
@@ -926,15 +862,59 @@ struct CaptureView: View {
     /// Routes captured scan data into background processing — prompting for a name if this is a
     /// new location, or extending the active one.
     private func beginProcessing(_ processingData: ProcessingData) {
+        // Leave the capture screen immediately: pop the Scans nav stack back to the all-scans
+        // list and switch to the Scans tab, so processing + the name keyboard run on a
+        // lightweight screen instead of over the live ARView (which made the keyboard take
+        // seconds to open). On completion, startBackgroundProcessing pushes the Location detail.
+        scanStore.navigationPath.removeLast(scanStore.navigationPath.count)
+        selectedTab = 2
+
         if scanStore.activeLocationForScan == nil {
-            newLocationName = ""
-            newLocationScanCase = .rescan
-            pendingProcessingData = processingData
-            withAnimation { showNamePrompt = true }
+            promptForScanName(processingData)
         } else {
             // Already extending a scan; user won't be prompted. Start processing immediately.
             startBackgroundProcessing(name: "Extended Scan", locationId: scanStore.activeLocationForScan, scanCase: .extend, data: processingData)
         }
+    }
+
+    /// Prompts for the new space's name with a system alert presented over the Scans tab —
+    /// decoupled from the capture screen so the keyboard opens instantly — then starts processing.
+    /// (The old segmented Time-Series / Space-Extension picker becomes two "Save as…" actions,
+    /// since a UIAlertController can't host a segmented control.)
+    private func promptForScanName(_ processingData: ProcessingData) {
+        let alert = UIAlertController(
+            title: "Name this Space",
+            message: "Enter a unique name for this space so you can 'Extend Scan' later.",
+            preferredStyle: .alert
+        )
+        alert.addTextField { tf in
+            tf.placeholder = "Location Name (e.g., Living Room)"
+            tf.autocapitalizationType = .words
+            tf.autocorrectionType = .no
+        }
+        func startProcessing(_ scanCase: ScanCase, _ alert: UIAlertController) {
+            let trimmed = (alert.textFields?.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            startBackgroundProcessing(name: trimmed.isEmpty ? "New Space" : trimmed, locationId: nil, scanCase: scanCase, data: processingData)
+        }
+        alert.addAction(UIAlertAction(title: "Save as Time-Series", style: .default) { [weak alert] _ in
+            if let alert { startProcessing(.rescan, alert) }
+        })
+        alert.addAction(UIAlertAction(title: "Save as Space Extension", style: .default) { [weak alert] _ in
+            if let alert { startProcessing(.extend, alert) }
+        })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+            self.discardCapturedData()
+        })
+        presentAlert(alert)
+    }
+
+    /// Presents a UIAlertController above whatever is currently on screen (any tab / modal).
+    private func presentAlert(_ alert: UIAlertController) {
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let root = (scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first)?.rootViewController else { return }
+        var top: UIViewController = root
+        while let presented = top.presentedViewController { top = presented }
+        top.present(alert, animated: true)
     }
 
     /// VIO starvation guard handler: ARKit tracking was lost mid‑recording, so frames captured
