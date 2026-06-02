@@ -54,6 +54,7 @@ class PointCloudManager {
     /// main (LowLevelMesh/LowLevelTexture are @MainActor).
     private let voxelQueue = DispatchQueue(label: "com.scan4d.voxelGrid", qos: .userInitiated)
     private var lastExtractionTime: CFAbsoluteTime = 0
+    private var lastDecayTime: CFAbsoluteTime = 0
     private var lastIntegrationTransform: simd_float4x4?
     private var lastIntegrationIntrinsics: simd_float3x3?
     private var lastIntegrationDepthMap: CVPixelBuffer?
@@ -714,14 +715,23 @@ class PointCloudManager {
         // integration resets/overwrites it — then merge it into the hash map off-main.
         let entries = grid.snapshotAppendBuffer()
 
-        // Capture decay inputs, then release the ARFrame depth-map reference promptly.
+        // Timing decisions on the main thread. Merge runs EVERY integration (must, or we lose
+        // appended voxels), but the expensive 350K-voxel decay is THROTTLED to ~voxelDecayInterval.
+        // Running decay every keyframe pegged a core (200–350ms each) and backed up the voxelQueue,
+        // which drove the multi-second stalls (including the post-stop drain). Extraction keeps its
+        // own 0.5s gate below.
+        let now = CACurrentMediaTime()
+        let shouldDecay = now - lastDecayTime > AppConstants.voxelDecayInterval
+        if shouldDecay { lastDecayTime = now }
+
         let transform = lastIntegrationTransform
-        let intrinsics = lastIntegrationIntrinsics
-        let depthMap = lastIntegrationDepthMap
-        lastIntegrationDepthMap = nil
+        // intrinsics + depth are only needed for decay; capture them only when decaying so
+        // non-decay completions don't retain the ARFrame depth buffer.
+        let intrinsics = shouldDecay ? lastIntegrationIntrinsics : nil
+        let depthMap = shouldDecay ? lastIntegrationDepthMap : nil
+        lastIntegrationDepthMap = nil // always release the ARFrame depth-map reference promptly
 
         // Decide extraction timing on the main thread (it owns the gate + flag).
-        let now = CACurrentMediaTime()
         let willExtract = now - lastExtractionTime > 0.5 && !extractionInProgress
             && voxelLowLevelMesh != nil && voxelColorTexture != nil && voxelExtractBuffer != nil
         let extractBuffer = voxelExtractBuffer
@@ -730,13 +740,15 @@ class PointCloudManager {
             lastExtractionTime = now
         }
 
-        // Merge + the 350K-voxel decay run off the main thread on the serial queue that
-        // owns ALL hash-map access. Pack also runs there; the GPU dispatch (LowLevelMesh
-        // is @MainActor) hops back to main.
+        // Merge (every time) + throttled decay run off the main thread on the serial queue that
+        // owns ALL hash-map access. Pack also runs there; the GPU dispatch (LowLevelMesh is
+        // @MainActor) hops back to main.
         voxelQueue.async { [weak self] in
-            PerfDiag.timed("voxel_merge_decay", warnOverMs: 5) {
+            PerfDiag.timed("voxel_merge", warnOverMs: 5) {
                 grid.mergeAppendBuffer(entries, frameCounter: frameCounter)
-                if let transform, let intrinsics, let depthMap {
+            }
+            if let transform, let intrinsics, let depthMap {
+                PerfDiag.timed("voxel_decay", warnOverMs: 5) {
                     grid.decayContradictedVoxels(
                         cameraTransform: transform,
                         intrinsics: intrinsics,
