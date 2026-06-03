@@ -980,8 +980,19 @@ struct CaptureView: View {
             })
         }
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let rootVC = windowScene.windows.first?.rootViewController {
-            rootVC.present(alert, animated: true)
+           let rootVC = (windowScene.windows.first(where: { $0.isKeyWindow }) ?? windowScene.windows.first)?.rootViewController {
+            // If another alert is already up — specifically the manual-stop "Insufficient Tracking"
+            // alert, which offers "Continue Scanning" — dismiss it first and let "Tracking Lost"
+            // take over. VIO loss takes precedence: its alert has NO Continue option, so a scan that
+            // lost tracking can only be saved as-is (the good frames before the loss) or discarded,
+            // never extended with post-loss frames that would mix good + corrupt tracking. The
+            // programmatic dismiss fires none of the old alert's actions, and it also prevents the
+            // double-present that wedged the UI (presenting onto an already-presenting controller).
+            if let presented = rootVC.presentedViewController {
+                presented.dismiss(animated: false) { rootVC.present(alert, animated: true) }
+            } else {
+                rootVC.present(alert, animated: true)
+            }
         }
     }
 
