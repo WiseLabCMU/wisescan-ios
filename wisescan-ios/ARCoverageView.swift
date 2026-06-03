@@ -256,8 +256,15 @@ struct ARCoverageView: UIViewRepresentable {
                 if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
                     config.frameSemantics.insert(.sceneDepth)
                 }
-                // Don't reset tracking — preserve the current relocalized coordinate frame
-                uiView.session.run(config)
+                // Don't reset tracking — preserve the current relocalized coordinate frame.
+                // But for a NEW scan, drop any ARMeshAnchors the warm session is still holding from
+                // a previous scan of the same space — otherwise scene-reconstruction geometry from
+                // the earlier scan bleeds into this scan's mesh export (exportMeshOBJ enumerates the
+                // live currentFrame.anchors). An extend preserves its anchors: the world-map load
+                // path (makeUIView / ghost-mesh-data) already cleared stale ones with
+                // .removeExistingAnchors, and we want to keep re-meshing in the relocalized frame.
+                let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [] : .removeExistingAnchors
+                uiView.session.run(config, options: runOptions)
                 
                 // If the user manually aligned the ghost mesh, bake that transform into the ARKit world origin
                 if let baked = bakedGhostTransform {
