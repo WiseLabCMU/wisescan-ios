@@ -107,17 +107,16 @@ struct ARCoverageView: UIViewRepresentable {
         } else if context.coordinator.isSessionPausedForBattery {
             context.coordinator.isSessionPausedForBattery = false
             PerfDiag.log("battery: resuming AR session (returned to capture)")
-            // Resume with the configuration the session last ran (ARKit retains it across pause),
-            // so we restore its scene reconstruction + frame semantics and don't silently drop an
-            // extend session's world-map relocalization. A bare ARWorldTrackingConfiguration()
-            // would strip all of that and leave hasWorldMap stale.
-            if let existingConfig = uiView.session.configuration {
-                uiView.session.run(existingConfig)
-            } else {
-                let resumeConfig = ARWorldTrackingConfiguration()
-                if Self.supportsLiDAR { resumeConfig.sceneReconstruction = [] }
-                uiView.session.run(resumeConfig)
-            }
+            // Resume in the nominal (new-scan) configuration. The idle pause only fires after the
+            // user has LEFT the capture tab, and leaving abandons any in-progress extend (CaptureView
+            // .onDisappear clears the extend/ghost state, and the ghost overlay is removed on return)
+            // — so there is intentionally NO world map to preserve here. Re-running the stale extend
+            // config would relocalize to the abandoned map for nothing. If the user wants to extend
+            // again they re-tap Extend, which reloads the map + ghost fresh; a brand-new scan's
+            // record-start reconfigures and clears anchors. (Supersedes b579197.)
+            let resumeConfig = ARWorldTrackingConfiguration()
+            if Self.supportsLiDAR { resumeConfig.sceneReconstruction = [] }
+            uiView.session.run(resumeConfig)
         }
 
         // Live active mesh color update — recolor all existing wireframe entities
