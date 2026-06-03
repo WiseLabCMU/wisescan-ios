@@ -264,6 +264,9 @@ struct ARCoverageView: UIViewRepresentable {
                 // path (makeUIView / ghost-mesh-data) already cleared stale ones with
                 // .removeExistingAnchors, and we want to keep re-meshing in the relocalized frame.
                 let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [] : .removeExistingAnchors
+                PerfDiag.log(config.initialWorldMap != nil
+                    ? "record-start: extend → preserving anchors + world map"
+                    : "record-start: new scan → .removeExistingAnchors (clear prior scan's mesh)")
                 uiView.session.run(config, options: runOptions)
                 
                 // If the user manually aligned the ghost mesh, bake that transform into the ARKit world origin
