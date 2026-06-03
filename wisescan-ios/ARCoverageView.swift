@@ -107,9 +107,17 @@ struct ARCoverageView: UIViewRepresentable {
         } else if context.coordinator.isSessionPausedForBattery {
             context.coordinator.isSessionPausedForBattery = false
             PerfDiag.log("battery: resuming AR session (returned to capture)")
-            let resumeConfig = ARWorldTrackingConfiguration()
-            if Self.supportsLiDAR { resumeConfig.sceneReconstruction = [] }
-            uiView.session.run(resumeConfig)
+            // Resume with the configuration the session last ran (ARKit retains it across pause),
+            // so we restore its scene reconstruction + frame semantics and don't silently drop an
+            // extend session's world-map relocalization. A bare ARWorldTrackingConfiguration()
+            // would strip all of that and leave hasWorldMap stale.
+            if let existingConfig = uiView.session.configuration {
+                uiView.session.run(existingConfig)
+            } else {
+                let resumeConfig = ARWorldTrackingConfiguration()
+                if Self.supportsLiDAR { resumeConfig.sceneReconstruction = [] }
+                uiView.session.run(resumeConfig)
+            }
         }
 
         // Live active mesh color update — recolor all existing wireframe entities
