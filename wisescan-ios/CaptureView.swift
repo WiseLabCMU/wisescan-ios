@@ -943,12 +943,16 @@ struct CaptureView: View {
     }
 
     /// Presents a UIAlertController above whatever is currently on screen (any tab / modal).
-    private func presentAlert(_ alert: UIAlertController) {
+    /// Returns false if there's no window to present in, so callers that must not hang (e.g. a
+    /// save awaiting a decision) can fall back instead of stalling.
+    @discardableResult
+    private func presentAlert(_ alert: UIAlertController) -> Bool {
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let root = (scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first)?.rootViewController else { return }
+              let root = (scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first)?.rootViewController else { return false }
         var top: UIViewController = root
         while let presented = top.presentedViewController { top = presented }
         top.present(alert, animated: true)
+        return true
     }
 
     /// VIO starvation guard handler: ARKit tracking was lost mid‑recording, so frames captured
@@ -1079,57 +1083,92 @@ struct CaptureView: View {
             DispatchQueue.main.async {
                 self.scanStore.processingMessage = "Saving World Map..."
 
-                // Export ARWorldMap for Scan4D relocalization
-                VertexColorAccumulator.exportWorldMap(from: self.currentARSession) { mapURL in
-                    DispatchQueue.main.async {
-                        // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping
-                        if let rawDir = rawDataPath {
-                            let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
-                            try? result.data.write(to: meshFileURL)
+                // Persists the scan + navigates to its Location, with whatever world map we end up
+                // with (nil = mapless: still useful as a mesh, just not relocalizable/extendable).
+                let finalizeSave: (URL?) -> Void = { mapURL in
+                    // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping
+                    if let rawDir = rawDataPath {
+                        let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
+                        try? result.data.write(to: meshFileURL)
 
-                            if let mapURL = mapURL {
-                                let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
-                                try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
-                            }
-                        }
-
-                        // Save directly
-                        let savedScan = ScanFileManager.shared.saveScan(
-                            context: self.modelContext,
-                            locationId: capturedLocationId,
-                            name: name,
-                            meshData: result.data,
-                            vertexCount: result.vertexCount,
-                            faceCount: result.faceCount,
-                            hardwareDeviceModel: UIDevice.current.name,
-                            rawDataPath: rawDataPath,
-                            vertexColors: vertexColors,
-                            worldMapURL: mapURL,
-                            thumbnailData: thumbnailData,
-                            scanCase: scanCase
-                        )
-
-                        // Release frame capture session memory
-                        self.frameCaptureSession = FrameCaptureSession()
-                        MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
-
-                        // Reset the active state so subsequent scans don't default to this location
-                        self.scanStore.activeLocationForScan = nil
-                        self.scanStore.activeRelocalizationMap = nil
-                        self.scanStore.activeScanToExtend = nil
-                        self.cachedGhostMeshData = nil
-                        self.activeLocationName = nil
-
-                        self.scanStore.isProcessingScan = false
-                        self.scanStore.processingMessage = nil
-
-                        // Programmatically navigate to the created LocationDetailView
-                        if let loc = savedScan.location {
-                            self.scanStore.navigationPath.removeLast(self.scanStore.navigationPath.count)
-                            self.scanStore.navigationPath.append(loc)
+                        if let mapURL = mapURL {
+                            let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
+                            try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
                         }
                     }
+
+                    // Save directly
+                    let savedScan = ScanFileManager.shared.saveScan(
+                        context: self.modelContext,
+                        locationId: capturedLocationId,
+                        name: name,
+                        meshData: result.data,
+                        vertexCount: result.vertexCount,
+                        faceCount: result.faceCount,
+                        hardwareDeviceModel: UIDevice.current.name,
+                        rawDataPath: rawDataPath,
+                        vertexColors: vertexColors,
+                        worldMapURL: mapURL,
+                        thumbnailData: thumbnailData,
+                        scanCase: scanCase
+                    )
+
+                    // Release frame capture session memory
+                    self.frameCaptureSession = FrameCaptureSession()
+                    MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
+
+                    // Reset the active state so subsequent scans don't default to this location
+                    self.scanStore.activeLocationForScan = nil
+                    self.scanStore.activeRelocalizationMap = nil
+                    self.scanStore.activeScanToExtend = nil
+                    self.cachedGhostMeshData = nil
+                    self.activeLocationName = nil
+
+                    self.scanStore.isProcessingScan = false
+                    self.scanStore.processingMessage = nil
+
+                    // Programmatically navigate to the created LocationDetailView
+                    if let loc = savedScan.location {
+                        self.scanStore.navigationPath.removeLast(self.scanStore.navigationPath.count)
+                        self.scanStore.navigationPath.append(loc)
+                    }
                 }
+
+                // Export the ARWorldMap, then save. If it fails (insufficient features, serialize
+                // error, or timeout) the scan would otherwise save silently with no map — not
+                // relocalizable/extendable later, flagged only by a card badge that's easy to miss
+                // (notably after choosing "Continue Scanning" past an Insufficient-Tracking warning).
+                // Surface it instead.
+                self.exportWorldMapThenSave(finalizeSave)
+            }
+        }
+    }
+
+    /// Exports the current ARWorldMap and then runs `finalize`. On a successful export, saves with
+    /// the map. On failure, surfaces a prompt — Try Again (re-attempt; re-prompts if it fails again)
+    /// or Save Without Map — rather than silently persisting a non-relocalizable scan. If there's no
+    /// window to prompt in, falls back to saving without a map so processing never hangs.
+    private func exportWorldMapThenSave(_ finalize: @escaping (URL?) -> Void) {
+        VertexColorAccumulator.exportWorldMap(from: self.currentARSession) { mapURL in
+            DispatchQueue.main.async {
+                if let mapURL = mapURL {
+                    finalize(mapURL)
+                    return
+                }
+                self.scanStore.processingMessage = "World Map Unavailable"
+                let alert = UIAlertController(
+                    title: "World Map Not Captured",
+                    message: "Not enough features were tracked to build a world map, so this scan can't be extended or relocalized later. The mesh is still saved. Try again, or save without a world map?",
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "Try Again", style: .default) { _ in
+                    self.scanStore.processingMessage = "Saving World Map..."
+                    self.exportWorldMapThenSave(finalize)
+                })
+                alert.addAction(UIAlertAction(title: "Save Without Map", style: .default) { _ in
+                    finalize(nil)
+                })
+                if !self.presentAlert(alert) { finalize(nil) }
             }
         }
     }
