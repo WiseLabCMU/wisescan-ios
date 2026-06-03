@@ -946,10 +946,14 @@ struct ARCoverageView: UIViewRepresentable {
             }
             activeMeshEntities.removeAll()
             // Delegate-owned dicts → clear on the delegate queue (the ARSession callbacks mutate
-            // them; concurrent mutation from main would crash).
+            // them; concurrent mutation from main would crash). Clear ALL per-anchor dicts together,
+            // including the vertex/face counts — otherwise updateStats keeps summing stale geometry
+            // totals and anchor counts after the entities are gone (e.g. switching into VR capture).
             sessionDelegateQueue.async { [weak self] in
                 self?.lastAnchorWireframeTime.removeAll()
                 self?.anchorUpdateCounts.removeAll()
+                self?.anchorVertexCounts.removeAll()
+                self?.anchorFaceCounts.removeAll()
             }
         }
 
