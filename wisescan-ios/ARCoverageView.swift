@@ -66,6 +66,9 @@ struct ARCoverageView: UIViewRepresentable {
         arView.environment.background = .cameraFeed()
 
         arView.session.delegate = context.coordinator
+        // Deliver delegate callbacks on a background serial queue (not main) so a busy main thread
+        // can never starve ARKit's frame pool. See Coordinator.sessionDelegateQueue for invariants.
+        arView.session.delegateQueue = context.coordinator.sessionDelegateQueue
         // No debug options in nominal mode (no wireframe overlay)
 
         arView.session.run(config, options: runOptions)
@@ -351,6 +354,14 @@ struct ARCoverageView: UIViewRepresentable {
         weak var arView: ARView?
         var scanStats: ScanStats?
         let rootEntity = Entity()
+        /// Serial queue for ALL ARSession delegate callbacks. Keeping them off the main thread is
+        /// the fix for "delegate is retaining N ARFrames": when main is busy (name-prompt keyboard,
+        /// post-scan processing, ARView render), ARKit can still hand frames to this queue, so the
+        /// camera/SLAM pipeline never stalls. Invariants: (1) every RealityKit / entity / SwiftUI
+        /// binding mutation is dispatched to `main`; (2) the delegate-owned dictionaries + VIO/stat
+        /// counters below are touched ONLY on this queue (so `resetForRecording/Nominal`, called
+        /// from updateUIView on main, hop here to clear them — never mutate them on main).
+        let sessionDelegateQueue = DispatchQueue(label: "org.arenaxr.scan4d.arsession.delegate")
         var privacyFilter: Bool = true
         var activeMeshColor: String = AppConstants.activeMeshColor
         var captureMode: AppConstants.CaptureMode = .ar
@@ -418,33 +429,44 @@ struct ARCoverageView: UIViewRepresentable {
 
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
-            anchorUpdateCounts.removeAll()
-            anchorVertexCounts.removeAll()
-            anchorFaceCounts.removeAll()
-            trackingDegradationCount = 0
-            totalTrackingUpdates = 0
-            sessionStartTime = Date()
-            baselineMemoryMB = ScanStats.currentMemoryUsageMB()
-            lastStatsUpdateTime = .distantPast // let the first stats update publish immediately
-            // VIO guard: arm immediately if tracking is already normal at record start; otherwise
-            // it arms on the first `.normal` frame (see session(_:didUpdate:)).
-            vioGuardArmed = (arView?.session.currentFrame?.camera.trackingState == .normal)
-            vioDegradedSince = 0
-            // Clear any stale wireframe entities from a previous recording
+            baselineMemoryMB = ScanStats.currentMemoryUsageMB() // read on main in updateStats's publish block
+            // Clear delegate-owned counters/flags ON the delegate queue (never on main): the
+            // ARSession callbacks mutate these dictionaries, and a concurrent mutation would crash.
+            sessionDelegateQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.anchorUpdateCounts.removeAll()
+                self.anchorVertexCounts.removeAll()
+                self.anchorFaceCounts.removeAll()
+                self.lastAnchorWireframeTime.removeAll()
+                self.trackingDegradationCount = 0
+                self.totalTrackingUpdates = 0
+                self.sessionStartTime = Date()
+                self.lastStatsUpdateTime = .distantPast // let the first stats update publish immediately
+                // VIO guard: arm immediately if tracking is already normal at record start; otherwise
+                // it arms on the first `.normal` frame (see session(_:didUpdate:)).
+                self.vioGuardArmed = (self.arView?.session.currentFrame?.camera.trackingState == .normal)
+                self.vioDegradedSince = 0
+            }
+            // Clear any stale wireframe entities from a previous recording (RealityKit → main)
             removeAllActiveMeshEntities()
         }
 
         /// Reset coordinator state when returning to nominal (idle) mode.
         func resetForNominal() {
-            anchorUpdateCounts.removeAll()
-            anchorVertexCounts.removeAll()
-            anchorFaceCounts.removeAll()
-            trackingDegradationCount = 0
-            totalTrackingUpdates = 0
-            vioGuardArmed = false
-            vioDegradedSince = 0
+            // Clear delegate-owned counters/flags ON the delegate queue (see resetForRecording).
+            sessionDelegateQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.anchorUpdateCounts.removeAll()
+                self.anchorVertexCounts.removeAll()
+                self.anchorFaceCounts.removeAll()
+                self.lastAnchorWireframeTime.removeAll()
+                self.trackingDegradationCount = 0
+                self.totalTrackingUpdates = 0
+                self.vioGuardArmed = false
+                self.vioDegradedSince = 0
+            }
 
-            // Remove all active mesh wireframe entities from the scene
+            // Remove all active mesh wireframe entities from the scene (RealityKit → main)
             removeAllActiveMeshEntities()
 
             DispatchQueue.main.async { [weak self] in
@@ -466,11 +488,12 @@ struct ARCoverageView: UIViewRepresentable {
 
         /// Removes all active mesh wireframe entities from the AR scene.
         private func removeAllActiveMeshEntities() {
+            // Main-only: activeMeshEntities + RealityKit removeFromParent. (lastAnchorWireframeTime
+            // is delegate-owned; it's cleared on the delegate queue by resetForRecording/Nominal.)
             for (_, entry) in activeMeshEntities {
                 entry.anchor.removeFromParent()
             }
             activeMeshEntities.removeAll()
-            lastAnchorWireframeTime.removeAll()
         }
 
         /// Recolors all existing active mesh wireframe entities with the current activeMeshColor.
@@ -669,9 +692,12 @@ struct ARCoverageView: UIViewRepresentable {
             if camera.trackingState == .normal && !hasAddedGhostMesh {
                 let canAdd = !hasWorldMap || hasSeenRelocalizing
                 if canAdd, let ghostAnchor = ghostAnchorEntity, let arView = arView {
-                    print("[GhostMesh] Session relocalized (hasWorldMap=\(hasWorldMap), sawRelocalizing=\(hasSeenRelocalizing)). Adding Ghost Mesh overlay.")
-                    arView.scene.addAnchor(ghostAnchor)
-                    hasAddedGhostMesh = true
+                    hasAddedGhostMesh = true // set on the delegate queue to prevent re-entry next frame
+                    let sawReloc = hasSeenRelocalizing, hadMap = hasWorldMap
+                    DispatchQueue.main.async { // RealityKit scene mutation must be on main
+                        print("[GhostMesh] Session relocalized (hasWorldMap=\(hadMap), sawRelocalizing=\(sawReloc)). Adding Ghost Mesh overlay.")
+                        arView.scene.addAnchor(ghostAnchor)
+                    }
                 } else if hasWorldMap && !hasSeenRelocalizing {
                     print("[GhostMesh] Tracking is .normal but relocalization not yet confirmed — deferring ghost mesh placement")
                 }
@@ -806,7 +832,6 @@ struct ARCoverageView: UIViewRepresentable {
             
             pendingVRUpdate = true
             DispatchQueue.main.async { [weak self] in
-                self?.pendingVRUpdate = false
                 pcm.update(
                     depthMap: depthMap,
                     capturedImage: capturedImage,
@@ -824,6 +849,9 @@ struct ARCoverageView: UIViewRepresentable {
                     arView.environment.background = .color(.black)
                     self?.vrBackgroundSet = true
                 }
+                // Reset the coalescing flag on the delegate queue — its only owner (the guard above
+                // reads it there), so it never races between main and the delegate queue.
+                self?.sessionDelegateQueue.async { self?.pendingVRUpdate = false }
             }
         }
 
@@ -858,28 +886,36 @@ struct ARCoverageView: UIViewRepresentable {
             guard isRecording else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
-                    anchorUpdateCounts.removeValue(forKey: mesh.identifier)
-                    anchorVertexCounts.removeValue(forKey: mesh.identifier)
-                    anchorFaceCounts.removeValue(forKey: mesh.identifier)
+                    let id = mesh.identifier
+                    anchorUpdateCounts.removeValue(forKey: id)
+                    anchorVertexCounts.removeValue(forKey: id)
+                    anchorFaceCounts.removeValue(forKey: id)
+                    lastAnchorWireframeTime.removeValue(forKey: id)
 
-                    // Remove wireframe entity for this anchor
-                    if let entry = activeMeshEntities.removeValue(forKey: mesh.identifier) {
-                        entry.anchor.removeFromParent()
+                    // Remove the wireframe entity on main — `activeMeshEntities` + RealityKit are
+                    // main-only (also touched by buildWireframeForAnchor's main block, recolor, reset).
+                    DispatchQueue.main.async { [weak self] in
+                        if let entry = self?.activeMeshEntities.removeValue(forKey: id) {
+                            entry.anchor.removeFromParent()
+                        }
                     }
-                    lastAnchorWireframeTime.removeValue(forKey: mesh.identifier)
                 }
             }
             updateStats(in: session)
         }
 
         func removeAllMeshEntities() {
+            // activeMeshEntities + RealityKit on main (this is called from updateUIView).
             for (_, entry) in activeMeshEntities {
                 entry.anchor.removeFromParent()
             }
             activeMeshEntities.removeAll()
-            lastAnchorWireframeTime.removeAll()
-            anchorUpdateCounts.removeAll()
-
+            // Delegate-owned dicts → clear on the delegate queue (the ARSession callbacks mutate
+            // them; concurrent mutation from main would crash).
+            sessionDelegateQueue.async { [weak self] in
+                self?.lastAnchorWireframeTime.removeAll()
+                self?.anchorUpdateCounts.removeAll()
+            }
         }
 
         private func updateStats(in session: ARSession) {
