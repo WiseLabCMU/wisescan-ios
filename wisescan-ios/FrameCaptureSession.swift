@@ -508,6 +508,19 @@ class FrameCaptureSession {
                         }
                         CVPixelBufferUnlockBaseAddress(dMap, .readOnly)
                     }
+                } else if self.privacyFilter {
+                    // Privacy is ON but ARKit's person stencil was unavailable for this frame —
+                    // either the device doesn't support .personSegmentationWithDepth, or it's a
+                    // momentary gap right after the session (re)starts. Fall back to the (slower)
+                    // Vision person-segmentation blur so we never leave a detected person unblurred.
+                    // The plain encode is passed as the fallback: a frame with no person (or a
+                    // failed Vision pass) still saves, but any detected person is pixelated.
+                    let plain = PerfDiag.timed("jpeg_encode", warnOverMs: 50) { self.pixelBufferToJPEG(pBuf) }
+                    let (blurredData, _) = PerfDiag.timed("privacy_blur_vision_fallback", warnOverMs: 100) {
+                        PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(ciImage: CIImage(cvPixelBuffer: pBuf), fallbackData: plain)
+                    }
+                    guard let bData = blurredData else { return }
+                    finalJpegData = bData
                 } else {
                     // No privacy filter: plain single JPEG encode.
                     guard let jpegData = PerfDiag.timed("jpeg_encode", warnOverMs: 50, { self.pixelBufferToJPEG(pBuf) }) else { return }
