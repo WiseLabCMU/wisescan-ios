@@ -27,7 +27,7 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 - **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay, capacity HUD, and real-time tracking guidance banners (LiDAR devices only).
 - **Lite Mode:** Non-LiDAR devices capture images + camera poses for server-side photogrammetry. A persistent banner indicates lite mode.
 - **Scan4D (Extend Scan):** Group scans by Location. Set your workflow intent (Time-Series vs Space Extension) when saving a new scan. Use "Extend Scan" with a configurable ghost-mesh overlay (default: magenta) to re-scan the identical space or stitch adjacent areas.
-- **Privacy Filtering:** Person segmentation pixelates detected humans in the live camera feed, exported frames, and depth maps. 3D face anchors are unprojected from depth for red-alert privacy markers on mesh previews.
+- **Privacy Filtering:** A live red-eye indicator marks detected people on-screen, and person regions are pixelated in exported frames and zeroed out of depth maps. All three are driven by ARKit's person-segmentation stencil (no per-frame Vision pass); one body-center 3D anchor per person is unprojected from depth for red privacy markers on mesh previews.
 - **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
 - **Developer Mode:** Toggleable debugging tools including front/back camera switching for testing privacy features, with a persistent banner across all views.
 - **Export & Scan Capture Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses governed by motion-blur rejection and overlapping metrics.
@@ -48,7 +48,7 @@ wisescan-ios/
 ├── CaptureView.swift            # Live capture UI, recording controls, scan HUD, capacity metrics
 ├── ARCoverageView.swift         # ARKit session, mesh wireframe (AR), point cloud (VR), OBJ export
 ├── PointCloudManager.swift      # VR mode: live depth point cloud rendering via Metal shaders
-├── FaceBlurOverlay.swift        # Privacy segmentation overlay + pixelation utility for exports
+├── FaceBlurOverlay.swift        # Live red-eye privacy indicator (ARKit stencil) + pixelation utility for exports
 ├── FrameCaptureSession.swift    # RAW data capture (RGB, depth, poses → transforms.json + cameras/)
 ├── LocationDetailView.swift     # Per-location scan management, export, upload, preview
 ├── ScansListView.swift          # Scan cards, location groups, rename, format picker, save/upload
@@ -116,8 +116,8 @@ Scan4D is designed to upload these packages directly to edge/cloud servers. Refe
 When enabled (toggle on Capture screen):
 
 - **Mesh**: ARKit person segmentation removes human-shaped geometry from the wireframe overlay and exported OBJ
-- **Camera Feed**: Detected persons are pixelated in real-time via Vision person segmentation
-- **RAW Frames**: Person regions are pixelated in saved JPEG images; face centers are unprojected to 3D anchors
+- **Live indicator**: Detected people are marked on-screen with a cheap red-eye marker driven by ARKit's segmentation stencil — no per-frame Vision pass or pixelation render (that starves tracking); the saved-frame blur below is the actual privacy guarantee
+- **RAW Frames**: Person regions are pixelated in saved JPEG images (from the ARKit stencil, with a Vision fallback if the stencil is ever unavailable, so a person is never saved unblurred); one body-center anchor per person is unprojected to 3D
 - **Depth Maps**: Person regions are zeroed out in 16-bit depth exports
 
 ## Quick Start
