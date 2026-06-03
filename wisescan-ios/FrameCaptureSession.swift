@@ -2,6 +2,7 @@ import Foundation
 import ARKit
 import UIKit
 import Observation
+import os
 
 /// Captures RGB frames, depth maps, and camera poses during an AR recording session.
 @Observable
@@ -41,7 +42,33 @@ class FrameCaptureSession {
     private var consecutiveBlurredFrames: Int = 0
 
     // Privacy logic
-    private(set) var faceAnchors: [SIMD3<Float>] = []
+    /// Accumulating person anchor with an observation count, which acts as a confidence weight:
+    /// a real person merges in across many frames (high weight) while a one-frame segmentation
+    /// false positive stays at weight 1 and is dropped at finalize. Mirrors the live indicator's
+    /// confidence gate, in 3D.
+    private struct AnchorAccumulator {
+        var position: SIMD3<Float>
+        var weight: Float
+    }
+    private var faceAnchors: [AnchorAccumulator] = []
+
+    /// Drop low-confidence anchors (seen in too few frames → likely transient segmentation noise)
+    /// then coalesce any survivors still within the merge radius, so the saved `face_anchors` are
+    /// few and representative of the live view — the persist-and-coalesce analog of the live gate.
+    private static func finalizeAnchors(_ anchors: [AnchorAccumulator]) -> [SIMD3<Float>] {
+        let confident = anchors.filter { $0.weight >= AppConstants.faceAnchorMinObservations }
+        var merged: [AnchorAccumulator] = []
+        for a in confident {
+            if let i = merged.firstIndex(where: { simd_distance($0.position, a.position) < AppConstants.faceClusterThresholdMeters }) {
+                let w = merged[i].weight
+                merged[i].position = (merged[i].position * w + a.position * a.weight) / (w + a.weight)
+                merged[i].weight = w + a.weight
+            } else {
+                merged.append(a)
+            }
+        }
+        return merged.map { $0.position }
+    }
 
     // Boundary Anchor (Pivot-Point)
     private(set) var boundaryAnchorTransform: simd_float4x4?
@@ -60,6 +87,14 @@ class FrameCaptureSession {
 
     private let ioQueue = DispatchQueue(label: "com.scan4d.capture.io", qos: .userInitiated)
     private let ciContext = CIContext()  // Reuse across frames to avoid GPU pipeline re-init
+    /// Reusable 16-bit depth conversion buffer (depth resolution is fixed per session).
+    /// Only touched inside depthMapToPNG16 on ioQueue, so no synchronization needed.
+    private var depthScratch: [UInt16] = []
+
+    /// Perf diagnostics: number of frame-save closures queued/running on ioQueue. Growth means
+    /// retained CVPixelBuffers are piling up faster than encodes finish — the capture-side cause
+    /// of ARFrame-pool starvation. Incremented on the capture (main) timer, decremented on ioQueue.
+    private let inFlightSaves = OSAllocatedUnfairLock(initialState: 0)
 
     struct FrameData {
         let index: Int
@@ -173,6 +208,25 @@ class FrameCaptureSession {
         return captureDir
     }
 
+    /// Immediately stop capturing new frames (cheap, main-thread safe). Call this on the main
+    /// thread before invoking `stop()` off-main, so no frames are saved after the scan ends and
+    /// the run-loop timer is invalidated on the thread it was scheduled on.
+    func pauseCapture() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    /// Abandon the in-progress capture without finalizing: stop the timer and delete the capture
+    /// directory (queued on ioQueue so it runs after any in-flight frame saves drain).
+    func discardCapture() {
+        timer?.invalidate()
+        timer = nil
+        let dir = captureDir
+        ioQueue.async {
+            if let dir = dir { try? FileManager.default.removeItem(at: dir) }
+        }
+    }
+
     private func captureFrame(from session: ARSession) {
         let fullyTest = isMockingIMU && isMockingImages && isMockingDepth
 
@@ -263,7 +317,6 @@ class FrameCaptureSession {
 
         lastCaptureTransform = transform
         lastCaptureTime = frameTimestamp
-        let currentOrientation = UIApplication.shared.currentInterfaceOrientation
 
         let currentIndex = self.testSequenceIndex
         self.testSequenceIndex += 1 // Increment sequence index for synthetic progression
@@ -277,8 +330,7 @@ class FrameCaptureSession {
             depthMap: depthMap,
             confidenceMap: confidenceMap,
             segBuffer: segBuffer,
-            currentIndex: currentIndex,
-            orientation: currentOrientation
+            currentIndex: currentIndex
         )
     }
 
@@ -343,10 +395,25 @@ class FrameCaptureSession {
         depthMap: CVPixelBuffer?,
         confidenceMap: CVPixelBuffer?,
         segBuffer: CVPixelBuffer?,
-        currentIndex: Int,
-        orientation: UIInterfaceOrientation
+        currentIndex: Int
     ) {
+        // Backlog guard: if frame encodes are falling behind, DROP this frame instead of piling
+        // up retained CVPixelBuffers. That pile-up is what starves ARKit's frame pool ("retaining
+        // N ARFrames") and ultimately stalls/loses VIO tracking — and any data captured after VIO
+        // loss is corrupt. Capture is movement-gated, so the next motion re-triggers a save.
+        // Admit-and-increment atomically; the ioQueue closure decrements in its defer.
+        let admittedDepth: Int? = inFlightSaves.withLock { count -> Int? in
+            guard count < AppConstants.maxFramesInFlight else { return nil }
+            count += 1
+            return count
+        }
+        guard let depth = admittedDepth else {
+            if PerfDiag.enabled { PerfDiag.log("capture frame DROPPED — backlog at cap (\(AppConstants.maxFramesInFlight))") }
+            return
+        }
+        if PerfDiag.enabled && depth > 1 { PerfDiag.log("capture I/O backlog: \(depth) frames in flight") }
         ioQueue.async { [weak self] in
+            defer { self?.inFlightSaves.withLock { $0 -= 1 } }
             guard let self = self, let imagesDir = self.imagesDir else { return }
 
             // Depth is optional — LiDAR devices get depth, others just capture images + poses
@@ -359,24 +426,28 @@ class FrameCaptureSession {
                     print("[FrameCapture] Unexpected depth format: \(depthFormat), skipping depth")
                     return
                 }
-                validDepthData = self.depthMapToPNG16(dMap, personMask: segBuffer)
+                validDepthData = PerfDiag.timed("depth_png16", warnOverMs: 50) { self.depthMapToPNG16(dMap, personMask: segBuffer) }
             }
 
             var finalJpegData: Data
             if self.isMockingImages {
                 finalJpegData = TestDataGenerator.generateImage(for: currentIndex, w: camW, h: camH, transform: transform, intrinsics: intrinsics)
             } else {
-                guard let pBuf = pixelBuffer, let jpegData = self.pixelBufferToJPEG(pBuf) else {
-                    return
-                }
-                var tempJpegData = jpegData
-                if self.privacyFilter {
-                    let (blurredData, centers) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: jpegData, orientation: orientation.visionPropertyOrientation)
-                    if let bData = blurredData {
-                        tempJpegData = bData
+                guard let pBuf = pixelBuffer else { return }
+                if self.privacyFilter, let segBuffer = segBuffer {
+                    // Blur directly from the camera buffer and encode the JPEG ONCE (no plain
+                    // encode → decode → re-encode), using ARKit's existing person-segmentation
+                    // stencil — the same buffer behind the depth cutout + live point-cloud holes.
+                    // The redundant .accurate Vision pass (180–360ms/frame) is gone; it was the
+                    // dominant capture-side cause of ioQueue backlog + ARFrame-pool starvation.
+                    // Also yields person-region centroids for 3D anchoring.
+                    let (blurredData, centers) = PerfDiag.timed("privacy_blur_mask", warnOverMs: 50) {
+                        PrivacyBlurUtil.pixelatePersonsWithMask(pixelBuffer: pBuf, mask: segBuffer)
                     }
-                    
-                    // Unproject face centers to 3D using depth map (only if depth available)
+                    guard let bData = blurredData else { return }
+                    finalJpegData = bData
+
+                    // Unproject person-region centers to 3D using depth map (only if depth available)
                     if !centers.isEmpty, let dMap = depthMap {
                         let depthWidth = CVPixelBufferGetWidth(dMap)
                         let depthHeight = CVPixelBufferGetHeight(dMap)
@@ -420,17 +491,22 @@ class FrameCaptureSession {
                                 let worldPoint = transform * localPoint
                                 let point3D = SIMD3<Float>(worldPoint.x, worldPoint.y, worldPoint.z)
 
-                                // Cluster merging
+                                // Cluster merging — weighted by observation count so the merged
+                                // position converges on the true centroid (not biased toward the
+                                // most recent point, as a flat 0.5 blend was), and the weight
+                                // records how many frames saw this person (its confidence).
                                 var found = false
                                 for i in 0..<localAnchors.count {
-                                    if simd_distance(localAnchors[i], point3D) < AppConstants.faceClusterThresholdMeters {
-                                        localAnchors[i] = (localAnchors[i] + point3D) * 0.5
+                                    if simd_distance(localAnchors[i].position, point3D) < AppConstants.faceClusterThresholdMeters {
+                                        let w = localAnchors[i].weight
+                                        localAnchors[i].position = (localAnchors[i].position * w + point3D) / (w + 1)
+                                        localAnchors[i].weight = w + 1
                                         found = true
                                         break
                                     }
                                 }
                                 if !found {
-                                    localAnchors.append(point3D)
+                                    localAnchors.append(AnchorAccumulator(position: point3D, weight: 1))
                                 }
                             }
                             // Publish updated anchors on main thread
@@ -441,8 +517,24 @@ class FrameCaptureSession {
                         }
                         CVPixelBufferUnlockBaseAddress(dMap, .readOnly)
                     }
+                } else if self.privacyFilter {
+                    // Privacy is ON but ARKit's person stencil was unavailable for this frame —
+                    // either the device doesn't support .personSegmentationWithDepth, or it's a
+                    // momentary gap right after the session (re)starts. Fall back to the (slower)
+                    // Vision person-segmentation blur so we never leave a detected person unblurred.
+                    // The plain encode is passed as the fallback: a frame with no person (or a
+                    // failed Vision pass) still saves, but any detected person is pixelated.
+                    let plain = PerfDiag.timed("jpeg_encode", warnOverMs: 50) { self.pixelBufferToJPEG(pBuf) }
+                    let (blurredData, _) = PerfDiag.timed("privacy_blur_vision_fallback", warnOverMs: 100) {
+                        PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(ciImage: CIImage(cvPixelBuffer: pBuf), fallbackData: plain)
+                    }
+                    guard let bData = blurredData else { return }
+                    finalJpegData = bData
+                } else {
+                    // No privacy filter: plain single JPEG encode.
+                    guard let jpegData = PerfDiag.timed("jpeg_encode", warnOverMs: 50, { self.pixelBufferToJPEG(pBuf) }) else { return }
+                    finalJpegData = jpegData
                 }
-                finalJpegData = tempJpegData
             }
             
         let index = self.frames.count
@@ -456,7 +548,7 @@ class FrameCaptureSession {
                     try depthData.write(to: depthPath, options: .atomic)
                 }
                 
-                if let confMap = confidenceMap, let confData = self.confidenceMapToPNG(confMap), let confDir = self.confidenceDir {
+                if let confMap = confidenceMap, let confData = PerfDiag.timed("confidence_png", warnOverMs: 40, { self.confidenceMapToPNG(confMap) }), let confDir = self.confidenceDir {
                     let confPath = confDir.appendingPathComponent("frame_\(paddedIndex).png")
                     try confData.write(to: confPath, options: .atomic)
                 }
@@ -610,8 +702,9 @@ class FrameCaptureSession {
             metadata["compass_heading"] = heading
         }
 
-        if !faceAnchors.isEmpty {
-            metadata["face_anchors"] = faceAnchors.map { ["x": $0.x, "y": $0.y, "z": $0.z] }
+        let finalAnchors = Self.finalizeAnchors(faceAnchors)
+        if !finalAnchors.isEmpty {
+            metadata["face_anchors"] = finalAnchors.map { ["x": $0.x, "y": $0.y, "z": $0.z] }
         }
 
         // Boundary Anchor (Pivot-Point) for spatial stitching
@@ -679,27 +772,36 @@ class FrameCaptureSession {
             maskStride = CVPixelBufferGetBytesPerRow(mask)
         }
 
-        // Convert float meters to UInt16 millimeters, zeroing person regions
-        var uint16Buffer = [UInt16](repeating: 0, count: width * height)
-        for y in 0..<height {
-            for x in 0..<width {
-                let i = y * width + x
+        // Convert float meters to UInt16 millimeters, zeroing person regions.
+        // Reuse a session-scoped buffer to avoid a per-frame allocation. Every pixel is
+        // written exactly once below, so stale contents from the previous frame don't leak.
+        // (Kept scalar: vDSP float→uint16 mishandles NaN/inf/negative depth, and the
+        // per-pixel person mask isn't vectorizable; the PNG encode dominates this function.)
+        let count = width * height
+        if depthScratch.count != count {
+            depthScratch = [UInt16](repeating: 0, count: count)
+        }
+        depthScratch.withUnsafeMutableBufferPointer { out in
+            for y in 0..<height {
+                for x in 0..<width {
+                    let i = y * width + x
 
-                // Check person mask (scale coordinates if sizes differ)
-                if let mBase = maskBase {
-                    let mx = x * maskWidth / max(width, 1)
-                    let my = y * maskHeight / max(height, 1)
-                    if mx < maskWidth && my < maskHeight {
-                        let pixel = mBase.advanced(by: my * maskStride + mx).assumingMemoryBound(to: UInt8.self).pointee
-                        if pixel > 128 {
-                            uint16Buffer[i] = 0 // zero out person region
-                            continue
+                    // Check person mask (scale coordinates if sizes differ)
+                    if let mBase = maskBase {
+                        let mx = x * maskWidth / max(width, 1)
+                        let my = y * maskHeight / max(height, 1)
+                        if mx < maskWidth && my < maskHeight {
+                            let pixel = mBase.advanced(by: my * maskStride + mx).assumingMemoryBound(to: UInt8.self).pointee
+                            if pixel > 128 {
+                                out[i] = 0 // zero out person region
+                                continue
+                            }
                         }
                     }
-                }
 
-                let meters = floatBuffer[i]
-                uint16Buffer[i] = meters.isFinite ? UInt16(min(max(meters * 1000.0, 0), 65535)) : 0
+                    let meters = floatBuffer[i]
+                    out[i] = meters.isFinite ? UInt16(min(max(meters * 1000.0, 0), 65535)) : 0
+                }
             }
         }
 
@@ -708,7 +810,7 @@ class FrameCaptureSession {
         }
 
         // Create 16-bit grayscale CGImage
-        let data = Data(bytes: uint16Buffer, count: uint16Buffer.count * 2)
+        let data = Data(bytes: depthScratch, count: count * 2)
         guard let provider = CGDataProvider(data: data as CFData),
               let cgImage = CGImage(
                   width: width,

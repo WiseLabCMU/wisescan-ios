@@ -14,28 +14,70 @@ enum MeshParser {
 
     /// Parses an OBJ file from raw data into vertices and triangle faces.
     /// Face indices are converted from 1-based to 0-based.
+    ///
+    /// Parses the raw bytes directly (no whole-file String, no per-line/per-token
+    /// Substring allocations), which is the dominant cost for large meshes. A trailing NUL
+    /// is appended and each line is temporarily NUL-terminated so the C numeric parsers
+    /// (strtof/strtol) always stop at the line boundary. Semantics match the previous
+    /// String-based parser: only `v ` lines become vertices (not `vn`/`vt`), only `f ` lines
+    /// become faces, the first three face tokens are used (handles `a`, `a/b`, `a/b/c`),
+    /// indices are 1-based→0-based, and malformed lines are skipped.
     static func parseOBJ(from data: Data) -> OBJData? {
-        guard let objStr = String(data: data, encoding: .utf8) else { return nil }
-
         var vertices: [SIMD3<Float>] = []
         var faces: [(UInt32, UInt32, UInt32)] = []
+        vertices.reserveCapacity(data.count / 30)
+        faces.reserveCapacity(data.count / 30)
 
-        for line in objStr.split(separator: "\n") {
-            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
-            guard let type = parts.first else { continue }
+        var bytes = [UInt8](data)
+        bytes.append(0) // sentinel so strtof/strtol always terminate
 
-            if type == "v" && parts.count >= 4 {
-                if let x = Float(parts[1]), let y = Float(parts[2]), let z = Float(parts[3]) {
-                    vertices.append(SIMD3<Float>(x, y, z))
+        bytes.withUnsafeMutableBufferPointer { rawBuf in
+            guard let base = rawBuf.baseAddress else { return }
+            base.withMemoryRebound(to: CChar.self, capacity: rawBuf.count) { cbuf in
+                let total = rawBuf.count // includes trailing NUL
+                let NL: CChar = 10, SP: CChar = 32, V: CChar = 118, F: CChar = 102
+
+                // Parse a float at p (strtof skips leading whitespace); nil if none.
+                func parseFloat(_ p: UnsafeMutablePointer<CChar>) -> (Float, UnsafeMutablePointer<CChar>)? {
+                    var end: UnsafeMutablePointer<CChar>? = nil
+                    let v = strtof(p, &end)
+                    guard let e = end, e != p else { return nil }
+                    return (v, e)
                 }
-            } else if type == "f" && parts.count >= 4 {
-                // Handles "f v1 v2 v3" and "f v1/vt1/vn1 v2/vt2/vn2 v3/vt3/vn3"
-                let v1Str = parts[1].split(separator: "/").first ?? ""
-                let v2Str = parts[2].split(separator: "/").first ?? ""
-                let v3Str = parts[3].split(separator: "/").first ?? ""
+                // Parse the leading 1-based index of a face token (e.g. "3", "3/2", "3/2/1"),
+                // then advance past the rest of the token. nil unless a positive, in-range int.
+                func parseFaceIndex(_ p0: UnsafeMutablePointer<CChar>) -> (UInt32, UnsafeMutablePointer<CChar>)? {
+                    var p = p0
+                    while p.pointee == SP { p += 1 }
+                    var end: UnsafeMutablePointer<CChar>? = nil
+                    let v = strtol(p, &end, 10)
+                    guard let e = end, e != p, v > 0, v <= Int(UInt32.max) else { return nil }
+                    p = e
+                    while p.pointee != SP && p.pointee != 0 { p += 1 }
+                    return (UInt32(v), p)
+                }
 
-                if let i1 = UInt32(v1Str), let i2 = UInt32(v2Str), let i3 = UInt32(v3Str) {
-                    faces.append((i1 - 1, i2 - 1, i3 - 1))
+                var lineStart = 0
+                while lineStart < total - 1 {
+                    var lineEnd = lineStart
+                    while lineEnd < total && cbuf[lineEnd] != NL { lineEnd += 1 }
+                    if lineEnd < total { cbuf[lineEnd] = 0 } // terminate this line
+
+                    if cbuf[lineStart] == V, lineStart + 1 < lineEnd, cbuf[lineStart + 1] == SP {
+                        if let (x, p1) = parseFloat(cbuf + lineStart + 2),
+                           let (y, p2) = parseFloat(p1),
+                           let (z, _) = parseFloat(p2) {
+                            vertices.append(SIMD3<Float>(x, y, z))
+                        }
+                    } else if cbuf[lineStart] == F, lineStart + 1 < lineEnd, cbuf[lineStart + 1] == SP {
+                        if let (i1, p1) = parseFaceIndex(cbuf + lineStart + 2),
+                           let (i2, p2) = parseFaceIndex(p1),
+                           let (i3, _) = parseFaceIndex(p2) {
+                            faces.append((i1 - 1, i2 - 1, i3 - 1))
+                        }
+                    }
+
+                    lineStart = lineEnd + 1
                 }
             }
         }
@@ -54,8 +96,11 @@ enum MeshParser {
         }
 
         var indices: [UInt32] = []
+        indices.reserveCapacity(parsed.faces.count * 3)
         for face in parsed.faces {
-            indices.append(contentsOf: [face.0, face.1, face.2])
+            indices.append(face.0)
+            indices.append(face.1)
+            indices.append(face.2)
         }
 
         var descriptor = MeshDescriptor(name: "GhostMesh")
@@ -229,7 +274,9 @@ enum MeshParser {
             outUVs.append(SIMD2<Float>(0, 1))
             outUVs.append(SIMD2<Float>(0, 0))
 
-            outIndices.append(contentsOf: [idx, idx + 1, idx + 2])
+            outIndices.append(idx)
+            outIndices.append(idx + 1)
+            outIndices.append(idx + 2)
             idx += 3
         }
 

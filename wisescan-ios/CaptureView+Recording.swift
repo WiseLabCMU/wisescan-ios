@@ -70,17 +70,31 @@ extension CaptureView {
         return (try? modelContext.fetch(descriptor).first?.name) ?? "Unknown"
     }
 
-    // swiftlint:disable:next function_body_length cyclomatic_complexity
     func performStopRecording(completion: ((CapturedScan?) -> Void)? = nil) {
-        // Stop frame capture and get raw data path
-        let rawDataPath = frameCaptureSession.stop()
+        // Flush the per-frame capture JSONs OFF the main thread (O(frames)) so ending a long scan
+        // doesn't freeze the UI or starve ARKit (perf fix ported from main). The mesh export and
+        // world-map co-framing that follow must run on main with the AR session still live, so we
+        // hop back before any of that — the ordering (and the map↔OBJ co-framing) is unchanged.
+        let capSession = frameCaptureSession
+        DispatchQueue.global(qos: .utility).async {
+            let rawDataPath = capSession.stop()
+            DispatchQueue.main.async {
+                self.finishStopRecording(rawDataPath: rawDataPath, completion: completion)
+            }
+        }
+    }
 
-        // Export mesh from the still-active AR session
-        let meshResult = ARCoverageView.exportMeshOBJ(from: currentARSession, privacyFilter: isPrivacyFilterOn)
+    // swiftlint:disable:next function_body_length cyclomatic_complexity
+    private func finishStopRecording(rawDataPath: URL?, completion: ((CapturedScan?) -> Void)? = nil) {
+        // Export mesh from the still-active AR session. exportMeshOBJ now takes the ARFrame directly
+        // (main's change — reading currentFrame inside pinned ARFrame memory), so grab it once here
+        // and reuse it for the thumbnail below.
+        let currentFrame = currentARSession?.currentFrame
+        let meshResult = ARCoverageView.exportMeshOBJ(from: currentFrame, privacyFilter: isPrivacyFilterOn)
 
         // Capture a 2D thumbnail from the current camera frame
         var thumbnailData: Data? = nil
-        if let currentFrame = currentARSession?.currentFrame {
+        if let currentFrame = currentFrame {
             let ciImage = CIImage(cvPixelBuffer: currentFrame.capturedImage)
             let context = CIContext()
             if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {

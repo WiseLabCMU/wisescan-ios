@@ -1,5 +1,6 @@
 import SwiftUI
 import ARKit
+import RealityKit
 import SwiftData
 
 // swiftlint:disable file_length type_body_length
@@ -15,14 +16,27 @@ struct CaptureView: View {
     @AppStorage(AppConstants.Key.mockCameraImages) var mockCameraImages: Bool = AppConstants.mockCameraImages
     @AppStorage(AppConstants.Key.mockDepthMaps) var mockDepthMaps: Bool = AppConstants.mockDepthMaps
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
+    @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
+    @AppStorage(AppConstants.Key.captureMode) private var captureModeStr: String = AppConstants.captureMode
     // Stream mode removed — fixed to Capture (Stream is a future feature)
     @State private var usingFrontCamera = false
+    // NOTE: capture/recording state is `internal` (not private) because the recording, alignment,
+    // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession? = nil
     @State var saveMessage: String? = nil
     @State var isRecording = false
+    // Set true by ARCoverageView's coordinator when VIO tracking is lost mid‑recording; observed
+    // below to halt the scan and prompt save/rescan (data after VIO loss is corrupt).
+    @State var vioCompromised = false
+    // Battery: pauses ARCoverageView's session after the capture tab has been hidden for
+    // AppConstants.arIdleTeardownSeconds; resumed on return. Rapid successive scans stay warm.
+    @State private var pauseARSession = false
+    @State private var idleTeardownTimer: Timer? = nil
     @State var recordingSeconds = 0
     @State var recordingTimer: Timer? = nil
     @State var frameCaptureSession = FrameCaptureSession()
+    // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
+    @State private var mainThreadWatchdog = MainThreadWatchdog()
     // colorAccumulator removed — vertex coloring now deferred to post-processing
     @AppStorage(AppConstants.Key.rawOverlapMax) var overlapMax: Double = AppConstants.overlapMax
     @AppStorage(AppConstants.Key.rawRejectBlur) var rejectBlur: Bool = AppConstants.rejectBlur
@@ -46,6 +60,17 @@ struct CaptureView: View {
     @State var showInsufficientTrackingAlert = false // SwiftUI alert for poor mapping status
     @State var sessionStabilizationTask: Task<Void, Never>? // Cancellable task for AR session warm-up after extend
     @State var isConfirmingAlignment = false // Re-entry guard for confirmAlignment double-tap
+
+    @State private var showSettings = false
+    @State private var activeLocationName: String? = nil
+    // Ghost-mesh offsets (from main) drive ARCoverageView's ghost rendering. Our link-adjacent
+    // flow leaves them at 0 so the relocalized ghost overlays at identity (the manual-nudge slider
+    // UI was dropped in favor of our anchor-based AlignmentOverlayView).
+    @State private var ghostYRotation: Float = 0
+    @State private var ghostXOffset: Float = 0
+    @State private var ghostZOffset: Float = 0
+    @State private var dismissGhostMesh = false
+    @State private var bakedGhostTransform: simd_float4x4? = nil
 
     struct PendingScanData {
         let locationId: UUID?
@@ -82,13 +107,21 @@ struct CaptureView: View {
                 arSession: $currentARSession,
                 isRecording: $isRecording,
                 isSessionReady: $isARSessionReady,
+                vioCompromised: $vioCompromised,
                 scanStats: scanStats,
                 privacyFilter: isPrivacyFilterOn,
                 activeMeshColor: activeMeshColor,
+                captureMode: AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar,
                 useFrontCamera: usingFrontCamera,
                 initialWorldMapURL: scanStore.activeRelocalizationMap,
                 initialGhostMeshData: cachedGhostMeshData,
-                scanStore: scanStore
+                scanStore: scanStore,
+                ghostYRotation: ghostYRotation,
+                ghostXOffset: ghostXOffset,
+                ghostZOffset: ghostZOffset,
+                dismissGhostMesh: dismissGhostMesh,
+                bakedGhostTransform: bakedGhostTransform,
+                pauseARSession: pauseARSession
             )
                 .ignoresSafeArea()
                 // Fix phase race: set .loadingWorldMap before the AR session starts
@@ -99,6 +132,10 @@ struct CaptureView: View {
                         && scanStore.capturePhase == .idle {
                         scanStore.capturePhase = .loadingWorldMap
                     }
+                }
+                // Main's VIO-loss guard: halt + prompt save/rescan when tracking is lost mid-scan.
+                .onChange(of: vioCompromised) { _, lost in
+                    if lost { handleVIOCompromised() }
                 }
 
             // Loading overlay while AR session initializes (camera + privacy models + depth pipeline)
@@ -117,9 +154,13 @@ struct CaptureView: View {
                 .transition(.opacity)
             }
 
-            // Privacy blur overlay (shown when privacy filter is on AND recording)
-            if isPrivacyFilterOn && isRecording {
-                PrivacyBlurOverlay(arSession: currentARSession)
+            // Live privacy indicator (shown when privacy filter is on AND recording in AR mode).
+            // A cheap red-eye marker over each person region, driven by ARKit's existing
+            // segmentation stencil — NOT the old per-tick Vision pass + pixelate render (which
+            // competed with VIO). Saved RGB frames are still blurred; this is just the live signal.
+            // In VR mode the point cloud already shows person-shaped holes as the indicator.
+            if isPrivacyFilterOn && isRecording && (AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar) != .vr {
+                PrivacyEyeOverlay(arSession: currentARSession)
                     .ignoresSafeArea()
             }
 
@@ -127,17 +168,48 @@ struct CaptureView: View {
             PermissionsOverlay(locationManager: locationManager)
                 .ignoresSafeArea()
 
-            if isRecording && frameCaptureSession.isBlurWarningActive {
-                Text("⚠️ Moving too fast! Slow down.")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 12)
-                    .background(Color.orange.opacity(0.85))
-                    .cornerRadius(20)
-                    .shadow(radius: 5)
-                    .transition(.scale.combined(with: .opacity))
-                    .animation(.easeInOut(duration: 0.2), value: frameCaptureSession.isBlurWarningActive)
+            VStack(spacing: 12) {
+                if isRecording && frameCaptureSession.isBlurWarningActive {
+                    Text("⚠️ Moving too fast! Slow down.")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(Color.orange.opacity(0.85))
+                        .cornerRadius(20)
+                        .shadow(radius: 5)
+                        .transition(.scale.combined(with: .opacity))
+                        .animation(.easeInOut(duration: 0.2), value: frameCaptureSession.isBlurWarningActive)
+                }
+
+                if cachedGhostMeshData != nil && scanStats.trackingStatus == .limited(reason: .relocalizing) {
+                    HStack(spacing: 8) {
+                        Text("🔄 Move camera to relocalize with previous scan")
+                        OctahedronIcon(color: ghostMeshColor.swiftUIColor)
+                    }
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(Color.blue.opacity(0.85))
+                        .cornerRadius(20)
+                        .shadow(radius: 5)
+                        .transition(.scale.combined(with: .opacity))
+                        .animation(.easeInOut(duration: 0.2), value: scanStats.trackingStatus)
+                }
+
+                if isRecording && scanStats.totalVertices < 500 && scanStats.trackingStatus != .limited(reason: .relocalizing) && !frameCaptureSession.isBlurWarningActive {
+                    Text("📷 Move camera slowly to scan environment")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(Color.indigo.opacity(0.85))
+                        .cornerRadius(20)
+                        .shadow(radius: 5)
+                        .transition(.scale.combined(with: .opacity))
+                        .animation(.easeInOut(duration: 0.2), value: scanStats.totalVertices < 500)
+                }
             }
 
             // Lite mode banner for non-LiDAR devices
@@ -242,10 +314,31 @@ struct CaptureView: View {
                         .padding(.vertical, 8)
                         .background(Color.red.opacity(0.3))
                         .cornerRadius(20)
+                    } else {
+                        Button(action: { showSettings = true }) {
+                            Image(systemName: "gearshape.fill")
+                                .font(.title3)
+                                .foregroundColor(.white)
+                                .padding(10)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
                     }
 
                 }
                 .padding()
+
+                if let locName = activeLocationName {
+                    let modeText = scanStore.activeScanToExtend != nil ? "Extend Scan" : "Rescan"
+                    Text("\(locName) — \(modeText)")
+                        .font(.caption.bold())
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(16)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
                 
                 // Wearable PiP Overlay and Status Warnings
                 let wearableManager = MetaWearableManager.shared
@@ -528,6 +621,50 @@ struct CaptureView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
+            // Pick up any Settings change to the diagnostics flag, then start the main-thread
+            // stall watchdog for this capture session (both no-ops unless Perf Diagnostics is on).
+            PerfDiag.refresh()
+            mainThreadWatchdog.start()
+
+            // Battery: returning to the capture tab — cancel any pending idle teardown and resume
+            // the AR session if it was paused while we were away.
+            idleTeardownTimer?.invalidate()
+            idleTeardownTimer = nil
+            pauseARSession = false
+
+            if let locId = scanStore.activeLocationForScan {
+                let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
+                if let loc = try? modelContext.fetch(descriptor).first {
+                    activeLocationName = loc.name
+                }
+            }
+            // Lock to portrait during capture to ensure consistent orientation
+            // for privacy segmentation, depth maps, and frame export.
+            //
+            // Three independent rendering layers must agree on orientation:
+            //   1. RealityKit scene (AR camera feed or VR point cloud — auto-rotates)
+            //   2. Privacy segmentation overlay (SwiftUI — WE must rotate)
+            //   3. Scene geometry (mesh wireframe in AR, point cloud in VR — auto-rotates)
+            // Locking to portrait eliminates orientation mismatches between them.
+            // See FaceBlurOverlay.swift for the full orientation architecture docs.
+            //
+            // TODO: Apple will eventually require all-orientation support on iPad
+            // (iPadOS logs warn "UIRequiresFullScreen will soon be ignored" and
+            // "Support for all orientations will soon be required"). When that
+            // happens, replace this lock with dynamic orientation handling across
+            // all layers and both capture modes (AR + VR).
+            // See the TODO section in FaceBlurOverlay.swift.
+            AppDelegate.orientationLocked = true
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                windowScene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait))
+            }
+
+            // Reset ghost mesh alignment state for this session
+            dismissGhostMesh = false
+            ghostYRotation = 0
+            ghostXOffset = 0
+            ghostZOffset = 0
+
             // Load ghost mesh once into @State cache (avoids recomputing on every body eval)
             loadGhostMeshData()
 
@@ -562,6 +699,25 @@ struct CaptureView: View {
             }
         }
         .onDisappear {
+            mainThreadWatchdog.stop()
+
+            // Battery: left the capture tab — after an idle period, pause the AR session (camera +
+            // sensors off). Guarded at fire time so we never pause mid-recording or during post-scan
+            // processing (the worldmap export still needs the live session). Returning to capture
+            // cancels this (see onAppear). One-shot; rapid successive scans return before it fires.
+            idleTeardownTimer?.invalidate()
+            idleTeardownTimer = Timer.scheduledTimer(withTimeInterval: AppConstants.arIdleTeardownSeconds, repeats: false) { _ in
+                if selectedTab != 1 && !isRecording && !scanStore.isProcessingScan {
+                    pauseARSession = true
+                }
+            }
+
+            // Unlock orientation when leaving capture
+            AppDelegate.orientationLocked = false
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                windowScene.requestGeometryUpdate(.iOS(interfaceOrientations: .all))
+            }
+
             // Stop GPS/heading updates to save battery (#12)
             locationManager.stopUpdating()
 
@@ -584,6 +740,7 @@ struct CaptureView: View {
             isARSessionReady = false
             sessionStabilizationTask?.cancel()
             sessionStabilizationTask = nil
+            activeLocationName = nil
         }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
@@ -634,6 +791,9 @@ struct CaptureView: View {
         } message: {
             Text("This scan has a poor mapping status (\(scanStats.mappingStatus)). Successful relocalization later requires 'mapped' or 'extending' status. Would you like to save it anyway?")
         }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
+        }
     }
 
     private var qualityColor: Color {
@@ -649,13 +809,137 @@ struct CaptureView: View {
         return String(format: "%02d:%02d", minutes, seconds)
     }
 
-    // Methods are organized into extension files:
+    // Recording / save / stitching methods are organized into extension files:
     //   CaptureView+Recording.swift  — toggleRecording, startRecording, stopRecording, performStopRecording, savePendingScan, etc.
     //   CaptureView+Extend.swift     — pinAndExtend (Flow A: mid-session extend)
     //   CaptureView+Alignment.swift  — confirmAlignment, cancelAlignment (Flow B: cross-session alignment)
+
+    /// VIO starvation guard handler (ported from main, adapted to our save pipeline): ARKit tracking
+    /// was lost mid-recording, so frames captured after that point are unreliable. Halt new-frame
+    /// capture, then let the user save what was gathered before the loss (our `performStopRecording`
+    /// flow, which co-frames the world map with the OBJ) or discard and rescan.
+    func handleVIOCompromised() {
+        vioCompromised = false // reset the latch so a later scan can trip the guard again
+        guard isRecording else { return }
+
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+
+        // Stop new frames immediately so no more post-loss (corrupt) frames are captured while the
+        // prompt is up. The good frames captured before the loss are still on disk; performStopRecording
+        // calls frameCaptureSession.stop() to flush them on "Save Anyway".
+        let capturedCount = frameCaptureSession.frameCount
+        frameCaptureSession.pauseCapture()
+
+        let alert: UIAlertController
+        if capturedCount > 0 {
+            alert = UIAlertController(
+                title: "Tracking Lost",
+                message: "AR tracking was interrupted during this scan, so anything captured after that point is unreliable. Save the \(capturedCount) frame\(capturedCount == 1 ? "" : "s") captured so far, or discard and rescan?",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
+                self.discardCapturedData()
+            })
+            alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in
+                // Our save pipeline tears down reconstruction itself and captures the world map
+                // co-framed with the OBJ; it flips isRecording = false once the map is grabbed.
+                self.performStopRecording()
+            })
+        } else {
+            // Nothing usable was captured (tracking lost almost immediately) — don't offer a save.
+            alert = UIAlertController(
+                title: "Tracking Lost",
+                message: "AR tracking was lost before any usable data was captured, so nothing was saved. Reposition and rescan when ready.",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in
+                self.discardCapturedData()
+            })
+        }
+
+        // VIO loss takes precedence: if the manual-stop "Insufficient Tracking" alert (which offers
+        // "Continue Scanning") is already up, dismiss it first so a scan that lost tracking can only
+        // be saved as-is or discarded, never extended with post-loss frames.
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = (windowScene.windows.first(where: { $0.isKeyWindow }) ?? windowScene.windows.first)?.rootViewController {
+            if let presented = rootVC.presentedViewController {
+                presented.dismiss(animated: false) { rootVC.present(alert, animated: true) }
+            } else {
+                rootVC.present(alert, animated: true)
+            }
+        }
+    }
+
+    /// Discards a partially-captured scan and resets capture/stitching state so the next scan starts
+    /// clean. Mirrors the "Discard Scan" path of the Insufficient-Tracking alert.
+    func discardCapturedData() {
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+        isRecording = false
+        frameCaptureSession.discardCapture()
+        frameCaptureSession = FrameCaptureSession()
+        MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
+        clearMessage()
+
+        // Clean up any empty location created for this flow.
+        if let locId = scanStore.activeLocationForScan {
+            let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
+            if let location = try? modelContext.fetch(descriptor).first, location.scans.isEmpty {
+                modelContext.delete(location)
+                try? modelContext.save()
+            }
+        }
+        scanStore.resetCaptureState()
+    }
 }
 
 #Preview {
     CaptureView(selectedTab: .constant(1))
         .environment(ScanStore())
+}
+
+struct OctahedronIcon: View {
+    var color: Color
+    var body: some View {
+        Path { path in
+            let w: CGFloat = 16
+            let h: CGFloat = 16
+            let midX = w / 2
+            let midY = h / 2
+            let top = CGPoint(x: w * 0.5, y: h * 0.075)
+            let bottom = CGPoint(x: w * 0.5, y: h * 0.925)
+            let left = CGPoint(x: w * 0.075, y: h * 0.53)
+            let right = CGPoint(x: w * 0.925, y: h * 0.47)
+            let front = CGPoint(x: w * 0.61, y: h * 0.61)
+            let back = CGPoint(x: w * 0.39, y: h * 0.39)
+            
+            // Outline
+            path.move(to: top)
+            path.addLine(to: right)
+            path.addLine(to: bottom)
+            path.addLine(to: left)
+            path.closeSubpath()
+            
+            // Front edges
+            path.move(to: top)
+            path.addLine(to: front)
+            path.addLine(to: bottom)
+            
+            path.move(to: left)
+            path.addLine(to: front)
+            path.addLine(to: right)
+            
+            // Back edges (wireframe)
+            path.move(to: top)
+            path.addLine(to: back)
+            path.addLine(to: bottom)
+            
+            path.move(to: left)
+            path.addLine(to: back)
+            path.addLine(to: right)
+        }
+        .stroke(color, lineWidth: 1.5)
+        .frame(width: 16, height: 16)
+    }
 }

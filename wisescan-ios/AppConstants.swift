@@ -4,6 +4,11 @@ import CoreGraphics
 /// Centralized repository for UI constants, app defaults, and magic numbers
 /// to ensure unified aesthetics and layout calculations across the app.
 enum AppConstants {
+    enum CaptureMode: String, CaseIterable {
+        case ar = "AR"
+        case vr = "VR"
+    }
+
     enum UI {
         // Picture-in-Picture Wearable Stream Overlay
         static let pipWidth: CGFloat = 100
@@ -21,7 +26,6 @@ enum AppConstants {
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"
         static let flipCameraEnabled = "flipCameraEnabled"
-        static let debugVertexMapping = "debugVertexMapping"
         static let mockIMU = "mockIMU"
         static let mockCameraImages = "mockCameraImages"
         static let mockDepthMaps = "mockDepthMaps"
@@ -32,6 +36,10 @@ enum AppConstants {
         static let ghostMeshColor = "ghostMeshColor"
         static let metaWearablesFPS = "metaWearablesFPS"
         static let metaWearablesPermissionGranted = "metaWearablesPermissionGranted"
+        static let captureMode = "captureMode"
+        static let hideLivePoints = "hideLivePoints"
+        static let perfDiagnostics = "perfDiagnostics"
+        static let pauseVRCompute = "pauseVRCompute"
     }
 
     // MARK: - Default Values
@@ -46,7 +54,6 @@ enum AppConstants {
     static let rejectBlur: Bool = true
     static let developerMode: Bool = false
     static let flipCameraEnabled: Bool = false
-    static let debugVertexMapping: Bool = false
     static let mockIMU: Bool = false
     static let mockCameraImages: Bool = false
     static let mockDepthMaps: Bool = false
@@ -56,9 +63,19 @@ enum AppConstants {
     static let activeMeshColor: String = "Green"
     static let ghostMeshColor: String = "Magenta"
     static let metaWearablesFPS: Double = 7.0
+    static let captureMode: String = CaptureMode.ar.rawValue
+    static let hideLivePoints: Bool = false
+    static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
+    static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
 
     // MARK: - Pipeline Constants
-    static let faceClusterThresholdMeters: Float = 0.5      // merge distance for face anchors (~head diameter)
+    static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
+    static let faceAnchorMinObservations: Float = 2         // a person anchor must be seen in at least this many frames to be saved (confidence gate; drops one-frame segmentation false positives)
+    static let maxFramesInFlight: Int = 2                    // cap on concurrent frame-save encodes; excess frames are dropped to keep retained CVPixelBuffers from starving ARKit's frame pool (VIO loss corrupts the scan)
+    static let vioFrameGapTripSeconds: TimeInterval = 1.5    // VIO guard: an ARKit frame-delivery gap this large mid-scan = the session stalled and VIO diverged → halt
+    static let vioDegradedTripSeconds: TimeInterval = 2.5    // VIO guard: tracking continuously degraded (limited/relocalizing/unavailable) this long mid-scan → halt
+    static let voxelDecayInterval: TimeInterval = 0.5        // VR: min seconds between 350K-voxel confidence-decay passes; throttled off every-integration so the voxelQueue can't back up (drove multi-second stalls)
+    static let arIdleTeardownSeconds: TimeInterval = 60      // battery: seconds on a non-capture tab before pausing the AR session (camera/sensors off); resumed on return. Long enough that rapid successive scans stay warm.
     static let overlapBaseThreshold: Float = 0.15            // movement threshold base for frame capture
     static let overlapMinThreshold: Float = 0.01             // minimum movement threshold
     static let maxColorizationFrames: Int = 150              // max sampled frames for vertex coloring

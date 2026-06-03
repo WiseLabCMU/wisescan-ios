@@ -138,58 +138,22 @@ struct ScansListView: View {
             }
             .preferredColorScheme(.dark)
             .overlay {
-                if isMigrating {
-                    VStack {
-                        ProgressView(value: migrationProgress)
-                            .progressViewStyle(LinearProgressViewStyle())
-                            .padding()
-                        Text("Migrating Scans... \(Int(migrationProgress * 100))%")
+                if scanStore.isProcessingScan {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(1.5)
+                        Text(scanStore.processingMessage ?? "Processing Scan...")
                             .foregroundColor(.white)
-                            .font(.caption)
+                            .font(.headline)
                     }
-                    .padding()
-                    .background(Color.black.opacity(0.8))
-                    .cornerRadius(12)
+                    .padding(24)
+                    .background(Color.black.opacity(0.85))
+                    .cornerRadius(16)
+                    .shadow(radius: 10)
                 }
             }
-            .task {
-                await performMigration()
-            }
         }
-    }
-
-    @State private var isMigrating = false
-    @State private var migrationProgress = 0.0
-
-    private func performMigration() async {
-        let allScans = locations.flatMap { $0.scans }
-        let scansToMigrate = allScans.filter { scan in
-            FileManager.default.fileExists(atPath: scan.meshFileURL.path) &&
-            !FileManager.default.fileExists(atPath: scan.modelPreviewURL.path)
-        }
-        
-        guard !scansToMigrate.isEmpty else { return }
-        isMigrating = true
-        
-        for (index, scan) in scansToMigrate.enumerated() {
-            let fm = FileManager.default
-            
-            // Migrate model preview
-            if !fm.fileExists(atPath: scan.modelPreviewURL.path) {
-                let pose = scan.location?.imagingPoseMatrix
-                if let img = await Task.detached(priority: .utility, operation: {
-                    MeshPreviewView.generateSnapshot(meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL, poseMatrix: pose)
-                }).value, let data = img.jpegData(compressionQuality: 0.8) {
-                    try? data.write(to: scan.modelPreviewURL)
-                }
-            }
-            
-            migrationProgress = Double(index + 1) / Double(scansToMigrate.count)
-        }
-        
-        // Let progress show briefly before hiding
-        try? await Task.sleep(for: .seconds(1))
-        isMigrating = false
     }
 
     private func deleteLocation(_ loc: ScanLocation) {
@@ -206,9 +170,13 @@ struct ScansListView: View {
 struct LocationGridTile: View {
     let location: ScanLocation
     @State private var thumbnailImage: UIImage? = nil
+    // Resolved off the main thread in `.task` so the body performs no FileManager I/O.
+    @State private var hasMissingWorldMap = false
 
     var latestScan: CapturedScan? {
-        location.scans.sorted(by: { $0.capturedAt > $1.capturedAt }).first
+        // Single O(n) pass with no intermediate sorted-array allocation; this is read
+        // multiple times per body evaluation.
+        location.scans.max(by: { $0.capturedAt < $1.capturedAt })
     }
 
     var body: some View {
@@ -256,7 +224,7 @@ struct LocationGridTile: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(alignment: .topLeading) {
-            if location.scans.contains(where: { !FileManager.default.fileExists(atPath: $0.worldMapURL.path) }) {
+            if hasMissingWorldMap {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundColor(.yellow)
@@ -267,17 +235,29 @@ struct LocationGridTile: View {
             }
         }
         .task(id: location.updatedAt) {
-            // Load thumbnail asynchronously to avoid main-thread I/O (#7)
-            guard let latest = latestScan else { thumbnailImage = nil; return }
-            let urls = [latest.modelPreviewURL, latest.thumbnailURL]
-            let fm = FileManager.default
-            let url = urls.first(where: { fm.fileExists(atPath: $0.path) }) ?? latest.thumbnailURL
-            
-            thumbnailImage = await Task.detached(priority: .utility) {
-                guard FileManager.default.fileExists(atPath: url.path),
-                      let data = try? Data(contentsOf: url) else { return nil as UIImage? }
-                return UIImage(data: data)
+            // Resolve thumbnail + missing-worldmap state off the main thread to avoid
+            // main-thread FileManager I/O during layout/scroll (#5/#7).
+            guard let latest = latestScan else {
+                thumbnailImage = nil
+                hasMissingWorldMap = false
+                return
+            }
+            let previewURL = latest.modelPreviewURL
+            let fallbackURL = latest.thumbnailURL
+            let worldMapPaths = location.scans.map { $0.worldMapURL.path }
+
+            // Missing-worldmap flag off-main.
+            hasMissingWorldMap = await Task.detached(priority: .utility) {
+                let fm = FileManager.default
+                return worldMapPaths.contains(where: { !fm.fileExists(atPath: $0) })
             }.value
+
+            // Downsampled, cached thumbnail (prefer the colored model preview).
+            if let img = await ThumbnailCache.image(for: previewURL) {
+                thumbnailImage = img
+            } else {
+                thumbnailImage = await ThumbnailCache.image(for: fallbackURL)
+            }
         }
     }
 }
@@ -300,12 +280,20 @@ struct ScanCard: View {
     var onDelete: (CapturedScan) -> Void
 
     @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
+    @Environment(\.modelContext) private var modelContext
     @State private var exportItem: ZipExportItem? = nil
     @State private var showExportError = false
     @State private var showDeleteConfirm = false
     @State private var itemCounts: (images: Int, proxy: Int, depth: Int, cameras: Int)? = nil
     @State private var showMeshPreview = false
     @State private var showMissingRelocAlert = false
+    @State private var isColoring = false
+    @State private var coloringMessage: String? = nil
+    // Disk-derived values resolved off the main thread in `.task` (see below) so the
+    // view body never performs synchronous FileManager I/O during layout/scroll.
+    @State private var previewImage: UIImage? = nil
+    @State private var isRelocMissing = false
+    @State private var sizeMB: Double = 0
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
@@ -324,12 +312,6 @@ struct ScanCard: View {
         self.onUpdate = onUpdate
         self.onDelete = onDelete
         self.onSelect = onSelect
-    }
-
-    private var previewURL: URL {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: scan.modelPreviewURL.path) { return scan.modelPreviewURL }
-        return scan.thumbnailURL
     }
 
     var body: some View {
@@ -408,25 +390,57 @@ struct ScanCard: View {
             Text("The scan data may have been deleted.")
         }
         .task(id: scan.id) {
+            // Resolve all disk-derived values off the main thread in a single detached
+            // pass, so the view body performs no synchronous FileManager I/O during
+            // layout/scroll (previously: previewURL existence, reloc-warning existence,
+            // and estimatedSizeMB's two attributesOfItem calls all ran inside body).
             let rawDir = scan.rawDataPath
+            let meshPath = scan.meshFileURL.path
+            let colorsPath = scan.colorsFileURL.path
+            let worldMapPath = scan.worldMapURL.path
+            let fallbackBytes = scan.vertexCount * 12 + scan.faceCount * 12
             let fm = FileManager.default
-            // Use detached task for I/O to avoid main thread stutter
-            itemCounts = await Task.detached(priority: .utility) {
+
+            let resolved = await Task.detached(priority: .utility) {
+                () -> (counts: (Int, Int, Int, Int), relocMissing: Bool, sizeMB: Double) in
                 let iCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("images").path))?.count ?? 0
                 let pCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("proxy_images").path))?.count ?? 0
                 let dCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("depth").path))?.count ?? 0
                 let cCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("cameras").path))?.count ?? 0
-                return (iCount, pCount, dCount, cCount)
+
+                let relocMissing = !fm.fileExists(atPath: worldMapPath)
+
+                var bytes: Int64 = 0
+                if let attr = try? fm.attributesOfItem(atPath: meshPath) { bytes += attr[.size] as? Int64 ?? 0 }
+                if let attr = try? fm.attributesOfItem(atPath: colorsPath) { bytes += attr[.size] as? Int64 ?? 0 }
+                let sizeMB = (bytes > 0 ? Double(bytes) : Double(fallbackBytes)) / (1024.0 * 1024.0)
+
+                return ((iCount, pCount, dCount, cCount), relocMissing, sizeMB)
             }.value
+
+            itemCounts = resolved.counts
+            isRelocMissing = resolved.relocMissing
+            sizeMB = resolved.sizeMB
+        }
+        // Load the preview as a downsampled, cached thumbnail. Keyed on the location's
+        // updatedAt so it refreshes after (re)coloring rewrites model_preview.jpg.
+        .task(id: scan.location?.updatedAt) {
+            let previewURL = scan.modelPreviewURL
+            let thumbURL = scan.thumbnailURL
+            if let img = await ThumbnailCache.image(for: previewURL) {
+                previewImage = img
+            } else {
+                previewImage = await ThumbnailCache.image(for: thumbURL)
+            }
         }
     }
 
     @ViewBuilder
     private var previewImageSection: some View {
         Button(action: { showMeshPreview = true }) {
-            AsyncImage(url: previewURL) { phase in
-                if let image = phase.image {
-                    image
+            Group {
+                if let image = previewImage {
+                    Image(uiImage: image)
                         .resizable()
                         .scaledToFill()
                 } else {
@@ -443,9 +457,23 @@ struct ScanCard: View {
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
-        .id(scan.location?.updatedAt)
         .overlay(editingOverlay)
         .overlay(alignment: .topLeading) { relocWarningOverlay }
+        .overlay {
+            if isColoring {
+                ZStack {
+                    Color.black.opacity(0.5)
+                    VStack(spacing: 8) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(1.2)
+                        Text(coloringMessage ?? "Coloring...")
+                            .font(.caption2)
+                            .foregroundColor(.white)
+                    }
+                }
+            }
+        }
         .confirmationDialog(
             "Delete Scan",
             isPresented: $showDeleteConfirm
@@ -468,7 +496,7 @@ struct ScanCard: View {
 
     @ViewBuilder
     private var relocWarningOverlay: some View {
-        if !FileManager.default.fileExists(atPath: scan.worldMapURL.path) {
+        if isRelocMissing {
             Button(action: { showMissingRelocAlert = true }) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.title2)
@@ -499,7 +527,7 @@ struct ScanCard: View {
                     .font(.subheadline).bold()
                     .foregroundColor(.white)
                 HStack(spacing: 8) {
-                    Text(String(format: "%.1f MB", scan.estimatedSizeMB))
+                    Text(String(format: "%.1f MB", sizeMB))
                     Text("\(formattedCount(scan.faceCount)) polys")
                 }
                 .font(.caption)
@@ -541,34 +569,52 @@ struct ScanCard: View {
 
     @ViewBuilder
     private var actionButtonsBlock: some View {
-        HStack(spacing: 10) {
-            Button(action: { saveToFiles() }) {
-                HStack {
-                    Image(systemName: "square.and.arrow.down")
-                    Text("Save")
-                        .font(.subheadline).bold()
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                Button(action: { saveToFiles() }) {
+                    HStack {
+                        Image(systemName: "square.and.arrow.down")
+                        Text("Save")
+                            .font(.subheadline).bold()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
+                    .foregroundColor(isEditing ? .gray : .white)
+                    .cornerRadius(10)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
-                .foregroundColor(isEditing ? .gray : .white)
-                .cornerRadius(10)
-            }
-            .disabled(isEditing)
+                .disabled(isEditing)
 
-            Button(action: { uploadScan() }) {
-                HStack {
-                    Image(systemName: "icloud.and.arrow.up")
-                    Text("Upload")
-                        .font(.subheadline).bold()
+                Button(action: { uploadScan() }) {
+                    HStack {
+                        Image(systemName: "icloud.and.arrow.up")
+                        Text("Upload")
+                            .font(.subheadline).bold()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(uploadButtonDisabled ? Color.gray.opacity(0.3) : Color.blue)
+                    .foregroundColor(isEditing ? .gray : .white)
+                    .cornerRadius(10)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(uploadButtonDisabled ? Color.gray.opacity(0.3) : Color.blue)
-                .foregroundColor(isEditing ? .gray : .white)
-                .cornerRadius(10)
+                .disabled(uploadButtonDisabled)
             }
-            .disabled(uploadButtonDisabled)
+
+            if !scan.isColored {
+                Button(action: { colorizeScan() }) {
+                    HStack {
+                        Image(systemName: "paintbrush.fill")
+                        Text("Color")
+                            .font(.subheadline).bold()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(isEditing || isColoring ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
+                    .foregroundColor(isEditing || isColoring ? .gray : .white)
+                    .cornerRadius(10)
+                }
+                .disabled(isEditing || isColoring)
+            }
         }
     }
 
@@ -721,6 +767,55 @@ struct ScanCard: View {
                     self.onUpdate(self.scan)
                     self.showExportError = true
                 }
+            }
+        }
+    }
+
+    private func colorizeScan() {
+        isColoring = true
+        coloringMessage = "Coloring..."
+
+        let meshURL = scan.meshFileURL
+        let rawDataDir = scan.rawDataPath
+        let colorsURL = scan.colorsFileURL
+        let previewURL = scan.modelPreviewURL
+        let pose = scan.location?.imagingPoseMatrix
+
+        DispatchQueue.global(qos: .utility).async {
+            guard let meshData = try? Data(contentsOf: meshURL) else {
+                DispatchQueue.main.async {
+                    self.isColoring = false
+                    self.coloringMessage = nil
+                }
+                return
+            }
+
+            let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
+                objData: meshData,
+                rawDataDir: rawDataDir
+            )
+
+            DispatchQueue.main.async {
+                self.coloringMessage = "Updating preview..."
+            }
+
+            // Write updated colors
+            if let colors = vertexColors {
+                try? colors.write(to: colorsURL)
+            }
+
+            // Regenerate 3D model preview
+            if let img = MeshPreviewView.generateSnapshot(meshURL: meshURL, colorsURL: colorsURL, poseMatrix: pose),
+               let data = img.jpegData(compressionQuality: 0.8) {
+                try? data.write(to: previewURL)
+            }
+
+            DispatchQueue.main.async {
+                self.scan.isColored = true
+                self.scan.location?.updatedAt = Date() // Trigger preview image reload
+                try? self.modelContext.save()
+                self.isColoring = false
+                self.coloringMessage = nil
             }
         }
     }

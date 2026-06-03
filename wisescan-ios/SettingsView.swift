@@ -8,14 +8,17 @@ struct SettingsView: View {
 
     @AppStorage(AppConstants.Key.rawOverlapMax) private var overlapMax: Double = AppConstants.overlapMax
     @AppStorage(AppConstants.Key.rawRejectBlur) private var rejectBlur: Bool = AppConstants.rejectBlur
+    @AppStorage(AppConstants.Key.captureMode) private var captureMode: String = AppConstants.captureMode
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
     @AppStorage(AppConstants.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppConstants.flipCameraEnabled
-    @AppStorage(AppConstants.Key.debugVertexMapping) private var debugVertexMapping: Bool = AppConstants.debugVertexMapping
     @AppStorage(AppConstants.Key.mockIMU) private var mockIMU: Bool = AppConstants.mockIMU
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
     @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
     @AppStorage(AppConstants.Key.mockWearable) private var mockWearable: Bool = AppConstants.mockWearable
+    @AppStorage(AppConstants.Key.hideLivePoints) private var hideLivePoints: Bool = AppConstants.hideLivePoints
+    @AppStorage(AppConstants.Key.perfDiagnostics) private var perfDiagnostics: Bool = AppConstants.perfDiagnostics
+    @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
@@ -79,6 +82,22 @@ struct SettingsView: View {
                             Slider(value: $overlapMax, in: 10...100, step: 5)
                                 .tint(.cyan)
                             Text("Controls maximum overlap between consecutive captured frames. Lower values capture fewer, more distinct frames. Higher values capture more frames with greater overlap.")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                        .padding(.vertical, 4)
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Capture View Mode")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            Picker("Capture Mode", selection: $captureMode) {
+                                Text("AR (Camera Feed)").tag(AppConstants.CaptureMode.ar.rawValue)
+                                Text("VR (Live Point Cloud)").tag(AppConstants.CaptureMode.vr.rawValue)
+                            }
+                            .pickerStyle(.segmented)
+                            .colorScheme(.dark)
+                            Text("Switch between augmented reality (ARKit passthrough) and virtual reality (live depth point cloud) capture modes.")
                                 .font(.caption)
                                 .foregroundColor(.gray)
                         }
@@ -195,7 +214,6 @@ struct SettingsView: View {
                                 if !newValue {
                                     // Reset all dev options to defaults when disabled
                                     self.flipCameraEnabled = AppConstants.flipCameraEnabled
-                                    self.debugVertexMapping = AppConstants.debugVertexMapping
                                     self.mockIMU = AppConstants.mockIMU
                                     self.mockCameraImages = AppConstants.mockCameraImages
                                     self.mockDepthMaps = AppConstants.mockDepthMaps
@@ -220,18 +238,6 @@ struct SettingsView: View {
                                     Text("Flip Camera")
                                         .foregroundColor(.white)
                                     Text("Adds a button on the Capture screen to switch between front and back cameras. Useful for testing privacy features with the front-facing camera.")
-                                        .font(.caption)
-                                        .foregroundColor(.gray)
-                                }
-                            }
-                            .tint(.orange)
-                            .padding(.vertical, 4)
-
-                            Toggle(isOn: $debugVertexMapping) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Test Vertex Mapping")
-                                        .foregroundColor(.white)
-                                    Text("Runs and logs a diagnostic projection test during mesh coloring to verify 3D-to-2D image math accuracy.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }
@@ -280,6 +286,42 @@ struct SettingsView: View {
                                     Text("Simulate Meta Wearable")
                                         .foregroundColor(.white)
                                     Text("Uses MockDeviceKit to simulate paired Meta Ray-Ban glasses without needing physical hardware.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $hideLivePoints) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Hide Live Points (VR)")
+                                        .foregroundColor(.white)
+                                    Text("Hides the live depth point cloud in VR capture so only the accumulated voxel cloud is shown. Applied when entering VR capture. Useful for inspecting how the accumulated voxels hold up.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $perfDiagnostics) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Perf Diagnostics")
+                                        .foregroundColor(.white)
+                                    Text("Logs main-thread stalls, ARKit frame gaps, capture-queue backlog, and GPU/voxel pass timings to the console (subsystem org.arenaxr.scan4d, category perf) and Instruments signposts. Use to diagnose the mid-scan freeze. Applied when entering capture.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $pauseVRCompute) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Pause VR Compute")
+                                        .foregroundColor(.white)
+                                    Text("Skips the entire VR GPU pipeline (point-cloud projection, voxel integration, extraction, and bloom) — not just hides it. Isolation test: if the freeze disappears with this on, the GPU pipeline is implicated. Applied per frame in VR capture.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

@@ -16,6 +16,7 @@ struct LocationDetailView: View {
     @State private var showRenameAlert = false
     @State private var showNoWorldMapAlert = false
     @State private var hasStitchingLinks = false
+    @State private var isBulkColoring = false
 
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.selectedExportFormat) private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
@@ -24,6 +25,10 @@ struct LocationDetailView: View {
     @State private var showExportSheet = false
 
     var body: some View {
+        // Sort once per body evaluation and reuse for both the scroll content and the
+        // bottom toolbar (which is a sibling of the ScrollView). Previously this sort ran
+        // twice per redraw — and redraws are frequent during uploads/selection toggles.
+        let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
         ZStack {
             Color.black.ignoresSafeArea()
 
@@ -31,7 +36,6 @@ struct LocationDetailView: View {
                 .ignoresSafeArea()
 
             ScrollView {
-                let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
                 VStack(spacing: 24) {
                     // MARK: - Header Actions
                     VStack(spacing: 16) {
@@ -268,7 +272,7 @@ struct LocationDetailView: View {
             if isEditing {
                 VStack {
                     Spacer()
-                    bottomActionToolbar(sortedScans: location.scans.sorted { $0.capturedAt > $1.capturedAt })
+                    bottomActionToolbar(sortedScans: sortedScans)
                 }
             }
         }
@@ -483,9 +487,69 @@ struct LocationDetailView: View {
                     .cornerRadius(10)
             }
             .disabled(selectedScans.isEmpty || isBulkExporting)
+            
+            Button(action: {
+                let scansToColor = sortedScans.filter { selectedScans.contains($0.id) && !$0.isColored }
+                bulkColorize(scans: scansToColor)
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "paintbrush.fill")
+                    Text("Color")
+                }
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(bulkColorDisabled ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
+                    .foregroundColor(bulkColorDisabled ? .gray : .white)
+                    .cornerRadius(10)
+            }
+            .disabled(bulkColorDisabled)
         }
         .padding()
         .background(.ultraThinMaterial)
+    }
+
+    private var bulkColorDisabled: Bool {
+        let selectedUncolored = location.scans.filter { selectedScans.contains($0.id) && !$0.isColored }
+        return selectedUncolored.isEmpty || isBulkColoring
+    }
+
+    private func bulkColorize(scans: [CapturedScan]) {
+        guard !scans.isEmpty else { return }
+        isBulkColoring = true
+
+        DispatchQueue.global(qos: .utility).async {
+            for scan in scans {
+                guard let meshData = try? Data(contentsOf: scan.meshFileURL) else { continue }
+
+                let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
+                    objData: meshData,
+                    rawDataDir: scan.rawDataPath
+                )
+
+                if let colors = vertexColors {
+                    try? colors.write(to: scan.colorsFileURL)
+                }
+
+                let pose = scan.location?.imagingPoseMatrix
+                if let img = MeshPreviewView.generateSnapshot(meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL, poseMatrix: pose),
+                   let data = img.jpegData(compressionQuality: 0.8) {
+                    try? data.write(to: scan.modelPreviewURL)
+                }
+
+                DispatchQueue.main.async {
+                    scan.isColored = true
+                    scan.location?.updatedAt = Date()
+                    try? self.modelContext.save()
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.isBulkColoring = false
+                self.isEditing = false
+                self.selectedScans.removeAll()
+            }
+        }
     }
 }
 

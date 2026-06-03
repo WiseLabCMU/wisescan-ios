@@ -45,8 +45,19 @@ enum VertexColorAccumulator {
             }
         }
         
-        // Failsafe timeout for Simulator / Test modes where ARKit refuses to yield a map or error
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+        // Failsafe so a non-responsive getCurrentWorldMap can't hang the save forever. On a real
+        // device getCurrentWorldMap honors its contract (always calls back with a map or an error),
+        // so this is a "something is broken" escape hatch, NOT a normal-operation cap: 30s is far
+        // longer than serializing even a large map (~1–3s, e.g. after several successive extends of
+        // one location), so it never race-drops a valid map the way the old 2s cap did (which saved
+        // scans with no worldMapURL → not relocalizable/extendable later, only a card badge). The
+        // Simulator never yields a real map, so keep it short there so test flows don't stall.
+        #if targetEnvironment(simulator)
+        let worldMapTimeout: TimeInterval = 2.0
+        #else
+        let worldMapTimeout: TimeInterval = 30.0
+        #endif
+        DispatchQueue.main.asyncAfter(deadline: .now() + worldMapTimeout) {
             completionLock.lock()
             if didComplete {
                 completionLock.unlock()
@@ -54,10 +65,63 @@ enum VertexColorAccumulator {
             }
             didComplete = true
             completionLock.unlock()
-            
-            print("[Warning] ARWorldMap export timed out after 2 seconds. Proceeding without map.")
+
+            print("[Warning] ARWorldMap export timed out after \(worldMapTimeout)s. Proceeding without map.")
             completion(nil)
         }
+    }
+
+    /// Generate normals-based vertex colors (fast, no image I/O).
+    /// Uses the standard tangent-space normal mapping convention where normals
+    /// are remapped from [-1,1] to [0,1] via (normal + 1) / 2:
+    ///   R = X axis, G = Y axis, B = Z axis.
+    /// This preserves directional information and produces the familiar
+    /// blue/purple/green visualization used in 3D workflows.
+    /// Used as the default coloring when a scan is first saved, before camera-based coloring.
+    static func generateNormalsColors(objData: Data) -> Data? {
+        guard let parsed = MeshParser.parseOBJ(from: objData) else { return nil }
+        let vertices = parsed.vertices
+        guard !vertices.isEmpty else { return nil }
+
+        // Accumulate face normals per vertex
+        var normals = [SIMD3<Float>](repeating: .zero, count: vertices.count)
+
+        for face in parsed.faces {
+            let i0 = Int(face.0)
+            let i1 = Int(face.1)
+            let i2 = Int(face.2)
+            guard i0 < vertices.count, i1 < vertices.count, i2 < vertices.count else { continue }
+
+            let v0 = vertices[i0]
+            let v1 = vertices[i1]
+            let v2 = vertices[i2]
+
+            let edge1 = v1 - v0
+            let edge2 = v2 - v0
+            let normal = simd_cross(edge1, edge2)
+
+            normals[i0] += normal
+            normals[i1] += normal
+            normals[i2] += normal
+        }
+
+        // Normalize and remap to [0,1] using standard normal map convention: (n + 1) / 2.
+        // Fill the output Data in place to avoid an intermediate [SIMD4<Float>] allocation.
+        var data = Data(count: normals.count * MemoryLayout<SIMD4<Float>>.stride)
+        data.withUnsafeMutableBytes { raw in
+            let out = raw.bindMemory(to: SIMD4<Float>.self)
+            for i in normals.indices {
+                let n = normals[i]
+                let normalized = simd_length(n) > 0 ? simd_normalize(n) : SIMD3<Float>(0, 0, 1)
+                out[i] = SIMD4<Float>(
+                    (normalized.x + 1) / 2,
+                    (normalized.y + 1) / 2,
+                    (normalized.z + 1) / 2,
+                    1.0
+                )
+            }
+        }
+        return data
     }
 
     /// Colorize OBJ mesh vertices using saved camera frames (post-processing).
@@ -93,22 +157,25 @@ enum VertexColorAccumulator {
         // Initialize color array (gray default for unsampled vertices)
         var colors = [SIMD3<Float>](repeating: SIMD3<Float>(0.5, 0.5, 0.5), count: vertices.count)
         var colored = [Bool](repeating: false, count: vertices.count)
-        var hasRunDeveloperTest = false
 
         // Downscale factor — vertex coloring doesn't need full-res images
         let downscaleFactor = 2
 
         for cameraFile in sampledFiles {
+          // Bound peak memory: each frame decodes a UIImage/CGImage + a downsample
+          // context + a depth image, all autoreleased. Without a per-frame pool these
+          // accumulate across every sampled frame and can spike memory / trigger jetsam.
+          autoreleasepool {
             // Parse camera JSON (Polycam format with t_XX transform and intrinsics)
             guard let jsonData = try? Data(contentsOf: cameraFile),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { continue }
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { return }
 
             guard let fx = (json["fx"] as? NSNumber)?.floatValue,
                   let fy = (json["fy"] as? NSNumber)?.floatValue,
                   let cx = (json["cx"] as? NSNumber)?.floatValue,
                   let cy = (json["cy"] as? NSNumber)?.floatValue,
                   let imgW = (json["width"] as? NSNumber)?.intValue,
-                  let imgH = (json["height"] as? NSNumber)?.intValue else { continue }
+                  let imgH = (json["height"] as? NSNumber)?.intValue else { return }
 
             // Reconstruct 4x4 camera-to-world transform (row-major t_XX values)
             guard let t00 = (json["t_00"] as? NSNumber)?.floatValue,
@@ -122,7 +189,7 @@ enum VertexColorAccumulator {
                   let t20 = (json["t_20"] as? NSNumber)?.floatValue,
                   let t21 = (json["t_21"] as? NSNumber)?.floatValue,
                   let t22 = (json["t_22"] as? NSNumber)?.floatValue,
-                  let t23 = (json["t_23"] as? NSNumber)?.floatValue else { continue }
+                  let t23 = (json["t_23"] as? NSNumber)?.floatValue else { return }
 
             // Camera-to-world (row-major → column-major for simd)
             let cam2World = simd_float4x4(columns: (
@@ -134,18 +201,12 @@ enum VertexColorAccumulator {
             // World-to-camera
             let world2Cam = cam2World.inverse
 
-            // Developer Diagnostic Test (runs once per coloring pass if enabled)
-            if UserDefaults.standard.bool(forKey: AppConstants.Key.developerMode) && UserDefaults.standard.bool(forKey: AppConstants.Key.debugVertexMapping) && !hasRunDeveloperTest {
-                runDeveloperMappingTest(fx: fx, fy: fy, cx: cx, cy: cy, cam2World: cam2World, world2Cam: world2Cam)
-                hasRunDeveloperTest = true
-            }
-
             // Load corresponding image
-            guard let imagePath = json["image_path"] as? String else { continue }
+            guard let imagePath = json["image_path"] as? String else { return }
             let imageURL = rawDir.appendingPathComponent(imagePath)
             guard let imageData = try? Data(contentsOf: imageURL),
                   let uiImage = UIImage(data: imageData),
-                  let cgImage = uiImage.cgImage else { continue }
+                  let cgImage = uiImage.cgImage else { return }
 
             // Downsample image to reduce memory peak (#9)
             let targetWidth = cgImage.width / downscaleFactor
@@ -159,13 +220,13 @@ enum VertexColorAccumulator {
                 bytesPerRow: targetWidth * 4,
                 space: colorSpace,
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-            ) else { continue }
+            ) else { return }
             context.interpolationQuality = .low
             context.draw(cgImage, in: CGRect(x: 0, y: 0, width: targetWidth, height: targetHeight))
 
             guard let downsampled = context.makeImage(),
                   let pixelData = downsampled.dataProvider?.data,
-                  let ptr = CFDataGetBytePtr(pixelData) else { continue }
+                  let ptr = CFDataGetBytePtr(pixelData) else { return }
             let width = downsampled.width
             let height = downsampled.height
             let bytesPerRow = downsampled.bytesPerRow
@@ -251,43 +312,22 @@ enum VertexColorAccumulator {
                 colored[i] = true
             }
             _ = depthPixelDataBuffer // Silence compiler warning while ensuring CFData buffer outlives the pointer
+          } // autoreleasepool (per frame)
         }
 
-        let coloredCount = colored.filter { $0 }.count
+        let coloredCount = colored.reduce(0) { $0 + ($1 ? 1 : 0) }
         print("[VertexColor] Colored \(coloredCount)/\(vertices.count) vertices from \(sampledFiles.count) frames")
 
-        // Convert to SIMD4<Float> with alpha=1 (matches buildColorData format)
-        let rgba = colors.map { SIMD4<Float>($0.x, $0.y, $0.z, 1.0) }
-        return Data(bytes: rgba, count: rgba.count * MemoryLayout<SIMD4<Float>>.stride)
-    }
-    
-    /// Validates 3D-to-2D image math by projecting test vertices into camera bounds
-    static func runDeveloperMappingTest(fx: Float, fy: Float, cx: Float, cy: Float, cam2World: simd_float4x4, world2Cam: simd_float4x4) {
-        print("\n[VertexColor Debug] --- RUNNING VERTEX MAPPING DIAGNOSTIC ---")
-        print("[VertexColor Debug] Intrinsics -> fx:\(fx) fy:\(fy) cx:\(cx) cy:\(cy)")
-        
-        // Create test vertices 2 meters directly in front of the camera
-        let testVerts: [(String, SIMD4<Float>)] = [
-            ("Center", SIMD4<Float>(0, 0, -2.0, 1.0)),
-            ("Right", SIMD4<Float>(1.0, 0, -2.0, 1.0)),
-            ("Left", SIMD4<Float>(-1.0, 0, -2.0, 1.0)),
-            ("Up", SIMD4<Float>(0, 1.0, -2.0, 1.0)),
-            ("Down", SIMD4<Float>(0, -1.0, -2.0, 1.0))
-        ]
-        
-        for (name, camPos) in testVerts {
-            let worldPos = cam2World * camPos
-            let simulatedCamPos = world2Cam * worldPos // should equal camPos
-            
-            let invZ = -1.0 / simulatedCamPos.z
-            let px = Int(fx * simulatedCamPos.x * invZ + cx)
-            let py = Int(cy - fy * simulatedCamPos.y * invZ)
-            
-            let yPlacement = py > Int(cy) ? "BOTTOM HALF" : (py < Int(cy) ? "TOP HALF" : "MIDDLE")
-            let xPlacement = px > Int(cx) ? "RIGHT HALF" : (px < Int(cx) ? "LEFT HALF" : "MIDDLE")
-            
-            print("[VertexColor Debug] '\(name)' vertex at world (\(String(format: "%.2f", worldPos.x)), \(String(format: "%.2f", worldPos.y)), \(String(format: "%.2f", worldPos.z))) -> projected to px:\(px), py:\(py) (\(xPlacement), \(yPlacement))")
+        // Convert to SIMD4<Float> with alpha=1 (matches buildColorData format), filling the
+        // output Data in place to avoid an intermediate [SIMD4<Float>] allocation.
+        var data = Data(count: colors.count * MemoryLayout<SIMD4<Float>>.stride)
+        data.withUnsafeMutableBytes { raw in
+            let out = raw.bindMemory(to: SIMD4<Float>.self)
+            for i in colors.indices {
+                let c = colors[i]
+                out[i] = SIMD4<Float>(c.x, c.y, c.z, 1.0)
+            }
         }
-        print("[VertexColor Debug] -----------------------------------------\n")
+        return data
     }
 }

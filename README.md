@@ -23,10 +23,11 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 
 ## Features
 
-- **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay and quality HUD (LiDAR devices only).
+- **AR + VR Capture Modes:** AR mode uses camera passthrough with live wireframe mesh overlay; VR mode renders a live depth point cloud on a black background using Metal shaders. Toggle between modes in Settings.
+- **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay, capacity HUD, and real-time tracking guidance banners (LiDAR devices only).
 - **Lite Mode:** Non-LiDAR devices capture images + camera poses for server-side photogrammetry. A persistent banner indicates lite mode.
-- **Scan4D (Extend Scan):** Group scans by Location. Use "Extend Scan" with a red ghost-mesh overlay to either re-scan the same space for time-series updates, or move to the edge and scan adjacent areas for downstream stitching.
-- **Privacy Filtering:** Person segmentation removes human geometry from the localized mesh; face detection blurs faces on camera feeds and natively generates unprojected 3D red-alert markers indicating downstream face removal on your mesh preview.
+- **Scan4D (Extend Scan):** Group scans by Location. Set your workflow intent (Time-Series vs Space Extension) when saving a new scan. Use "Extend Scan" with a configurable ghost-mesh overlay (default: magenta) to re-scan the identical space or stitch adjacent areas.
+- **Privacy Filtering:** A live red-eye indicator marks detected people on-screen, and person regions are pixelated in exported frames and zeroed out of depth maps. All three are driven by ARKit's person-segmentation stencil (no per-frame Vision pass); one body-center 3D anchor per person is unprojected from depth for red privacy markers on mesh previews.
 - **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
 - **Developer Mode:** Toggleable debugging tools including front/back camera switching for testing privacy features, with a persistent banner across all views.
 - **Export & Scan Capture Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses governed by motion-blur rejection and overlapping metrics.
@@ -40,17 +41,35 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 
 ```
 wisescan-ios/
-├── AppDelegate.swift          # App lifecycle, splash screen
-├── ContentView.swift          # Tab bar (Dashboard, Capture, Workflows) + LiDAR check + Developer Mode banner
-├── DashboardView.swift        # Upload server status card, wearable glasses connect
-├── CaptureView.swift          # Live capture UI, recording controls, scan HUD, capacity metrics, flip camera
-├── ARCoverageView.swift       # ARKit scene reconstruction, person segmentation, OBJ export, capacity tracking
-├── FaceBlurOverlay.swift      # Live face detection overlay + face blur utility for exports
-├── FrameCaptureSession.swift  # RAW data capture (RGB, depth, poses → transforms.json + Polycam cameras/)
-├── ScansListView.swift        # Scan cards, location rename, format picker, save/upload actions
-├── MeshPreviewView.swift      # SceneKit 3D mesh preview with camera-sampled or height-gradient coloring
-├── ScanStore.swift            # Shared data models (CapturedScan, ExportFormat, ScanStats, capacity scoring)
-└── SettingsView.swift         # Upload URL, RAW export settings, Developer Mode toggles, workflow guide
+├── AppDelegate.swift            # App lifecycle, orientation locking
+├── AppConstants.swift           # Centralized UI constants, app defaults, pipeline tuning
+├── ContentView.swift            # Tab bar (Dashboard, Capture, Scans) + LiDAR check
+├── DashboardView.swift          # Upload server status card, wearable glasses connect
+├── CaptureView.swift            # Live capture UI, recording controls, scan HUD, capacity metrics
+├── ARCoverageView.swift         # ARKit session, mesh wireframe (AR), point cloud (VR), OBJ export
+├── PointCloudManager.swift      # VR mode: live depth point cloud rendering via Metal shaders
+├── FaceBlurOverlay.swift        # Live red-eye privacy indicator (ARKit stencil) + pixelation utility for exports
+├── FrameCaptureSession.swift    # RAW data capture (RGB, depth, poses → transforms.json + cameras/)
+├── LocationDetailView.swift     # Per-location scan management, export, upload, preview
+├── ScansListView.swift          # Scan cards, location groups, rename, format picker, save/upload
+├── MeshPreviewView.swift        # SceneKit 3D mesh preview with vertex colors or height gradient
+├── ScanStore.swift              # Data models (ScanLocation, CapturedScan, ScanStats, capacity)
+├── ScanExportManager.swift      # Export packaging (Scan4D, Polycam, RAW, OBJ, PLY, USDZ)
+├── MeshConverter.swift          # OBJ→PLY and OBJ→USDZ mesh conversion
+├── MeshParser.swift             # Wavefront OBJ parser for RealityKit MeshResource
+├── VertexColorAccumulator.swift # Normals-based default coloring, on-demand vertex coloring, ARWorldMap export
+├── VoxelGrid.swift              # Metal voxel grid for VR accumulated point cloud
+├── MetaWearableManager.swift    # Meta Ray-Ban DAT SDK lifecycle, streaming, proxy frames
+├── LocationManager.swift        # GPS/heading updates for scan metadata
+├── PermissionsOverlay.swift     # Camera/AR permission request UI
+├── SettingsView.swift           # Upload URL, RAW settings, capture mode, Developer Mode
+├── UserGuideView.swift          # In-app workflow guide
+├── DemoDataSeeder.swift         # Orphan scan discovery + SwiftData seeding
+├── TestDataGenerator.swift      # Mock camera intrinsics for testing
+└── Shaders/
+    ├── PointCloud.metal         # VR point cloud vertex/fragment shaders
+    ├── Bloom.metal              # Bloom post-processing shader
+    └── Wireframe.metal          # AR wireframe rendering shaders
 ```
 
 ## Export Formats & Backend Ingestion
@@ -97,18 +116,19 @@ Scan4D is designed to upload these packages directly to edge/cloud servers. Refe
 When enabled (toggle on Capture screen):
 
 - **Mesh**: ARKit person segmentation removes human-shaped geometry from the wireframe overlay and exported OBJ
-- **Camera Feed**: Detected faces are blurred in real-time with visual indicators
-- **RAW Frames**: Faces are Gaussian-blurred in saved JPEG images
+- **Live indicator**: Detected people are marked on-screen with a cheap red-eye marker driven by ARKit's segmentation stencil — no per-frame Vision pass or pixelation render (that starves tracking); the saved-frame blur below is the actual privacy guarantee
+- **RAW Frames**: Person regions are pixelated in saved JPEG images (from the ARKit stencil, with a Vision fallback if the stencil is ever unavailable, so a person is never saved unblurred); one body-center anchor per person is unprojected to 3D
 - **Depth Maps**: Person regions are zeroed out in 16-bit depth exports
 
 ## Quick Start
 
 1. Open the Xcode project in Xcode
 2. Set your development team signing in the target settings
-3. Build and deploy to a LiDAR-equipped device (iPhone 12 Pro or newer)
+3. Build and deploy to an ARKit-capable device (LiDAR recommended for full mesh + depth capture)
 4. Configure the upload URL in Settings (gear icon)
-5. Go to Capture → tap record → scan → tap stop → name your space to save it
-6. In the Scans tab, tap **Extend Scan** on any scan card to either re-scan the same space (time-series) or scan adjacent areas (stitching). The red overlay shows the previous scan boundary.
+5. Go to Capture → tap record → scan → tap stop
+6. Name your space and select its workflow intent (Time-Series vs Space Extension) to save it. You will instantly be routed to the Scans tab with a progress overlay while mesh export and data extraction finishes in the background. The scan initially appears with normals-based coloring; tap the "Color" button on the scan card to apply camera-based vertex coloring.
+7. In the Scans tab, tap **Extend Scan** on any scan card to either re-scan the same space (time-series) or scan adjacent areas (stitching). A colored ghost-mesh overlay (default: magenta, configurable in Settings) shows the previous scan boundary.
 
 ## Testing Guidelines (Meta Wearables)
 

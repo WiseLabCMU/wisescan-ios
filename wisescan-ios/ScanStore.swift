@@ -16,11 +16,12 @@ class CapturedScan {
     var selectedFormatStr: String
     var uploadStatusStr: String
     var uploadProgress: Double
+    var isColored: Bool = false
 
     @Relationship(inverse: \ScanLocation.scans)
     var location: ScanLocation?
 
-    init(id: UUID = UUID(), name: String, capturedAt: Date = Date(), vertexCount: Int, faceCount: Int, hardwareDeviceModel: String = "Native iOS") {
+    init(id: UUID = UUID(), name: String, capturedAt: Date = Date(), vertexCount: Int, faceCount: Int, hardwareDeviceModel: String = "Native iOS", isColored: Bool = false) {
         self.id = id
         self.name = name
         self.capturedAt = capturedAt
@@ -30,6 +31,7 @@ class CapturedScan {
         self.selectedFormatStr = ExportFormat.scan4d.rawValue
         self.uploadStatusStr = "pending"
         self.uploadProgress = 0.0
+        self.isColored = isColored
     }
 
     @Transient var selectedFormat: ExportFormat {
@@ -292,6 +294,12 @@ class ScanStore {
     /// Pending stitch link built up during the extend flow; consumed when the target scan is saved.
     var pendingStitchLink: PendingStitchLink?
 
+    // MARK: Background Processing
+
+    /// Global state for background scan processing (set while a saved scan is being processed).
+    var isProcessingScan: Bool = false
+    var processingMessage: String? = nil
+
     // MARK: Navigation
 
     /// Shared navigation path to allow programmatic pushes from capture to scan detail.
@@ -420,14 +428,14 @@ class ScanStats {
 
     /// Whether the session has accumulated a robust enough map for relocalization.
     var hasEnoughFeaturesForRelocalization: Bool {
-        // ARFrame.WorldMappingStatus: .mapped is the most reliable, .extending is usually acceptable
-        mappingStatus == "mapped" || mappingStatus == "extending"
+        // ARFrame.WorldMappingStatus: .mapped is the most reliable for consistent relocalization
+        mappingStatus == "mapped"
     }
 
     var relocalizationLabel: String {
         switch mappingStatus {
         case "mapped": return "Good"
-        case "extending": return "Fair"
+        case "extending": return "Poor"
         case "limited": return "Poor"
         default: return "None"
         }

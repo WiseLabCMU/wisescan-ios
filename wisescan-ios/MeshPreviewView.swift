@@ -14,6 +14,7 @@ struct MeshPreviewContainer: View {
     @StateObject private var markerState = MarkerProjectionState()
     @State private var isUpdating = false
     @State private var isViewerReady = false
+    @State private var isMeshLoaded = false
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
@@ -23,7 +24,8 @@ struct MeshPreviewContainer: View {
                     meshFileURL: meshFileURL,
                     colorsFileURL: colorsFileURL,
                     scanDirectoryURL: scanDirectoryURL,
-                    markerState: markerState
+                    markerState: markerState,
+                    isMeshLoaded: $isMeshLoaded
                 )
 
                 // 2D overlay icons projected from 3D face anchor positions
@@ -37,17 +39,21 @@ struct MeshPreviewContainer: View {
                             .position(x: pos.point.x, y: pos.point.y)
                     }
                 }
-            } else {
+            }
+
+            // Show loading indicator until mesh is fully parsed and rendered
+            if !isMeshLoaded {
                 VStack(spacing: 16) {
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle(tint: .gray))
                         .scaleEffect(1.5)
-                    Text("Loading Mesh Data...")
+                    Text("Loading Mesh...")
                         .font(.headline)
                         .foregroundColor(.gray)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(white: 0.15))
+                .transition(.opacity)
             }
             
             if isUpdating {
@@ -72,13 +78,13 @@ struct MeshPreviewContainer: View {
                             Text("Set Default Pose")
                         }
                     }
-                    .disabled(isUpdating || !isViewerReady)
+                    .disabled(isUpdating || !isMeshLoaded)
                 }
             }
         }
         .onAppear {
             // Defer the heavy OBJ parsing to ensure the fullScreenCover animation completes smoothly
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 isViewerReady = true
             }
         }
@@ -111,7 +117,7 @@ struct MeshPreviewContainer: View {
 
 /// Published state for projected 2D marker positions.
 class MarkerProjectionState: ObservableObject {
-    struct MarkerScreenPos {
+    struct MarkerScreenPos: Equatable {
         var point: CGPoint
         var isVisible: Bool
     }
@@ -122,9 +128,23 @@ class MarkerProjectionState: ObservableObject {
     var anchorPositions: [SCNVector3] = []
     /// Reference to the SCNView for projection
     weak var scnView: SCNView?
+    /// Tracks whether the last update had no markers, so the common (no-marker) case
+    /// doesn't dispatch to main or republish on every rendered frame.
+    private var lastWasEmpty = false
 
     func updateProjections() {
         guard let scnView = scnView else { return }
+
+        // Common case: no privacy markers. Clear once, then do nothing per frame.
+        // (updateProjections is called from the SceneKit render thread on every frame.)
+        if anchorPositions.isEmpty {
+            if lastWasEmpty { return }
+            lastWasEmpty = true
+            DispatchQueue.main.async { self.screenPositions = [] }
+            return
+        }
+        lastWasEmpty = false
+
         DispatchQueue.main.async {
             guard scnView.pointOfView != nil else { return }
             var newPositions: [MarkerScreenPos] = []
@@ -138,7 +158,10 @@ class MarkerProjectionState: ObservableObject {
                     && screenPoint.y >= 0 && screenPoint.y <= boundsHeight
                 newPositions.append(MarkerScreenPos(point: screenPoint, isVisible: visible))
             }
-            self.screenPositions = newPositions
+            // Skip the publish (and SwiftUI re-render) when nothing moved on screen.
+            if newPositions != self.screenPositions {
+                self.screenPositions = newPositions
+            }
         }
     }
     
@@ -159,6 +182,7 @@ struct MeshPreviewView: UIViewRepresentable {
     var colorsFileURL: URL?
     var scanDirectoryURL: URL?
     var markerState: MarkerProjectionState
+    @Binding var isMeshLoaded: Bool
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -264,9 +288,12 @@ struct MeshPreviewView: UIViewRepresentable {
                     let cameraNode = SCNNode()
                     cameraNode.camera = SCNCamera()
                     cameraNode.camera?.automaticallyAdjustsZRange = true
-                    cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 1.5)
+                    cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 0.4)
                     cameraNode.look(at: SCNVector3Zero)
                     scene.rootNode.addChildNode(cameraNode)
+
+                    // Signal that mesh is ready
+                    self.isMeshLoaded = true
                 }
             }
         }
@@ -501,7 +528,7 @@ struct MeshPreviewView: UIViewRepresentable {
         } else {
             let size = SCNVector3(maxBound.x - minBound.x, maxBound.y - minBound.y, maxBound.z - minBound.z)
             let maxDimension = max(size.x, max(size.y, size.z))
-            cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 1.5)
+            cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 0.4)
             cameraNode.look(at: SCNVector3Zero)
         }
         scene.rootNode.addChildNode(cameraNode)
