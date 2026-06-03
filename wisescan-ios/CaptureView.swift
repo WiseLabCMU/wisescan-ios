@@ -25,6 +25,10 @@ struct CaptureView: View {
     // Set true by ARCoverageView's coordinator when VIO tracking is lost mid‑recording; observed
     // below to halt the scan and prompt save/rescan (data after VIO loss is corrupt).
     @State private var vioCompromised = false
+    // Battery: pauses ARCoverageView's session after the capture tab has been hidden for
+    // AppConstants.arIdleTeardownSeconds; resumed on return. Rapid successive scans stay warm.
+    @State private var pauseARSession = false
+    @State private var idleTeardownTimer: Timer? = nil
     @State private var recordingSeconds = 0
     @State private var recordingTimer: Timer? = nil
     @State private var frameCaptureSession = FrameCaptureSession()
@@ -90,7 +94,8 @@ struct CaptureView: View {
                 ghostXOffset: ghostXOffset,
                 ghostZOffset: ghostZOffset,
                 dismissGhostMesh: dismissGhostMesh,
-                bakedGhostTransform: bakedGhostTransform
+                bakedGhostTransform: bakedGhostTransform,
+                pauseARSession: pauseARSession
             )
                 .ignoresSafeArea()
                 .onChange(of: vioCompromised) { _, lost in
@@ -636,6 +641,12 @@ struct CaptureView: View {
             PerfDiag.refresh()
             mainThreadWatchdog.start()
 
+            // Battery: returning to the capture tab — cancel any pending idle teardown and resume
+            // the AR session if it was paused while we were away.
+            idleTeardownTimer?.invalidate()
+            idleTeardownTimer = nil
+            pauseARSession = false
+
             if let locId = scanStore.activeLocationForScan {
                 let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
                 if let loc = try? modelContext.fetch(descriptor).first {
@@ -688,6 +699,17 @@ struct CaptureView: View {
         }
         .onDisappear {
             mainThreadWatchdog.stop()
+
+            // Battery: left the capture tab — after an idle period, pause the AR session (camera +
+            // sensors off). Guarded at fire time so we never pause mid-recording or during post-scan
+            // processing (the worldmap export still needs the live session). Returning to capture
+            // cancels this (see onAppear). One-shot; rapid successive scans return before it fires.
+            idleTeardownTimer?.invalidate()
+            idleTeardownTimer = Timer.scheduledTimer(withTimeInterval: AppConstants.arIdleTeardownSeconds, repeats: false) { _ in
+                if selectedTab != 1 && !isRecording && !scanStore.isProcessingScan {
+                    pauseARSession = true
+                }
+            }
 
             // Unlock orientation when leaving capture
             AppDelegate.orientationLocked = false

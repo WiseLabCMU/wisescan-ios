@@ -25,6 +25,11 @@ struct ARCoverageView: UIViewRepresentable {
     var dismissGhostMesh: Bool = false  // When true, remove ghost mesh from scene
     var bakedGhostTransform: simd_float4x4? = nil // Manual transform to bake into the session origin
 
+    /// Battery: when true, pause the AR session (camera + sensors power down). Raised by CaptureView
+    /// after an idle period on a non-capture tab; lowered on return to capture. Resume re-runs a
+    /// nominal config (the "Initializing" overlay covers it — non-blocking now the delegate is off-main).
+    var pauseARSession: Bool = false
+
     /// Whether this device has LiDAR for scene reconstruction and depth capture.
     static let supportsLiDAR = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
 
@@ -87,6 +92,25 @@ struct ARCoverageView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.privacyFilter = privacyFilter
+
+        // Battery: pause/resume the session when the capture tab goes idle / returns. ARKit keeps
+        // the camera + sensors powered until paused. While paused, skip the rest of updateUIView
+        // (nothing to render). Resume re-runs the same nominal config makeUIView uses; the
+        // "Initializing" overlay covers it, and it no longer freezes main now the delegate is off-main.
+        if pauseARSession {
+            if !context.coordinator.isSessionPausedForBattery {
+                PerfDiag.log("battery: pausing AR session (idle)")
+                uiView.session.pause()
+                context.coordinator.isSessionPausedForBattery = true
+            }
+            return
+        } else if context.coordinator.isSessionPausedForBattery {
+            context.coordinator.isSessionPausedForBattery = false
+            PerfDiag.log("battery: resuming AR session (returned to capture)")
+            let resumeConfig = ARWorldTrackingConfiguration()
+            if Self.supportsLiDAR { resumeConfig.sceneReconstruction = [] }
+            uiView.session.run(resumeConfig)
+        }
 
         // Live active mesh color update — recolor all existing wireframe entities
         if activeMeshColor != context.coordinator.activeMeshColor {
@@ -362,6 +386,9 @@ struct ARCoverageView: UIViewRepresentable {
         /// counters below are touched ONLY on this queue (so `resetForRecording/Nominal`, called
         /// from updateUIView on main, hop here to clear them — never mutate them on main).
         let sessionDelegateQueue = DispatchQueue(label: "org.arenaxr.scan4d.arsession.delegate")
+        /// Tracks whether we paused the session for battery (idle on a non-capture tab), so we resume
+        /// it exactly once on return rather than re-running the config on every update.
+        var isSessionPausedForBattery = false
         var privacyFilter: Bool = true
         var activeMeshColor: String = AppConstants.activeMeshColor
         var captureMode: AppConstants.CaptureMode = .ar
