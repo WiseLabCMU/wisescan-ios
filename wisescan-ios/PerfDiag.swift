@@ -1,6 +1,7 @@
 import Foundation
 import QuartzCore
 import os
+import Synchronization
 
 /// Lightweight performance diagnostics for investigating mid-scan ARKit VIO starvation
 /// (the 1–2s freeze + tracking drift). Everything here is a **no-op unless the
@@ -14,14 +15,17 @@ import os
 ///   (Points of Interest / os_signpost), so an encode/GPU spike can be visually correlated
 ///   with a main-thread stall and an ARKit frame gap.
 enum PerfDiag {
-    /// Cached so hot paths are a single branch instead of a `UserDefaults` read.
-    /// Refresh via `refresh()` when entering the capture screen.
-    nonisolated(unsafe) static var enabled: Bool =
-        UserDefaults.standard.bool(forKey: AppConstants.Key.perfDiagnostics)
+    /// Cached so hot paths are a single atomic load instead of a `UserDefaults` read. Atomic
+    /// (not a plain `var`) because it's read from many threads — render, ioQueue, voxelQueue,
+    /// delegate queue — while `refresh()` writes it on main; a bare global would be a data race.
+    private static let _enabled = Atomic<Bool>(UserDefaults.standard.bool(forKey: AppConstants.Key.perfDiagnostics))
+
+    /// Single relaxed atomic load — diagnostics gating tolerates seeing a toggle flip one tick late.
+    static var enabled: Bool { _enabled.load(ordering: .relaxed) }
 
     /// Re-read the toggle (call when the capture view appears so a Settings change takes effect).
     static func refresh() {
-        enabled = UserDefaults.standard.bool(forKey: AppConstants.Key.perfDiagnostics)
+        _enabled.store(UserDefaults.standard.bool(forKey: AppConstants.Key.perfDiagnostics), ordering: .relaxed)
     }
 
     static let subsystem = "org.arenaxr.scan4d"
