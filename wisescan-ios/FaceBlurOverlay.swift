@@ -79,6 +79,10 @@ struct PrivacyEyeOverlay: View {
     @State private var regions: [CGRect] = []
     @State private var timer: Timer?
     @State private var isProcessing = false
+    /// Retained confidence-grid state that temporally smooths the raw per-tick segmentation so the
+    /// markers stop popping/skating. `@State` keeps the one instance alive across struct re-creation;
+    /// only the (serialized) seg tick touches it, so no locking is needed.
+    @State private var tracker = PrivacyEyeTracker()
 
     var body: some View {
         GeometryReader { geo in
@@ -114,15 +118,19 @@ struct PrivacyEyeOverlay: View {
         guard !isProcessing else { return } // drop a tick rather than pile up
         // Grab ARKit's existing person stencil and release the ARFrame immediately — only the
         // CVPixelBuffer is retained across the scan (avoids "retaining N ARFrames").
-        guard let seg = arSession?.currentFrame?.segmentationBuffer else {
-            if !regions.isEmpty { regions = [] } // no person / privacy off → clear markers
+        let seg = arSession?.currentFrame?.segmentationBuffer
+        if seg == nil && tracker.isEmpty {
+            if !regions.isEmpty { regions = [] } // nothing present and nothing fading → clear markers
             return
         }
         isProcessing = true
         // The stencil is small (~256×192) so the scan is cheap, but keep it off the main thread
         // to leave the capture timer + VIO untouched, then publish portrait-mapped rects.
         DispatchQueue.global(qos: .userInitiated).async {
-            let sensorRects = PrivacyBlurUtil.personRegions(in: seg)
+            // Feed the stencil (or a nil frame) through the confidence grid: occupied cells build
+            // toward 1, empty cells decay toward 0, and only cells above threshold emit a region —
+            // so a brief blip can't pop a marker in and a brief dropout can't pop one out.
+            let sensorRects = tracker.update(mask: seg)
             // Map sensor (landscape-right) → portrait (.right, i.e. 90° CW): (u, v) → (1 - v, u).
             // Same rotation the camera passthrough uses (see orientation notes above), so markers
             // land over the person as displayed. Aspect-fill crop is ignored — fine for a coarse
@@ -137,6 +145,140 @@ struct PrivacyEyeOverlay: View {
                 self.regions = mapped
                 self.isProcessing = false
             }
+        }
+    }
+}
+
+/// Retained temporal-coherence state for the live red-eye indicator. The raw `personRegions` scan
+/// recomputed occupancy fresh every ~10 Hz tick with no memory, so markers skated and popped as
+/// cells flipped near person boundaries. This holds a persistent per-cell **confidence** grid:
+/// each tick, person-occupied cells build their confidence toward 1 and empty cells decay toward 0,
+/// and only cells above a threshold are rendered. A single threshold on the ramped value gives both
+/// behaviors — a cell must be occupied for a few ticks before it locks on (debounces pop-in) and
+/// stays lit for a few ticks after the person leaves (debounces pop-out). Per cluster we emit a
+/// confidence-WEIGHTED centroid so the marker glides sub-cell as edge confidences ramp, instead of
+/// snapping to whole-cell grid boundaries.
+///
+/// Single-threaded by contract: only the serialized seg tick (`PrivacyEyeOverlay.tick`, gated by
+/// `isProcessing`) calls `update`, so the mutable grid needs no synchronization.
+final class PrivacyEyeTracker {
+    private let cols = 6, rows = 8
+    private var confidence: [Float]
+
+    // Tuned for the 0.1 s (10 Hz) tick. Build is faster than decay so a real person locks on
+    // quickly (~2 ticks to cross threshold) while a momentary dropout lingers (~5 ticks to fade),
+    // which is what kills the flicker. Adjust together if the tick rate changes.
+    private let buildRate: Float = 0.35
+    private let decayRate: Float = 0.15
+    private let onThreshold: Float = 0.5
+    private let minCount = 8 // person pixels per cell to count it occupied this tick (ignore specks)
+    private let step = 4     // sample every 4th pixel for speed
+
+    init() {
+        confidence = [Float](repeating: 0, count: cols * rows)
+    }
+
+    /// True once every cell's confidence has decayed back to ~0 — i.e. nothing left to fade out.
+    /// Lets the caller stop ticking the grid when there's neither a person nor a lingering marker.
+    var isEmpty: Bool {
+        !confidence.contains { $0 > 0.01 }
+    }
+
+    /// Decay/build the grid from the current stencil (nil = no person this tick → pure decay) and
+    /// return merged person regions (normalized sensor coords, top-left origin) for confident cells.
+    func update(mask: CVPixelBuffer?) -> [CGRect] {
+        let occupiedNow = mask.map { countOccupiedCells(in: $0) } ?? [Bool](repeating: false, count: cols * rows)
+        for i in 0..<(cols * rows) {
+            if occupiedNow[i] {
+                confidence[i] += (1 - confidence[i]) * buildRate
+            } else {
+                confidence[i] *= (1 - decayRate)
+            }
+        }
+        return regions()
+    }
+
+    /// One strided pass over the stencil → which grid cells hold enough person pixels this tick.
+    private func countOccupiedCells(in mask: CVPixelBuffer) -> [Bool] {
+        CVPixelBufferLockBaseAddress(mask, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
+        var occupied = [Bool](repeating: false, count: cols * rows)
+        guard let base = CVPixelBufferGetBaseAddress(mask) else { return occupied }
+        let w = CVPixelBufferGetWidth(mask)
+        let h = CVPixelBufferGetHeight(mask)
+        guard w > 0, h > 0 else { return occupied }
+        let stride = CVPixelBufferGetBytesPerRow(mask)
+        let ptr = base.assumingMemoryBound(to: UInt8.self)
+
+        var cnt = [Int](repeating: 0, count: cols * rows)
+        var y = 0
+        while y < h {
+            let row = ptr + y * stride
+            var x = 0
+            while x < w {
+                if row[x] > 128 {
+                    let cx = min(cols - 1, x * cols / w)
+                    let cy = min(rows - 1, y * rows / h)
+                    cnt[cy * cols + cx] += 1
+                }
+                x += step
+            }
+            y += step
+        }
+        for i in 0..<(cols * rows) { occupied[i] = cnt[i] >= minCount }
+        return occupied
+    }
+
+    /// Merge cells above the confidence threshold (4-connectivity union-find) into one region per
+    /// person, each placed at its confidence-weighted centroid for smooth, gliding motion.
+    private func regions() -> [CGRect] {
+        let on = (0..<(cols * rows)).map { confidence[$0] >= onThreshold }
+
+        var parent = Array(0..<(cols * rows))
+        func find(_ a: Int) -> Int {
+            var r = a
+            while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }
+            return r
+        }
+        func union(_ a: Int, _ b: Int) {
+            let ra = find(a), rb = find(b)
+            if ra != rb { parent[ra] = rb }
+        }
+        for cy in 0..<rows {
+            for cx in 0..<cols {
+                let i = cy * cols + cx
+                guard on[i] else { continue }
+                if cx + 1 < cols, on[i + 1] { union(i, i + 1) }
+                if cy + 1 < rows, on[i + cols] { union(i, i + cols) }
+            }
+        }
+
+        // Per cluster: grid-space bounding box (→ region size) + confidence-weighted center (→ glide).
+        struct Accum { var minCX = Int.max, minCY = Int.max, maxCX = Int.min, maxCY = Int.min
+                       var wX: Float = 0, wY: Float = 0, w: Float = 0 }
+        var clusters = [Int: Accum]()
+        for cy in 0..<rows {
+            for cx in 0..<cols {
+                let i = cy * cols + cx
+                guard on[i] else { continue }
+                let r = find(i)
+                var a = clusters[r] ?? Accum()
+                a.minCX = min(a.minCX, cx); a.maxCX = max(a.maxCX, cx)
+                a.minCY = min(a.minCY, cy); a.maxCY = max(a.maxCY, cy)
+                let wt = confidence[i]
+                a.wX += wt * (Float(cx) + 0.5); a.wY += wt * (Float(cy) + 0.5); a.w += wt
+                clusters[r] = a
+            }
+        }
+
+        return clusters.values.map { a in
+            let width = CGFloat(a.maxCX - a.minCX + 1) / CGFloat(cols)
+            let height = CGFloat(a.maxCY - a.minCY + 1) / CGFloat(rows)
+            // Confidence-weighted center (normalized); the rect is centered on it so the view's
+            // midX/midY tracks the smooth centroid while width/height drive marker scaling.
+            let cxNorm = CGFloat(a.wX / a.w) / CGFloat(cols)
+            let cyNorm = CGFloat(a.wY / a.w) / CGFloat(rows)
+            return CGRect(x: cxNorm - width / 2, y: cyNorm - height / 2, width: width, height: height)
         }
     }
 }
@@ -320,80 +462,4 @@ enum PrivacyBlurUtil {
         return centers
     }
 
-    /// Merged person regions (normalized sensor coords, top-left origin) from a segmentation
-    /// stencil — drives the live red-eye indicator. Bins person pixels into the same coarse grid
-    /// as `personCentroids`, then unions adjacent occupied cells (4-connectivity) so each physical
-    /// person yields roughly one region rather than a swarm of per-cell markers. Cheap: one strided
-    /// pass + a tiny connected-components merge over the ≤48-cell grid. No Vision, no render.
-    nonisolated static func personRegions(in mask: CVPixelBuffer) -> [CGRect] {
-        CVPixelBufferLockBaseAddress(mask, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(mask) else { return [] }
-        let w = CVPixelBufferGetWidth(mask)
-        let h = CVPixelBufferGetHeight(mask)
-        guard w > 0, h > 0 else { return [] }
-        let stride = CVPixelBufferGetBytesPerRow(mask)
-        let ptr = base.assumingMemoryBound(to: UInt8.self)
-
-        let cols = 6, rows = 8
-        var cnt = [Int](repeating: 0, count: cols * rows)
-        let step = 4 // sample every 4th pixel for speed
-        var y = 0
-        while y < h {
-            let row = ptr + y * stride
-            var x = 0
-            while x < w {
-                if row[x] > 128 {
-                    let cx = min(cols - 1, x * cols / w)
-                    let cy = min(rows - 1, y * rows / h)
-                    cnt[cy * cols + cx] += 1
-                }
-                x += step
-            }
-            y += step
-        }
-
-        let minCount = 8 // ignore tiny specks / noise
-        let occupied = (0..<(cols * rows)).map { cnt[$0] >= minCount }
-
-        // Union-find over occupied cells (4-connectivity) so one person = one region.
-        var parent = Array(0..<(cols * rows))
-        func find(_ a: Int) -> Int {
-            var r = a
-            while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }
-            return r
-        }
-        func union(_ a: Int, _ b: Int) {
-            let ra = find(a), rb = find(b)
-            if ra != rb { parent[ra] = rb }
-        }
-        for cy in 0..<rows {
-            for cx in 0..<cols {
-                let i = cy * cols + cx
-                guard occupied[i] else { continue }
-                if cx + 1 < cols, occupied[i + 1] { union(i, i + 1) }
-                if cy + 1 < rows, occupied[i + cols] { union(i, i + cols) }
-            }
-        }
-
-        // Bounding box (in grid space) per cluster.
-        var minCX = [Int: Int](), minCY = [Int: Int](), maxCX = [Int: Int](), maxCY = [Int: Int]()
-        for cy in 0..<rows {
-            for cx in 0..<cols {
-                let i = cy * cols + cx
-                guard occupied[i] else { continue }
-                let r = find(i)
-                minCX[r] = min(minCX[r] ?? cx, cx); maxCX[r] = max(maxCX[r] ?? cx, cx)
-                minCY[r] = min(minCY[r] ?? cy, cy); maxCY[r] = max(maxCY[r] ?? cy, cy)
-            }
-        }
-
-        return minCX.keys.map { r in
-            let x0 = CGFloat(minCX[r]!) / CGFloat(cols)
-            let y0 = CGFloat(minCY[r]!) / CGFloat(rows)
-            let x1 = CGFloat(maxCX[r]! + 1) / CGFloat(cols)
-            let y1 = CGFloat(maxCY[r]! + 1) / CGFloat(rows)
-            return CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
-        }
-    }
 }
