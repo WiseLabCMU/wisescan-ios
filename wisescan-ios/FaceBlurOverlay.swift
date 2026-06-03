@@ -417,10 +417,14 @@ enum PrivacyBlurUtil {
         return (UIImage(cgImage: cgImage).jpegData(compressionQuality: AppConstants.jpegCompressionQuality), centers)
     }
 
-    /// Sparse normalized centroids (top-left origin) of person-labeled regions in a
-    /// segmentation stencil. Bins person pixels into a coarse grid and emits one centroid per
-    /// occupied cell; the caller's 3D clustering then merges cells of the same person into a
-    /// single anchor at the body-sized threshold. Cheap — one strided pass over the stencil.
+    /// ONE normalized centroid (top-left origin) per person in a segmentation stencil — the 3D
+    /// anchoring counterpart to the live indicator's `PrivacyEyeTracker`. Bins person pixels into
+    /// the same coarse grid, then **union-finds adjacent occupied cells** so a person spanning
+    /// several cells (head→torso→legs) collapses to a single body-center centroid instead of a
+    /// vertical stack of per-cell points. Emitting one centroid per person — rather than per cell —
+    /// is what keeps the saved `face_anchors` from fragmenting into widely-spaced anchors that the
+    /// 3D merge radius (~body width) can't rejoin once they've unprojected onto separate body parts.
+    /// Cheap: one strided pass + a tiny connected-components merge over the ≤48-cell grid.
     private nonisolated static func personCentroids(in mask: CVPixelBuffer) -> [CGPoint] {
         CVPixelBufferLockBaseAddress(mask, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
@@ -452,14 +456,39 @@ enum PrivacyBlurUtil {
             y += step
         }
 
-        var centers: [CGPoint] = []
         let minCount = 8 // ignore tiny specks / noise
-        for i in 0..<(cols * rows) where cnt[i] >= minCount {
-            let ux = (sumX[i] / Float(cnt[i])) / Float(w)
-            let uy = (sumY[i] / Float(cnt[i])) / Float(h)
-            centers.append(CGPoint(x: CGFloat(ux), y: CGFloat(uy)))
+        let occupied = (0..<(cols * rows)).map { cnt[$0] >= minCount }
+
+        // Union-find over occupied cells (4-connectivity) so one person = one cluster.
+        var parent = Array(0..<(cols * rows))
+        func find(_ a: Int) -> Int {
+            var r = a
+            while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }
+            return r
         }
-        return centers
+        func union(_ a: Int, _ b: Int) {
+            let ra = find(a), rb = find(b)
+            if ra != rb { parent[ra] = rb }
+        }
+        for cy in 0..<rows {
+            for cx in 0..<cols {
+                let i = cy * cols + cx
+                guard occupied[i] else { continue }
+                if cx + 1 < cols, occupied[i + 1] { union(i, i + 1) }
+                if cy + 1 < rows, occupied[i + cols] { union(i, i + cols) }
+            }
+        }
+
+        // Pixel-weighted centroid per cluster (summed pixel positions, not cell centers, for accuracy).
+        var clX = [Int: Float](), clY = [Int: Float](), clN = [Int: Float]()
+        for i in 0..<(cols * rows) where occupied[i] {
+            let r = find(i)
+            clX[r, default: 0] += sumX[i]; clY[r, default: 0] += sumY[i]; clN[r, default: 0] += Float(cnt[i])
+        }
+        return clN.keys.map { r in
+            CGPoint(x: CGFloat(clX[r]! / clN[r]!) / CGFloat(w),
+                    y: CGFloat(clY[r]! / clN[r]!) / CGFloat(h))
+        }
     }
 
 }

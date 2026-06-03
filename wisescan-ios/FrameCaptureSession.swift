@@ -41,7 +41,33 @@ class FrameCaptureSession {
     private var consecutiveBlurredFrames: Int = 0
 
     // Privacy logic
-    private(set) var faceAnchors: [SIMD3<Float>] = []
+    /// Accumulating person anchor with an observation count, which acts as a confidence weight:
+    /// a real person merges in across many frames (high weight) while a one-frame segmentation
+    /// false positive stays at weight 1 and is dropped at finalize. Mirrors the live indicator's
+    /// confidence gate, in 3D.
+    private struct AnchorAccumulator {
+        var position: SIMD3<Float>
+        var weight: Float
+    }
+    private var faceAnchors: [AnchorAccumulator] = []
+
+    /// Drop low-confidence anchors (seen in too few frames → likely transient segmentation noise)
+    /// then coalesce any survivors still within the merge radius, so the saved `face_anchors` are
+    /// few and representative of the live view — the persist-and-coalesce analog of the live gate.
+    private static func finalizeAnchors(_ anchors: [AnchorAccumulator]) -> [SIMD3<Float>] {
+        let confident = anchors.filter { $0.weight >= AppConstants.faceAnchorMinObservations }
+        var merged: [AnchorAccumulator] = []
+        for a in confident {
+            if let i = merged.firstIndex(where: { simd_distance($0.position, a.position) < AppConstants.faceClusterThresholdMeters }) {
+                let w = merged[i].weight
+                merged[i].position = (merged[i].position * w + a.position * a.weight) / (w + a.weight)
+                merged[i].weight = w + a.weight
+            } else {
+                merged.append(a)
+            }
+        }
+        return merged.map { $0.position }
+    }
 
     // Metadata dependencies
     private var locationManager: LocationManager?
@@ -456,17 +482,22 @@ class FrameCaptureSession {
                                 let worldPoint = transform * localPoint
                                 let point3D = SIMD3<Float>(worldPoint.x, worldPoint.y, worldPoint.z)
 
-                                // Cluster merging
+                                // Cluster merging — weighted by observation count so the merged
+                                // position converges on the true centroid (not biased toward the
+                                // most recent point, as a flat 0.5 blend was), and the weight
+                                // records how many frames saw this person (its confidence).
                                 var found = false
                                 for i in 0..<localAnchors.count {
-                                    if simd_distance(localAnchors[i], point3D) < AppConstants.faceClusterThresholdMeters {
-                                        localAnchors[i] = (localAnchors[i] + point3D) * 0.5
+                                    if simd_distance(localAnchors[i].position, point3D) < AppConstants.faceClusterThresholdMeters {
+                                        let w = localAnchors[i].weight
+                                        localAnchors[i].position = (localAnchors[i].position * w + point3D) / (w + 1)
+                                        localAnchors[i].weight = w + 1
                                         found = true
                                         break
                                     }
                                 }
                                 if !found {
-                                    localAnchors.append(point3D)
+                                    localAnchors.append(AnchorAccumulator(position: point3D, weight: 1))
                                 }
                             }
                             // Publish updated anchors on main thread
@@ -649,8 +680,9 @@ class FrameCaptureSession {
             metadata["compass_heading"] = heading.trueHeading > 0 ? heading.trueHeading : heading.magneticHeading
         }
 
-        if !faceAnchors.isEmpty {
-            metadata["face_anchors"] = faceAnchors.map { ["x": $0.x, "y": $0.y, "z": $0.z] }
+        let finalAnchors = Self.finalizeAnchors(faceAnchors)
+        if !finalAnchors.isEmpty {
+            metadata["face_anchors"] = finalAnchors.map { ["x": $0.x, "y": $0.y, "z": $0.z] }
         }
 
         let jsonPath = directory.appendingPathComponent("scan4d_metadata.json")
