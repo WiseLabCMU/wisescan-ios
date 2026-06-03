@@ -17,6 +17,8 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
     @AppStorage(AppConstants.Key.mockWearable) private var mockWearable: Bool = AppConstants.mockWearable
     @AppStorage(AppConstants.Key.hideLivePoints) private var hideLivePoints: Bool = AppConstants.hideLivePoints
+    @AppStorage(AppConstants.Key.perfDiagnostics) private var perfDiagnostics: Bool = AppConstants.perfDiagnostics
+    @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
@@ -296,6 +298,30 @@ struct SettingsView: View {
                                     Text("Hide Live Points (VR)")
                                         .foregroundColor(.white)
                                     Text("Hides the live depth point cloud in VR capture so only the accumulated voxel cloud is shown. Applied when entering VR capture. Useful for inspecting how the accumulated voxels hold up.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $perfDiagnostics) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Perf Diagnostics")
+                                        .foregroundColor(.white)
+                                    Text("Logs main-thread stalls, ARKit frame gaps, capture-queue backlog, and GPU/voxel pass timings to the console (subsystem org.arenaxr.scan4d, category perf) and Instruments signposts. Use to diagnose the mid-scan freeze. Applied when entering capture.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $pauseVRCompute) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Pause VR Compute")
+                                        .foregroundColor(.white)
+                                    Text("Skips the entire VR GPU pipeline (point-cloud projection, voxel integration, extraction, and bloom) — not just hides it. Isolation test: if the freeze disappears with this on, the GPU pipeline is implicated. Applied per frame in VR capture.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

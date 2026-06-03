@@ -22,9 +22,18 @@ struct CaptureView: View {
     @State private var currentARSession: ARSession? = nil
     @State private var saveMessage: String? = nil
     @State private var isRecording = false
+    // Set true by ARCoverageView's coordinator when VIO tracking is lost mid‑recording; observed
+    // below to halt the scan and prompt save/rescan (data after VIO loss is corrupt).
+    @State private var vioCompromised = false
+    // Battery: pauses ARCoverageView's session after the capture tab has been hidden for
+    // AppConstants.arIdleTeardownSeconds; resumed on return. Rapid successive scans stay warm.
+    @State private var pauseARSession = false
+    @State private var idleTeardownTimer: Timer? = nil
     @State private var recordingSeconds = 0
     @State private var recordingTimer: Timer? = nil
     @State private var frameCaptureSession = FrameCaptureSession()
+    // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
+    @State private var mainThreadWatchdog = MainThreadWatchdog()
     // colorAccumulator removed — vertex coloring now deferred to post-processing
     @AppStorage(AppConstants.Key.rawOverlapMax) private var overlapMax: Double = AppConstants.overlapMax
     @AppStorage(AppConstants.Key.rawRejectBlur) private var rejectBlur: Bool = AppConstants.rejectBlur
@@ -32,9 +41,6 @@ struct CaptureView: View {
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
 
     // Scan4D properties
-    @State private var showNamePrompt = false
-    @State private var newLocationName = ""
-    @State private var newLocationScanCase: ScanCase = .rescan
     @State private var cachedGhostMeshData: Data? = nil
     @State private var isARSessionReady = false
     @State private var showSettings = false
@@ -52,7 +58,6 @@ struct CaptureView: View {
         let rawDataPath: URL?
         let thumbnailData: Data?
     }
-    @State private var pendingProcessingData: ProcessingData?
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State.
     private func loadGhostMeshData() {
@@ -77,6 +82,7 @@ struct CaptureView: View {
                 arSession: $currentARSession,
                 isRecording: $isRecording,
                 isSessionReady: $isARSessionReady,
+                vioCompromised: $vioCompromised,
                 scanStats: scanStats,
                 privacyFilter: isPrivacyFilterOn,
                 activeMeshColor: activeMeshColor,
@@ -88,9 +94,13 @@ struct CaptureView: View {
                 ghostXOffset: ghostXOffset,
                 ghostZOffset: ghostZOffset,
                 dismissGhostMesh: dismissGhostMesh,
-                bakedGhostTransform: bakedGhostTransform
+                bakedGhostTransform: bakedGhostTransform,
+                pauseARSession: pauseARSession
             )
                 .ignoresSafeArea()
+                .onChange(of: vioCompromised) { _, lost in
+                    if lost { handleVIOCompromised() }
+                }
 
             // Loading overlay while AR session initializes (camera + privacy models + depth pipeline)
             if !isARSessionReady {
@@ -108,10 +118,13 @@ struct CaptureView: View {
                 .transition(.opacity)
             }
 
-            // Privacy blur overlay (shown when privacy filter is on AND recording in AR mode).
-            // In VR mode the point cloud already shows person-shaped holes as the privacy indicator.
+            // Live privacy indicator (shown when privacy filter is on AND recording in AR mode).
+            // A cheap red-eye marker over each person region, driven by ARKit's existing
+            // segmentation stencil — NOT the old per-tick Vision pass + pixelate render (which
+            // competed with VIO). Saved RGB frames are still blurred; this is just the live signal.
+            // In VR mode the point cloud already shows person-shaped holes as the indicator.
             if isPrivacyFilterOn && isRecording && (AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar) != .vr {
-                PrivacyBlurOverlay(arSession: currentARSession)
+                PrivacyEyeOverlay(arSession: currentARSession)
                     .ignoresSafeArea()
             }
 
@@ -623,6 +636,17 @@ struct CaptureView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
+            // Pick up any Settings change to the diagnostics flag, then start the main-thread
+            // stall watchdog for this capture session (both no-ops unless Perf Diagnostics is on).
+            PerfDiag.refresh()
+            mainThreadWatchdog.start()
+
+            // Battery: returning to the capture tab — cancel any pending idle teardown and resume
+            // the AR session if it was paused while we were away.
+            idleTeardownTimer?.invalidate()
+            idleTeardownTimer = nil
+            pauseARSession = false
+
             if let locId = scanStore.activeLocationForScan {
                 let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
                 if let loc = try? modelContext.fetch(descriptor).first {
@@ -674,6 +698,19 @@ struct CaptureView: View {
             MetaWearableManager.shared.startStreaming()
         }
         .onDisappear {
+            mainThreadWatchdog.stop()
+
+            // Battery: left the capture tab — after an idle period, pause the AR session (camera +
+            // sensors off). Guarded at fire time so we never pause mid-recording or during post-scan
+            // processing (the worldmap export still needs the live session). Returning to capture
+            // cancels this (see onAppear). One-shot; rapid successive scans return before it fires.
+            idleTeardownTimer?.invalidate()
+            idleTeardownTimer = Timer.scheduledTimer(withTimeInterval: AppConstants.arIdleTeardownSeconds, repeats: false) { _ in
+                if selectedTab != 1 && !isRecording && !scanStore.isProcessingScan {
+                    pauseARSession = true
+                }
+            }
+
             // Unlock orientation when leaving capture
             AppDelegate.orientationLocked = false
             if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
@@ -697,66 +734,6 @@ struct CaptureView: View {
             cachedGhostMeshData = nil
             isARSessionReady = false
             activeLocationName = nil
-        }
-        .overlay {
-            if showNamePrompt {
-                ZStack {
-                    Color.black.opacity(0.4).ignoresSafeArea()
-                    
-                    VStack(spacing: 20) {
-                        Text("Name this Space")
-                            .font(.headline)
-                            .foregroundColor(.primary)
-                        Text("Enter a unique name for this space so you can efficiently 'Extend Scan' later.")
-                            .font(.caption)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-                            .foregroundColor(.secondary)
-                        
-                        TextField("Location Name (e.g., Living Room)", text: $newLocationName)
-                            .textFieldStyle(.roundedBorder)
-                            .padding(.horizontal)
-                        
-                        Picker("Use Case", selection: $newLocationScanCase) {
-                            Text("Time-Series").tag(ScanCase.rescan)
-                            Text("Space Extension").tag(ScanCase.extend)
-                        }
-                        .pickerStyle(.segmented)
-                        .padding(.horizontal)
-                        
-                        HStack {
-                            Button("Cancel") {
-                                showNamePrompt = false
-                                pendingProcessingData = nil
-                                saveMessage = nil
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            
-                            Button("Save") {
-                                showNamePrompt = false
-                                if let data = pendingProcessingData {
-                                    let trimmedName = newLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    let finalName = trimmedName.isEmpty ? "New Space" : trimmedName
-                                    startBackgroundProcessing(name: finalName, locationId: nil, scanCase: newLocationScanCase, data: data)
-                                    pendingProcessingData = nil
-                                }
-                            }
-                            .fontWeight(.bold)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                        }
-                    }
-                    .padding(.top, 24)
-                    .padding(.bottom, 8)
-                    .background(Color(UIColor.secondarySystemBackground))
-                    .cornerRadius(16)
-                    .shadow(radius: 20)
-                    .padding(40)
-                }
-                .transition(.opacity)
-                .zIndex(100)
-            }
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
@@ -872,43 +849,187 @@ struct CaptureView: View {
     }
 
     private func performStopRecording() {
-        // Stop frame capture and get raw data path
-        let rawDataPath = frameCaptureSession.stop()
-
-        // Capture the current frame for background mesh export
+        // Grab the AR frame + thumbnail and tear down recording on the main thread first.
         let currentFrame = currentARSession?.currentFrame
-
-        // Capture a 2D thumbnail from the current camera frame
-        var thumbnailData: Data? = nil
-        if let currentFrame = currentFrame {
-            let ciImage = CIImage(cvPixelBuffer: currentFrame.capturedImage)
-            let context = CIContext()
-            if let cgImage = context.createCGImage(ciImage, from: ciImage.extent) {
-                let uiImage = UIImage(cgImage: cgImage)
-                let maxW = AppConstants.thumbnailMaxWidth
-                let targetSize = CGSize(width: maxW, height: maxW * (uiImage.size.height / uiImage.size.width))
-                UIGraphicsBeginImageContextWithOptions(targetSize, false, 1.0)
-                UIImage(cgImage: cgImage, scale: 1.0, orientation: .right).draw(in: CGRect(origin: .zero, size: targetSize))
-                let resizedImage = UIGraphicsGetImageFromCurrentImageContext()
-                UIGraphicsEndImageContext()
-                thumbnailData = resizedImage?.jpegData(compressionQuality: AppConstants.thumbnailJpegQuality)
-            }
-        }
+        let thumbnailData = makeThumbnail(from: currentFrame)
+        frameCaptureSession.pauseCapture() // stop new frames immediately (cheap, main-safe)
 
         // ── Now switch to nominal mode (drops mesh anchors, frees AR memory) ──
         isRecording = false
 
-        let processingData = ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData)
+        // The capture flush writes one JSON per frame (O(frames)); run it OFF the main thread so
+        // ending a long scan doesn't freeze the UI or starve ARKit, then resume on main.
+        let session = frameCaptureSession
+        DispatchQueue.global(qos: .utility).async {
+            let rawDataPath = session.stop()
+            DispatchQueue.main.async {
+                self.beginProcessing(ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData))
+            }
+        }
+    }
+
+    /// Renders a downsampled JPEG thumbnail from the current camera frame (sensor→portrait via .right).
+    private func makeThumbnail(from currentFrame: ARFrame?) -> Data? {
+        guard let currentFrame = currentFrame else { return nil }
+        let ciImage = CIImage(cvPixelBuffer: currentFrame.capturedImage)
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+        let uiImage = UIImage(cgImage: cgImage)
+        let maxW = AppConstants.thumbnailMaxWidth
+        let targetSize = CGSize(width: maxW, height: maxW * (uiImage.size.height / uiImage.size.width))
+        UIGraphicsBeginImageContextWithOptions(targetSize, false, 1.0)
+        UIImage(cgImage: cgImage, scale: 1.0, orientation: .right).draw(in: CGRect(origin: .zero, size: targetSize))
+        let resizedImage = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        return resizedImage?.jpegData(compressionQuality: AppConstants.thumbnailJpegQuality)
+    }
+
+    /// Routes captured scan data into background processing — prompting for a name if this is a
+    /// new location, or extending the active one.
+    private func beginProcessing(_ processingData: ProcessingData) {
+        // Leave the capture screen: switch to the Scans tab so processing + the name keyboard run
+        // on a lightweight screen instead of over the live ARView (which made the keyboard take
+        // seconds to open).
+        selectedTab = 2
+
+        // Reset the Scans stack to the all-scans list so the processing overlay (anchored on the
+        // list root) is visible during processing — for BOTH new scans AND rescan/extend, which
+        // arrive here with the Location detail still on the stack. DEFERRED one runloop: we get
+        // here from the capture tab, and popping the Scans stack while it's still off-screen
+        // desyncs the NavigationStack and leaves a stale blank level (the bug just fixed). By the
+        // next runloop the Scans tab is active, so the pop is safe. startBackgroundProcessing's
+        // completion then pushes the Location detail back on (→ [loc], one back press to the list).
+        DispatchQueue.main.async {
+            scanStore.navigationPath.removeLast(scanStore.navigationPath.count)
+        }
 
         if scanStore.activeLocationForScan == nil {
-            newLocationName = ""
-            newLocationScanCase = .rescan
-            pendingProcessingData = processingData
-            withAnimation { showNamePrompt = true }
+            promptForScanName(processingData)
         } else {
             // Already extending a scan; user won't be prompted. Start processing immediately.
             startBackgroundProcessing(name: "Extended Scan", locationId: scanStore.activeLocationForScan, scanCase: .extend, data: processingData)
         }
+    }
+
+    /// Prompts for the new space's name with a system alert presented over the Scans tab —
+    /// decoupled from the capture screen so the keyboard opens instantly — then starts processing.
+    /// (The old segmented Time-Series / Space-Extension picker becomes two "Save as…" actions,
+    /// since a UIAlertController can't host a segmented control.)
+    private func promptForScanName(_ processingData: ProcessingData) {
+        let alert = UIAlertController(
+            title: "Name this Space",
+            message: "Enter a unique name for this space so you can 'Extend Scan' later.",
+            preferredStyle: .alert
+        )
+        alert.addTextField { tf in
+            tf.placeholder = "Location Name (e.g., Living Room)"
+            tf.autocapitalizationType = .words
+            tf.autocorrectionType = .no
+        }
+        func startProcessing(_ scanCase: ScanCase, _ alert: UIAlertController) {
+            let trimmed = (alert.textFields?.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            startBackgroundProcessing(name: trimmed.isEmpty ? "New Space" : trimmed, locationId: nil, scanCase: scanCase, data: processingData)
+        }
+        alert.addAction(UIAlertAction(title: "Save as Time-Series", style: .default) { [weak alert] _ in
+            if let alert { startProcessing(.rescan, alert) }
+        })
+        alert.addAction(UIAlertAction(title: "Save as Space Extension", style: .default) { [weak alert] _ in
+            if let alert { startProcessing(.extend, alert) }
+        })
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
+            self.discardCapturedData()
+        })
+        presentAlert(alert)
+    }
+
+    /// Presents a UIAlertController above whatever is currently on screen (any tab / modal).
+    /// Returns false if there's no window to present in, so callers that must not hang (e.g. a
+    /// save awaiting a decision) can fall back instead of stalling.
+    @discardableResult
+    private func presentAlert(_ alert: UIAlertController) -> Bool {
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let root = (scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first)?.rootViewController else { return false }
+        var top: UIViewController = root
+        while let presented = top.presentedViewController { top = presented }
+        top.present(alert, animated: true)
+        return true
+    }
+
+    /// VIO starvation guard handler: ARKit tracking was lost mid‑recording, so frames captured
+    /// after that point are unreliable. Halt capture immediately, then let the user save what was
+    /// gathered so far or discard it and rescan.
+    private func handleVIOCompromised() {
+        vioCompromised = false // reset the latch so a later scan can trip the guard again
+        guard isRecording else { return }
+
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+
+        // Stop new frames immediately; grab the AR frame + thumbnail; tear down recording.
+        let capturedCount = frameCaptureSession.frameCount
+        let currentFrame = currentARSession?.currentFrame
+        let thumbnailData = makeThumbnail(from: currentFrame)
+        frameCaptureSession.pauseCapture()
+        isRecording = false
+
+        let alert: UIAlertController
+        if capturedCount > 0 {
+            // Some usable frames were captured before the loss — offer to keep them or rescan.
+            let session = frameCaptureSession
+            alert = UIAlertController(
+                title: "Tracking Lost",
+                message: "AR tracking was interrupted during this scan, so anything captured after that point is unreliable. Save the \(capturedCount) frame\(capturedCount == 1 ? "" : "s") captured so far, or discard and rescan?",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
+                self.discardCapturedData()
+            })
+            alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in
+                // Flush the capture off the main thread (per-frame JSONs), then process.
+                DispatchQueue.global(qos: .utility).async {
+                    let rawDataPath = session.stop()
+                    DispatchQueue.main.async {
+                        self.beginProcessing(ProcessingData(frame: currentFrame, rawDataPath: rawDataPath, thumbnailData: thumbnailData))
+                    }
+                }
+            })
+        } else {
+            // Nothing usable was captured (tracking was lost almost immediately). Saving would
+            // produce an empty scan with no world map or mesh, so don't offer it — just discard.
+            alert = UIAlertController(
+                title: "Tracking Lost",
+                message: "AR tracking was lost before any usable data was captured, so nothing was saved. Reposition and rescan when ready.",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in
+                self.discardCapturedData()
+            })
+        }
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = (windowScene.windows.first(where: { $0.isKeyWindow }) ?? windowScene.windows.first)?.rootViewController {
+            // If another alert is already up — specifically the manual-stop "Insufficient Tracking"
+            // alert, which offers "Continue Scanning" — dismiss it first and let "Tracking Lost"
+            // take over. VIO loss takes precedence: its alert has NO Continue option, so a scan that
+            // lost tracking can only be saved as-is (the good frames before the loss) or discarded,
+            // never extended with post-loss frames that would mix good + corrupt tracking. The
+            // programmatic dismiss fires none of the old alert's actions, and it also prevents the
+            // double-present that wedged the UI (presenting onto an already-presenting controller).
+            if let presented = rootVC.presentedViewController {
+                presented.dismiss(animated: false) { rootVC.present(alert, animated: true) }
+            } else {
+                rootVC.present(alert, animated: true)
+            }
+        }
+    }
+
+    /// Discards a partially-captured scan: removes its on-disk capture dir and resets the capture
+    /// session so the next scan starts clean.
+    private func discardCapturedData() {
+        // Stop + delete the in-progress capture dir (queued after in-flight saves), then reset.
+        frameCaptureSession.discardCapture()
+        frameCaptureSession = FrameCaptureSession()
+        MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
+        clearMessage()
     }
 
     private func startBackgroundProcessing(name: String, locationId: UUID?, scanCase: ScanCase = .rescan, data: ProcessingData) {
@@ -962,57 +1083,92 @@ struct CaptureView: View {
             DispatchQueue.main.async {
                 self.scanStore.processingMessage = "Saving World Map..."
 
-                // Export ARWorldMap for Scan4D relocalization
-                VertexColorAccumulator.exportWorldMap(from: self.currentARSession) { mapURL in
-                    DispatchQueue.main.async {
-                        // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping
-                        if let rawDir = rawDataPath {
-                            let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
-                            try? result.data.write(to: meshFileURL)
+                // Persists the scan + navigates to its Location, with whatever world map we end up
+                // with (nil = mapless: still useful as a mesh, just not relocalizable/extendable).
+                let finalizeSave: (URL?) -> Void = { mapURL in
+                    // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping
+                    if let rawDir = rawDataPath {
+                        let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
+                        try? result.data.write(to: meshFileURL)
 
-                            if let mapURL = mapURL {
-                                let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
-                                try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
-                            }
-                        }
-
-                        // Save directly
-                        let savedScan = ScanFileManager.shared.saveScan(
-                            context: self.modelContext,
-                            locationId: capturedLocationId,
-                            name: name,
-                            meshData: result.data,
-                            vertexCount: result.vertexCount,
-                            faceCount: result.faceCount,
-                            hardwareDeviceModel: UIDevice.current.name,
-                            rawDataPath: rawDataPath,
-                            vertexColors: vertexColors,
-                            worldMapURL: mapURL,
-                            thumbnailData: thumbnailData,
-                            scanCase: scanCase
-                        )
-
-                        // Release frame capture session memory
-                        self.frameCaptureSession = FrameCaptureSession()
-                        MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
-
-                        // Reset the active state so subsequent scans don't default to this location
-                        self.scanStore.activeLocationForScan = nil
-                        self.scanStore.activeRelocalizationMap = nil
-                        self.scanStore.activeScanToExtend = nil
-                        self.cachedGhostMeshData = nil
-                        self.activeLocationName = nil
-
-                        self.scanStore.isProcessingScan = false
-                        self.scanStore.processingMessage = nil
-
-                        // Programmatically navigate to the created LocationDetailView
-                        if let loc = savedScan.location {
-                            self.scanStore.navigationPath.removeLast(self.scanStore.navigationPath.count)
-                            self.scanStore.navigationPath.append(loc)
+                        if let mapURL = mapURL {
+                            let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
+                            try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
                         }
                     }
+
+                    // Save directly
+                    let savedScan = ScanFileManager.shared.saveScan(
+                        context: self.modelContext,
+                        locationId: capturedLocationId,
+                        name: name,
+                        meshData: result.data,
+                        vertexCount: result.vertexCount,
+                        faceCount: result.faceCount,
+                        hardwareDeviceModel: UIDevice.current.name,
+                        rawDataPath: rawDataPath,
+                        vertexColors: vertexColors,
+                        worldMapURL: mapURL,
+                        thumbnailData: thumbnailData,
+                        scanCase: scanCase
+                    )
+
+                    // Release frame capture session memory
+                    self.frameCaptureSession = FrameCaptureSession()
+                    MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
+
+                    // Reset the active state so subsequent scans don't default to this location
+                    self.scanStore.activeLocationForScan = nil
+                    self.scanStore.activeRelocalizationMap = nil
+                    self.scanStore.activeScanToExtend = nil
+                    self.cachedGhostMeshData = nil
+                    self.activeLocationName = nil
+
+                    self.scanStore.isProcessingScan = false
+                    self.scanStore.processingMessage = nil
+
+                    // Programmatically navigate to the created LocationDetailView
+                    if let loc = savedScan.location {
+                        self.scanStore.navigationPath.removeLast(self.scanStore.navigationPath.count)
+                        self.scanStore.navigationPath.append(loc)
+                    }
                 }
+
+                // Export the ARWorldMap, then save. If it fails (insufficient features, serialize
+                // error, or timeout) the scan would otherwise save silently with no map — not
+                // relocalizable/extendable later, flagged only by a card badge that's easy to miss
+                // (notably after choosing "Continue Scanning" past an Insufficient-Tracking warning).
+                // Surface it instead.
+                self.exportWorldMapThenSave(finalizeSave)
+            }
+        }
+    }
+
+    /// Exports the current ARWorldMap and then runs `finalize`. On a successful export, saves with
+    /// the map. On failure, surfaces a prompt — Try Again (re-attempt; re-prompts if it fails again)
+    /// or Save Without Map — rather than silently persisting a non-relocalizable scan. If there's no
+    /// window to prompt in, falls back to saving without a map so processing never hangs.
+    private func exportWorldMapThenSave(_ finalize: @escaping (URL?) -> Void) {
+        VertexColorAccumulator.exportWorldMap(from: self.currentARSession) { mapURL in
+            DispatchQueue.main.async {
+                if let mapURL = mapURL {
+                    finalize(mapURL)
+                    return
+                }
+                self.scanStore.processingMessage = "World Map Unavailable"
+                let alert = UIAlertController(
+                    title: "World Map Not Captured",
+                    message: "Not enough features were tracked to build a world map, so this scan can't be extended or relocalized later. The mesh is still saved. Try again, or save without a world map?",
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "Try Again", style: .default) { _ in
+                    self.scanStore.processingMessage = "Saving World Map..."
+                    self.exportWorldMapThenSave(finalize)
+                })
+                alert.addAction(UIAlertAction(title: "Save Without Map", style: .default) { _ in
+                    finalize(nil)
+                })
+                if !self.presentAlert(alert) { finalize(nil) }
             }
         }
     }

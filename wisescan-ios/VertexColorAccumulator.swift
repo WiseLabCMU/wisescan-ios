@@ -45,8 +45,19 @@ enum VertexColorAccumulator {
             }
         }
         
-        // Failsafe timeout for Simulator / Test modes where ARKit refuses to yield a map or error
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+        // Failsafe so a non-responsive getCurrentWorldMap can't hang the save forever. On a real
+        // device getCurrentWorldMap honors its contract (always calls back with a map or an error),
+        // so this is a "something is broken" escape hatch, NOT a normal-operation cap: 30s is far
+        // longer than serializing even a large map (~1–3s, e.g. after several successive extends of
+        // one location), so it never race-drops a valid map the way the old 2s cap did (which saved
+        // scans with no worldMapURL → not relocalizable/extendable later, only a card badge). The
+        // Simulator never yields a real map, so keep it short there so test flows don't stall.
+        #if targetEnvironment(simulator)
+        let worldMapTimeout: TimeInterval = 2.0
+        #else
+        let worldMapTimeout: TimeInterval = 30.0
+        #endif
+        DispatchQueue.main.asyncAfter(deadline: .now() + worldMapTimeout) {
             completionLock.lock()
             if didComplete {
                 completionLock.unlock()
@@ -54,8 +65,8 @@ enum VertexColorAccumulator {
             }
             didComplete = true
             completionLock.unlock()
-            
-            print("[Warning] ARWorldMap export timed out after 2 seconds. Proceeding without map.")
+
+            print("[Warning] ARWorldMap export timed out after \(worldMapTimeout)s. Proceeding without map.")
             completion(nil)
         }
     }

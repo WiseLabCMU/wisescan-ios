@@ -54,6 +54,7 @@ class PointCloudManager {
     /// main (LowLevelMesh/LowLevelTexture are @MainActor).
     private let voxelQueue = DispatchQueue(label: "com.scan4d.voxelGrid", qos: .userInitiated)
     private var lastExtractionTime: CFAbsoluteTime = 0
+    private var lastDecayTime: CFAbsoluteTime = 0
     private var lastIntegrationTransform: simd_float4x4?
     private var lastIntegrationIntrinsics: simd_float3x3?
     private var lastIntegrationDepthMap: CVPixelBuffer?
@@ -319,14 +320,18 @@ class PointCloudManager {
             // on Simulator because it uses an sRGB format and lacks the shaderWrite usage flag.
             return
             #else
+            // Developer isolation test: skip the bloom passes (the VR point-cloud GPU pipeline
+            // is gated separately in update()). Reading UserDefaults on the render thread is safe.
+            if UserDefaults.standard.bool(forKey: AppConstants.Key.pauseVRCompute) { return }
+
             let source = context.sourceColorTexture
             let dest = context.targetColorTexture
-            
+
             // Check if RealityKit provided a texture we can actually write to with a compute shader
             guard dest.usage.contains(.shaderWrite) else {
                 return
             }
-            
+
             let width = source.width
             let height = source.height
             // Bloom is low-frequency: run the threshold + horizontal-blur pass at half
@@ -401,6 +406,11 @@ class PointCloudManager {
         intrinsics: simd_float3x3,
         privacyFilter: Bool
     ) {
+        // Developer isolation test: skip the entire VR GPU pipeline (point-cloud projection +
+        // voxel integration). Bloom is gated separately in setupBloomPostProcess. If the freeze
+        // disappears with this on, the GPU pipeline is implicated.
+        if UserDefaults.standard.bool(forKey: AppConstants.Key.pauseVRCompute) { return }
+
         guard let llm = lowLevelMesh,
               let depthMap = depthMap else { return }
 
@@ -443,7 +453,7 @@ class PointCloudManager {
         if let seg = segMap {
             segTexture = makeTexture(from: seg, pixelFormat: .r8Unorm)
         }
-        
+
         var confTexture: MTLTexture? = nil
         if let conf = confidenceMap {
             confTexture = makeTexture(from: conf, pixelFormat: .r8Uint)
@@ -521,7 +531,15 @@ class PointCloudManager {
         computeEncoder.endEncoding()
 
         gpuBusy = true
-        commandBuffer.addCompletedHandler { [weak self] _ in
+        commandBuffer.addCompletedHandler { [weak self] cb in
+            // Perf diagnostics: report the on-GPU duration of the per-frame project(+integrate)
+            // pass when it spikes — this competes with ARKit's own depth/VIO GPU work.
+            if PerfDiag.enabled {
+                let gpuMs = (cb.gpuEndTime - cb.gpuStartTime) * 1000.0
+                if gpuMs > 8 {
+                    PerfDiag.log("VR GPU project\(didDispatchIntegration ? "+integrate" : "") \(Int(gpuMs))ms")
+                }
+            }
             DispatchQueue.main.async {
                 self?.gpuBusy = false
                 if didDispatchIntegration {
@@ -697,14 +715,23 @@ class PointCloudManager {
         // integration resets/overwrites it — then merge it into the hash map off-main.
         let entries = grid.snapshotAppendBuffer()
 
-        // Capture decay inputs, then release the ARFrame depth-map reference promptly.
+        // Timing decisions on the main thread. Merge runs EVERY integration (must, or we lose
+        // appended voxels), but the expensive 350K-voxel decay is THROTTLED to ~voxelDecayInterval.
+        // Running decay every keyframe pegged a core (200–350ms each) and backed up the voxelQueue,
+        // which drove the multi-second stalls (including the post-stop drain). Extraction keeps its
+        // own 0.5s gate below.
+        let now = CACurrentMediaTime()
+        let shouldDecay = now - lastDecayTime > AppConstants.voxelDecayInterval
+        if shouldDecay { lastDecayTime = now }
+
         let transform = lastIntegrationTransform
-        let intrinsics = lastIntegrationIntrinsics
-        let depthMap = lastIntegrationDepthMap
-        lastIntegrationDepthMap = nil
+        // intrinsics + depth are only needed for decay; capture them only when decaying so
+        // non-decay completions don't retain the ARFrame depth buffer.
+        let intrinsics = shouldDecay ? lastIntegrationIntrinsics : nil
+        let depthMap = shouldDecay ? lastIntegrationDepthMap : nil
+        lastIntegrationDepthMap = nil // always release the ARFrame depth-map reference promptly
 
         // Decide extraction timing on the main thread (it owns the gate + flag).
-        let now = CACurrentMediaTime()
         let willExtract = now - lastExtractionTime > 0.5 && !extractionInProgress
             && voxelLowLevelMesh != nil && voxelColorTexture != nil && voxelExtractBuffer != nil
         let extractBuffer = voxelExtractBuffer
@@ -713,24 +740,28 @@ class PointCloudManager {
             lastExtractionTime = now
         }
 
-        // Merge + the 350K-voxel decay run off the main thread on the serial queue that
-        // owns ALL hash-map access. Pack also runs there; the GPU dispatch (LowLevelMesh
-        // is @MainActor) hops back to main.
+        // Merge (every time) + throttled decay run off the main thread on the serial queue that
+        // owns ALL hash-map access. Pack also runs there; the GPU dispatch (LowLevelMesh is
+        // @MainActor) hops back to main.
         voxelQueue.async { [weak self] in
-            grid.mergeAppendBuffer(entries, frameCounter: frameCounter)
+            PerfDiag.timed("voxel_merge", warnOverMs: 5) {
+                grid.mergeAppendBuffer(entries, frameCounter: frameCounter)
+            }
             if let transform, let intrinsics, let depthMap {
-                grid.decayContradictedVoxels(
-                    cameraTransform: transform,
-                    intrinsics: intrinsics,
-                    depthMap: depthMap,
-                    depthWidth: CVPixelBufferGetWidth(depthMap),
-                    depthHeight: CVPixelBufferGetHeight(depthMap)
-                )
+                PerfDiag.timed("voxel_decay", warnOverMs: 5) {
+                    grid.decayContradictedVoxels(
+                        cameraTransform: transform,
+                        intrinsics: intrinsics,
+                        depthMap: depthMap,
+                        depthWidth: CVPixelBufferGetWidth(depthMap),
+                        depthHeight: CVPixelBufferGetHeight(depthMap)
+                    )
+                }
             }
 
             guard willExtract, let extractBuffer else { return }
             // Lightweight pack: unpack keys + copy color into the reused GPU buffer.
-            let count = grid.packForExtraction(into: extractBuffer.contents(), maxVoxels: VoxelGrid.maxVoxels)
+            let count = PerfDiag.timed("voxel_pack", warnOverMs: 3) { grid.packForExtraction(into: extractBuffer.contents(), maxVoxels: VoxelGrid.maxVoxels) }
 
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -793,7 +824,12 @@ class PointCloudManager {
         encoder.endEncoding()
 
         let iPerVoxel = indicesPerVoxel
-        cmdBuf.addCompletedHandler { [weak self] _ in
+        cmdBuf.addCompletedHandler { [weak self] cb in
+            // Perf diagnostics: on-GPU duration of the (up to 350K-thread) voxel extract pass.
+            if PerfDiag.enabled {
+                let gpuMs = (cb.gpuEndTime - cb.gpuStartTime) * 1000.0
+                PerfDiag.log("VR GPU extract \(voxelCount) voxels \(Int(gpuMs))ms")
+            }
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 // Set the visible index count to match the buffer the GPU just filled.

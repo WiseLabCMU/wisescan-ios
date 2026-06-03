@@ -6,6 +6,10 @@ struct ARCoverageView: UIViewRepresentable {
     @Binding var arSession: ARSession?
     @Binding var isRecording: Bool
     @Binding var isSessionReady: Bool
+    /// Set true by the coordinator when ARKit tracking is lost mid‑recording (VIO starvation).
+    /// CaptureView observes this to halt the scan and prompt the user to save or rescan, since
+    /// any data captured after VIO loss is corrupt.
+    @Binding var vioCompromised: Bool
     var scanStats: ScanStats
     var privacyFilter: Bool
     var activeMeshColor: String = AppConstants.activeMeshColor
@@ -20,6 +24,11 @@ struct ARCoverageView: UIViewRepresentable {
     var ghostZOffset: Float = 0         // Meters, Z-axis position offset
     var dismissGhostMesh: Bool = false  // When true, remove ghost mesh from scene
     var bakedGhostTransform: simd_float4x4? = nil // Manual transform to bake into the session origin
+
+    /// Battery: when true, pause the AR session (camera + sensors power down). Raised by CaptureView
+    /// after an idle period on a non-capture tab; lowered on return to capture. Resume re-runs a
+    /// nominal config (the "Initializing" overlay covers it — non-blocking now the delegate is off-main).
+    var pauseARSession: Bool = false
 
     /// Whether this device has LiDAR for scene reconstruction and depth capture.
     static let supportsLiDAR = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
@@ -54,6 +63,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.captureMode = captureMode
         context.coordinator.isRecording = false
         context.coordinator.isSessionReadyBinding = $isSessionReady
+        context.coordinator.vioCompromisedBinding = $vioCompromised
         context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
 
         // Always start with the live camera feed — even in VR mode.
@@ -61,6 +71,9 @@ struct ARCoverageView: UIViewRepresentable {
         arView.environment.background = .cameraFeed()
 
         arView.session.delegate = context.coordinator
+        // Deliver delegate callbacks on a background serial queue (not main) so a busy main thread
+        // can never starve ARKit's frame pool. See Coordinator.sessionDelegateQueue for invariants.
+        arView.session.delegateQueue = context.coordinator.sessionDelegateQueue
         // No debug options in nominal mode (no wireframe overlay)
 
         arView.session.run(config, options: runOptions)
@@ -79,6 +92,32 @@ struct ARCoverageView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.privacyFilter = privacyFilter
+
+        // Battery: pause/resume the session when the capture tab goes idle / returns. ARKit keeps
+        // the camera + sensors powered until paused. While paused, skip the rest of updateUIView
+        // (nothing to render). Resume re-runs the same nominal config makeUIView uses; the
+        // "Initializing" overlay covers it, and it no longer freezes main now the delegate is off-main.
+        if pauseARSession {
+            if !context.coordinator.isSessionPausedForBattery {
+                PerfDiag.log("battery: pausing AR session (idle)")
+                uiView.session.pause()
+                context.coordinator.isSessionPausedForBattery = true
+            }
+            return
+        } else if context.coordinator.isSessionPausedForBattery {
+            context.coordinator.isSessionPausedForBattery = false
+            PerfDiag.log("battery: resuming AR session (returned to capture)")
+            // Resume in the nominal (new-scan) configuration. The idle pause only fires after the
+            // user has LEFT the capture tab, and leaving abandons any in-progress extend (CaptureView
+            // .onDisappear clears the extend/ghost state, and the ghost overlay is removed on return)
+            // — so there is intentionally NO world map to preserve here. Re-running the stale extend
+            // config would relocalize to the abandoned map for nothing. If the user wants to extend
+            // again they re-tap Extend, which reloads the map + ghost fresh; a brand-new scan's
+            // record-start reconfigures and clears anchors. (Supersedes b579197.)
+            let resumeConfig = ARWorldTrackingConfiguration()
+            if Self.supportsLiDAR { resumeConfig.sceneReconstruction = [] }
+            uiView.session.run(resumeConfig)
+        }
 
         // Live active mesh color update — recolor all existing wireframe entities
         if activeMeshColor != context.coordinator.activeMeshColor {
@@ -216,8 +255,18 @@ struct ARCoverageView: UIViewRepresentable {
                 if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
                     config.frameSemantics.insert(.sceneDepth)
                 }
-                // Don't reset tracking — preserve the current relocalized coordinate frame
-                uiView.session.run(config)
+                // Don't reset tracking — preserve the current relocalized coordinate frame.
+                // But for a NEW scan, drop any ARMeshAnchors the warm session is still holding from
+                // a previous scan of the same space — otherwise scene-reconstruction geometry from
+                // the earlier scan bleeds into this scan's mesh export (exportMeshOBJ enumerates the
+                // live currentFrame.anchors). An extend preserves its anchors: the world-map load
+                // path (makeUIView / ghost-mesh-data) already cleared stale ones with
+                // .removeExistingAnchors, and we want to keep re-meshing in the relocalized frame.
+                let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [] : .removeExistingAnchors
+                PerfDiag.log(config.initialWorldMap != nil
+                    ? "record-start: extend → preserving anchors + world map"
+                    : "record-start: new scan → .removeExistingAnchors (clear prior scan's mesh)")
+                uiView.session.run(config, options: runOptions)
                 
                 // If the user manually aligned the ghost mesh, bake that transform into the ARKit world origin
                 if let baked = bakedGhostTransform {
@@ -346,6 +395,17 @@ struct ARCoverageView: UIViewRepresentable {
         weak var arView: ARView?
         var scanStats: ScanStats?
         let rootEntity = Entity()
+        /// Serial queue for ALL ARSession delegate callbacks. Keeping them off the main thread is
+        /// the fix for "delegate is retaining N ARFrames": when main is busy (name-prompt keyboard,
+        /// post-scan processing, ARView render), ARKit can still hand frames to this queue, so the
+        /// camera/SLAM pipeline never stalls. Invariants: (1) every RealityKit / entity / SwiftUI
+        /// binding mutation is dispatched to `main`; (2) the delegate-owned dictionaries + VIO/stat
+        /// counters below are touched ONLY on this queue (so `resetForRecording/Nominal`, called
+        /// from updateUIView on main, hop here to clear them — never mutate them on main).
+        let sessionDelegateQueue = DispatchQueue(label: "org.arenaxr.scan4d.arsession.delegate")
+        /// Tracks whether we paused the session for battery (idle on a non-capture tab), so we resume
+        /// it exactly once on return rather than re-running the config on every update.
+        var isSessionPausedForBattery = false
         var privacyFilter: Bool = true
         var activeMeshColor: String = AppConstants.activeMeshColor
         var captureMode: AppConstants.CaptureMode = .ar
@@ -357,6 +417,14 @@ struct ARCoverageView: UIViewRepresentable {
         var vrBackgroundSet: Bool = false
         var isSessionReadyBinding: Binding<Bool>?
         var hasSetSessionReady = false
+        /// VIO starvation guard: becomes armed once tracking reaches `.normal` while recording.
+        /// Once armed, a drop to `.notAvailable`/`.relocalizing` means the world frame is lost and
+        /// everything captured afterward is corrupt — so we trip the guard (halt + prompt) once.
+        var vioCompromisedBinding: Binding<Bool>?
+        private var vioGuardArmed = false
+        /// ARFrame timestamp when tracking first went degraded (0 = currently fine). Used to
+        /// measure *continuous* degradation for the VIO guard. Touched on the delegate queue.
+        private var vioDegradedSince: TimeInterval = 0
         private var anchorUpdateCounts: [UUID: Int] = [:]
         /// Coalescing flag: prevents queuing multiple main-actor dispatches
         /// that each hold CVPixelBuffer references → ARFrame retention.
@@ -365,6 +433,10 @@ struct ARCoverageView: UIViewRepresentable {
         /// which pins ARFrame memory alive and triggers "retaining N ARFrames" warnings.
         private var anchorVertexCounts: [UUID: Int] = [:]
         private var anchorFaceCounts: [UUID: Int] = [:]
+
+        /// Perf diagnostics: timestamp of the previous ARFrame, to detect gaps in frame
+        /// delivery (the signature of ARKit VIO being starved). Touched only on the delegate queue.
+        private var lastFrameTimestamp: TimeInterval = 0
 
         // Session capacity tracking
         private var sessionStartTime: Date = Date()
@@ -401,27 +473,44 @@ struct ARCoverageView: UIViewRepresentable {
 
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
-            anchorUpdateCounts.removeAll()
-            anchorVertexCounts.removeAll()
-            anchorFaceCounts.removeAll()
-            trackingDegradationCount = 0
-            totalTrackingUpdates = 0
-            sessionStartTime = Date()
-            baselineMemoryMB = ScanStats.currentMemoryUsageMB()
-            lastStatsUpdateTime = .distantPast // let the first stats update publish immediately
-            // Clear any stale wireframe entities from a previous recording
+            baselineMemoryMB = ScanStats.currentMemoryUsageMB() // read on main in updateStats's publish block
+            // Clear delegate-owned counters/flags ON the delegate queue (never on main): the
+            // ARSession callbacks mutate these dictionaries, and a concurrent mutation would crash.
+            sessionDelegateQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.anchorUpdateCounts.removeAll()
+                self.anchorVertexCounts.removeAll()
+                self.anchorFaceCounts.removeAll()
+                self.lastAnchorWireframeTime.removeAll()
+                self.trackingDegradationCount = 0
+                self.totalTrackingUpdates = 0
+                self.sessionStartTime = Date()
+                self.lastStatsUpdateTime = .distantPast // let the first stats update publish immediately
+                // VIO guard: arm immediately if tracking is already normal at record start; otherwise
+                // it arms on the first `.normal` frame (see session(_:didUpdate:)).
+                self.vioGuardArmed = (self.arView?.session.currentFrame?.camera.trackingState == .normal)
+                self.vioDegradedSince = 0
+            }
+            // Clear any stale wireframe entities from a previous recording (RealityKit → main)
             removeAllActiveMeshEntities()
         }
 
         /// Reset coordinator state when returning to nominal (idle) mode.
         func resetForNominal() {
-            anchorUpdateCounts.removeAll()
-            anchorVertexCounts.removeAll()
-            anchorFaceCounts.removeAll()
-            trackingDegradationCount = 0
-            totalTrackingUpdates = 0
+            // Clear delegate-owned counters/flags ON the delegate queue (see resetForRecording).
+            sessionDelegateQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.anchorUpdateCounts.removeAll()
+                self.anchorVertexCounts.removeAll()
+                self.anchorFaceCounts.removeAll()
+                self.lastAnchorWireframeTime.removeAll()
+                self.trackingDegradationCount = 0
+                self.totalTrackingUpdates = 0
+                self.vioGuardArmed = false
+                self.vioDegradedSince = 0
+            }
 
-            // Remove all active mesh wireframe entities from the scene
+            // Remove all active mesh wireframe entities from the scene (RealityKit → main)
             removeAllActiveMeshEntities()
 
             DispatchQueue.main.async { [weak self] in
@@ -443,11 +532,12 @@ struct ARCoverageView: UIViewRepresentable {
 
         /// Removes all active mesh wireframe entities from the AR scene.
         private func removeAllActiveMeshEntities() {
+            // Main-only: activeMeshEntities + RealityKit removeFromParent. (lastAnchorWireframeTime
+            // is delegate-owned; it's cleared on the delegate queue by resetForRecording/Nominal.)
             for (_, entry) in activeMeshEntities {
                 entry.anchor.removeFromParent()
             }
             activeMeshEntities.removeAll()
-            lastAnchorWireframeTime.removeAll()
         }
 
         /// Recolors all existing active mesh wireframe entities with the current activeMeshColor.
@@ -646,9 +736,12 @@ struct ARCoverageView: UIViewRepresentable {
             if camera.trackingState == .normal && !hasAddedGhostMesh {
                 let canAdd = !hasWorldMap || hasSeenRelocalizing
                 if canAdd, let ghostAnchor = ghostAnchorEntity, let arView = arView {
-                    print("[GhostMesh] Session relocalized (hasWorldMap=\(hasWorldMap), sawRelocalizing=\(hasSeenRelocalizing)). Adding Ghost Mesh overlay.")
-                    arView.scene.addAnchor(ghostAnchor)
-                    hasAddedGhostMesh = true
+                    hasAddedGhostMesh = true // set on the delegate queue to prevent re-entry next frame
+                    let sawReloc = hasSeenRelocalizing, hadMap = hasWorldMap
+                    DispatchQueue.main.async { // RealityKit scene mutation must be on main
+                        print("[GhostMesh] Session relocalized (hasWorldMap=\(hadMap), sawRelocalizing=\(sawReloc)). Adding Ghost Mesh overlay.")
+                        arView.scene.addAnchor(ghostAnchor)
+                    }
                 } else if hasWorldMap && !hasSeenRelocalizing {
                     print("[GhostMesh] Tracking is .normal but relocalization not yet confirmed — deferring ghost mesh placement")
                 }
@@ -684,6 +777,10 @@ struct ARCoverageView: UIViewRepresentable {
                 }
             }
 
+            PerfDiag.log("ARKit tracking → \(stateStr)\(reasonStr.isEmpty ? "" : " (\(reasonStr))")")
+            // (VIO starvation guard lives in session(_:didUpdate:) — it needs per-frame
+            // timing to catch frame-delivery stalls + sustained degradation, not just transitions.)
+
             DispatchQueue.main.async { [weak self] in
                 self?.scanStats?.trackingState = stateStr
                 self?.scanStats?.trackingReason = reasonStr
@@ -691,11 +788,61 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
+            // Per-frame ARKit timing (runs in AR + VR, above the VR-only guard). The frame-delivery
+            // gap is the direct signal that VIO was starved.
+            let ts = frame.timestamp
+            let frameGap = lastFrameTimestamp > 0 ? ts - lastFrameTimestamp : 0
+            lastFrameTimestamp = ts
+            if PerfDiag.enabled, frameGap > 0.1 {
+                let normal = frame.camera.trackingState == .normal
+                PerfDiag.log("ARKit frame gap \(Int(frameGap * 1000))ms (tracking \(normal ? "normal" : "degraded"))")
+            }
+
+            // ── VIO starvation guard ──
+            // Once tracking has been .normal during recording (armed), trip if EITHER ARKit just
+            // stalled (a large frame-delivery gap → VIO almost certainly diverged — the original
+            // freeze signature) OR tracking stayed degraded continuously past a threshold
+            // (excessiveMotion/insufficientFeatures/relocalizing/notAvailable). Data captured after
+            // VIO loss is corrupt, so we halt + prompt. Benign startup (initializing, and anything
+            // before the first .normal) is ignored. See CaptureView.handleVIOCompromised().
+            if isRecording {
+                switch frame.camera.trackingState {
+                case .normal:
+                    vioGuardArmed = true
+                    vioDegradedSince = 0
+                case .limited(.initializing):
+                    break // benign startup; neither arms nor accumulates
+                default:
+                    if vioGuardArmed && vioDegradedSince == 0 { vioDegradedSince = ts }
+                }
+                if vioGuardArmed {
+                    let sustainedDegraded = vioDegradedSince > 0 && (ts - vioDegradedSince) > AppConstants.vioDegradedTripSeconds
+                    let stalled = frameGap > AppConstants.vioFrameGapTripSeconds
+                    if sustainedDegraded || stalled {
+                        vioGuardArmed = false // fire once per recording
+                        vioDegradedSince = 0
+                        let why = stalled ? "frame gap \(Int(frameGap * 1000))ms" : "tracking degraded >\(AppConstants.vioDegradedTripSeconds)s"
+                        PerfDiag.log("⛔️ VIO guard tripped (\(why)) — halting scan")
+                        DispatchQueue.main.async { [weak self] in
+                            self?.vioCompromisedBinding?.wrappedValue = true
+                        }
+                    }
+                }
+            } else {
+                vioGuardArmed = false
+                vioDegradedSince = 0
+            }
+
             // ── VR Mode: update point cloud ──
             // IMPORTANT: Extract pixel buffers and camera data HERE (on the delegate queue)
             // so the ARFrame reference is released immediately. Do NOT forward the ARFrame
             // to the main actor — that queues work and holds references to 10+ frames.
-            guard captureMode == .vr, let pcm = pointCloudManager else { return }
+            //
+            // Gate on `isRecording`: once the scan ends, stop the live point-cloud / voxel
+            // pipeline immediately. Otherwise it keeps projecting + integrating every frame while
+            // the AR view is still mounted (name prompt, post-scan processing), starving the main
+            // thread/GPU — that's what made the keyboard take seconds to open after stopping.
+            guard isRecording, captureMode == .vr, let pcm = pointCloudManager else { return }
 
             // Skip VR updates when tracking is degraded — prevents accumulating
             // voxels with wrong coordinates during SLAM re-initialization.
@@ -729,7 +876,6 @@ struct ARCoverageView: UIViewRepresentable {
             
             pendingVRUpdate = true
             DispatchQueue.main.async { [weak self] in
-                self?.pendingVRUpdate = false
                 pcm.update(
                     depthMap: depthMap,
                     capturedImage: capturedImage,
@@ -747,6 +893,9 @@ struct ARCoverageView: UIViewRepresentable {
                     arView.environment.background = .color(.black)
                     self?.vrBackgroundSet = true
                 }
+                // Reset the coalescing flag on the delegate queue — its only owner (the guard above
+                // reads it there), so it never races between main and the delegate queue.
+                self?.sessionDelegateQueue.async { self?.pendingVRUpdate = false }
             }
         }
 
@@ -781,28 +930,40 @@ struct ARCoverageView: UIViewRepresentable {
             guard isRecording else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
-                    anchorUpdateCounts.removeValue(forKey: mesh.identifier)
-                    anchorVertexCounts.removeValue(forKey: mesh.identifier)
-                    anchorFaceCounts.removeValue(forKey: mesh.identifier)
+                    let id = mesh.identifier
+                    anchorUpdateCounts.removeValue(forKey: id)
+                    anchorVertexCounts.removeValue(forKey: id)
+                    anchorFaceCounts.removeValue(forKey: id)
+                    lastAnchorWireframeTime.removeValue(forKey: id)
 
-                    // Remove wireframe entity for this anchor
-                    if let entry = activeMeshEntities.removeValue(forKey: mesh.identifier) {
-                        entry.anchor.removeFromParent()
+                    // Remove the wireframe entity on main — `activeMeshEntities` + RealityKit are
+                    // main-only (also touched by buildWireframeForAnchor's main block, recolor, reset).
+                    DispatchQueue.main.async { [weak self] in
+                        if let entry = self?.activeMeshEntities.removeValue(forKey: id) {
+                            entry.anchor.removeFromParent()
+                        }
                     }
-                    lastAnchorWireframeTime.removeValue(forKey: mesh.identifier)
                 }
             }
             updateStats(in: session)
         }
 
         func removeAllMeshEntities() {
+            // activeMeshEntities + RealityKit on main (this is called from updateUIView).
             for (_, entry) in activeMeshEntities {
                 entry.anchor.removeFromParent()
             }
             activeMeshEntities.removeAll()
-            lastAnchorWireframeTime.removeAll()
-            anchorUpdateCounts.removeAll()
-
+            // Delegate-owned dicts → clear on the delegate queue (the ARSession callbacks mutate
+            // them; concurrent mutation from main would crash). Clear ALL per-anchor dicts together,
+            // including the vertex/face counts — otherwise updateStats keeps summing stale geometry
+            // totals and anchor counts after the entities are gone (e.g. switching into VR capture).
+            sessionDelegateQueue.async { [weak self] in
+                self?.lastAnchorWireframeTime.removeAll()
+                self?.anchorUpdateCounts.removeAll()
+                self?.anchorVertexCounts.removeAll()
+                self?.anchorFaceCounts.removeAll()
+            }
         }
 
         private func updateStats(in session: ARSession) {
