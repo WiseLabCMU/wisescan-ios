@@ -295,6 +295,15 @@ struct ARCoverageView: UIViewRepresentable {
                 if let ghostData = initialGhostMeshData, context.coordinator.ghostAnchorEntity == nil {
                     Self.loadGhostMesh(data: ghostData, coordinator: context.coordinator, arView: uiView)
                 }
+
+                // Draw the boundary marker for a metadata-only Pin B (mapB link flow). With no
+                // world map there's no ARWorldMap anchor to trigger the didAdd visual path, and
+                // resetForRecording above cleared any stale marker — so render it directly from
+                // the pose pinB published to scanStore. (World-map flows keep using didAdd.)
+                if config.initialWorldMap == nil,
+                   let pinTransform = scanStore?.boundaryAnchorTransform {
+                    context.coordinator.addBoundaryAnchorVisual(at: pinTransform, in: uiView)
+                }
             } else {
                 // Downgrade to nominal: pure camera passthrough — no overlays
                 context.coordinator.resetForNominal()

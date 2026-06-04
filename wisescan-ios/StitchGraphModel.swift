@@ -137,11 +137,9 @@ enum StitchGraphBuilder {
     /// within that level. Components are stacked by offsetting `level`-rows is left to
     /// the view; here we only need per-node level/order plus component membership.
     private static func layout(nodes: inout [StitchGraphNode], edges: [StitchGraphEdge], components: [[UUID]]) {
-        // adjacency (directed) and in-degree for root selection
-        var outgoing: [UUID: [UUID]] = [:]
+        // in-degree per node for root selection (prefer a source-side node)
         var inDegree: [UUID: Int] = [:]
         for e in edges {
-            outgoing[e.from, default: []].append(e.to)
             inDegree[e.to, default: 0] += 1
             inDegree[e.from] = inDegree[e.from] ?? 0
         }
@@ -152,8 +150,9 @@ enum StitchGraphBuilder {
             let root = component.first(where: { (inDegree[$0] ?? 0) == 0 }) ?? component.first
             guard let root else { continue }
 
-            // BFS over the *undirected* graph for connectivity, but level grows only
-            // when following a directed (source→target) edge.
+            // BFS over the *undirected* graph for connectivity. Level changes by the
+            // edge direction: +1 when following a directed source→target edge, -1 when
+            // traversing it in reverse (negative levels are normalized to 0 below).
             var queue: [UUID] = [root]
             level[root] = 0
             var visited: Set<UUID> = [root]

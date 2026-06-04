@@ -973,7 +973,23 @@ struct CaptureView: View {
         frameCaptureSession.pauseCapture()
 
         let alert: UIAlertController
-        if capturedCount > 0 {
+        if scanStore.pendingStitchLink != nil {
+            // Stitch flow (mapB of a Pin & Extend / Link Adjacent link): the link pins pinB's pose
+            // to mapB's world-map frame. If tracking is lost the saved map can drift away from that
+            // pinned point, silently corrupting the A→B transform — a salvaged-but-misposed link is
+            // worse than none. So we don't offer "Save Anyway" here; the user is still physically in
+            // the space, so discarding and redoing the link is the safe, cheap path.
+            alert = UIAlertController(
+                title: "Tracking Lost",
+                message: "AR tracking was interrupted while linking this space. Saving now could "
+                    + "misalign the spatial link, so this scan will be discarded. Reposition and "
+                    + "start the link again.",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
+                self.discardInProgressScan(isExtendFlow: false, completion: nil)
+            })
+        } else if capturedCount > 0 {
             alert = UIAlertController(
                 title: "Tracking Lost",
                 message: "AR tracking was interrupted during this scan, so anything captured after that "

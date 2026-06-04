@@ -536,14 +536,17 @@ extension CaptureView {
             return nil
         }
 
-        let anchor = ARAnchor(
-            name: ARCoverageView.boundaryAnchorName,
-            transform: frame.camera.transform
-        )
-        self.currentARSession?.add(anchor: anchor)
+        // Pin B is metadata-only, mirroring Pin A — no ARAnchor. The saved stitch transform is
+        // this camera-pose snapshot (recordBoundaryAnchor / PendingStitchLink), not a value read
+        // back from a live anchor, so an anchor adds nothing to correctness. It would also be
+        // futile: a fresh mapB session carries no world map, so record-start runs with
+        // .removeExistingAnchors and would wipe the anchor immediately. Publishing the transform
+        // to scanStore lets ARCoverageView draw the boundary marker directly at record-start.
         let pinBTransform = frame.camera.transform
-        let pinBId = anchor.identifier
-        print("[BoundaryAnchor] Placed pinB in mapB at \(frame.camera.transform.columns.3)")
+        let pinBId = UUID()
+        self.scanStore.boundaryAnchorTransform = pinBTransform
+        self.scanStore.boundaryAnchorId = pinBId
+        print("[BoundaryAnchor] Placed pinB (metadata-only) in mapB at \(frame.camera.transform.columns.3)")
 
         // Start recording and then record Pin B (order matters:
         // FrameCaptureSession.start() clears boundary anchor state).

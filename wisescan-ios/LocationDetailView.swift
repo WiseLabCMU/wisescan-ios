@@ -100,6 +100,13 @@ struct LocationDetailView: View {
                                 HStack(spacing: 12) {
                                     // Rescan Space button
                                     Button(action: {
+                                        // Rescan relocalizes against the existing world map (ghost
+                                        // overlay + shared frame). Without the file ARCoverageView
+                                        // silently falls back to a mapless session, so guard first.
+                                        guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
+                                            showNoWorldMapAlert = true
+                                            return
+                                        }
                                         scanStore.activeLocationForScan = location.id
                                         scanStore.activeRelocalizationMap = latestScan.worldMapURL
                                         scanStore.activeScanToExtend = latestScan.id
