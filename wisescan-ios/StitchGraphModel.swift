@@ -68,10 +68,15 @@ enum StitchGraphBuilder {
         for loc in locations {
             guard let manifest = await StitchingMetadataManager.readAsync(locationId: loc.id) else { continue }
             for link in manifest.links where seenLinks.insert(link.id).inserted {
-                // Keep only links whose endpoints both still exist on this device.
-                if byId[link.sourceLocationId] != nil && byId[link.targetLocationId] != nil {
-                    links.append(link)
-                }
+                // Keep only links whose endpoints both still exist on this device — both the
+                // locations AND the specific source/target scans. A scan can be deleted while its
+                // location's stitching.json lingers; without the scan-id check the graph would show
+                // a node/edge that combined rendering then silently drops (scanLookup miss),
+                // producing incomplete or empty renders.
+                guard let src = byId[link.sourceLocationId], let tgt = byId[link.targetLocationId],
+                      src.scans.contains(where: { $0.id == link.sourceScanId }),
+                      tgt.scans.contains(where: { $0.id == link.targetScanId }) else { continue }
+                links.append(link)
             }
         }
 

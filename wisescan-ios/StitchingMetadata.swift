@@ -21,7 +21,11 @@ struct StitchingManifest: Codable, Sendable {
 /// The "source" is the original scan where Pin A was dropped.
 /// The "target" is the new scan (in this location) where Pin B was dropped.
 struct StitchingLink: Codable, Identifiable, Sendable {
-    var id: UUID = UUID()
+    // Immutable, persisted identity (de-dup + graph edges depend on it). Declared without an
+    // inline default on purpose: a `let` WITH a default (`let id = UUID()`) is dropped from the
+    // synthesized Codable, which would silently regenerate the id on every decode. The single
+    // construction site supplies `UUID()`.
+    let id: UUID
 
     // Source (the original scan/location that was extended FROM)
     let sourceLocationId: UUID

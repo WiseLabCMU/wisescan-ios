@@ -387,6 +387,7 @@ extension CaptureView {
         guard let pending = scanStore.pendingStitchLink else { return }
 
         let link = StitchingLink(
+            id: UUID(),
             sourceLocationId: pending.sourceLocationId,
             sourceScanId: pending.sourceScanId,
             sourceAnchorId: pending.sourceAnchorId,
