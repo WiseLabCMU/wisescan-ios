@@ -259,7 +259,7 @@ private struct CompactLocationTile: View {
     @State private var thumbnail: UIImage?
 
     private var latestScan: CapturedScan? {
-        location.scans.sorted(by: { $0.capturedAt > $1.capturedAt }).first
+        location.scans.max(by: { $0.capturedAt < $1.capturedAt })
     }
 
     var body: some View {
