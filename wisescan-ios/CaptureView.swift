@@ -333,7 +333,7 @@ struct CaptureView: View {
                 .padding()
 
                 if let locName = activeLocationName {
-                    let modeText = scanStore.activeScanToExtend != nil ? "Link Adjacent Space" : "Rescan"
+                    let modeText = scanStore.activeScanCase == .linkAdjacent ? "Link Adjacent Space" : "Rescan"
                     Text("\(locName) — \(modeText)")
                         .font(.caption.bold())
                         .foregroundColor(.white)

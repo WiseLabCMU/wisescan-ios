@@ -91,8 +91,12 @@ enum StitchGraphBuilder {
             edges.append(StitchGraphEdge(from: link.sourceLocationId, to: link.targetLocationId, link: link))
         }
 
-        let components = connectedComponents(nodeIds: Array(nodes.keys), edges: edges)
-        var nodeList = Array(nodes.values)
+        // Sort node ids/list deterministically — Dictionary iteration order is unstable
+        // across runs, which would otherwise leak into component membership order and
+        // the layered layout's `order` assignment.
+        let sortedIds = nodes.keys.sorted { $0.uuidString < $1.uuidString }
+        let components = connectedComponents(nodeIds: sortedIds, edges: edges)
+        var nodeList = sortedIds.compactMap { nodes[$0] }
         layout(nodes: &nodeList, edges: edges, components: components)
 
         return StitchGraph(nodes: nodeList, edges: edges, components: components)
@@ -120,7 +124,11 @@ enum StitchGraphBuilder {
 
         var groups: [UUID: [UUID]] = [:]
         for id in nodeIds { groups[find(id), default: []].append(id) }
-        return groups.values.map { $0 }.sorted { $0.count > $1.count }
+        // Largest-first; break ties by the (already-sorted) first element so equal-size
+        // components keep a stable order across runs.
+        return groups.values.map { $0 }.sorted {
+            $0.count != $1.count ? $0.count > $1.count : $0[0].uuidString < $1[0].uuidString
+        }
     }
 
     // MARK: Layered layout
@@ -196,7 +204,10 @@ enum StitchGraphBuilder {
     /// `R = sourceAnchorTransform · inverse(targetAnchorTransform)` (the anchors are the same
     /// physical pin). A spanning-tree BFS propagates transforms from the root outward.
     static func placeScans(in component: [UUID], edges componentEdges: [StitchGraphEdge]) -> [PlacedScan] {
-        guard let root = component.first else { return [] }
+        // Pick a deterministic root (smallest UUID) so combined-render placements are
+        // stable across runs — component element order comes from non-deterministic
+        // Dictionary iteration and must not drive the accumulated transform frame.
+        guard let root = component.min(by: { $0.uuidString < $1.uuidString }) else { return [] }
 
         // Undirected adjacency carrying the link and traversal direction.
         var adj: [UUID: [(neighbor: UUID, link: StitchingLink, forward: Bool)]] = [:]
