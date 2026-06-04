@@ -216,6 +216,20 @@ struct ARCoverageView: UIViewRepresentable {
             context.coordinator.hasAddedGhostMesh = false
         }
 
+        // Clear a stale boundary visual when the app cleared the boundary anchor state without an
+        // isRecording transition (the alignment reset paths — confirmAlignment / cancelAlignment /
+        // stabilization timeout — nil scanStore.boundaryAnchorTransform but never start recording,
+        // so resetForRecording/Nominal don't run). Without this, mapA's boundary sphere lingers in
+        // the freshly-reset mapB/idle session. Guarded on !isRecording so an active scan's marker
+        // (and the brief place-then-publish window) is untouched.
+        if !isRecording, scanStore?.boundaryAnchorTransform == nil,
+           let staleBoundary = context.coordinator.boundaryAnchorEntity {
+            staleBoundary.removeFromParent()
+            context.coordinator.boundaryAnchorEntity = nil
+            context.coordinator.boundaryAnchorId = nil
+            context.coordinator.scanStats?.hasBoundaryAnchor = false
+        }
+
         // Apply manual alignment transform offset to ghost mesh
         if let ghostAnchor = context.coordinator.ghostAnchorEntity {
             if isRecording {

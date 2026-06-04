@@ -1,5 +1,6 @@
 import SwiftUI
 import ARKit
+import RealityKit
 import SwiftData
 
 // MARK: - Recording Controls
@@ -15,6 +16,24 @@ extension CaptureView {
     }
 
     func startRecording() {
+        // Bake the manual ghost-mesh offsets into the ARKit world origin right before recording
+        // starts (restored from main). ARCoverageView consumes bakedGhostTransform via
+        // session.setWorldOrigin at record-start so the captured mesh + the world map we export at
+        // save time are co-framed in the SAME (nudged) origin — see finishStopRecording's co-framing
+        // comment. In the link-adjacent mapB flow the ghost is cleared so offsets are 0 → nil bake.
+        if ghostXOffset != 0 || ghostYRotation != 0 || ghostZOffset != 0 {
+            let rotation = simd_quatf(angle: ghostYRotation, axis: [0, 1, 0])
+            let translation = SIMD3<Float>(ghostXOffset, 0, ghostZOffset)
+            bakedGhostTransform = Transform(rotation: rotation, translation: translation).matrix
+            // Zero the sliders so the visual offset isn't double-applied after baking.
+            ghostYRotation = 0
+            ghostXOffset = 0
+            ghostZOffset = 0
+        } else {
+            bakedGhostTransform = nil
+        }
+        showManualAdjust = false // dismiss the manual-adjust panel once recording begins
+
         isRecording = true
         if scanStore.capturePhase == .idle {
             scanStore.capturePhase = .recording
@@ -189,86 +208,164 @@ extension CaptureView {
         let originAnchor = ARAnchor(name: "Scan4D_Mesh_Origin", transform: matrix_identity_float4x4)
         currentARSession?.add(anchor: originAnchor)
 
-        VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL in
-            DispatchQueue.main.async {
-                // Map captured. Sync the isRecording binding so SwiftUI's updateUIView
-                // reflects nominal mode (reconstruction was already disabled above).
-                self.isRecording = false
+        // Export the ARWorldMap (co-framed with the OBJ). A scan with no world map can't be
+        // relocalized or extended, so on failure exportWorldMapThenContinue offers Retry / Discard —
+        // never save-without-map. `proceed` runs on the main thread with a guaranteed-valid mapURL.
+        exportWorldMapThenContinue(isExtendFlow: isExtendFlow, completion: completion) { mapURL in
+            // Map captured. Sync the isRecording binding so SwiftUI's updateUIView
+            // reflects nominal mode (reconstruction was already disabled above).
+            self.isRecording = false
 
-                // Run vertex coloring in background using saved camera frames (.utility QoS
-                // so the name-prompt keyboard stays responsive while coloring runs)
-                DispatchQueue.global(qos: .utility).async {
-                    let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
-                        objData: result.data,
-                        rawDataDir: rawDataPath
-                    )
+            // Fast placeholder coloring from surface normals (perf). It's far cheaper than the
+            // photo-based pass but still re-parses the OBJ + does two O(n) passes, so run it OFF the
+            // main thread, then hop back for the SwiftData / @State mutations. The high-quality
+            // colorize is now a deliberate post-scan user action — the "Color" button on each scan
+            // (ScansListView / LocationDetailView bulk) runs colorizeFromSavedFrames and sets
+            // isColored = true. Scans saved here keep isColored = false (saveScan never sets it),
+            // so that button is still offered.
+            DispatchQueue.global(qos: .utility).async {
+                let vertexColors = VertexColorAccumulator.generateNormalsColors(objData: result.data)
 
-                    DispatchQueue.main.async {
-                        // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping
-                        if let rawDir = rawDataPath {
-                            let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
-                            try? result.data.write(to: meshFileURL)
+                DispatchQueue.main.async {
+                    // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping.
+                    if let rawDir = rawDataPath {
+                        let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
+                        try? result.data.write(to: meshFileURL)
+                        let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
+                        try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
+                    }
 
-                            if let mapURL = mapURL {
-                                let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
-                                try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
-                            }
-                        }
+                    if isExtendFlow {
+                        // Extend flow: save immediately and call completion
+                        let autoSaveName = capturedLocationId == nil ? "New Space" : "Scan"
+                        let savedScan = ScanFileManager.shared.saveScan(
+                            context: self.modelContext,
+                            locationId: capturedLocationId,
+                            name: autoSaveName,
+                            meshData: result.data,
+                            vertexCount: result.vertexCount,
+                            faceCount: result.faceCount,
+                            hardwareDeviceModel: UIDevice.current.name,
+                            rawDataPath: rawDataPath,
+                            vertexColors: vertexColors,
+                            worldMapURL: mapURL,
+                            thumbnailData: thumbnailData,
+                            scanCase: capturedScanCase
+                        )
+                        self.frameCaptureSession = FrameCaptureSession()
+                        MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
+                        self.isProcessingMesh = false
 
-                        if isExtendFlow {
-                            // Extend flow: save immediately and call completion
-                            let autoSaveName = capturedLocationId == nil ? "New Space" : "Scan"
-                            let savedScan = ScanFileManager.shared.saveScan(
-                                context: self.modelContext,
-                                locationId: capturedLocationId,
-                                name: autoSaveName,
-                                meshData: result.data,
-                                vertexCount: result.vertexCount,
-                                faceCount: result.faceCount,
-                                hardwareDeviceModel: UIDevice.current.name,
-                                rawDataPath: rawDataPath,
-                                vertexColors: vertexColors,
-                                worldMapURL: mapURL,
-                                thumbnailData: thumbnailData,
-                                scanCase: capturedScanCase
-                            )
-                            self.frameCaptureSession = FrameCaptureSession()
-                            MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
-                            self.isProcessingMesh = false
+                        // Write deferred stitching.json now that we have the real target scan ID
+                        self.writeStitchingLinkIfPending(targetScanId: savedScan.id)
 
-                            // Write deferred stitching.json now that we have the real target scan ID
-                            self.writeStitchingLinkIfPending(targetScanId: savedScan.id)
+                        completion?(savedScan)
+                    } else {
+                        // Normal flow: store as pending scan
+                        self.pendingScan = PendingScanData(
+                            locationId: capturedLocationId,
+                            meshData: result.data,
+                            vertexCount: result.vertexCount,
+                            faceCount: result.faceCount,
+                            rawDataPath: rawDataPath,
+                            vertexColors: vertexColors,
+                            worldMapURL: mapURL,
+                            thumbnailData: thumbnailData,
+                            scanCase: capturedScanCase
+                        )
 
-                            completion?(savedScan)
-                        } else {
-                            // Normal flow: store as pending scan
-                            self.pendingScan = PendingScanData(
-                                locationId: capturedLocationId,
-                                meshData: result.data,
-                                vertexCount: result.vertexCount,
-                                faceCount: result.faceCount,
-                                rawDataPath: rawDataPath,
-                                vertexColors: vertexColors,
-                                worldMapURL: mapURL,
-                                thumbnailData: thumbnailData,
-                                scanCase: capturedScanCase
-                            )
+                        // Release frame capture session memory
+                        self.frameCaptureSession = FrameCaptureSession()
+                        MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
+                        self.isProcessingMesh = false
 
-                            // Release frame capture session memory
-                            self.frameCaptureSession = FrameCaptureSession()
-                            MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
-                            self.isProcessingMesh = false
-
-                            // If user already tapped save in the alert, OR if this is a background extension
-                            if self.isWaitingToSave {
-                                self.savePendingScan()
-                            } else if self.scanStore.activeLocationForScan != nil {
-                                self.savePendingScan()
-                            }
+                        // If user already tapped save in the alert, OR if this is a background extension
+                        if self.isWaitingToSave {
+                            self.savePendingScan()
+                        } else if self.scanStore.activeLocationForScan != nil {
+                            self.savePendingScan()
                         }
                     }
                 }
             }
+        }
+    }
+
+    /// Exports the ARWorldMap (co-framed with the OBJ — reconstruction is already disabled and the
+    /// Scan4D_Mesh_Origin anchor placed by the caller) and runs `proceed(mapURL)` on the main thread
+    /// on success. A scan with no world map is useless (not relocalizable / extendable), so on
+    /// failure we do NOT offer save-without-map: the user can Retry the export (after moving to a
+    /// more feature-rich spot) or Discard the whole scan. If there's no window to present in, we
+    /// discard rather than silently persist a mapless scan or hang.
+    private func exportWorldMapThenContinue(isExtendFlow: Bool,
+                                            completion: ((CapturedScan?) -> Void)?,
+                                            proceed: @escaping (URL) -> Void) {
+        VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL in
+            DispatchQueue.main.async {
+                if let mapURL = mapURL {
+                    proceed(mapURL)
+                    return
+                }
+                let alert = UIAlertController(
+                    title: "World Map Not Captured",
+                    message: "Not enough features were tracked to build a world map, so this scan can't be "
+                        + "relocalized or extended later. Move to a more detailed area and try again, or "
+                        + "discard this scan.",
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "Try Again", style: .default) { _ in
+                    self.saveMessage = "Saving World Map..."
+                    // Keep the full-screen extend overlay text honest during the retry (otherwise it
+                    // keeps showing the stale "📍 Saving scan..." behind the alert).
+                    if isExtendFlow { self.extendPhaseText = "📍 Retrying world map…" }
+                    self.exportWorldMapThenContinue(
+                        isExtendFlow: isExtendFlow, completion: completion, proceed: proceed
+                    )
+                })
+                alert.addAction(UIAlertAction(title: "Discard Scan", style: .destructive) { _ in
+                    self.discardInProgressScan(isExtendFlow: isExtendFlow, completion: completion)
+                })
+                if !self.presentTopAlert(alert) {
+                    self.discardInProgressScan(isExtendFlow: isExtendFlow, completion: completion)
+                }
+            }
+        }
+    }
+
+    /// Abandons an in-progress save (world-map export failed and the user chose Discard, or there
+    /// was no window to prompt in). Tears down the capture session, deletes any empty location
+    /// created for this flow, and resets state. For the extend flow it fires completion(nil) so the
+    /// caller (pinAndExtend) can abort its session-restart sequence and clean up its new location.
+    func discardInProgressScan(isExtendFlow: Bool, completion: ((CapturedScan?) -> Void)?) {
+        isRecording = false
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+        isProcessingMesh = false
+        isWaitingToSave = false
+        pendingScan = nil
+
+        frameCaptureSession.discardCapture()
+        frameCaptureSession = FrameCaptureSession()
+        MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
+
+        // Clean up any empty location created for this flow.
+        if let locId = scanStore.activeLocationForScan {
+            let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
+            if let location = try? modelContext.fetch(descriptor).first, location.scans.isEmpty {
+                modelContext.delete(location)
+                try? modelContext.save()
+            }
+        }
+
+        if isExtendFlow {
+            // Extend abort: drop the pending link and let the completion handler reset the flow.
+            scanStore.pendingStitchLink = nil
+            saveMessage = nil
+            completion?(nil)
+        } else {
+            saveMessage = "Scan Discarded"
+            scanStore.resetCaptureState()
+            clearMessage()
         }
     }
 

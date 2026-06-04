@@ -72,6 +72,11 @@ extension CaptureView {
                 try self.modelContext.save()
             } catch {
                 print("[CaptureView] Failed to save new location: \(error)")
+                // Clean up the just-inserted location so a failed save can't leave a phantom
+                // "Adjacent to …" location that autosave later persists. The stabilization task's
+                // cleanup defer isn't reached on this early return, so do it here. (delete() alone —
+                // NOT rollback(), which would also discard mapA's just-saved scan.)
+                self.modelContext.delete(newLocation)
                 self.showExtendOverlay = false
                 self.scanStore.capturePhase = .idle
                 self.showTransientMessage("Failed to create location — please try again", duration: 4)

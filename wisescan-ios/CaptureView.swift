@@ -63,14 +63,18 @@ struct CaptureView: View {
 
     @State private var showSettings = false
     @State private var activeLocationName: String? = nil
-    // Ghost-mesh offsets (from main) drive ARCoverageView's ghost rendering. Our link-adjacent
-    // flow leaves them at 0 so the relocalized ghost overlays at identity (the manual-nudge slider
-    // UI was dropped in favor of our anchor-based AlignmentOverlayView).
-    @State private var ghostYRotation: Float = 0
-    @State private var ghostXOffset: Float = 0
-    @State private var ghostZOffset: Float = 0
+    // Ghost-mesh manual "nudger" (from main) — coexists with our anchor-based AlignmentOverlayView.
+    // The sliders adjust the ghost overlay; startRecording bakes the offset into the ARKit world
+    // origin (bakedGhostTransform → ARCoverageView.setWorldOrigin) so the captured mesh and the
+    // world map exported at save time stay co-framed. `internal` (not private) where the recording
+    // extension (startRecording) needs access.
+    @State var ghostYRotation: Float = 0
+    @State var ghostXOffset: Float = 0
+    @State var ghostZOffset: Float = 0
     @State private var dismissGhostMesh = false
-    @State private var bakedGhostTransform: simd_float4x4? = nil
+    @State var bakedGhostTransform: simd_float4x4? = nil
+    @State private var showRelocDialog = false
+    @State var showManualAdjust = false
 
     struct PendingScanData {
         let locationId: UUID?
@@ -329,7 +333,7 @@ struct CaptureView: View {
                 .padding()
 
                 if let locName = activeLocationName {
-                    let modeText = scanStore.activeScanToExtend != nil ? "Extend Scan" : "Rescan"
+                    let modeText = scanStore.activeScanToExtend != nil ? "Link Adjacent Space" : "Rescan"
                     Text("\(locName) — \(modeText)")
                         .font(.caption.bold())
                         .foregroundColor(.white)
@@ -618,6 +622,146 @@ struct CaptureView: View {
                     onCancel: { cancelAlignment() }
                 )
             }
+
+            // Ghost-mesh manual nudger (restored from main): a bottom-left status chip that opens an
+            // alignment dialog, plus a slider overlay to rotate/translate the ghost when
+            // relocalization is imperfect. Complements the anchor-based AlignmentOverlayView above;
+            // startRecording bakes any offset into the world origin so mesh + world map stay co-framed.
+            if cachedGhostMeshData != nil && !dismissGhostMesh {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Button(action: { showRelocDialog = true }) {
+                            HStack(spacing: 6) {
+                                OctahedronIcon(color: ghostMeshColor.swiftUIColor)
+                                Text("Ghost Mesh")
+                                    .font(.caption2.bold())
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial)
+                            .cornerRadius(20)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 20)
+                                    .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                            )
+                        }
+                        Spacer()
+                    }
+                    .padding(.leading, 16)
+                    .padding(.bottom, 100)
+                }
+            }
+
+            // Manual alignment slider overlay
+            if showManualAdjust && cachedGhostMeshData != nil && !dismissGhostMesh {
+                VStack {
+                    Spacer()
+                    VStack(spacing: 12) {
+                        HStack {
+                            Text("Manual Alignment")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            Spacer()
+                            Button("Done") {
+                                showManualAdjust = false
+                            }
+                            .font(.subheadline.bold())
+                            .foregroundColor(.cyan)
+                        }
+
+                        VStack(spacing: 8) {
+                            HStack {
+                                Image(systemName: "rotate.3d")
+                                    .frame(width: 24)
+                                Text("Y Rotation")
+                                    .font(.caption)
+                                    .frame(width: 70, alignment: .leading)
+                                Slider(value: Binding(
+                                    get: { Double(ghostYRotation) },
+                                    set: { ghostYRotation = Float($0) }
+                                ), in: -0.524...0.524) // ±30°
+                                Text("\(Int(ghostYRotation * 180 / .pi))°")
+                                    .font(.caption.monospacedDigit())
+                                    .frame(width: 40, alignment: .trailing)
+                            }
+                            .foregroundColor(.white)
+
+                            HStack {
+                                Image(systemName: "arrow.left.and.right")
+                                    .frame(width: 24)
+                                Text("X Position")
+                                    .font(.caption)
+                                    .frame(width: 70, alignment: .leading)
+                                Slider(value: Binding(
+                                    get: { Double(ghostXOffset) },
+                                    set: { ghostXOffset = Float($0) }
+                                ), in: -1.0...1.0)
+                                Text(String(format: "%.2fm", ghostXOffset))
+                                    .font(.caption.monospacedDigit())
+                                    .frame(width: 50, alignment: .trailing)
+                            }
+                            .foregroundColor(.white)
+
+                            HStack {
+                                Image(systemName: "arrow.up.and.down")
+                                    .frame(width: 24)
+                                Text("Z Position")
+                                    .font(.caption)
+                                    .frame(width: 70, alignment: .leading)
+                                Slider(value: Binding(
+                                    get: { Double(ghostZOffset) },
+                                    set: { ghostZOffset = Float($0) }
+                                ), in: -1.0...1.0)
+                                Text(String(format: "%.2fm", ghostZOffset))
+                                    .font(.caption.monospacedDigit())
+                                    .frame(width: 50, alignment: .trailing)
+                            }
+                            .foregroundColor(.white)
+                        }
+
+                        Button(action: {
+                            ghostYRotation = 0
+                            ghostXOffset = 0
+                            ghostZOffset = 0
+                        }) {
+                            Text("Reset to Default")
+                                .font(.caption)
+                                .foregroundColor(.orange)
+                        }
+                    }
+                    .padding()
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(16)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 160)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .animation(.spring(), value: showManualAdjust)
+            }
+        }
+        .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
+            Button("Re-relocalize") {
+                // Reset transform and reload the world map by toggling the ghost data.
+                ghostYRotation = 0
+                ghostXOffset = 0
+                ghostZOffset = 0
+                let savedData = cachedGhostMeshData
+                cachedGhostMeshData = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    cachedGhostMeshData = savedData
+                }
+            }
+            Button("Manual Adjust") {
+                showManualAdjust = true
+            }
+            Button("Dismiss Ghost Mesh", role: .destructive) {
+                dismissGhostMesh = true
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The ghost mesh from your previous scan may not be perfectly aligned. Choose an option:")
         }
         .preferredColorScheme(.dark)
         .onAppear {
@@ -661,6 +805,8 @@ struct CaptureView: View {
 
             // Reset ghost mesh alignment state for this session
             dismissGhostMesh = false
+            showManualAdjust = false
+            showRelocDialog = false
             ghostYRotation = 0
             ghostXOffset = 0
             ghostZOffset = 0
@@ -695,6 +841,13 @@ struct CaptureView: View {
                 scanStore.resetCaptureState()
                 scanStore.pendingStitchLink = inflightStitchLink
 
+                // Tear down the reference ghost loaded for the (now-failed) link: clearing
+                // cachedGhostMeshData drives ARCoverageView's teardown path (removes the ghost
+                // anchor, resets the coordinator's hasAddedGhostMesh/hasWorldMap), so the stale
+                // "Ghost Mesh" chip + overlay don't linger into the next scan in this view.
+                cachedGhostMeshData = nil
+                dismissGhostMesh = false
+
                 scanStore.mapLoadFailed = false // reset
             }
         }
@@ -707,7 +860,12 @@ struct CaptureView: View {
             // cancels this (see onAppear). One-shot; rapid successive scans return before it fires.
             idleTeardownTimer?.invalidate()
             idleTeardownTimer = Timer.scheduledTimer(withTimeInterval: AppConstants.arIdleTeardownSeconds, repeats: false) { _ in
-                if selectedTab != 1 && !isRecording && !scanStore.isProcessingScan {
+                // Don't pause mid-recording or during the post-scan processing/save window — the
+                // world-map export + save still need the live session. isProcessingScan is currently
+                // unused by the capture path, so gate on the flags this pipeline actually maintains:
+                // isProcessingMesh (export/color in flight) and a pendingScan awaiting its name/save.
+                let processing = isProcessingMesh || pendingScan != nil
+                if selectedTab != 1 && !isRecording && !processing && !scanStore.isProcessingScan {
                     pauseARSession = true
                 }
             }
@@ -762,34 +920,17 @@ struct CaptureView: View {
             Text("Enter a unique name for this space so you can add scans later.")
         }
         .alert("Insufficient Tracking", isPresented: $showInsufficientTrackingAlert) {
-            Button("Save Anyway") {
-                recordingTimer?.invalidate()
-                recordingTimer = nil
-                performStopRecording()
-            }
+            // A scan without a usable world map can't be relocalized or extended, so we don't offer
+            // "Save Anyway". Recording is still live here (stopRecording returned early without
+            // tearing down), so "Keep Scanning" just dismisses and lets the user map more area.
+            Button("Keep Scanning", role: .cancel) { }
             Button("Discard Scan", role: .destructive) {
-                recordingTimer?.invalidate()
-                recordingTimer = nil
-                isRecording = false
-                frameCaptureSession = FrameCaptureSession()
-                MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
-                clearMessage()
-                
-                // Clean up any empty location created for this flow
-                if let locId = scanStore.activeLocationForScan {
-                    let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
-                    if let location = try? modelContext.fetch(descriptor).first, location.scans.isEmpty {
-                        modelContext.delete(location)
-                        try? modelContext.save()
-                    }
-                }
-                
-                // Reset capture/stitching state so a stale pendingStitchLink
-                // from a prior extend flow doesn't corrupt the next save.
-                scanStore.resetCaptureState()
+                discardInProgressScan(isExtendFlow: false, completion: nil)
             }
         } message: {
-            Text("This scan has a poor mapping status (\(scanStats.mappingStatus)). Successful relocalization later requires 'mapped' or 'extending' status. Would you like to save it anyway?")
+            Text("This scan's mapping status is '\(scanStats.mappingStatus)'. Relocalizing or extending it "
+                + "later requires a 'mapped' world map. Keep scanning the area to improve it, or discard "
+                + "and start over.")
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
@@ -835,11 +976,13 @@ struct CaptureView: View {
         if capturedCount > 0 {
             alert = UIAlertController(
                 title: "Tracking Lost",
-                message: "AR tracking was interrupted during this scan, so anything captured after that point is unreliable. Save the \(capturedCount) frame\(capturedCount == 1 ? "" : "s") captured so far, or discard and rescan?",
+                message: "AR tracking was interrupted during this scan, so anything captured after that "
+                    + "point is unreliable. Save the \(capturedCount) frame\(capturedCount == 1 ? "" : "s") "
+                    + "captured so far, or discard and rescan?",
                 preferredStyle: .alert
             )
             alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
-                self.discardCapturedData()
+                self.discardInProgressScan(isExtendFlow: false, completion: nil)
             })
             alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in
                 // Our save pipeline tears down reconstruction itself and captures the world map
@@ -854,12 +997,12 @@ struct CaptureView: View {
                 preferredStyle: .alert
             )
             alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in
-                self.discardCapturedData()
+                self.discardInProgressScan(isExtendFlow: false, completion: nil)
             })
         }
 
         // VIO loss takes precedence: if the manual-stop "Insufficient Tracking" alert (which offers
-        // "Continue Scanning") is already up, dismiss it first so a scan that lost tracking can only
+        // "Keep Scanning") is already up, dismiss it first so a scan that lost tracking can only
         // be saved as-is or discarded, never extended with post-loss frames.
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
            let rootVC = (windowScene.windows.first(where: { $0.isKeyWindow }) ?? windowScene.windows.first)?.rootViewController {
@@ -871,26 +1014,19 @@ struct CaptureView: View {
         }
     }
 
-    /// Discards a partially-captured scan and resets capture/stitching state so the next scan starts
-    /// clean. Mirrors the "Discard Scan" path of the Insufficient-Tracking alert.
-    func discardCapturedData() {
-        recordingTimer?.invalidate()
-        recordingTimer = nil
-        isRecording = false
-        frameCaptureSession.discardCapture()
-        frameCaptureSession = FrameCaptureSession()
-        MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
-        clearMessage()
-
-        // Clean up any empty location created for this flow.
-        if let locId = scanStore.activeLocationForScan {
-            let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
-            if let location = try? modelContext.fetch(descriptor).first, location.scans.isEmpty {
-                modelContext.delete(location)
-                try? modelContext.save()
-            }
+    /// Presents a UIAlertController above whatever is currently on screen (any tab / modal).
+    /// Returns false if there's no window to present in, so callers that must not hang (e.g. the
+    /// world-map-export prompt) can fall back to a safe default instead of stalling.
+    @discardableResult
+    func presentTopAlert(_ alert: UIAlertController) -> Bool {
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let root = (scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first)?.rootViewController else {
+            return false
         }
-        scanStore.resetCaptureState()
+        var top: UIViewController = root
+        while let presented = top.presentedViewController { top = presented }
+        top.present(alert, animated: true)
+        return true
     }
 }
 

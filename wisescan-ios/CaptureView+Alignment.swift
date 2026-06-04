@@ -66,8 +66,16 @@ extension CaptureView {
         scanStore.distanceToBoundaryAnchor = nil
         cachedGhostMeshData = nil
 
+        // Take the phase OUT of the alignment-overlay set ({loadingWorldMap, aligning, alignedReady})
+        // for the whole mapB stabilization window. Otherwise AlignmentOverlayView — with its live
+        // Confirm/Cancel buttons — stays mounted over the freshly-reset, mid-relocalizing session
+        // (mirrors Flow A, which uses .saving + showExtendOverlay). awaitStabilizationAndPlacePinB
+        // flips this to .recording on success and back to .idle (clearing the overlay) on failure.
+        scanStore.capturePhase = .saving
+        showExtendOverlay = true
+        extendPhaseText = "📍 Aligning — hold still..."
+
         hapticGenerator.impactOccurred()
-        showTransientMessage("📍 Aligning — hold still...", duration: 3)
 
         // Wait for the new session (mapB) to stabilize, place pinB, and start recording.
         // Uses the shared stabilization helper (CaptureView+Recording.swift).
@@ -80,6 +88,7 @@ extension CaptureView {
                     self.modelContext.delete(newLocation)
                     try? self.modelContext.save()
                     self.scanStore.resetCaptureState()
+                    self.showExtendOverlay = false // clear the "hold still" overlay on the cancel path
                 }
             }
 
@@ -103,6 +112,7 @@ extension CaptureView {
             )
 
             didLinkSuccessfully = true
+            self.showExtendOverlay = false
             self.showTransientMessage("📍 Aligned & linked! Scanning new space...", duration: 3)
         }
     }
@@ -111,11 +121,23 @@ extension CaptureView {
     /// Resets both app state AND the AR session so the next scan starts
     /// in a fresh coordinate frame (not the source world map's).
     func cancelAlignment() {
+        // If a confirm is already in flight, the stabilization task's own defer performs the single
+        // resetCaptureState + orphaned-location delete and confirmAlignment already issued the
+        // fresh-session reset. Just cancel the task and bail — do NOT resetCaptureState or fire a
+        // SECOND resetTracking here (that churned the AR session mid-relocalization).
+        if isConfirmingAlignment {
+            sessionStabilizationTask?.cancel()
+            sessionStabilizationTask = nil
+            showExtendOverlay = false
+            showTransientMessage("Alignment cancelled — start a new scan without linking", duration: 4)
+            return
+        }
+
         sessionStabilizationTask?.cancel()
         sessionStabilizationTask = nil
-        isConfirmingAlignment = false
         scanStore.resetCaptureState()
         cachedGhostMeshData = nil
+        showExtendOverlay = false
 
         // Reset AR session to a clean coordinate space — without this,
         // the session continues running with the source world map loaded,
