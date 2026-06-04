@@ -26,6 +26,8 @@ Privacy has two distinct paths — **do not conflate them**:
 
 - **SwiftUI First:** All new views should be written using SwiftUI rather than storyboards.
 - **Data Model:** Follow the hierarchical `Locations` -> `Scans` data model pattern.
+- **SwiftData enums:** Stored strings use raw values; expose enums via `@Transient` computed properties with legacy mapping in the getters, so adding/renaming cases never breaks existing on-device databases.
+- **`@Observable` + simd:** A class using `simd_float4x4` (or similar simd types) needs an explicit `import simd` — the `@Observable` macro expands in a context where SwiftUI's implicit re-export is not sufficient.
 
 ### 4. Dependencies — Pin All Versions
 
@@ -82,4 +84,32 @@ If `getCurrentWorldMap` fails (insufficient features / serialize error / timeout
 
 To build the project locally, open `wisescan-ios.xcodeproj` with Xcode.
 
-The `wisescan-ios` repository uses [Release Please](https://github.com/googleapis/release-please) to automate CHANGELOG generation and semantic versioning. Your PR titles *must* follow Conventional Commit standards (e.g., `feat:`, `fix:`, `chore:`). Fastlane is used to automate TestFlight deployments via `fastlane testflight`.
+The `wisescan-ios` repository uses [Release Please](https://github.com/googleapis/release-please) to automate CHANGELOG generation and semantic versioning. Your PR titles *must* follow Conventional Commit standards (e.g., `feat:`, `fix:`, `chore:`). Keep commit subjects to ~50 chars. Fastlane is used to automate TestFlight deployments via `fastlane testflight`.
+
+For CLI build and lint commands (CI / no-signing validation, SwiftLint baseline diffing), see [docs/BUILDING.md](docs/BUILDING.md). For the full release process, see [docs/RELEASE.md](docs/RELEASE.md).
+
+## Stitching / Scan Linking — Implementation Contract
+
+Hard-won invariants for the Extend Scan / map-stitching flow (REQ-003, REQ-012). Design rationale lives in [docs/design/Scan4D_Architecture.md](docs/design/Scan4D_Architecture.md).
+
+### `PendingStitchLink` — deferred write pattern
+- Never write `stitching.json` until the **target scan ID is known** (i.e., after `ScanFileManager.saveScan()` returns).
+- `PendingStitchLink` holds both source AND target anchor data; only `targetScanId` is missing until save.
+- `CaptureView.writeStitchingLinkIfPending(targetScanId:)` is the single write point — called from `savePendingScan()` and the extend-flow branch of `performStopRecording()`.
+- Do **not** build `PendingStitchLink` at UI button-tap time (anchor data is unavailable); build it after AR relocalization confirms the boundary anchor.
+
+### AR configuration
+- Use `ARCoverageView.makeFreshConfiguration()` whenever resetting to a clean session (both extend and alignment flows).
+- `sceneReconstruction` is managed by `updateUIView` based on `isRecording` state — don't set it manually in other flows; just call `run()` with the fresh config and let `updateUIView` re-enable mesh capture when recording starts.
+- `ARSessionDelegate` callbacks run on ARKit's internal queue — always dispatch UI/state updates to `@MainActor` via `DispatchQueue.main.async`. (See also the off-main delegate-queue rules in the Performance section above.)
+
+### `TrackingStatus` enum
+- Use `ScanStats.trackingStatus: TrackingStatus` (not string comparisons) for tracking state in views.
+- `trackingStatus.isNormal` is the canonical check for "session has full positional tracking".
+
+### `StitchingMetadataManager` — async I/O
+- `write()` and `addLink()` dispatch to a private serial `ioQueue` — do not block on their return value for correctness; use the optional `completion` handler if you need confirmation.
+- `read()` and `hasLinks()` remain synchronous (files are tiny JSON) but should be loaded via `.task` into `@State` rather than called directly in a SwiftUI `body`, to avoid repeated I/O on every re-render.
+
+### `LocationManager.bestHeading`
+- Use `locationManager.bestHeading: Double?` everywhere instead of inline `trueHeading > 0 ? trueHeading : magneticHeading` — it encapsulates the true-north fallback.

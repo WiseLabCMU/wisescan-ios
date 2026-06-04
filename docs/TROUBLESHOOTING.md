@@ -78,11 +78,11 @@ The DAT SDK uses Bluetooth for control but negotiates a hidden **WiFi Direct** c
 
 **Recovery Steps:**
 1. Check the Dashboard or CaptureView for the blue "Lite Mode" banner. If present, the device lacks LiDAR.
-2. Scan slower. Watch the HUD's capacity score. If it turns yellow/red, stop the scan and save it, then use "Extend Scan" to start a new chunk.
+2. Scan slower. Watch the HUD's capacity score. If it turns yellow/red, stop the scan and save it, then use **Link Adjacent Space** to start a new chunk.
 
 ### 2. Relocalization Fails (Ghost Mesh Jumps)
 **Symptoms:**
-- When extending a scan, the red ghost mesh appears but is completely misaligned or jumps wildly around the room.
+- When relocalizing for a Rescan or Link Adjacent, the red ghost mesh appears but is completely misaligned or jumps wildly around the room.
 
 **Root Cause:**
 ARKit's `ARWorldMap` requires identical visual features to relocalize. If the lighting has changed significantly, or if the original scan was entirely of a blank wall, ARKit cannot anchor the coordinate space.
