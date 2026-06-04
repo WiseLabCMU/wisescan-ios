@@ -2,6 +2,7 @@ import SwiftUI
 import RealityKit
 import ARKit
 
+// swiftlint:disable type_body_length
 struct ARCoverageView: UIViewRepresentable {
     @Binding var arSession: ARSession?
     @Binding var isRecording: Bool
@@ -17,6 +18,10 @@ struct ARCoverageView: UIViewRepresentable {
     var useFrontCamera: Bool = false
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
     var initialGhostMeshData: Data? = nil // Raw OBJ data from the previous scan
+    var scanStore: ScanStore? = nil // Runtime state for boundary anchor tracking
+
+    /// Well-known name for boundary anchors so they can be identified across sessions.
+    static let boundaryAnchorName = "Scan4D_Boundary_Anchor"
 
     // Ghost mesh manual alignment
     var ghostYRotation: Float = 0       // Radians, applied as Y-axis rotation offset
@@ -45,15 +50,7 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Start in nominal mode: camera passthrough only, no scene reconstruction
         // EXCEPT if we are extending a scan, in which case we load the map right away
-        let config = ARWorldTrackingConfiguration()
-        if Self.supportsLiDAR {
-            config.sceneReconstruction = []
-        }
-        if let mapURL = initialWorldMapURL,
-           let data = try? Data(contentsOf: mapURL),
-           let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
-            config.initialWorldMap = worldMap
-        }
+        let config = Self.makeConfiguration(worldMapURL: initialWorldMapURL)
         let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
 
         context.coordinator.scanStats = scanStats
@@ -65,6 +62,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.isSessionReadyBinding = $isSessionReady
         context.coordinator.vioCompromisedBinding = $vioCompromised
         context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
+        context.coordinator.scanStore = scanStore
 
         // Always start with the live camera feed — even in VR mode.
         // The VR point cloud + skybox are activated only when recording starts (in updateUIView).
@@ -182,7 +180,7 @@ struct ARCoverageView: UIViewRepresentable {
             context.coordinator.hasSetSessionReady = true
         }
 
-        // Detect ghost mesh data changes (e.g., user tapped "Extend Scan" after initial view creation)
+        // Detect ghost mesh data changes (e.g., user tapped "Rescan Space" or "Link Adjacent Space" after initial view creation)
         let newGhostCount = initialGhostMeshData?.count
         if newGhostCount != context.coordinator.lastGhostMeshDataCount {
             context.coordinator.lastGhostMeshDataCount = newGhostCount
@@ -196,14 +194,11 @@ struct ARCoverageView: UIViewRepresentable {
 
             if let ghostData = initialGhostMeshData {
                 // Load the world map for relocalization
-                let config = ARWorldTrackingConfiguration()
-                config.sceneReconstruction = (Self.supportsLiDAR && isRecording) ? .mesh : []
-                config.environmentTexturing = .automatic
-                if let mapURL = initialWorldMapURL,
-                   let data = try? Data(contentsOf: mapURL),
-                   let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
-                    config.initialWorldMap = worldMap
-                }
+                let config = Self.makeConfiguration(
+                    enableMeshReconstruction: isRecording,
+                    worldMapURL: initialWorldMapURL
+                )
+
                 let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
                 context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
                 context.coordinator.hasSeenRelocalizing = false
@@ -219,6 +214,20 @@ struct ARCoverageView: UIViewRepresentable {
             uiView.scene.removeAnchor(ghostAnchor)
             context.coordinator.ghostAnchorEntity = nil
             context.coordinator.hasAddedGhostMesh = false
+        }
+
+        // Clear a stale boundary visual when the app cleared the boundary anchor state without an
+        // isRecording transition (the alignment reset paths — confirmAlignment / cancelAlignment /
+        // stabilization timeout — nil scanStore.boundaryAnchorTransform but never start recording,
+        // so resetForRecording/Nominal don't run). Without this, mapA's boundary sphere lingers in
+        // the freshly-reset mapB/idle session. Guarded on !isRecording so an active scan's marker
+        // (and the brief place-then-publish window) is untouched.
+        if !isRecording, scanStore?.boundaryAnchorTransform == nil,
+           let staleBoundary = context.coordinator.boundaryAnchorEntity {
+            staleBoundary.removeFromParent()
+            context.coordinator.boundaryAnchorEntity = nil
+            context.coordinator.boundaryAnchorId = nil
+            context.coordinator.scanStats?.hasBoundaryAnchor = false
         }
 
         // Apply manual alignment transform offset to ghost mesh
@@ -273,7 +282,7 @@ struct ARCoverageView: UIViewRepresentable {
                     uiView.session.setWorldOrigin(relativeTransform: baked)
                     print("[ARCoverageView] Applied baked ghost transform to ARSession world origin.")
                 }
-                
+
                 // Active wireframe is now rendered via procedural geometry (not .showSceneUnderstanding)
                 // Entities are built incrementally in session(_:didAdd:) and session(_:didUpdate:)
                 context.coordinator.resetForRecording()
@@ -286,6 +295,15 @@ struct ARCoverageView: UIViewRepresentable {
                 if let ghostData = initialGhostMeshData, context.coordinator.ghostAnchorEntity == nil {
                     Self.loadGhostMesh(data: ghostData, coordinator: context.coordinator, arView: uiView)
                 }
+
+                // Draw the boundary marker for a metadata-only Pin B (mapB link flow). With no
+                // world map there's no ARWorldMap anchor to trigger the didAdd visual path, and
+                // resetForRecording above cleared any stale marker — so render it directly from
+                // the pose pinB published to scanStore. (World-map flows keep using didAdd.)
+                if config.initialWorldMap == nil,
+                   let pinTransform = scanStore?.boundaryAnchorTransform {
+                    context.coordinator.addBoundaryAnchorVisual(at: pinTransform, in: uiView)
+                }
             } else {
                 // Downgrade to nominal: pure camera passthrough — no overlays
                 context.coordinator.resetForNominal()
@@ -296,11 +314,7 @@ struct ARCoverageView: UIViewRepresentable {
                     ghostAnchor.removeFromParent()
                 }
 
-                let config = ARWorldTrackingConfiguration()
-                if Self.supportsLiDAR {
-                    config.sceneReconstruction = []
-                }
-                config.environmentTexturing = .automatic
+                let config = Self.makeConfiguration()
                 uiView.session.run(config)
                 // Clear ALL debug options for pure passthrough (or VR background)
                 uiView.debugOptions = []
@@ -356,10 +370,10 @@ struct ARCoverageView: UIViewRepresentable {
             
             DispatchQueue.main.async {
                 let ghostColorStr = UserDefaults.standard.string(forKey: AppConstants.Key.ghostMeshColor) ?? AppConstants.ghostMeshColor
-                let c = ghostColorStr.toSIMD4Color
+                let color = ghostColorStr.toSIMD4Color
                 // Fully opaque UnlitMaterial — the only stable material in ARView
                 let material = UnlitMaterial(color: UIColor(
-                    red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1.0
+                    red: CGFloat(color.x), green: CGFloat(color.y), blue: CGFloat(color.z), alpha: 1.0
                 ))
                 
                 let containerEntity = Entity()
@@ -372,7 +386,12 @@ struct ARCoverageView: UIViewRepresentable {
                         containerEntity.addChild(chunkModel)
                     }
                 }
-                
+                // The ghost OBJ is already baked in the world frame of the source
+                // scan's ARWorldMap (mesh + map are captured together at save time;
+                // see performStopRecording). After relocalization the live session
+                // adopts that same map coordinate frame, so the mesh overlays the
+                // real space correctly at identity by default (the manual offset above
+                // layers on top when the user nudges alignment).
                 let anchorEntity = AnchorEntity(world: .zero)
                 anchorEntity.addChild(containerEntity)
                 coordinator.ghostAnchorEntity = anchorEntity
@@ -381,9 +400,11 @@ struct ARCoverageView: UIViewRepresentable {
                 // or if the session has already relocalized.
                 let canAdd = !coordinator.hasWorldMap || coordinator.hasSeenRelocalizing
                 if canAdd && arView.session.currentFrame?.camera.trackingState == .normal && !coordinator.hasAddedGhostMesh {
-                    print("Ghost mesh ready, adding immediately (hasWorldMap=\(coordinator.hasWorldMap), relocalized=\(coordinator.hasSeenRelocalizing))")
-                    arView.scene.addAnchor(anchorEntity)
-                    coordinator.hasAddedGhostMesh = true
+                    if let ghostAnchor = coordinator.ghostAnchorEntity {
+                        print("Ghost mesh ready, adding immediately (hasWorldMap=\(coordinator.hasWorldMap), relocalized=\(coordinator.hasSeenRelocalizing))")
+                        arView.scene.addAnchor(ghostAnchor)
+                        coordinator.hasAddedGhostMesh = true
+                    }
                 }
             }
         }
@@ -471,6 +492,11 @@ struct ARCoverageView: UIViewRepresentable {
         var hasSeenRelocalizing = false
         var lastGhostMeshDataCount: Int? = nil // Track changes to ghost mesh data
 
+        // Boundary Anchor tracking
+        weak var scanStore: ScanStore?
+        var boundaryAnchorEntity: AnchorEntity?
+        var boundaryAnchorId: UUID? = nil
+
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
             baselineMemoryMB = ScanStats.currentMemoryUsageMB() // read on main in updateStats's publish block
@@ -493,6 +519,16 @@ struct ARCoverageView: UIViewRepresentable {
             }
             // Clear any stale wireframe entities from a previous recording (RealityKit → main)
             removeAllActiveMeshEntities()
+
+            scanStats?.hasBoundaryAnchor = false
+
+            // Remove boundary anchor visual from the scene — prevents stale marker
+            // from appearing at wrong position after session/coordinate-frame reset.
+            if let existing = boundaryAnchorEntity {
+                existing.removeFromParent()
+            }
+            boundaryAnchorEntity = nil
+            boundaryAnchorId = nil
         }
 
         /// Reset coordinator state when returning to nominal (idle) mode.
@@ -513,18 +549,25 @@ struct ARCoverageView: UIViewRepresentable {
             // Remove all active mesh wireframe entities from the scene (RealityKit → main)
             removeAllActiveMeshEntities()
 
+            // Remove boundary anchor visual from the scene
+            if let existing = boundaryAnchorEntity {
+                existing.removeFromParent()
+            }
+            boundaryAnchorEntity = nil
+            boundaryAnchorId = nil
+
             DispatchQueue.main.async { [weak self] in
                 // Zero out scan stats
                 self?.scanStats?.totalVertices = 0
                 self?.scanStats?.totalFaces = 0
                 self?.scanStats?.anchorCount = 0
                 self?.scanStats?.sessionDuration = 0
+                self?.scanStats?.hasBoundaryAnchor = false
                 self?.scanStats?.memoryUsageMB = 0
                 self?.scanStats?.baselineMemoryMB = 0
                 self?.scanStats?.driftEstimate = 0
                 self?.scanStats?.averageQuality = 0
-                self?.scanStats?.trackingState = "notAvailable"
-                self?.scanStats?.trackingReason = ""
+                self?.scanStats?.trackingStatus = .notAvailable
             }
         }
 
@@ -749,45 +792,112 @@ struct ARCoverageView: UIViewRepresentable {
 
             // Track drift via tracking state transitions
             totalTrackingUpdates += 1
-            var stateStr = "normal"
-            var reasonStr = ""
+            var status: TrackingStatus = .normal
             switch camera.trackingState {
             case .normal:
-                stateStr = "normal"
+                status = .normal
             case .notAvailable:
-                stateStr = "notAvailable"
+                status = .notAvailable
                 trackingDegradationCount += 1
             case .limited(let reason):
-                stateStr = "limited"
                 switch reason {
                 case .excessiveMotion:
-                    reasonStr = "Excessive Motion"
+                    status = .limited(reason: .excessiveMotion)
                     trackingDegradationCount += 1 // Real drift indicator
                 case .insufficientFeatures:
-                    reasonStr = "Insufficient Features"
+                    status = .limited(reason: .insufficientFeatures)
                     trackingDegradationCount += 1 // Real drift indicator
                 case .initializing:
-                    reasonStr = "Initializing"
+                    status = .limited(reason: .initializing)
                     // Don't count as drift — normal startup
                 case .relocalizing:
-                    reasonStr = "Relocalizing"
+                    status = .limited(reason: .relocalizing)
                     // Don't count as drift — normal recovery
                 @unknown default:
-                    reasonStr = "Unknown"
+                    status = .limited(reason: .unknown)
                 }
             }
 
-            PerfDiag.log("ARKit tracking → \(stateStr)\(reasonStr.isEmpty ? "" : " (\(reasonStr))")")
+            let trackingDesc: String
+            switch status {
+            case .normal: trackingDesc = "normal"
+            case .notAvailable: trackingDesc = "notAvailable"
+            case .limited(let r): trackingDesc = "limited (\(r.rawValue))"
+            }
+            PerfDiag.log("ARKit tracking → \(trackingDesc)")
             // (VIO starvation guard lives in session(_:didUpdate:) — it needs per-frame
             // timing to catch frame-delivery stalls + sustained degradation, not just transitions.)
 
             DispatchQueue.main.async { [weak self] in
-                self?.scanStats?.trackingState = stateStr
-                self?.scanStats?.trackingReason = reasonStr
+                self?.scanStats?.trackingStatus = status
+            }
+        }
+
+        // MARK: - Per-Frame Alignment Phase Transitions
+
+        /// Drives alignment phase transitions based on tracking state.
+        /// Relocalization succeeds when ARKit reaches `.normal` tracking
+        /// after loading a world map — no boundary anchor required.
+        /// Distance-to-boundary-anchor is still published when available
+        /// as optional visual feedback in the overlay.
+        /// Drives the pre-recording relocalization/alignment phase transitions for Link Adjacent /
+        /// Rescan. Called from session(_:didUpdate frame:); a no-op outside the alignment phases.
+        private func driveAlignmentPhase(_ frame: ARFrame) {
+            guard let phase = scanStore?.capturePhase,
+                  phase == .loadingWorldMap || phase == .aligning || phase == .alignedReady else {
+                return
+            }
+
+            let isTrackingNormal = frame.camera.trackingState == .normal
+            // In Link Adjacent, `.loadingWorldMap` means this flow expects relocalization
+            // against a source scan. If loading failed and `hasWorldMap` is false, do not
+            // treat that the same as a no-world-map flow.
+            let worldMapWasRequested = phase == .loadingWorldMap || hasWorldMap
+            
+            if phase == .loadingWorldMap && !hasWorldMap {
+                // The world map file was missing or corrupted and failed to load
+                DispatchQueue.main.async { [weak self] in
+                    self?.scanStore?.mapLoadFailed = true
+                    self?.scanStore?.capturePhase = .idle
+                }
+                return
+            }
+            
+            let isRelocalized = isTrackingNormal && (!worldMapWasRequested || hasSeenRelocalizing)
+
+            // Optionally update distance to boundary anchor if one exists (visual only)
+            if let anchorTransform = scanStore?.boundaryAnchorTransform {
+                let anchorPos = SIMD3<Float>(anchorTransform.columns.3.x, anchorTransform.columns.3.y, anchorTransform.columns.3.z)
+                let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x, frame.camera.transform.columns.3.y, frame.camera.transform.columns.3.z)
+                let dist = simd_distance(anchorPos, camPos)
+                DispatchQueue.main.async { [weak self] in
+                    self?.scanStore?.distanceToBoundaryAnchor = dist
+                }
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                // Re-read capturePhase inside the main-queue block to avoid stale
+                // values overwriting a user-initiated cancel/reset that occurred
+                // between the ARKit delegate call and this dispatch.
+                guard let currentPhase = self?.scanStore?.capturePhase else { return }
+                // Drive capturePhase transitions based on tracking state:
+                // .loadingWorldMap → .aligning: ARKit has relocalized
+                // .aligning → .alignedReady: tracking is stable, user can confirm
+                // .alignedReady → .aligning: tracking degraded, revert
+                if currentPhase == .loadingWorldMap && isRelocalized {
+                    self?.scanStore?.capturePhase = .aligning
+                } else if currentPhase == .aligning && isRelocalized {
+                    self?.scanStore?.capturePhase = .alignedReady
+                } else if currentPhase == .alignedReady && !isRelocalized {
+                    self?.scanStore?.capturePhase = .aligning
+                }
             }
         }
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
+            // Pre-recording relocalization/alignment phase driver (no-op outside those phases).
+            driveAlignmentPhase(frame)
+
             // Per-frame ARKit timing (runs in AR + VR, above the VR-only guard). The frame-delivery
             // gap is the direct signal that VIO was starved.
             let ts = frame.timestamp
@@ -901,6 +1011,26 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Track anchor update counts via delegate + build active mesh wireframe
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+            // Detect boundary anchors from loaded ARWorldMap (visual marker only —
+            // phase transitions are driven by tracking state in didUpdate frame).
+            for anchor in anchors {
+                if anchor.name == ARCoverageView.boundaryAnchorName {
+                    print("[BoundaryAnchor] Detected boundary anchor from ARWorldMap: \(anchor.identifier)")
+                    boundaryAnchorId = anchor.identifier
+                    DispatchQueue.main.async { [weak self] in
+                        self?.scanStore?.boundaryAnchorTransform = anchor.transform
+                        self?.scanStore?.boundaryAnchorId = anchor.identifier
+                        self?.scanStats?.hasBoundaryAnchor = true
+
+                        // Render the existing boundary anchor (must be on main thread
+                        // because RealityKit scene mutations are not thread-safe)
+                        if let arView = self?.arView {
+                            self?.addBoundaryAnchorVisual(at: anchor.transform, in: arView)
+                        }
+                    }
+                }
+            }
+
             guard isRecording else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
@@ -914,6 +1044,23 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+            for anchor in anchors {
+                // Always refresh boundary anchor transform — ARKit refines anchor
+                // positions during relocalization, and the alignment UI needs the
+                // latest position even before recording starts.
+                if anchor.name == ARCoverageView.boundaryAnchorName {
+                    let transform = anchor.transform
+                    DispatchQueue.main.async { [weak self] in
+                        self?.scanStore?.boundaryAnchorTransform = transform
+                        // Move the visual marker to match the refined anchor position
+                        let pos = SIMD3<Float>(transform.columns.3.x,
+                                               transform.columns.3.y,
+                                               transform.columns.3.z)
+                        self?.boundaryAnchorEntity?.transform.translation = pos
+                    }
+                }
+            }
+
             guard isRecording else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
@@ -1024,6 +1171,35 @@ struct ARCoverageView: UIViewRepresentable {
                 }
             }
         }
+
+        // MARK: - Boundary Anchor Visual
+
+        /// Adds a vibrant green sphere with a translucent glow at the boundary anchor location.
+        func addBoundaryAnchorVisual(at transform: simd_float4x4, in arView: ARView) {
+            // Remove existing boundary visual if any
+            if let existing = boundaryAnchorEntity {
+                existing.removeFromParent()
+            }
+
+            // Create a green sphere with pulsing animation
+            let sphereMesh = MeshResource.generateSphere(radius: 0.04)
+            let material = UnlitMaterial(color: UIColor(red: 0.0, green: 0.95, blue: 0.4, alpha: 1.0))
+            let modelEntity = ModelEntity(mesh: sphereMesh, materials: [material])
+
+            // Add a slightly larger translucent outer sphere for glow effect
+            let outerMesh = MeshResource.generateSphere(radius: 0.06)
+            let outerMaterial = UnlitMaterial(color: UIColor(red: 0.0, green: 0.95, blue: 0.4, alpha: 0.3))
+            let outerEntity = ModelEntity(mesh: outerMesh, materials: [outerMaterial])
+            modelEntity.addChild(outerEntity)
+
+            // Place at the anchor's world position
+            let position = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+            let anchorEntity = AnchorEntity(world: position)
+            anchorEntity.addChild(modelEntity)
+
+            arView.scene.addAnchor(anchorEntity)
+            boundaryAnchorEntity = anchorEntity
+        }
     }
 
     // MARK: - Export
@@ -1032,6 +1208,7 @@ struct ARCoverageView: UIViewRepresentable {
         guard let currentFrame = currentFrame else { return nil }
 
         // Get person segmentation for privacy filtering
+        // swiftlint:disable:next large_tuple
         var personPixels: (buffer: CVPixelBuffer, width: Int, height: Int, stride: Int, base: UnsafeMutableRawPointer)?
         if privacyFilter, let segBuffer = currentFrame.segmentationBuffer {
             CVPixelBufferLockBaseAddress(segBuffer, .readOnly)
@@ -1052,7 +1229,11 @@ struct ARCoverageView: UIViewRepresentable {
         let imageRes = camera.imageResolution
         let projMatrix = camera.projectionMatrix(for: .landscapeRight, viewportSize: imageRes, zNear: 0.001, zFar: 100)
 
-        var objLines: [String] = []
+        // Write OBJ directly to a Data buffer to avoid intermediate [String] array
+        // and the large joined String copy. For large meshes (~300K+ vertices) this
+        // roughly halves peak memory vs the array-join approach.
+        var objData = Data()
+        objData.reserveCapacity(1024 * 1024) // Pre-allocate 1MB; grows as needed
         var vertexOffset = 1
         var totalVertices = 0
         var totalFaces = 0
@@ -1065,13 +1246,13 @@ struct ARCoverageView: UIViewRepresentable {
             let vertices = geometry.vertices
             var isPersonVertex = [Bool](repeating: false, count: vertices.count)
 
-            for i in 0..<vertices.count {
-                let pointer = vertices.buffer.contents().advanced(by: i * vertices.stride)
+            for idx in 0..<vertices.count {
+                let pointer = vertices.buffer.contents().advanced(by: idx * vertices.stride)
                 let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
                 let localPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
                 let worldPos = transform * localPos
 
-                objLines.append("v \(worldPos.x) \(worldPos.y) \(worldPos.z)")
+                objData.append(contentsOf: "v \(worldPos.x) \(worldPos.y) \(worldPos.z)\n".utf8)
 
                 // Check person segmentation
                 if let pp = personPixels {
@@ -1082,7 +1263,7 @@ struct ARCoverageView: UIViewRepresentable {
                         let py = Int((1.0 - (clipPos.y / clipPos.w * 0.5 + 0.5)) * Float(pp.height))
                         if px >= 0 && px < pp.width && py >= 0 && py < pp.height {
                             let pixel = pp.base.advanced(by: py * pp.stride + px).assumingMemoryBound(to: UInt8.self).pointee
-                            isPersonVertex[i] = pixel > 128
+                            isPersonVertex[idx] = pixel > 128
                         }
                     }
                 }
@@ -1098,8 +1279,8 @@ struct ARCoverageView: UIViewRepresentable {
                 continue
             }
 
-            for i in 0..<faces.count {
-                let pointer = faces.buffer.contents().advanced(by: i * faceBytes)
+            for faceIdx in 0..<faces.count {
+                let pointer = faces.buffer.contents().advanced(by: faceIdx * faceBytes)
                 let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
 
                 // Skip person faces if privacy filter is on
@@ -1115,7 +1296,7 @@ struct ARCoverageView: UIViewRepresentable {
                 let v1 = Int(indices.0) + vertexOffset
                 let v2 = Int(indices.1) + vertexOffset
                 let v3 = Int(indices.2) + vertexOffset
-                objLines.append("f \(v1) \(v2) \(v3)")
+                objData.append(contentsOf: "f \(v1) \(v2) \(v3)\n".utf8)
                 totalFaces += 1
             }
 
@@ -1126,9 +1307,50 @@ struct ARCoverageView: UIViewRepresentable {
             CVPixelBufferUnlockBaseAddress(pp.buffer, .readOnly)
         }
 
-        let objString = objLines.joined(separator: "\n") + "\n"
-        guard let data = objString.data(using: .utf8), !data.isEmpty else { return nil }
-        return (data, totalVertices, totalFaces)
+        guard !objData.isEmpty else { return nil }
+        return (objData, totalVertices, totalFaces)
+    }
+
+    /// Returns a fresh ARWorldTrackingConfiguration with no scene reconstruction
+    /// and automatic environment texturing. Used by extend/alignment flows to
+    /// reset the AR session to a clean coordinate space.
+    static func makeFreshConfiguration() -> ARWorldTrackingConfiguration {
+        return makeConfiguration()
+    }
+
+    /// Centralized factory for `ARWorldTrackingConfiguration`.
+    /// Consolidates LiDAR checks, world map loading, and frame semantics setup
+    /// that was previously duplicated across multiple call sites.
+    ///
+    /// - Parameters:
+    ///   - enableMeshReconstruction: When `true`, enables `.mesh` scene reconstruction (requires LiDAR).
+    ///   - worldMapURL: Optional URL to an `ARWorldMap` archive for relocalization continuity.
+    ///   - enableFrameSemantics: When `true`, adds person segmentation and scene depth semantics.
+    /// - Returns: A configured `ARWorldTrackingConfiguration` ready for `session.run()`.
+    static func makeConfiguration(
+        enableMeshReconstruction: Bool = false,
+        worldMapURL: URL? = nil,
+        enableFrameSemantics: Bool = false
+    ) -> ARWorldTrackingConfiguration {
+        let config = ARWorldTrackingConfiguration()
+        if supportsLiDAR {
+            config.sceneReconstruction = enableMeshReconstruction ? .mesh : []
+        }
+        config.environmentTexturing = .automatic
+        if let mapURL = worldMapURL,
+           let data = try? Data(contentsOf: mapURL),
+           let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
+            config.initialWorldMap = worldMap
+        }
+        if enableFrameSemantics {
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
+                config.frameSemantics.insert(.personSegmentationWithDepth)
+            }
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+                config.frameSemantics.insert(.sceneDepth)
+            }
+        }
+        return config
     }
 
 }

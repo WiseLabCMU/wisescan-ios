@@ -6,6 +6,7 @@ import os
 
 /// Captures RGB frames, depth maps, and camera poses during an AR recording session.
 @Observable
+// swiftlint:disable type_body_length function_body_length cyclomatic_complexity function_parameter_count identifier_name
 class FrameCaptureSession {
     private(set) var frameCount = 0
     private(set) var captureDir: URL?
@@ -68,6 +69,11 @@ class FrameCaptureSession {
         }
         return merged.map { $0.position }
     }
+
+    // Boundary Anchor (Pivot-Point)
+    private(set) var boundaryAnchorTransform: simd_float4x4?
+    private(set) var boundaryAnchorId: UUID?
+    private var boundaryAnchorCompassHeading: Double?
 
     // Metadata dependencies
     private var locationManager: LocationManager?
@@ -152,6 +158,9 @@ class FrameCaptureSession {
         self.rejectBlur = rejectBlur
         self.privacyFilter = privacyFilter
         self.faceAnchors = []
+        self.boundaryAnchorTransform = nil
+        self.boundaryAnchorId = nil
+        self.boundaryAnchorCompassHeading = nil
         self.lastCaptureTime = 0
         self.locationManager = locationManager
         self.activeLocationId = activeLocationId
@@ -689,13 +698,35 @@ class FrameCaptureSession {
             metadata["gps_accuracy"] = location.horizontalAccuracy
         }
 
-        if let heading = locationManager?.currentHeading {
-            metadata["compass_heading"] = heading.trueHeading > 0 ? heading.trueHeading : heading.magneticHeading
+        if let heading = locationManager?.bestHeading {
+            metadata["compass_heading"] = heading
         }
 
         let finalAnchors = Self.finalizeAnchors(faceAnchors)
         if !finalAnchors.isEmpty {
             metadata["face_anchors"] = finalAnchors.map { ["x": $0.x, "y": $0.y, "z": $0.z] }
+        }
+
+        // Boundary Anchor (Pivot-Point) for spatial stitching
+        // Only emit when both transform and ID are present — a random fallback UUID
+        // would break downstream stitching/debugging.
+        if let anchorTransform = boundaryAnchorTransform,
+           let anchorId = boundaryAnchorId {
+            var boundaryDict: [String: Any] = [
+                "id": anchorId.uuidString,
+                // Column-major layout: each inner array is one column of the 4×4 matrix.
+                // This matches the transform export convention used by the app.
+                "transform": [
+                    [anchorTransform.columns.0.x, anchorTransform.columns.0.y, anchorTransform.columns.0.z, anchorTransform.columns.0.w],
+                    [anchorTransform.columns.1.x, anchorTransform.columns.1.y, anchorTransform.columns.1.z, anchorTransform.columns.1.w],
+                    [anchorTransform.columns.2.x, anchorTransform.columns.2.y, anchorTransform.columns.2.z, anchorTransform.columns.2.w],
+                    [anchorTransform.columns.3.x, anchorTransform.columns.3.y, anchorTransform.columns.3.z, anchorTransform.columns.3.w]
+                ]
+            ]
+            if let heading = boundaryAnchorCompassHeading {
+                boundaryDict["compass_heading"] = heading
+            }
+            metadata["boundary_anchor"] = boundaryDict
         }
 
         let jsonPath = directory.appendingPathComponent("scan4d_metadata.json")
@@ -799,6 +830,26 @@ class FrameCaptureSession {
         return uiImage.pngData()
     }
 
+    // MARK: - Boundary Anchor
+
+    /// Records a boundary anchor's transform along with the compass heading at pin-drop time.
+    /// Called when the user drops a boundary pin during recording.
+    /// GPS is intentionally omitted — indoor accuracy (~5-15m) is useless for
+    /// doorway-level alignment. The recorded camera pose provides sub-cm precision,
+    /// and session-level GPS already covers coarse "which building" context.
+    ///
+    /// - Parameters:
+    ///   - transform: The camera's world transform at the moment the boundary pin is dropped.
+    ///   - id: The ARAnchor identifier.
+    ///   - compassHeading: Best available compass heading (true north preferred) at pin-drop time.
+    func recordBoundaryAnchor(transform: simd_float4x4, id: UUID, compassHeading: Double?) {
+        self.boundaryAnchorTransform = transform
+        self.boundaryAnchorId = id
+        self.boundaryAnchorCompassHeading = compassHeading
+
+        print("[FrameCapture] Recorded boundary anchor \(id.uuidString) with heading=\(compassHeading ?? -1)")
+    }
+
     /// Cleanup temp files.
     func cleanup() {
         if let dir = captureDir {
@@ -808,14 +859,14 @@ class FrameCaptureSession {
     }
 
     /// Compute how far the camera moved between two transforms (translation distance + rotation).
-    private func cameraMovement(from a: simd_float4x4, to b: simd_float4x4) -> Float {
-        let posA = SIMD3<Float>(a.columns.3.x, a.columns.3.y, a.columns.3.z)
-        let posB = SIMD3<Float>(b.columns.3.x, b.columns.3.y, b.columns.3.z)
+    private func cameraMovement(from fromTransform: simd_float4x4, to toTransform: simd_float4x4) -> Float {
+        let posA = SIMD3<Float>(fromTransform.columns.3.x, fromTransform.columns.3.y, fromTransform.columns.3.z)
+        let posB = SIMD3<Float>(toTransform.columns.3.x, toTransform.columns.3.y, toTransform.columns.3.z)
         let translationDist = simd_length(posB - posA)
 
         // Also account for rotation (dot product of forward vectors)
-        let fwdA = SIMD3<Float>(a.columns.2.x, a.columns.2.y, a.columns.2.z)
-        let fwdB = SIMD3<Float>(b.columns.2.x, b.columns.2.y, b.columns.2.z)
+        let fwdA = SIMD3<Float>(fromTransform.columns.2.x, fromTransform.columns.2.y, fromTransform.columns.2.z)
+        let fwdB = SIMD3<Float>(toTransform.columns.2.x, toTransform.columns.2.y, toTransform.columns.2.z)
         let rotationChange = 1.0 - abs(simd_dot(simd_normalize(fwdA), simd_normalize(fwdB)))
 
         return translationDist + rotationChange * 0.3

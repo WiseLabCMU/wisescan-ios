@@ -1,18 +1,21 @@
 import SwiftUI
 import SwiftData
 
+// swiftlint:disable type_body_length
 struct LocationDetailView: View {
     let location: ScanLocation
     @Environment(\.modelContext) private var modelContext
     @Environment(ScanStore.self) private var scanStore
     @Environment(\.dismiss) private var dismiss
-    @Binding var selectedTab: Int // Pass through to allow "Extend Scan" to switch tabs
+    @Binding var selectedTab: Int // Pass through to allow scan continuation to switch tabs
     @State private var isEditing = false
     @State private var selectedScans: Set<PersistentIdentifier> = []
     @State private var showBulkDeleteConfirm = false
     @State private var showSettings = false
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
+    @State private var showNoWorldMapAlert = false
+    @State private var hasStitchingLinks = false
     @State private var isBulkColoring = false
 
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
@@ -66,8 +69,8 @@ struct LocationDetailView: View {
                                         try? modelContext.save()
                                     }
                                 )) {
-                                    Text("Time-Series").tag(ScanCase.rescan)
-                                    Text("Space Extension").tag(ScanCase.extend)
+                                    Text("Rescan Space").tag(ScanCase.rescanSpace)
+                                    Text("Link Adjacent Space").tag(ScanCase.linkAdjacent)
                                 }
                                 .pickerStyle(.segmented)
                                 .colorScheme(.dark)
@@ -75,26 +78,79 @@ struct LocationDetailView: View {
                         }
 
                         if !isEditing && !sortedScans.isEmpty {
-                            // Extend Latest Scan
+                            // Linked badge
+                            if hasStitchingLinks {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "link.circle.fill")
+                                        .foregroundColor(.green)
+                                    Text("Linked to adjacent space")
+                                        .font(.caption)
+                                        .foregroundColor(.green)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.green.opacity(0.1))
+                                .cornerRadius(8)
+                            }
+
+                            // Extend / Rescan Latest Scan
                             if let latestScan = sortedScans.first,
                                !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("ray ban") &&
                                !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("glass") {
-                                Button(action: {
-                                    scanStore.activeLocationForScan = location.id
-                                    scanStore.activeRelocalizationMap = latestScan.worldMapURL
-                                    scanStore.activeScanToExtend = latestScan.id
-                                    selectedTab = 1 // Switch to Capture Tab
-                                }) {
-                                    HStack {
-                                        Image(systemName: "plus.viewfinder")
-                                        Text(location.scanCase == .rescan ? "Rescan Location" : "Extend Latest Scan")
-                                            .font(.headline)
+                                HStack(spacing: 12) {
+                                    // Rescan Space button
+                                    Button(action: {
+                                        // Rescan relocalizes against the existing world map (ghost
+                                        // overlay + shared frame). Without the file ARCoverageView
+                                        // silently falls back to a mapless session, so guard first.
+                                        guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
+                                            showNoWorldMapAlert = true
+                                            return
+                                        }
+                                        scanStore.activeLocationForScan = location.id
+                                        scanStore.activeRelocalizationMap = latestScan.worldMapURL
+                                        scanStore.activeScanToExtend = latestScan.id
+                                        scanStore.activeScanCase = .rescanSpace
+                                        selectedTab = 1
+                                    }) {
+                                        HStack {
+                                            Image(systemName: "plus.viewfinder")
+                                            Text("Rescan Space")
+                                                .font(.subheadline).bold()
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 14)
+                                        .background(Color.indigo.opacity(0.8))
+                                        .foregroundColor(.white)
+                                        .cornerRadius(12)
                                     }
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 14)
-                                    .background(Color.indigo.opacity(0.8))
-                                    .foregroundColor(.white)
-                                    .cornerRadius(12)
+
+                                    // Link Adjacent Space button
+                                    Button(action: {
+                                        // Only require a valid world map — no boundary anchor needed.
+                                        // The user relocalizes via the world map and chooses the
+                                        // boundary point by walking there.
+                                        guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
+                                            showNoWorldMapAlert = true
+                                            return
+                                        }
+                                        scanStore.activeLocationForScan = location.id
+                                        scanStore.activeRelocalizationMap = latestScan.worldMapURL
+                                        scanStore.activeScanToExtend = latestScan.id
+                                        scanStore.activeScanCase = .linkAdjacent
+                                        selectedTab = 1
+                                    }) {
+                                        HStack {
+                                            Image(systemName: "link.badge.plus")
+                                            Text("Link Adjacent")
+                                                .font(.subheadline).bold()
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 14)
+                                        .background(Color.orange.opacity(0.8))
+                                        .foregroundColor(.white)
+                                        .cornerRadius(12)
+                                    }
                                 }
                             }
 
@@ -282,6 +338,11 @@ struct LocationDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+        .alert("World Map Missing", isPresented: $showNoWorldMapAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("The relocalization world map for this scan is missing, so it can't be rescanned or linked to an adjacent space — both relocalize against the saved world map. Capture a new scan of this space to create one.")
+        }
         .confirmationDialog(
             "Delete Scans",
             isPresented: $showBulkDeleteConfirm
@@ -292,6 +353,11 @@ struct LocationDetailView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will permanently delete the selected scans and their data.")
+        }
+        .task {
+            // Load stitching link status once asynchronously instead of
+            // calling hasLinks() synchronously on every body evaluation.
+            hasStitchingLinks = await StitchingMetadataManager.hasLinksAsync(locationId: location.id)
         }
     }
 
@@ -557,6 +623,7 @@ struct WorkflowCard: View {
 
 #Preview {
     let config = ModelConfiguration(isStoredInMemoryOnly: true)
+    // swiftlint:disable:next force_try
     let container = try! ModelContainer(for: ScanLocation.self, CapturedScan.self, configurations: config)
     let ctx = container.mainContext
     let sampleLocation = ScanLocation(name: "Sample Location")

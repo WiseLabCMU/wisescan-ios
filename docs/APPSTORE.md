@@ -47,7 +47,7 @@ LITE MODE (all devices)
 
 TIME-SERIES SCANNING
 • Group scans by Location and re-scan the same space over time
-• "Extend Scan" loads a red ghost-mesh overlay of previous captures
+• Rescan Space and Link Adjacent Space load a red ghost-mesh overlay of previous captures
 • Adjacent stitching: scan neighboring areas with shared coordinate frames
 • ARWorldMap relocalization for precise alignment between sessions
 
@@ -151,7 +151,7 @@ https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md
 | 2 | **Capture View** (privacy filter on, face blur visible) | "Built-in privacy filtering with face detection and person removal" |
 | 3 | **3D Mesh Preview** (colored mesh in SceneKit viewer) | "Interactive 3D preview with camera-sampled vertex coloring" |
 | 4 | **Scans List** (location grid with thumbnails) | "Organize scans by location for time-series and spatial mapping" |
-| 5 | **Extend Scan** (red ghost overlay visible) | "Re-scan spaces over time or extend into adjacent areas" |
+| 5 | **Link Adjacent Space** (red ghost overlay visible) | "Re-scan a space over time, or link adjacent areas into one model" |
 | 6 | **Export Format Picker** (scan card with format dropdown) | "Export to Scan4D, Polycam, Nerfstudio, OBJ, PLY, or USDZ" |
 | 7 | **Dashboard** (server status card) | "Connect to your own reconstruction server" |
 | 8 | **Settings** (upload URL + capture settings) | "Full control over capture quality and server configuration" |

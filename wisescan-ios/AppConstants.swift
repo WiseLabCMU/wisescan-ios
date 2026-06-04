@@ -86,6 +86,8 @@ enum AppConstants {
     static let depthOcclusionToleranceMM: Float = 150.0      // mm tolerance for depth occlusion test
     static let thumbnailMaxWidth: CGFloat = 800              // max width for scan thumbnails
     static let thumbnailJpegQuality: CGFloat = 0.6           // JPEG quality for thumbnails
+    static let stabilizationPollIntervalMs: Int = 200         // ms between tracking-state polls after session reset
+    static let stabilizationMaxPolls: Int = 25                // max polls before timeout (total = interval × polls)
 }
 
 extension String {

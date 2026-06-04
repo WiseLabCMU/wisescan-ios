@@ -89,6 +89,13 @@ graph TD
         MPR[MeshParser.swift]
     end
 
+    subgraph "Stitching / Linking"
+        SM[StitchingMetadata.swift]
+        SGM[StitchGraphModel.swift]
+        SGV[StitchGraphView.swift]
+        CMV[CombinedMeshView.swift]
+    end
+
     subgraph "Peripherals"
         MWM[MetaWearableManager.swift]
         LM[LocationManager.swift]
@@ -111,6 +118,11 @@ graph TD
     ARC --> VCA
     WV --> SS
     WV --> LDV
+    WV --> SGV
+    SGV --> SGM
+    SGV --> CMV
+    SGM --> SM
+    CAP --> SM
     LDV --> SEM
     LDV --> MP
     LDV --> SV
@@ -129,12 +141,20 @@ graph TD
 | [ContentView.swift](wisescan-ios/ContentView.swift) | Root TabView (Dashboard, Capture, Scans), LiDAR check | `ContentView`, `hasLiDAR` |
 | [DashboardView.swift](wisescan-ios/DashboardView.swift) | Server status, wearable pairing | `DashboardView` |
 | [CaptureView.swift](wisescan-ios/CaptureView.swift) | Live capture UI, recording, Scan4D naming, capacity HUD | `CaptureView`, `startRecording()`, `stopRecording()`, `performStopRecording()`, `startBackgroundProcessing()` |
-| [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) | ARKit session, mesh wireframe (AR), point cloud (VR), mesh export | `ARCoverageView`, `Coordinator`, `exportMeshOBJ()`, `PointCloudManager` |
+| [CaptureView+Recording.swift](wisescan-ios/CaptureView+Recording.swift) | Recording start/stop, save flow, world-map + VIO save safety | `savePendingScan()`, `writeStitchingLinkIfPending()` |
+| [CaptureView+Extend.swift](wisescan-ios/CaptureView+Extend.swift) | Pin & Extend (mid-session boundary link) | extend/auto-save/reset flow |
+| [CaptureView+Alignment.swift](wisescan-ios/CaptureView+Alignment.swift) | Link Adjacent (cross-session relocalization + alignment) | alignment flow, boundary-anchor matching |
+| [AlignmentOverlayView.swift](wisescan-ios/AlignmentOverlayView.swift) | Cross-session alignment overlay (distance + tracking state) | `AlignmentOverlayView` |
+| [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) | ARKit session, mesh wireframe (AR), point cloud (VR), mesh export | `ARCoverageView`, `Coordinator`, `exportMeshOBJ()`, `makeFreshConfiguration()`, `PointCloudManager` |
 | [PointCloudManager.swift](wisescan-ios/PointCloudManager.swift) | VR mode: live depth point cloud rendering via Metal | `PointCloudManager`, `setup()`, `updatePointCloud()` |
 | [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) | Live red-eye privacy indicator (from ARKit stencil) + pixelation utility for exports | `PrivacyEyeOverlay`, `PrivacyEyeTracker`, `PrivacyBlurUtil.pixelatePersonsWithMask()`, `pixelatePersonsAndGetFaceCenters()` |
 | [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) | RAW data capture (RGB, depth, poses) | `FrameCaptureSession`, `start()`, `stop()`, `writeTransformsJSON()`, `writePolycamCameras()` |
 | [LocationDetailView.swift](wisescan-ios/LocationDetailView.swift) | Per-location scan management, export, upload, preview | `LocationDetailView` |
-| [ScansListView.swift](wisescan-ios/ScansListView.swift) | Scan cards, location groups, rename, upload | `ScansListView`, `ScanCard` |
+| [ScansListView.swift](wisescan-ios/ScansListView.swift) | Scan cards, location groups, rename, upload, stitch graph entry | `ScansListView`, `ScanCard` |
+| [StitchingMetadata.swift](wisescan-ios/StitchingMetadata.swift) | Boundary-anchor link manifest (`stitching.json`), async I/O | `StitchingLink`, `LinkType`, `StitchingMetadataManager` (`write`/`addLink`/`read`/`hasLinks`) |
+| [StitchGraphModel.swift](wisescan-ios/StitchGraphModel.swift) | Linked-scan graph model (nodes, edges, components) | `StitchGraph`, `StitchGraphNode`, `StitchGraphEdge`, `StitchGraph.build(from:)` |
+| [StitchGraphView.swift](wisescan-ios/StitchGraphView.swift) | Node-graph visualization of linked scans | `StitchGraphView` |
+| [CombinedMeshView.swift](wisescan-ios/CombinedMeshView.swift) | Combined SceneKit view of all linked scans (optional per-map tint) | `CombinedMeshScreen`, `CombinedMeshView` |
 | [MeshPreviewView.swift](wisescan-ios/MeshPreviewView.swift) | SceneKit 3D preview with vertex colors | `MeshPreviewView` |
 | [ScanStore.swift](wisescan-ios/ScanStore.swift) | Data models, location hierarchy, capacity scoring | `ScanStore`, `ScanLocation`, `CapturedScan`, `ScanStats`, `capacityScore` |
 | [ScanExportManager.swift](wisescan-ios/ScanExportManager.swift) | Export packaging for all formats | `ScanExportManager`, `prepareExport()` |
@@ -222,12 +242,13 @@ sequenceDiagram
     BG->>SS: isColored = true
 ```
 
-### REQ-003: Scan4D (Extend Scan — Time-Series & Adjacent Stitching)
+### REQ-003: Scan4D (Rescan & Link Adjacent — Temporal & Spatial Capture)
 | | |
 |:--|:--|
 | **Status** | ✅ Complete (Phase 1 — Local) |
-| **Description** | Enable two complementary scanning workflows via a single "Extend Scan" mechanism, both powered by `ARWorldMap` relocalization and a ghost-mesh overlay. Provide conditional UI for specific capture sources. |
-| **Details** | **Use Case 1 — Time-Series Re-Scan:** Scan the same space again at a later time. The ghost overlay shows the original capture area; the user re-scans the identical region. The backend pipeline can diff or merge these scans to track changes over time. **Use Case 2 — Adjacent-Space Stitching:** Extend a scan into an adjacent area. The user moves to the edge of the ghost overlay and begins recording, overlapping slightly with the previous scan. The backend pipeline stitches the chunks together to build a single unified model. Both use cases share identical device-side mechanics: (1) **Intent Declaration:** The workflow intent (Time-Series vs Extend) is explicitly chosen by the user in the initial save dialog (`ScanCase` picker). (2) **Relocalization Setup:** Tapping "Extend Scan" on any scan card loads that scan's `ARWorldMap` as the AR session initialization target. (3) **Ghost Visualization:** The selected scan's mesh renders as a configurable ghost-mesh overlay (default: magenta, adjustable in Settings). (4) **UI Prompting:** Live tracking banners instruct the user to "Move camera to relocalize" until the world map successfully aligns. |
+| **Description** | Enable two complementary scanning intents — **Rescan Space** (*temporal*: re-capture the same area over time) and **Link Adjacent Space** (*spatial*: capture a neighboring area and stitch the chunks) — both powered by `ARWorldMap` relocalization and a ghost-mesh overlay. Provide conditional UI for specific capture sources. The spatial path joins chunks at a shared boundary anchor, dropped mid-session via **Pin & Extend** or matched cross-session via a guided alignment overlay — see REQ-012 for the boundary-anchor / `stitching.json` link layer that pairs the chunks for server-side alignment. |
+| **Details** | **Use Case 1 — Time-Series Re-Scan:** Scan the same space again at a later time. The ghost overlay shows the original capture area; the user re-scans the identical region. The backend pipeline can diff or merge these scans to track changes over time. **Use Case 2 — Adjacent-Space Stitching:** Continue a scan into an adjacent area. The user moves to the edge of the ghost overlay and begins recording, overlapping slightly with the previous scan. The backend pipeline stitches the chunks together to build a single unified model. Both use cases share identical device-side mechanics: (1) **Intent Declaration:** The workflow intent (Rescan vs Link Adjacent) is explicitly chosen by the user in the initial save dialog (`ScanCase` picker). (2) **Relocalization Setup:** Tapping **Rescan Space** or **Link Adjacent Space** on any scan card loads that scan's `ARWorldMap` as the AR session initialization target. (3) **Ghost Visualization:** The selected scan's mesh renders as a configurable ghost-mesh overlay (default: magenta, adjustable in Settings). (4) **UI Prompting:** Live tracking banners instruct the user to "Move camera to relocalize" until the world map successfully aligns. |
+| **Source** | [CaptureView+Extend.swift](wisescan-ios/CaptureView+Extend.swift) — Pin & Extend (mid-session) · [CaptureView+Alignment.swift](wisescan-ios/CaptureView+Alignment.swift) + [AlignmentOverlayView.swift](wisescan-ios/AlignmentOverlayView.swift) — Link Adjacent (cross-session) · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `makeFreshConfiguration()`, ghost-mesh overlay, relocalization |
 
 ```mermaid
 sequenceDiagram
@@ -244,8 +265,8 @@ sequenceDiagram
     SS->>SS: addLocation("Kitchen", useCase: .rescan)
     SS->>SS: addScan("Scan 1", mesh, worldMap)
 
-    Note over U,SS: Extend Scan (Time-Series or Adjacent)
-    U->>SS: Tap "Extend Scan" on Scan 1
+    Note over U,SS: Rescan / Link Adjacent (Temporal or Spatial)
+    U->>SS: Tap "Rescan Space" or "Link Adjacent Space" on Scan 1
     SS-->>Cap: activeRelocalizationMap + activeScanToExtend
     Cap->>AR: updateUIView (ghost mesh + worldMap)
     AR->>AR: config.initialWorldMap = loaded map
@@ -315,12 +336,13 @@ sequenceDiagram
 | **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanFileManager`, `@Model ScanLocation`, `@Model CapturedScan` |
 
 ### REQ-012: Map Stitching and Coverage
-**Description:** Prevent localized mesh limits from capping scan size by supporting both time-series re-scans and adjacent spatial mapping.
-
-**Details:**
-- There is no upper limit on how many scans can exist inside a single Location. Users are encouraged to either re-scan the same space at different times (for time-series analysis) or chop up large environments (like multi-room offices) into several overlapping adjacent sessions.
-- **Dual Workflow Support:** "Extend Scan" supports both re-scanning an existing area and extending into new adjacent areas. The backend pipeline determines whether to treat the scans as temporal updates or spatial extensions based on overlap and metadata.
-- **Unbounded Local Storage:** The "Keep Last 2" local storage retention limit has been removed, as all scans in a chain are required to reconstruct a complete master scene. Scans must be deleted manually by the user or purged upon successful upload to the server.
+| | |
+|:--|:--|
+| **Status** | ✅ Complete (Phase 1 — Local link layer) |
+| **Description** | Prevent localized mesh limits from capping scan size by supporting both time-series re-scans and adjacent spatial mapping, and by recording an explicit **boundary-anchor link** between adjacent chunks for server-side alignment. |
+| **Details** | **Unbounded chaining:** There is no upper limit on how many scans can exist inside a single Location; the old "Keep Last 2" retention limit was removed because all scans in a chain are needed to reconstruct the master scene (scans are deleted manually or purged on successful upload). **Two link flows:** *Pin & Extend* (mid-session) drops a boundary pin, auto-saves the current scan, resets ARKit, and starts a fresh session whose origin `[0,0,0]` is the boundary — no interaction beyond the initial tap. *Link Adjacent* (cross-session, from the location detail) loads the prior world map read-only, shows an alignment overlay (distance indicator + tracking state) guiding the user back to the boundary anchor, then drops a matching pin and starts fresh. **`stitching.json` manifest:** each link is a `Codable` `StitchingLink` pairing source/target `{location, scan, anchor}` IDs, both 4×4 anchor transforms, per-end compass headings, a timestamp, and a `LinkType` (`.midSession` / `.crossSession`). The manifest is written per-location and bundled in every Scan4D export zip so uploads are self-contained. Writes are deferred until the target scan ID exists (see the deferred-write contract in CONTRIBUTING.md). **Visualization:** the Scans list surfaces a node-graph of linked scans (connected components, boundary edges) and a combined-mesh viewer that loads every linked scan into one SceneKit scene, optionally tinted per source map. |
+| **Source** | [StitchingMetadata.swift](wisescan-ios/StitchingMetadata.swift) — `StitchingLink`, `LinkType`, `StitchingMetadataManager` (async `write`/`addLink`, sync `read`/`hasLinks`) · [CaptureView+Extend.swift](wisescan-ios/CaptureView+Extend.swift) / [CaptureView+Alignment.swift](wisescan-ios/CaptureView+Alignment.swift) — link flows · [StitchGraphModel.swift](wisescan-ios/StitchGraphModel.swift) + [StitchGraphView.swift](wisescan-ios/StitchGraphView.swift) — linked-scan graph · [CombinedMeshView.swift](wisescan-ios/CombinedMeshView.swift) — combined-mesh viewer · [ScansListView.swift](wisescan-ios/ScansListView.swift) — entry points |
+| **Notes** | The device only captures and annotates the boundary link; final alignment (ICP / photogrammetry) is a server-side concern (see Anchoring Strategy). Implementation invariants live in CONTRIBUTING.md → "Stitching / Scan Linking — Implementation Contract". |
 
 ### REQ-013: Developer Mode
 | | |
@@ -384,10 +406,10 @@ sequenceDiagram
 | REQ-018 | Streaming Mode | Real-time lower-res tracking data to server | Medium |
 | REQ-019 | Workflow Orchestration | Select preset server pipelines (Mesh, Splat, Spatial Indexing) | High |
 | REQ-020 | Job Observability | Display remote Prefect job status locally | Medium |
-| ~~REQ-021~~ | ~~Scan4D Ghost Overlay~~ | ✅ **Implemented** — Red translucent overlay renders previous scan during Extend Scan | — |
+| ~~REQ-021~~ | ~~Scan4D Ghost Overlay~~ | ✅ **Implemented** — Red translucent overlay renders previous scan during Rescan / Link Adjacent | — |
 | REQ-022 | Scan4D Ground Truth Offset | Capture GPS or AprilTag data alongside scans for backend alignment seeding | High |
 | REQ-023 | OpenFLAME Live Relocalization | Use backend server to stream visual localization back to device, bypassing ARKit maps | Low |
-| ~~REQ-024~~ | ~~Large-Space Map Stitching~~ | ✅ **Implemented (client-side)** — Extend Scan supports adjacent chunking with shared coordinate frames; server-side alignment is a downstream concern | — |
+| ~~REQ-024~~ | ~~Large-Space Map Stitching~~ | ✅ **Implemented (client-side)** — Pin & Extend / Link Adjacent chunking with shared coordinate frames + boundary-anchor `stitching.json` links, graph + combined-mesh views; server-side alignment is downstream. See REQ-012 | — |
 | REQ-025 | VR Capture Mode | ✅ **Implemented** — see REQ-025 below | — |
 | REQ-026 | Orientation Locking | ✅ **Implemented** — see REQ-026 below | — |
 | REQ-027 | Capture Performance, Session Lifecycle & VIO Integrity | ✅ **Implemented** — see REQ-027 below | — |

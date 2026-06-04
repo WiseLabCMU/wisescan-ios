@@ -11,6 +11,13 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
     var currentHeading: CLHeading?
     var error: Error?
 
+    /// Best available compass heading in degrees (0–360).
+    /// Prefers true north (requires location authorization) with a fallback to magnetic north.
+    var bestHeading: Double? {
+        guard let heading = currentHeading else { return nil }
+        return heading.trueHeading >= 0 ? heading.trueHeading : heading.magneticHeading
+    }
+
     override init() {
         super.init()
         manager.delegate = self

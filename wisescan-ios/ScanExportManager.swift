@@ -2,6 +2,7 @@ import Foundation
 import SwiftData
 
 struct ScanExportManager {
+    // swiftlint:disable:next function_body_length cyclomatic_complexity
     static func prepareExport(filename: String, scanDir: URL, format: ExportFormat) -> URL? {
         let fm = FileManager.default
         let rawDataDir = scanDir.appendingPathComponent("raw_data")
@@ -87,6 +88,33 @@ struct ScanExportManager {
                     print("[prepareExport] Failed to copy worldmap: \(error.localizedDescription)")
                 }
                 stagePolycamPayload(to: stagingDir)
+
+                // Include stitching.json from the location directory if it exists.
+                // Resolve the location directory canonically via StitchingMetadataManager
+                // instead of relying on parent-path arithmetic on scanDir.
+                // scanDir layout: Documents/Scans/{locationId}/{scanId}/
+                let locationDirName = scanDir.deletingLastPathComponent().lastPathComponent
+                let stitchingURL: URL? = {
+                    if let locId = UUID(uuidString: locationDirName),
+                       let locDir = StitchingMetadataManager.locationDirectory(for: locId) {
+                        return StitchingMetadataManager.url(forLocationDir: locDir)
+                    }
+                    // Fallback: parent directory (preserves behavior if path format changes)
+                    return scanDir.deletingLastPathComponent()
+                        .appendingPathComponent(StitchingMetadataManager.filename)
+                }()
+                if let stitchingURL, fm.fileExists(atPath: stitchingURL.path) {
+                    let destURL = stagingDir.appendingPathComponent(StitchingMetadataManager.filename)
+                    do {
+                        // Remove existing destination if present (copyItem fails on overwrite)
+                        try? fm.removeItem(at: destURL)
+                        try fm.copyItem(at: stitchingURL, to: destURL)
+                        print("[prepareExport] ✓ included stitching.json")
+                    } catch {
+                        print("[prepareExport] ✗ failed to copy stitching.json: \(error.localizedDescription)")
+                    }
+                }
+
                 return zipStaging(stagingDir)
             }
 

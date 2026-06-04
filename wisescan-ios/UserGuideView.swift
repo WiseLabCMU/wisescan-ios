@@ -22,8 +22,10 @@ struct UserGuideView: View {
                     )
                     guideRow(
                         icon: "3.circle.fill",
-                        title: "Extend Scan",
-                        text: "Tap 'Extend Scan' on any scan to continue mapping. A red overlay shows your previous scan. Re-scan the same area for time-series updates, or move to the edge and scan adjacent areas — the backend will stitch them together."
+                        title: "Rescan Space / Link Adjacent Space",
+                        text: "Tap 'Rescan Space' on any location to re-scan the identical area over time — a red ghost overlay shows your previous scan for reference. " +
+                              "Tap 'Link Adjacent Space' to scan a neighboring room: relocalize with your previous scan, walk to the boundary threshold, " +
+                              "and confirm to relationally link the two spaces."
                     )
                     guideRow(
                         icon: "4.circle.fill",
