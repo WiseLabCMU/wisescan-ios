@@ -95,6 +95,11 @@ extension CaptureView {
         // world-map co-framing that follow must run on main with the AR session still live, so we
         // hop back before any of that — the ordering (and the map↔OBJ co-framing) is unchanged.
         let capSession = frameCaptureSession
+        // Stop the capture timer on the main thread NOW, before stop() runs off-main below.
+        // The timer was scheduled on the main run loop and Timer isn't safe to invalidate from
+        // another thread; this also guarantees no further frames are captured during shutdown.
+        // (FrameCaptureSession.pauseCapture() contract — see its docs.)
+        capSession.pauseCapture()
         // Snapshot the save-routing state NOW, on main, while it's still valid. The pipeline below
         // resolves asynchronously, and a teardown/reset between here and finishStopRecording (most
         // notably onDisappear's resetCaptureState) would otherwise clear scanStore — making an

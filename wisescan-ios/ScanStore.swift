@@ -319,6 +319,10 @@ class ScanStore {
         boundaryAnchorId = nil
         distanceToBoundaryAnchor = nil
         pendingStitchLink = nil
+        // Clear the map-load failure latch too — otherwise a reset via a path that bypasses
+        // CaptureView's onChange self-reset (onDisappear / cancelAlignment) leaves it true, and a
+        // later identical failure can't re-fire the handler (no value change) → stuck failed state.
+        mapLoadFailed = false
     }
 }
 
