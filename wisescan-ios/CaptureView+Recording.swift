@@ -469,10 +469,10 @@ extension CaptureView {
         saveMessage = "Scan Saved!"
         pendingScan = nil
 
-        // Reset the active state so subsequent scans don't default to this location
-        scanStore.activeLocationForScan = nil
-        scanStore.activeRelocalizationMap = nil
-        scanStore.capturePhase = .idle
+        // Reset the FULL capture state so a scan started before the delayed tab switch below can't
+        // inherit stale link/rescan routing (activeScanToExtend, activeScanCase, boundary fields).
+        // The pending link was already consumed above; navigationPath is untouched by this reset.
+        scanStore.resetCaptureState()
 
         // Programmatically navigate to the created LocationDetailView
         let savedLoc = savedScan.location
@@ -498,8 +498,9 @@ extension CaptureView {
         let compassHeading: Double?
     }
 
-    /// Waits for the AR session to stabilize after a reset, places Pin B as a real
-    /// ARAnchor, starts recording, and records the boundary anchor.
+    /// Waits for the AR session to stabilize after a reset, places Pin B (metadata-only — a UUID
+    /// plus the camera transform published to ScanStore, no ARAnchor; see `pinB`), starts
+    /// recording, and records the boundary anchor.
     ///
     /// Shared by both mid-session extend (Flow A) and cross-session alignment (Flow B)
     /// to avoid duplicating the stabilization → anchor → record sequence.
