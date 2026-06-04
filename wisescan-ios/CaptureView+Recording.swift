@@ -95,16 +95,24 @@ extension CaptureView {
         // world-map co-framing that follow must run on main with the AR session still live, so we
         // hop back before any of that — the ordering (and the map↔OBJ co-framing) is unchanged.
         let capSession = frameCaptureSession
+        // Snapshot the save-routing state NOW, on main, while it's still valid. The pipeline below
+        // resolves asynchronously, and a teardown/reset between here and finishStopRecording (most
+        // notably onDisappear's resetCaptureState) would otherwise clear scanStore — making an
+        // in-progress rescan look like a brand-new location and triggering prompts on a dead view.
+        let locationId = scanStore.activeLocationForScan
+        let scanCase = scanStore.activeScanCase
         DispatchQueue.global(qos: .utility).async {
             let rawDataPath = capSession.stop()
             DispatchQueue.main.async {
-                self.finishStopRecording(rawDataPath: rawDataPath, completion: completion)
+                self.finishStopRecording(rawDataPath: rawDataPath, locationId: locationId,
+                                         scanCase: scanCase, completion: completion)
             }
         }
     }
 
     // swiftlint:disable:next function_body_length cyclomatic_complexity
-    private func finishStopRecording(rawDataPath: URL?, completion: ((CapturedScan?) -> Void)? = nil) {
+    private func finishStopRecording(rawDataPath: URL?, locationId: UUID?, scanCase: ScanCase,
+                                     completion: ((CapturedScan?) -> Void)? = nil) {
         // Export mesh from the still-active AR session. exportMeshOBJ now takes the ARFrame directly
         // (main's change — reading currentFrame inside pinned ARFrame memory), so grab it once here
         // and reuse it for the thumbnail below.
@@ -149,7 +157,7 @@ extension CaptureView {
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
 
             // Clean up any empty location created for this flow
-            if let locId = scanStore.activeLocationForScan {
+            if let locId = locationId {
                 let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
                 if let location = try? modelContext.fetch(descriptor).first, location.scans.isEmpty {
                     modelContext.delete(location)
@@ -176,7 +184,7 @@ extension CaptureView {
             isProcessingMesh = true
             isWaitingToSave = false
 
-            if scanStore.activeLocationForScan == nil {
+            if locationId == nil {
                 newLocationName = ""
                 showNamePrompt = true
             } else {
@@ -187,8 +195,8 @@ extension CaptureView {
             isProcessingMesh = true
         }
 
-        let capturedLocationId = scanStore.activeLocationForScan
-        let capturedScanCase = scanStore.activeScanCase
+        let capturedLocationId = locationId
+        let capturedScanCase = scanCase
 
         // ── Capture the ARWorldMap co-framed with the OBJ, BEFORE coloring ──
         // mesh.obj was just baked from the live world frame above. The world map
@@ -282,7 +290,7 @@ extension CaptureView {
                         // If user already tapped save in the alert, OR if this is a background extension
                         if self.isWaitingToSave {
                             self.savePendingScan()
-                        } else if self.scanStore.activeLocationForScan != nil {
+                        } else if capturedLocationId != nil {
                             self.savePendingScan()
                         }
                     }

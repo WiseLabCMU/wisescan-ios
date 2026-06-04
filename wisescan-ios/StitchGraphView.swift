@@ -158,6 +158,14 @@ private struct ClusterView: View {
                 // A plain Button's tap competes with the two-axis ScrollView's pan and is
                 // dropped most of the time; a simultaneous tap gesture is recognized reliably.
                 .simultaneousGesture(TapGesture().onEnded { onRender() })
+                // The gesture above is invisible to assistive tech, so expose this as a button
+                // with an explicit action for VoiceOver / Switch Control without disturbing the
+                // gesture path used for touch.
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Render together")
+                .accessibilityHint("Shows all linked maps in a single combined view")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { onRender() }
 
                 Spacer(minLength: 0)
             }

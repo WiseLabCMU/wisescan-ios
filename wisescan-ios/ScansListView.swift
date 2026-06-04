@@ -94,6 +94,7 @@ struct ScansListView: View {
                             Image(systemName: viewMode == .grid ? "point.3.connected.trianglepath.dotted" : "square.grid.2x2")
                                 .foregroundColor(.cyan)
                         }
+                        .accessibilityLabel(viewMode == .grid ? "Switch to graph view" : "Switch to grid view")
                         .disabled(isEditing)
                     }
                 }

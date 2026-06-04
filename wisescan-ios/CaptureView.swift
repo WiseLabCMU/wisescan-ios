@@ -911,6 +911,17 @@ struct CaptureView: View {
                 }
             })
             Button("Cancel", role: .cancel) {
+                // Nothing consumes the pending scan after cancel, so remove its temp artifacts —
+                // both live in FileManager.temporaryDirectory and saveScan would normally move them.
+                // Dropping pendingScan alone would leak the (potentially large) raw-frames dir.
+                if let pending = pendingScan {
+                    if let rawDir = pending.rawDataPath {
+                        try? FileManager.default.removeItem(at: rawDir)
+                    }
+                    if let mapURL = pending.worldMapURL {
+                        try? FileManager.default.removeItem(at: mapURL)
+                    }
+                }
                 pendingScan = nil
                 saveMessage = nil
                 isProcessingMesh = false

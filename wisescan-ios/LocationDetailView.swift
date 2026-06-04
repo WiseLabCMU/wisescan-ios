@@ -341,7 +341,7 @@ struct LocationDetailView: View {
         .alert("World Map Missing", isPresented: $showNoWorldMapAlert) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("The relocalization world map for this scan is missing. Try rescanning the space first — the world map is required for cross-session alignment.")
+            Text("The relocalization world map for this scan is missing, so it can't be rescanned or linked to an adjacent space — both relocalize against the saved world map. Capture a new scan of this space to create one.")
         }
         .confirmationDialog(
             "Delete Scans",

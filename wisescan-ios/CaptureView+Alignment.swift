@@ -46,6 +46,10 @@ extension CaptureView {
             try modelContext.save()
         } catch {
             print("[CaptureView] Failed to save new location: \(error)")
+            // Drop the just-inserted location so a failed save can't leak a phantom "Adjacent to …"
+            // into live @Query results (delete() only — NOT rollback(), which would also discard
+            // other pending context changes). Mirrors the Flow A extend path.
+            modelContext.delete(newLocation)
             isConfirmingAlignment = false
             showTransientMessage("Failed to create location — please try again", duration: 4)
             return
