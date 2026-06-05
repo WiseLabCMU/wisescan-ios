@@ -337,21 +337,31 @@ struct ScanCard: View {
     @State private var previewImage: UIImage? = nil
     @State private var isRelocMissing = false
     @State private var sizeMB: Double = 0
+    // Single-card coloring progress (SwiftUI @State — reliably observed, unlike a SwiftData
+    // @Transient model prop). Bulk coloring drives `bulkColoringMessage` from the parent instead.
+    @State private var coloringMessage: String? = nil
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
         nonmutating set { selectedFormatStr = newValue.rawValue }
     }
 
+    /// Effective coloring progress: single-card @State, or the parent's bulk message.
+    private var activeColoringMessage: String? { coloringMessage ?? bulkColoringMessage }
+
     var isSelected: Bool = false
     var onSelect: (() -> Void)? = nil
+    /// Coloring progress message driven by the parent during a BULK colorize (nil otherwise).
+    /// Single-card colorize uses the local `coloringMessage` @State.
+    var bulkColoringMessage: String? = nil
 
-    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
+    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, bulkColoringMessage: String? = nil, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
         self.scan = scan
         self.isLatest = isLatest
         self.uploadURL = uploadURL
         self.isEditing = isEditing
         self.isSelected = isSelected
+        self.bulkColoringMessage = bulkColoringMessage
         self.onUpdate = onUpdate
         self.onDelete = onDelete
         self.onSelect = onSelect
@@ -503,7 +513,7 @@ struct ScanCard: View {
         .overlay(editingOverlay)
         .overlay(alignment: .topLeading) { relocWarningOverlay }
         .overlay {
-            if let msg = scan.coloringMessage {
+            if let msg = activeColoringMessage {
                 ZStack {
                     Color.black.opacity(0.5)
                     VStack(spacing: 8) {
@@ -652,11 +662,11 @@ struct ScanCard: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
-                    .background(isEditing || scan.coloringMessage != nil ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
-                    .foregroundColor(isEditing || scan.coloringMessage != nil ? .gray : .white)
+                    .background(isEditing || activeColoringMessage != nil ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
+                    .foregroundColor(isEditing || activeColoringMessage != nil ? .gray : .white)
                     .cornerRadius(10)
                 }
-                .disabled(isEditing || scan.coloringMessage != nil)
+                .disabled(isEditing || activeColoringMessage != nil)
             }
         }
     }
@@ -815,7 +825,7 @@ struct ScanCard: View {
     }
 
     private func colorizeScan() {
-        scan.coloringMessage = "Coloring…"
+        coloringMessage = "Coloring…"
 
         let meshURL = scan.meshFileURL
         let rawDataDir = scan.rawDataPath
@@ -826,7 +836,7 @@ struct ScanCard: View {
         DispatchQueue.global(qos: .utility).async {
             guard let meshData = try? Data(contentsOf: meshURL) else {
                 DispatchQueue.main.async {
-                    self.scan.coloringMessage = nil
+                    self.coloringMessage = nil
                 }
                 return
             }
@@ -839,12 +849,12 @@ struct ScanCard: View {
                     let pct = Int(p * 100)
                     guard pct != lastPct else { return } // throttle to whole-percent changes
                     lastPct = pct
-                    DispatchQueue.main.async { self.scan.coloringMessage = "Coloring \(pct)%" }
+                    DispatchQueue.main.async { self.coloringMessage = "Coloring \(pct)%" }
                 }
             )
 
             DispatchQueue.main.async {
-                self.scan.coloringMessage = "Updating preview…"
+                self.coloringMessage = "Updating preview…"
             }
 
             // Write updated colors
@@ -862,7 +872,7 @@ struct ScanCard: View {
                 self.scan.isColored = true
                 self.scan.location?.updatedAt = Date() // Trigger preview image reload
                 try? self.modelContext.save()
-                self.scan.coloringMessage = nil
+                self.coloringMessage = nil
             }
         }
     }

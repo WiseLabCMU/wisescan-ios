@@ -17,6 +17,9 @@ struct LocationDetailView: View {
     @State private var showNoWorldMapAlert = false
     @State private var hasStitchingLinks = false
     @State private var isBulkColoring = false
+    /// Per-scan coloring progress during a bulk colorize, keyed by scan id. SwiftUI @State so the
+    /// cards reliably re-render as it updates (a SwiftData @Transient model prop is not observed).
+    @State private var bulkColoringMessages: [PersistentIdentifier: String] = [:]
 
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.selectedExportFormat) private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
@@ -208,6 +211,7 @@ struct LocationDetailView: View {
                                     uploadURL: uploadURL,
                                     isEditing: isEditing,
                                     isSelected: selectedScans.contains(scan.id),
+                                    bulkColoringMessage: bulkColoringMessages[scan.id],
                                     onUpdate: { _ in try? modelContext.save() },
                                     onDelete: { scanToDelete in
                                         ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
@@ -530,9 +534,9 @@ struct LocationDetailView: View {
                 // Per-card progress: each card shows its own "Coloring NN%" as the batch reaches it
                 // (mirrors how per-card upload status is shown). Same model property the single-card
                 // Color button uses, so only one card animates at a time as the loop advances.
-                DispatchQueue.main.async { scan.coloringMessage = "Coloring…" }
+                DispatchQueue.main.async { self.bulkColoringMessages[scan.id] = "Coloring…" }
                 guard let meshData = try? Data(contentsOf: scan.meshFileURL) else {
-                    DispatchQueue.main.async { scan.coloringMessage = nil }
+                    DispatchQueue.main.async { self.bulkColoringMessages[scan.id] = nil }
                     continue
                 }
 
@@ -544,7 +548,7 @@ struct LocationDetailView: View {
                         let pct = Int(p * 100)
                         guard pct != lastPct else { return } // throttle to whole-percent changes
                         lastPct = pct
-                        DispatchQueue.main.async { scan.coloringMessage = "Coloring \(pct)%" }
+                        DispatchQueue.main.async { self.bulkColoringMessages[scan.id] = "Coloring \(pct)%" }
                     }
                 )
 
@@ -561,7 +565,7 @@ struct LocationDetailView: View {
                 DispatchQueue.main.async {
                     scan.isColored = true
                     scan.location?.updatedAt = Date()
-                    scan.coloringMessage = nil
+                    self.bulkColoringMessages[scan.id] = nil
                     try? self.modelContext.save()
                 }
             }
