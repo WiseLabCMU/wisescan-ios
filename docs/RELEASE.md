@@ -56,6 +56,7 @@ chore(main): release 0.2.0
 This PR contains:
 - Updated `CHANGELOG.md` with all new entries
 - Updated `.release-please-manifest.json` with the new version
+- Updated `MARKETING_VERSION` in `wisescan-ios.xcodeproj/project.pbxproj` — release-please's `extra-files` config bumps it via the `/* x-release-please-version */` annotation on the app target, so the app's `CFBundleShortVersionString` (shown in Settings) matches the release version once merged
 
 **Review the changelog**, then **merge the PR**. This triggers release-please to:
 - Create a **git tag** (e.g. `v0.2.0`)
@@ -73,7 +74,7 @@ git describe --tags
 # Should output: v0.2.0 (or similar)
 ```
 
-> **Why this matters:** The Xcode build phase "Pull Release Tag From Github" runs `git describe --tags` during Archive and writes the version into `CFBundleShortVersionString`. If the tag isn't pulled locally, the version won't be correct.
+> **Note:** The app version (`CFBundleShortVersionString`) is derived from `MARKETING_VERSION`, which release-please already bumped in the project file when you merged the release PR (step 2) — there is **no** build-time git/version injection (an older `git describe --tags` Archive build phase is disabled). Pulling the tag here just syncs your local repo with the GitHub Release.
 
 ### 4. Build & Upload to TestFlight via Fastlane
 
@@ -84,7 +85,7 @@ bundle exec fastlane beta
 This single command:
 1. Authenticates with App Store Connect (via API key)
 2. Auto-increments the build number (fetches latest from TestFlight + 1)
-3. Archives the app (which triggers the git tag → version injection)
+3. Archives the app (using `MARKETING_VERSION` from the merged release PR; the build number is the auto-incremented `CURRENT_PROJECT_VERSION`)
 4. Uploads the `.ipa` to TestFlight
 5. Sets the **beta feedback email** to `arenaxr@andrew.cmu.edu`
 
@@ -116,11 +117,8 @@ If this release is going to production (App Store), ensure the following are upd
 
 ## Troubleshooting
 
-### "No tags found" during Archive
-```bash
-git fetch --tags
-git describe --tags  # Verify tag exists
-```
+### Settings shows the wrong version
+The displayed version is `MARKETING_VERSION` from the project file, bumped by release-please on the release PR via the `/* x-release-please-version */` annotation on the app target's `MARKETING_VERSION` lines. If it's stale, confirm the release PR was merged and that the annotation is still present.
 
 ### Build number conflict
 Fastlane auto-increments from the latest TestFlight build number. If you get a conflict, check App Store Connect for the current highest build number.

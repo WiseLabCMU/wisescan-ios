@@ -332,9 +332,12 @@ struct SettingsView: View {
                         let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
                         let buildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "Unknown"
                         #if DEBUG
-                        let buildType = "Debug"
+                        let distribution = "Debug"
                         #else
-                        let buildType = "Release"
+                        // TestFlight (and other sandbox installs) ship a "sandboxReceipt"; the App
+                        // Store ships "receipt". Lets a tester tell a TestFlight build apart from a
+                        // store build at a glance.
+                        let distribution = (Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt") ? "TestFlight" : "App Store"
                         #endif
                         
                         HStack {
@@ -343,7 +346,7 @@ struct SettingsView: View {
                                 Text("Scan4D Version \(appVersion) (\(buildNumber))")
                                     .font(.caption)
                                     .foregroundColor(.gray)
-                                Text("Build Type: \(buildType)")
+                                Text("Distribution: \(distribution)")
                                     .font(.caption2)
                                     .foregroundColor(.gray.opacity(0.7))
                             }
