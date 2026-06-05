@@ -11,7 +11,6 @@ struct CaptureView: View {
     @State var locationManager = LocationManager()
     @AppStorage(AppConstants.Key.privacyFilter) var isPrivacyFilterOn = AppConstants.privacyFilter
     @AppStorage(AppConstants.Key.developerMode) var developerMode: Bool = AppConstants.developerMode
-    @AppStorage(AppConstants.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppConstants.flipCameraEnabled
     @AppStorage(AppConstants.Key.mockIMU) var mockIMU: Bool = AppConstants.mockIMU
     @AppStorage(AppConstants.Key.mockCameraImages) var mockCameraImages: Bool = AppConstants.mockCameraImages
     @AppStorage(AppConstants.Key.mockDepthMaps) var mockDepthMaps: Bool = AppConstants.mockDepthMaps
@@ -19,7 +18,6 @@ struct CaptureView: View {
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.captureMode) private var captureModeStr: String = AppConstants.captureMode
     // Stream mode removed — fixed to Capture (Stream is a future feature)
-    @State private var usingFrontCamera = false
     // NOTE: capture/recording state is `internal` (not private) because the recording, alignment,
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession? = nil
@@ -116,7 +114,6 @@ struct CaptureView: View {
                 privacyFilter: isPrivacyFilterOn,
                 activeMeshColor: activeMeshColor,
                 captureMode: AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar,
-                useFrontCamera: usingFrontCamera,
                 initialWorldMapURL: scanStore.activeRelocalizationMap,
                 initialGhostMeshData: cachedGhostMeshData,
                 scanStore: scanStore,
@@ -284,23 +281,6 @@ struct CaptureView: View {
                     .padding(.vertical, 8)
                     .background(.ultraThinMaterial)
                     .cornerRadius(20)
-
-                    // Flip Camera Button (Developer Mode only)
-                    if developerMode && flipCameraEnabled && !isRecording {
-                        Button(action: {
-                            usingFrontCamera.toggle()
-                        }) {
-                            Image(systemName: "camera.rotate")
-                                .font(.title3)
-                                .foregroundColor(.orange)
-                                .padding(10)
-                                .background(.ultraThinMaterial)
-                                .clipShape(Circle())
-                                .overlay(
-                                    Circle().stroke(Color.orange.opacity(0.6), lineWidth: 1)
-                                )
-                        }
-                    }
 
                     Spacer()
 
@@ -821,11 +801,6 @@ struct CaptureView: View {
 
             // Prepare haptic engine for pin drop
             hapticGenerator.prepare()
-
-            // Auto-revert to back camera when developer mode is disabled
-            if !developerMode || !flipCameraEnabled {
-                usingFrontCamera = false
-            }
 
             // Bind wearable proxy frame session and start stream
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession

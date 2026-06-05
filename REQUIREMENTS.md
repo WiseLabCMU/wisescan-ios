@@ -348,8 +348,8 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Toggleable debugging section in Settings with persistent `@AppStorage` switches. Includes Flip Camera (front/back switching via `ARFaceTrackingConfiguration`), persistent orange banner across all tabs with tap-to-disable (auto-scrolls to Settings section). Camera auto-reverts to back when dev mode is disabled. |
-| **Source** | [SettingsView.swift](wisescan-ios/SettingsView.swift) — `developerMode`, `flipCameraEnabled` · [ContentView.swift](wisescan-ios/ContentView.swift) — banner overlay · [CaptureView.swift](wisescan-ios/CaptureView.swift) — flip button · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `ARFaceTrackingConfiguration` switching |
+| **Description** | Toggleable debugging section in Settings with persistent `@AppStorage` switches: synthetic IMU / camera / depth injection for Simulator testing, Perf Diagnostics, and Pause VR Compute. A persistent orange banner across all tabs indicates dev mode and taps-to-disable (auto-scrolls to the Settings section). (The former "Flip Camera" front/back toggle was removed — person-segmentation privacy is now trivially tested by putting a hand or foot in frame on the rear camera.) |
+| **Source** | [SettingsView.swift](wisescan-ios/SettingsView.swift) — `developerMode` + dev toggles · [ContentView.swift](wisescan-ios/ContentView.swift) — banner overlay · [PerfDiag.swift](wisescan-ios/PerfDiag.swift) — diagnostics |
 
 ### REQ-014: Scan Capacity Metrics
 | | |

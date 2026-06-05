@@ -64,9 +64,8 @@ SERVER INTEGRATION
 • Compatible with self-hosted reconstruction pipelines
 
 DEVELOPER MODE
-• Front/back camera switching for testing privacy features
 • Synthetic IMU, camera, and depth injection for Simulator testing
-• Vertex mapping diagnostics and debug overlays
+• Performance diagnostics and debug overlays
 
 Designed for researchers, 3D scanning professionals, and spatial computing developers who need raw, high-fidelity sensor data with full control over the reconstruction pipeline.
 

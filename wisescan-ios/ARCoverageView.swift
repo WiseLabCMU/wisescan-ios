@@ -15,7 +15,6 @@ struct ARCoverageView: UIViewRepresentable {
     var privacyFilter: Bool
     var activeMeshColor: String = AppConstants.activeMeshColor
     var captureMode: AppConstants.CaptureMode
-    var useFrontCamera: Bool = false
     var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
     var initialGhostMeshData: Data? = nil // Raw OBJ data from the previous scan
     var scanStore: ScanStore? = nil // Runtime state for boundary anchor tracking
@@ -321,33 +320,6 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
-        // Detect camera switch
-        let currentlyUsingFront = context.coordinator.isUsingFrontCamera
-        if useFrontCamera != currentlyUsingFront {
-            context.coordinator.isUsingFrontCamera = useFrontCamera
-            if useFrontCamera {
-                if ARFaceTrackingConfiguration.isSupported {
-                    let faceConfig = ARFaceTrackingConfiguration()
-                    uiView.session.run(faceConfig, options: [.resetTracking, .removeExistingAnchors])
-                }
-            } else {
-                // Switch back to rear camera — use recording-appropriate config
-                let config = ARWorldTrackingConfiguration()
-                config.sceneReconstruction = (Self.supportsLiDAR && isRecording) ? .mesh : []
-                config.environmentTexturing = .automatic
-                if isRecording, privacyFilter, ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
-                    config.frameSemantics.insert(.personSegmentationWithDepth)
-                }
-                if isRecording, ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-                    config.frameSemantics.insert(.sceneDepth)
-                }
-                if captureMode == .vr, ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-                    config.frameSemantics.insert(.sceneDepth) // Always need sceneDepth in VR mode
-                }
-                uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
-                // Active wireframe entities are rebuilt automatically by anchor delegate callbacks
-            }
-        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -432,7 +404,6 @@ struct ARCoverageView: UIViewRepresentable {
         var captureMode: AppConstants.CaptureMode = .ar
         var pointCloudManager: PointCloudManager?
         var vrAnchorEntity: AnchorEntity?
-        var isUsingFrontCamera: Bool = false
         var isRecording: Bool = false
         /// Whether the VR black background has been applied (deferred until first frame)
         var vrBackgroundSet: Bool = false

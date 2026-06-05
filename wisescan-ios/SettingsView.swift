@@ -11,7 +11,6 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.captureMode) private var captureMode: String = AppConstants.captureMode
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
-    @AppStorage(AppConstants.Key.flipCameraEnabled) private var flipCameraEnabled: Bool = AppConstants.flipCameraEnabled
     @AppStorage(AppConstants.Key.mockIMU) private var mockIMU: Bool = AppConstants.mockIMU
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
     @AppStorage(AppConstants.Key.mockDepthMaps) private var mockDepthMaps: Bool = AppConstants.mockDepthMaps
@@ -213,7 +212,6 @@ struct SettingsView: View {
                                 self.developerMode = newValue
                                 if !newValue {
                                     // Reset all dev options to defaults when disabled
-                                    self.flipCameraEnabled = AppConstants.flipCameraEnabled
                                     self.mockIMU = AppConstants.mockIMU
                                     self.mockCameraImages = AppConstants.mockCameraImages
                                     self.mockDepthMaps = AppConstants.mockDepthMaps
@@ -233,18 +231,6 @@ struct SettingsView: View {
                         .padding(.vertical, 4)
 
                         if developerMode {
-                            Toggle(isOn: $flipCameraEnabled) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Flip Camera")
-                                        .foregroundColor(.white)
-                                    Text("Adds a button on the Capture screen to switch between front and back cameras. Useful for testing privacy features with the front-facing camera.")
-                                        .font(.caption)
-                                        .foregroundColor(.gray)
-                                }
-                            }
-                            .tint(.orange)
-                            .padding(.vertical, 4)
-
                             Toggle(isOn: $mockIMU) {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("Simulate IMU & Poses")
