@@ -12,8 +12,8 @@ struct ScansListView: View {
     @Query(sort: \ScanLocation.updatedAt, order: .reverse) private var locations: [ScanLocation]
 
     @State private var showSettings = false
-    @State private var locationToDelete: ScanLocation? = nil
-    @State private var showDeleteLocationConfirm = false
+    @State private var selectedLocations: Set<PersistentIdentifier> = []
+    @State private var showBulkDeleteConfirm = false
     @State private var isEditing = false
     @State private var viewMode: LibraryViewMode = .grid
     @State private var renderRequest: ComponentRenderRequest? = nil
@@ -62,21 +62,33 @@ struct ScansListView: View {
                                     .opacity(isEditing ? 0.6 : 1.0)
 
                                     if isEditing {
-                                        Button(action: {
-                                            locationToDelete = location
-                                            showDeleteLocationConfirm = true
-                                        }) {
-                                            Image(systemName: "minus.circle.fill")
-                                                .font(.title2)
-                                                .foregroundColor(.red)
-                                                .background(Circle().fill(Color.white).padding(4))
-                                        }
-                                        .offset(x: 8, y: -8)
+                                        let selected = selectedLocations.contains(location.id)
+                                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                                            .font(.title2)
+                                            .foregroundColor(selected ? .cyan : .gray)
+                                            .background(Circle().fill(Color.white).padding(4))
+                                            .offset(x: 8, y: -8)
+                                    }
+                                }
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    guard isEditing else { return }
+                                    if selectedLocations.contains(location.id) {
+                                        selectedLocations.remove(location.id)
+                                    } else {
+                                        selectedLocations.insert(location.id)
                                     }
                                 }
                             }
                         }
                         .padding()
+                    }
+                }
+
+                if isEditing {
+                    VStack {
+                        Spacer()
+                        bulkDeleteBar
                     }
                 }
             }
@@ -87,7 +99,18 @@ struct ScansListView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    if !locations.isEmpty {
+                    if isEditing {
+                        Button(action: {
+                            if selectedLocations.count == locations.count {
+                                selectedLocations.removeAll()
+                            } else {
+                                selectedLocations = Set(locations.map { $0.id })
+                            }
+                        }) {
+                            Text(selectedLocations.count == locations.count ? "Deselect All" : "Select All")
+                                .font(.subheadline)
+                        }
+                    } else if !locations.isEmpty {
                         Button(action: {
                             withAnimation { viewMode = (viewMode == .grid) ? .graph : .grid }
                         }) {
@@ -95,12 +118,14 @@ struct ScansListView: View {
                                 .foregroundColor(.cyan)
                         }
                         .accessibilityLabel(viewMode == .grid ? "Switch to graph view" : "Switch to grid view")
-                        .disabled(isEditing)
                     }
                 }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
                     if !locations.isEmpty {
-                        Button(action: { isEditing.toggle() }) {
+                        Button(action: {
+                            isEditing.toggle()
+                            if !isEditing { selectedLocations.removeAll() }
+                        }) {
                             Text(isEditing ? "Done" : "Edit")
                                 .bold(isEditing)
                                 .foregroundColor(isEditing ? .red : .cyan)
@@ -115,6 +140,7 @@ struct ScansListView: View {
             .onChange(of: selectedTab) {
                 if selectedTab != 2 {
                     isEditing = false
+                    selectedLocations.removeAll()
                 }
             }
             .sheet(isPresented: $showSettings) {
@@ -124,18 +150,15 @@ struct ScansListView: View {
                 CombinedMeshScreen(title: req.title, items: req.items)
             }
             .confirmationDialog(
-                "Delete Location",
-                isPresented: $showDeleteLocationConfirm,
-                presenting: locationToDelete
-            ) { locToDelete in
-                Button("Delete \(locToDelete.scans.count) Scan\(locToDelete.scans.count == 1 ? "" : "s")", role: .destructive) {
-                    deleteLocation(locToDelete)
-                    locationToDelete = nil
-                    if locations.isEmpty { isEditing = false }
+                "Delete Locations",
+                isPresented: $showBulkDeleteConfirm
+            ) {
+                Button("Delete \(selectedLocations.count) Location\(selectedLocations.count == 1 ? "" : "s")", role: .destructive) {
+                    deleteSelectedLocations()
                 }
-                Button("Cancel", role: .cancel) { locationToDelete = nil }
-            } message: { locToDelete in
-                Text("This will permanently delete \"\(locToDelete.name)\" and all scans inside it.")
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This will permanently delete the selected locations and every scan inside them.")
             }
             .preferredColorScheme(.dark)
             .overlay {
@@ -157,12 +180,33 @@ struct ScansListView: View {
         }
     }
 
-    private func deleteLocation(_ loc: ScanLocation) {
-        for scan in loc.scans {
-            ScanFileManager.shared.deleteScan(scan, context: modelContext)
+    @ViewBuilder
+    private var bulkDeleteBar: some View {
+        Button(action: { showBulkDeleteConfirm = true }) {
+            Label("Delete \(selectedLocations.count) Location\(selectedLocations.count == 1 ? "" : "s")", systemImage: "trash")
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(selectedLocations.isEmpty ? Color.gray.opacity(0.3) : Color.red.opacity(0.8))
+                .foregroundColor(selectedLocations.isEmpty ? .gray : .white)
+                .cornerRadius(10)
         }
-        modelContext.delete(loc)
+        .disabled(selectedLocations.isEmpty)
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+    }
+
+    private func deleteSelectedLocations() {
+        let toDelete = locations.filter { selectedLocations.contains($0.id) }
+        for loc in toDelete {
+            for scan in loc.scans {
+                ScanFileManager.shared.deleteScan(scan, context: modelContext)
+            }
+            modelContext.delete(loc)
+        }
         try? modelContext.save()
+        selectedLocations.removeAll()
+        isEditing = false
     }
 }
 

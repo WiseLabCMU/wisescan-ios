@@ -307,7 +307,7 @@ struct LocationDetailView: View {
                             isEditing.toggle()
                             if !isEditing { selectedScans.removeAll() }
                         }) {
-                            Text(isEditing ? "Done" : "Select")
+                            Text(isEditing ? "Done" : "Edit")
                                 .bold(isEditing)
                                 .foregroundColor(isEditing ? .red : .cyan)
                         }
