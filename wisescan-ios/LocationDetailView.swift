@@ -527,11 +527,25 @@ struct LocationDetailView: View {
 
         DispatchQueue.global(qos: .utility).async {
             for scan in scans {
-                guard let meshData = try? Data(contentsOf: scan.meshFileURL) else { continue }
+                // Per-card progress: each card shows its own "Coloring NN%" as the batch reaches it
+                // (mirrors how per-card upload status is shown). Same model property the single-card
+                // Color button uses, so only one card animates at a time as the loop advances.
+                DispatchQueue.main.async { scan.coloringMessage = "Coloring…" }
+                guard let meshData = try? Data(contentsOf: scan.meshFileURL) else {
+                    DispatchQueue.main.async { scan.coloringMessage = nil }
+                    continue
+                }
 
+                var lastPct = -1
                 let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
                     objData: meshData,
-                    rawDataDir: scan.rawDataPath
+                    rawDataDir: scan.rawDataPath,
+                    progress: { p in
+                        let pct = Int(p * 100)
+                        guard pct != lastPct else { return } // throttle to whole-percent changes
+                        lastPct = pct
+                        DispatchQueue.main.async { scan.coloringMessage = "Coloring \(pct)%" }
+                    }
                 )
 
                 if let colors = vertexColors {
@@ -547,6 +561,7 @@ struct LocationDetailView: View {
                 DispatchQueue.main.async {
                     scan.isColored = true
                     scan.location?.updatedAt = Date()
+                    scan.coloringMessage = nil
                     try? self.modelContext.save()
                 }
             }

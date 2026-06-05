@@ -332,8 +332,6 @@ struct ScanCard: View {
     @State private var itemCounts: (images: Int, proxy: Int, depth: Int, cameras: Int)? = nil
     @State private var showMeshPreview = false
     @State private var showMissingRelocAlert = false
-    @State private var isColoring = false
-    @State private var coloringMessage: String? = nil
     // Disk-derived values resolved off the main thread in `.task` (see below) so the
     // view body never performs synchronous FileManager I/O during layout/scroll.
     @State private var previewImage: UIImage? = nil
@@ -505,14 +503,14 @@ struct ScanCard: View {
         .overlay(editingOverlay)
         .overlay(alignment: .topLeading) { relocWarningOverlay }
         .overlay {
-            if isColoring {
+            if let msg = scan.coloringMessage {
                 ZStack {
                     Color.black.opacity(0.5)
                     VStack(spacing: 8) {
                         ProgressView()
                             .progressViewStyle(CircularProgressViewStyle(tint: .white))
                             .scaleEffect(1.2)
-                        Text(coloringMessage ?? "Coloring...")
+                        Text(msg)
                             .font(.caption2)
                             .foregroundColor(.white)
                     }
@@ -654,11 +652,11 @@ struct ScanCard: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
-                    .background(isEditing || isColoring ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
-                    .foregroundColor(isEditing || isColoring ? .gray : .white)
+                    .background(isEditing || scan.coloringMessage != nil ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
+                    .foregroundColor(isEditing || scan.coloringMessage != nil ? .gray : .white)
                     .cornerRadius(10)
                 }
-                .disabled(isEditing || isColoring)
+                .disabled(isEditing || scan.coloringMessage != nil)
             }
         }
     }
@@ -817,8 +815,7 @@ struct ScanCard: View {
     }
 
     private func colorizeScan() {
-        isColoring = true
-        coloringMessage = "Coloring..."
+        scan.coloringMessage = "Coloring…"
 
         let meshURL = scan.meshFileURL
         let rawDataDir = scan.rawDataPath
@@ -829,8 +826,7 @@ struct ScanCard: View {
         DispatchQueue.global(qos: .utility).async {
             guard let meshData = try? Data(contentsOf: meshURL) else {
                 DispatchQueue.main.async {
-                    self.isColoring = false
-                    self.coloringMessage = nil
+                    self.scan.coloringMessage = nil
                 }
                 return
             }
@@ -843,12 +839,12 @@ struct ScanCard: View {
                     let pct = Int(p * 100)
                     guard pct != lastPct else { return } // throttle to whole-percent changes
                     lastPct = pct
-                    DispatchQueue.main.async { self.coloringMessage = "Coloring \(pct)%" }
+                    DispatchQueue.main.async { self.scan.coloringMessage = "Coloring \(pct)%" }
                 }
             )
 
             DispatchQueue.main.async {
-                self.coloringMessage = "Updating preview..."
+                self.scan.coloringMessage = "Updating preview…"
             }
 
             // Write updated colors
@@ -866,8 +862,7 @@ struct ScanCard: View {
                 self.scan.isColored = true
                 self.scan.location?.updatedAt = Date() // Trigger preview image reload
                 try? self.modelContext.save()
-                self.isColoring = false
-                self.coloringMessage = nil
+                self.scan.coloringMessage = nil
             }
         }
     }

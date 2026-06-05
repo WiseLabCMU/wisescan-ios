@@ -17,6 +17,10 @@ class CapturedScan {
     var uploadStatusStr: String
     var uploadProgress: Double
     var isColored: Bool = false
+    /// Ephemeral per-card coloring progress message ("Coloring NN%"), nil when not coloring.
+    /// Not persisted — drives the card overlay for both single and bulk coloring (mirrors how
+    /// `uploadStatus` drives per-card upload UI).
+    @Transient var coloringMessage: String? = nil
 
     @Relationship(inverse: \ScanLocation.scans)
     var location: ScanLocation?
