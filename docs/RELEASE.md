@@ -85,9 +85,10 @@ bundle exec fastlane beta
 This single command:
 1. Authenticates with App Store Connect (via API key)
 2. Auto-increments the build number (fetches latest from TestFlight + 1)
-3. Archives the app (using `MARKETING_VERSION` from the merged release PR; the build number is the auto-incremented `CURRENT_PROJECT_VERSION`)
-4. Uploads the `.ipa` to TestFlight
-5. Sets the **beta feedback email** to `arenaxr@andrew.cmu.edu`
+3. **Fetches the Apple Distribution certificate + App Store provisioning profile via the API key** (`get_certificates` + `get_provisioning_profile`) and signs the export manually — so releasing needs **no interactive Xcode account login**. (The API key must have **App Manager** or **Admin** role to manage signing assets.)
+4. Archives the app (using `MARKETING_VERSION` from the merged release PR; the build number is the auto-incremented `CURRENT_PROJECT_VERSION`)
+5. Uploads the `.ipa` to TestFlight
+6. Sets the **beta feedback email** to `arenaxr@andrew.cmu.edu`
 
 ### 5. Distribute to Testers
 
