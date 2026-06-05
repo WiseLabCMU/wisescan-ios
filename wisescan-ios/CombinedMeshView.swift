@@ -181,18 +181,38 @@ struct CombinedMeshView: UIViewRepresentable {
             }
         }
 
-        /// Multiplies each mesh's color by its map tint (so seams between maps are visible),
-        /// or clears the multiply to show the original sampled colors.
+        /// Renders each mesh as a single flat map color (so seams between maps are obvious),
+        /// or restores the original per-vertex colors.
+        ///
+        /// We override the *surface diffuse* rather than using `material.multiply`: the geometry
+        /// bakes per-vertex colors (camera-sampled OR normals→RGB) into a `.color` source, and a
+        /// plain multiply just tints those. Over normals coloring that reads as "shifted normals"
+        /// instead of one discrete color. The surface shader modifier runs after the vertex color
+        /// is applied, so it replaces it outright — and lighting still shades it, keeping shape
+        /// readable.
         func applyTint(colorByMap: Bool) {
             for (id, node) in meshNodes {
                 guard let material = node.geometry?.materials.first else { continue }
                 if colorByMap, let tint = tints[id] {
-                    material.multiply.contents = tint
+                    var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+                    tint.getRed(&r, green: &g, blue: &b, alpha: &a)
+                    material.shaderModifiers = [.surface: Self.flatTintModifier]
+                    material.setValue(NSValue(scnVector3: SCNVector3(Float(r), Float(g), Float(b))), forKey: "mapTint")
+                    material.multiply.contents = UIColor.white
                 } else {
+                    material.shaderModifiers = nil
                     material.multiply.contents = UIColor.white
                 }
             }
         }
+
+        /// Forces the surface diffuse to a flat per-map color, overriding the geometry's
+        /// per-vertex `.color` source. `mapTint` is supplied per-material via KVC.
+        private static let flatTintModifier = """
+        uniform float3 mapTint;
+        #pragma body
+        _surface.diffuse = float4(mapTint, 1.0);
+        """
 
         /// Recenters the assembled cluster on its combined bounding box and frames the camera.
         private func frameCamera(scene: SCNScene, contentNode: SCNNode, scnView: SCNView) {
