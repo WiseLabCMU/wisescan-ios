@@ -36,8 +36,13 @@ class FrameCaptureSession {
     private var proxyFrameCount: Int = 0
     private var lastProxyCaptureTime: TimeInterval = 0
 
-    // Blur Warning logic
-    private(set) var isBlurWarningActive: Bool = false
+    // Capture warning logic — split by cause so the on-screen prompt matches the actual problem
+    // (tracking dropped vs. genuinely moving too fast). Detection is a pose-velocity + tracking-state
+    // heuristic, NOT a pixel-sharpness measurement (so blur_score in metadata is assumed, not measured).
+    enum CaptureWarning: Equatable { case fastMotion, trackingLost }
+    private(set) var blurWarningReason: CaptureWarning? = nil
+    /// Convenience for call sites that only care whether any capture warning is showing.
+    var isBlurWarningActive: Bool { blurWarningReason != nil }
     private var blurWarningTimer: Timer?
     private var consecutiveBlurredFrames: Int = 0
 
@@ -150,7 +155,7 @@ class FrameCaptureSession {
         self.frameCount = 0
         self.globalIntrinsics = nil
         self.lastCaptureTransform = nil
-        self.isBlurWarningActive = false
+        self.blurWarningReason = nil
         self.consecutiveBlurredFrames = 0
         self.blurWarningTimer?.invalidate()
         self.blurWarningTimer = nil
@@ -266,39 +271,40 @@ class FrameCaptureSession {
 
         // Reject blurred frames based on camera tracking quality
         if rejectBlur && !isMockingIMU {
-            var isBlurred = false
-            
-            // Skip if tracking is not normal (e.g. limited, excessive motion)
+            var warning: CaptureWarning? = nil
+
+            // Tracking dropped out of .normal (limited / excessive motion / relocalizing): frames
+            // here are unreliable. The fix is to hold steady & let tracking recover — NOT necessarily
+            // to slow down — so this is reported as a distinct cause from genuine fast motion.
             if let state = trackingState, state != .normal {
-                isBlurred = true
+                warning = .trackingLost
             }
-            
-            // Skip if camera moved too fast since last capture (motion blur likely)
-            if !isBlurred, let lastTransform = lastCaptureTransform {
+
+            // Otherwise, the camera pose moved too fast since the last capture (motion blur likely).
+            // Heuristic from pose velocity, not a pixel-sharpness measurement.
+            if warning == nil, let lastTransform = lastCaptureTransform {
                 let timeDelta = frameTimestamp - lastCaptureTime
                 if timeDelta > 0 {
                     let movement = cameraMovement(from: lastTransform, to: transform)
                     let velocity = movement / Float(timeDelta)
                     if velocity > AppConstants.motionBlurVelocity {
-                        isBlurred = true
+                        warning = .fastMotion
                     }
                 }
             }
-            
-            if isBlurred {
-                // Increment blurred frame counter
+
+            if let warning = warning {
+                // Increment the bad-frame counter; surface the warning once several land in a row.
                 consecutiveBlurredFrames += 1
-                
-                // If we get several blurred frames in a row, trigger the warning
-                if consecutiveBlurredFrames >= AppConstants.consecutiveBlurThreshold && !isBlurWarningActive {
+                if consecutiveBlurredFrames >= AppConstants.consecutiveBlurThreshold && blurWarningReason != warning {
                     DispatchQueue.main.async {
-                        self.isBlurWarningActive = true
+                        self.blurWarningReason = warning
                         self.resetBlurWarningTimer()
                     }
                 }
                 return
             } else {
-                // Valid frame, reset blur counter
+                // Valid frame, reset the counter
                 consecutiveBlurredFrames = 0
             }
         }
@@ -876,7 +882,7 @@ class FrameCaptureSession {
         blurWarningTimer?.invalidate()
         blurWarningTimer = Timer.scheduledTimer(withTimeInterval: AppConstants.blurWarningTimeout, repeats: false) { [weak self] _ in
             DispatchQueue.main.async {
-                self?.isBlurWarningActive = false
+                self?.blurWarningReason = nil
             }
         }
     }

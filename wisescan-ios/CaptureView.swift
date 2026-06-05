@@ -174,17 +174,17 @@ struct CaptureView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 12) {
-                if isRecording && frameCaptureSession.isBlurWarningActive {
-                    Text("⚠️ Moving too fast! Slow down.")
+                if isRecording, let warning = frameCaptureSession.blurWarningReason {
+                    Text(warning == .fastMotion ? "⚠️ Slow down — moving too fast" : "⚠️ Hold steady — regaining tracking")
                         .font(.headline)
                         .foregroundColor(.white)
                         .padding(.horizontal, 20)
                         .padding(.vertical, 12)
-                        .background(Color.orange.opacity(0.85))
+                        .background((warning == .fastMotion ? Color.orange : Color.blue).opacity(0.85))
                         .cornerRadius(20)
                         .shadow(radius: 5)
                         .transition(.scale.combined(with: .opacity))
-                        .animation(.easeInOut(duration: 0.2), value: frameCaptureSession.isBlurWarningActive)
+                        .animation(.easeInOut(duration: 0.2), value: frameCaptureSession.blurWarningReason)
                 }
 
                 if cachedGhostMeshData != nil && scanStats.trackingStatus == .limited(reason: .relocalizing) {
