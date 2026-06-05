@@ -128,7 +128,9 @@ enum VertexColorAccumulator {
     /// Reads saved JPEG images and camera JSON transforms from `rawDataDir`,
     /// parses vertices from `objData`, and projects each vertex into camera frames
     /// to sample RGB color.
-    static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?) -> Data? {
+    /// Vertex-colors the mesh by sampling saved frames. `progress` (0...1) is called after each
+    /// sampled frame on the calling (background) thread — callers hop to main to update UI.
+    static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?, progress: ((Double) -> Void)? = nil) -> Data? {
         guard let rawDir = rawDataDir else { return nil }
         let fm = FileManager.default
 
@@ -161,7 +163,7 @@ enum VertexColorAccumulator {
         // Downscale factor — vertex coloring doesn't need full-res images
         let downscaleFactor = 2
 
-        for cameraFile in sampledFiles {
+        for (frameIdx, cameraFile) in sampledFiles.enumerated() {
           // Bound peak memory: each frame decodes a UIImage/CGImage + a downsample
           // context + a depth image, all autoreleased. Without a per-frame pool these
           // accumulate across every sampled frame and can spike memory / trigger jetsam.
@@ -313,6 +315,7 @@ enum VertexColorAccumulator {
             }
             _ = depthPixelDataBuffer // Silence compiler warning while ensuring CFData buffer outlives the pointer
           } // autoreleasepool (per frame)
+            progress?(Double(frameIdx + 1) / Double(sampledFiles.count))
         }
 
         let coloredCount = colored.reduce(0) { $0 + ($1 ? 1 : 0) }

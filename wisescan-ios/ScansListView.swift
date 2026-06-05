@@ -835,9 +835,16 @@ struct ScanCard: View {
                 return
             }
 
+            var lastPct = -1
             let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
                 objData: meshData,
-                rawDataDir: rawDataDir
+                rawDataDir: rawDataDir,
+                progress: { p in
+                    let pct = Int(p * 100)
+                    guard pct != lastPct else { return } // throttle to whole-percent changes
+                    lastPct = pct
+                    DispatchQueue.main.async { self.coloringMessage = "Coloring \(pct)%" }
+                }
             )
 
             DispatchQueue.main.async {
