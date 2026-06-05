@@ -198,15 +198,21 @@ struct ScansListView: View {
 
     private func deleteSelectedLocations() {
         let toDelete = locations.filter { selectedLocations.contains($0.id) }
+        // Capture file URLs on main (SwiftData model access must stay on the context's thread),
+        // delete the records + save once on main, then remove the scan directories OFF main — the
+        // per-scan directory removal is the slow part and would otherwise freeze the grid.
+        let dirs = toDelete.flatMap { $0.scans.map(\.scanDirectory) }
         for loc in toDelete {
-            for scan in loc.scans {
-                ScanFileManager.shared.deleteScan(scan, context: modelContext)
-            }
+            for scan in loc.scans { modelContext.delete(scan) }
             modelContext.delete(loc)
         }
         try? modelContext.save()
         selectedLocations.removeAll()
         isEditing = false
+
+        DispatchQueue.global(qos: .utility).async {
+            for dir in dirs { try? FileManager.default.removeItem(at: dir) }
+        }
     }
 }
 

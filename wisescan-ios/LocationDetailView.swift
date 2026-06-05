@@ -369,20 +369,29 @@ struct LocationDetailView: View {
 
     private func bulkDelete() {
         let scansToDelete = location.scans.filter { selectedScans.contains($0.id) }
+        // Capture file URLs on main (SwiftData model access must stay on the context's thread).
+        // Delete the records + save once on main (fast, in-memory), then remove the scan
+        // directories (images/depth/cameras — the slow part) OFF main so bulk delete of many
+        // scans doesn't freeze the UI.
+        let dirs = scansToDelete.map(\.scanDirectory)
         for scan in scansToDelete {
-            ScanFileManager.shared.deleteScan(scan, context: modelContext)
+            modelContext.delete(scan)
         }
-        
+
         selectedScans.removeAll()
         isEditing = false
-        
-        if location.scans.isEmpty {
+
+        let emptyAfter = location.scans.isEmpty
+        if emptyAfter {
             modelContext.delete(location)
-            try? modelContext.save()
-            dismiss()
-        } else {
-            try? modelContext.save()
         }
+        try? modelContext.save()
+
+        DispatchQueue.global(qos: .utility).async {
+            for dir in dirs { try? FileManager.default.removeItem(at: dir) }
+        }
+
+        if emptyAfter { dismiss() }
     }
 
     private func bulkSaveToFiles(scans: [CapturedScan]) {
