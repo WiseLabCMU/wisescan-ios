@@ -260,9 +260,9 @@ sequenceDiagram
     Note over U,SS: First Scan (New Location)
     U->>Cap: Tap Record → Tap Stop
     Cap->>U: Custom Overlay: "Name this Space" & "Use Case" Picker
-    U->>Cap: Selects "Time-Series", taps Save
+    U->>Cap: Selects "Rescan", taps Save
     Cap->>SS: Background Processing...
-    SS->>SS: addLocation("Kitchen", useCase: .rescan)
+    SS->>SS: addLocation("Kitchen", scanCase: .rescanSpace)
     SS->>SS: addScan("Scan 1", mesh, worldMap)
 
     Note over U,SS: Rescan / Link Adjacent (Temporal or Spatial)

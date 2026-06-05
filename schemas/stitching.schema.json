@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Scan4D Stitching Manifest JSON Schema",
+  "description": "Per-location manifest of spatial boundary links between scans, written to Documents/Scans/{locationId}/stitching.json and bundled into the Scan4D export zip. Each link pairs a boundary anchor in a source scan (Pin A) with one in a target scan (Pin B); final alignment is a server-side concern.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "description": "Manifest format version. Currently 1."
+    },
+    "layout": {
+      "type": "string",
+      "enum": ["column_major", "row_major"],
+      "description": "Serialization convention for the 4x4 transforms in this manifest. Currently always 'column_major' (each inner array is one column), matching transforms.json / scan4d_metadata.json."
+    },
+    "links": {
+      "type": "array",
+      "description": "All spatial links whose TARGET scan lives in this location. Append-only; de-duplicated by link id.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Stable, persisted link identity (graph edge + de-dup key)."
+          },
+          "sourceLocationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Location of the original scan that was extended FROM (where Pin A was dropped)."
+          },
+          "sourceScanId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The source scan (Pin A)."
+          },
+          "sourceAnchorId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "UUID of the source boundary anchor (Pin A). Metadata-only camera-pose snapshot, not an ARAnchor."
+          },
+          "sourceAnchorTransform": {
+            "$ref": "#/definitions/matrix4x4",
+            "description": "Camera-to-world pose of Pin A at the moment it was dropped, in the source scan's world frame."
+          },
+          "sourceAnchorCompassHeading": {
+            "type": ["number", "null"],
+            "description": "True (or magnetic) compass heading in degrees [0,360) at Pin A, if available."
+          },
+          "targetLocationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Location of the new scan this link belongs to (THIS manifest's location)."
+          },
+          "targetScanId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The target scan (Pin B). Known only after the target scan is saved, which is why the link is written deferred."
+          },
+          "targetAnchorId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "UUID of the target boundary anchor (Pin B). Metadata-only camera-pose snapshot."
+          },
+          "targetAnchorTransform": {
+            "$ref": "#/definitions/matrix4x4",
+            "description": "Camera-to-world pose of Pin B at the moment it was dropped, in the target scan's world frame."
+          },
+          "targetAnchorCompassHeading": {
+            "type": ["number", "null"],
+            "description": "True (or magnetic) compass heading in degrees [0,360) at Pin B, if available."
+          },
+          "linkedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO-8601 timestamp when the link was created."
+          },
+          "linkType": {
+            "type": "string",
+            "enum": ["mid_session", "cross_session"],
+            "description": "'mid_session' = Pin & Extend (boundary dropped during one continuous recording, then auto-saved + reset). 'cross_session' = Link Adjacent (boundary matched later by relocalizing against the source scan's world map)."
+          }
+        },
+        "required": [
+          "id",
+          "sourceLocationId", "sourceScanId", "sourceAnchorId", "sourceAnchorTransform",
+          "targetLocationId", "targetScanId", "targetAnchorId", "targetAnchorTransform",
+          "linkedAt", "linkType"
+        ]
+      }
+    }
+  },
+  "required": ["version", "layout", "links"],
+  "definitions": {
+    "matrix4x4": {
+      "type": "array",
+      "description": "A 4x4 matrix as 4 inner arrays of 4 numbers each. Column-major per `layout`: inner array i is column i.",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "array",
+        "minItems": 4,
+        "maxItems": 4,
+        "items": { "type": "number" }
+      }
+    }
+  }
+}
