@@ -22,6 +22,10 @@ struct CaptureView: View {
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession? = nil
     @State var saveMessage: String? = nil
+    /// Mesh vertex count captured at record-start. The "move to start the live mesh" cue is shown
+    /// until enough NEW vertices appear; a baseline makes it fire in relocalized ghost/stitch flows
+    /// where `totalVertices` already starts high (would otherwise never cross an absolute threshold).
+    @State var verticesAtRecordStart = 0
     @State var isRecording = false
     // Set true by ARCoverageView's coordinator when VIO tracking is lost mid‑recording; observed
     // below to halt the scan and prompt save/rescan (data after VIO loss is corrupt).
@@ -199,8 +203,10 @@ struct CaptureView: View {
                         .animation(.easeInOut(duration: 0.2), value: scanStats.trackingStatus)
                 }
 
-                if isRecording && scanStats.totalVertices < 500 && scanStats.trackingStatus != .limited(reason: .relocalizing) && !frameCaptureSession.isBlurWarningActive {
-                    Text("📷 Move camera slowly to scan environment")
+                let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
+                let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
+                if isRecording && needsLiveMeshCue && scanStats.trackingStatus != .limited(reason: .relocalizing) && !frameCaptureSession.isBlurWarningActive {
+                    Text("📷 Move the camera to start the live mesh")
                         .font(.headline)
                         .foregroundColor(.white)
                         .padding(.horizontal, 20)
@@ -209,7 +215,7 @@ struct CaptureView: View {
                         .cornerRadius(20)
                         .shadow(radius: 5)
                         .transition(.scale.combined(with: .opacity))
-                        .animation(.easeInOut(duration: 0.2), value: scanStats.totalVertices < 500)
+                        .animation(.easeInOut(duration: 0.2), value: needsLiveMeshCue)
                 }
             }
 

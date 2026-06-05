@@ -35,6 +35,10 @@ extension CaptureView {
         showManualAdjust = false // dismiss the manual-adjust panel once recording begins
 
         isRecording = true
+        // Baseline for the "move the camera to start the live mesh" cue. In a relocalized ghost /
+        // stitch-boundary flow `totalVertices` already starts high, so the cue is shown until enough
+        // NEW vertices appear relative to this baseline (not an absolute count).
+        verticesAtRecordStart = scanStats.totalVertices
         if scanStore.capturePhase == .idle {
             scanStore.capturePhase = .recording
         }
