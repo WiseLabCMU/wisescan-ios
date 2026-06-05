@@ -150,7 +150,11 @@ struct CombinedMeshView: UIViewRepresentable {
 
     final class Coordinator {
         private var meshNodes: [UUID: SCNNode] = [:]
-        private var tints: [UUID: UIColor] = [:]
+        // Two geometries per mesh, swapped on toggle (no runtime shader): the real per-vertex
+        // colors, and a flat per-map color. The flat one omits the `.color` source so the map hue
+        // isn't multiplied into the vertex/normal colors, but keeps `.normal` so it's still lit.
+        private var coloredGeometries: [UUID: SCNGeometry] = [:]
+        private var flatGeometries: [UUID: SCNGeometry] = [:]
 
         func load(into scnView: SCNView, items: [CombinedMeshItem], colorByMap: Bool, onLoaded: @escaping () -> Void) {
             guard let scene = scnView.scene else { onLoaded(); return }
@@ -158,12 +162,12 @@ struct CombinedMeshView: UIViewRepresentable {
             scene.rootNode.addChildNode(contentNode)
 
             DispatchQueue.global(qos: .userInitiated).async {
-                var built: [(item: CombinedMeshItem, geometry: SCNGeometry)] = []
+                var built: [(item: CombinedMeshItem, geometry: SCNGeometry, flat: SCNGeometry)] = []
                 for item in items {
                     guard let data = try? Data(contentsOf: item.meshURL) else { continue }
                     let colors = item.colorsURL.flatMap { try? Data(contentsOf: $0) }
                     guard let (geometry, _) = MeshPreviewView.buildGeometry(from: data, vertexColors: colors) else { continue }
-                    built.append((item, geometry))
+                    built.append((item, geometry, Self.makeFlatTinted(from: geometry, tint: item.tint)))
                 }
 
                 DispatchQueue.main.async {
@@ -172,7 +176,8 @@ struct CombinedMeshView: UIViewRepresentable {
                         node.simdTransform = entry.item.transform
                         contentNode.addChildNode(node)
                         self.meshNodes[entry.item.id] = node
-                        self.tints[entry.item.id] = entry.item.tint
+                        self.coloredGeometries[entry.item.id] = entry.geometry
+                        self.flatGeometries[entry.item.id] = entry.flat
                     }
                     self.applyTint(colorByMap: colorByMap)
                     self.frameCamera(scene: scene, contentNode: contentNode, scnView: scnView)
@@ -181,38 +186,30 @@ struct CombinedMeshView: UIViewRepresentable {
             }
         }
 
-        /// Renders each mesh as a single flat map color (so seams between maps are obvious),
-        /// or restores the original per-vertex colors.
-        ///
-        /// We override the *surface diffuse* rather than using `material.multiply`: the geometry
-        /// bakes per-vertex colors (camera-sampled OR normals→RGB) into a `.color` source, and a
-        /// plain multiply just tints those. Over normals coloring that reads as "shifted normals"
-        /// instead of one discrete color. The surface shader modifier runs after the vertex color
-        /// is applied, so it replaces it outright — and lighting still shades it, keeping shape
-        /// readable.
+        /// Swaps each mesh between its real per-vertex colors and a single flat, *lit* per-map color
+        /// (so seams between maps are obvious while shape/depth stay readable). We swap whole
+        /// geometries rather than tinting the colored one — a `material.multiply` tint would multiply
+        /// the map hue into the per-vertex colors, which over normals coloring reads as "shifted
+        /// normals" instead of one discrete color.
         func applyTint(colorByMap: Bool) {
             for (id, node) in meshNodes {
-                guard let material = node.geometry?.materials.first else { continue }
-                if colorByMap, let tint = tints[id] {
-                    var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-                    tint.getRed(&r, green: &g, blue: &b, alpha: &a)
-                    material.shaderModifiers = [.surface: Self.flatTintModifier]
-                    material.setValue(NSValue(scnVector3: SCNVector3(Float(r), Float(g), Float(b))), forKey: "mapTint")
-                    material.multiply.contents = UIColor.white
-                } else {
-                    material.shaderModifiers = nil
-                    material.multiply.contents = UIColor.white
-                }
+                node.geometry = colorByMap ? flatGeometries[id] : coloredGeometries[id]
             }
         }
 
-        /// Forces the surface diffuse to a flat per-map color, overriding the geometry's
-        /// per-vertex `.color` source. `mapTint` is supplied per-material via KVC.
-        private static let flatTintModifier = """
-        uniform float3 mapTint;
-        #pragma body
-        _surface.diffuse = float4(mapTint, 1.0);
-        """
+        /// A flat per-map variant of `geometry`: same vertices/normals/elements, but the per-vertex
+        /// `.color` source dropped and a single lit diffuse color, so it renders as one discrete
+        /// hue with normal shading (depth cues) — and needs no runtime Metal shader.
+        private static func makeFlatTinted(from geometry: SCNGeometry, tint: UIColor) -> SCNGeometry {
+            let sources = geometry.sources.filter { $0.semantic != .color }
+            let flat = SCNGeometry(sources: sources, elements: geometry.elements)
+            let material = SCNMaterial()
+            material.lightingModel = .physicallyBased
+            material.diffuse.contents = tint
+            material.isDoubleSided = false
+            flat.materials = [material]
+            return flat
+        }
 
         /// Recenters the assembled cluster on its combined bounding box and frames the camera.
         private func frameCamera(scene: SCNScene, contentNode: SCNNode, scnView: SCNView) {
