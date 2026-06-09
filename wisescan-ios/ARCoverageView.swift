@@ -18,6 +18,10 @@ struct ARCoverageView: UIViewRepresentable {
     var initialWorldMapURL: URL? // Support for Scan4D anchoring
     var initialGhostMeshData: Data? // Raw OBJ data from the previous scan
     var scanStore: ScanStore? // Runtime state for boundary anchor tracking
+    /// Track C — all connectors the active location's scans share with other maps, in the
+    /// relocalized session's world frame. Computed by CaptureView (which has the ModelContext) and
+    /// rendered as labeled markers on record-start when rescanning an existing space. Empty otherwise.
+    var connectorAnchors: [ConnectorAnchor] = []
 
     /// Well-known name for boundary anchors so they can be identified across sessions.
     static let boundaryAnchorName = "Scan4D_Boundary_Anchor"
@@ -303,6 +307,14 @@ struct ARCoverageView: UIViewRepresentable {
                    let pinTransform = scanStore?.boundaryAnchorTransform {
                     context.coordinator.addBoundaryAnchorVisual(at: pinTransform, in: uiView)
                 }
+
+                // Track C — rescan coverage: render a labeled marker for EVERY connector the active
+                // location shares with other maps. The session relocalized to the existing world
+                // map, so each ConnectorAnchor.transform is already in this session's world frame.
+                // (resetForRecording cleared any stale markers above; render once here.)
+                if scanStore?.activeScanCase == .rescanSpace, !connectorAnchors.isEmpty {
+                    context.coordinator.renderConnectorMarkers(connectorAnchors, in: uiView)
+                }
             } else {
                 // Downgrade to nominal: pure camera passthrough — no overlays
                 context.coordinator.resetForNominal()
@@ -467,6 +479,12 @@ struct ARCoverageView: UIViewRepresentable {
         var boundaryAnchorEntity: AnchorEntity?
         var boundaryAnchorId: UUID?
 
+        // Connector markers (Track C). Each labeled marker is an AnchorEntity whose top-level
+        // child is billboarded toward the camera each frame. `connectorMarkerEntities` holds the
+        // markers rendered for a rescan (one per ConnectorAnchor); `boundaryAnchorEntity` is the
+        // lone single-link marker. We billboard whatever is present in either set.
+        var connectorMarkerEntities: [AnchorEntity] = []
+
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
             baselineMemoryMB = ScanStats.currentMemoryUsageMB() // read on main in updateStats's publish block
@@ -499,6 +517,8 @@ struct ARCoverageView: UIViewRepresentable {
             }
             boundaryAnchorEntity = nil
             boundaryAnchorId = nil
+            // Clear any rescan connector markers (re-added below when the rescan render fires).
+            removeConnectorMarkers()
         }
 
         /// Reset coordinator state when returning to nominal (idle) mode.
@@ -525,6 +545,8 @@ struct ARCoverageView: UIViewRepresentable {
             }
             boundaryAnchorEntity = nil
             boundaryAnchorId = nil
+            // Clear any rescan connector markers.
+            removeConnectorMarkers()
 
             DispatchQueue.main.async { [weak self] in
                 // Zero out scan stats
@@ -868,6 +890,19 @@ struct ARCoverageView: UIViewRepresentable {
             // Pre-recording relocalization/alignment phase driver (no-op outside those phases).
             driveAlignmentPhase(frame)
 
+            // Billboard connector/boundary markers toward the camera (Track C). RealityKit mutations
+            // must run on main; extract the camera transform here so the ARFrame isn't forwarded.
+            // Gate the per-frame main hop on delegate-queue-visible state that's only true when
+            // markers can exist (an active recording, or a published boundary anchor) — the
+            // billboard pass itself is a no-op when there are none, and `connectorMarkerEntities`
+            // is main-only so we can't read it here.
+            if isRecording || scanStore?.boundaryAnchorTransform != nil {
+                let camTransform = frame.camera.transform
+                DispatchQueue.main.async { [weak self] in
+                    self?.updateConnectorBillboards(cameraTransform: camTransform)
+                }
+            }
+
             // Per-frame ARKit timing (runs in AR + VR, above the VR-only guard). The frame-delivery
             // gap is the direct signal that VIO was starved.
             let ts = frame.timestamp
@@ -1142,33 +1177,118 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
-        // MARK: - Boundary Anchor Visual
+        // MARK: - Connector Markers (Track C)
 
-        /// Adds a vibrant green sphere with a translucent glow at the boundary anchor location.
-        func addBoundaryAnchorVisual(at transform: simd_float4x4, in arView: ARView) {
+        /// Adds the single-link boundary marker at `transform`, labeled with the linked map's name
+        /// (falls back to a generic label). Kept as the call site used by the new-link / Pin B flow
+        /// and the ARWorldMap boundary-anchor didAdd path. Backed by `addConnectorMarker`, tracked
+        /// in `boundaryAnchorEntity` (so the existing remove/refresh logic continues to work).
+        func addBoundaryAnchorVisual(at transform: simd_float4x4, in arView: ARView, name: String = "Connector") {
             // Remove existing boundary visual if any
             if let existing = boundaryAnchorEntity {
                 existing.removeFromParent()
             }
+            let marker = makeConnectorMarker(name: name, transform: transform)
+            arView.scene.addAnchor(marker)
+            boundaryAnchorEntity = marker
+        }
 
-            // Create a green sphere with pulsing animation
-            let sphereMesh = MeshResource.generateSphere(radius: 0.04)
-            let material = UnlitMaterial(color: UIColor(red: 0.0, green: 0.95, blue: 0.4, alpha: 1.0))
-            let modelEntity = ModelEntity(mesh: sphereMesh, materials: [material])
+        /// Renders all connectors for a rescan: one labeled marker per `ConnectorAnchor`.
+        /// Clears any previously-rendered connector markers first so repeated calls don't stack.
+        /// Each ConnectorAnchor's `transform` is already in the relocalized session's world frame.
+        func renderConnectorMarkers(_ anchors: [ConnectorAnchor], in arView: ARView) {
+            removeConnectorMarkers()
+            for anchor in anchors {
+                let marker = makeConnectorMarker(name: anchor.otherLocationName, transform: anchor.transform)
+                arView.scene.addAnchor(marker)
+                connectorMarkerEntities.append(marker)
+            }
+        }
 
-            // Add a slightly larger translucent outer sphere for glow effect
-            let outerMesh = MeshResource.generateSphere(radius: 0.06)
-            let outerMaterial = UnlitMaterial(color: UIColor(red: 0.0, green: 0.95, blue: 0.4, alpha: 0.3))
-            let outerEntity = ModelEntity(mesh: outerMesh, materials: [outerMaterial])
-            modelEntity.addChild(outerEntity)
+        /// Removes all rescan connector markers from the scene.
+        func removeConnectorMarkers() {
+            for marker in connectorMarkerEntities {
+                marker.removeFromParent()
+            }
+            connectorMarkerEntities.removeAll()
+        }
 
-            // Place at the anchor's world position
+        /// Builds a labeled connector marker at the anchor's world position. The marker reads as a
+        /// CONNECTOR: a "link.circle.fill" SF Symbol rendered to a textured UnlitMaterial quad, with
+        /// the other map's name as floating 3D text just above it. Only UnlitMaterial composites
+        /// reliably in the AR video pipeline, so both the icon and the text use it (no
+        /// CustomMaterial/PBR). The returned AnchorEntity's single child (`billboardRoot`) is named
+        /// so the per-frame billboard pass (session(_:didUpdate:)) can rotate it toward the camera.
+        private func makeConnectorMarker(name: String, transform: simd_float4x4) -> AnchorEntity {
             let position = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
             let anchorEntity = AnchorEntity(world: position)
-            anchorEntity.addChild(modelEntity)
 
-            arView.scene.addAnchor(anchorEntity)
-            boundaryAnchorEntity = anchorEntity
+            // A single root the billboard pass spins to face the camera; icon + label hang off it.
+            let billboardRoot = Entity()
+            billboardRoot.name = "connector_billboard"
+
+            // ── Link glyph: SF Symbol rendered to a UIImage, applied as the base color texture of
+            // an UnlitMaterial on a small plane (≈8cm). UnlitMaterial is the only material that
+            // composites reliably over the AR camera feed (see loadGhostMesh notes). ──
+            let iconSize: Float = 0.08
+            let iconMesh = MeshResource.generatePlane(width: iconSize, height: iconSize)
+            var iconMaterial = UnlitMaterial(color: UIColor(red: 0.0, green: 0.95, blue: 0.4, alpha: 1.0))
+            if let image = Self.connectorGlyphImage(),
+               let cgImage = image.cgImage,
+               let texture = try? TextureResource(image: cgImage, options: .init(semantic: .color)) {
+                iconMaterial.color = .init(tint: .white, texture: .init(texture))
+                // Texture has its own alpha (transparent outside the glyph) — blend so the
+                // surrounding plane doesn't show as an opaque green square.
+                iconMaterial.blending = .transparent(opacity: 1.0)
+                iconMaterial.opacityThreshold = 0.05
+            }
+            let iconEntity = ModelEntity(mesh: iconMesh, materials: [iconMaterial])
+            billboardRoot.addChild(iconEntity)
+
+            // ── Floating 3D name label above the icon. generateText is extruded; scale it down to a
+            // sensible real-world height (~5cm cap height). UnlitMaterial again for AR compositing. ──
+            let labelMaterial = UnlitMaterial(color: .white)
+            let textMesh = MeshResource.generateText(
+                name,
+                extrusionDepth: 0.001,
+                font: .systemFont(ofSize: 0.05),
+                containerFrame: .zero,
+                alignment: .center,
+                lineBreakMode: .byTruncatingTail
+            )
+            let textEntity = ModelEntity(mesh: textMesh, materials: [labelMaterial])
+            // generateText origins at the lower-left of its bounds; recenter horizontally and seat it
+            // just above the icon.
+            let textBounds = textEntity.model?.mesh.bounds.extents ?? .zero
+            textEntity.position = SIMD3<Float>(-textBounds.x / 2, iconSize / 2 + 0.01, 0)
+            billboardRoot.addChild(textEntity)
+
+            anchorEntity.addChild(billboardRoot)
+            return anchorEntity
+        }
+
+        /// Renders the "link.circle.fill" SF Symbol to a UIImage for use as a marker texture.
+        private static func connectorGlyphImage() -> UIImage? {
+            let config = UIImage.SymbolConfiguration(pointSize: 128, weight: .semibold)
+            let symbol = UIImage(systemName: "link.circle.fill", withConfiguration: config)?
+                .withTintColor(UIColor(red: 0.0, green: 0.95, blue: 0.4, alpha: 1.0), renderingMode: .alwaysOriginal)
+            return symbol
+        }
+
+        /// Rotates every connector/boundary marker's billboard root to face the camera. Called once
+        /// per ARFrame from session(_:didUpdate:). Cheap (a handful of markers); a no-op when none.
+        func updateConnectorBillboards(cameraTransform: simd_float4x4) {
+            let camPos = SIMD3<Float>(cameraTransform.columns.3.x, cameraTransform.columns.3.y, cameraTransform.columns.3.z)
+            var roots: [Entity] = connectorMarkerEntities.compactMap { $0.children.first }
+            if let boundaryRoot = boundaryAnchorEntity?.children.first { roots.append(boundaryRoot) }
+            guard !roots.isEmpty else { return }
+            for root in roots {
+                let markerPos = root.position(relativeTo: nil)
+                var toCam = camPos - markerPos
+                toCam.y = 0 // keep the marker upright; yaw-only billboard so text stays level
+                guard simd_length(toCam) > 0.0001 else { continue }
+                root.orientation = simd_quatf(from: SIMD3<Float>(0, 0, 1), to: simd_normalize(toCam))
+            }
         }
     }
 
