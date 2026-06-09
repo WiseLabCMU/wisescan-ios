@@ -13,7 +13,8 @@ struct UserGuideView: View {
                     guideRow(
                         icon: "1.circle.fill",
                         title: "Capture",
-                        text: "Point your device at a scene. Toggle Privacy Filter to exclude people from the scan. Tap the capture button to start recording — the mesh overlay shows scanning progress in real-time."
+                        text: "Point your device at a scene. Toggle Privacy Filter to exclude people from the scan. " +
+                              "Tap the capture button to start recording — the mesh overlay shows scanning progress in real-time."
                     )
                     guideRow(
                         icon: "2.circle.fill",
@@ -22,10 +23,11 @@ struct UserGuideView: View {
                     )
                     guideRow(
                         icon: "3.circle.fill",
-                        title: "Rescan Space / Link Adjacent Space",
+                        title: "Rescan Space / Connect Adjacent Space",
                         text: "Tap 'Rescan Space' on any location to re-scan the identical area over time — a red ghost overlay shows your previous scan for reference. " +
-                              "Tap 'Link Adjacent Space' to scan a neighboring room: relocalize with your previous scan, walk to the boundary threshold, " +
-                              "and confirm to relationally link the two spaces."
+                              "Tap 'Connect Adjacent Space' to scan a neighboring room: relocalize with your " +
+                              "previous scan, walk to where the new connector should be, " +
+                              "and confirm to place the connector and start scanning the new space."
                     )
                     guideRow(
                         icon: "4.circle.fill",

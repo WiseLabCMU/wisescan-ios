@@ -73,7 +73,7 @@ struct LocationDetailView: View {
                                     }
                                 )) {
                                     Text("Rescan Space").tag(ScanCase.rescanSpace)
-                                    Text("Link Adjacent Space").tag(ScanCase.linkAdjacent)
+                                    Text("Connect Adjacent Space").tag(ScanCase.linkAdjacent)
                                 }
                                 .pickerStyle(.segmented)
                                 .colorScheme(.dark)
@@ -145,7 +145,7 @@ struct LocationDetailView: View {
                                     }) {
                                         HStack {
                                             Image(systemName: "link.badge.plus")
-                                            Text("Link Adjacent")
+                                            Text("Connect Adjacent")
                                                 .font(.subheadline).bold()
                                         }
                                         .frame(maxWidth: .infinity)

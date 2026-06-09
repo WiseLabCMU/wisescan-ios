@@ -239,14 +239,14 @@ struct CaptureView: View {
                 if showExtendPrompt {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(scanStore.activeScanCase == .linkAdjacent ? "Link Adjacent Space" : "Rescan Space")
+                            Text(scanStore.activeScanCase == .linkAdjacent ? "Connect Adjacent Space" : "Rescan Space")
                                 .font(.headline)
                                 .foregroundColor(.white)
                             Text(scanStore.activeScanCase == .linkAdjacent
                                  ? """
-                                   Link Adjacent Space: Relocalize with the \
-                                   previous scan, walk to the boundary, and \
-                                   confirm to relationally link this adjacent \
+                                   Connect Adjacent Space: Relocalize with the \
+                                   previous scan, walk to where the new connector should be, and \
+                                   confirm to connect this adjacent \
                                    space.
                                    """
                                  : """
@@ -319,7 +319,7 @@ struct CaptureView: View {
                 .padding()
 
                 if let locName = activeLocationName {
-                    let modeText = scanStore.activeScanCase == .linkAdjacent ? "Link Adjacent Space" : "Rescan Space"
+                    let modeText = scanStore.activeScanCase == .linkAdjacent ? "Connect Adjacent Space" : "Rescan Space"
                     Text("\(locName) — \(modeText)")
                         .font(.caption.bold())
                         .foregroundColor(.white)
@@ -456,8 +456,8 @@ struct CaptureView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "mappin.and.ellipse")
                                 .font(.title3)
-                            Text("Pin & Extend")
-                                .font(.subheadline).bold()
+                                Text("Save Scan & Place Connector")
+                                    .font(.subheadline).bold()
                         }
                         .foregroundColor(.white)
                         .padding(.horizontal, 20)

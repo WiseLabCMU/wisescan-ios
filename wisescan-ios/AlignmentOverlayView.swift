@@ -32,7 +32,7 @@ struct AlignmentOverlayView: View {
         case .loadingWorldMap:
             return "Relocalizing with previous scan..."
         case .aligning:
-            return "Relocalized — walk to where the new boundary should be, then confirm"
+            return "Relocalized — walk to where the new connector should be, then confirm"
         case .alignedReady:
             return "Ready — confirm to start scanning adjacent space"
         default:
@@ -112,7 +112,7 @@ struct AlignmentOverlayView: View {
                     Button(action: onConfirm) {
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark.circle.fill")
-                            Text("Confirm & Start Scan")
+                            Text("Place Connector & Start Scanning")
                         }
                         .font(.subheadline.bold())
                         .foregroundColor(isAligned ? .white : .gray)
