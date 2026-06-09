@@ -126,6 +126,12 @@ struct CaptureView: View {
             connectorAnchors = []
             return
         }
+        // Safe to aggregate connectors across ALL scans in the location: a location's scans share
+        // one world frame (each rescan relocalizes to the latest scan's map, which itself was
+        // captured by relocalizing to the prior one — a continuous frame chain), so every scan's
+        // `localAnchor` pose is expressed in the same frame we relocalize into here. If rescanning
+        // a NON-latest scan is ever allowed, this invariant breaks and this must filter to the
+        // connectors of the scan actually being relocalized against (`activeScanToExtend`).
         connectorAnchors = location.scans.flatMap { StitchLinkStore.connectorAnchors(for: $0) }
     }
 

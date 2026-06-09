@@ -21,7 +21,9 @@ import simd
 final class StitchLink {
     // Persisted identity (de-dup + graph edges depend on it). Declared with a default so
     // SwiftData can synthesize it; the single construction site supplies an explicit UUID.
-    var id: UUID = UUID()
+    // `.unique` upserts on id collision, so re-import / re-entrant migration can't create
+    // duplicate rows for the same logical link — a store-level backstop for the code-side de-dup.
+    @Attribute(.unique) var id: UUID = UUID()
 
     // Endpoint scans. Symmetric — neither is privileged for traversal.
     var endpointAScan: CapturedScan?
@@ -153,6 +155,8 @@ struct ConnectorAnchor: Identifiable {
 enum StitchLinkStore {
 
     /// Creates a link between two scans (source = Pin A / pre-existing map) and saves.
+    /// Throws if the save fails so the caller can surface it — a silently-dropped link would
+    /// leave the maps visually stitched but with no persisted connection.
     // swiftlint:disable:next function_parameter_count
     static func create(sourceScan: CapturedScan,
                        targetScan: CapturedScan,
@@ -163,7 +167,7 @@ enum StitchLinkStore {
                        sourceCompassHeading: Double?,
                        targetCompassHeading: Double?,
                        linkType: StitchingLink.LinkType,
-                       in context: ModelContext) -> StitchLink {
+                       in context: ModelContext) throws -> StitchLink {
         let link = StitchLink(
             endpointAScan: sourceScan,
             endpointBScan: targetScan,
@@ -177,7 +181,7 @@ enum StitchLinkStore {
             linkType: linkType
         )
         context.insert(link)
-        try? context.save()
+        try context.save()
         return link
     }
 
@@ -220,9 +224,18 @@ enum StitchLinkStore {
     /// Idempotent (de-dups by link id) and guarded by a UserDefaults flag so it runs once.
     /// Legacy files are left on disk (the builder ignores them); they are now dead weight only.
     /// Must run AFTER any demo-data seeding so source/target scans exist to resolve against.
+    /// Re-entrancy guard: `migrateFromFilesIfNeeded` yields the main actor at every `await`
+    /// (readAsync per location), so a second invocation — e.g. `onAppear` firing twice — could
+    /// interleave, see the UserDefaults flag still unset, and import the same files again. The flag
+    /// is only persisted at the very end, so this synchronous in-flight bool (set before any await)
+    /// is what actually serializes concurrent runs within a single launch.
+    private static var migrationInFlight = false
+
     static func migrateFromFilesIfNeeded(context: ModelContext) async {
         let flagKey = "stitchLinkMigrationV1Done"
-        if UserDefaults.standard.bool(forKey: flagKey) { return }
+        if UserDefaults.standard.bool(forKey: flagKey) || migrationInFlight { return }
+        migrationInFlight = true
+        defer { migrationInFlight = false }
 
         guard let locations = try? context.fetch(FetchDescriptor<ScanLocation>()) else { return }
         let scanById: [UUID: CapturedScan] = Dictionary(

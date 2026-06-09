@@ -403,19 +403,24 @@ extension CaptureView {
             return
         }
 
-        _ = StitchLinkStore.create(
-            sourceScan: sourceScan,
-            targetScan: targetScan,
-            sourceAnchor: pending.sourceAnchorTransform,
-            targetAnchor: pending.targetAnchorTransform,
-            sourceAnchorId: pending.sourceAnchorId,
-            targetAnchorId: pending.targetAnchorId,
-            sourceCompassHeading: pending.sourceAnchorCompassHeading,
-            targetCompassHeading: pending.targetAnchorCompassHeading,
-            linkType: pending.linkType,
-            in: modelContext
-        )
-        print("[StitchLink] Created link source=\(srcId.uuidString.prefix(8)) target=\(targetScanId.uuidString.prefix(8))")
+        do {
+            _ = try StitchLinkStore.create(
+                sourceScan: sourceScan,
+                targetScan: targetScan,
+                sourceAnchor: pending.sourceAnchorTransform,
+                targetAnchor: pending.targetAnchorTransform,
+                sourceAnchorId: pending.sourceAnchorId,
+                targetAnchorId: pending.targetAnchorId,
+                sourceCompassHeading: pending.sourceAnchorCompassHeading,
+                targetCompassHeading: pending.targetAnchorCompassHeading,
+                linkType: pending.linkType,
+                in: modelContext
+            )
+            print("[StitchLink] Created link source=\(srcId.uuidString.prefix(8)) target=\(targetScanId.uuidString.prefix(8))")
+        } catch {
+            print("[StitchLink] WARNING: failed to save link: \(error.localizedDescription)")
+            self.showTransientMessage("⚠️ Scan saved but spatial link failed to write", duration: 5)
+        }
         scanStore.pendingStitchLink = nil
     }
 

@@ -231,6 +231,7 @@ struct ARCoverageView: UIViewRepresentable {
             context.coordinator.boundaryAnchorEntity = nil
             context.coordinator.boundaryAnchorId = nil
             context.coordinator.scanStats?.hasBoundaryAnchor = false
+            context.coordinator.refreshHasBillboardMarkers()
         }
 
         // Apply manual alignment transform offset to ghost mesh
@@ -484,6 +485,20 @@ struct ARCoverageView: UIViewRepresentable {
         // markers rendered for a rescan (one per ConnectorAnchor); `boundaryAnchorEntity` is the
         // lone single-link marker. We billboard whatever is present in either set.
         var connectorMarkerEntities: [AnchorEntity] = []
+
+        // Delegate-queue-visible mirror of "are there any billboard markers right now?". Lets
+        // session(_:didUpdate:) skip the per-frame main hop entirely when there's nothing to
+        // billboard (the common case — normal scans with no connectors/boundary). Written on main
+        // whenever the marker sets change; read (relaxed) on the AR delegate queue, same single-flag
+        // convention as `isRecording`. `connectorMarkerEntities`/`boundaryAnchorEntity` are main-only
+        // so they can't be read off the delegate queue directly.
+        var hasBillboardMarkers = false
+
+        /// Recompute `hasBillboardMarkers` from the (main-only) marker sets. Call on main after any
+        /// mutation of `connectorMarkerEntities` or `boundaryAnchorEntity`.
+        func refreshHasBillboardMarkers() {
+            hasBillboardMarkers = !connectorMarkerEntities.isEmpty || boundaryAnchorEntity != nil
+        }
 
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
@@ -892,11 +907,9 @@ struct ARCoverageView: UIViewRepresentable {
 
             // Billboard connector/boundary markers toward the camera (Track C). RealityKit mutations
             // must run on main; extract the camera transform here so the ARFrame isn't forwarded.
-            // Gate the per-frame main hop on delegate-queue-visible state that's only true when
-            // markers can exist (an active recording, or a published boundary anchor) — the
-            // billboard pass itself is a no-op when there are none, and `connectorMarkerEntities`
-            // is main-only so we can't read it here.
-            if isRecording || scanStore?.boundaryAnchorTransform != nil {
+            // Gate the per-frame main hop on `hasBillboardMarkers` — true ONLY while markers are
+            // actually in the scene — so normal scans (no connectors, no boundary) pay nothing.
+            if hasBillboardMarkers {
                 let camTransform = frame.camera.transform
                 DispatchQueue.main.async { [weak self] in
                     self?.updateConnectorBillboards(cameraTransform: camTransform)
@@ -1191,6 +1204,7 @@ struct ARCoverageView: UIViewRepresentable {
             let marker = makeConnectorMarker(name: name, transform: transform)
             arView.scene.addAnchor(marker)
             boundaryAnchorEntity = marker
+            refreshHasBillboardMarkers()
         }
 
         /// Renders all connectors for a rescan: one labeled marker per `ConnectorAnchor`.
@@ -1203,6 +1217,7 @@ struct ARCoverageView: UIViewRepresentable {
                 arView.scene.addAnchor(marker)
                 connectorMarkerEntities.append(marker)
             }
+            refreshHasBillboardMarkers()
         }
 
         /// Removes all rescan connector markers from the scene.
@@ -1211,6 +1226,7 @@ struct ARCoverageView: UIViewRepresentable {
                 marker.removeFromParent()
             }
             connectorMarkerEntities.removeAll()
+            refreshHasBillboardMarkers()
         }
 
         /// Builds a labeled connector marker at the anchor's world position. The marker reads as a
@@ -1233,9 +1249,7 @@ struct ARCoverageView: UIViewRepresentable {
             let iconSize: Float = 0.08
             let iconMesh = MeshResource.generatePlane(width: iconSize, height: iconSize)
             var iconMaterial = UnlitMaterial(color: UIColor(red: 0.0, green: 0.95, blue: 0.4, alpha: 1.0))
-            if let image = Self.connectorGlyphImage(),
-               let cgImage = image.cgImage,
-               let texture = try? TextureResource(image: cgImage, options: .init(semantic: .color)) {
+            if let texture = Self.connectorGlyphTexture {
                 iconMaterial.color = .init(tint: .white, texture: .init(texture))
                 // Texture has its own alpha (transparent outside the glyph) — blend so the
                 // surrounding plane doesn't show as an opaque green square.
@@ -1248,8 +1262,11 @@ struct ARCoverageView: UIViewRepresentable {
             // ── Floating 3D name label above the icon. generateText is extruded; scale it down to a
             // sensible real-world height (~5cm cap height). UnlitMaterial again for AR compositing. ──
             let labelMaterial = UnlitMaterial(color: .white)
+            // `containerFrame: .zero` means generateText won't truncate, so bound the string
+            // ourselves — a long map name would otherwise render as one very wide 3D label.
+            let label = name.count > 24 ? name.prefix(23) + "…" : Substring(name)
             let textMesh = MeshResource.generateText(
-                name,
+                String(label),
                 extrusionDepth: 0.001,
                 font: .systemFont(ofSize: 0.05),
                 containerFrame: .zero,
@@ -1267,13 +1284,16 @@ struct ARCoverageView: UIViewRepresentable {
             return anchorEntity
         }
 
-        /// Renders the "link.circle.fill" SF Symbol to a UIImage for use as a marker texture.
-        private static func connectorGlyphImage() -> UIImage? {
+        /// The "link.circle.fill" glyph, rendered once and uploaded to the GPU a single time. The
+        /// glyph is identical for every marker, so caching avoids re-rendering the SF Symbol and
+        /// re-creating a TextureResource per connector at record-start (N markers on a rescan).
+        private static let connectorGlyphTexture: TextureResource? = {
             let config = UIImage.SymbolConfiguration(pointSize: 128, weight: .semibold)
-            let symbol = UIImage(systemName: "link.circle.fill", withConfiguration: config)?
+            guard let cgImage = UIImage(systemName: "link.circle.fill", withConfiguration: config)?
                 .withTintColor(UIColor(red: 0.0, green: 0.95, blue: 0.4, alpha: 1.0), renderingMode: .alwaysOriginal)
-            return symbol
-        }
+                .cgImage else { return nil }
+            return try? TextureResource(image: cgImage, options: .init(semantic: .color))
+        }()
 
         /// Rotates every connector/boundary marker's billboard root to face the camera. Called once
         /// per ARFrame from session(_:didUpdate:). Cheap (a handful of markers); a no-op when none.
@@ -1287,7 +1307,11 @@ struct ARCoverageView: UIViewRepresentable {
                 var toCam = camPos - markerPos
                 toCam.y = 0 // keep the marker upright; yaw-only billboard so text stays level
                 guard simd_length(toCam) > 0.0001 else { continue }
-                root.orientation = simd_quatf(from: SIMD3<Float>(0, 0, 1), to: simd_normalize(toCam))
+                // Yaw the +Z face toward the camera directly. `simd_quatf(from:to:)` is degenerate
+                // when the two vectors are antiparallel (camera behind the marker along -Z → NaN /
+                // arbitrary-axis flip), so derive the yaw angle instead — well-defined everywhere.
+                let yaw = atan2(toCam.x, toCam.z)
+                root.orientation = simd_quatf(angle: yaw, axis: SIMD3<Float>(0, 1, 0))
             }
         }
     }
