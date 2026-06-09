@@ -7,9 +7,9 @@ struct ScanExportManager {
     // mirrors AppDelegate.sharedModelContainer). `prepareExport` runs off the main actor
     // and has no injected ModelContext, so stitching/graph serialization fetches through
     // this shared store on a @MainActor hop. Cached so we don't reopen the SQLite file per
-    // export. Marked unsafe because ModelContainer is Sendable-by-convention here and this
-    // is only ever assigned once under the @MainActor accessor below.
-    nonisolated(unsafe) private static var cachedContainer: ModelContainer?
+    // export. Isolated to the main actor: the only accessor (`exportModelContainer`) is
+    // @MainActor, so this needs no `nonisolated(unsafe)` escape hatch.
+    @MainActor private static var cachedContainer: ModelContainer?
 
     @MainActor
     private static func exportModelContainer() -> ModelContainer? {
@@ -30,6 +30,15 @@ struct ScanExportManager {
     fileprivate struct StitchExportArtifacts: Sendable {
         var stitching: Data?
         var graph: Data?
+    }
+
+    /// Reference box used to shuttle the `@MainActor`-built artifacts back to the waiting
+    /// background queue across the semaphore boundary. `@unchecked Sendable` is sound here because
+    /// the `DispatchSemaphore` establishes happens-before ordering: the background queue only reads
+    /// `value` after `wait()` returns, which is after the Task's single write + `signal()`, so the
+    /// write and read never overlap.
+    private final class ArtifactsBox: @unchecked Sendable {
+        var value = StitchExportArtifacts()
     }
 
     /// Pre-serialized stitch artifacts for a batch of locations, built ONCE (a single graph build)
@@ -272,13 +281,13 @@ struct ScanExportManager {
                         // future main-thread caller would deadlock. Fail loudly instead.
                         dispatchPrecondition(condition: .notOnQueue(.main))
                         let semaphore = DispatchSemaphore(value: 0)
-                        nonisolated(unsafe) var built = StitchExportArtifacts()
+                        let box = ArtifactsBox()
                         Task { @MainActor in
-                            built = await makeStitchExportArtifacts(forLocationId: locationId)
+                            box.value = await makeStitchExportArtifacts(forLocationId: locationId)
                             semaphore.signal()
                         }
                         semaphore.wait()
-                        captured = built
+                        captured = box.value
                     }
 
                     if let stitchingData = captured.stitching {

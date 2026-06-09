@@ -268,8 +268,18 @@ enum StitchLinkStore {
                 imported += 1
             }
         }
-        try? context.save()
-        UserDefaults.standard.set(true, forKey: flagKey)
-        if imported > 0 { print("[StitchLinkStore] Migrated \(imported) link(s) from stitching.json into SwiftData") }
+        // Only mark the migration done if the save actually succeeds. If we set the flag
+        // unconditionally and the save threw, the migration would be marked complete and never
+        // retried — silently losing every legacy link (the on-disk files survive but the builder
+        // ignores them). A failed save leaves the flag unset so the next launch tries again; a
+        // no-op migration (no files) saves cleanly and still sets the flag, so we don't rescan
+        // the disk every launch.
+        do {
+            try context.save()
+            UserDefaults.standard.set(true, forKey: flagKey)
+            if imported > 0 { print("[StitchLinkStore] Migrated \(imported) link(s) from stitching.json into SwiftData") }
+        } catch {
+            print("[StitchLinkStore] migration save failed; will retry next launch: \(error)")
+        }
     }
 }

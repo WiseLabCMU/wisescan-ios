@@ -1,6 +1,7 @@
 import SwiftUI
 import RealityKit
 import ARKit
+import Synchronization
 
 // swiftlint:disable type_body_length
 struct ARCoverageView: UIViewRepresentable {
@@ -61,7 +62,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.privacyFilter = privacyFilter
         context.coordinator.activeMeshColor = activeMeshColor
         context.coordinator.captureMode = captureMode
-        context.coordinator.isRecording = false
+        context.coordinator.isRecording.store(false, ordering: .relaxed)
         context.coordinator.isSessionReadyBinding = $isSessionReady
         context.coordinator.vioCompromisedBinding = $vioCompromised
         context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
@@ -127,7 +128,7 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         let modeChanged = (captureMode != context.coordinator.captureMode)
-        let recordingChanged = (isRecording != context.coordinator.isRecording)
+        let recordingChanged = (isRecording != context.coordinator.isRecording.load(ordering: .relaxed))
 
         if modeChanged {
             context.coordinator.captureMode = captureMode
@@ -248,7 +249,7 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Detect recording state change → switch AR session config
         if recordingChanged {
-            context.coordinator.isRecording = isRecording
+            context.coordinator.isRecording.store(isRecording, ordering: .relaxed)
             if isRecording {
                 // Upgrade to full scene reconstruction — preserve world map for coordinate continuity
                 let config = ARWorldTrackingConfiguration()
@@ -417,7 +418,12 @@ struct ARCoverageView: UIViewRepresentable {
         var captureMode: AppConstants.CaptureMode = .ar
         var pointCloudManager: PointCloudManager?
         var vrAnchorEntity: AnchorEntity?
-        var isRecording: Bool = false
+        // Written on main (updateUIView), read on both main and the AR delegate queue
+        // (session(_:didUpdate:) and the anchor callbacks). Atomic with relaxed ordering so the
+        // cross-queue read/write is formally race-free (a plain Bool here is a data race, even
+        // though it's word-aligned); relaxed matches the prior semantics — a one-frame-stale read
+        // is harmless and self-corrects.
+        let isRecording = Atomic<Bool>(false)
         /// Whether the VR black background has been applied (deferred until first frame)
         var vrBackgroundSet: Bool = false
         var isSessionReadyBinding: Binding<Bool>?
@@ -489,15 +495,16 @@ struct ARCoverageView: UIViewRepresentable {
         // Delegate-queue-visible mirror of "are there any billboard markers right now?". Lets
         // session(_:didUpdate:) skip the per-frame main hop entirely when there's nothing to
         // billboard (the common case — normal scans with no connectors/boundary). Written on main
-        // whenever the marker sets change; read (relaxed) on the AR delegate queue, same single-flag
-        // convention as `isRecording`. `connectorMarkerEntities`/`boundaryAnchorEntity` are main-only
-        // so they can't be read off the delegate queue directly.
-        var hasBillboardMarkers = false
+        // whenever the marker sets change; read on the AR delegate queue. Atomic (relaxed) for the
+        // same reason as `isRecording` — formally race-free cross-queue access, with a harmless,
+        // self-correcting one-frame-stale read. `connectorMarkerEntities`/`boundaryAnchorEntity`
+        // are main-only so they can't be read off the delegate queue directly.
+        let hasBillboardMarkers = Atomic<Bool>(false)
 
         /// Recompute `hasBillboardMarkers` from the (main-only) marker sets. Call on main after any
         /// mutation of `connectorMarkerEntities` or `boundaryAnchorEntity`.
         func refreshHasBillboardMarkers() {
-            hasBillboardMarkers = !connectorMarkerEntities.isEmpty || boundaryAnchorEntity != nil
+            hasBillboardMarkers.store(!connectorMarkerEntities.isEmpty || boundaryAnchorEntity != nil, ordering: .relaxed)
         }
 
         /// Reset coordinator state when entering recording mode.
@@ -683,7 +690,7 @@ struct ARCoverageView: UIViewRepresentable {
                 filledDescriptor.primitives = .triangles(flatIndices)
 
                 DispatchQueue.main.async {
-                    guard let self = self, let arView = self.arView, self.isRecording else { return }
+                    guard let self = self, let arView = self.arView, self.isRecording.load(ordering: .relaxed) else { return }
 
                     let c = colorStr.toSIMD4Color
                     let material = UnlitMaterial(color: UIColor(
@@ -909,7 +916,7 @@ struct ARCoverageView: UIViewRepresentable {
             // must run on main; extract the camera transform here so the ARFrame isn't forwarded.
             // Gate the per-frame main hop on `hasBillboardMarkers` — true ONLY while markers are
             // actually in the scene — so normal scans (no connectors, no boundary) pay nothing.
-            if hasBillboardMarkers {
+            if hasBillboardMarkers.load(ordering: .relaxed) {
                 let camTransform = frame.camera.transform
                 DispatchQueue.main.async { [weak self] in
                     self?.updateConnectorBillboards(cameraTransform: camTransform)
@@ -933,7 +940,7 @@ struct ARCoverageView: UIViewRepresentable {
             // (excessiveMotion/insufficientFeatures/relocalizing/notAvailable). Data captured after
             // VIO loss is corrupt, so we halt + prompt. Benign startup (initializing, and anything
             // before the first .normal) is ignored. See CaptureView.handleVIOCompromised().
-            if isRecording {
+            if isRecording.load(ordering: .relaxed) {
                 switch frame.camera.trackingState {
                 case .normal:
                     vioGuardArmed = true
@@ -970,7 +977,7 @@ struct ARCoverageView: UIViewRepresentable {
             // pipeline immediately. Otherwise it keeps projecting + integrating every frame while
             // the AR view is still mounted (name prompt, post-scan processing), starving the main
             // thread/GPU — that's what made the keyboard take seconds to open after stopping.
-            guard isRecording, captureMode == .vr, let pcm = pointCloudManager else { return }
+            guard isRecording.load(ordering: .relaxed), captureMode == .vr, let pcm = pointCloudManager else { return }
 
             // Skip VR updates when tracking is degraded — prevents accumulating
             // voxels with wrong coordinates during SLAM re-initialization.
@@ -1049,7 +1056,7 @@ struct ARCoverageView: UIViewRepresentable {
                 }
             }
 
-            guard isRecording else { return }
+            guard isRecording.load(ordering: .relaxed) else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     anchorUpdateCounts[mesh.identifier] = 1
@@ -1079,7 +1086,7 @@ struct ARCoverageView: UIViewRepresentable {
                 }
             }
 
-            guard isRecording else { return }
+            guard isRecording.load(ordering: .relaxed) else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     anchorUpdateCounts[mesh.identifier, default: 0] += 1
@@ -1092,7 +1099,7 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
-            guard isRecording else { return }
+            guard isRecording.load(ordering: .relaxed) else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
                     let id = mesh.identifier

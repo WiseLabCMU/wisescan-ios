@@ -380,8 +380,9 @@ struct ScansListView: View {
             let dirs = selectedLocs.flatMap { $0.scans.map(\.scanDirectory) }
             // Also remove each location's own directory (Documents/Scans/{locationId}) — it still
             // holds a legacy stitching.json and would be orphaned once the per-scan subdirs go.
-            // scanDirectory is Documents/Scans/{locationId}/{scanId}, so its parent is the location dir.
-            let locationDirs = selectedLocs.compactMap { $0.scans.first?.scanDirectory.deletingLastPathComponent() }
+            // Use the canonical helper rather than deriving the parent from a scan path, so cleanup
+            // doesn't depend on the {locationId}/{scanId} layout and still covers scanless locations.
+            let locationDirs = selectedLocs.compactMap { StitchingMetadataManager.locationDirectory(for: $0.id) }
             for loc in selectedLocs {
                 for scan in loc.scans { modelContext.delete(scan) }
                 modelContext.delete(loc)
@@ -403,8 +404,12 @@ struct ScansListView: View {
                 modelContext.delete(latest)
                 if loc.scans.count <= 1 {
                     // This was the last scan — remove the location too, and its now-orphaned
-                    // location directory (legacy stitching.json + empty dir).
-                    dirsToRemove.append(latest.scanDirectory.deletingLastPathComponent())
+                    // location directory (legacy stitching.json + empty dir). Resolve via the
+                    // canonical helper (same as the .allScans path) so cleanup doesn't depend on
+                    // scan-path arithmetic.
+                    if let locDir = StitchingMetadataManager.locationDirectory(for: loc.id) {
+                        dirsToRemove.append(locDir)
+                    }
                     modelContext.delete(loc)
                 }
             }
