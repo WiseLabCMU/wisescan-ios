@@ -21,6 +21,15 @@ class CapturedScan {
     @Relationship(inverse: \ScanLocation.scans)
     var location: ScanLocation?
 
+    // Stitch links where this scan is an endpoint. Cascade lives here so deleting a scan
+    // (or its location, which cascades to its scans) removes every link touching it — the
+    // referential integrity the file-based `stitching.json` model lacked. A scan is endpoint
+    // A in some links and B in others; the full incident set is `linksAsA + linksAsB`.
+    @Relationship(deleteRule: .cascade, inverse: \StitchLink.endpointAScan)
+    var linksAsA: [StitchLink] = []
+    @Relationship(deleteRule: .cascade, inverse: \StitchLink.endpointBScan)
+    var linksAsB: [StitchLink] = []
+
     init(id: UUID = UUID(), name: String, capturedAt: Date = Date(), vertexCount: Int, faceCount: Int, hardwareDeviceModel: String = "Native iOS", isColored: Bool = false) {
         self.id = id
         self.name = name

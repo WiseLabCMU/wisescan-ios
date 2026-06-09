@@ -37,7 +37,8 @@ struct Scan4DApp: App {
     var sharedModelContainer: ModelContainer = {
         let schema = Schema([
             ScanLocation.self,
-            CapturedScan.self
+            CapturedScan.self,
+            StitchLink.self
         ])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 

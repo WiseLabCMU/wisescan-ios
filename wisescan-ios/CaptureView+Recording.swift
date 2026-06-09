@@ -386,33 +386,36 @@ extension CaptureView {
         }
     }
 
-    /// Consumes a pending stitch link and writes the stitching.json with the real target scan ID.
+    /// Consumes a pending stitch link and persists it as a `StitchLink` SwiftData row now that the
+    /// real target scan ID is known. Resolves both endpoint scans in the model graph.
     func writeStitchingLinkIfPending(targetScanId: UUID) {
         guard let pending = scanStore.pendingStitchLink else { return }
 
-        let link = StitchingLink(
-            id: UUID(),
-            sourceLocationId: pending.sourceLocationId,
-            sourceScanId: pending.sourceScanId,
-            sourceAnchorId: pending.sourceAnchorId,
-            sourceAnchorTransform: CodableMatrix4x4(pending.sourceAnchorTransform),
-            sourceAnchorCompassHeading: pending.sourceAnchorCompassHeading,
-            targetLocationId: pending.targetLocationId,
-            targetScanId: targetScanId,
-            targetAnchorId: pending.targetAnchorId,
-            targetAnchorTransform: CodableMatrix4x4(pending.targetAnchorTransform),
-            targetAnchorCompassHeading: pending.targetAnchorCompassHeading,
-            linkedAt: Date(),
-            linkType: pending.linkType
-        )
-        StitchingMetadataManager.addLink(link, locationId: pending.targetLocationId) { success in
-            if success {
-                print("[StitchingMetadata] Wrote stitching.json with targetScanId=\(targetScanId.uuidString)")
-            } else {
-                print("[StitchingMetadata] WARNING: Failed to write stitching.json for targetScanId=\(targetScanId.uuidString)")
-                self.showTransientMessage("⚠️ Scan saved but spatial link failed to write", duration: 5)
-            }
+        let srcId = pending.sourceScanId
+        let srcDescriptor = FetchDescriptor<CapturedScan>(predicate: #Predicate { $0.id == srcId })
+        let tgtDescriptor = FetchDescriptor<CapturedScan>(predicate: #Predicate { $0.id == targetScanId })
+        guard let sourceScan = try? modelContext.fetch(srcDescriptor).first,
+              let targetScan = try? modelContext.fetch(tgtDescriptor).first else {
+            print("[StitchLink] WARNING: could not resolve endpoint scans (source=\(srcId.uuidString.prefix(8)) "
+                + "target=\(targetScanId.uuidString.prefix(8)))")
+            self.showTransientMessage("⚠️ Scan saved but spatial link failed to write", duration: 5)
+            scanStore.pendingStitchLink = nil
+            return
         }
+
+        _ = StitchLinkStore.create(
+            sourceScan: sourceScan,
+            targetScan: targetScan,
+            sourceAnchor: pending.sourceAnchorTransform,
+            targetAnchor: pending.targetAnchorTransform,
+            sourceAnchorId: pending.sourceAnchorId,
+            targetAnchorId: pending.targetAnchorId,
+            sourceCompassHeading: pending.sourceAnchorCompassHeading,
+            targetCompassHeading: pending.targetAnchorCompassHeading,
+            linkType: pending.linkType,
+            in: modelContext
+        )
+        print("[StitchLink] Created link source=\(srcId.uuidString.prefix(8)) target=\(targetScanId.uuidString.prefix(8))")
         scanStore.pendingStitchLink = nil
     }
 

@@ -365,10 +365,9 @@ struct LocationDetailView: View {
         } message: {
             Text("This will permanently delete the selected scans and their data.")
         }
-        .task {
-            // Load stitching link status once asynchronously instead of
-            // calling hasLinks() synchronously on every body evaluation.
-            hasStitchingLinks = await StitchingMetadataManager.hasLinksAsync(locationId: location.id)
+        .task(id: location.updatedAt) {
+            // Links are now SwiftData rows; read them straight off the object graph.
+            hasStitchingLinks = StitchLinkStore.hasLinks(in: location)
         }
     }
 

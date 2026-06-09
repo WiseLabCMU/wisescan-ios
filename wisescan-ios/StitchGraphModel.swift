@@ -1,12 +1,13 @@
 import Foundation
+import SwiftData
 import simd
 
 // MARK: - Stitch Graph Model
 //
-// Builds a directed graph of locations connected by stitch links. Each location's
-// `stitching.json` (read via `StitchingMetadataManager`) contributes links whose
-// directed edge is source → target. Nodes are locations; connected components are
-// the "sets of maps" the user can view together.
+// Builds a graph of locations connected by stitch links. Links are read from the
+// SwiftData object graph (`CapturedScan.linksAsA/linksAsB`) — the source of truth.
+// Edges retain a source → target orientation for provenance/layout, but the relation
+// is bidirectional (see `StitchLink`); the view renders connectors undirected.
 
 /// A node in the stitch graph — one per location that participates in any link.
 struct StitchGraphNode: Identifiable {
@@ -19,12 +20,13 @@ struct StitchGraphNode: Identifiable {
     var order: Int = 0
 }
 
-/// A directed edge: the source scan was extended into the target scan.
+/// An edge between two locations. `from`/`to` carry the source → target provenance
+/// orientation (used for layout); the underlying relation is bidirectional.
 struct StitchGraphEdge: Identifiable {
     var id: UUID { link.id }
     let from: UUID   // source locationId
     let to: UUID     // target locationId
-    let link: StitchingLink
+    let link: StitchLink
 }
 
 /// A scan placed into a shared coordinate frame for combined rendering.
@@ -58,25 +60,24 @@ struct StitchGraph {
 
 enum StitchGraphBuilder {
 
-    /// Reads every location's stitching manifest and assembles the graph.
+    /// Walks the SwiftData object graph and assembles the stitch graph.
+    @MainActor
     static func build(from locations: [ScanLocation]) async -> StitchGraph {
         let byId = Dictionary(uniqueKeysWithValues: locations.map { ($0.id, $0) })
 
-        // Gather links from every location's manifest, de-duped by link id.
-        var links: [StitchingLink] = []
+        // Gather StitchLink objects incident to the given locations, de-duped by id. SwiftData's
+        // cascade delete keeps these consistent, but a link's endpoint scan/location can still be
+        // absent from `locations` (e.g. filtered view) — keep only links whose source AND target
+        // scans both resolve to a location in this set, mirroring the old endpoint-existence guard.
+        var links: [StitchLink] = []
         var seenLinks = Set<UUID>()
         for loc in locations {
-            guard let manifest = await StitchingMetadataManager.readAsync(locationId: loc.id) else { continue }
-            for link in manifest.links where seenLinks.insert(link.id).inserted {
-                // Keep only links whose endpoints both still exist on this device — both the
-                // locations AND the specific source/target scans. A scan can be deleted while its
-                // location's stitching.json lingers; without the scan-id check the graph would show
-                // a node/edge that combined rendering then silently drops (scanLookup miss),
-                // producing incomplete or empty renders.
-                guard let src = byId[link.sourceLocationId], let tgt = byId[link.targetLocationId],
-                      src.scans.contains(where: { $0.id == link.sourceScanId }),
-                      tgt.scans.contains(where: { $0.id == link.targetScanId }) else { continue }
-                links.append(link)
+            for scan in loc.scans {
+                for link in (scan.linksAsA + scan.linksAsB) where seenLinks.insert(link.id).inserted {
+                    guard let srcLoc = link.sourceScan?.location, let tgtLoc = link.targetScan?.location,
+                          byId[srcLoc.id] != nil, byId[tgtLoc.id] != nil else { continue }
+                    links.append(link)
+                }
             }
         }
 
@@ -89,11 +90,13 @@ enum StitchGraphBuilder {
 
         var edges: [StitchGraphEdge] = []
         for link in links {
-            ensureNode(link.sourceLocationId)
-            ensureNode(link.targetLocationId)
-            nodes[link.sourceLocationId]?.scanIds.insert(link.sourceScanId)
-            nodes[link.targetLocationId]?.scanIds.insert(link.targetScanId)
-            edges.append(StitchGraphEdge(from: link.sourceLocationId, to: link.targetLocationId, link: link))
+            guard let srcScan = link.sourceScan, let tgtScan = link.targetScan,
+                  let srcLocId = srcScan.location?.id, let tgtLocId = tgtScan.location?.id else { continue }
+            ensureNode(srcLocId)
+            ensureNode(tgtLocId)
+            nodes[srcLocId]?.scanIds.insert(srcScan.id)
+            nodes[tgtLocId]?.scanIds.insert(tgtScan.id)
+            edges.append(StitchGraphEdge(from: srcLocId, to: tgtLocId, link: link))
         }
 
         // Sort node ids/list deterministically — Dictionary iteration order is unstable
@@ -207,6 +210,7 @@ enum StitchGraphBuilder {
     /// For a link, a point in the **target** scan's frame maps into the **source** frame by
     /// `R = sourceAnchorTransform · inverse(targetAnchorTransform)` (the anchors are the same
     /// physical pin). A spanning-tree BFS propagates transforms from the root outward.
+    @MainActor
     static func placeScans(in component: [UUID], edges componentEdges: [StitchGraphEdge]) -> [PlacedScan] {
         // Pick a deterministic root (smallest UUID) so combined-render placements are
         // stable across runs — component element order comes from non-deterministic
@@ -214,7 +218,7 @@ enum StitchGraphBuilder {
         guard let root = component.min(by: { $0.uuidString < $1.uuidString }) else { return [] }
 
         // Undirected adjacency carrying the link and traversal direction.
-        var adj: [UUID: [(neighbor: UUID, link: StitchingLink, forward: Bool)]] = [:]
+        var adj: [UUID: [(neighbor: UUID, link: StitchLink, forward: Bool)]] = [:]
         for e in componentEdges {
             adj[e.from, default: []].append((e.to, e.link, true))
             adj[e.to, default: []].append((e.from, e.link, false))
@@ -224,8 +228,9 @@ enum StitchGraphBuilder {
         var scanForLocation: [UUID: UUID] = [:]
 
         // Seed the root's representative scan from any incident edge.
-        if let first = adj[root]?.first {
-            scanForLocation[root] = first.forward ? first.link.sourceScanId : first.link.targetScanId
+        if let first = adj[root]?.first,
+           let seedScanId = (first.forward ? first.link.sourceScan?.id : first.link.targetScan?.id) {
+            scanForLocation[root] = seedScanId
         }
 
         var queue: [UUID] = [root]
@@ -236,17 +241,17 @@ enum StitchGraphBuilder {
             let worldU = world[u] ?? matrix_identity_float4x4
             for step in adj[u] ?? [] where !visited.contains(step.neighbor) {
                 visited.insert(step.neighbor)
-                let mSrc = step.link.sourceAnchorTransform.matrix
-                let mTgt = step.link.targetAnchorTransform.matrix
+                let mSrc = step.link.sourceAnchorMatrix
+                let mTgt = step.link.targetAnchorMatrix
                 let r = mSrc * simd_inverse(mTgt)   // maps target-frame → source-frame
                 if step.forward {
                     // u is the source, neighbor is the target.
                     world[step.neighbor] = worldU * r
-                    scanForLocation[step.neighbor] = step.link.targetScanId
+                    if let sid = step.link.targetScan?.id { scanForLocation[step.neighbor] = sid }
                 } else {
                     // u is the target, neighbor is the source.
                     world[step.neighbor] = worldU * simd_inverse(r)
-                    scanForLocation[step.neighbor] = step.link.sourceScanId
+                    if let sid = step.link.sourceScan?.id { scanForLocation[step.neighbor] = sid }
                 }
                 queue.append(step.neighbor)
             }

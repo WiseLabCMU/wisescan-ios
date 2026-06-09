@@ -40,6 +40,10 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .onAppear {
             DemoDataSeeder.seedIfNeeded(context: modelContext)
+            // One-time import of legacy stitching.json files into SwiftData (runs after seeding so
+            // the endpoint scans exist). Idempotent + UserDefaults-guarded, so this is a no-op
+            // on every launch after the first.
+            Task { await StitchLinkStore.migrateFromFilesIfNeeded(context: modelContext) }
             if !hasLiDAR {
                 showLiDARWarning = true
             }
