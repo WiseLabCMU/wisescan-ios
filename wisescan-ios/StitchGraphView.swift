@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 import simd
 
 // MARK: - Stitch Graph View
@@ -6,11 +7,19 @@ import simd
 // Toolbar-toggleable alternative to the grid in ScansListView. Renders stitched
 // locations as a directed graph: one node per location, arrows source → target.
 // Each connected cluster offers a "Render together" action that composes the meshes.
+// In edit mode, nodes become selectable for bulk operations; cluster headers gain
+// a "Select All / Deselect" shortcut.
 
 struct StitchGraphView: View {
     let locations: [ScanLocation]
     /// Owned by the parent (ScansListView) so the cover presents from the NavigationStack root.
     @Binding var renderRequest: ComponentRenderRequest?
+    /// Shared edit-mode state from ScansListView (same bindings drive the grid view too).
+    @Binding var isEditing: Bool
+    @Binding var selectedLocations: Set<PersistentIdentifier>
+    /// Set of PersistentIdentifiers for locations visible as graph nodes. Updated when the graph
+    /// is rebuilt, so the parent can scope "Select All" to only the visible locations.
+    @Binding var visibleLocationIds: Set<PersistentIdentifier>
 
     @State private var graph: StitchGraph?
 
@@ -31,6 +40,8 @@ struct StitchGraphView: View {
                                 ClusterView(
                                     component: component,
                                     graph: graph,
+                                    isEditing: isEditing,
+                                    selectedLocations: $selectedLocations,
                                     onRender: { presentRender(for: component) }
                                 )
                             }
@@ -46,6 +57,14 @@ struct StitchGraphView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: locations.map(\.id)) {
             graph = await StitchGraphBuilder.build(from: locations)
+            // Publish which locations are visible as graph nodes so the parent's
+            // "Select All" can scope to only visible items in graph mode.
+            if let graph {
+                let nodeLocations = graph.nodes.map { $0.location.persistentModelID }
+                visibleLocationIds = Set(nodeLocations)
+            } else {
+                visibleLocationIds = []
+            }
         }
     }
 
@@ -70,7 +89,7 @@ struct StitchGraphView: View {
         let placements = StitchGraphBuilder.placeScans(in: component, edges: graph?.edges(in: component) ?? [])
         let nodesById = graph?.nodesById ?? [:]
         var items: [CombinedMeshItem] = []
-        for (i, placed) in placements.enumerated() {
+        for (idx, placed) in placements.enumerated() {
             guard let scan = scanLookup[placed.scanId] else { continue }
             let name = nodesById[placed.locationId]?.location.name ?? scan.name
             items.append(CombinedMeshItem(
@@ -79,7 +98,7 @@ struct StitchGraphView: View {
                 meshURL: scan.meshFileURL,
                 colorsURL: scan.colorsFileURL,
                 transform: placed.transform,
-                tint: CombinedMeshItem.palette[i % CombinedMeshItem.palette.count]
+                tint: CombinedMeshItem.palette[idx % CombinedMeshItem.palette.count]
             ))
         }
         let title = items.count == 1 ? (items.first?.name ?? "Combined") : "\(items.count) Maps"
@@ -98,6 +117,8 @@ struct ComponentRenderRequest: Identifiable {
 private struct ClusterView: View {
     let component: [UUID]
     let graph: StitchGraph
+    let isEditing: Bool
+    @Binding var selectedLocations: Set<PersistentIdentifier>
     let onRender: () -> Void
 
     // Layout metrics
@@ -133,6 +154,12 @@ private struct ClusterView: View {
         Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, center(of: $0)) })
     }
 
+    /// Whether every location in this cluster is currently selected.
+    private var allClusterSelected: Bool {
+        let ids = nodes.map { $0.location.persistentModelID }
+        return !ids.isEmpty && ids.allSatisfy { selectedLocations.contains($0) }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
@@ -144,28 +171,42 @@ private struct ClusterView: View {
                 }
                 .font(.headline)
 
-                HStack(spacing: 8) {
-                    Image(systemName: "cube.transparent")
-                    Text("Render together")
+                if isEditing {
+                    // Cluster-level Select All / Deselect shortcut
+                    Button(action: toggleClusterSelection) {
+                        HStack(spacing: 6) {
+                            Image(systemName: allClusterSelected
+                                  ? "checkmark.circle.fill" : "circle")
+                            Text(allClusterSelected ? "Deselect Cluster" : "Select Cluster")
+                        }
+                        .font(.subheadline)
+                        .foregroundColor(allClusterSelected ? .cyan : .gray)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    HStack(spacing: 8) {
+                        Image(systemName: "cube.transparent")
+                        Text("Render together")
+                    }
+                    .font(.headline)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 11)
+                    .foregroundColor(.cyan)
+                    .background(Color.cyan.opacity(0.2))
+                    .clipShape(Capsule())
+                    .contentShape(Capsule())
+                    // A plain Button's tap competes with the two-axis ScrollView's pan and is
+                    // dropped most of the time; a simultaneous tap gesture is recognized reliably.
+                    .simultaneousGesture(TapGesture().onEnded { onRender() })
+                    // The gesture above is invisible to assistive tech, so expose this as a button
+                    // with an explicit action for VoiceOver / Switch Control without disturbing the
+                    // gesture path used for touch.
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Render together")
+                    .accessibilityHint("Shows all linked maps in a single combined view")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { onRender() }
                 }
-                .font(.headline)
-                .padding(.horizontal, 18)
-                .padding(.vertical, 11)
-                .foregroundColor(.cyan)
-                .background(Color.cyan.opacity(0.2))
-                .clipShape(Capsule())
-                .contentShape(Capsule())
-                // A plain Button's tap competes with the two-axis ScrollView's pan and is
-                // dropped most of the time; a simultaneous tap gesture is recognized reliably.
-                .simultaneousGesture(TapGesture().onEnded { onRender() })
-                // The gesture above is invisible to assistive tech, so expose this as a button
-                // with an explicit action for VoiceOver / Switch Control without disturbing the
-                // gesture path used for touch.
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("Render together")
-                .accessibilityHint("Shows all linked maps in a single combined view")
-                .accessibilityAddTraits(.isButton)
-                .accessibilityAction { onRender() }
 
                 Spacer(minLength: 0)
             }
@@ -193,12 +234,30 @@ private struct ClusterView: View {
 
                 // Nodes
                 ForEach(nodes) { node in
-                    NavigationLink(value: node.location) {
-                        CompactLocationTile(location: node.location)
+                    let isSelected = selectedLocations.contains(node.location.persistentModelID)
+
+                    if isEditing {
+                        // In edit mode: tap toggles selection instead of navigating
+                        CompactLocationTile(location: node.location, isEditing: true, isSelected: isSelected)
                             .frame(width: nodeWidth, height: nodeHeight)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                let pid = node.location.persistentModelID
+                                if selectedLocations.contains(pid) {
+                                    selectedLocations.remove(pid)
+                                } else {
+                                    selectedLocations.insert(pid)
+                                }
+                            }
+                            .position(center(of: node))
+                    } else {
+                        NavigationLink(value: node.location) {
+                            CompactLocationTile(location: node.location, isEditing: false, isSelected: false)
+                                .frame(width: nodeWidth, height: nodeHeight)
+                        }
+                        .buttonStyle(.plain)
+                        .position(center(of: node))
                     }
-                    .buttonStyle(.plain)
-                    .position(center(of: node))
                 }
             }
             .frame(width: canvasSize.width, height: canvasSize.height)
@@ -209,6 +268,15 @@ private struct ClusterView: View {
                 .fill(Color.white.opacity(0.05))
                 .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.green.opacity(0.25), lineWidth: 1))
         )
+    }
+
+    private func toggleClusterSelection() {
+        let ids = nodes.map { $0.location.persistentModelID }
+        if allClusterSelected {
+            for pid in ids { selectedLocations.remove(pid) }
+        } else {
+            for pid in ids { selectedLocations.insert(pid) }
+        }
     }
 
     /// Point on a node's rectangle boundary along the ray from its center toward `other`.
@@ -256,6 +324,8 @@ private struct ClusterView: View {
 
 private struct CompactLocationTile: View {
     let location: ScanLocation
+    var isEditing: Bool = false
+    var isSelected: Bool = false
     @State private var thumbnail: UIImage?
 
     private var latestScan: CapturedScan? {
@@ -263,37 +333,52 @@ private struct CompactLocationTile: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                Color.gray.opacity(0.2)
-                if let thumbnail {
-                    Image(uiImage: thumbnail)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } else {
-                    Image(systemName: "photo")
-                        .foregroundColor(.gray.opacity(0.5))
+        ZStack(alignment: .topTrailing) {
+            VStack(spacing: 0) {
+                ZStack {
+                    Color.gray.opacity(0.2)
+                    if let thumbnail {
+                        Image(uiImage: thumbnail)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    } else {
+                        Image(systemName: "photo")
+                            .foregroundColor(.gray.opacity(0.5))
+                    }
                 }
-            }
-            .frame(height: 64)
-            .clipped()
+                .frame(height: 64)
+                .clipped()
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(location.name)
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-                Text("\(location.scans.count) scan\(location.scans.count == 1 ? "" : "s")")
-                    .font(.caption2)
-                    .foregroundColor(.gray)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(location.name)
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                    Text("\(location.scans.count) scan\(location.scans.count == 1 ? "" : "s")")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(Color.white.opacity(0.06))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(Color.white.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(isEditing && isSelected ? Color.cyan : Color.white.opacity(0.12),
+                            lineWidth: isEditing && isSelected ? 2 : 1)
+            )
+            .opacity(isEditing ? 0.85 : 1.0)
+
+            if isEditing {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 18))
+                    .foregroundColor(isSelected ? .cyan : .gray)
+                    .background(Circle().fill(Color.black.opacity(0.6)).padding(-2))
+                    .offset(x: 6, y: -6)
+            }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.12), lineWidth: 1))
         .task(id: location.updatedAt) {
             guard let latest = latestScan else { thumbnail = nil; return }
             let fm = FileManager.default
