@@ -1,0 +1,24 @@
+name: lint
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-release-markers:
+    name: Verify release-please version markers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check x-release-please-version markers in project.pbxproj
+        run: |
+          EXPECTED=2
+          FOUND=$(grep -c "x-release-please-version" wisescan-ios.xcodeproj/project.pbxproj || true)
+          if [ "$FOUND" -ne "$EXPECTED" ]; then
+            echo "::error::Expected $EXPECTED x-release-please-version markers in project.pbxproj but found $FOUND."
+            echo "Xcode's serializer strips non-standard inline comments when it resaves the project."
+            echo "Restore them: MARKETING_VERSION = X.Y.Z; /* x-release-please-version */"
+            echo "See CONTRIBUTING.md for details."
+            exit 1
+          fi
+          echo "✅ Found $FOUND x-release-please-version markers (expected $EXPECTED)"
