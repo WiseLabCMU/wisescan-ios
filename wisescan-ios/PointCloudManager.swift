@@ -312,7 +312,7 @@ class PointCloudManager {
         // Capture device and pipelines directly — the postProcess closure runs
         // on the render thread, not MainActor, so we can't capture `self`.
         let device = self.device
-        var intermediateTexture: MTLTexture? = nil
+        var intermediateTexture: MTLTexture?
 
         arView.renderCallbacks.postProcess = { context in
             #if targetEnvironment(simulator)
@@ -449,12 +449,12 @@ class PointCloudManager {
         let imageYTexture = makeTexture(from: capturedImage, plane: 0, pixelFormat: .r8Unorm)
         let imageCbCrTexture = makeTexture(from: capturedImage, plane: 1, pixelFormat: .rg8Unorm)
 
-        var segTexture: MTLTexture? = nil
+        var segTexture: MTLTexture?
         if let seg = segMap {
             segTexture = makeTexture(from: seg, pixelFormat: .r8Unorm)
         }
 
-        var confTexture: MTLTexture? = nil
+        var confTexture: MTLTexture?
         if let conf = confidenceMap {
             confTexture = makeTexture(from: conf, pixelFormat: .r8Uint)
         }

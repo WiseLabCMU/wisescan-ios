@@ -266,7 +266,7 @@ struct SettingsView: View {
                             }
                             .tint(.orange)
                             .padding(.vertical, 4)
-                            
+
                             Toggle(isOn: $mockWearable) {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("Simulate Meta Wearable")
@@ -339,7 +339,7 @@ struct SettingsView: View {
                         // store build at a glance.
                         let distribution = (Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt") ? "TestFlight" : "App Store"
                         #endif
-                        
+
                         HStack {
                             Spacer()
                             VStack(spacing: 4) {

@@ -129,7 +129,7 @@ extension CaptureView {
         let meshResult = ARCoverageView.exportMeshOBJ(from: currentFrame, privacyFilter: isPrivacyFilterOn)
 
         // Capture a 2D thumbnail from the current camera frame
-        var thumbnailData: Data? = nil
+        var thumbnailData: Data?
         if let currentFrame = currentFrame {
             let ciImage = CIImage(cvPixelBuffer: currentFrame.capturedImage)
             let context = CIContext()

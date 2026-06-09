@@ -39,7 +39,7 @@ enum MeshParser {
 
                 // Parse a float at p (strtof skips leading whitespace); nil if none.
                 func parseFloat(_ p: UnsafeMutablePointer<CChar>) -> (Float, UnsafeMutablePointer<CChar>)? {
-                    var end: UnsafeMutablePointer<CChar>? = nil
+                    var end: UnsafeMutablePointer<CChar>?
                     let v = strtof(p, &end)
                     guard let e = end, e != p else { return nil }
                     return (v, e)
@@ -49,7 +49,7 @@ enum MeshParser {
                 func parseFaceIndex(_ p0: UnsafeMutablePointer<CChar>) -> (UInt32, UnsafeMutablePointer<CChar>)? {
                     var p = p0
                     while p.pointee == SP { p += 1 }
-                    var end: UnsafeMutablePointer<CChar>? = nil
+                    var end: UnsafeMutablePointer<CChar>?
                     let v = strtol(p, &end, 10)
                     guard let e = end, e != p, v > 0, v <= Int(UInt32.max) else { return nil }
                     p = e
@@ -166,9 +166,9 @@ enum MeshParser {
             positions.reserveCapacity(chunk.count * 4)
             var indices = [UInt32]()
             indices.reserveCapacity(chunk.count * 6)
-            
+
             var idx: UInt32 = 0
-            
+
             for edge in chunk {
                 guard Int(edge.a) < vertices.count && Int(edge.b) < vertices.count else { continue }
                 let p0 = vertices[Int(edge.a)]
@@ -199,7 +199,7 @@ enum MeshParser {
                 indices.append(contentsOf: [idx, idx+1, idx+2, idx, idx+2, idx+3])
                 idx += 4
             }
-            
+
             if !positions.isEmpty {
                 var desc = MeshDescriptor(name: "WireframeChunk_\(chunkStart)")
                 desc.positions = MeshBuffer(positions)
@@ -210,7 +210,6 @@ enum MeshParser {
 
         return descriptors
     }
-
 
     // MARK: - Un-indexed mesh generation (for wireframe shader with barycentric UVs)
 

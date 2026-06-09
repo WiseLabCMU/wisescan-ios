@@ -36,7 +36,6 @@ class VoxelGrid {
     static let appendCapacity: Int = 49_152  // 256 × 192
     /// Billboard quad half-size in meters (2.5cm / 2 = slightly > cell size for overlap)
 
-
     // MARK: - Voxel Data
 
     /// Per-voxel accumulated color (EMA) with confidence for decay.

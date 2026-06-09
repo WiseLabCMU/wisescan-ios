@@ -189,7 +189,7 @@ class ScanLocation {
     var updatedAt: Date = Date()
     var remoteLocationId: String?
     var scanCaseStr: String = ScanCase.rescanSpace.rawValue
-    var imagingPoseMatrix: [Float]? = nil
+    var imagingPoseMatrix: [Float]?
 
     @Relationship(deleteRule: .cascade)
     var scans: [CapturedScan] = []
@@ -298,7 +298,7 @@ class ScanStore {
 
     /// Global state for background scan processing (set while a saved scan is being processed).
     var isProcessingScan: Bool = false
-    var processingMessage: String? = nil
+    var processingMessage: String?
 
     // MARK: Navigation
 
@@ -325,7 +325,6 @@ class ScanStore {
         mapLoadFailed = false
     }
 }
-
 
 // MARK: - Live Scan Stats (updated by ARCoverageView)
 
@@ -530,16 +529,13 @@ class ScanFileManager {
 
         // Optional files — failures must not block the critical raw data move
         if let colors = vertexColors {
-            do { try colors.write(to: newScan.colorsFileURL) }
-            catch { print("[ScanFileManager] Failed to write colors: \(error)") }
+            do { try colors.write(to: newScan.colorsFileURL) } catch { print("[ScanFileManager] Failed to write colors: \(error)") }
         }
         if let map = worldMapURL {
-            do { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) }
-            catch { print("[ScanFileManager] Failed to copy worldmap: \(error)") }
+            do { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) } catch { print("[ScanFileManager] Failed to copy worldmap: \(error)") }
         }
         if let thumb = thumbnailData {
-            do { try thumb.write(to: newScan.thumbnailURL) }
-            catch { print("[ScanFileManager] Failed to write thumbnail: \(error)") }
+            do { try thumb.write(to: newScan.thumbnailURL) } catch { print("[ScanFileManager] Failed to write thumbnail: \(error)") }
         }
 
         // Critical: move raw data directory (images, depth, cameras, metadata)
@@ -547,7 +543,7 @@ class ScanFileManager {
             try? FileManager.default.removeItem(at: newScan.rawDataPath)
             do {
                 try FileManager.default.moveItem(at: raw, to: newScan.rawDataPath)
-                
+
                 // Extract first RGB frame to thumbnailURL
                 let imagesDir = newScan.rawDataPath.appendingPathComponent("images")
                 if let files = try? FileManager.default.contentsOfDirectory(atPath: imagesDir.path),
@@ -560,7 +556,7 @@ class ScanFileManager {
                 print("[ScanFileManager] Failed to move raw data: \(error)")
             }
         }
-        
+
         // Generate 2D model preview if pose is available or default
         if let img = MeshPreviewView.generateSnapshot(meshURL: newScan.meshFileURL, colorsURL: newScan.colorsFileURL, poseMatrix: targetLocation.imagingPoseMatrix),
            let data = img.jpegData(compressionQuality: 0.8) {

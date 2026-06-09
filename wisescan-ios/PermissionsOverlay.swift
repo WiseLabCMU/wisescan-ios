@@ -49,7 +49,7 @@ struct PermissionsOverlay: View {
             // Transition smoothly out when permissions are granted
             .transition(.opacity)
             .animation(.easeInOut, value: isAuthorized)
-            .onChange(of: scenePhase) { oldPhase, newPhase in
+            .onChange(of: scenePhase) { _, newPhase in
                 if newPhase == .active {
                     cameraStatus = AVCaptureDevice.authorizationStatus(for: .video)
                     // Re-read from the underlying CLLocationManager to trigger @Observable update
@@ -61,7 +61,7 @@ struct PermissionsOverlay: View {
 
     private func requestPermissions() {
         if cameraStatus == .notDetermined {
-            AVCaptureDevice.requestAccess(for: .video) { granted in
+            AVCaptureDevice.requestAccess(for: .video) { _ in
                 DispatchQueue.main.async {
                     self.cameraStatus = AVCaptureDevice.authorizationStatus(for: .video)
                     // Once camera is resolved, ask for location

@@ -55,7 +55,7 @@ struct MeshPreviewContainer: View {
                 .background(Color(white: 0.15))
                 .transition(.opacity)
             }
-            
+
             if isUpdating {
                 VStack {
                     ProgressView()
@@ -89,13 +89,13 @@ struct MeshPreviewContainer: View {
             }
         }
     }
-    
+
     private func savePoseAndUpdate() {
         guard let location = location, let pose = markerState.currentPoseMatrix() else { return }
         location.imagingPoseMatrix = pose
         try? modelContext.save()
         isUpdating = true
-        
+
         Task {
             let scans = location.scans
             for scan in scans {
@@ -164,7 +164,7 @@ class MarkerProjectionState: ObservableObject {
             }
         }
     }
-    
+
     func currentPoseMatrix() -> [Float]? {
         guard let transform = scnView?.pointOfView?.transform else { return nil }
         return [
@@ -218,8 +218,8 @@ struct MeshPreviewView: UIViewRepresentable {
 
         // Dispatch to background queue for loading files and parsing OBJ
         DispatchQueue.global(qos: .userInitiated).async {
-            var meshData: Data? = nil
-            var colorsData: Data? = nil
+            var meshData: Data?
+            var colorsData: Data?
 
             if let meshURL = meshFileURL {
                 meshData = try? Data(contentsOf: meshURL)
@@ -318,8 +318,6 @@ struct MeshPreviewView: UIViewRepresentable {
             markerState.updateProjections()
         }
     }
-
-
 
     /// Parses OBJ data and creates geometry with vertex colors (camera-sampled or height-based fallback).
     nonisolated static func buildGeometry(from data: Data, vertexColors: Data?) -> (SCNGeometry, Int)? {
@@ -472,25 +470,25 @@ struct MeshPreviewView: UIViewRepresentable {
             return SIMD4<Float>(r, g, b, 1.0)
         }
     }
-    
+
     /// Generates a 2D snapshot of the mesh using an offscreen renderer.
     nonisolated static func generateSnapshot(meshURL: URL, colorsURL: URL?, poseMatrix: [Float]? = nil) -> UIImage? {
         guard let meshData = try? Data(contentsOf: meshURL) else { return nil }
         let colorsData = colorsURL.flatMap { try? Data(contentsOf: $0) }
         guard let (geometry, _) = buildGeometry(from: meshData, vertexColors: colorsData) else { return nil }
-        
+
         let node = SCNNode(geometry: geometry)
         let (minBound, maxBound) = node.boundingBox
         let center = SCNVector3((minBound.x + maxBound.x) / 2, (minBound.y + maxBound.y) / 2, (minBound.z + maxBound.z) / 2)
         node.position = SCNVector3(-center.x, -center.y, -center.z)
-        
+
         let containerNode = SCNNode()
         containerNode.addChildNode(node)
-        
+
         let scene = SCNScene()
         scene.background.contents = UIColor.black
         scene.rootNode.addChildNode(containerNode)
-        
+
         // Lighting
         let ambientLight = SCNNode()
         ambientLight.light = SCNLight()
@@ -512,11 +510,11 @@ struct MeshPreviewView: UIViewRepresentable {
         fillLight.light?.color = UIColor(white: 0.3, alpha: 1.0)
         fillLight.eulerAngles = SCNVector3(Float.pi / 4, -Float.pi / 3, 0)
         scene.rootNode.addChildNode(fillLight)
-        
+
         let cameraNode = SCNNode()
         cameraNode.camera = SCNCamera()
         cameraNode.camera?.automaticallyAdjustsZRange = true
-        
+
         if let matrix = poseMatrix, matrix.count == 16 {
             let m = SCNMatrix4(
                 m11: matrix[0], m12: matrix[1], m13: matrix[2], m14: matrix[3],
@@ -532,12 +530,12 @@ struct MeshPreviewView: UIViewRepresentable {
             cameraNode.look(at: SCNVector3Zero)
         }
         scene.rootNode.addChildNode(cameraNode)
-        
+
         let renderer = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
         renderer.scene = scene
         renderer.pointOfView = cameraNode
         renderer.autoenablesDefaultLighting = false
-        
+
         let size = CGSize(width: 512, height: 512)
         return renderer.snapshot(atTime: 0, with: size, antialiasingMode: .multisampling4X)
     }

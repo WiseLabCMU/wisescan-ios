@@ -44,7 +44,7 @@ enum VertexColorAccumulator {
                 completion(nil)
             }
         }
-        
+
         // Failsafe so a non-responsive getCurrentWorldMap can't hang the save forever. On a real
         // device getCurrentWorldMap honors its contract (always calls back with a map or an error),
         // so this is a "something is broken" escape hatch, NOT a normal-operation cap: 30s is far
@@ -243,13 +243,13 @@ enum VertexColorAccumulator {
             let scaledH = imgH / downscaleFactor
 
             // Load corresponding depth image for occlusion testing
-            var depthPtr: UnsafePointer<UInt8>? = nil
+            var depthPtr: UnsafePointer<UInt8>?
             var depthWidth = 0
             var depthHeight = 0
             var depthBytesPerRow = 0
-            var depthPixelDataBuffer: CFData? = nil
+            var depthPixelDataBuffer: CFData?
             var isDepthLittleEndian = false
-            
+
             if let depthPath = json["depth_path"] as? String {
                 let depthURL = rawDir.appendingPathComponent(depthPath)
                 if let depthData = try? Data(contentsOf: depthURL),
@@ -292,13 +292,13 @@ enum VertexColorAccumulator {
                         let b0 = UInt16(dPtr[dOffset])
                         let b1 = UInt16(dPtr[dOffset + 1])
                         let depthValue = isDepthLittleEndian ? (b1 << 8) | b0 : (b0 << 8) | b1
-                        
+
                         let depthMM = Float(depthValue)
                         let expectedMM = -camPos.z * 1000.0
-                        
+
                         // If depth pixel is 0, it means no valid depth or privacy mask. Skip coloring.
                         if depthMM == 0 { continue }
-                        
+
                         // If expected distance is > tolerance farther than what the depth sensor saw, we are occluded
                         if expectedMM > depthMM + AppConstants.depthOcclusionToleranceMM { continue }
                     }

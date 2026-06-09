@@ -16,7 +16,7 @@ struct ScansListView: View {
     @State private var showBulkDeleteConfirm = false
     @State private var isEditing = false
     @State private var viewMode: LibraryViewMode = .grid
-    @State private var renderRequest: ComponentRenderRequest? = nil
+    @State private var renderRequest: ComponentRenderRequest?
     @Binding var selectedTab: Int
 
     let columns = [
@@ -220,7 +220,7 @@ struct ScansListView: View {
 
 struct LocationGridTile: View {
     let location: ScanLocation
-    @State private var thumbnailImage: UIImage? = nil
+    @State private var thumbnailImage: UIImage?
     // Resolved off the main thread in `.task` so the body performs no FileManager I/O.
     @State private var hasMissingWorldMap = false
 
@@ -235,7 +235,7 @@ struct LocationGridTile: View {
             // Thumbnail Area
             ZStack {
                 Color.gray.opacity(0.2)
-                
+
                 if let uiImage = thumbnailImage {
                     Image(uiImage: uiImage)
                         .resizable()
@@ -257,7 +257,7 @@ struct LocationGridTile: View {
                     .fontWeight(.semibold)
                     .foregroundColor(.white)
                     .lineLimit(1)
-                
+
                 HStack {
                     Text("\(location.scans.count) scan\(location.scans.count == 1 ? "" : "s")")
                         .font(.caption2)
@@ -332,20 +332,20 @@ struct ScanCard: View {
 
     @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
     @Environment(\.modelContext) private var modelContext
-    @State private var exportItem: ZipExportItem? = nil
+    @State private var exportItem: ZipExportItem?
     @State private var showExportError = false
     @State private var showDeleteConfirm = false
-    @State private var itemCounts: (images: Int, proxy: Int, depth: Int, cameras: Int)? = nil
+    @State private var itemCounts: (images: Int, proxy: Int, depth: Int, cameras: Int)?
     @State private var showMeshPreview = false
     @State private var showMissingRelocAlert = false
     // Disk-derived values resolved off the main thread in `.task` (see below) so the
     // view body never performs synchronous FileManager I/O during layout/scroll.
-    @State private var previewImage: UIImage? = nil
+    @State private var previewImage: UIImage?
     @State private var isRelocMissing = false
     @State private var sizeMB: Double = 0
     // Single-card coloring progress (SwiftUI @State — reliably observed, unlike a SwiftData
     // @Transient model prop). Bulk coloring drives `bulkColoringMessage` from the parent instead.
-    @State private var coloringMessage: String? = nil
+    @State private var coloringMessage: String?
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
@@ -356,10 +356,10 @@ struct ScanCard: View {
     private var activeColoringMessage: String? { coloringMessage ?? bulkColoringMessage }
 
     var isSelected: Bool = false
-    var onSelect: (() -> Void)? = nil
+    var onSelect: (() -> Void)?
     /// Coloring progress message driven by the parent during a BULK colorize (nil otherwise).
     /// Single-card colorize uses the local `coloringMessage` @State.
-    var bulkColoringMessage: String? = nil
+    var bulkColoringMessage: String?
 
     init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, bulkColoringMessage: String? = nil, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
         self.scan = scan
@@ -387,7 +387,7 @@ struct ScanCard: View {
                 }
                 .buttonStyle(.plain)
             }
-            
+
             HStack(alignment: .top, spacing: 0) {
                 previewImageSection
                 infoSection
@@ -409,10 +409,10 @@ struct ScanCard: View {
                 onUpdate(scan)
             }
         }) { item in
-            ShareSheet(activityItems: [item.url]) { activityType, completed, returnedItems, activityError in
+            ShareSheet(activityItems: [item.url]) { _, completed, _, activityError in
                 // Only process if we aren't currently streaming an upload
                 if case .uploading = scan.uploadStatus { return }
-                
+
                 if let error = activityError {
                     scan.uploadStatus = .failed(error.localizedDescription)
                 } else if completed {
@@ -703,7 +703,7 @@ struct ScanCard: View {
         case .pending: return .gray
         case .zipping: return .cyan
         case .savedLocally: return .green
-        case .uploading(_): return .blue
+        case .uploading: return .blue
         case .success: return .green
         case .failed: return .red
         }
@@ -714,7 +714,6 @@ struct ScanCard: View {
         if count >= 1_000 { return String(format: "%.0fK", Double(count) / 1_000.0) }
         return "\(count)"
     }
-
 
     private func uploadScan() {
         guard !uploadURL.isEmpty else { return }
@@ -749,7 +748,7 @@ struct ScanCard: View {
                 }
                 return
             }
-            
+
             DispatchQueue.main.async {
                 self.scan.uploadStatus = .uploading(progress: 0.0)
                 self.onUpdate(self.scan)
@@ -763,10 +762,10 @@ struct ScanCard: View {
             // Track upload progress using KVO
             class ObserverBox { var observer: NSKeyValueObservation? }
             let box = ObserverBox()
-            
+
             let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, uploadError in
                 _ = box
-                
+
                 try? FileManager.default.removeItem(at: exportURL)
                 DispatchQueue.main.async {
                     self.scan.selectedFormat = self.selectedFormat
@@ -780,7 +779,7 @@ struct ScanCard: View {
                     self.onUpdate(self.scan)
                 }
             }
-            
+
             box.observer = task.progress.observe(\.fractionCompleted) { progress, _ in
                 DispatchQueue.main.async {
                     if case .uploading = self.scan.uploadStatus {
@@ -789,7 +788,7 @@ struct ScanCard: View {
                     }
                 }
             }
-            
+
             task.resume()
         }
     }
@@ -883,14 +882,13 @@ struct ScanCard: View {
         }
     }
 
-
 }
 
 // MARK: - Share Sheet
 
 struct ShareSheet: UIViewControllerRepresentable {
     var activityItems: [Any]
-    var completion: UIActivityViewController.CompletionWithItemsHandler? = nil
+    var completion: UIActivityViewController.CompletionWithItemsHandler?
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
         let controller = UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
@@ -901,23 +899,22 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
-
 #Preview("ScansListView") {
     let config = ModelConfiguration(isStoredInMemoryOnly: true)
     let container = try! ModelContainer(for: ScanLocation.self, CapturedScan.self, configurations: config)
-    
+
     let loc1 = ScanLocation(name: "Living Room")
     loc1.scans.append(CapturedScan(name: "Scan A", capturedAt: Date().addingTimeInterval(-3600), vertexCount: 1500, faceCount: 2000))
     container.mainContext.insert(loc1)
-    
+
     let loc2 = ScanLocation(name: "Kitchen")
     loc2.scans.append(CapturedScan(name: "Scan B", capturedAt: Date().addingTimeInterval(-86400 * 3), vertexCount: 4200, faceCount: 8100))
     container.mainContext.insert(loc2)
-    
+
     let loc3 = ScanLocation(name: "Garage")
     loc3.scans.append(CapturedScan(name: "Scan C", capturedAt: Date().addingTimeInterval(-86400 * 45), vertexCount: 9800, faceCount: 19200))
     container.mainContext.insert(loc3)
-    
+
     return ScansListView(selectedTab: .constant(2))
         .modelContainer(container)
         .environment(ScanStore())

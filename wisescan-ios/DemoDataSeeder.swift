@@ -94,8 +94,7 @@ struct DemoDataSeeder {
         var vertices = 0
         var faces = 0
         for line in data.split(separator: "\n") {
-            if line.hasPrefix("v ") { vertices += 1 }
-            else if line.hasPrefix("f ") { faces += 1 }
+            if line.hasPrefix("v ") { vertices += 1 } else if line.hasPrefix("f ") { faces += 1 }
         }
         return (vertices, faces)
     }

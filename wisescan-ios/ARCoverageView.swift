@@ -15,9 +15,9 @@ struct ARCoverageView: UIViewRepresentable {
     var privacyFilter: Bool
     var activeMeshColor: String = AppConstants.activeMeshColor
     var captureMode: AppConstants.CaptureMode
-    var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
-    var initialGhostMeshData: Data? = nil // Raw OBJ data from the previous scan
-    var scanStore: ScanStore? = nil // Runtime state for boundary anchor tracking
+    var initialWorldMapURL: URL? // Support for Scan4D anchoring
+    var initialGhostMeshData: Data? // Raw OBJ data from the previous scan
+    var scanStore: ScanStore? // Runtime state for boundary anchor tracking
 
     /// Well-known name for boundary anchors so they can be identified across sessions.
     static let boundaryAnchorName = "Scan4D_Boundary_Anchor"
@@ -27,7 +27,7 @@ struct ARCoverageView: UIViewRepresentable {
     var ghostXOffset: Float = 0         // Meters, X-axis position offset
     var ghostZOffset: Float = 0         // Meters, Z-axis position offset
     var dismissGhostMesh: Bool = false  // When true, remove ghost mesh from scene
-    var bakedGhostTransform: simd_float4x4? = nil // Manual transform to bake into the session origin
+    var bakedGhostTransform: simd_float4x4? // Manual transform to bake into the session origin
 
     /// Battery: when true, pause the AR session (camera + sensors power down). Raised by CaptureView
     /// after an idle period on a non-capture tab; lowered on return to capture. Resume re-runs a
@@ -121,17 +121,17 @@ struct ARCoverageView: UIViewRepresentable {
             context.coordinator.activeMeshColor = activeMeshColor
             context.coordinator.recolorActiveMeshEntities()
         }
-        
+
         let modeChanged = (captureMode != context.coordinator.captureMode)
         let recordingChanged = (isRecording != context.coordinator.isRecording)
-        
+
         if modeChanged {
             context.coordinator.captureMode = captureMode
         }
 
         let shouldShowVR = (captureMode == .vr && isRecording)
         let wasShowingVR = (context.coordinator.pointCloudManager != nil)
-        
+
         if shouldShowVR && !wasShowingVR {
             // Keep cameraFeed() background during setup — switch to black
             // only after the first point cloud frame renders (see session(_:didUpdate:)).
@@ -145,7 +145,7 @@ struct ARCoverageView: UIViewRepresentable {
             vrAnchor.addChild(context.coordinator.rootEntity)
             uiView.scene.addAnchor(vrAnchor)
             context.coordinator.vrAnchorEntity = vrAnchor
-            
+
             // Re-configure session for sceneDepth if needed
             if let config = uiView.session.configuration as? ARWorldTrackingConfiguration {
                 if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
@@ -160,12 +160,12 @@ struct ARCoverageView: UIViewRepresentable {
             context.coordinator.pointCloudManager = nil
             context.coordinator.vrAnchorEntity?.removeFromParent()
             context.coordinator.vrAnchorEntity = nil
-            
+
             if captureMode == .vr {
                 context.coordinator.removeAllMeshEntities()
             }
         }
-        
+
         if modeChanged && captureMode == .vr {
             context.coordinator.removeAllMeshEntities()
         }
@@ -275,7 +275,7 @@ struct ARCoverageView: UIViewRepresentable {
                     ? "record-start: extend → preserving anchors + world map"
                     : "record-start: new scan → .removeExistingAnchors (clear prior scan's mesh)")
                 uiView.session.run(config, options: runOptions)
-                
+
                 // If the user manually aligned the ghost mesh, bake that transform into the ARKit world origin
                 if let baked = bakedGhostTransform {
                     uiView.session.setWorldOrigin(relativeTransform: baked)
@@ -339,7 +339,7 @@ struct ARCoverageView: UIViewRepresentable {
             // Build procedural wireframe: thin 3D quads for each unique edge
             let descriptors = MeshParser.generateWireframeDescriptors(from: data)
             guard !descriptors.isEmpty else { return }
-            
+
             DispatchQueue.main.async {
                 let ghostColorStr = UserDefaults.standard.string(forKey: AppConstants.Key.ghostMeshColor) ?? AppConstants.ghostMeshColor
                 let color = ghostColorStr.toSIMD4Color
@@ -347,9 +347,9 @@ struct ARCoverageView: UIViewRepresentable {
                 let material = UnlitMaterial(color: UIColor(
                     red: CGFloat(color.x), green: CGFloat(color.y), blue: CGFloat(color.z), alpha: 1.0
                 ))
-                
+
                 let containerEntity = Entity()
-                
+
                 // Generating resources on the main thread, 1 chunk per MeshResource.
                 // This bypasses RealityKit's multi-part internal buffers and concurrent background generation crashes.
                 for desc in descriptors {
@@ -455,18 +455,17 @@ struct ARCoverageView: UIViewRepresentable {
         /// The green background quad entity (far plane). Mesh occlusion punches holes.
         private var coverageGreenQuadAnchor: AnchorEntity?
 
-
         // Ghost Mesh properties
         var ghostAnchorEntity: AnchorEntity?
         var hasAddedGhostMesh = false
         var hasWorldMap = false
         var hasSeenRelocalizing = false
-        var lastGhostMeshDataCount: Int? = nil // Track changes to ghost mesh data
+        var lastGhostMeshDataCount: Int? // Track changes to ghost mesh data
 
         // Boundary Anchor tracking
         weak var scanStore: ScanStore?
         var boundaryAnchorEntity: AnchorEntity?
-        var boundaryAnchorId: UUID? = nil
+        var boundaryAnchorId: UUID?
 
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
@@ -580,7 +579,7 @@ struct ARCoverageView: UIViewRepresentable {
         /// entity can be anchored at the origin — avoids AnchorEntity transform issues.
         private func buildWireframeForAnchor(_ meshAnchor: ARMeshAnchor) {
             if captureMode == .vr { return } // No wireframes in VR mode
-            
+
             let anchorId = meshAnchor.identifier
             let colorStr = activeMeshColor
 
@@ -824,7 +823,7 @@ struct ARCoverageView: UIViewRepresentable {
             // against a source scan. If loading failed and `hasWorldMap` is false, do not
             // treat that the same as a no-world-map flow.
             let worldMapWasRequested = phase == .loadingWorldMap || hasWorldMap
-            
+
             if phase == .loadingWorldMap && !hasWorldMap {
                 // The world map file was missing or corrupted and failed to load
                 DispatchQueue.main.async { [weak self] in
@@ -833,7 +832,7 @@ struct ARCoverageView: UIViewRepresentable {
                 }
                 return
             }
-            
+
             let isRelocalized = isTrackingNormal && (!worldMapWasRequested || hasSeenRelocalizing)
 
             // Optionally update distance to boundary anchor if one exists (visual only)
@@ -931,7 +930,7 @@ struct ARCoverageView: UIViewRepresentable {
                 // If tracking just went to relocalizing/initializing, the coordinate
                 // system may have shifted. Clear accumulated voxels to prevent ghosting.
                 if case .limited(let reason) = frame.camera.trackingState,
-                   (reason == .initializing || reason == .relocalizing) {
+                   reason == .initializing || reason == .relocalizing {
                     DispatchQueue.main.async { [weak self] in
                         if let pcm = self?.pointCloudManager {
                             pcm.resetVoxels()
@@ -941,11 +940,11 @@ struct ARCoverageView: UIViewRepresentable {
                 }
                 return
             }
-            
+
             // Coalesce: if a main-actor dispatch is already pending, skip this frame.
             // This limits retained CVPixelBuffers to at most 2 (one in-flight GPU + one pending).
             guard !pendingVRUpdate else { return }
-            
+
             let depthMap = frame.sceneDepth?.depthMap
             let confidenceMap = frame.sceneDepth?.confidenceMap
             let capturedImage = frame.capturedImage
@@ -954,7 +953,7 @@ struct ARCoverageView: UIViewRepresentable {
             let intrinsics = frame.camera.intrinsics
             let privFilter = privacyFilter
             // ARFrame reference is now released — only CVPixelBuffers are retained
-            
+
             pendingVRUpdate = true
             DispatchQueue.main.async { [weak self] in
                 pcm.update(

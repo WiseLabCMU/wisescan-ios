@@ -105,7 +105,7 @@ struct DashboardView: View {
                                 Text("Your glasses firmware needs an update before they can be used reliably.")
                                     .font(.caption)
                                     .foregroundColor(.gray)
-                                
+
                                 Button(action: {
                                     wearableManager.openFirmwareUpdate()
                                 }) {
@@ -144,7 +144,7 @@ struct DashboardView: View {
                                 Text("Camera access must be granted in the Meta AI companion app before streaming can start.")
                                     .font(.caption)
                                     .foregroundColor(.gray)
-                                
+
                                 Button(action: {
                                     wearableManager.requestPermissions()
                                 }) {
@@ -273,7 +273,7 @@ struct DashboardView: View {
         request.httpMethod = "HEAD"
         request.timeoutInterval = 5
 
-        URLSession.shared.dataTask(with: request) { _, response, error in
+        URLSession.shared.dataTask(with: request) { _, response, _ in
             DispatchQueue.main.async {
                 if let httpResponse = response as? HTTPURLResponse,
                    (200...499).contains(httpResponse.statusCode) {

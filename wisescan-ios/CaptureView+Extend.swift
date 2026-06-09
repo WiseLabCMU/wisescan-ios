@@ -25,7 +25,7 @@ extension CaptureView {
         // Pin A: camera pose in Map A's coordinate system.
         let pinACameraPose = frame.camera.transform
         let compassHeading = locationManager.bestHeading
-        
+
         // Create and record a real anchor so it goes into the source scan's metadata
         let anchor = ARAnchor(name: ARCoverageView.boundaryAnchorName, transform: pinACameraPose)
         currentARSession?.add(anchor: anchor)

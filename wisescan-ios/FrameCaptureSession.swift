@@ -31,7 +31,7 @@ class FrameCaptureSession {
     private var isMockingImages: Bool = false
     private var isMockingDepth: Bool = false
     private var testSequenceIndex: Int = 0
-    
+
     // Wearables proxy
     private var proxyFrameCount: Int = 0
     private var lastProxyCaptureTime: TimeInterval = 0
@@ -40,7 +40,7 @@ class FrameCaptureSession {
     // (tracking dropped vs. genuinely moving too fast). Detection is a pose-velocity + tracking-state
     // heuristic, NOT a pixel-sharpness measurement (so blur_score in metadata is assumed, not measured).
     enum CaptureWarning: Equatable { case fastMotion, trackingLost }
-    private(set) var blurWarningReason: CaptureWarning? = nil
+    private(set) var blurWarningReason: CaptureWarning?
     /// Convenience for call sites that only care whether any capture warning is showing.
     var isBlurWarningActive: Bool { blurWarningReason != nil }
     private var blurWarningTimer: Timer?
@@ -84,7 +84,7 @@ class FrameCaptureSession {
     private var locationManager: LocationManager?
     private var activeLocationId: UUID?
     private var hardwareDeviceModel: String = "Native iOS"
-    
+
     // Cached for export on background queue
     private var cachedDeviceName: String = "Unknown"
     private var cachedOSName: String = "iOS"
@@ -271,7 +271,7 @@ class FrameCaptureSession {
 
         // Reject blurred frames based on camera tracking quality
         if rejectBlur && !isMockingIMU {
-            var warning: CaptureWarning? = nil
+            var warning: CaptureWarning?
 
             // Tracking dropped out of .normal (limited / excessive motion / relocalizing): frames
             // here are unreliable. The fix is to hold steady & let tracking recover — NOT necessarily
@@ -343,22 +343,22 @@ class FrameCaptureSession {
     /// Injects a pixel buffer from a proxy capture device (e.g., Meta Ray-Ban stream).
     func captureProxyFrame(pixelBuffer: CVPixelBuffer) {
         guard let proxyDir = self.proxyImagesDir else { return }
-        
+
         let now = Date().timeIntervalSince1970
         // Limit to ~15 FPS to prevent massive proxy image bloat
         guard now - lastProxyCaptureTime >= (1.0 / 15.0) else { return }
         lastProxyCaptureTime = now
-        
+
         ioQueue.async { [weak self] in
             guard let self = self else { return }
             guard let jpegData = self.pixelBufferToJPEG(pixelBuffer) else { return }
-            
+
             let index = self.proxyFrameCount
             self.proxyFrameCount += 1
-            
+
             let paddedIndex = String(format: "%05d", index)
             let rgbPath = proxyDir.appendingPathComponent("frame_\(paddedIndex).jpg")
-            
+
             do {
                 try jpegData.write(to: rgbPath, options: .atomic)
             } catch {
@@ -370,20 +370,20 @@ class FrameCaptureSession {
     /// Injects pre-encoded JPEG data as a proxy frame (used by mock wearable mode).
     func captureProxyFrameData(_ jpegData: Data) {
         guard let proxyDir = self.proxyImagesDir else { return }
-        
+
         let now = Date().timeIntervalSince1970
         guard now - lastProxyCaptureTime >= (1.0 / 15.0) else { return }
         lastProxyCaptureTime = now
-        
+
         ioQueue.async { [weak self] in
             guard let self = self else { return }
-            
+
             let index = self.proxyFrameCount
             self.proxyFrameCount += 1
-            
+
             let paddedIndex = String(format: "%05d", index)
             let rgbPath = proxyDir.appendingPathComponent("frame_\(paddedIndex).jpg")
-            
+
             do {
                 try jpegData.write(to: rgbPath, options: .atomic)
             } catch {
@@ -423,7 +423,7 @@ class FrameCaptureSession {
             guard let self = self, let imagesDir = self.imagesDir else { return }
 
             // Depth is optional — LiDAR devices get depth, others just capture images + poses
-            var validDepthData: Data? = nil
+            var validDepthData: Data?
             if self.isMockingDepth {
                 validDepthData = TestDataGenerator.generateDepthMap(for: currentIndex, w: camW, h: camH)
             } else if let dMap = depthMap {
@@ -542,23 +542,23 @@ class FrameCaptureSession {
                     finalJpegData = jpegData
                 }
             }
-            
+
         let index = self.frames.count
             let paddedIndex = String(format: "%05d", index)
             let rgbPath = imagesDir.appendingPathComponent("frame_\(paddedIndex).jpg")
-            
+
             do {
                 try finalJpegData.write(to: rgbPath, options: .atomic)
                 if let depthData = validDepthData, let depthDir = self.depthDir {
                     let depthPath = depthDir.appendingPathComponent("frame_\(paddedIndex).png")
                     try depthData.write(to: depthPath, options: .atomic)
                 }
-                
+
                 if let confMap = confidenceMap, let confData = PerfDiag.timed("confidence_png", warnOverMs: 40, { self.confidenceMapToPNG(confMap) }), let confDir = self.confidenceDir {
                     let confPath = confDir.appendingPathComponent("frame_\(paddedIndex).png")
                     try confData.write(to: confPath, options: .atomic)
                 }
-                
+
                 if self.globalIntrinsics == nil {
                     self.imageWidth = camW
                     self.imageHeight = camH
@@ -569,10 +569,10 @@ class FrameCaptureSession {
                         cy: intrinsics[2][1]
                     )
                 }
-                
+
                 self.frames.append(FrameData(index: index, transform: transform))
                 let newlyAddedCount = self.frames.count
-                
+
                 DispatchQueue.main.async {
                     self.frameCount = newlyAddedCount
                 }
@@ -877,7 +877,7 @@ class FrameCaptureSession {
 
         return translationDist + rotationChange * 0.3
     }
-    
+
     private func resetBlurWarningTimer() {
         blurWarningTimer?.invalidate()
         blurWarningTimer = Timer.scheduledTimer(withTimeInterval: AppConstants.blurWarningTimeout, repeats: false) { [weak self] _ in
@@ -887,4 +887,3 @@ class FrameCaptureSession {
         }
     }
 }
-

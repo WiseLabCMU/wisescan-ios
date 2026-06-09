@@ -68,14 +68,14 @@ class MetaWearableManager {
         func shouldProcess() -> Bool {
             os_unfair_lock_lock(&lock)
             defer { os_unfair_lock_unlock(&lock) }
-            
+
             // Fast read of cached setting
             let defaultFps = UserDefaults.standard.object(forKey: AppConstants.Key.metaWearablesFPS) != nil
                 ? UserDefaults.standard.double(forKey: AppConstants.Key.metaWearablesFPS)
                 : AppConstants.metaWearablesFPS
             let targetFps = max(1.0, min(30.0, defaultFps))
             let interval = 1.0 / targetFps
-            
+
             let now = CFAbsoluteTimeGetCurrent()
             if now - lastTime < interval { return false }
             lastTime = now
@@ -87,7 +87,7 @@ class MetaWearableManager {
     private final class TokenBox: @unchecked Sendable {
         var token: (any AnyListenerToken)?
     }
-    
+
     private final class ResumeFlag: @unchecked Sendable {
         private var lock = os_unfair_lock()
         private var resumed = false
@@ -503,9 +503,9 @@ class MetaWearableManager {
                     return
                 }
             }
-            
+
             let stateStream = devSession.stateStream()
-            
+
             do {
                 try devSession.start()
             } catch {
@@ -523,7 +523,7 @@ class MetaWearableManager {
                 }
                 return
             }
-            
+
             print("[MetaWearable] Waiting for DeviceSession to start...")
             if devSession.state == .started {
                 print("[MetaWearable] DeviceSession started (synchronous check)!")
@@ -598,7 +598,7 @@ class MetaWearableManager {
                 guard let self = self else { return }
                 // Throttle to ~7 FPS
                 guard localThrottle.shouldProcess() else { return }
-                
+
                 // print("[MetaWearable] Received video frame")
 
                 // TODO(Hardware Test): The DAT SDK 0.6.0 does not explicitly expose camera intrinsics.
@@ -675,4 +675,3 @@ class MetaWearableManager {
         }
     }
 }
-

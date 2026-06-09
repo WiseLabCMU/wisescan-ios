@@ -44,13 +44,13 @@ struct ScanExportManager {
         func zipStaging(_ stagingDir: URL) -> URL? {
             let zipURL = fm.temporaryDirectory.appendingPathComponent(filename)
             try? fm.removeItem(at: zipURL)
-            
+
             var error: NSError?
             let coordinator = NSFileCoordinator()
             coordinator.coordinate(readingItemAt: stagingDir, options: .forUploading, error: &error) { zipTempURL in
                 try? fm.copyItem(at: zipTempURL, to: zipURL)
             }
-            
+
             if let zipAttr = try? fm.attributesOfItem(atPath: zipURL.path),
                let zipSize = zipAttr[.size] as? Int64 {
                 print("[prepareExport] \(format.rawValue) zipSize=\(zipSize) bytes")

@@ -265,6 +265,6 @@ extension CombinedMeshItem {
         UIColor(red: 0.62, green: 1.00, blue: 0.55, alpha: 1.0), // green
         UIColor(red: 1.00, green: 0.55, blue: 0.85, alpha: 1.0), // pink
         UIColor(red: 0.85, green: 0.78, blue: 0.45, alpha: 1.0), // gold
-        UIColor(red: 0.70, green: 0.60, blue: 1.00, alpha: 1.0), // violet
+        UIColor(red: 0.70, green: 0.60, blue: 1.00, alpha: 1.0) // violet
     ]
 }
