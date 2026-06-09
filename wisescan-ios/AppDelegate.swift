@@ -55,18 +55,30 @@ struct Scan4DApp: App {
         }
     }()
 
+    /// True when the process is hosting an XCTest bundle. Unit tests are hosted by this app,
+    /// but the Meta Wearables SDK asserts on the simulator (no paired device), which would
+    /// crash the host on launch as soon as `ContentView` builds `DashboardView`. Skip the real
+    /// UI under test — the logic tests build their own in-memory `ModelContainer` and never need it.
+    private var isRunningUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .onOpenURL { url in
-                    Task {
-                        do {
-                            _ = try await Wearables.shared.handleUrl(url)
-                        } catch {
-                            print("Error handling Wearables URL: \(error)")
+            if isRunningUnitTests {
+                EmptyView()
+            } else {
+                ContentView()
+                    .onOpenURL { url in
+                        Task {
+                            do {
+                                _ = try await Wearables.shared.handleUrl(url)
+                            } catch {
+                                print("Error handling Wearables URL: \(error)")
+                            }
                         }
                     }
-                }
+            }
         }
         .modelContainer(sharedModelContainer)
     }
