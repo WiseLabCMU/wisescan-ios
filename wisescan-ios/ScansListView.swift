@@ -6,6 +6,13 @@ enum LibraryViewMode {
     case graph
 }
 
+/// Controls whether bulk actions target only the latest scan per selected location
+/// or every scan within each selected location.
+enum BulkScope: String, CaseIterable {
+    case latest = "Latest"
+    case allScans = "All Scans"
+}
+
 struct ScansListView: View {
     @Environment(ScanStore.self) private var scanStore
     @Environment(\.modelContext) private var modelContext
@@ -17,6 +24,19 @@ struct ScansListView: View {
     @State private var isEditing = false
     @State private var viewMode: LibraryViewMode = .grid
     @State private var renderRequest: ComponentRenderRequest?
+    @State private var graphVisibleLocationIds: Set<PersistentIdentifier> = []
+    @State private var bulkScope: BulkScope = .latest
+    @State private var isBulkColoring = false
+    @State private var bulkProgressMessage: String?
+    @State private var isBulkExporting = false
+    @State private var exportItems: [ZipExportItem] = []
+    @State private var showExportSheet = false
+    @State private var isBulkUploading = false
+    @State private var bulkUploadCompleted = 0
+    @State private var bulkUploadTotal = 0
+    @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.selectedExportFormat)
+    private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @Binding var selectedTab: Int
 
     let columns = [
@@ -48,7 +68,7 @@ struct ScansListView: View {
                         .padding(.vertical, 60)
                     }
                 } else if viewMode == .graph {
-                    StitchGraphView(locations: locations, renderRequest: $renderRequest)
+                    StitchGraphView(locations: locations, renderRequest: $renderRequest, isEditing: $isEditing, selectedLocations: $selectedLocations, visibleLocationIds: $graphVisibleLocationIds)
                 } else {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 16) {
@@ -88,7 +108,7 @@ struct ScansListView: View {
                 if isEditing {
                     VStack {
                         Spacer()
-                        bulkDeleteBar
+                        bulkActionToolbar
                     }
                 }
             }
@@ -101,13 +121,15 @@ struct ScansListView: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     if isEditing {
                         Button(action: {
-                            if selectedLocations.count == locations.count {
+                            let visibleIds = selectableLocationIds
+                            if visibleIds.isSubset(of: selectedLocations) {
                                 selectedLocations.removeAll()
                             } else {
-                                selectedLocations = Set(locations.map { $0.id })
+                                selectedLocations = visibleIds
                             }
                         }) {
-                            Text(selectedLocations.count == locations.count ? "Deselect All" : "Select All")
+                            let visibleIds = selectableLocationIds
+                            Text(visibleIds.isSubset(of: selectedLocations) ? "Deselect All" : "Select All")
                                 .font(.subheadline)
                         }
                     } else if !locations.isEmpty {
@@ -146,19 +168,25 @@ struct ScansListView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView()
             }
+            .sheet(isPresented: $showExportSheet) {
+                ShareSheet(activityItems: exportItems.map { $0.url }) { _, _, _, _ in
+                    isBulkExporting = false
+                    exitEditModeWithBanner("✓ Saved \(exportItems.count) scan\(exportItems.count == 1 ? "" : "s")")
+                }
+            }
             .fullScreenCover(item: $renderRequest) { req in
                 CombinedMeshScreen(title: req.title, items: req.items)
             }
             .confirmationDialog(
-                "Delete Locations",
+                "Delete \(bulkScope == .allScans ? "Locations" : "Scans")",
                 isPresented: $showBulkDeleteConfirm
             ) {
-                Button("Delete \(selectedLocations.count) Location\(selectedLocations.count == 1 ? "" : "s")", role: .destructive) {
+                Button(bulkDeleteButtonLabel, role: .destructive) {
                     deleteSelectedLocations()
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This will permanently delete the selected locations and every scan inside them.")
+                Text(bulkDeleteMessage)
             }
             .preferredColorScheme(.dark)
             .overlay {
@@ -180,38 +208,396 @@ struct ScansListView: View {
         }
     }
 
+    // MARK: - Bulk Action Toolbar
+
     @ViewBuilder
-    private var bulkDeleteBar: some View {
-        Button(action: { showBulkDeleteConfirm = true }) {
-            Label("Delete \(selectedLocations.count) Location\(selectedLocations.count == 1 ? "" : "s")", systemImage: "trash")
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
-                .background(selectedLocations.isEmpty ? Color.gray.opacity(0.3) : Color.red.opacity(0.8))
-                .foregroundColor(selectedLocations.isEmpty ? .gray : .white)
-                .cornerRadius(10)
+    private var bulkActionToolbar: some View {
+        VStack(spacing: 0) {
+            // Scope toggle: "Latest" | "All Scans"
+            Picker("Scope", selection: $bulkScope) {
+                ForEach(BulkScope.allCases, id: \.self) { scope in
+                    Text(scope.rawValue).tag(scope)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+
+            // Progress banner (visible only during bulk operations)
+            if let msg = bulkProgressMessage {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        .scaleEffect(0.8)
+                    Text(msg)
+                        .font(.caption)
+                        .foregroundColor(.white)
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 6)
+                .transition(.opacity)
+            }
+
+            // Action buttons: [Trash] [Upload] [Save] [Color]
+            HStack(spacing: 20) {
+                // Delete
+                Button(action: { showBulkDeleteConfirm = true }) {
+                    Image(systemName: "trash")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(selectedLocations.isEmpty ? Color.gray.opacity(0.3) : Color.red.opacity(0.8))
+                        .foregroundColor(selectedLocations.isEmpty ? .gray : .white)
+                        .cornerRadius(10)
+                }
+                .disabled(selectedLocations.isEmpty)
+
+                // Upload
+                Button(action: { bulkUpload() }) {
+                    Text("Upload")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(uploadDisabled ? Color.gray.opacity(0.3) : Color.blue)
+                        .foregroundColor(uploadDisabled ? .gray : .white)
+                        .cornerRadius(10)
+                }
+                .disabled(uploadDisabled)
+
+                // Save
+                Button(action: { bulkSaveToFiles() }) {
+                    Text("Save")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(selectedLocations.isEmpty || isBulkExporting ?
+                                    Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
+                        .foregroundColor(selectedLocations.isEmpty || isBulkExporting ? .gray : .white)
+                        .cornerRadius(10)
+                }
+                .disabled(selectedLocations.isEmpty || isBulkExporting)
+
+                // Color
+                Button(action: { bulkColorize() }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "paintbrush.fill")
+                        Text("Color")
+                    }
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(colorDisabled ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
+                    .foregroundColor(colorDisabled ? .gray : .white)
+                    .cornerRadius(10)
+                }
+                .disabled(colorDisabled)
+            }
+            .padding(.horizontal)
+            .padding(.bottom, 10)
         }
-        .disabled(selectedLocations.isEmpty)
-        .padding(.horizontal)
-        .padding(.bottom, 8)
+        .background(.ultraThinMaterial)
     }
 
-    private func deleteSelectedLocations() {
-        let toDelete = locations.filter { selectedLocations.contains($0.id) }
-        // Capture file URLs on main (SwiftData model access must stay on the context's thread),
-        // delete the records + save once on main, then remove the scan directories OFF main — the
-        // per-scan directory removal is the slow part and would otherwise freeze the grid.
-        let dirs = toDelete.flatMap { $0.scans.map(\.scanDirectory) }
-        for loc in toDelete {
-            for scan in loc.scans { modelContext.delete(scan) }
-            modelContext.delete(loc)
+    private var uploadDisabled: Bool {
+        selectedLocations.isEmpty || uploadURL.isEmpty
+    }
+
+    private var colorDisabled: Bool {
+        resolveTargetScans().filter({ !$0.isColored }).isEmpty || isBulkColoring
+    }
+
+    /// Returns the set of location PersistentIdentifiers that are visible in the current view mode.
+    /// Grid mode shows all locations; graph mode shows only locations that participate in stitch links.
+    private var selectableLocationIds: Set<PersistentIdentifier> {
+        switch viewMode {
+        case .grid:
+            return Set(locations.map { $0.id })
+        case .graph:
+            return graphVisibleLocationIds
         }
-        try? modelContext.save()
+    }
+
+    // MARK: - Confirmation Dialog Helpers
+
+    private var bulkDeleteButtonLabel: String {
+        let count = selectedLocations.count
+        switch bulkScope {
+        case .allScans:
+            return "Delete \(count) Location\(count == 1 ? "" : "s")"
+        case .latest:
+            return "Delete Latest Scan from \(count) Location\(count == 1 ? "" : "s")"
+        }
+    }
+
+    private var bulkDeleteMessage: String {
+        switch bulkScope {
+        case .allScans:
+            return "This will permanently delete the selected locations and every scan inside them."
+        case .latest:
+            return "This will permanently delete only the latest scan from each selected location. Locations with older scans will be preserved."
+        }
+    }
+
+    // MARK: - Scan Resolution
+
+    /// Resolves the target scans based on the current scope and selection.
+    /// "Latest" returns only the newest scan per location; "All Scans" returns every scan.
+    private func resolveTargetScans() -> [CapturedScan] {
+        let selectedLocs = locations.filter { selectedLocations.contains($0.id) }
+        switch bulkScope {
+        case .latest:
+            return selectedLocs.compactMap { loc in
+                loc.scans.max(by: { $0.capturedAt < $1.capturedAt })
+            }
+        case .allScans:
+            return selectedLocs.flatMap { $0.scans }
+        }
+    }
+
+    // MARK: - Bulk Operations
+
+    /// Scope-aware delete: "All Scans" deletes entire locations; "Latest" deletes only
+    /// the newest scan per location (preserving the location if older scans remain).
+    private func deleteSelectedLocations() {
+        let selectedLocs = locations.filter { selectedLocations.contains($0.id) }
+
+        switch bulkScope {
+        case .allScans:
+            // Delete entire locations + all scans (original behavior)
+            let dirs = selectedLocs.flatMap { $0.scans.map(\.scanDirectory) }
+            for loc in selectedLocs {
+                for scan in loc.scans { modelContext.delete(scan) }
+                modelContext.delete(loc)
+            }
+            try? modelContext.save()
+            selectedLocations.removeAll()
+            isEditing = false
+            DispatchQueue.global(qos: .utility).async {
+                for dir in dirs { try? FileManager.default.removeItem(at: dir) }
+            }
+
+        case .latest:
+            // Delete only the latest scan per location; auto-delete location if empty
+            var dirsToRemove: [URL] = []
+            for loc in selectedLocs {
+                guard let latest = loc.scans.max(by: { $0.capturedAt < $1.capturedAt }) else { continue }
+                dirsToRemove.append(latest.scanDirectory)
+                modelContext.delete(latest)
+                if loc.scans.count <= 1 {
+                    // This was the last scan — remove the location too
+                    modelContext.delete(loc)
+                }
+            }
+            try? modelContext.save()
+            selectedLocations.removeAll()
+            isEditing = false
+            DispatchQueue.global(qos: .utility).async {
+                for dir in dirsToRemove { try? FileManager.default.removeItem(at: dir) }
+            }
+        }
+    }
+
+    /// Export selected scans to the share sheet. Runs export packaging on a background queue.
+    /// Progress banner shows per-scan preparation status.
+    private func bulkSaveToFiles() {
+        let scans = resolveTargetScans()
+        guard !scans.isEmpty else { return }
+        isBulkExporting = true
         selectedLocations.removeAll()
-        isEditing = false
+        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
+        let totalScans = scans.count
+
+        bulkProgressMessage = "Preparing 1/\(totalScans)…"
+
+        // Capture scan directories on main (SwiftData model access).
+        let scanInfos = scans.map { (dir: $0.scanDirectory, filename: $0.makeExportFilename(format: format)) }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var urls: [ZipExportItem] = []
+            for (idx, info) in scanInfos.enumerated() {
+                DispatchQueue.main.async {
+                    self.bulkProgressMessage = "Preparing \(idx + 1)/\(totalScans)…"
+                }
+                if let url = ScanExportManager.prepareExport(
+                    filename: info.filename, scanDir: info.dir, format: format
+                ) {
+                    urls.append(ZipExportItem(url: url))
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.bulkProgressMessage = nil
+                self.exportItems = urls
+                self.showExportSheet = !urls.isEmpty
+                if urls.isEmpty {
+                    self.isBulkExporting = false
+                    self.exitEditModeWithBanner("Export failed")
+                }
+                // isBulkExporting is cleared + edit mode exits in the share sheet completion handler
+            }
+        }
+    }
+
+    /// Upload selected scans to the configured server. Each scan is exported and uploaded
+    /// independently on a background queue. Banner tracks per-scan completion and upload progress.
+    private func bulkUpload() {
+        let scans = resolveTargetScans()
+        guard !scans.isEmpty, !uploadURL.isEmpty else { return }
+        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
+        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
+
+        isBulkUploading = true
+        bulkUploadCompleted = 0
+        bulkUploadTotal = scans.count
+        selectedLocations.removeAll()
+        bulkProgressMessage = "Uploading 0/\(scans.count)…"
+
+        for scan in scans {
+            let filename = scan.makeExportFilename(format: format)
+            guard let url = URL(string: baseURLString + filename) else {
+                bulkUploadCompleted += 1
+                checkBulkUploadCompletion()
+                continue
+            }
+            scan.uploadStatus = .zipping
+            let scanDir = scan.scanDirectory
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let exportURL = ScanExportManager.prepareExport(
+                    filename: filename, scanDir: scanDir, format: format
+                ) else {
+                    DispatchQueue.main.async {
+                        scan.uploadStatus = .failed("Export failed")
+                        self.bulkUploadCompleted += 1
+                        self.checkBulkUploadCompletion()
+                    }
+                    return
+                }
+
+                DispatchQueue.main.async { scan.uploadStatus = .uploading(progress: 0.0) }
+
+                var request = URLRequest(url: url)
+                request.httpMethod = "PUT"
+                request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
+
+                let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
+                    try? FileManager.default.removeItem(at: exportURL)
+                    DispatchQueue.main.async {
+                        if let error = error {
+                            scan.uploadStatus = .failed(error.localizedDescription)
+                        } else if let httpResponse = response as? HTTPURLResponse,
+                                  (200...299).contains(httpResponse.statusCode) {
+                            scan.uploadStatus = .success
+                        } else {
+                            scan.uploadStatus = .failed("Server error")
+                        }
+                        self.bulkUploadCompleted += 1
+                        self.checkBulkUploadCompletion()
+                    }
+                }
+                task.resume()
+            }
+        }
+    }
+
+    /// Called after each upload completes; when all are done, shows a completion banner and exits edit mode.
+    private func checkBulkUploadCompletion() {
+        let done = bulkUploadCompleted
+        let total = bulkUploadTotal
+        bulkProgressMessage = "Uploading \(done)/\(total)…"
+        guard done >= total else { return }
+        isBulkUploading = false
+        exitEditModeWithBanner("✓ Uploaded \(total) scan\(total == 1 ? "" : "s")")
+    }
+
+    /// Serial colorize of selected uncolored scans on a utility queue.
+    /// Progress is throttled to whole-percent updates to avoid flooding the main thread.
+    private func bulkColorize() {
+        let scans = resolveTargetScans().filter { !$0.isColored }
+        guard !scans.isEmpty else { return }
+        isBulkColoring = true
+
+        let totalScans = scans.count
+        // Capture all needed properties on main before dispatching (SwiftData models aren't
+        // thread-safe). Each tuple carries the values needed for the background colorize loop.
+        struct ScanColorizeInfo {
+            let meshURL: URL
+            let rawDataDir: URL
+            let colorsURL: URL
+            let previewURL: URL
+            let pose: [Float]?
+        }
+        let infos: [(scan: CapturedScan, info: ScanColorizeInfo)] = scans.map { scan in
+            (scan, ScanColorizeInfo(
+                meshURL: scan.meshFileURL,
+                rawDataDir: scan.rawDataPath,
+                colorsURL: scan.colorsFileURL,
+                previewURL: scan.modelPreviewURL,
+                pose: scan.location?.imagingPoseMatrix
+            ))
+        }
 
         DispatchQueue.global(qos: .utility).async {
-            for dir in dirs { try? FileManager.default.removeItem(at: dir) }
+            for (idx, entry) in infos.enumerated() {
+                let scanName = "Scan \(idx + 1)"
+                DispatchQueue.main.async {
+                    self.bulkProgressMessage = "Coloring \(idx + 1)/\(totalScans) — \(scanName)"
+                }
+
+                guard let meshData = try? Data(contentsOf: entry.info.meshURL) else { continue }
+
+                var lastPct = -1
+                let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
+                    objData: meshData,
+                    rawDataDir: entry.info.rawDataDir,
+                    progress: { progress in
+                        let pct = Int(progress * 100)
+                        guard pct != lastPct else { return } // throttle to whole-percent changes
+                        lastPct = pct
+                        DispatchQueue.main.async {
+                            self.bulkProgressMessage = "Coloring \(idx + 1)/\(totalScans) — \(scanName): \(pct)%"
+                        }
+                    }
+                )
+
+                if let colors = vertexColors {
+                    try? colors.write(to: entry.info.colorsURL)
+                }
+
+                if let img = MeshPreviewView.generateSnapshot(
+                    meshURL: entry.info.meshURL, colorsURL: entry.info.colorsURL, poseMatrix: entry.info.pose
+                ),
+                   let data = img.jpegData(compressionQuality: 0.8) {
+                    try? data.write(to: entry.info.previewURL)
+                }
+
+                DispatchQueue.main.async {
+                    entry.scan.isColored = true
+                    entry.scan.location?.updatedAt = Date()
+                    try? self.modelContext.save()
+                }
+            }
+
+            DispatchQueue.main.async {
+                self.isBulkColoring = false
+                self.exitEditModeWithBanner("✓ Colored \(totalScans) scan\(totalScans == 1 ? "" : "s")")
+            }
+        }
+    }
+
+    // MARK: - Edit Mode Exit with Banner
+
+    /// Shows a completion message in the progress banner for 2 seconds, then exits edit mode.
+    /// This gives the user a clear signal that the operation completed, especially for fast ops.
+    private func exitEditModeWithBanner(_ message: String) {
+        bulkProgressMessage = message
+        selectedLocations.removeAll()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            withAnimation {
+                self.bulkProgressMessage = nil
+                self.isEditing = false
+            }
         }
     }
 }
