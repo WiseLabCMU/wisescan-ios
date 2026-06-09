@@ -11,6 +11,9 @@ struct LocationDetailView: View {
     @State private var isEditing = false
     @State private var selectedScans: Set<PersistentIdentifier> = []
     @State private var showBulkDeleteConfirm = false
+    /// Number of DISTINCT OTHER maps the about-to-be-deleted scans are linked to (computed when
+    /// the user taps delete). > 0 means the cascade will silently remove those spatial links.
+    @State private var bulkDeleteLinkedMapCount = 0
     @State private var showSettings = false
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
@@ -363,7 +366,14 @@ struct LocationDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will permanently delete the selected scans and their data.")
+            if bulkDeleteLinkedMapCount > 0 {
+                Text("This map is linked to \(bulkDeleteLinkedMapCount) other " +
+                     "map\(bulkDeleteLinkedMapCount == 1 ? "" : "s"). Deleting these scans will " +
+                     "remove those spatial links.\n\nThis will permanently delete the selected " +
+                     "scans and their data.")
+            } else {
+                Text("This will permanently delete the selected scans and their data.")
+            }
         }
         .task(id: location.updatedAt) {
             // Links are now SwiftData rows; read them straight off the object graph.
@@ -372,6 +382,24 @@ struct LocationDetailView: View {
     }
 
     // MARK: - Bulk Actions
+
+    /// Count of DISTINCT OTHER locations the given scans are linked to via incident stitch links.
+    /// Used to warn that deleting them will cascade-remove the connections to those maps.
+    private func linkedOtherMapCount(for scanIds: Set<PersistentIdentifier>) -> Int {
+        let scans = location.scans.filter { scanIds.contains($0.id) }
+        // Set element type is inferred from `ScanLocation.id` so this stays correct regardless of
+        // whether that resolves to a UUID or a PersistentIdentifier.
+        let thisLocationId = location.id
+        var otherLocationIds: Set = [thisLocationId]
+        otherLocationIds.removeAll()
+        for scan in scans {
+            for link in StitchLinkStore.incidentLinks(for: scan) {
+                guard let otherId = link.localAnchor(for: scan)?.otherScan?.location?.id else { continue }
+                if otherId != thisLocationId { otherLocationIds.insert(otherId) }
+            }
+        }
+        return otherLocationIds.count
+    }
 
     private func bulkDelete() {
         let scansToDelete = location.scans.filter { selectedScans.contains($0.id) }
@@ -478,6 +506,7 @@ struct LocationDetailView: View {
     private func bottomActionToolbar(sortedScans: [CapturedScan]) -> some View {
         HStack(spacing: 20) {
             Button(action: {
+                bulkDeleteLinkedMapCount = linkedOtherMapCount(for: selectedScans)
                 showBulkDeleteConfirm = true
             }, label: {
                 Image(systemName: "trash")

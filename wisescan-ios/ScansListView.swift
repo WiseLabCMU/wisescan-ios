@@ -21,6 +21,9 @@ struct ScansListView: View {
     @State private var showSettings = false
     @State private var selectedLocations: Set<PersistentIdentifier> = []
     @State private var showBulkDeleteConfirm = false
+    /// Number of DISTINCT OTHER maps the about-to-be-deleted locations are linked to (computed
+    /// when the user taps delete). > 0 means the cascade will silently remove those spatial links.
+    @State private var bulkDeleteLinkedMapCount = 0
     @State private var isEditing = false
     @State private var viewMode: LibraryViewMode = .grid
     @State private var renderRequest: ComponentRenderRequest?
@@ -186,7 +189,13 @@ struct ScansListView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text(bulkDeleteMessage)
+                if bulkDeleteLinkedMapCount > 0 {
+                    Text("\(bulkDeleteLinkedMapCount == 1 ? "This map is" : "These maps are") linked to " +
+                         "\(bulkDeleteLinkedMapCount) other map\(bulkDeleteLinkedMapCount == 1 ? "" : "s"). " +
+                         "Deleting will remove those spatial links.\n\n" + bulkDeleteMessage)
+                } else {
+                    Text(bulkDeleteMessage)
+                }
             }
             .preferredColorScheme(.dark)
             .overlay {
@@ -242,7 +251,10 @@ struct ScansListView: View {
             // Action buttons: [Trash] [Upload] [Save] [Color]
             HStack(spacing: 20) {
                 // Delete
-                Button(action: { showBulkDeleteConfirm = true }) {
+                Button(action: {
+                    bulkDeleteLinkedMapCount = linkedOtherMapCount(for: selectedLocations)
+                    showBulkDeleteConfirm = true
+                }) {
                     Image(systemName: "trash")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
@@ -366,6 +378,10 @@ struct ScansListView: View {
         case .allScans:
             // Delete entire locations + all scans (original behavior)
             let dirs = selectedLocs.flatMap { $0.scans.map(\.scanDirectory) }
+            // Also remove each location's own directory (Documents/Scans/{locationId}) — it still
+            // holds a legacy stitching.json and would be orphaned once the per-scan subdirs go.
+            // scanDirectory is Documents/Scans/{locationId}/{scanId}, so its parent is the location dir.
+            let locationDirs = selectedLocs.compactMap { $0.scans.first?.scanDirectory.deletingLastPathComponent() }
             for loc in selectedLocs {
                 for scan in loc.scans { modelContext.delete(scan) }
                 modelContext.delete(loc)
@@ -375,6 +391,7 @@ struct ScansListView: View {
             isEditing = false
             DispatchQueue.global(qos: .utility).async {
                 for dir in dirs { try? FileManager.default.removeItem(at: dir) }
+                for dir in locationDirs { try? FileManager.default.removeItem(at: dir) }
             }
 
         case .latest:
@@ -385,7 +402,9 @@ struct ScansListView: View {
                 dirsToRemove.append(latest.scanDirectory)
                 modelContext.delete(latest)
                 if loc.scans.count <= 1 {
-                    // This was the last scan — remove the location too
+                    // This was the last scan — remove the location too, and its now-orphaned
+                    // location directory (legacy stitching.json + empty dir).
+                    dirsToRemove.append(latest.scanDirectory.deletingLastPathComponent())
                     modelContext.delete(loc)
                 }
             }
@@ -396,6 +415,25 @@ struct ScansListView: View {
                 for dir in dirsToRemove { try? FileManager.default.removeItem(at: dir) }
             }
         }
+    }
+
+    /// Count of DISTINCT OTHER locations (those NOT being deleted) that the given locations are
+    /// linked to via incident stitch links. Used to warn that deleting them will cascade-remove the
+    /// connections to those maps.
+    private func linkedOtherMapCount(for locationIds: Set<PersistentIdentifier>) -> Int {
+        let toDelete = locations.filter { locationIds.contains($0.id) }
+        let deletedLocationIds = Set(toDelete.map { $0.id })
+        var otherLocationIds = deletedLocationIds
+        otherLocationIds.removeAll(keepingCapacity: true)
+        for loc in toDelete {
+            for scan in loc.scans {
+                for link in StitchLinkStore.incidentLinks(for: scan) {
+                    guard let otherLoc = link.localAnchor(for: scan)?.otherScan?.location else { continue }
+                    if !deletedLocationIds.contains(otherLoc.id) { otherLocationIds.insert(otherLoc.id) }
+                }
+            }
+        }
+        return otherLocationIds.count
     }
 
     /// Export selected scans to the share sheet. Runs export packaging on a background queue.
