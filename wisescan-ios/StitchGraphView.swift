@@ -5,7 +5,8 @@ import simd
 // MARK: - Stitch Graph View
 //
 // Toolbar-toggleable alternative to the grid in ScansListView. Renders stitched
-// locations as a directed graph: one node per location, arrows source → target.
+// locations as an undirected graph: one node per location, a plain connector line
+// between linked locations (links are bidirectional, so there is no direction to show).
 // Each connected cluster offers a "Render together" action that composes the meshes.
 // In edit mode, nodes become selectable for bulk operations; cluster headers gain
 // a "Select All / Deselect" shortcut.
@@ -227,7 +228,7 @@ private struct ClusterView: View {
                     let pos = positions
                     for edge in edges {
                         guard let from = pos[edge.from], let to = pos[edge.to] else { continue }
-                        drawArrow(ctx: &ctx, fromCenter: from, toCenter: to)
+                        drawEdge(ctx: &ctx, fromCenter: from, toCenter: to)
                     }
                 }
                 .frame(width: canvasSize.width, height: canvasSize.height)
@@ -289,34 +290,24 @@ private struct ClusterView: View {
         return CGPoint(x: center.x + dx * s, y: center.y + dy * s)
     }
 
-    /// Draws a directed edge with an arrowhead, stopping exactly at each node's rectangle edge.
-    private func drawArrow(ctx: inout GraphicsContext, fromCenter: CGPoint, toCenter: CGPoint) {
-        // Meet the rectangle boundaries; pull the head a few points off the target tile so the
-        // arrowhead always sits in open space and is never clipped by the node drawn on top.
-        let start = boundaryPoint(from: fromCenter, toward: toCenter)
+    /// Draws an undirected connector line between two nodes, stopping exactly at each node's
+    /// rectangle edge (links are bidirectional, so there is no arrowhead).
+    private func drawEdge(ctx: inout GraphicsContext, fromCenter: CGPoint, toCenter: CGPoint) {
+        // Meet the rectangle boundaries; pull each end a few points off the tile so the line
+        // sits in open space and is never clipped by the node drawn on top.
+        let rawStart = boundaryPoint(from: fromCenter, toward: toCenter)
         let rawEnd = boundaryPoint(from: toCenter, toward: fromCenter)
-        let rawDx = rawEnd.x - start.x, rawDy = rawEnd.y - start.y
+        let rawDx = rawEnd.x - rawStart.x, rawDy = rawEnd.y - rawStart.y
         let rawLen = max(hypot(rawDx, rawDy), 0.001)
         let ux = rawDx / rawLen, uy = rawDy / rawLen
         let gap: CGFloat = 5
+        let start = CGPoint(x: rawStart.x + ux * gap, y: rawStart.y + uy * gap)
         let end = CGPoint(x: rawEnd.x - ux * gap, y: rawEnd.y - uy * gap)
 
         var line = Path()
         line.move(to: start)
         line.addLine(to: end)
         ctx.stroke(line, with: .color(.cyan.opacity(0.7)), lineWidth: 2)
-
-        // Arrowhead
-        let headLen: CGFloat = 12
-        let angle = atan2(uy, ux)
-        let a1 = angle + .pi * 0.85
-        let a2 = angle - .pi * 0.85
-        var head = Path()
-        head.move(to: end)
-        head.addLine(to: CGPoint(x: end.x + cos(a1) * headLen, y: end.y + sin(a1) * headLen))
-        head.move(to: end)
-        head.addLine(to: CGPoint(x: end.x + cos(a2) * headLen, y: end.y + sin(a2) * headLen))
-        ctx.stroke(head, with: .color(.cyan.opacity(0.9)), lineWidth: 2)
     }
 }
 

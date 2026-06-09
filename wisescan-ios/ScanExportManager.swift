@@ -2,6 +2,123 @@ import Foundation
 import SwiftData
 
 struct ScanExportManager {
+    // Lazily-opened container pointing at the SAME on-disk store the app uses (default
+    // Application Support location, default `ModelConfiguration`, identical Schema —
+    // mirrors AppDelegate.sharedModelContainer). `prepareExport` runs off the main actor
+    // and has no injected ModelContext, so stitching/graph serialization fetches through
+    // this shared store on a @MainActor hop. Cached so we don't reopen the SQLite file per
+    // export. Marked unsafe because ModelContainer is Sendable-by-convention here and this
+    // is only ever assigned once under the @MainActor accessor below.
+    nonisolated(unsafe) private static var cachedContainer: ModelContainer?
+
+    @MainActor
+    private static func exportModelContainer() -> ModelContainer? {
+        if let cachedContainer { return cachedContainer }
+        let schema = Schema([ScanLocation.self, CapturedScan.self, StitchLink.self])
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        guard let container = try? ModelContainer(for: schema, configurations: [config]) else {
+            print("[prepareExport] ✗ could not open model store for stitching export")
+            return nil
+        }
+        cachedContainer = container
+        return container
+    }
+
+    /// Holder for the two serialized export artifacts. `Data` is Sendable, so this can cross
+    /// the actor boundary back to whatever queue `prepareExport` runs on. Either field is nil
+    /// when there is nothing to write (no location, no incident links, or no component).
+    private struct StitchExportArtifacts: Sendable {
+        var stitching: Data?
+        var graph: Data?
+    }
+
+    /// Resolves the `ScanLocation` for the given id and builds the JSON `Data` for both
+    /// serialized artifacts. Runs on the main actor because SwiftData models, `StitchLinkStore`
+    /// and `StitchGraphBuilder.build` are all @MainActor; the returned `Data` is handed back to
+    /// the (off-main) caller for file writing.
+    @MainActor
+    private static func makeStitchExportArtifacts(forLocationId locationId: UUID) async -> StitchExportArtifacts {
+        guard let container = exportModelContainer() else { return StitchExportArtifacts() }
+        let context = ModelContext(container)
+        let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locationId })
+        guard let location = try? context.fetch(descriptor).first else { return StitchExportArtifacts() }
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+
+        var artifacts = StitchExportArtifacts()
+
+        // A1: per-location stitching.json generated from the DB (every incident link, both
+        // directions). Skip entirely when the location has no links.
+        let manifest = StitchLinkStore.manifest(forLocation: location)
+        if !manifest.links.isEmpty {
+            artifacts.stitching = try? encoder.encode(manifest)
+        }
+
+        // A2: graph.json — the connected component this location belongs to.
+        if let aggregate = await buildGraphAggregate(for: location, in: context) {
+            artifacts.graph = try? encoder.encode(aggregate)
+        }
+
+        return artifacts
+    }
+
+    // MARK: Graph aggregate (graph.json)
+
+    /// Wire shape for `graph.json`: the whole connected map (nodes + dedup'd links) so the
+    /// backend can ingest a linked cluster from one file. Local to export — the per-link
+    /// payload reuses the canonical `StitchingLink` DTO.
+    private struct GraphAggregateNode: Encodable {
+        let locationId: UUID
+        let name: String
+        let scanIds: [UUID]
+    }
+    private struct GraphAggregate: Encodable {
+        let version: Int
+        let nodes: [GraphAggregateNode]
+        let links: [StitchingLink]
+    }
+
+    /// Builds the full stitch graph, finds the connected component containing `location`, and
+    /// assembles the `graph.json` aggregate (nodes + de-duped link DTOs). Returns nil if the
+    /// location is in no component (i.e. participates in no links).
+    @MainActor
+    private static func buildGraphAggregate(for location: ScanLocation,
+                                            in context: ModelContext) async -> GraphAggregate? {
+        // Need every location so cross-location links resolve both endpoints.
+        guard let allLocations = try? context.fetch(FetchDescriptor<ScanLocation>()) else { return nil }
+        let graph = await StitchGraphBuilder.build(from: allLocations)
+
+        // Find the component this location sits in; bail if it's isolated (no links).
+        guard let component = graph.components.first(where: { $0.contains(location.id) }) else { return nil }
+        let componentSet = Set(component)
+        let nodesById = graph.nodesById
+
+        // Nodes: one per location in the component, with the scans an incident link references.
+        let nodes: [GraphAggregateNode] = component.compactMap { locId in
+            guard let node = nodesById[locId] else { return nil }
+            return GraphAggregateNode(
+                locationId: locId,
+                name: node.location.name,
+                scanIds: node.scanIds.sorted { $0.uuidString < $1.uuidString }
+            )
+        }
+
+        // Links: every edge whose endpoints are both inside this component, mapped to the wire
+        // DTO and de-duped by link id (an edge appears once per StitchLink already, but guard).
+        var seen = Set<UUID>()
+        let links: [StitchingLink] = graph.edges
+            .filter { componentSet.contains($0.from) && componentSet.contains($0.to) }
+            .compactMap { edge in
+                guard seen.insert(edge.link.id).inserted else { return nil }
+                return edge.link.asDTO()
+            }
+
+        guard !links.isEmpty else { return nil }
+        return GraphAggregate(version: 1, nodes: nodes, links: links)
+    }
+
     // swiftlint:disable:next function_body_length cyclomatic_complexity
     static func prepareExport(filename: String, scanDir: URL, format: ExportFormat) -> URL? {
         let fm = FileManager.default
@@ -89,29 +206,40 @@ struct ScanExportManager {
                 }
                 stagePolycamPayload(to: stagingDir)
 
-                // Include stitching.json from the location directory if it exists.
-                // Resolve the location directory canonically via StitchingMetadataManager
-                // instead of relying on parent-path arithmetic on scanDir.
-                // scanDir layout: Documents/Scans/{locationId}/{scanId}/
+                // Generate stitching.json (and the graph.json aggregate) FROM the DB rather
+                // than copying the now-legacy on-disk file. Links live in SwiftData, so we
+                // fetch the location and build the manifest on the main actor (everything
+                // there is @MainActor), then write the resulting Data here. scanDir layout is
+                // Documents/Scans/{locationId}/{scanId}/, so the parent dir name is the id.
                 let locationDirName = scanDir.deletingLastPathComponent().lastPathComponent
-                let stitchingURL: URL? = {
-                    if let locId = UUID(uuidString: locationDirName),
-                       let locDir = StitchingMetadataManager.locationDirectory(for: locId) {
-                        return StitchingMetadataManager.url(forLocationDir: locDir)
+                if let locationId = UUID(uuidString: locationDirName) {
+                    // prepareExport is a synchronous function called from a background queue, so
+                    // block on the async @MainActor build with a semaphore. Data is Sendable.
+                    let semaphore = DispatchSemaphore(value: 0)
+                    nonisolated(unsafe) var captured = StitchExportArtifacts()
+                    Task { @MainActor in
+                        captured = await makeStitchExportArtifacts(forLocationId: locationId)
+                        semaphore.signal()
                     }
-                    // Fallback: parent directory (preserves behavior if path format changes)
-                    return scanDir.deletingLastPathComponent()
-                        .appendingPathComponent(StitchingMetadataManager.filename)
-                }()
-                if let stitchingURL, fm.fileExists(atPath: stitchingURL.path) {
-                    let destURL = stagingDir.appendingPathComponent(StitchingMetadataManager.filename)
-                    do {
-                        // Remove existing destination if present (copyItem fails on overwrite)
-                        try? fm.removeItem(at: destURL)
-                        try fm.copyItem(at: stitchingURL, to: destURL)
-                        print("[prepareExport] ✓ included stitching.json")
-                    } catch {
-                        print("[prepareExport] ✗ failed to copy stitching.json: \(error.localizedDescription)")
+                    semaphore.wait()
+
+                    if let stitchingData = captured.stitching {
+                        let destURL = stagingDir.appendingPathComponent(StitchingMetadataManager.filename)
+                        do {
+                            try stitchingData.write(to: destURL, options: .atomic)
+                            print("[prepareExport] ✓ generated stitching.json")
+                        } catch {
+                            print("[prepareExport] ✗ failed to write stitching.json: \(error.localizedDescription)")
+                        }
+                    }
+                    if let graphData = captured.graph {
+                        let destURL = stagingDir.appendingPathComponent("graph.json")
+                        do {
+                            try graphData.write(to: destURL, options: .atomic)
+                            print("[prepareExport] ✓ generated graph.json")
+                        } catch {
+                            print("[prepareExport] ✗ failed to write graph.json: \(error.localizedDescription)")
+                        }
                     }
                 }
 
