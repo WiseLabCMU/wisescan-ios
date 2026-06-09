@@ -376,6 +376,10 @@ struct LocationDetailView: View {
 
     private func bulkDelete() {
         let scansToDelete = location.scans.filter { selectedScans.contains($0.id) }
+        // Determine if the location will be empty BEFORE mutating — SwiftData's inverse
+        // relationship array isn't updated until save(), so checking .isEmpty after delete()
+        // would incorrectly report non-empty.
+        let willBeEmpty = scansToDelete.count >= location.scans.count
         // Capture file URLs on main (SwiftData model access must stay on the context's thread).
         // Delete the records + save once on main (fast, in-memory), then remove the scan
         // directories (images/depth/cameras — the slow part) OFF main so bulk delete of many
@@ -388,8 +392,7 @@ struct LocationDetailView: View {
         selectedScans.removeAll()
         isEditing = false
 
-        let emptyAfter = location.scans.isEmpty
-        if emptyAfter {
+        if willBeEmpty {
             modelContext.delete(location)
         }
         try? modelContext.save()
@@ -398,7 +401,7 @@ struct LocationDetailView: View {
             for dir in dirs { try? FileManager.default.removeItem(at: dir) }
         }
 
-        if emptyAfter { dismiss() }
+        if willBeEmpty { dismiss() }
     }
 
     private func bulkSaveToFiles(scans: [CapturedScan]) {
