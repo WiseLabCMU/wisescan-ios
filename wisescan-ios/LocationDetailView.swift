@@ -22,7 +22,8 @@ struct LocationDetailView: View {
     @State private var bulkColoringMessages: [PersistentIdentifier: String] = [:]
 
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
-    @AppStorage(AppConstants.Key.selectedExportFormat) private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
+    @AppStorage(AppConstants.Key.selectedExportFormat) 
+    private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @State private var isBulkExporting = false
     @State private var exportItems: [ZipExportItem] = []
     @State private var showExportSheet = false
@@ -246,7 +247,8 @@ struct LocationDetailView: View {
                             WorkflowCard(
                                 icon: "arrow.triangle.2.circlepath.camera.fill",
                                 title: "Quick Mesh",
-                                description: "Fast photogrammetry pipeline optimized for immediate preview. Lower resolution textures.",
+                                description: "Fast photogrammetry pipeline optimized for immediate preview. " +
+                                             "Lower resolution textures.",
                                 time: "~5 mins",
                                 buttonText: "Run Workflow",
                                 isPrimary: true,
@@ -256,7 +258,8 @@ struct LocationDetailView: View {
                             WorkflowCard(
                                 icon: "camera.macro",
                                 title: "Gaussian Splat",
-                                description: "High-fidelity radiance field reconstruction for photo-realistic novel view synthesis.",
+                                description: "High-fidelity radiance field reconstruction for " +
+                                             "photo-realistic novel view synthesis.",
                                 time: "~25 mins",
                                 buttonText: "Run Workflow",
                                 isDisabled: true
@@ -265,7 +268,9 @@ struct LocationDetailView: View {
                             WorkflowCard(
                                 icon: "map.fill",
                                 title: "Spatial Indexing",
-                                description: "OpenFLAME spatial indexing with automatic semantic labelling. Identifies and tags objects, surfaces, and regions for spatial queries and AR anchoring.",
+                                description: "OpenFLAME spatial indexing with automatic semantic labelling. " +
+                                             "Identifies and tags objects, surfaces, and regions for " +
+                                             "spatial queries and AR anchoring.",
                                 time: "~10 mins",
                                 buttonText: "Run Workflow",
                                 isDisabled: true
@@ -279,7 +284,7 @@ struct LocationDetailView: View {
                     Spacer().frame(height: 100)
                 }
             }
-            
+
             if isEditing {
                 VStack {
                     Spacer()
@@ -345,7 +350,9 @@ struct LocationDetailView: View {
         .alert("World Map Missing", isPresented: $showNoWorldMapAlert) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("The relocalization world map for this scan is missing, so it can't be rescanned or linked to an adjacent space — both relocalize against the saved world map. Capture a new scan of this space to create one.")
+            Text("The relocalization world map for this scan is missing, so it can't be rescanned " +
+                 "or linked to an adjacent space — both relocalize against the saved world map. " +
+                 "Capture a new scan of this space to create one.")
         }
         .confirmationDialog(
             "Delete Scans",
@@ -404,7 +411,9 @@ struct LocationDetailView: View {
             for scan in scans {
                 DispatchQueue.main.async { scan.uploadStatus = .zipping }
                 let filename = scan.makeExportFilename(format: format)
-                if let url = ScanExportManager.prepareExport(filename: filename, scanDir: scan.scanDirectory, format: format) {
+                if let url = ScanExportManager.prepareExport(
+                    filename: filename, scanDir: scan.scanDirectory, format: format
+                ) {
                     urls.append(ZipExportItem(url: url))
                     DispatchQueue.main.async { scan.uploadStatus = .savedLocally }
                 } else {
@@ -431,7 +440,9 @@ struct LocationDetailView: View {
 
             DispatchQueue.global(qos: .userInitiated).async {
                 let filename = scan.makeExportFilename(format: format)
-                guard let exportURL = ScanExportManager.prepareExport(filename: filename, scanDir: scan.scanDirectory, format: format) else {
+                guard let exportURL = ScanExportManager.prepareExport(
+                    filename: filename, scanDir: scan.scanDirectory, format: format
+                ) else {
                     DispatchQueue.main.async { scan.uploadStatus = .failed("Export failed") }
                     return
                 }
@@ -447,7 +458,8 @@ struct LocationDetailView: View {
                     DispatchQueue.main.async {
                         if let error = error {
                             scan.uploadStatus = .failed(error.localizedDescription)
-                        } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
+                        } else if let httpResponse = response as? HTTPURLResponse, 
+                                  (200...299).contains(httpResponse.statusCode) {
                             scan.uploadStatus = .success
                         } else {
                             scan.uploadStatus = .failed("Server error")
@@ -475,7 +487,7 @@ struct LocationDetailView: View {
                     .cornerRadius(10)
             }
             .disabled(selectedScans.isEmpty)
-            
+
             Button(action: {
                 let scansToUpload = sortedScans.filter { selectedScans.contains($0.id) }
                 bulkUpload(scans: scansToUpload)
@@ -491,7 +503,7 @@ struct LocationDetailView: View {
                     .cornerRadius(10)
             }
             .disabled(selectedScans.isEmpty || uploadURL.isEmpty)
-            
+
             Button(action: {
                 let scansToSave = sortedScans.filter { selectedScans.contains($0.id) }
                 bulkSaveToFiles(scans: scansToSave)
@@ -502,12 +514,13 @@ struct LocationDetailView: View {
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
-                    .background(selectedScans.isEmpty || isBulkExporting ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
+                    .background(selectedScans.isEmpty || isBulkExporting ? 
+                                Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
                     .foregroundColor(selectedScans.isEmpty || isBulkExporting ? .gray : .white)
                     .cornerRadius(10)
             }
             .disabled(selectedScans.isEmpty || isBulkExporting)
-            
+
             Button(action: {
                 let scansToColor = sortedScans.filter { selectedScans.contains($0.id) && !$0.isColored }
                 bulkColorize(scans: scansToColor)
@@ -566,7 +579,9 @@ struct LocationDetailView: View {
                 }
 
                 let pose = scan.location?.imagingPoseMatrix
-                if let img = MeshPreviewView.generateSnapshot(meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL, poseMatrix: pose),
+                if let img = MeshPreviewView.generateSnapshot(
+                    meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL, poseMatrix: pose
+                ),
                    let data = img.jpegData(compressionQuality: 0.8) {
                     try? data.write(to: scan.modelPreviewURL)
                 }
@@ -629,7 +644,8 @@ struct WorkflowCard: View {
                             .font(.caption).bold()
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(isDisabled ? Color.gray.opacity(0.3) : (isPrimary ? Color.blue : Color.white.opacity(0.2)))
+                            .background(isDisabled ? Color.gray.opacity(0.3) : 
+                                        (isPrimary ? Color.blue : Color.white.opacity(0.2)))
                             .foregroundColor(isDisabled ? .gray : .white)
                             .cornerRadius(8)
                     }
@@ -656,10 +672,16 @@ struct WorkflowCard: View {
     let ctx = container.mainContext
     let sampleLocation = ScanLocation(name: "Sample Location")
     ctx.insert(sampleLocation)
-    
-    let scan1 = CapturedScan(name: "Morning Scan", capturedAt: Date().addingTimeInterval(-3600), vertexCount: 1500, faceCount: 2000)
-    let scan2 = CapturedScan(name: "Afternoon Scan", capturedAt: Date().addingTimeInterval(-86400 * 3), vertexCount: 4200, faceCount: 8100)
-    let scan3 = CapturedScan(name: "Evening Scan", capturedAt: Date().addingTimeInterval(-86400 * 45), vertexCount: 9800, faceCount: 19200)
+
+    let scan1 = CapturedScan(
+        name: "Morning Scan", capturedAt: Date().addingTimeInterval(-3600), 
+        vertexCount: 1500, faceCount: 2000)
+    let scan2 = CapturedScan(
+        name: "Afternoon Scan", capturedAt: Date().addingTimeInterval(-86400 * 3), 
+        vertexCount: 4200, faceCount: 8100)
+    let scan3 = CapturedScan(
+        name: "Evening Scan", capturedAt: Date().addingTimeInterval(-86400 * 45), 
+        vertexCount: 9800, faceCount: 19200)
     ctx.insert(scan1)
     ctx.insert(scan2)
     ctx.insert(scan3)

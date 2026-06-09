@@ -14,17 +14,20 @@ struct UserGuideView: View {
                         icon: "1.circle.fill",
                         title: "Capture",
                         text: "Point your device at a scene. Toggle Privacy Filter to exclude people from the scan. " +
-                              "Tap the capture button to start recording — the mesh overlay shows scanning progress in real-time."
+                              "Tap the capture button to start recording — " +
+                              "the mesh overlay shows scanning progress in real-time."
                     )
                     guideRow(
                         icon: "2.circle.fill",
                         title: "Name & Save",
-                        text: "Tap stop when done. Name your space to save it. Your scan appears on the Workflows tab under its specific Location."
+                        text: "Tap stop when done. Name your space to save it. " +
+                              "Your scan appears on the Workflows tab under its specific Location."
                     )
                     guideRow(
                         icon: "3.circle.fill",
                         title: "Rescan Space / Connect Adjacent Space",
-                        text: "Tap 'Rescan Space' on any location to re-scan the identical area over time — a red ghost overlay shows your previous scan for reference. " +
+                        text: "Tap 'Rescan Space' on any location to re-scan the identical area over time " +
+                              "— a red ghost overlay shows your previous scan for reference. " +
                               "Tap 'Connect Adjacent Space' to scan a neighboring room: relocalize with your " +
                               "previous scan, walk to where the new connector should be, " +
                               "and confirm to place the connector and start scanning the new space."
@@ -32,7 +35,8 @@ struct UserGuideView: View {
                     guideRow(
                         icon: "4.circle.fill",
                         title: "Choose Format",
-                        text: "Select an export format (Scan4D, Polycam, OBJ, PLY, USDZ, or RAW) using the format picker on each scan card."
+                        text: "Select an export format (Scan4D, Polycam, OBJ, PLY, USDZ, or RAW) " +
+                              "using the format picker on each scan card."
                     )
                     guideRow(
                         icon: "5.circle.fill",
@@ -48,19 +52,24 @@ struct UserGuideView: View {
                 Section {
                     formatRow(
                         format: "Scan4D",
-                        desc: "Default format. Includes scan4d_metadata, relocalization worldmap, plus the full Polycam raw import payload (images, depth, cameras, mesh_info). Zip archive."
+                        desc: "Default format. Includes scan4d_metadata, relocalization worldmap, " +
+                              "plus the full Polycam raw import payload " +
+                              "(images, depth, cameras, mesh_info). Zip archive."
                     )
                     formatRow(
                         format: "Polycam",
-                        desc: "Polycam raw data import only: RGB images, depth maps, per-frame camera JSONs (cameras/), and mesh_info.json. Zip archive."
+                        desc: "Polycam raw data import only: RGB images, depth maps, per-frame camera JSONs " +
+                              "(cameras/), and mesh_info.json. Zip archive."
                     )
                     formatRow(
                         format: "RAW",
-                        desc: "Nerfstudio-compatible bundle: RGB images, 16-bit depth maps, and camera poses (transforms.json). Use for NeRF/3DGS reconstruction."
+                        desc: "Nerfstudio-compatible bundle: RGB images, 16-bit depth maps, " +
+                              "and camera poses (transforms.json). Use for NeRF/3DGS reconstruction."
                     )
                     formatRow(
                         format: "USDZ",
-                        desc: "Apple's 3D format converted from on-device mesh via ModelIO. Opens natively on iPhone/iPad with Quick Look."
+                        desc: "Apple's 3D format converted from on-device mesh via ModelIO. " +
+                              "Opens natively on iPhone/iPad with Quick Look."
                     )
                     formatRow(
                         format: "PLY",
@@ -68,7 +77,8 @@ struct UserGuideView: View {
                     )
                     formatRow(
                         format: "OBJ",
-                        desc: "Wavefront 3D mesh file. Universal format supported by almost all 3D software. No vertex colors."
+                        desc: "Wavefront 3D mesh file. Universal format supported by almost all " +
+                              "3D software. No vertex colors."
                     )
                 } header: {
                     Text("EXPORT FORMATS")
@@ -78,12 +88,14 @@ struct UserGuideView: View {
                 // MARK: - Supported Wearables
                 Section {
                     appRow(name: "Meta Ray-Ban Smart Glasses", icon: "eyeglasses", color: .indigo,
-                           desc: "Stream proxy frames directly from your Meta Ray-Bans via the Device Access Toolkit (DAT).",
+                           desc: "Stream proxy frames directly from your Meta Ray-Bans " +
+                                 "via the Device Access Toolkit (DAT).",
                            appStore: nil, website: "https://developers.meta.com/wearables")
                 } header: {
                     Text("SUPPORTED WEARABLES")
                 } footer: {
-                    Text("Follow the Meta Wearables developer documentation to enable developer mode and pair your smart glasses.")
+                    Text("Follow the Meta Wearables developer documentation to enable developer mode " +
+                         "and pair your smart glasses.")
                         .font(.caption2)
                         .foregroundColor(.gray)
                 }
@@ -112,7 +124,9 @@ struct UserGuideView: View {
                 } header: {
                     Text("RECOMMENDED VIEWERS")
                 } footer: {
-                    Text("USDZ files can be previewed directly in the Files app. For OBJ/PLY, install MeshLab or Polycam. RAW exports are designed for desktop processing with Nerfstudio or COLMAP.")
+                    Text("USDZ files can be previewed directly in the Files app. For OBJ/PLY, " +
+                         "install MeshLab or Polycam. RAW exports are designed " +
+                         "for desktop processing with Nerfstudio or COLMAP.")
                         .font(.caption2)
                         .foregroundColor(.gray)
                 }

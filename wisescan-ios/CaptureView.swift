@@ -20,8 +20,8 @@ struct CaptureView: View {
     // Stream mode removed — fixed to Capture (Stream is a future feature)
     // NOTE: capture/recording state is `internal` (not private) because the recording, alignment,
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
-    @State var currentARSession: ARSession? = nil
-    @State var saveMessage: String? = nil
+    @State var currentARSession: ARSession?
+    @State var saveMessage: String?
     /// Mesh vertex count captured at record-start. The "move to start the live mesh" cue is shown
     /// until enough NEW vertices appear; a baseline makes it fire in relocalized ghost/stitch flows
     /// where `totalVertices` already starts high (would otherwise never cross an absolute threshold).
@@ -33,9 +33,9 @@ struct CaptureView: View {
     // Battery: pauses ARCoverageView's session after the capture tab has been hidden for
     // AppConstants.arIdleTeardownSeconds; resumed on return. Rapid successive scans stay warm.
     @State private var pauseARSession = false
-    @State private var idleTeardownTimer: Timer? = nil
+    @State private var idleTeardownTimer: Timer?
     @State var recordingSeconds = 0
-    @State var recordingTimer: Timer? = nil
+    @State var recordingTimer: Timer?
     @State var frameCaptureSession = FrameCaptureSession()
     // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
     @State private var mainThreadWatchdog = MainThreadWatchdog()
@@ -43,15 +43,15 @@ struct CaptureView: View {
     @AppStorage(AppConstants.Key.rawOverlapMax) var overlapMax: Double = AppConstants.overlapMax
     @AppStorage(AppConstants.Key.rawRejectBlur) var rejectBlur: Bool = AppConstants.rejectBlur
     @Binding var selectedTab: Int
-    var initialWorldMapURL: URL? = nil // Support for Scan4D anchoring
+    var initialWorldMapURL: URL? // Support for Scan4D anchoring
 
     // Scan4D properties
     @State var showNamePrompt = false
     @State var newLocationName = ""
-    @State var pendingScan: PendingScanData? = nil
+    @State var pendingScan: PendingScanData?
     @State var isProcessingMesh = false
     @State var isWaitingToSave = false
-    @State var cachedGhostMeshData: Data? = nil
+    @State var cachedGhostMeshData: Data?
     @State private var isARSessionReady = false
     @State var messageVersion = 0
     @State var hapticGenerator = UIImpactFeedbackGenerator(style: .medium)
@@ -64,7 +64,7 @@ struct CaptureView: View {
     @State var isConfirmingAlignment = false // Re-entry guard for confirmAlignment double-tap
 
     @State private var showSettings = false
-    @State private var activeLocationName: String? = nil
+    @State private var activeLocationName: String?
     // Ghost-mesh manual "nudger" (from main) — coexists with our anchor-based AlignmentOverlayView.
     // The sliders adjust the ghost overlay; startRecording bakes the offset into the ARKit world
     // origin (bakedGhostTransform → ARCoverageView.setWorldOrigin) so the captured mesh and the
@@ -74,7 +74,7 @@ struct CaptureView: View {
     @State var ghostXOffset: Float = 0
     @State var ghostZOffset: Float = 0
     @State private var dismissGhostMesh = false
-    @State var bakedGhostTransform: simd_float4x4? = nil
+    @State var bakedGhostTransform: simd_float4x4?
     @State private var showRelocDialog = false
     @State var showManualAdjust = false
 
@@ -175,7 +175,9 @@ struct CaptureView: View {
 
             VStack(spacing: 12) {
                 if isRecording, let warning = frameCaptureSession.blurWarningReason {
-                    Text(warning == .fastMotion ? "⚠️ Slow down — moving too fast" : "⚠️ Hold steady — regaining tracking")
+                    Text(warning == .fastMotion ? 
+                         "⚠️ Slow down — moving too fast" : 
+                         "⚠️ Hold steady — regaining tracking")
                         .font(.headline)
                         .foregroundColor(.white)
                         .padding(.horizontal, 20)
@@ -205,7 +207,9 @@ struct CaptureView: View {
 
                 let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
                 let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
-                if isRecording && needsLiveMeshCue && scanStats.trackingStatus != .limited(reason: .relocalizing) && !frameCaptureSession.isBlurWarningActive {
+                if isRecording && needsLiveMeshCue && 
+                   scanStats.trackingStatus != .limited(reason: .relocalizing) && 
+                   !frameCaptureSession.isBlurWarningActive {
                     Text("📷 Move the camera to start the live mesh")
                         .font(.headline)
                         .foregroundColor(.white)
@@ -329,7 +333,7 @@ struct CaptureView: View {
                         .cornerRadius(16)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
-                
+
                 // Wearable PiP Overlay and Status Warnings
                 let wearableManager = MetaWearableManager.shared
                 if let firstDevice = wearableManager.connectedDevices.first {
@@ -434,7 +438,9 @@ struct CaptureView: View {
                 // Capacity Warning Banner (above HUD, only during recording)
                 if isRecording && scanStats.isNearCapacity {
                     HStack(spacing: 8) {
-                        Image(systemName: scanStats.isAtCapacity ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
+                        Image(systemName: scanStats.isAtCapacity ? 
+                              "exclamationmark.octagon.fill" : 
+                              "exclamationmark.triangle.fill")
                             .foregroundColor(.white)
                         Text(scanStats.isAtCapacity
                              ? "Session at capacity — save now to avoid quality loss"
@@ -840,7 +846,10 @@ struct CaptureView: View {
             // processing (the worldmap export still needs the live session). Returning to capture
             // cancels this (see onAppear). One-shot; rapid successive scans return before it fires.
             idleTeardownTimer?.invalidate()
-            idleTeardownTimer = Timer.scheduledTimer(withTimeInterval: AppConstants.arIdleTeardownSeconds, repeats: false) { _ in
+            idleTeardownTimer = Timer.scheduledTimer(
+                withTimeInterval: AppConstants.arIdleTeardownSeconds, 
+                repeats: false
+            ) { _ in
                 // Don't pause mid-recording or during the post-scan processing/save window — the
                 // world-map export + save still need the live session. isProcessingScan is currently
                 // unused by the capture path, so gate on the flags this pipeline actually maintains:
@@ -883,10 +892,10 @@ struct CaptureView: View {
         }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
-            Button("Save", action: { 
+            Button("Save", action: {
                 if isProcessingMesh {
                     isWaitingToSave = true
-                    saveMessage = "Adding location details..." 
+                    saveMessage = "Adding location details..."
                 } else {
                     savePendingScan()
                 }
@@ -943,7 +952,8 @@ struct CaptureView: View {
     }
 
     // Recording / save / stitching methods are organized into extension files:
-    //   CaptureView+Recording.swift  — toggleRecording, startRecording, stopRecording, performStopRecording, savePendingScan, etc.
+    // CaptureView+Recording.swift  — toggleRecording, startRecording, stopRecording, 
+    // performStopRecording, savePendingScan, etc.
     //   CaptureView+Extend.swift     — pinAndExtend (Flow A: mid-session extend)
     //   CaptureView+Alignment.swift  — confirmAlignment, cancelAlignment (Flow B: cross-session alignment)
 
@@ -1001,7 +1011,8 @@ struct CaptureView: View {
             // Nothing usable was captured (tracking lost almost immediately) — don't offer a save.
             alert = UIAlertController(
                 title: "Tracking Lost",
-                message: "AR tracking was lost before any usable data was captured, so nothing was saved. Reposition and rescan when ready.",
+                message: "AR tracking was lost before any usable data was captured, " +
+                         "so nothing was saved. Reposition and rescan when ready.",
                 preferredStyle: .alert
             )
             alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in
@@ -1013,7 +1024,8 @@ struct CaptureView: View {
         // "Keep Scanning") is already up, dismiss it first so a scan that lost tracking can only
         // be saved as-is or discarded, never extended with post-loss frames.
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let rootVC = (windowScene.windows.first(where: { $0.isKeyWindow }) ?? windowScene.windows.first)?.rootViewController {
+           let rootVC = (windowScene.windows.first(where: { $0.isKeyWindow }) ?? 
+                         windowScene.windows.first)?.rootViewController {
             if let presented = rootVC.presentedViewController {
                 presented.dismiss(animated: false) { rootVC.present(alert, animated: true) }
             } else {
@@ -1028,7 +1040,8 @@ struct CaptureView: View {
     @discardableResult
     func presentTopAlert(_ alert: UIAlertController) -> Bool {
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let root = (scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first)?.rootViewController else {
+              let root = (scene.windows.first(where: { $0.isKeyWindow }) ?? 
+                          scene.windows.first)?.rootViewController else {
             return false
         }
         var top: UIViewController = root
@@ -1057,28 +1070,28 @@ struct OctahedronIcon: View {
             let right = CGPoint(x: w * 0.925, y: h * 0.47)
             let front = CGPoint(x: w * 0.61, y: h * 0.61)
             let back = CGPoint(x: w * 0.39, y: h * 0.39)
-            
+
             // Outline
             path.move(to: top)
             path.addLine(to: right)
             path.addLine(to: bottom)
             path.addLine(to: left)
             path.closeSubpath()
-            
+
             // Front edges
             path.move(to: top)
             path.addLine(to: front)
             path.addLine(to: bottom)
-            
+
             path.move(to: left)
             path.addLine(to: front)
             path.addLine(to: right)
-            
+
             // Back edges (wireframe)
             path.move(to: top)
             path.addLine(to: back)
             path.addLine(to: bottom)
-            
+
             path.move(to: left)
             path.addLine(to: back)
             path.addLine(to: right)
