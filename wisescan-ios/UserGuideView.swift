@@ -192,18 +192,18 @@ struct UserGuideView: View {
                     .foregroundColor(.gray)
                 HStack(spacing: 12) {
                     if let appStore = appStore, let url = URL(string: appStore) {
-                        Button(action: { UIApplication.shared.open(url) }) {
+                        Button(action: { UIApplication.shared.open(url) }, label: {
                             Label("App Store", systemImage: "arrow.down.app")
                                 .font(.caption2)
                                 .foregroundColor(.cyan)
-                        }
+                        })
                     }
                     if let website = website, let url = URL(string: website) {
-                        Button(action: { UIApplication.shared.open(url) }) {
+                        Button(action: { UIApplication.shared.open(url) }, label: {
                             Label("Website", systemImage: "safari")
                                 .font(.caption2)
                                 .foregroundColor(.cyan)
-                        }
+                        })
                     }
                 }
                 .padding(.top, 2)

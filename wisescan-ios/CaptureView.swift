@@ -175,8 +175,8 @@ struct CaptureView: View {
 
             VStack(spacing: 12) {
                 if isRecording, let warning = frameCaptureSession.blurWarningReason {
-                    Text(warning == .fastMotion ? 
-                         "⚠️ Slow down — moving too fast" : 
+                    Text(warning == .fastMotion ?
+                         "⚠️ Slow down — moving too fast" :
                          "⚠️ Hold steady — regaining tracking")
                         .font(.headline)
                         .foregroundColor(.white)
@@ -207,8 +207,8 @@ struct CaptureView: View {
 
                 let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
                 let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
-                if isRecording && needsLiveMeshCue && 
-                   scanStats.trackingStatus != .limited(reason: .relocalizing) && 
+                if isRecording && needsLiveMeshCue &&
+                   scanStats.trackingStatus != .limited(reason: .relocalizing) &&
                    !frameCaptureSession.isBlurWarningActive {
                     Text("📷 Move the camera to start the live mesh")
                         .font(.headline)
@@ -261,11 +261,11 @@ struct CaptureView: View {
                                 .foregroundColor(.white.opacity(0.8))
                         }
                         Spacer()
-                        Button(action: { showExtendPrompt = false }) {
+                        Button(action: { showExtendPrompt = false }, label: {
                             Image(systemName: "xmark.circle.fill")
                                 .font(.title2)
                                 .foregroundColor(.white.opacity(0.6))
-                        }
+                        })
                     }
                     .padding()
                     .background(Color.indigo.opacity(0.9))
@@ -309,14 +309,14 @@ struct CaptureView: View {
                         .background(Color.red.opacity(0.3))
                         .cornerRadius(20)
                     } else {
-                        Button(action: { showSettings = true }) {
+                        Button(action: { showSettings = true }, label: {
                             Image(systemName: "gearshape.fill")
                                 .font(.title3)
                                 .foregroundColor(.white)
                                 .padding(10)
                                 .background(.ultraThinMaterial)
                                 .clipShape(Circle())
-                        }
+                        })
                     }
 
                 }
@@ -354,7 +354,7 @@ struct CaptureView: View {
                             if wearableManager.deviceUpdateRequired {
                                 Button(action: {
                                     wearableManager.openFirmwareUpdate()
-                                }) {
+                                }, label: {
                                     HStack(spacing: 6) {
                                         Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
                                         Text("Device update needed — tap to open Meta App")
@@ -365,7 +365,7 @@ struct CaptureView: View {
                                     .padding(.vertical, 6)
                                     .background(Color.orange.opacity(0.8))
                                     .cornerRadius(8)
-                                }
+                                })
                                 .padding(.trailing, AppConstants.UI.pipPaddingX)
                             }
 
@@ -379,7 +379,7 @@ struct CaptureView: View {
                                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                                             wearableManager.startStreaming()
                                         }
-                                    }) {
+                                    }, label: {
                                         HStack(spacing: 6) {
                                             Image(systemName: "arrow.clockwise.circle.fill").foregroundColor(.orange)
                                             Text("Connection failed — tap to retry")
@@ -390,7 +390,7 @@ struct CaptureView: View {
                                         .padding(.vertical, 6)
                                         .background(Color.orange.opacity(0.7))
                                         .cornerRadius(8)
-                                    }
+                                    })
                                     .padding(.trailing, AppConstants.UI.pipPaddingX)
                                 } else {
                                     HStack(spacing: 6) {
@@ -438,8 +438,8 @@ struct CaptureView: View {
                 // Capacity Warning Banner (above HUD, only during recording)
                 if isRecording && scanStats.isNearCapacity {
                     HStack(spacing: 8) {
-                        Image(systemName: scanStats.isAtCapacity ? 
-                              "exclamationmark.octagon.fill" : 
+                        Image(systemName: scanStats.isAtCapacity ?
+                              "exclamationmark.octagon.fill" :
                               "exclamationmark.triangle.fill")
                             .foregroundColor(.white)
                         Text(scanStats.isAtCapacity
@@ -458,7 +458,7 @@ struct CaptureView: View {
 
                 // Pin & Extend Button — available during any recording session
                 if isRecording && scanStore.capturePhase == .recording && scanStats.hasEnoughFeaturesForRelocalization {
-                    Button(action: { pinAndExtend() }) {
+                    Button(action: { pinAndExtend() }, label: {
                         HStack(spacing: 8) {
                             Image(systemName: "mappin.and.ellipse")
                                 .font(.title3)
@@ -471,7 +471,7 @@ struct CaptureView: View {
                         .background(Color.orange.opacity(0.85))
                         .cornerRadius(20)
                         .shadow(radius: 5)
-                    }
+                    })
                     .padding(.horizontal)
                 }
 
@@ -548,7 +548,7 @@ struct CaptureView: View {
                         }
 
                         // Capture Button
-                        Button(action: { toggleRecording() }) {
+                        Button(action: { toggleRecording() }, label: {
                             ZStack {
                                 Circle()
                                     .fill(.ultraThinMaterial)
@@ -577,7 +577,7 @@ struct CaptureView: View {
                                         .offset(y: 50)
                                 }
                             }
-                        }
+                        })
                         .offset(y: isRecording ? -20 : 0)
                     }
                 }
@@ -623,7 +623,7 @@ struct CaptureView: View {
                 VStack {
                     Spacer()
                     HStack {
-                        Button(action: { showRelocDialog = true }) {
+                        Button(action: { showRelocDialog = true }, label: {
                             HStack(spacing: 6) {
                                 OctahedronIcon(color: ghostMeshColor.swiftUIColor)
                                 Text("Ghost Mesh")
@@ -638,7 +638,7 @@ struct CaptureView: View {
                                 RoundedRectangle(cornerRadius: 20)
                                     .stroke(Color.white.opacity(0.3), lineWidth: 1)
                             )
-                        }
+                        })
                         Spacer()
                     }
                     .padding(.leading, 16)
@@ -717,11 +717,11 @@ struct CaptureView: View {
                             ghostYRotation = 0
                             ghostXOffset = 0
                             ghostZOffset = 0
-                        }) {
+                        }, label: {
                             Text("Reset to Default")
                                 .font(.caption)
                                 .foregroundColor(.orange)
-                        }
+                        })
                     }
                     .padding()
                     .background(.ultraThinMaterial)
@@ -847,7 +847,7 @@ struct CaptureView: View {
             // cancels this (see onAppear). One-shot; rapid successive scans return before it fires.
             idleTeardownTimer?.invalidate()
             idleTeardownTimer = Timer.scheduledTimer(
-                withTimeInterval: AppConstants.arIdleTeardownSeconds, 
+                withTimeInterval: AppConstants.arIdleTeardownSeconds,
                 repeats: false
             ) { _ in
                 // Don't pause mid-recording or during the post-scan processing/save window — the
@@ -1024,7 +1024,7 @@ struct CaptureView: View {
         // "Keep Scanning") is already up, dismiss it first so a scan that lost tracking can only
         // be saved as-is or discarded, never extended with post-loss frames.
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let rootVC = (windowScene.windows.first(where: { $0.isKeyWindow }) ?? 
+           let rootVC = (windowScene.windows.first(where: { $0.isKeyWindow }) ??
                          windowScene.windows.first)?.rootViewController {
             if let presented = rootVC.presentedViewController {
                 presented.dismiss(animated: false) { rootVC.present(alert, animated: true) }
@@ -1040,7 +1040,7 @@ struct CaptureView: View {
     @discardableResult
     func presentTopAlert(_ alert: UIAlertController) -> Bool {
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let root = (scene.windows.first(where: { $0.isKeyWindow }) ?? 
+              let root = (scene.windows.first(where: { $0.isKeyWindow }) ??
                           scene.windows.first)?.rootViewController else {
             return false
         }

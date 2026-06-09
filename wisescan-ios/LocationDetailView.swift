@@ -22,7 +22,7 @@ struct LocationDetailView: View {
     @State private var bulkColoringMessages: [PersistentIdentifier: String] = [:]
 
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
-    @AppStorage(AppConstants.Key.selectedExportFormat) 
+    @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @State private var isBulkExporting = false
     @State private var exportItems: [ZipExportItem] = []
@@ -49,22 +49,22 @@ struct LocationDetailView: View {
                                 Button(action: {
                                     newLocationName = location.name
                                     showRenameAlert = true
-                                }) {
+                                }, label: {
                                     HStack {
                                         Image(systemName: "pencil")
                                         Text("Rename Location")
                                     }
-                                    .font(.subheadline)
-                                    .foregroundColor(.orange)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 12)
-                                    .background(Color.orange.opacity(0.1))
-                                    .cornerRadius(12)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 12)
-                                            .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                                    )
-                                }
+                                })
+                                .font(.subheadline)
+                                .foregroundColor(.orange)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(Color.orange.opacity(0.1))
+                                .cornerRadius(12)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                                )
 
                                 Picker("Use Case", selection: Binding(
                                     get: { location.scanCase },
@@ -116,18 +116,18 @@ struct LocationDetailView: View {
                                         scanStore.activeScanToExtend = latestScan.id
                                         scanStore.activeScanCase = .rescanSpace
                                         selectedTab = 1
-                                    }) {
+                                    }, label: {
                                         HStack {
                                             Image(systemName: "plus.viewfinder")
                                             Text("Rescan Space")
                                                 .font(.subheadline).bold()
                                         }
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 14)
-                                        .background(Color.indigo.opacity(0.8))
-                                        .foregroundColor(.white)
-                                        .cornerRadius(12)
-                                    }
+                                    })
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 14)
+                                    .background(Color.indigo.opacity(0.8))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(12)
 
                                     // Link Adjacent Space button
                                     Button(action: {
@@ -143,18 +143,18 @@ struct LocationDetailView: View {
                                         scanStore.activeScanToExtend = latestScan.id
                                         scanStore.activeScanCase = .linkAdjacent
                                         selectedTab = 1
-                                    }) {
+                                    }, label: {
                                         HStack {
                                             Image(systemName: "link.badge.plus")
                                             Text("Connect Adjacent")
                                                 .font(.subheadline).bold()
                                         }
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 14)
-                                        .background(Color.orange.opacity(0.8))
-                                        .foregroundColor(.white)
-                                        .cornerRadius(12)
-                                    }
+                                    })
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 14)
+                                    .background(Color.orange.opacity(0.8))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(12)
                                 }
                             }
 
@@ -303,10 +303,10 @@ struct LocationDetailView: View {
                         } else {
                             selectedScans = Set(location.scans.map { $0.id })
                         }
-                    }) {
+                    }, label: {
                         Text(selectedScans.count == location.scans.count ? "Deselect All" : "Select All")
                             .font(.subheadline)
-                    }
+                    })
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -315,15 +315,15 @@ struct LocationDetailView: View {
                         Button(action: {
                             isEditing.toggle()
                             if !isEditing { selectedScans.removeAll() }
-                        }) {
+                        }, label: {
                             Text(isEditing ? "Done" : "Edit")
                                 .bold(isEditing)
                                 .foregroundColor(isEditing ? .red : .cyan)
-                        }
+                        })
                     }
-                    Button(action: { showSettings = true }) {
+                    Button(action: { showSettings = true }, label: {
                         Image(systemName: "gearshape")
-                    }
+                    })
                     .disabled(isEditing)
                 }
             }
@@ -458,7 +458,7 @@ struct LocationDetailView: View {
                     DispatchQueue.main.async {
                         if let error = error {
                             scan.uploadStatus = .failed(error.localizedDescription)
-                        } else if let httpResponse = response as? HTTPURLResponse, 
+                        } else if let httpResponse = response as? HTTPURLResponse,
                                   (200...299).contains(httpResponse.statusCode) {
                             scan.uploadStatus = .success
                         } else {
@@ -477,7 +477,7 @@ struct LocationDetailView: View {
         HStack(spacing: 20) {
             Button(action: {
                 showBulkDeleteConfirm = true
-            }) {
+            }, label: {
                 Image(systemName: "trash")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
@@ -485,7 +485,7 @@ struct LocationDetailView: View {
                     .background(selectedScans.isEmpty ? Color.gray.opacity(0.3) : Color.red.opacity(0.8))
                     .foregroundColor(selectedScans.isEmpty ? .gray : .white)
                     .cornerRadius(10)
-            }
+            })
             .disabled(selectedScans.isEmpty)
 
             Button(action: {
@@ -493,7 +493,7 @@ struct LocationDetailView: View {
                 bulkUpload(scans: scansToUpload)
                 isEditing = false
                 selectedScans.removeAll()
-            }) {
+            }, label: {
                 Text("Upload")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
@@ -501,7 +501,7 @@ struct LocationDetailView: View {
                     .background(selectedScans.isEmpty || uploadURL.isEmpty ? Color.gray.opacity(0.3) : Color.blue)
                     .foregroundColor(selectedScans.isEmpty || uploadURL.isEmpty ? .gray : .white)
                     .cornerRadius(10)
-            }
+            })
             .disabled(selectedScans.isEmpty || uploadURL.isEmpty)
 
             Button(action: {
@@ -509,22 +509,22 @@ struct LocationDetailView: View {
                 bulkSaveToFiles(scans: scansToSave)
                 isEditing = false
                 selectedScans.removeAll()
-            }) {
+            }, label: {
                 Text("Save")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
-                    .background(selectedScans.isEmpty || isBulkExporting ? 
+                    .background(selectedScans.isEmpty || isBulkExporting ?
                                 Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
                     .foregroundColor(selectedScans.isEmpty || isBulkExporting ? .gray : .white)
                     .cornerRadius(10)
-            }
+            })
             .disabled(selectedScans.isEmpty || isBulkExporting)
 
             Button(action: {
                 let scansToColor = sortedScans.filter { selectedScans.contains($0.id) && !$0.isColored }
                 bulkColorize(scans: scansToColor)
-            }) {
+            }, label: {
                 HStack(spacing: 4) {
                     Image(systemName: "paintbrush.fill")
                     Text("Color")
@@ -535,7 +535,7 @@ struct LocationDetailView: View {
                     .background(bulkColorDisabled ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
                     .foregroundColor(bulkColorDisabled ? .gray : .white)
                     .cornerRadius(10)
-            }
+            })
             .disabled(bulkColorDisabled)
         }
         .padding()
@@ -639,16 +639,16 @@ struct WorkflowCard: View {
 
                     Spacer()
 
-                    Button(action: {}) {
+                    Button(action: {}, label: {
                         Text(buttonText)
                             .font(.caption).bold()
                             .padding(.horizontal, 12)
                             .padding(.vertical, 6)
-                            .background(isDisabled ? Color.gray.opacity(0.3) : 
+                            .background(isDisabled ? Color.gray.opacity(0.3) :
                                         (isPrimary ? Color.blue : Color.white.opacity(0.2)))
                             .foregroundColor(isDisabled ? .gray : .white)
                             .cornerRadius(8)
-                    }
+                    })
                     .disabled(isDisabled)
                 }
                 .padding(.top, 4)
@@ -674,13 +674,13 @@ struct WorkflowCard: View {
     ctx.insert(sampleLocation)
 
     let scan1 = CapturedScan(
-        name: "Morning Scan", capturedAt: Date().addingTimeInterval(-3600), 
+        name: "Morning Scan", capturedAt: Date().addingTimeInterval(-3600),
         vertexCount: 1500, faceCount: 2000)
     let scan2 = CapturedScan(
-        name: "Afternoon Scan", capturedAt: Date().addingTimeInterval(-86400 * 3), 
+        name: "Afternoon Scan", capturedAt: Date().addingTimeInterval(-86400 * 3),
         vertexCount: 4200, faceCount: 8100)
     let scan3 = CapturedScan(
-        name: "Evening Scan", capturedAt: Date().addingTimeInterval(-86400 * 45), 
+        name: "Evening Scan", capturedAt: Date().addingTimeInterval(-86400 * 45),
         vertexCount: 9800, faceCount: 19200)
     ctx.insert(scan1)
     ctx.insert(scan2)
