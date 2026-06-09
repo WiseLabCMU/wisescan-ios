@@ -35,6 +35,17 @@
             parallelizable = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "DD0000000000000000000001"
+               BuildableName = "wisescan-iosTests.xctest"
+               BlueprintName = "wisescan-iosTests"
+               ReferencedContainer = "container:wisescan-ios.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "C994223D2FA29616004526C4"
                BuildableName = "wisescan-iosUITests.xctest"
                BlueprintName = "wisescan-iosUITests"

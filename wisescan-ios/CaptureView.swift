@@ -52,6 +52,11 @@ struct CaptureView: View {
     @State var isProcessingMesh = false
     @State var isWaitingToSave = false
     @State var cachedGhostMeshData: Data?
+    /// Track C — connectors shared by the active location's scans with other maps, in the active
+    /// scans' world frame. Computed here (CaptureView owns the ModelContext) and passed to
+    /// ARCoverageView, which renders one labeled marker per connector when rescanning an existing
+    /// space. Empty unless `activeScanCase == .rescanSpace` with linked scans.
+    @State var connectorAnchors: [ConnectorAnchor] = []
     @State private var isARSessionReady = false
     @State var messageVersion = 0
     @State var hapticGenerator = UIImpactFeedbackGenerator(style: .medium)
@@ -106,6 +111,30 @@ struct CaptureView: View {
         cachedGhostMeshData = try? Data(contentsOf: targetScan.meshFileURL)
     }
 
+    /// Computes the connector anchors for the active location (Track C). Only populated when
+    /// rescanning an existing space: gathers every connector each scan in the location shares with
+    /// other maps via `StitchLinkStore.connectorAnchors(for:)`. ARCoverageView renders these as
+    /// labeled markers once the rescan relocalizes (record-start). Cleared otherwise.
+    private func loadConnectorAnchors() {
+        guard scanStore.activeScanCase == .rescanSpace,
+              let locId = scanStore.activeLocationForScan else {
+            connectorAnchors = []
+            return
+        }
+        let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
+        guard let location = try? modelContext.fetch(descriptor).first else {
+            connectorAnchors = []
+            return
+        }
+        // Safe to aggregate connectors across ALL scans in the location: a location's scans share
+        // one world frame (each rescan relocalizes to the latest scan's map, which itself was
+        // captured by relocalizing to the prior one — a continuous frame chain), so every scan's
+        // `localAnchor` pose is expressed in the same frame we relocalize into here. If rescanning
+        // a NON-latest scan is ever allowed, this invariant breaks and this must filter to the
+        // connectors of the scan actually being relocalized against (`activeScanToExtend`).
+        connectorAnchors = location.scans.flatMap { StitchLinkStore.connectorAnchors(for: $0) }
+    }
+
     var body: some View {
         ZStack {
             // Live ARKit Scene Reconstruction View
@@ -121,6 +150,7 @@ struct CaptureView: View {
                 initialWorldMapURL: scanStore.activeRelocalizationMap,
                 initialGhostMeshData: cachedGhostMeshData,
                 scanStore: scanStore,
+                connectorAnchors: connectorAnchors,
                 ghostYRotation: ghostYRotation,
                 ghostXOffset: ghostXOffset,
                 ghostZOffset: ghostZOffset,
@@ -805,6 +835,10 @@ struct CaptureView: View {
 
             // Load ghost mesh once into @State cache (avoids recomputing on every body eval)
             loadGhostMeshData()
+
+            // Track C — gather connectors for a rescan so ARCoverageView can mark coverage
+            // boundaries once the session relocalizes.
+            loadConnectorAnchors()
 
             // Start GPS/heading updates for scan metadata
             locationManager.startUpdating()

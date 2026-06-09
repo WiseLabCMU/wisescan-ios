@@ -21,6 +21,9 @@ struct ScansListView: View {
     @State private var showSettings = false
     @State private var selectedLocations: Set<PersistentIdentifier> = []
     @State private var showBulkDeleteConfirm = false
+    /// Number of DISTINCT OTHER maps the about-to-be-deleted locations are linked to (computed
+    /// when the user taps delete). > 0 means the cascade will silently remove those spatial links.
+    @State private var bulkDeleteLinkedMapCount = 0
     @State private var isEditing = false
     @State private var viewMode: LibraryViewMode = .grid
     @State private var renderRequest: ComponentRenderRequest?
@@ -186,7 +189,13 @@ struct ScansListView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text(bulkDeleteMessage)
+                if bulkDeleteLinkedMapCount > 0 {
+                    Text("\(bulkDeleteLinkedMapCount == 1 ? "This map is" : "These maps are") linked to " +
+                         "\(bulkDeleteLinkedMapCount) other map\(bulkDeleteLinkedMapCount == 1 ? "" : "s"). " +
+                         "Deleting will remove those spatial links.\n\n" + bulkDeleteMessage)
+                } else {
+                    Text(bulkDeleteMessage)
+                }
             }
             .preferredColorScheme(.dark)
             .overlay {
@@ -242,7 +251,10 @@ struct ScansListView: View {
             // Action buttons: [Trash] [Upload] [Save] [Color]
             HStack(spacing: 20) {
                 // Delete
-                Button(action: { showBulkDeleteConfirm = true }) {
+                Button(action: {
+                    bulkDeleteLinkedMapCount = linkedOtherMapCount(for: selectedLocations)
+                    showBulkDeleteConfirm = true
+                }) {
                     Image(systemName: "trash")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
@@ -366,6 +378,11 @@ struct ScansListView: View {
         case .allScans:
             // Delete entire locations + all scans (original behavior)
             let dirs = selectedLocs.flatMap { $0.scans.map(\.scanDirectory) }
+            // Also remove each location's own directory (Documents/Scans/{locationId}) — it still
+            // holds a legacy stitching.json and would be orphaned once the per-scan subdirs go.
+            // Use the canonical helper rather than deriving the parent from a scan path, so cleanup
+            // doesn't depend on the {locationId}/{scanId} layout and still covers scanless locations.
+            let locationDirs = selectedLocs.compactMap { StitchingMetadataManager.locationDirectory(for: $0.id) }
             for loc in selectedLocs {
                 for scan in loc.scans { modelContext.delete(scan) }
                 modelContext.delete(loc)
@@ -375,6 +392,7 @@ struct ScansListView: View {
             isEditing = false
             DispatchQueue.global(qos: .utility).async {
                 for dir in dirs { try? FileManager.default.removeItem(at: dir) }
+                for dir in locationDirs { try? FileManager.default.removeItem(at: dir) }
             }
 
         case .latest:
@@ -385,7 +403,13 @@ struct ScansListView: View {
                 dirsToRemove.append(latest.scanDirectory)
                 modelContext.delete(latest)
                 if loc.scans.count <= 1 {
-                    // This was the last scan — remove the location too
+                    // This was the last scan — remove the location too, and its now-orphaned
+                    // location directory (legacy stitching.json + empty dir). Resolve via the
+                    // canonical helper (same as the .allScans path) so cleanup doesn't depend on
+                    // scan-path arithmetic.
+                    if let locDir = StitchingMetadataManager.locationDirectory(for: loc.id) {
+                        dirsToRemove.append(locDir)
+                    }
                     modelContext.delete(loc)
                 }
             }
@@ -396,6 +420,24 @@ struct ScansListView: View {
                 for dir in dirsToRemove { try? FileManager.default.removeItem(at: dir) }
             }
         }
+    }
+
+    /// Count of DISTINCT OTHER locations (those NOT being deleted) that the given locations are
+    /// linked to via incident stitch links. Used to warn that deleting them will cascade-remove the
+    /// connections to those maps.
+    private func linkedOtherMapCount(for locationIds: Set<PersistentIdentifier>) -> Int {
+        let toDelete = locations.filter { locationIds.contains($0.id) }
+        let deletedLocationIds = Set(toDelete.map { $0.id })
+        var otherLocationIds = Set<ScanLocation.ID>()
+        for loc in toDelete {
+            for scan in loc.scans {
+                for link in StitchLinkStore.incidentLinks(for: scan) {
+                    guard let otherLoc = link.localAnchor(for: scan)?.otherScan?.location else { continue }
+                    if !deletedLocationIds.contains(otherLoc.id) { otherLocationIds.insert(otherLoc.id) }
+                }
+            }
+        }
+        return otherLocationIds.count
     }
 
     /// Export selected scans to the share sheet. Runs export packaging on a background queue.
@@ -410,31 +452,36 @@ struct ScansListView: View {
 
         bulkProgressMessage = "Preparing 1/\(totalScans)…"
 
-        // Capture scan directories on main (SwiftData model access).
+        // Capture scan directories + the set of locations on main (SwiftData model access).
         let scanInfos = scans.map { (dir: $0.scanDirectory, filename: $0.makeExportFilename(format: format)) }
+        let locationIds = Set(scans.compactMap { $0.location?.id })
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            var urls: [ZipExportItem] = []
-            for (idx, info) in scanInfos.enumerated() {
+        Task { @MainActor in
+            // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
+            let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
+            DispatchQueue.global(qos: .userInitiated).async {
+                var urls: [ZipExportItem] = []
+                for (idx, info) in scanInfos.enumerated() {
+                    DispatchQueue.main.async {
+                        self.bulkProgressMessage = "Preparing \(idx + 1)/\(totalScans)…"
+                    }
+                    if let url = ScanExportManager.prepareExport(
+                        filename: info.filename, scanDir: info.dir, format: format, bulkStitch: bulkStitch
+                    ) {
+                        urls.append(ZipExportItem(url: url))
+                    }
+                }
+
                 DispatchQueue.main.async {
-                    self.bulkProgressMessage = "Preparing \(idx + 1)/\(totalScans)…"
+                    self.bulkProgressMessage = nil
+                    self.exportItems = urls
+                    self.showExportSheet = !urls.isEmpty
+                    if urls.isEmpty {
+                        self.isBulkExporting = false
+                        self.exitEditModeWithBanner("Export failed")
+                    }
+                    // isBulkExporting is cleared + edit mode exits in the share sheet completion handler
                 }
-                if let url = ScanExportManager.prepareExport(
-                    filename: info.filename, scanDir: info.dir, format: format
-                ) {
-                    urls.append(ZipExportItem(url: url))
-                }
-            }
-
-            DispatchQueue.main.async {
-                self.bulkProgressMessage = nil
-                self.exportItems = urls
-                self.showExportSheet = !urls.isEmpty
-                if urls.isEmpty {
-                    self.isBulkExporting = false
-                    self.exitEditModeWithBanner("Export failed")
-                }
-                // isBulkExporting is cleared + edit mode exits in the share sheet completion handler
             }
         }
     }
@@ -453,50 +500,55 @@ struct ScansListView: View {
         selectedLocations.removeAll()
         bulkProgressMessage = "Uploading 0/\(scans.count)…"
 
-        for scan in scans {
-            let filename = scan.makeExportFilename(format: format)
-            guard let url = URL(string: baseURLString + filename) else {
-                bulkUploadCompleted += 1
-                checkBulkUploadCompletion()
-                continue
-            }
-            scan.uploadStatus = .zipping
-            let scanDir = scan.scanDirectory
-
-            DispatchQueue.global(qos: .userInitiated).async {
-                guard let exportURL = ScanExportManager.prepareExport(
-                    filename: filename, scanDir: scanDir, format: format
-                ) else {
-                    DispatchQueue.main.async {
-                        scan.uploadStatus = .failed("Export failed")
-                        self.bulkUploadCompleted += 1
-                        self.checkBulkUploadCompletion()
-                    }
-                    return
+        let locationIds = Set(scans.compactMap { $0.location?.id })
+        Task { @MainActor in
+            // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
+            let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
+            for scan in scans {
+                let filename = scan.makeExportFilename(format: format)
+                guard let url = URL(string: baseURLString + filename) else {
+                    bulkUploadCompleted += 1
+                    checkBulkUploadCompletion()
+                    continue
                 }
+                scan.uploadStatus = .zipping
+                let scanDir = scan.scanDirectory
 
-                DispatchQueue.main.async { scan.uploadStatus = .uploading(progress: 0.0) }
-
-                var request = URLRequest(url: url)
-                request.httpMethod = "PUT"
-                request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
-
-                let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
-                    try? FileManager.default.removeItem(at: exportURL)
-                    DispatchQueue.main.async {
-                        if let error = error {
-                            scan.uploadStatus = .failed(error.localizedDescription)
-                        } else if let httpResponse = response as? HTTPURLResponse,
-                                  (200...299).contains(httpResponse.statusCode) {
-                            scan.uploadStatus = .success
-                        } else {
-                            scan.uploadStatus = .failed("Server error")
+                DispatchQueue.global(qos: .userInitiated).async {
+                    guard let exportURL = ScanExportManager.prepareExport(
+                        filename: filename, scanDir: scanDir, format: format, bulkStitch: bulkStitch
+                    ) else {
+                        DispatchQueue.main.async {
+                            scan.uploadStatus = .failed("Export failed")
+                            self.bulkUploadCompleted += 1
+                            self.checkBulkUploadCompletion()
                         }
-                        self.bulkUploadCompleted += 1
-                        self.checkBulkUploadCompletion()
+                        return
                     }
+
+                    DispatchQueue.main.async { scan.uploadStatus = .uploading(progress: 0.0) }
+
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "PUT"
+                    request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
+
+                    let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
+                        try? FileManager.default.removeItem(at: exportURL)
+                        DispatchQueue.main.async {
+                            if let error = error {
+                                scan.uploadStatus = .failed(error.localizedDescription)
+                            } else if let httpResponse = response as? HTTPURLResponse,
+                                      (200...299).contains(httpResponse.statusCode) {
+                                scan.uploadStatus = .success
+                            } else {
+                                scan.uploadStatus = .failed("Server error")
+                            }
+                            self.bulkUploadCompleted += 1
+                            self.checkBulkUploadCompletion()
+                        }
+                    }
+                    task.resume()
                 }
-                task.resume()
             }
         }
     }

@@ -20,11 +20,19 @@
 			remoteGlobalIDString = C93B8BCD2F568A6F00785D6B;
 			remoteInfo = "wisescan-ios";
 		};
+		DD0000000000000000000007 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C93B8BC62F568A6F00785D6B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = C93B8BCD2F568A6F00785D6B;
+			remoteInfo = "wisescan-ios";
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		C93B8BCE2F568A6F00785D6B /* wisescan-ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "wisescan-ios.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C994223E2FA29616004526C4 /* wisescan-iosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "wisescan-iosUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		DD0000000000000000000002 /* wisescan-iosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "wisescan-iosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -36,6 +44,11 @@
 		C994223F2FA29616004526C4 /* wisescan-iosUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = "wisescan-iosUITests";
+			sourceTree = "<group>";
+		};
+		DD0000000000000000000003 /* wisescan-iosTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "wisescan-iosTests";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -58,6 +71,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		DD0000000000000000000005 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -66,6 +86,7 @@
 			children = (
 				C93B8BD02F568A6F00785D6B /* wisescan-ios */,
 				C994223F2FA29616004526C4 /* wisescan-iosUITests */,
+				DD0000000000000000000003 /* wisescan-iosTests */,
 				C93B8BCF2F568A6F00785D6B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -75,6 +96,7 @@
 			children = (
 				C93B8BCE2F568A6F00785D6B /* wisescan-ios.app */,
 				C994223E2FA29616004526C4 /* wisescan-iosUITests.xctest */,
+				DD0000000000000000000002 /* wisescan-iosTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -131,6 +153,29 @@
 			productReference = C994223E2FA29616004526C4 /* wisescan-iosUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		DD0000000000000000000001 /* wisescan-iosTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DD0000000000000000000011 /* Build configuration list for PBXNativeTarget "wisescan-iosTests" */;
+			buildPhases = (
+				DD0000000000000000000004 /* Sources */,
+				DD0000000000000000000005 /* Frameworks */,
+				DD0000000000000000000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				DD0000000000000000000008 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				DD0000000000000000000003 /* wisescan-iosTests */,
+			);
+			name = "wisescan-iosTests";
+			packageProductDependencies = (
+			);
+			productName = "wisescan-iosTests";
+			productReference = DD0000000000000000000002 /* wisescan-iosTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -145,6 +190,10 @@
 						CreatedOnToolsVersion = 26.3;
 					};
 					C994223D2FA29616004526C4 = {
+						CreatedOnToolsVersion = 26.4.1;
+						TestTargetID = C93B8BCD2F568A6F00785D6B;
+					};
+					DD0000000000000000000001 = {
 						CreatedOnToolsVersion = 26.4.1;
 						TestTargetID = C93B8BCD2F568A6F00785D6B;
 					};
@@ -169,6 +218,7 @@
 			targets = (
 				C93B8BCD2F568A6F00785D6B /* wisescan-ios */,
 				C994223D2FA29616004526C4 /* wisescan-iosUITests */,
+				DD0000000000000000000001 /* wisescan-iosTests */,
 			);
 		};
 /* End PBXProject section */
@@ -182,6 +232,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		C994223C2FA29616004526C4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DD0000000000000000000006 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -227,6 +284,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		DD0000000000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -234,6 +298,11 @@
 			isa = PBXTargetDependency;
 			target = C93B8BCD2F568A6F00785D6B /* wisescan-ios */;
 			targetProxy = C99422442FA29616004526C4 /* PBXContainerItemProxy */;
+		};
+		DD0000000000000000000008 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = C93B8BCD2F568A6F00785D6B /* wisescan-ios */;
+			targetProxy = DD0000000000000000000007 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -481,6 +550,50 @@
 			};
 			name = Release;
 		};
+		DD0000000000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 4;
+				DEVELOPMENT_TEAM = 24D5JLAEA3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.wisescan-iosTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/wisescan-ios.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/wisescan-ios";
+			};
+			name = Debug;
+		};
+		DD0000000000000000000010 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 4;
+				DEVELOPMENT_TEAM = 24D5JLAEA3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.wisescan-iosTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/wisescan-ios.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/wisescan-ios";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -507,6 +620,15 @@
 			buildConfigurations = (
 				C99422462FA29616004526C4 /* Debug */,
 				C99422472FA29616004526C4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		DD0000000000000000000011 /* Build configuration list for PBXNativeTarget "wisescan-iosTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DD0000000000000000000009 /* Debug */,
+				DD0000000000000000000010 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

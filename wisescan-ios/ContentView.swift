@@ -44,6 +44,13 @@ struct ContentView: View {
                 showLiDARWarning = true
             }
         }
+        .task {
+            // One-time import of legacy stitching.json files into SwiftData. Runs after the
+            // synchronous seedIfNeeded in onAppear (so endpoint scans exist) since this task body
+            // only begins executing after appear. Idempotent + UserDefaults-guarded + re-entrancy
+            // guarded, so it's a safe no-op on every launch after the first.
+            await StitchLinkStore.migrateFromFilesIfNeeded(context: modelContext)
+        }
         .alert("Lite Mode — No LiDAR", isPresented: $showLiDARWarning) {
             Button("Got it", role: .cancel) {}
         } message: {
