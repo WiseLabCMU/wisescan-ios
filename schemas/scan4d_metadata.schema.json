@@ -70,6 +70,15 @@
         },
         "required": ["x", "y", "z"]
       }
+    },
+    "semantic_labeling": {
+      "type": "boolean",
+      "description": "Whether ARKit mesh classification was enabled during this capture."
+    },
+    "semantic_classes_detected": {
+      "type": "array",
+      "description": "List of semantic class names detected during capture (e.g., wall, floor, table).",
+      "items": { "type": "string" }
     }
   },
   "required": [
