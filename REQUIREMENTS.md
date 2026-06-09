@@ -413,6 +413,17 @@ sequenceDiagram
 | REQ-025 | VR Capture Mode | ✅ **Implemented** — see REQ-025 below | — |
 | REQ-026 | Orientation Locking | ✅ **Implemented** — see REQ-026 below | — |
 | REQ-027 | Capture Performance, Session Lifecycle & VIO Integrity | ✅ **Implemented** — see REQ-027 below | — |
+| REQ-028 | Semantic Labeling | ✅ **Implemented** — see REQ-028 below | — |
+
+---
+
+### REQ-028: Semantic Labeling
+| | |
+|:--|:--|
+| **Status** | ✅ Complete |
+| **Description** | ARKit `ARMeshClassification` support for live visualization and data export of per-face semantic labels (wall, floor, ceiling, table, seat, door, window). **(1) AR/VR live rendering:** axis-aligned bounding-box wireframe outlines per classified region, rendered as opaque `UnlitMaterial` (no `CustomMaterial` — incompatible with ARKit video compositing). Outlines use **global coalescing with greedy overlap-merge**: per-anchor boxes within a per-class distance threshold are merged into a single box (0.3m for large surfaces like walls/floor/ceiling, 0.15m for discrete objects like seats/tables/doors). This produces one box per spatially-distinct instance (e.g., two separate chairs remain two boxes, adjacent wall anchors merge into one). **(2) Export:** `semantics.json` sidecar with per-anchor, per-face classification indices + OBJ face groups (`g wall`, `g floor`, etc.) in the mesh. Metadata includes `semantic_labeling` flag and `semantic_classes_detected` array. **(3) 3D Preview:** `MeshPreviewView` parses `semantics.json`, reconstructs per-class bounding boxes from OBJ vertices + per-face labels, runs the same overlap-merge, and renders SceneKit `.line` wireframe boxes. Toggle via toolbar button + color legend overlay. **(4) HUD:** compact colored-dot row showing detected classes during recording. **(5) Configuration:** always-on when LiDAR is available; Developer Mode kill-switch toggle. Throttled at 500ms (matches wireframe rebuild). All RealityKit object creation is main-thread only. |
+| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `.meshWithClassification` config, `buildClassificationOutlines`, `scheduleGlobalClassificationRebuild` · [AppConstants.swift](wisescan-ios/AppConstants.swift) — `SemanticClass` enum with color palette + merge thresholds · [SemanticsExporter.swift](wisescan-ios/SemanticsExporter.swift) — `semantics.json` writer · [MeshPreviewView.swift](wisescan-ios/MeshPreviewView.swift) — preview outlines + legend · [CaptureView.swift](wisescan-ios/CaptureView.swift) — HUD class dots · [SettingsView.swift](wisescan-ios/SettingsView.swift) — Developer Mode toggle · [ScanExportManager.swift](wisescan-ios/ScanExportManager.swift) — Scan4D ZIP inclusion |
+| **Notes** | ARKit provides per-face semantic labels only — no instance segmentation. Separate instances of the same class are distinguished via spatial clustering (greedy AABB overlap-merge). |
 
 ---
 
