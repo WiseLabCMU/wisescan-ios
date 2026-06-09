@@ -115,6 +115,17 @@ struct ScanExportManager {
                     }
                 }
 
+                // Include semantics.json if classification data was captured
+                let semanticsURL = scanDir.appendingPathComponent("semantics.json")
+                if fm.fileExists(atPath: semanticsURL.path) {
+                    do {
+                        try fm.copyItem(at: semanticsURL, to: stagingDir.appendingPathComponent("semantics.json"))
+                        print("[prepareExport] ✓ included semantics.json")
+                    } catch {
+                        print("[prepareExport] ✗ failed to copy semantics.json: \(error.localizedDescription)")
+                    }
+                }
+
                 return zipStaging(stagingDir)
             }
 

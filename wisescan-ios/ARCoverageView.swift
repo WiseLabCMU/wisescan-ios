@@ -248,7 +248,15 @@ struct ARCoverageView: UIViewRepresentable {
                 // Upgrade to full scene reconstruction — preserve world map for coordinate continuity
                 let config = ARWorldTrackingConfiguration()
                 if Self.supportsLiDAR {
-                    config.sceneReconstruction = .mesh
+                    // Use .meshWithClassification for semantic labeling when available and not
+                    // disabled via Developer Mode kill-switch. Same LiDAR requirement as .mesh.
+                    let semanticEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
+                    if semanticEnabled,
+                       ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
+                        config.sceneReconstruction = .meshWithClassification
+                    } else {
+                        config.sceneReconstruction = .mesh
+                    }
                 }
                 config.environmentTexturing = .automatic
                 // Preserve the relocalized coordinate system by keeping the world map
@@ -451,6 +459,19 @@ struct ARCoverageView: UIViewRepresentable {
         /// Minimum interval between wireframe rebuilds for the same anchor (seconds).
         private let wireframeThrottleInterval: TimeInterval = 0.5
 
+        // Semantic Classification outline properties
+        /// Per-anchor class bounds accumulated on the delegate queue. Merged into global
+        /// per-class bounding boxes before rendering. Keyed by anchor UUID.
+        private var anchorClassBounds: [UUID: [SemanticClass: (min: SIMD3<Float>, max: SIMD3<Float>)]] = [:]
+        /// Single global classification entity (replaces per-anchor entities to avoid overlapping outlines).
+        private var globalClassificationEntity: AnchorEntity?
+        /// Throttle: last time global classification outlines were rebuilt.
+        private var lastGlobalClassificationTime: Date = .distantPast
+        /// Whether a global classification rebuild is already pending (prevents duplicate dispatches).
+        private var classificationRebuildPending = false
+        /// Accumulated set of detected semantic classes (published to ScanStats for HUD).
+        private var detectedSemanticClasses: Set<String> = []
+
         // Coverage Overlay: 3D occlusion-based negative rendering
         /// The green background quad entity (far plane). Mesh occlusion punches holes.
         private var coverageGreenQuadAnchor: AnchorEntity?
@@ -478,6 +499,10 @@ struct ARCoverageView: UIViewRepresentable {
                 self.anchorVertexCounts.removeAll()
                 self.anchorFaceCounts.removeAll()
                 self.lastAnchorWireframeTime.removeAll()
+                self.anchorClassBounds.removeAll()
+                self.lastGlobalClassificationTime = .distantPast
+                self.classificationRebuildPending = false
+                self.detectedSemanticClasses.removeAll()
                 self.trackingDegradationCount = 0
                 self.totalTrackingUpdates = 0
                 self.sessionStartTime = Date()
@@ -489,8 +514,10 @@ struct ARCoverageView: UIViewRepresentable {
             }
             // Clear any stale wireframe entities from a previous recording (RealityKit → main)
             removeAllActiveMeshEntities()
+            removeAllClassificationEntities()
 
             scanStats?.hasBoundaryAnchor = false
+            scanStats?.detectedClasses.removeAll()
 
             // Remove boundary anchor visual from the scene — prevents stale marker
             // from appearing at wrong position after session/coordinate-frame reset.
@@ -510,6 +537,10 @@ struct ARCoverageView: UIViewRepresentable {
                 self.anchorVertexCounts.removeAll()
                 self.anchorFaceCounts.removeAll()
                 self.lastAnchorWireframeTime.removeAll()
+                self.anchorClassBounds.removeAll()
+                self.lastGlobalClassificationTime = .distantPast
+                self.classificationRebuildPending = false
+                self.detectedSemanticClasses.removeAll()
                 self.trackingDegradationCount = 0
                 self.totalTrackingUpdates = 0
                 self.vioGuardArmed = false
@@ -518,6 +549,7 @@ struct ARCoverageView: UIViewRepresentable {
 
             // Remove all active mesh wireframe entities from the scene (RealityKit → main)
             removeAllActiveMeshEntities()
+            removeAllClassificationEntities()
 
             // Remove boundary anchor visual from the scene
             if let existing = boundaryAnchorEntity {
@@ -538,6 +570,7 @@ struct ARCoverageView: UIViewRepresentable {
                 self?.scanStats?.driftEstimate = 0
                 self?.scanStats?.averageQuality = 0
                 self?.scanStats?.trackingStatus = .notAvailable
+                self?.scanStats?.detectedClasses.removeAll()
             }
         }
 
@@ -690,6 +723,236 @@ struct ARCoverageView: UIViewRepresentable {
                     }
                 }
             }
+        }
+
+        // MARK: - Semantic Classification Outlines
+
+        /// Removes the global classification outline entity from the AR scene.
+        private func removeAllClassificationEntities() {
+            globalClassificationEntity?.removeFromParent()
+            globalClassificationEntity = nil
+        }
+
+        /// Extracts per-face classification bounds from a single ARMeshAnchor and stores them.
+        /// Does minimal work on the delegate queue: reads classification IDs + vertex positions
+        /// for min/max expansion only. Schedules a coalesced global rebuild if throttle allows.
+        private func buildClassificationOutlines(_ meshAnchor: ARMeshAnchor) {
+            let anchorId = meshAnchor.identifier
+            let geometry = meshAnchor.geometry
+            let vertices = geometry.vertices
+            let faces = geometry.faces
+            let anchorTransform = meshAnchor.transform
+
+            // Classification buffer is optional — nil if .mesh (not .meshWithClassification)
+            guard let classificationSource = geometry.classification else { return }
+            guard faces.bytesPerIndex == 4, faces.indexCountPerPrimitive == 3 else { return }
+
+            // Transform vertices to world space
+            var worldPositions = [SIMD3<Float>]()
+            worldPositions.reserveCapacity(vertices.count)
+            for idx in 0..<vertices.count {
+                let ptr = vertices.buffer.contents().advanced(by: idx * vertices.stride)
+                let local = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
+                let worldPos = anchorTransform * SIMD4<Float>(local.x, local.y, local.z, 1.0)
+                worldPositions.append(SIMD3<Float>(worldPos.x, worldPos.y, worldPos.z))
+            }
+
+            // Read per-face classification and compute per-class bounding boxes for this anchor
+            var classBounds: [SemanticClass: (min: SIMD3<Float>, max: SIMD3<Float>)] = [:]
+            let vertexCount = worldPositions.count
+            let faceStride = faces.bytesPerIndex * faces.indexCountPerPrimitive
+
+            for faceIdx in 0..<faces.count {
+                let classPtr = classificationSource.buffer.contents()
+                    .advanced(by: faceIdx * classificationSource.stride)
+                let classValue = classPtr.assumingMemoryBound(to: UInt8.self).pointee
+                let arkitClass = ARMeshClassification(rawValue: Int(classValue)) ?? .none
+                let semanticClass = SemanticClass.from(arkitClass)
+                guard semanticClass != .none else { continue }
+
+                let facePtr = faces.buffer.contents().advanced(by: faceIdx * faceStride)
+                let indices = facePtr.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
+                guard Int(indices.0) < vertexCount, Int(indices.1) < vertexCount, Int(indices.2) < vertexCount else { continue }
+
+                for idx in [Int(indices.0), Int(indices.1), Int(indices.2)] {
+                    let vtx = worldPositions[idx]
+                    if var existing = classBounds[semanticClass] {
+                        existing.min = simd_min(existing.min, vtx)
+                        existing.max = simd_max(existing.max, vtx)
+                        classBounds[semanticClass] = existing
+                    } else {
+                        classBounds[semanticClass] = (min: vtx, max: vtx)
+                    }
+                }
+
+                detectedSemanticClasses.insert(semanticClass.rawValue)
+            }
+            // ── ARMeshAnchor buffers are no longer accessed past this point ──
+
+            // Store this anchor's bounds (overwrite previous version)
+            anchorClassBounds[anchorId] = classBounds.isEmpty ? nil : classBounds
+
+            // Schedule a coalesced global rebuild (skip if one is already pending or throttled)
+            scheduleGlobalClassificationRebuild()
+        }
+
+        /// Removes an anchor's stored classification bounds and schedules a global rebuild.
+        private func removeClassificationForAnchor(_ anchorId: UUID) {
+            anchorClassBounds.removeValue(forKey: anchorId)
+            scheduleGlobalClassificationRebuild()
+        }
+
+        /// Schedules a single coalesced rebuild of global classification outlines.
+        /// Collects per-anchor bounds, runs greedy overlap-merge per class (using per-class
+        /// mergeThreshold), builds wireframe geometry on a background queue, and creates
+        /// RealityKit entities on main.
+        private func scheduleGlobalClassificationRebuild() {
+            // Throttle: skip if rebuilt too recently
+            guard Date().timeIntervalSince(lastGlobalClassificationTime) >= AppConstants.semanticThrottleInterval else { return }
+            // De-duplicate: skip if a rebuild is already in flight
+            guard !classificationRebuildPending else { return }
+
+            classificationRebuildPending = true
+            lastGlobalClassificationTime = Date()
+
+            // Collect all per-anchor boxes grouped by class
+            var boxesByClass: [SemanticClass: [(min: SIMD3<Float>, max: SIMD3<Float>)]] = [:]
+            for (_, perClass) in anchorClassBounds {
+                for (cls, bounds) in perClass {
+                    boxesByClass[cls, default: []].append(bounds)
+                }
+            }
+
+            // Greedy overlap-merge: for each class, merge boxes whose gap < mergeThreshold.
+            // Repeat until no more merges occur. O(n²) per class but n is typically <20.
+            var mergedBounds: [(semanticClass: SemanticClass, min: SIMD3<Float>, max: SIMD3<Float>)] = []
+            for (cls, var boxes) in boxesByClass {
+                let threshold = cls.mergeThreshold
+                var merged = true
+                while merged {
+                    merged = false
+                    outer: for idxA in 0..<boxes.count {
+                        for idxB in (idxA + 1)..<boxes.count {
+                            // Check if the gap between boxes is within threshold on all axes.
+                            // Gap = max(0, separation on each axis). If any axis gap > threshold, skip.
+                            let gap = SIMD3<Float>(
+                                max(0, boxes[idxA].min.x - boxes[idxB].max.x),
+                                max(0, boxes[idxA].min.y - boxes[idxB].max.y),
+                                max(0, boxes[idxA].min.z - boxes[idxB].max.z)
+                            )
+                            let gapReverse = SIMD3<Float>(
+                                max(0, boxes[idxB].min.x - boxes[idxA].max.x),
+                                max(0, boxes[idxB].min.y - boxes[idxA].max.y),
+                                max(0, boxes[idxB].min.z - boxes[idxA].max.z)
+                            )
+                            let maxGap = simd_max(gap, gapReverse)
+                            if maxGap.x <= threshold && maxGap.y <= threshold && maxGap.z <= threshold {
+                                // Merge: union of both boxes, remove the two originals, add merged
+                                let unionMin = simd_min(boxes[idxA].min, boxes[idxB].min)
+                                let unionMax = simd_max(boxes[idxA].max, boxes[idxB].max)
+                                boxes.remove(at: idxB)
+                                boxes.remove(at: idxA)
+                                boxes.append((min: unionMin, max: unionMax))
+                                merged = true
+                                break outer
+                            }
+                        }
+                    }
+                }
+                for box in boxes {
+                    mergedBounds.append((semanticClass: cls, min: box.min, max: box.max))
+                }
+            }
+
+            let classesForHUD = detectedSemanticClasses
+
+            guard !mergedBounds.isEmpty else {
+                classificationRebuildPending = false
+                DispatchQueue.main.async { [weak self] in
+                    self?.scanStats?.detectedClasses = classesForHUD
+                }
+                return
+            }
+
+            // Build MeshDescriptor geometry on a background queue (pure data, no RealityKit objects).
+            // ALL RealityKit object creation (UnlitMaterial, MeshResource, ModelEntity) MUST happen
+            // on the main thread — creating them off-main causes EXC_BREAKPOINT crashes.
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                var classDescriptors: [(semanticClass: SemanticClass, descriptors: [MeshDescriptor])] = []
+
+                for entry in mergedBounds {
+                    let edges = Self.buildBoundingBoxEdges(min: entry.min, max: entry.max, thickness: 0.003)
+                    guard !edges.isEmpty else { continue }
+                    classDescriptors.append((semanticClass: entry.semanticClass, descriptors: edges))
+                }
+
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self, let arView = self.arView, self.isRecording else {
+                        self?.classificationRebuildPending = false
+                        return
+                    }
+
+                    // Remove old global entity
+                    self.globalClassificationEntity?.removeFromParent()
+
+                    let anchorEntity = AnchorEntity(world: .zero)
+                    for entry in classDescriptors {
+                        let color = entry.semanticClass.color
+                        let material = UnlitMaterial(color: UIColor(
+                            red: CGFloat(color.x), green: CGFloat(color.y),
+                            blue: CGFloat(color.z), alpha: 1.0
+                        ))
+                        for desc in entry.descriptors {
+                            if let mesh = try? MeshResource.generate(from: [desc]) {
+                                anchorEntity.addChild(ModelEntity(mesh: mesh, materials: [material]))
+                            }
+                        }
+                    }
+                    arView.scene.addAnchor(anchorEntity)
+                    self.globalClassificationEntity = anchorEntity
+                    self.scanStats?.detectedClasses = classesForHUD
+
+                    // Allow next rebuild
+                    self.sessionDelegateQueue.async {
+                        self.classificationRebuildPending = false
+                    }
+                }
+            }
+        }
+
+        /// Builds 12-edge wireframe box geometry from min/max corners.
+        private static func buildBoundingBoxEdges(
+            min minCorner: SIMD3<Float>,
+            max maxCorner: SIMD3<Float>,
+            thickness: Float
+        ) -> [MeshDescriptor] {
+            let size = maxCorner - minCorner
+            // Skip degenerate boxes (too small to be meaningful)
+            guard size.x > 0.01, size.y > 0.01, size.z > 0.01 else { return [] }
+
+            // 8 corners of the AABB
+            let corners: [SIMD3<Float>] = [
+                SIMD3<Float>(minCorner.x, minCorner.y, minCorner.z),
+                SIMD3<Float>(maxCorner.x, minCorner.y, minCorner.z),
+                SIMD3<Float>(maxCorner.x, maxCorner.y, minCorner.z),
+                SIMD3<Float>(minCorner.x, maxCorner.y, minCorner.z),
+                SIMD3<Float>(minCorner.x, minCorner.y, maxCorner.z),
+                SIMD3<Float>(maxCorner.x, minCorner.y, maxCorner.z),
+                SIMD3<Float>(maxCorner.x, maxCorner.y, maxCorner.z),
+                SIMD3<Float>(minCorner.x, maxCorner.y, maxCorner.z)
+            ]
+
+            // 12 edges (pairs of corner indices)
+            let edgePairs: [(Int, Int)] = [
+                (0, 1), (1, 2), (2, 3), (3, 0), // bottom face
+                (4, 5), (5, 6), (6, 7), (7, 4), // top face
+                (0, 4), (1, 5), (2, 6), (3, 7)  // vertical edges
+            ]
+
+            return MeshParser.buildWireframeDescriptors(
+                edges: edgePairs.map { (corners[$0.0], corners[$0.1]) },
+                thickness: thickness
+            )
         }
 
         // MARK: - Coverage Overlay (3D Occlusion)
@@ -1008,6 +1271,7 @@ struct ARCoverageView: UIViewRepresentable {
                     anchorVertexCounts[mesh.identifier] = mesh.geometry.vertices.count
                     anchorFaceCounts[mesh.identifier] = mesh.geometry.faces.count
                     buildWireframeForAnchor(mesh)
+                    buildClassificationOutlines(mesh)
                 }
             }
             updateStats(in: session)
@@ -1038,6 +1302,7 @@ struct ARCoverageView: UIViewRepresentable {
                     anchorVertexCounts[mesh.identifier] = mesh.geometry.vertices.count
                     anchorFaceCounts[mesh.identifier] = mesh.geometry.faces.count
                     buildWireframeForAnchor(mesh)
+                    buildClassificationOutlines(mesh)
                 }
             }
             updateStats(in: session)
@@ -1052,9 +1317,9 @@ struct ARCoverageView: UIViewRepresentable {
                     anchorVertexCounts.removeValue(forKey: id)
                     anchorFaceCounts.removeValue(forKey: id)
                     lastAnchorWireframeTime.removeValue(forKey: id)
+                    removeClassificationForAnchor(id)
 
-                    // Remove the wireframe entity on main — `activeMeshEntities` + RealityKit are
-                    // main-only (also touched by buildWireframeForAnchor's main block, recolor, reset).
+                    // Remove the wireframe entity on main — RealityKit is main-only.
                     DispatchQueue.main.async { [weak self] in
                         if let entry = self?.activeMeshEntities.removeValue(forKey: id) {
                             entry.anchor.removeFromParent()
@@ -1077,10 +1342,14 @@ struct ARCoverageView: UIViewRepresentable {
             // totals and anchor counts after the entities are gone (e.g. switching into VR capture).
             sessionDelegateQueue.async { [weak self] in
                 self?.lastAnchorWireframeTime.removeAll()
+                self?.anchorClassBounds.removeAll()
+                self?.lastGlobalClassificationTime = .distantPast
+                self?.classificationRebuildPending = false
                 self?.anchorUpdateCounts.removeAll()
                 self?.anchorVertexCounts.removeAll()
                 self?.anchorFaceCounts.removeAll()
             }
+            removeAllClassificationEntities()
         }
 
         private func updateStats(in session: ARSession) {
@@ -1174,7 +1443,16 @@ struct ARCoverageView: UIViewRepresentable {
 
     // MARK: - Export
 
-    static func exportMeshOBJ(from currentFrame: ARFrame?, privacyFilter: Bool = false) -> (data: Data, vertexCount: Int, faceCount: Int)? {
+    /// Result of a mesh export including optional semantic classification data.
+    struct MeshExportResult {
+        let data: Data
+        let vertexCount: Int
+        let faceCount: Int
+        let semantics: SemanticsData?
+    }
+
+    // swiftlint:disable:next function_body_length
+    static func exportMeshOBJ(from currentFrame: ARFrame?, privacyFilter: Bool = false) -> MeshExportResult? {
         guard let currentFrame = currentFrame else { return nil }
 
         // Get person segmentation for privacy filtering
@@ -1207,6 +1485,11 @@ struct ARCoverageView: UIViewRepresentable {
         var vertexOffset = 1
         var totalVertices = 0
         var totalFaces = 0
+
+        // Semantic classification tracking
+        var anchorSemanticsList: [AnchorSemantics] = []
+        var allDetectedClasses = Set<String>()
+        var hasAnyClassification = false
 
         for anchor in currentFrame.anchors {
             guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
@@ -1249,9 +1532,40 @@ struct ARCoverageView: UIViewRepresentable {
                 continue
             }
 
+            // Read classification buffer if available
+            let classificationSource = geometry.classification
+            let hasClassification = classificationSource != nil
+            if hasClassification { hasAnyClassification = true }
+            var perFaceClassifications: [Int] = []
+            if hasClassification {
+                perFaceClassifications.reserveCapacity(faces.count)
+            }
+            var currentGroupName: String?
+
             for faceIdx in 0..<faces.count {
                 let pointer = faces.buffer.contents().advanced(by: faceIdx * faceBytes)
                 let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
+
+                // Read classification for this face
+                if hasClassification, let classSource = classificationSource {
+                    let classPtr = classSource.buffer.contents()
+                        .advanced(by: faceIdx * classSource.stride)
+                    let classValue = classPtr.assumingMemoryBound(to: UInt8.self).pointee
+                    let arkitClass = ARMeshClassification(rawValue: Int(classValue)) ?? .none
+                    let semanticClass = SemanticClass.from(arkitClass)
+                    perFaceClassifications.append(semanticClass.classIndex)
+
+                    if semanticClass != .none {
+                        allDetectedClasses.insert(semanticClass.rawValue)
+                    }
+
+                    // Emit OBJ group statement when classification changes
+                    let groupName = semanticClass.rawValue
+                    if groupName != currentGroupName {
+                        objData.append(contentsOf: "g \(groupName)\n".utf8)
+                        currentGroupName = groupName
+                    }
+                }
 
                 // Skip person faces if privacy filter is on
                 if privacyFilter {
@@ -1270,6 +1584,15 @@ struct ARCoverageView: UIViewRepresentable {
                 totalFaces += 1
             }
 
+            // Accumulate per-anchor semantics
+            if hasClassification {
+                anchorSemanticsList.append(AnchorSemantics(
+                    anchorId: meshAnchor.identifier,
+                    faceCount: faces.count,
+                    classifications: perFaceClassifications
+                ))
+            }
+
             vertexOffset += vertices.count
         }
 
@@ -1278,7 +1601,12 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         guard !objData.isEmpty else { return nil }
-        return (objData, totalVertices, totalFaces)
+
+        let semantics: SemanticsData? = hasAnyClassification
+            ? SemanticsData(anchors: anchorSemanticsList, classesDetected: allDetectedClasses)
+            : nil
+
+        return MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces, semantics: semantics)
     }
 
     /// Returns a fresh ARWorldTrackingConfiguration with no scene reconstruction
@@ -1293,7 +1621,8 @@ struct ARCoverageView: UIViewRepresentable {
     /// that was previously duplicated across multiple call sites.
     ///
     /// - Parameters:
-    ///   - enableMeshReconstruction: When `true`, enables `.mesh` scene reconstruction (requires LiDAR).
+    ///   - enableMeshReconstruction: When `true`, enables `.mesh` (or `.meshWithClassification`
+    ///     if semantic labeling is active) scene reconstruction (requires LiDAR).
     ///   - worldMapURL: Optional URL to an `ARWorldMap` archive for relocalization continuity.
     ///   - enableFrameSemantics: When `true`, adds person segmentation and scene depth semantics.
     /// - Returns: A configured `ARWorldTrackingConfiguration` ready for `session.run()`.
@@ -1304,7 +1633,18 @@ struct ARCoverageView: UIViewRepresentable {
     ) -> ARWorldTrackingConfiguration {
         let config = ARWorldTrackingConfiguration()
         if supportsLiDAR {
-            config.sceneReconstruction = enableMeshReconstruction ? .mesh : []
+            if enableMeshReconstruction {
+                // Prefer .meshWithClassification for semantic labeling when not killed by Developer Mode
+                let semanticEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
+                if semanticEnabled,
+                   ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
+                    config.sceneReconstruction = .meshWithClassification
+                } else {
+                    config.sceneReconstruction = .mesh
+                }
+            } else {
+                config.sceneReconstruction = []
+            }
         }
         config.environmentTexturing = .automatic
         if let mapURL = worldMapURL,

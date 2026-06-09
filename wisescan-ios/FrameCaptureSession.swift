@@ -735,6 +735,10 @@ class FrameCaptureSession {
             metadata["boundary_anchor"] = boundaryDict
         }
 
+        // Semantic labeling: record whether classification was enabled for this session
+        let semanticEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
+        metadata["semantic_labeling"] = semanticEnabled
+
         let jsonPath = directory.appendingPathComponent("scan4d_metadata.json")
         if let jsonData = try? JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted) {
             try? jsonData.write(to: jsonPath)

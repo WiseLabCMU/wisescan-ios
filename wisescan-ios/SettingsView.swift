@@ -21,6 +21,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
+    @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -216,6 +217,7 @@ struct SettingsView: View {
                                     self.mockCameraImages = AppConstants.mockCameraImages
                                     self.mockDepthMaps = AppConstants.mockDepthMaps
                                     self.mockWearable = AppConstants.mockWearable
+                                    self.semanticLabeling = AppConstants.semanticLabeling
                                 }
                             }
                         )) {
@@ -308,6 +310,18 @@ struct SettingsView: View {
                                     Text("Pause VR Compute")
                                         .foregroundColor(.white)
                                     Text("Skips the entire VR GPU pipeline (point-cloud projection, voxel integration, extraction, and bloom) — not just hides it. Isolation test: if the freeze disappears with this on, the GPU pipeline is implicated. Applied per frame in VR capture.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $semanticLabeling) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Semantic Labeling")
+                                        .foregroundColor(.white)
+                                    Text("Enables ARKit mesh classification (wall, floor, ceiling, etc.) and renders colored bounding outlines per class during scanning. Disable to reduce GPU load if classification outlines cause frame drops.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

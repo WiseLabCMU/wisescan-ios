@@ -94,6 +94,7 @@ class CapturedScan {
     @Transient var modelPreviewURL: URL { scanDirectory.appendingPathComponent("model_preview.jpg") }
     @Transient var thumbnailURL: URL { scanDirectory.appendingPathComponent("thumbnail.jpg") }
     @Transient var rawDataPath: URL { scanDirectory.appendingPathComponent("raw_data") }
+    @Transient var semanticsFileURL: URL { scanDirectory.appendingPathComponent("semantics.json") }
 
     @Transient var estimatedSizeMB: Double {
         // Compute dynamically by checking disk if needed, or fallback to an estimate
@@ -363,6 +364,7 @@ class ScanStats {
     var baselineMemoryMB: Double = 0 // Captured at session start
     var driftEstimate: Double = 0 // 0.0 to 1.0
     var mappingStatus: String = "notAvailable" // ARFrame.WorldMappingStatus for cumulative relocalization quality
+    var detectedClasses: Set<String> = [] // Semantic classes detected so far (for HUD display)
 
     // Capacity thresholds (tunable)
     private let maxPolygons: Double = 2_000_000
@@ -485,7 +487,8 @@ class ScanFileManager {
         vertexColors: Data?,
         worldMapURL: URL?,
         thumbnailData: Data? = nil,
-        scanCase: ScanCase = .rescanSpace
+        scanCase: ScanCase = .rescanSpace,
+        semantics: SemanticsData? = nil
     ) -> CapturedScan {
         let targetLocation: ScanLocation
 
@@ -536,6 +539,9 @@ class ScanFileManager {
         }
         if let thumb = thumbnailData {
             do { try thumb.write(to: newScan.thumbnailURL) } catch { print("[ScanFileManager] Failed to write thumbnail: \(error)") }
+        }
+        if let semantics = semantics {
+            SemanticsExporter.writeSemantics(semantics, to: newScan.semanticsFileURL)
         }
 
         // Critical: move raw data directory (images, depth, cameras, metadata)

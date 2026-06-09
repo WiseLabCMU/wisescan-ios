@@ -88,6 +88,7 @@ struct CaptureView: View {
         let worldMapURL: URL?
         let thumbnailData: Data?
         let scanCase: ScanCase
+        let semantics: SemanticsData?
     }
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State.
@@ -499,6 +500,22 @@ struct CaptureView: View {
                                     Label(scanStats.formattedDuration, systemImage: "clock")
                                         .font(.caption2)
                                         .foregroundColor(.white)
+                                }
+
+                                // Row 1.5: Semantic classes detected (colored dots)
+                                if !scanStats.detectedClasses.isEmpty {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "tag.fill")
+                                            .font(.caption2)
+                                            .foregroundColor(.gray)
+                                        ForEach(SemanticClass.allCases.filter { $0 != .none && scanStats.detectedClasses.contains($0.rawValue) },
+                                                id: \.rawValue) { cls in
+                                            Circle()
+                                                .fill(cls.swiftUIDisplayColor)
+                                                .frame(width: 8, height: 8)
+                                        }
+                                        Spacer()
+                                    }
                                 }
 
                                 // Row 2: Capacity bar

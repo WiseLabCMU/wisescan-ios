@@ -211,6 +211,44 @@ enum MeshParser {
         return descriptors
     }
 
+    /// Builds wireframe geometry descriptors from explicit edge pairs (start, end positions).
+    /// Used for bounding box outlines where edges are known (not derived from triangles).
+    static func buildWireframeDescriptors(
+        edges: [(SIMD3<Float>, SIMD3<Float>)],
+        thickness: Float
+    ) -> [MeshDescriptor] {
+        guard !edges.isEmpty else { return [] }
+        let halfT = thickness * 0.5
+        var positions = [SIMD3<Float>]()
+        positions.reserveCapacity(edges.count * 4)
+        var indices = [UInt32]()
+        indices.reserveCapacity(edges.count * 6)
+        var idx: UInt32 = 0
+
+        for (p0, p1) in edges {
+            let dir = p1 - p0
+            let len = simd_length(dir)
+            guard len > 1e-8 else { continue }
+
+            let up = SIMD3<Float>(0, 1, 0)
+            var perp = simd_cross(dir, up)
+            if simd_length(perp) < 1e-6 {
+                perp = simd_cross(dir, SIMD3<Float>(1, 0, 0))
+            }
+            perp = simd_normalize(perp) * halfT
+
+            positions.append(contentsOf: [p0 - perp, p0 + perp, p1 + perp, p1 - perp])
+            indices.append(contentsOf: [idx, idx + 1, idx + 2, idx, idx + 2, idx + 3])
+            idx += 4
+        }
+
+        guard !positions.isEmpty else { return [] }
+        var desc = MeshDescriptor(name: "BBoxWireframe")
+        desc.positions = MeshBuffer(positions)
+        desc.primitives = .triangles(indices)
+        return [desc]
+    }
+
     // MARK: - Un-indexed mesh generation (for wireframe shader with barycentric UVs)
 
     /// Generates an un-indexed MeshResource from an ARMeshAnchor's geometry.

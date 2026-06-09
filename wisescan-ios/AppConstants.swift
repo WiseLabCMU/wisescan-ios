@@ -1,5 +1,7 @@
 import Foundation
 import CoreGraphics
+import ARKit
+import SwiftUI
 
 /// Centralized repository for UI constants, app defaults, and magic numbers
 /// to ensure unified aesthetics and layout calculations across the app.
@@ -39,6 +41,7 @@ enum AppConstants {
         static let hideLivePoints = "hideLivePoints"
         static let perfDiagnostics = "perfDiagnostics"
         static let pauseVRCompute = "pauseVRCompute"
+        static let semanticLabeling = "semanticLabeling"
     }
 
     // MARK: - Default Values
@@ -65,6 +68,7 @@ enum AppConstants {
     static let hideLivePoints: Bool = false
     static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
+    static let semanticLabeling: Bool = true    // Semantic classification: always-on when LiDAR available; Developer Mode kill-switch
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
@@ -87,6 +91,66 @@ enum AppConstants {
     static let thumbnailJpegQuality: CGFloat = 0.6           // JPEG quality for thumbnails
     static let stabilizationPollIntervalMs: Int = 200         // ms between tracking-state polls after session reset
     static let stabilizationMaxPolls: Int = 25                // max polls before timeout (total = interval × polls)
+    static let semanticThrottleInterval: TimeInterval = 0.5   // min seconds between classification outline rebuilds per anchor
+}
+
+// MARK: - Semantic Classification
+
+/// ARKit mesh classification categories with fixed color palette.
+/// Colors are chosen to avoid the default active mesh (Green) and ghost mesh (Magenta) colors.
+enum SemanticClass: String, CaseIterable, Codable {
+    case none, wall, floor, ceiling, table, seat, door, window
+
+    /// Fixed color palette for classification outlines.
+    var color: SIMD4<Float> {
+        switch self {
+        case .none:    return .zero                              // Hidden (no outline rendered)
+        case .wall:    return SIMD4<Float>(0.2, 0.4, 1.0, 1.0)  // Blue
+        case .floor:   return SIMD4<Float>(1.0, 0.6, 0.2, 1.0)  // Orange
+        case .ceiling: return SIMD4<Float>(0.0, 0.9, 0.9, 1.0)  // Cyan
+        case .table:   return SIMD4<Float>(1.0, 0.9, 0.2, 1.0)  // Yellow
+        case .seat:    return SIMD4<Float>(1.0, 0.2, 0.2, 1.0)  // Red
+        case .door:    return SIMD4<Float>(1.0, 1.0, 1.0, 1.0)  // White
+        case .window:  return SIMD4<Float>(0.6, 0.6, 0.6, 1.0)  // Gray
+        }
+    }
+
+    /// Maximum gap (meters) between two bounding boxes of the same class before they are
+    /// considered separate instances. Large planar surfaces get a wider threshold to bridge
+    /// anchor boundaries; discrete objects use a tighter threshold to avoid collapsing distinct items.
+    var mergeThreshold: Float {
+        switch self {
+        case .none:                           return 0
+        case .wall, .floor, .ceiling:         return 0.3   // Large planar surfaces
+        case .table, .seat, .door, .window:   return 0.15  // Discrete objects
+        }
+    }
+
+    /// SwiftUI color for HUD display and legend.
+    var swiftUIDisplayColor: Color {
+        let rgba = color
+        return Color(red: Double(rgba.x), green: Double(rgba.y), blue: Double(rgba.z))
+    }
+
+    /// Map from ARKit's ARMeshClassification to SemanticClass.
+    static func from(_ arkitClass: ARMeshClassification) -> SemanticClass {
+        switch arkitClass {
+        case .wall:    return .wall
+        case .floor:   return .floor
+        case .ceiling: return .ceiling
+        case .table:   return .table
+        case .seat:    return .seat
+        case .door:    return .door
+        case .window:  return .window
+        case .none:    return .none
+        @unknown default: return .none
+        }
+    }
+
+    /// Integer index for compact JSON export (matches allCases ordering).
+    var classIndex: Int {
+        SemanticClass.allCases.firstIndex(of: self) ?? 0
+    }
 }
 
 extension String {
