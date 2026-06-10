@@ -132,7 +132,17 @@ struct CaptureView: View {
         // `localAnchor` pose is expressed in the same frame we relocalize into here. If rescanning
         // a NON-latest scan is ever allowed, this invariant breaks and this must filter to the
         // connectors of the scan actually being relocalized against (`activeScanToExtend`).
-        connectorAnchors = location.scans.flatMap { StitchLinkStore.connectorAnchors(for: $0) }
+        //
+        // This surfaces EVERY connector incident to the location — the ≤1 link TO this map (it is a
+        // target) plus the 0..N links FROM this map (it is a source) — because the underlying query
+        // is direction-agnostic (see StitchLinkStore.incidentLinks). De-dup by link id: a connector
+        // could otherwise repeat if both its endpoints are scans of THIS location. The links are
+        // fetched ONCE via the scan-id index, not per scan.
+        let linkIndex = StitchLinkStore.incidentLinksByScanId(in: modelContext)
+        var seenConnectors = Set<UUID>()
+        connectorAnchors = location.scans
+            .flatMap { StitchLinkStore.connectorAnchors(for: $0, from: linkIndex[$0.id] ?? []) }
+            .filter { seenConnectors.insert($0.id).inserted }
     }
 
     var body: some View {

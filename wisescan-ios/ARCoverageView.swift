@@ -184,6 +184,15 @@ struct ARCoverageView: UIViewRepresentable {
             context.coordinator.hasSetSessionReady = true
         }
 
+        // Track C — mirror the rescan's named connector set to the coordinator and paint the markers
+        // as soon as relocalization confirms. Three gated paths drive the (idempotent, one-shot)
+        // render: here on every updateUIView, the record-start branch below, and per-frame from
+        // session(_:didUpdate:) — updateUIView isn't guaranteed to fire each frame during
+        // relocalization, so the delegate path is the continuous retry. The legacy single nameless
+        // boundary marker is suppressed for rescans (see session(_:didAdd:)).
+        context.coordinator.syncRescanConnectors(connectorAnchors, isRescan: scanStore?.activeScanCase == .rescanSpace)
+        context.coordinator.renderRescanConnectorsIfReady(arView: uiView)
+
         // Detect ghost mesh data changes (e.g., user tapped "Rescan Space" or "Link Adjacent Space" after initial view creation)
         let newGhostCount = initialGhostMeshData?.count
         if newGhostCount != context.coordinator.lastGhostMeshDataCount {
@@ -311,12 +320,11 @@ struct ARCoverageView: UIViewRepresentable {
                 }
 
                 // Track C — rescan coverage: render a labeled marker for EVERY connector the active
-                // location shares with other maps. The session relocalized to the existing world
-                // map, so each ConnectorAnchor.transform is already in this session's world frame.
-                // (resetForRecording cleared any stale markers above; render once here.)
-                if scanStore?.activeScanCase == .rescanSpace, !connectorAnchors.isEmpty {
-                    context.coordinator.renderConnectorMarkers(connectorAnchors, in: uiView)
-                }
+                // location shares with other maps. resetForRecording above cleared markers and the
+                // render gate, so re-paint now (we're past relocalization at record-start). The same
+                // path also runs continuously from updateUIView / cameraDidChangeTrackingState so the
+                // markers are visible during relocalization too, not just once recording begins.
+                context.coordinator.renderRescanConnectorsIfReady(arView: uiView)
             } else {
                 // Downgrade to nominal: pure camera passthrough — no overlays
                 context.coordinator.resetForNominal()
@@ -492,6 +500,38 @@ struct ARCoverageView: UIViewRepresentable {
         // lone single-link marker. We billboard whatever is present in either set.
         var connectorMarkerEntities: [AnchorEntity] = []
 
+        // Track C — the rescan's named connector set, mirrored here from updateUIView (which owns
+        // the ModelContext). They must render only AFTER relocalization confirms, so the stored
+        // world-frame poses line up with the live frame — otherwise they'd land in the pre-reloc
+        // frame and never correct (unlike ARKit-owned anchors). `rescanConnectorsRendered` gates
+        // the one-shot render; reset on every record/nominal transition so they re-render.
+        var rescanConnectorAnchors: [ConnectorAnchor] = []
+        var isRescanForConnectors = false
+        var rescanConnectorsRendered = false
+
+        /// Mirror the rescan connector set from updateUIView. Resets the render gate when the set
+        /// changes so the new markers paint on the next relocalization check.
+        func syncRescanConnectors(_ anchors: [ConnectorAnchor], isRescan: Bool) {
+            let wanted = isRescan ? anchors : []
+            if wanted.map(\.id) != rescanConnectorAnchors.map(\.id) {
+                rescanConnectorAnchors = wanted
+                rescanConnectorsRendered = false
+            }
+            isRescanForConnectors = isRescan
+        }
+
+        /// Renders the named connector markers once the session has relocalized to the saved world
+        /// map (tracking `.normal`, and — if a map was loaded — relocalization confirmed). Idempotent
+        /// and main-thread only (RealityKit scene mutation).
+        func renderRescanConnectorsIfReady(arView: ARView) {
+            guard isRescanForConnectors, !rescanConnectorsRendered, !rescanConnectorAnchors.isEmpty else { return }
+            let relocalized = (!hasWorldMap || hasSeenRelocalizing)
+                && arView.session.currentFrame?.camera.trackingState == .normal
+            guard relocalized else { return }
+            rescanConnectorsRendered = true
+            renderConnectorMarkers(rescanConnectorAnchors, in: arView)
+        }
+
         // Delegate-queue-visible mirror of "are there any billboard markers right now?". Lets
         // session(_:didUpdate:) skip the per-frame main hop entirely when there's nothing to
         // billboard (the common case — normal scans with no connectors/boundary). Written on main
@@ -539,8 +579,10 @@ struct ARCoverageView: UIViewRepresentable {
             }
             boundaryAnchorEntity = nil
             boundaryAnchorId = nil
-            // Clear any rescan connector markers (re-added below when the rescan render fires).
+            // Clear any rescan connector markers and reset the render gate so they re-paint in the
+            // recording frame (preserved relocalized frame → still valid; render gated on .normal).
             removeConnectorMarkers()
+            rescanConnectorsRendered = false
         }
 
         /// Reset coordinator state when returning to nominal (idle) mode.
@@ -567,8 +609,9 @@ struct ARCoverageView: UIViewRepresentable {
             }
             boundaryAnchorEntity = nil
             boundaryAnchorId = nil
-            // Clear any rescan connector markers.
+            // Clear any rescan connector markers and reset the render gate.
             removeConnectorMarkers()
+            rescanConnectorsRendered = false
 
             DispatchQueue.main.async { [weak self] in
                 // Zero out scan stats
@@ -801,6 +844,21 @@ struct ARCoverageView: UIViewRepresentable {
                     }
                 } else if hasWorldMap && !hasSeenRelocalizing {
                     print("[GhostMesh] Tracking is .normal but relocalization not yet confirmed — deferring ghost mesh placement")
+                }
+
+                // Track C — same moment the ghost mesh is placed: the session has relocalized to the
+                // saved world map, so the stored connector poses now line up with the live frame.
+                // Hop to main and run the GATED render there — the connector array is written on main
+                // by syncRescanConnectors, so it must never be read from this delegate queue (a
+                // concurrent read during reassignment can race on the array's storage). The Bool gates
+                // below are a cheap delegate-queue early-out only; `renderRescanConnectorsIfReady`
+                // re-checks the gate and reads the array on main (one-shot; idempotent).
+                if (!hasWorldMap || hasSeenRelocalizing),
+                   isRescanForConnectors, !rescanConnectorsRendered,
+                   let arView = arView {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.renderRescanConnectorsIfReady(arView: arView)
+                    }
                 }
             }
 
@@ -1040,6 +1098,13 @@ struct ARCoverageView: UIViewRepresentable {
             // phase transitions are driven by tracking state in didUpdate frame).
             for anchor in anchors {
                 if anchor.name == ARCoverageView.boundaryAnchorName {
+                    // During a RESCAN, the named connector markers own in-scene rendering — they
+                    // cover this same physical point WITH the connected map's name, plus every other
+                    // connector. Drawing the legacy nameless boundary marker here would put a lone
+                    // "Connector" over the relocalized map instead of the named set, so skip it.
+                    if scanStore?.activeScanCase == .rescanSpace {
+                        continue
+                    }
                     print("[BoundaryAnchor] Detected boundary anchor from ARWorldMap: \(anchor.identifier)")
                     boundaryAnchorId = anchor.identifier
                     DispatchQueue.main.async { [weak self] in
@@ -1250,55 +1315,96 @@ struct ARCoverageView: UIViewRepresentable {
             let billboardRoot = Entity()
             billboardRoot.name = "connector_billboard"
 
-            // ── Link glyph: SF Symbol rendered to a UIImage, applied as the base color texture of
-            // an UnlitMaterial on a small plane (≈8cm). UnlitMaterial is the only material that
-            // composites reliably over the AR camera feed (see loadGhostMesh notes). ──
-            let iconSize: Float = 0.08
-            let iconMesh = MeshResource.generatePlane(width: iconSize, height: iconSize)
-            var iconMaterial = UnlitMaterial(color: UIColor(red: 0.0, green: 0.95, blue: 0.4, alpha: 1.0))
-            if let texture = Self.connectorGlyphTexture {
-                iconMaterial.color = .init(tint: .white, texture: .init(texture))
-                // Texture has its own alpha (transparent outside the glyph) — blend so the
-                // surrounding plane doesn't show as an opaque green square.
-                iconMaterial.blending = .transparent(opacity: 1.0)
-                iconMaterial.opacityThreshold = 0.05
-            }
-            let iconEntity = ModelEntity(mesh: iconMesh, materials: [iconMaterial])
-            billboardRoot.addChild(iconEntity)
+            // Bright connector accent — high luminance + saturation so the glyph reads against
+            // typical indoor walls/floors (the old 0.0,0.95,0.4 looked muddy/"dark" on light scenes).
+            let accent = UIColor(red: 0.15, green: 1.0, blue: 0.55, alpha: 1.0)
 
-            // ── Floating 3D name label above the icon. generateText is extruded; scale it down to a
-            // sensible real-world height (~5cm cap height). UnlitMaterial again for AR compositing. ──
-            let labelMaterial = UnlitMaterial(color: .white)
+            // ── Icon: a dark disc scrim with a BRIGHT link glyph on top — the same positive
+            // treatment as the label (bright foreground over a translucent dark backing) so the two
+            // read consistently. (The old approach layered the glyph as a punched-out hole over a
+            // dark quad, which read as "black disc, transparent link.") UnlitMaterial throughout —
+            // the only material that composites reliably over the AR camera feed. ──
+            let iconSize: Float = 0.133
+            let discMesh = MeshResource.generatePlane(width: iconSize, height: iconSize, cornerRadius: iconSize / 2)
+            var discMaterial = UnlitMaterial(color: .black)
+            discMaterial.blending = .transparent(opacity: 0.72) // matches the label scrim
+            let discEntity = ModelEntity(mesh: discMesh, materials: [discMaterial])
+            billboardRoot.addChild(discEntity)
+
+            if let texture = Self.connectorGlyphTexture {
+                // Baked white silhouette (centered in a square, transparent elsewhere) → tint sets
+                // the color. Sits just in front of the disc so it's a bright glyph ON the scrim.
+                let glyphMesh = MeshResource.generatePlane(width: iconSize, height: iconSize)
+                var glyphMaterial = UnlitMaterial(color: accent)
+                glyphMaterial.color = .init(tint: accent, texture: .init(texture))
+                glyphMaterial.blending = .transparent(opacity: 1.0)
+                glyphMaterial.opacityThreshold = 0.05
+                let glyphEntity = ModelEntity(mesh: glyphMesh, materials: [glyphMaterial])
+                glyphEntity.position = SIMD3<Float>(0, 0, 0.001)
+                billboardRoot.addChild(glyphEntity)
+            }
+
+            // ── Floating 3D name label above the icon, on a dark rounded backing panel so the white
+            // text stays readable over any background (the standard AR "label pill"). generateText is
+            // extruded; size it to a ~5cm cap height. UnlitMaterial again for AR compositing. ──
             // `containerFrame: .zero` means generateText won't truncate, so bound the string
             // ourselves — a long map name would otherwise render as one very wide 3D label.
             let label = name.count > 24 ? name.prefix(23) + "…" : Substring(name)
             let textMesh = MeshResource.generateText(
                 String(label),
                 extrusionDepth: 0.001,
-                font: .systemFont(ofSize: 0.05),
+                font: .systemFont(ofSize: 0.066, weight: .semibold),
                 containerFrame: .zero,
                 alignment: .center,
                 lineBreakMode: .byTruncatingTail
             )
-            let textEntity = ModelEntity(mesh: textMesh, materials: [labelMaterial])
-            // generateText origins at the lower-left of its bounds; recenter horizontally and seat it
-            // just above the icon.
-            let textBounds = textEntity.model?.mesh.bounds.extents ?? .zero
-            textEntity.position = SIMD3<Float>(-textBounds.x / 2, iconSize / 2 + 0.01, 0)
+            let textEntity = ModelEntity(mesh: textMesh, materials: [UnlitMaterial(color: .white)])
+            // generateText origins at the baseline (NOT the box bottom), so the mesh's bounds are
+            // offset from the entity origin — using only `extents` to place a backing panel leaves
+            // the glyphs riding high with a gap below. Use the mesh's `bounds.center` to land the
+            // text's true visual center at a known point, then center the panel on that same point.
+            let textBounds = textEntity.model?.mesh.bounds ?? .init(min: .zero, max: .zero)
+            let textExtents = textBounds.extents
+            let textCenter = textBounds.center
+            let labelCenterY = iconSize / 2 + 0.025 + textExtents.y / 2
+            textEntity.position = SIMD3<Float>(-textCenter.x, labelCenterY - textCenter.y, 0)
+
+            // Dark rounded panel behind the label (sized to the text + padding) for contrast,
+            // centered exactly on the text's visual center for even margins all around.
+            let padX: Float = 0.016
+            let padY: Float = 0.012
+            let panelW = max(textExtents.x, 0.02) + padX * 2
+            let panelH = max(textExtents.y, 0.02) + padY * 2
+            let panelMesh = MeshResource.generatePlane(width: panelW, height: panelH, cornerRadius: panelH * 0.35)
+            var panelMaterial = UnlitMaterial(color: .black)
+            panelMaterial.blending = .transparent(opacity: 0.72)
+            let panelEntity = ModelEntity(mesh: panelMesh, materials: [panelMaterial])
+            panelEntity.position = SIMD3<Float>(0, labelCenterY, -0.001)
+            billboardRoot.addChild(panelEntity)
             billboardRoot.addChild(textEntity)
 
             anchorEntity.addChild(billboardRoot)
             return anchorEntity
         }
 
-        /// The "link.circle.fill" glyph, rendered once and uploaded to the GPU a single time. The
-        /// glyph is identical for every marker, so caching avoids re-rendering the SF Symbol and
-        /// re-creating a TextureResource per connector at record-start (N markers on a rescan).
+        /// The plain "link" glyph baked once as a WHITE silhouette centered in a SQUARE, transparent
+        /// canvas, uploaded to the GPU a single time. The `link` symbol is wider than tall, so it's
+        /// drawn centered into a square (≈70% fill) to avoid distortion when mapped onto a square
+        /// plane and to leave margin inside the disc. Baking it white lets each marker's UnlitMaterial
+        /// tint pick the color without re-rendering the SF Symbol per connector at record-start.
         private static let connectorGlyphTexture: TextureResource? = {
-            let config = UIImage.SymbolConfiguration(pointSize: 128, weight: .semibold)
-            guard let cgImage = UIImage(systemName: "link.circle.fill", withConfiguration: config)?
-                .withTintColor(UIColor(red: 0.0, green: 0.95, blue: 0.4, alpha: 1.0), renderingMode: .alwaysOriginal)
-                .cgImage else { return nil }
+            let side: CGFloat = 128
+            let config = UIImage.SymbolConfiguration(pointSize: side * 0.62, weight: .bold)
+            guard let symbol = UIImage(systemName: "link", withConfiguration: config)?
+                .withTintColor(.white, renderingMode: .alwaysOriginal) else { return nil }
+            let format = UIGraphicsImageRendererFormat()
+            format.opaque = false
+            format.scale = 1
+            let squared = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format).image { _ in
+                let origin = CGPoint(x: (side - symbol.size.width) / 2, y: (side - symbol.size.height) / 2)
+                symbol.draw(in: CGRect(origin: origin, size: symbol.size))
+            }
+            guard let cgImage = squared.cgImage else { return nil }
             return try? TextureResource(image: cgImage, options: .init(semantic: .color))
         }()
 
@@ -1319,6 +1425,15 @@ struct ARCoverageView: UIViewRepresentable {
                 // arbitrary-axis flip), so derive the yaw angle instead — well-defined everywhere.
                 let yaw = atan2(toCam.x, toCam.z)
                 root.orientation = simd_quatf(angle: yaw, axis: SIMD3<Float>(0, 1, 0))
+
+                // Distance-compensated scaling: hold a roughly constant apparent size so the marker
+                // stays legible far away (the main "underwhelming visibility" fix) without ballooning
+                // up close. Scale ∝ full 3D distance, normalized so it's 1× at the design distance,
+                // then clamped. Uses the full distance (incl. Y) since apparent size depends on it.
+                let dist = simd_length(camPos - markerPos)
+                let referenceDistance: Float = 2.0
+                let scale = min(max(dist / referenceDistance, 0.8), 2.75)
+                root.scale = SIMD3<Float>(repeating: scale)
             }
         }
     }
