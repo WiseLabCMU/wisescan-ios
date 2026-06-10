@@ -1,0 +1,29 @@
+#!/bin/bash
+# pre-commit hook: verify release-please version markers in project.pbxproj
+#
+# Xcode's project serializer strips non-standard inline comments when it
+# resaves the file. This hook catches the stripped markers before they're
+# committed. Install via: ./scripts/install-hooks.sh
+#
+# See CONTRIBUTING.md for details.
+
+PBXPROJ="wisescan-ios.xcodeproj/project.pbxproj"
+
+# Only check if project.pbxproj is staged
+if git diff --cached --name-only | grep -q "$PBXPROJ"; then
+    EXPECTED=2
+    FOUND=$(git show :"$PBXPROJ" | grep -c "x-release-please-version" || true)
+    if [ "$FOUND" -ne "$EXPECTED" ]; then
+        echo ""
+        echo "❌ ERROR: x-release-please-version markers missing from project.pbxproj"
+        echo "   Expected $EXPECTED markers, found $FOUND."
+        echo "   Xcode's serializer strips non-standard inline comments."
+        echo ""
+        echo "   Fix: restore the comment on MARKETING_VERSION lines (Debug + Release):"
+        echo "     MARKETING_VERSION = X.Y.Z; /* x-release-please-version */"
+        echo ""
+        echo "   See CONTRIBUTING.md for details."
+        echo ""
+        exit 1
+    fi
+fi

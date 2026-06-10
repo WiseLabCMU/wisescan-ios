@@ -153,7 +153,9 @@ extension CaptureView {
             if developerMode && (mockCameraImages || mockIMU || mockDepthMaps) {
                 let dummyObj = "v -0.5 -0.5 -0.5\nv 0.5 -0.5 -0.5\nv 0.5 0.5 -0.5\nf 1 2 3\n"
                 if let dummyObjData = dummyObj.data(using: .utf8) {
-                    finalMeshResult = (dummyObjData, 3, 1)
+                    finalMeshResult = ARCoverageView.MeshExportResult(
+                        data: dummyObjData, vertexCount: 3, faceCount: 1, semantics: nil
+                    )
                 }
             }
         }
@@ -250,6 +252,11 @@ extension CaptureView {
                         try? result.data.write(to: meshFileURL)
                         let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
                         try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
+                        // Write semantics.json sidecar if classification data is available
+                        if let semantics = result.semantics {
+                            let semanticsURL = rawDir.appendingPathComponent("semantics.json")
+                            SemanticsExporter.writeSemantics(semantics, to: semanticsURL)
+                        }
                     }
 
                     if isExtendFlow {
@@ -267,7 +274,8 @@ extension CaptureView {
                             vertexColors: vertexColors,
                             worldMapURL: mapURL,
                             thumbnailData: thumbnailData,
-                            scanCase: capturedScanCase
+                            scanCase: capturedScanCase,
+                            semantics: result.semantics
                         )
                         self.frameCaptureSession = FrameCaptureSession()
                         MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
@@ -288,7 +296,8 @@ extension CaptureView {
                             vertexColors: vertexColors,
                             worldMapURL: mapURL,
                             thumbnailData: thumbnailData,
-                            scanCase: capturedScanCase
+                            scanCase: capturedScanCase,
+                            semantics: result.semantics
                         )
 
                         // Release frame capture session memory
@@ -473,7 +482,8 @@ extension CaptureView {
             vertexColors: pending.vertexColors,
             worldMapURL: pending.worldMapURL,
             thumbnailData: pending.thumbnailData,
-            scanCase: pending.scanCase
+            scanCase: pending.scanCase,
+            semantics: pending.semantics
         )
 
         // Write deferred stitching.json now that we have the real target scan ID
