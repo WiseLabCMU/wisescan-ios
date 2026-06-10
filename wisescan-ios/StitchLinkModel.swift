@@ -1,6 +1,13 @@
 import Foundation
 import SwiftData
 import simd
+import os
+
+/// Structured logging for the stitch-link subsystem (migration, link queries). Uses `os.Logger`
+/// (same subsystem as `PerfDiag`) instead of `print` so it costs nothing in release, never spams
+/// stdout, and is filterable in Console.app. `.info` for once-per-launch outcomes worth keeping;
+/// `.debug` for verbose per-item detail (not persisted in release).
+let stitchLog = Logger(subsystem: PerfDiag.subsystem, category: "stitch")
 
 // MARK: - Stitch Link Model (SwiftData)
 //
@@ -186,19 +193,68 @@ enum StitchLinkStore {
     }
 
     /// All links incident to a scan (as either endpoint), de-duped by id.
+    ///
+    /// Resolved via an explicit fetch filtered on the *forward* relationships
+    /// (`StitchLink.endpointAScan`/`endpointBScan` — the side `create(...)` actually sets), NOT the
+    /// cached inverse collections (`scan.linksAsA`/`linksAsB`). SwiftData's inverse maintenance for a
+    /// model with TWO relationships to the SAME destination type (both endpoints are `CapturedScan?`)
+    /// is unreliable and asymmetric: one inverse array can come back empty even though the forward
+    /// link is set. That made a *source* map's outgoing connectors silently vanish on rescan while a
+    /// *target* map's incoming connector still showed — the "only appears backwards" bug. Filtering
+    /// fetched links by endpoint id surfaces BOTH directions. Falls back to the inverse arrays only
+    /// when the scan has no associated context (e.g. not yet inserted).
     static func incidentLinks(for scan: CapturedScan) -> [StitchLink] {
+        let scanId = scan.id
+        if let context = scan.modelContext,
+           let all = try? context.fetch(FetchDescriptor<StitchLink>()) {
+            return all.filter { $0.endpointAScan?.id == scanId || $0.endpointBScan?.id == scanId }
+        }
         var seen = Set<UUID>()
         return (scan.linksAsA + scan.linksAsB).filter { seen.insert($0.id).inserted }
     }
 
+    /// Every `StitchLink` fetched ONCE and grouped by each incident scan's id. Use this when
+    /// resolving links for MANY scans (a location's whole connector set, the graph build) so the
+    /// full-table fetch in `incidentLinks(for:)` runs a single time instead of once per scan.
+    /// Returns an empty index if the context can't be fetched (callers then resolve nothing — the
+    /// same outcome as `incidentLinks`' fetch failing).
+    static func incidentLinksByScanId(in context: ModelContext) -> [UUID: [StitchLink]] {
+        guard let all = try? context.fetch(FetchDescriptor<StitchLink>()) else { return [:] }
+        var index: [UUID: [StitchLink]] = [:]
+        for link in all {
+            let a = link.endpointAScan?.id
+            let b = link.endpointBScan?.id
+            if let a { index[a, default: []].append(link) }
+            if let b, b != a { index[b, default: []].append(link) }
+        }
+        return index
+    }
+
     /// Whether any scan in the location participates in a link.
+    ///
+    /// Deliberately reads the inverse arrays (`linksAsA`/`linksAsB`) directly rather than routing
+    /// through the fetch-based `incidentLinks`. This is the badge's data source and is read inside a
+    /// SwiftUI `body` (LocationDetailView): touching the relationship properties registers them as
+    /// observation dependencies, so the badge updates reactively when a link is added/removed — a
+    /// `context.fetch` would not. It also stays cheap (no per-render store fetch). The asymmetric
+    /// inverse-maintenance quirk that `incidentLinks` works around can drop a *specific* direction,
+    /// but a scan being unaware of EVERY link it participates in (which is all the badge needs to
+    /// detect) is a degenerate state that shouldn't occur. Where correctness of each individual edge
+    /// matters (render, graph), use `incidentLinks`/`connectorAnchors` instead.
     static func hasLinks(in location: ScanLocation) -> Bool {
         location.scans.contains { !$0.linksAsA.isEmpty || !$0.linksAsB.isEmpty }
     }
 
     /// Labeled connectors for an in-scan 3D render, in `scan`'s world frame (Track C).
     static func connectorAnchors(for scan: CapturedScan) -> [ConnectorAnchor] {
-        incidentLinks(for: scan).compactMap { link in
+        connectorAnchors(for: scan, from: incidentLinks(for: scan))
+    }
+
+    /// Labeled connectors for `scan` resolved from a PRE-FETCHED link set (e.g. one entry of
+    /// `incidentLinksByScanId`). Use this when resolving many scans to avoid a per-scan fetch; the
+    /// no-argument overload is the single-scan convenience.
+    static func connectorAnchors(for scan: CapturedScan, from links: [StitchLink]) -> [ConnectorAnchor] {
+        links.compactMap { link in
             guard let local = link.localAnchor(for: scan) else { return nil }
             let name = local.otherScan?.location?.name ?? "Linked map"
             return ConnectorAnchor(id: link.id, transform: local.transform, otherLocationName: name)
@@ -211,7 +267,7 @@ enum StitchLinkStore {
         var seen = Set<UUID>()
         var dtos: [StitchingLink] = []
         for scan in location.scans {
-            for link in (scan.linksAsA + scan.linksAsB) where seen.insert(link.id).inserted {
+            for link in incidentLinks(for: scan) where seen.insert(link.id).inserted {
                 if let dto = link.asDTO() { dtos.append(dto) }
             }
         }
@@ -233,11 +289,27 @@ enum StitchLinkStore {
 
     static func migrateFromFilesIfNeeded(context: ModelContext) async {
         let flagKey = "stitchLinkMigrationV1Done"
-        if UserDefaults.standard.bool(forKey: flagKey) || migrationInFlight { return }
+        let flagSet = UserDefaults.standard.bool(forKey: flagKey)
+        let existingRows = (try? context.fetchCount(FetchDescriptor<StitchLink>())) ?? 0
+
+        // Self-heal: a prior run could have persisted the done-flag while importing ZERO rows (a
+        // save that silently failed, or scans not yet resolvable), permanently orphaning every
+        // legacy link. So the flag alone isn't trusted — we also require that StitchLink rows
+        // actually exist. If the flag is set AND rows exist, the migration genuinely ran; skip.
+        // If the flag is set but there are NO rows, re-scan the disk: legacy files may still hold
+        // links we can import now.
+        if (flagSet && existingRows > 0) || migrationInFlight {
+            stitchLog.debug("migration skip (flagSet=\(flagSet) existingRows=\(existingRows) inFlight=\(migrationInFlight))")
+            return
+        }
         migrationInFlight = true
         defer { migrationInFlight = false }
+        stitchLog.debug("migration START flagSet=\(flagSet) existingRows=\(existingRows)")
 
-        guard let locations = try? context.fetch(FetchDescriptor<ScanLocation>()) else { return }
+        guard let locations = try? context.fetch(FetchDescriptor<ScanLocation>()) else {
+            stitchLog.error("migration ABORT — could not fetch locations")
+            return
+        }
         let scanById: [UUID: CapturedScan] = Dictionary(
             locations.flatMap { $0.scans }.map { ($0.id, $0) },
             uniquingKeysWith: { a, _ in a }
@@ -245,10 +317,21 @@ enum StitchLinkStore {
         var existing = Set((try? context.fetch(FetchDescriptor<StitchLink>()))?.map(\.id) ?? [])
 
         var imported = 0
+        var filesFound = 0
+        var fileLinks = 0
+        var unresolved = 0
         for loc in locations {
             guard let manifest = await StitchingMetadataManager.readAsync(locationId: loc.id) else { continue }
-            for dto in manifest.links where !existing.contains(dto.id) {
-                guard let src = scanById[dto.sourceScanId], let tgt = scanById[dto.targetScanId] else { continue }
+            filesFound += 1
+            stitchLog.debug("migration file for '\(loc.name, privacy: .public)': \(manifest.links.count) link(s)")
+            for dto in manifest.links {
+                fileLinks += 1
+                if existing.contains(dto.id) { continue }
+                guard let src = scanById[dto.sourceScanId], let tgt = scanById[dto.targetScanId] else {
+                    unresolved += 1
+                    stitchLog.error("migration UNRESOLVED link \(dto.id.uuidString.prefix(8), privacy: .public) src=\(dto.sourceScanId.uuidString.prefix(8), privacy: .public) tgt=\(dto.targetScanId.uuidString.prefix(8), privacy: .public)")
+                    continue
+                }
                 let link = StitchLink(
                     id: dto.id,
                     endpointAScan: src,
@@ -268,18 +351,23 @@ enum StitchLinkStore {
                 imported += 1
             }
         }
-        // Only mark the migration done if the save actually succeeds. If we set the flag
-        // unconditionally and the save threw, the migration would be marked complete and never
-        // retried — silently losing every legacy link (the on-disk files survive but the builder
-        // ignores them). A failed save leaves the flag unset so the next launch tries again; a
-        // no-op migration (no files) saves cleanly and still sets the flag, so we don't rescan
-        // the disk every launch.
+        // Persist the done-flag ONLY when nothing is left unimported. If links failed to resolve,
+        // leave the flag UNSET so a later launch (e.g. once scans fully load) retries — and the
+        // UNRESOLVED logs above tell us why. A clean run (no unresolved) sets the flag so we don't
+        // re-scan the disk every launch. (Note: a library with zero links keeps `existingRows == 0`,
+        // so the self-heal guard re-scans the disk each launch — cheap and async, but intentional.)
         do {
             try context.save()
-            UserDefaults.standard.set(true, forKey: flagKey)
-            if imported > 0 { print("[StitchLinkStore] Migrated \(imported) link(s) from stitching.json into SwiftData") }
+            if unresolved == 0 {
+                UserDefaults.standard.set(true, forKey: flagKey)
+            }
+            stitchLog.info("""
+                migration done: locations=\(locations.count) filesFound=\(filesFound) \
+                fileLinks=\(fileLinks) imported=\(imported) unresolved=\(unresolved) \
+                flagPersisted=\(unresolved == 0)
+                """)
         } catch {
-            print("[StitchLinkStore] migration save failed; will retry next launch: \(error)")
+            stitchLog.error("migration save FAILED; will retry next launch: \(error.localizedDescription, privacy: .public)")
         }
     }
 }
