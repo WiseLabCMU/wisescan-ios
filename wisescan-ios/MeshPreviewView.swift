@@ -14,7 +14,7 @@ struct MeshPreviewContainer: View {
     @StateObject private var markerState = MarkerProjectionState()
     @State private var isUpdating = false
     @State private var isViewerReady = false
-    @State private var semanticViewMode: SemanticViewMode = .meshWithOutlines
+    @State private var semanticViewMode: SemanticViewMode = .meshOnly
     @State private var showPrivacyMarkers = true
     @State private var detectedClasses: [SemanticClass] = []
     @State private var hasPrivacyMarkers = false
