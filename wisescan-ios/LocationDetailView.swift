@@ -56,17 +56,14 @@ struct LocationDetailView: View {
                                         Image(systemName: "pencil")
                                         Text("Rename Location")
                                     }
+                                    .font(.subheadline)
                                 })
-                                .font(.subheadline)
-                                .foregroundColor(.orange)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
-                                .background(Color.orange.opacity(0.1))
-                                .cornerRadius(12)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                                )
+                                .buttonStyle(FilledActionButtonStyle(
+                                    background: Color.orange.opacity(0.1),
+                                    foreground: .orange,
+                                    verticalPadding: 12,
+                                    border: Color.orange.opacity(0.3)
+                                ))
 
                                 Picker("Use Case", selection: Binding(
                                     get: { location.scanCase },
@@ -128,11 +125,7 @@ struct LocationDetailView: View {
                                                 .font(.subheadline).bold()
                                         }
                                     })
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 14)
-                                    .background(Color.indigo.opacity(0.8))
-                                    .foregroundColor(.white)
-                                    .cornerRadius(12)
+                                    .buttonStyle(FilledActionButtonStyle(background: Color.indigo.opacity(0.8)))
 
                                     // Link Adjacent Space button
                                     Button(action: {
@@ -155,11 +148,7 @@ struct LocationDetailView: View {
                                                 .font(.subheadline).bold()
                                         }
                                     })
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 14)
-                                    .background(Color.orange.opacity(0.8))
-                                    .foregroundColor(.white)
-                                    .cornerRadius(12)
+                                    .buttonStyle(FilledActionButtonStyle(background: Color.orange.opacity(0.8)))
                                 }
                             }
 

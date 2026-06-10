@@ -639,6 +639,10 @@ struct CaptureView: View {
                                 }
                             }
                         })
+                        // After Stop, the mesh export/save runs while isRecording is already
+                        // false; block taps during that window so a new recording can't start
+                        // on top of the in-flight export.
+                        .disabled(isProcessingMesh || isWaitingToSave)
                         .offset(y: isRecording ? -20 : 0)
                     }
                 }

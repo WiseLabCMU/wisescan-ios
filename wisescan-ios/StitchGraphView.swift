@@ -87,6 +87,10 @@ struct StitchGraphView: View {
     }
 
     private func presentRender(for component: [UUID]) {
+        // The cover presents from the parent off this binding; while one is up (or
+        // queued from a just-registered tap) ignore repeat taps so rapid presses on
+        // the gesture-driven capsule can't stack/re-trigger presentations.
+        guard renderRequest == nil else { return }
         let placements = StitchGraphBuilder.placeScans(in: component, edges: graph?.edges(in: component) ?? [])
         let nodesById = graph?.nodesById ?? [:]
         var items: [CombinedMeshItem] = []
