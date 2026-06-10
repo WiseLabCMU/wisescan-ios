@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ARKit
+import RoomPlan
 import SwiftUI
 
 /// Centralized repository for UI constants, app defaults, and magic numbers
@@ -92,14 +93,52 @@ enum AppConstants {
     static let stabilizationPollIntervalMs: Int = 200         // ms between tracking-state polls after session reset
     static let stabilizationMaxPolls: Int = 25                // max polls before timeout (total = interval × polls)
     static let semanticThrottleInterval: TimeInterval = 0.5   // min seconds between classification outline rebuilds per anchor
+    static let surfaceOutlineLiftDistance: Float = 0.06       // meters surface outlines are lifted toward the camera to draw on top of the co-planar scan mesh (must clear ARKit mesh noise)
+}
+
+// MARK: - Semantic View Mode
+
+/// Controls what is visible in the 3D mesh preview and combined mesh views.
+/// Cycles through states via a single toolbar button tap.
+enum SemanticViewMode: String, CaseIterable {
+    /// Mesh geometry only — no semantic overlays.
+    case meshOnly
+    /// Mesh geometry with wireframe semantic outlines overlaid.
+    case meshWithOutlines
+    /// Semantic boxes only (no mesh) — filled at 75% opacity with wireframe edges. "Floor plan" mode.
+    case semanticOnly
+
+    /// SF Symbol name for the toolbar button.
+    var iconName: String {
+        switch self {
+        case .meshOnly:        return "cube"
+        case .meshWithOutlines: return "cube.fill"
+        case .semanticOnly:    return "square.3.layers.3d"
+        }
+    }
+
+    /// Advance to the next mode in the cycle.
+    var next: SemanticViewMode {
+        switch self {
+        case .meshOnly:        return .meshWithOutlines
+        case .meshWithOutlines: return .semanticOnly
+        case .semanticOnly:    return .meshOnly
+        }
+    }
+
+    var showMesh: Bool { self != .semanticOnly }
+    var showOutlines: Bool { self != .meshOnly }
+    var showFills: Bool { self == .semanticOnly }
 }
 
 // MARK: - Semantic Classification
 
-/// ARKit mesh classification categories with fixed color palette.
-/// Colors are chosen to avoid the default active mesh (Green) and ghost mesh (Magenta) colors.
+/// Semantic display classes for AR/VR overlays, HUD, and preview rendering.
+/// This is a **display-level** superset covering both ARKit `ARMeshClassification` and
+/// RoomPlan categories. Fine-grained sub-categories (e.g., "sofa", "bathtub") are preserved
+/// in `roomplan.json`; these display classes control visualization grouping and color.
 enum SemanticClass: String, CaseIterable, Codable {
-    case none, wall, floor, ceiling, table, seat, door, window
+    case none, wall, floor, ceiling, table, seat, door, window, fixture
 
     /// Fixed color palette for classification outlines.
     var color: SIMD4<Float> {
@@ -107,22 +146,12 @@ enum SemanticClass: String, CaseIterable, Codable {
         case .none:    return .zero                              // Hidden (no outline rendered)
         case .wall:    return SIMD4<Float>(0.2, 0.4, 1.0, 1.0)  // Blue
         case .floor:   return SIMD4<Float>(1.0, 0.6, 0.2, 1.0)  // Orange
-        case .ceiling: return SIMD4<Float>(0.0, 0.9, 0.9, 1.0)  // Cyan
+        case .ceiling: return SIMD4<Float>(0.6, 0.6, 0.6, 1.0)  // Light Gray
         case .table:   return SIMD4<Float>(1.0, 0.9, 0.2, 1.0)  // Yellow
         case .seat:    return SIMD4<Float>(1.0, 0.2, 0.2, 1.0)  // Red
-        case .door:    return SIMD4<Float>(1.0, 1.0, 1.0, 1.0)  // White
-        case .window:  return SIMD4<Float>(0.6, 0.6, 0.6, 1.0)  // Gray
-        }
-    }
-
-    /// Maximum gap (meters) between two bounding boxes of the same class before they are
-    /// considered separate instances. Large planar surfaces get a wider threshold to bridge
-    /// anchor boundaries; discrete objects use a tighter threshold to avoid collapsing distinct items.
-    var mergeThreshold: Float {
-        switch self {
-        case .none:                           return 0
-        case .wall, .floor, .ceiling:         return 0.3   // Large planar surfaces
-        case .table, .seat, .door, .window:   return 0.15  // Discrete objects
+        case .door:    return SIMD4<Float>(0.0, 0.9, 0.9, 1.0)  // Cyan
+        case .window:  return SIMD4<Float>(1.0, 1.0, 1.0, 1.0)  // White
+        case .fixture: return SIMD4<Float>(0.7, 0.3, 0.9, 1.0)  // Purple
         }
     }
 
@@ -132,24 +161,45 @@ enum SemanticClass: String, CaseIterable, Codable {
         return Color(red: Double(rgba.x), green: Double(rgba.y), blue: Double(rgba.z))
     }
 
-    /// Map from ARKit's ARMeshClassification to SemanticClass.
-    static func from(_ arkitClass: ARMeshClassification) -> SemanticClass {
-        switch arkitClass {
-        case .wall:    return .wall
-        case .floor:   return .floor
-        case .ceiling: return .ceiling
-        case .table:   return .table
-        case .seat:    return .seat
-        case .door:    return .door
-        case .window:  return .window
-        case .none:    return .none
-        @unknown default: return .none
+    /// Map from RoomPlan Surface.Category to SemanticClass.
+    static func from(_ surfaceCategory: CapturedRoom.Surface.Category) -> SemanticClass {
+        switch surfaceCategory {
+        case .wall:              return .wall
+        case .floor:             return .floor
+        case .door(isOpen: _):   return .door
+        case .window:            return .window
+        case .opening:           return .door    // openings treated as door-like for rendering
+        @unknown default:    return .none
         }
     }
 
-    /// Integer index for compact JSON export (matches allCases ordering).
-    var classIndex: Int {
-        SemanticClass.allCases.firstIndex(of: self) ?? 0
+    /// Map from RoomPlan Object.Category to SemanticClass.
+    static func from(_ objectCategory: CapturedRoom.Object.Category) -> SemanticClass {
+        switch objectCategory {
+        case .table:                       return .table
+        case .chair:                       return .seat
+        case .sofa:                        return .seat
+        case .bed:                         return .seat
+        case .storage, .refrigerator,
+             .stove, .sink, .washerDryer,
+             .dishwasher, .oven,
+             .fireplace, .television,
+             .bathtub, .toilet, .stairs:   return .fixture
+        @unknown default:                  return .none
+        }
+    }
+
+    /// Map from string object category (as stored in roomplan.json) to SemanticClass.
+    static func fromObjectCategory(_ category: String) -> SemanticClass {
+        switch category {
+        case "table":                                       return .table
+        case "chair", "sofa", "bed":                        return .seat
+        case "storage", "refrigerator", "stove", "sink",
+             "washer_dryer", "dishwasher", "oven",
+             "fireplace", "television", "bathtub", "toilet",
+             "stairs":                                      return .fixture
+        default:                                            return .none
+        }
     }
 }
 

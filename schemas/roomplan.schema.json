@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Scan4D RoomPlan JSON Schema",
+  "description": "Per-scan RoomPlan output written to `roomplan.json` within the scan directory and bundled into the Scan4D export zip. Contains oriented bounding boxes for detected surfaces (walls, floors, doors, windows, openings) and objects (tables, chairs, etc.) from Apple's RoomPlan API. Transforms are in the scan's ARKit world coordinate space (same as the mesh OBJ).",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "description": "Schema version. Currently 1."
+    },
+    "source": {
+      "type": "string",
+      "description": "Detection system that produced this data (e.g. 'roomplan', 'arkit_mesh_classification'). Enables downstream consumers to handle data from different detection backends."
+    },
+    "surfaces": {
+      "type": "array",
+      "description": "Detected planar surfaces: walls, floors, doors, windows, and openings.",
+      "items": { "$ref": "#/definitions/surface" }
+    },
+    "objects": {
+      "type": "array",
+      "description": "Detected 3D objects: furniture and fixtures.",
+      "items": { "$ref": "#/definitions/object" }
+    }
+  },
+  "required": ["version", "source", "surfaces", "objects"],
+  "definitions": {
+    "surface": {
+      "type": "object",
+      "description": "An oriented bounding box for a detected planar surface.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique identifier for this surface (from CapturedRoom.Surface.identifier)."
+        },
+        "category": {
+          "type": "string",
+          "enum": ["wall", "floor", "door", "window", "opening", "unknown"],
+          "description": "Surface classification from RoomPlan."
+        },
+        "dimensions": {
+          "$ref": "#/definitions/dimensions",
+          "description": "Bounding box size in meters (local space, before transform)."
+        },
+        "transform": {
+          "$ref": "#/definitions/flatMatrix4x4",
+          "description": "4x4 transform placing the surface in world space (column-major, 16 floats)."
+        },
+        "confidence": {
+          "$ref": "#/definitions/confidence",
+          "description": "RoomPlan detection confidence."
+        }
+      },
+      "required": ["id", "category", "dimensions", "transform", "confidence"]
+    },
+    "object": {
+      "type": "object",
+      "description": "An oriented bounding box for a detected 3D object.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique identifier for this object (from CapturedRoom.Object.identifier)."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "table", "chair", "sofa", "bed", "storage", "stove",
+            "sink", "washerDryer", "toilet", "bathtub", "oven",
+            "dishwasher", "refrigerator", "television", "stairs",
+            "fireplace", "unknown"
+          ],
+          "description": "Object classification from RoomPlan."
+        },
+        "dimensions": {
+          "$ref": "#/definitions/dimensions",
+          "description": "Bounding box size in meters (local space, before transform)."
+        },
+        "transform": {
+          "$ref": "#/definitions/flatMatrix4x4",
+          "description": "4x4 transform placing the object in world space (column-major, 16 floats)."
+        },
+        "confidence": {
+          "$ref": "#/definitions/confidence",
+          "description": "RoomPlan detection confidence."
+        }
+      },
+      "required": ["id", "category", "dimensions", "transform", "confidence"]
+    },
+    "dimensions": {
+      "type": "object",
+      "description": "Bounding box dimensions in meters.",
+      "properties": {
+        "width":  { "type": "number", "description": "Extent along the local X axis (meters)." },
+        "height": { "type": "number", "description": "Extent along the local Y axis (meters)." },
+        "depth":  { "type": "number", "description": "Extent along the local Z axis (meters)." }
+      },
+      "required": ["width", "height", "depth"]
+    },
+    "flatMatrix4x4": {
+      "type": "array",
+      "description": "A 4x4 matrix flattened to 16 floats in column-major order: [c0r0, c0r1, c0r2, c0r3, c1r0, c1r1, c1r2, c1r3, c2r0, c2r1, c2r2, c2r3, c3r0, c3r1, c3r2, c3r3]. Matches the convention used by stitching.json and transforms.json.",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": { "type": "number" }
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "unknown"],
+      "description": "Detection confidence level from RoomPlan."
+    }
+  }
+}

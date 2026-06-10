@@ -14,7 +14,7 @@ struct MeshPreviewContainer: View {
     @StateObject private var markerState = MarkerProjectionState()
     @State private var isUpdating = false
     @State private var isViewerReady = false
-    @State private var showSemantics = true
+    @State private var semanticViewMode: SemanticViewMode = .meshOnly
     @State private var showPrivacyMarkers = true
     @State private var detectedClasses: [SemanticClass] = []
     @State private var hasPrivacyMarkers = false
@@ -30,7 +30,7 @@ struct MeshPreviewContainer: View {
                     scanDirectoryURL: scanDirectoryURL,
                     markerState: markerState,
                     isMeshLoaded: $isMeshLoaded,
-                    showSemantics: $showSemantics,
+                    semanticViewMode: $semanticViewMode,
                     detectedClasses: $detectedClasses,
                     hasPrivacyMarkers: $hasPrivacyMarkers
                 )
@@ -50,9 +50,9 @@ struct MeshPreviewContainer: View {
                 }
 
                 // Bottom-left legend (semantic classes + privacy markers)
-                if (showSemantics && !detectedClasses.isEmpty) || (showPrivacyMarkers && hasPrivacyMarkers) {
+                if (semanticViewMode.showOutlines && !detectedClasses.isEmpty) || (showPrivacyMarkers && hasPrivacyMarkers) {
                     VStack(alignment: .leading, spacing: 4) {
-                        if showSemantics {
+                        if semanticViewMode.showOutlines {
                             ForEach(detectedClasses, id: \.rawValue) { cls in
                                 HStack(spacing: 6) {
                                     Circle()
@@ -126,9 +126,9 @@ struct MeshPreviewContainer: View {
             if !detectedClasses.isEmpty {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        showSemantics.toggle()
+                        semanticViewMode = semanticViewMode.next
                     } label: {
-                        Image(systemName: showSemantics ? "tag.fill" : "tag")
+                        Image(systemName: semanticViewMode.iconName)
                     }
                 }
             }
@@ -245,7 +245,7 @@ struct MeshPreviewView: UIViewRepresentable {
     var scanDirectoryURL: URL?
     var markerState: MarkerProjectionState
     @Binding var isMeshLoaded: Bool
-    @Binding var showSemantics: Bool
+    @Binding var semanticViewMode: SemanticViewMode
     @Binding var detectedClasses: [SemanticClass]
     @Binding var hasPrivacyMarkers: Bool
 
@@ -317,14 +317,14 @@ struct MeshPreviewView: UIViewRepresentable {
             }
 
             if let md = meshData, let (geometry, _) = Self.buildGeometry(from: md, vertexColors: colorsData) {
-                // Parse semantics.json and compute classification outlines (background)
-                let semanticOutlines = Self.buildSemanticOutlines(
-                    meshData: md,
+                // Build semantic outlines from RoomPlan data (roomplan.json)
+                let semanticOutlines = Self.buildRoomPlanOutlines(
                     scanDirectoryURL: self.scanDirectoryURL
                 )
 
                 DispatchQueue.main.async {
                     let node = SCNNode(geometry: geometry)
+                    node.name = "mesh"
 
                     // Center the model
                     let (minBound, maxBound) = node.boundingBox
@@ -348,22 +348,38 @@ struct MeshPreviewView: UIViewRepresentable {
                     let containerNode = SCNNode()
                     containerNode.addChildNode(node)
 
-                    // Add semantic classification outlines (same center offset as mesh)
+                    // Add semantic classification outlines + fills (same center offset as mesh)
                     if let outlines = semanticOutlines {
                         let semanticsNode = SCNNode()
                         semanticsNode.name = "semantics"
+                        let fillsNode = SCNNode()
+                        fillsNode.name = "semanticFills"
                         for outline in outlines.outlineNodes {
-                            let offsetNode = SCNNode(geometry: outline.geometry)
-                            offsetNode.position = SCNVector3(-center.x, -center.y, -center.z)
-                            semanticsNode.addChildNode(offsetNode)
+                            let wireNode = SCNNode(geometry: outline.geometry)
+                            wireNode.position = SCNVector3(-center.x, -center.y, -center.z)
+                            semanticsNode.addChildNode(wireNode)
+
+                            let fNode = SCNNode(geometry: outline.fillGeometry)
+                            fNode.position = SCNVector3(-center.x, -center.y, -center.z)
+                            fillsNode.addChildNode(fNode)
                         }
                         containerNode.addChildNode(semanticsNode)
+                        containerNode.addChildNode(fillsNode)
                         self.detectedClasses = outlines.detectedClasses
                     }
 
                     scene.rootNode.addChildNode(containerNode)
+                    context.coordinator.meshNode = node
                     context.coordinator.semanticsNode = scene.rootNode
                         .childNode(withName: "semantics", recursively: true)
+                    context.coordinator.semanticFillsNode = scene.rootNode
+                        .childNode(withName: "semanticFills", recursively: true)
+
+                    // Apply initial visibility based on the current mode
+                    let mode = self.semanticViewMode
+                    node.isHidden = !mode.showMesh
+                    context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
+                    context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
 
                     // Position camera based on model size
                     let size = SCNVector3(
@@ -390,8 +406,10 @@ struct MeshPreviewView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
-        // Toggle semantics node visibility when showSemantics changes
-        context.coordinator.semanticsNode?.isHidden = !showSemantics
+        let mode = semanticViewMode
+        context.coordinator.meshNode?.isHidden = !mode.showMesh
+        context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
+        context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
     }
 
     func makeCoordinator() -> Coordinator {
@@ -400,8 +418,12 @@ struct MeshPreviewView: UIViewRepresentable {
 
     class Coordinator: NSObject, SCNSceneRendererDelegate {
         let markerState: MarkerProjectionState
-        /// Reference to the semantics outline node for toggling visibility.
+        /// Reference to the mesh geometry node for toggling visibility.
+        weak var meshNode: SCNNode?
+        /// Reference to the semantics outline (wireframe) node for toggling visibility.
         weak var semanticsNode: SCNNode?
+        /// Reference to the semantics fill (translucent faces) node for toggling visibility.
+        weak var semanticFillsNode: SCNNode?
 
         init(markerState: MarkerProjectionState) {
             self.markerState = markerState
@@ -553,203 +575,6 @@ struct MeshPreviewView: UIViewRepresentable {
         return (geometry, vertices.count)
     }
 
-    // MARK: - Semantic Classification Outlines
-
-    /// Result from building semantic outlines: SceneKit geometry nodes + detected class list.
-    struct SemanticOutlineResult {
-        struct OutlineNode {
-            let geometry: SCNGeometry
-        }
-        let outlineNodes: [OutlineNode]
-        let detectedClasses: [SemanticClass]
-    }
-
-    /// Parses `semantics.json` from the scan directory, reconstructs per-class bounding boxes
-    /// from OBJ vertices + per-face labels, runs greedy overlap-merge, and generates SceneKit
-    /// line geometry for each merged bounding box. Runs entirely on a background queue.
-    nonisolated static func buildSemanticOutlines(
-        meshData: Data,
-        scanDirectoryURL: URL?
-    ) -> SemanticOutlineResult? {
-        guard let scanDir = scanDirectoryURL else { return nil }
-
-        // Find semantics.json (check raw_data/ subdirectory first, then scan root)
-        let candidates = [
-            scanDir.appendingPathComponent("raw_data").appendingPathComponent("semantics.json"),
-            scanDir.appendingPathComponent("semantics.json")
-        ]
-        var semanticsJSON: [String: Any]?
-        for url in candidates {
-            if let data = try? Data(contentsOf: url),
-               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                semanticsJSON = dict
-                break
-            }
-        }
-        guard let json = semanticsJSON,
-              let classNames = json["classes"] as? [String],
-              let anchorsArray = json["anchors"] as? [[String: Any]] else {
-            return nil
-        }
-
-        // Parse OBJ to get vertex positions and face indices
-        guard let parsed = MeshParser.parseOBJ(from: meshData) else { return nil }
-
-        // Build a flat per-face classification array (across all anchors in order)
-        var allClassifications: [Int] = []
-        for anchor in anchorsArray {
-            if let classifications = anchor["classifications"] as? [Int] {
-                allClassifications.append(contentsOf: classifications)
-            }
-        }
-
-        // Ensure face count matches
-        guard allClassifications.count == parsed.faces.count else { return nil }
-
-        // Map class name indices to SemanticClass
-        let classMapping: [SemanticClass] = classNames.map { name in
-            SemanticClass(rawValue: name) ?? .none
-        }
-
-        // Compute per-class bounding boxes (one box per contiguous group from each anchor)
-        var boxesByClass: [SemanticClass: [(min: SIMD3<Float>, max: SIMD3<Float>)]] = [:]
-
-        // Group by anchor: each anchor's faces form a contiguous range
-        var faceOffset = 0
-        for anchor in anchorsArray {
-            guard let classifications = anchor["classifications"] as? [Int] else { continue }
-            var anchorBounds: [SemanticClass: (min: SIMD3<Float>, max: SIMD3<Float>)] = [:]
-
-            for localIdx in 0..<classifications.count {
-                let globalIdx = faceOffset + localIdx
-                guard globalIdx < parsed.faces.count else { break }
-                let classIdx = classifications[localIdx]
-                guard classIdx >= 0, classIdx < classMapping.count else { continue }
-                let cls = classMapping[classIdx]
-                guard cls != .none else { continue }
-
-                let face = parsed.faces[globalIdx]
-                for vertIdx in [Int(face.0), Int(face.1), Int(face.2)] {
-                    guard vertIdx < parsed.vertices.count else { continue }
-                    let vtx = parsed.vertices[vertIdx]
-                    if var existing = anchorBounds[cls] {
-                        existing.min = simd_min(existing.min, vtx)
-                        existing.max = simd_max(existing.max, vtx)
-                        anchorBounds[cls] = existing
-                    } else {
-                        anchorBounds[cls] = (min: vtx, max: vtx)
-                    }
-                }
-            }
-
-            // Add this anchor's per-class bounds to the global collection
-            for (cls, bounds) in anchorBounds {
-                boxesByClass[cls, default: []].append(bounds)
-            }
-            faceOffset += classifications.count
-        }
-
-        // Greedy overlap-merge per class (same algorithm as live AR outlines)
-        var mergedBounds: [(cls: SemanticClass, min: SIMD3<Float>, max: SIMD3<Float>)] = []
-        for (cls, var boxes) in boxesByClass {
-            let threshold = cls.mergeThreshold
-            var merged = true
-            while merged {
-                merged = false
-                outerLoop: for idxA in 0..<boxes.count {
-                    for idxB in (idxA + 1)..<boxes.count {
-                        let gap = SIMD3<Float>(
-                            max(0, boxes[idxA].min.x - boxes[idxB].max.x),
-                            max(0, boxes[idxA].min.y - boxes[idxB].max.y),
-                            max(0, boxes[idxA].min.z - boxes[idxB].max.z)
-                        )
-                        let gapReverse = SIMD3<Float>(
-                            max(0, boxes[idxB].min.x - boxes[idxA].max.x),
-                            max(0, boxes[idxB].min.y - boxes[idxA].max.y),
-                            max(0, boxes[idxB].min.z - boxes[idxA].max.z)
-                        )
-                        let maxGap = simd_max(gap, gapReverse)
-                        if maxGap.x <= threshold && maxGap.y <= threshold && maxGap.z <= threshold {
-                            let unionMin = simd_min(boxes[idxA].min, boxes[idxB].min)
-                            let unionMax = simd_max(boxes[idxA].max, boxes[idxB].max)
-                            boxes.remove(at: idxB)
-                            boxes.remove(at: idxA)
-                            boxes.append((min: unionMin, max: unionMax))
-                            merged = true
-                            break outerLoop
-                        }
-                    }
-                }
-            }
-            for box in boxes {
-                mergedBounds.append((cls: cls, min: box.min, max: box.max))
-            }
-        }
-
-        guard !mergedBounds.isEmpty else { return nil }
-
-        // Build SceneKit line geometry for each bounding box
-        var outlineNodes: [SemanticOutlineResult.OutlineNode] = []
-        var detectedSet = Set<SemanticClass>()
-
-        for entry in mergedBounds {
-            detectedSet.insert(entry.cls)
-            let geo = buildBoxLineGeometry(
-                min: entry.min, max: entry.max,
-                color: entry.cls.color
-            )
-            outlineNodes.append(SemanticOutlineResult.OutlineNode(geometry: geo))
-        }
-
-        let detectedClasses = SemanticClass.allCases.filter { detectedSet.contains($0) && $0 != .none }
-        return SemanticOutlineResult(outlineNodes: outlineNodes, detectedClasses: detectedClasses)
-    }
-
-    /// Builds a SceneKit line geometry representing the 12 edges of an axis-aligned bounding box.
-    private nonisolated static func buildBoxLineGeometry(
-        min minC: SIMD3<Float>,
-        max maxC: SIMD3<Float>,
-        color: SIMD4<Float>
-    ) -> SCNGeometry {
-        // 8 corners of the AABB
-        let corners: [SCNVector3] = [
-            SCNVector3(minC.x, minC.y, minC.z), // 0: bottom-front-left
-            SCNVector3(maxC.x, minC.y, minC.z), // 1: bottom-front-right
-            SCNVector3(maxC.x, minC.y, maxC.z), // 2: bottom-back-right
-            SCNVector3(minC.x, minC.y, maxC.z), // 3: bottom-back-left
-            SCNVector3(minC.x, maxC.y, minC.z), // 4: top-front-left
-            SCNVector3(maxC.x, maxC.y, minC.z), // 5: top-front-right
-            SCNVector3(maxC.x, maxC.y, maxC.z), // 6: top-back-right
-            SCNVector3(minC.x, maxC.y, maxC.z)  // 7: top-back-left
-        ]
-
-        // 12 edges as pairs of vertex indices
-        let edgeIndices: [UInt32] = [
-            0, 1, 1, 2, 2, 3, 3, 0, // bottom face
-            4, 5, 5, 6, 6, 7, 7, 4, // top face
-            0, 4, 1, 5, 2, 6, 3, 7  // vertical edges
-        ]
-
-        let vertexSource = SCNGeometrySource(vertices: corners)
-        let indexData = Data(bytes: edgeIndices, count: edgeIndices.count * MemoryLayout<UInt32>.size)
-        let element = SCNGeometryElement(
-            data: indexData,
-            primitiveType: .line,
-            primitiveCount: 12,
-            bytesPerIndex: MemoryLayout<UInt32>.size
-        )
-
-        let geometry = SCNGeometry(sources: [vertexSource], elements: [element])
-        let material = SCNMaterial()
-        material.lightingModel = .constant
-        material.diffuse.contents = UIColor(
-            red: CGFloat(color.x), green: CGFloat(color.y),
-            blue: CGFloat(color.z), alpha: 1.0
-        )
-        material.isDoubleSided = true
-        geometry.materials = [material]
-        return geometry
-    }
 
     nonisolated static func heightGradientColors(vertices: [SCNVector3], minY: Float, maxY: Float) -> [SIMD4<Float>] {
         let yRange = maxY - minY
@@ -829,6 +654,206 @@ struct MeshPreviewView: UIViewRepresentable {
 
         let size = CGSize(width: 512, height: 512)
         return renderer.snapshot(atTime: 0, with: size, antialiasingMode: .multisampling4X)
+    }
+
+
+    // MARK: - Semantic Outline Result
+
+    /// Result from building semantic outlines: SceneKit geometry nodes + detected class list.
+    struct SemanticOutlineResult {
+        struct OutlineNode {
+            let geometry: SCNGeometry       // wireframe edges (.line)
+            let fillGeometry: SCNGeometry   // filled box faces (.triangles, 75% opacity)
+        }
+        let outlineNodes: [OutlineNode]
+        let detectedClasses: [SemanticClass]
+    }
+
+    // MARK: - RoomPlan Outline Rendering
+
+    /// Parses `roomplan.json` from the scan directory and generates oriented wireframe boxes
+    /// for each surface and object. Unlike the legacy AABB approach, these boxes use the actual
+    /// transform (rotation + position) from RoomPlan, producing accurate outlines.
+    nonisolated static func buildRoomPlanOutlines(
+        scanDirectoryURL: URL?
+    ) -> SemanticOutlineResult? {
+        guard let scanDir = scanDirectoryURL else { return nil }
+
+        // Find roomplan.json (check raw_data/ subdirectory first, then scan root)
+        let candidates = [
+            scanDir.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json"),
+            scanDir.appendingPathComponent("roomplan.json")
+        ]
+        var exportData: RoomPlanExportData?
+        for url in candidates {
+            if let data = try? Data(contentsOf: url),
+               let decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) {
+                exportData = decoded
+                break
+            }
+        }
+        guard let roomData = exportData else { return nil }
+
+        var outlineNodes: [SemanticOutlineResult.OutlineNode] = []
+        var detectedSet = Set<SemanticClass>()
+
+        // Build outlines for surfaces
+        for surface in roomData.surfaces {
+            let cls = SemanticClass(rawValue: surface.category) ?? .none
+            guard cls != .none else { continue }
+            detectedSet.insert(cls)
+
+            let dims = SIMD3<Float>(surface.dimensions.width, surface.dimensions.height, surface.dimensions.depth)
+            let transform = reconstructMatrix(from: surface.transform)
+            let wireframe = buildOrientedBoxLineGeometry(
+                dimensions: dims, transform: transform, color: cls.color
+            )
+            let fill = buildOrientedBoxFillGeometry(
+                dimensions: dims, transform: transform, color: cls.color, opacity: 0.75
+            )
+            outlineNodes.append(SemanticOutlineResult.OutlineNode(geometry: wireframe, fillGeometry: fill))
+        }
+
+        // Build outlines for objects
+        for object in roomData.objects {
+            let cls = SemanticClass.fromObjectCategory(object.category)
+            guard cls != .none else { continue }
+            detectedSet.insert(cls)
+
+            let dims = SIMD3<Float>(object.dimensions.width, object.dimensions.height, object.dimensions.depth)
+            let transform = reconstructMatrix(from: object.transform)
+            let wireframe = buildOrientedBoxLineGeometry(
+                dimensions: dims, transform: transform, color: cls.color
+            )
+            let fill = buildOrientedBoxFillGeometry(
+                dimensions: dims, transform: transform, color: cls.color, opacity: 0.75
+            )
+            outlineNodes.append(SemanticOutlineResult.OutlineNode(geometry: wireframe, fillGeometry: fill))
+        }
+
+        guard !outlineNodes.isEmpty else { return nil }
+        let detectedClasses = SemanticClass.allCases.filter { detectedSet.contains($0) && $0 != .none }
+        return SemanticOutlineResult(outlineNodes: outlineNodes, detectedClasses: detectedClasses)
+    }
+
+    /// Builds a SceneKit line geometry for an oriented bounding box (12 edges).
+    /// Unlike `buildBoxLineGeometry` (axis-aligned), this applies the full 4×4 transform
+    /// to produce correctly rotated outlines matching RoomPlan's detections.
+    private nonisolated static func buildOrientedBoxLineGeometry(
+        dimensions: SIMD3<Float>,
+        transform: simd_float4x4,
+        color: SIMD4<Float>
+    ) -> SCNGeometry {
+        let corners = orientedBoxCorners(dimensions: dimensions, transform: transform)
+
+        let edgeIndices: [UInt32] = [
+            0, 1, 1, 2, 2, 3, 3, 0,
+            4, 5, 5, 6, 6, 7, 7, 4,
+            0, 4, 1, 5, 2, 6, 3, 7
+        ]
+
+        let vertexSource = SCNGeometrySource(vertices: corners)
+        let indexData = Data(bytes: edgeIndices, count: edgeIndices.count * MemoryLayout<UInt32>.size)
+        let element = SCNGeometryElement(
+            data: indexData,
+            primitiveType: .line,
+            primitiveCount: 12,
+            bytesPerIndex: MemoryLayout<UInt32>.size
+        )
+
+        let geometry = SCNGeometry(sources: [vertexSource], elements: [element])
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.diffuse.contents = UIColor(
+            red: CGFloat(color.x), green: CGFloat(color.y),
+            blue: CGFloat(color.z), alpha: 1.0
+        )
+        material.isDoubleSided = true
+        geometry.materials = [material]
+        return geometry
+    }
+
+    /// Builds a SceneKit triangle geometry for an oriented bounding box (6 faces, 12 triangles).
+    /// Used in "semantic only" / floor plan mode with translucent fills.
+    private nonisolated static func buildOrientedBoxFillGeometry(
+        dimensions: SIMD3<Float>,
+        transform: simd_float4x4,
+        color: SIMD4<Float>,
+        opacity: CGFloat
+    ) -> SCNGeometry {
+        let corners = orientedBoxCorners(dimensions: dimensions, transform: transform)
+
+        // 6 faces × 2 triangles × 3 vertices = 36 indices
+        // Face winding: counter-clockwise when viewed from outside
+        let faceIndices: [UInt32] = [
+            // bottom (y-) 0,1,2,3
+            0, 2, 1, 0, 3, 2,
+            // top (y+) 4,5,6,7
+            4, 5, 6, 4, 6, 7,
+            // front (z+) 3,2,6,7
+            3, 7, 6, 3, 6, 2,
+            // back (z-) 0,1,5,4
+            0, 1, 5, 0, 5, 4,
+            // left (x-) 0,3,7,4
+            0, 4, 7, 0, 7, 3,
+            // right (x+) 1,2,6,5
+            1, 2, 6, 1, 6, 5
+        ]
+
+        let vertexSource = SCNGeometrySource(vertices: corners)
+        let indexData = Data(bytes: faceIndices, count: faceIndices.count * MemoryLayout<UInt32>.size)
+        let element = SCNGeometryElement(
+            data: indexData,
+            primitiveType: .triangles,
+            primitiveCount: 12,
+            bytesPerIndex: MemoryLayout<UInt32>.size
+        )
+
+        let geometry = SCNGeometry(sources: [vertexSource], elements: [element])
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.diffuse.contents = UIColor(
+            red: CGFloat(color.x), green: CGFloat(color.y),
+            blue: CGFloat(color.z), alpha: opacity
+        )
+        material.isDoubleSided = true
+        material.blendMode = .alpha
+        material.writesToDepthBuffer = true
+        material.readsFromDepthBuffer = true
+        geometry.materials = [material]
+        return geometry
+    }
+
+    /// Compute the 8 world-space corners of an oriented bounding box (shared by line + fill builders).
+    private nonisolated static func orientedBoxCorners(
+        dimensions: SIMD3<Float>, transform: simd_float4x4
+    ) -> [SCNVector3] {
+        let hx = dimensions.x / 2
+        let hy = dimensions.y / 2
+        let hz = dimensions.z / 2
+
+        let localCorners: [SIMD4<Float>] = [
+            SIMD4(-hx, -hy, -hz, 1), SIMD4( hx, -hy, -hz, 1),
+            SIMD4( hx, -hy,  hz, 1), SIMD4(-hx, -hy,  hz, 1),
+            SIMD4(-hx,  hy, -hz, 1), SIMD4( hx,  hy, -hz, 1),
+            SIMD4( hx,  hy,  hz, 1), SIMD4(-hx,  hy,  hz, 1)
+        ]
+
+        return localCorners.map { lc in
+            let wc = transform * lc
+            return SCNVector3(wc.x, wc.y, wc.z)
+        }
+    }
+
+    /// Reconstruct a simd_float4x4 from a 16-element column-major float array.
+    private nonisolated static func reconstructMatrix(from flat: [Float]) -> simd_float4x4 {
+        guard flat.count == 16 else { return matrix_identity_float4x4 }
+        return simd_float4x4(columns: (
+            SIMD4(flat[0], flat[1], flat[2], flat[3]),
+            SIMD4(flat[4], flat[5], flat[6], flat[7]),
+            SIMD4(flat[8], flat[9], flat[10], flat[11]),
+            SIMD4(flat[12], flat[13], flat[14], flat[15])
+        ))
     }
 }
 

@@ -103,7 +103,9 @@ class CapturedScan {
     @Transient var modelPreviewURL: URL { scanDirectory.appendingPathComponent("model_preview.jpg") }
     @Transient var thumbnailURL: URL { scanDirectory.appendingPathComponent("thumbnail.jpg") }
     @Transient var rawDataPath: URL { scanDirectory.appendingPathComponent("raw_data") }
-    @Transient var semanticsFileURL: URL { scanDirectory.appendingPathComponent("semantics.json") }
+
+    @Transient var roomPlanFileURL: URL { scanDirectory.appendingPathComponent("roomplan.json") }
+    @Transient var roomPlanRawFileURL: URL { scanDirectory.appendingPathComponent("roomplan_raw.json") }
 
     @Transient var estimatedSizeMB: Double {
         // Compute dynamically by checking disk if needed, or fallback to an estimate
@@ -496,8 +498,7 @@ class ScanFileManager {
         vertexColors: Data?,
         worldMapURL: URL?,
         thumbnailData: Data? = nil,
-        scanCase: ScanCase = .rescanSpace,
-        semantics: SemanticsData? = nil
+        scanCase: ScanCase = .rescanSpace
     ) -> CapturedScan {
         let targetLocation: ScanLocation
 
@@ -549,9 +550,6 @@ class ScanFileManager {
         if let thumb = thumbnailData {
             do { try thumb.write(to: newScan.thumbnailURL) } catch { print("[ScanFileManager] Failed to write thumbnail: \(error)") }
         }
-        if let semantics = semantics {
-            SemanticsExporter.writeSemantics(semantics, to: newScan.semanticsFileURL)
-        }
 
         // Critical: move raw data directory (images, depth, cameras, metadata)
         if let raw = rawDataPath, FileManager.default.fileExists(atPath: raw.path) {
@@ -569,6 +567,15 @@ class ScanFileManager {
                 }
             } catch {
                 print("[ScanFileManager] Failed to move raw data: \(error)")
+            }
+
+            // Promote RoomPlan files from raw_data to scan directory top level (for export lookup)
+            for rpFile in ["roomplan.json", "roomplan_raw.json"] {
+                let src = newScan.rawDataPath.appendingPathComponent(rpFile)
+                let dst = newScan.scanDirectory.appendingPathComponent(rpFile)
+                if FileManager.default.fileExists(atPath: src.path) {
+                    try? FileManager.default.copyItem(at: src, to: dst)
+                }
             }
         }
 

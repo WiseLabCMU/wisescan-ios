@@ -14,6 +14,7 @@ struct CombinedMeshItem: Identifiable {
     let name: String
     let meshURL: URL
     let colorsURL: URL?
+    let scanDirectoryURL: URL?
     let transform: simd_float4x4
     /// Distinct hue used when "color by map" is enabled.
     let tint: UIColor
@@ -27,6 +28,8 @@ struct CombinedMeshScreen: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var colorByMap = false
+    @State private var semanticViewMode: SemanticViewMode = .meshOnly
+    @State private var detectedClasses: [SemanticClass] = []
     @State private var isLoading = true
 
     /// Items whose mesh file actually exists on disk.
@@ -49,8 +52,34 @@ struct CombinedMeshScreen: View {
                             .foregroundColor(.gray)
                     }
                 } else {
-                    CombinedMeshView(items: presentItems, colorByMap: colorByMap, onLoaded: { isLoading = false })
-                        .ignoresSafeArea(edges: .bottom)
+                    CombinedMeshView(
+                        items: presentItems, colorByMap: colorByMap,
+                        semanticViewMode: semanticViewMode,
+                        detectedClasses: $detectedClasses,
+                        onLoaded: { isLoading = false }
+                    )
+                    .ignoresSafeArea(edges: .bottom)
+                    .overlay(alignment: .bottomLeading) {
+                        if semanticViewMode.showOutlines && !detectedClasses.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(detectedClasses, id: \.rawValue) { cls in
+                                    HStack(spacing: 6) {
+                                        Circle()
+                                            .fill(cls.swiftUIDisplayColor)
+                                            .frame(width: 10, height: 10)
+                                        Text(cls.rawValue)
+                                            .font(.caption2)
+                                            .foregroundColor(.white)
+                                    }
+                                }
+                            }
+                            .padding(10)
+                            .background(Color.black.opacity(0.7))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .padding(.leading, 16)
+                            .padding(.bottom, 40)
+                        }
+                    }
                 }
 
                 if isLoading && !presentItems.isEmpty {
@@ -87,12 +116,21 @@ struct CombinedMeshScreen: View {
                     Button("Done") { dismiss() }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        colorByMap.toggle()
-                    } label: {
-                        Image(systemName: colorByMap ? "paintpalette.fill" : "paintpalette")
+                    HStack(spacing: 12) {
+                        Button {
+                            semanticViewMode = semanticViewMode.next
+                        } label: {
+                            Image(systemName: semanticViewMode.iconName)
+                        }
+                        .disabled(presentItems.isEmpty)
+
+                        Button {
+                            colorByMap.toggle()
+                        } label: {
+                            Image(systemName: colorByMap ? "paintpalette.fill" : "paintpalette")
+                        }
+                        .disabled(presentItems.isEmpty)
                     }
-                    .disabled(presentItems.isEmpty)
                 }
             }
             .preferredColorScheme(.dark)
@@ -105,6 +143,8 @@ struct CombinedMeshScreen: View {
 struct CombinedMeshView: UIViewRepresentable {
     let items: [CombinedMeshItem]
     let colorByMap: Bool
+    let semanticViewMode: SemanticViewMode
+    @Binding var detectedClasses: [SemanticClass]
     var onLoaded: () -> Void = {}
 
     func makeUIView(context: Context) -> SCNView {
@@ -137,27 +177,39 @@ struct CombinedMeshView: UIViewRepresentable {
         fill.eulerAngles = SCNVector3(Float.pi / 4, -Float.pi / 3, 0)
         scene.rootNode.addChildNode(fill)
 
-        context.coordinator.load(into: scnView, items: items, colorByMap: colorByMap, onLoaded: onLoaded)
+        context.coordinator.load(
+            into: scnView, items: items, colorByMap: colorByMap,
+            semanticViewMode: semanticViewMode, detectedClassesBinding: $detectedClasses,
+            onLoaded: onLoaded
+        )
         return scnView
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         // Re-tint in place when the toggle changes (no reload needed).
         context.coordinator.applyTint(colorByMap: colorByMap)
+        context.coordinator.applyViewMode(semanticViewMode)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     final class Coordinator {
         private var meshNodes: [UUID: SCNNode] = [:]
+        private var semanticsNode: SCNNode?
+        private var semanticFillsNode: SCNNode?
+        private var allDetectedClasses: [SemanticClass] = []
+        private var detectedClassesBinding: Binding<[SemanticClass]>?
         // Two geometries per mesh, swapped on toggle (no runtime shader): the real per-vertex
         // colors, and a flat per-map color. The flat one omits the `.color` source so the map hue
         // isn't multiplied into the vertex/normal colors, but keeps `.normal` so it's still lit.
         private var coloredGeometries: [UUID: SCNGeometry] = [:]
         private var flatGeometries: [UUID: SCNGeometry] = [:]
 
-        func load(into scnView: SCNView, items: [CombinedMeshItem], colorByMap: Bool, onLoaded: @escaping () -> Void) {
+        func load(into scnView: SCNView, items: [CombinedMeshItem], colorByMap: Bool,
+                  semanticViewMode: SemanticViewMode, detectedClassesBinding: Binding<[SemanticClass]>,
+                  onLoaded: @escaping () -> Void) {
             guard let scene = scnView.scene else { onLoaded(); return }
+            self.detectedClassesBinding = detectedClassesBinding
             let contentNode = SCNNode()
             scene.rootNode.addChildNode(contentNode)
 
@@ -170,6 +222,24 @@ struct CombinedMeshView: UIViewRepresentable {
                     built.append((item, geometry, Self.makeFlatTinted(from: geometry, tint: item.tint)))
                 }
 
+                // Build RoomPlan outlines + fills for each scan
+                var allOutlineNodes: [(wireNode: SCNNode, fillNode: SCNNode, transform: simd_float4x4)] = []
+                var detectedSet = Set<SemanticClass>()
+                for item in items {
+                    if let result = MeshPreviewView.buildRoomPlanOutlines(
+                        scanDirectoryURL: item.scanDirectoryURL
+                    ) {
+                        for outline in result.outlineNodes {
+                            let wire = SCNNode(geometry: outline.geometry)
+                            let fill = SCNNode(geometry: outline.fillGeometry)
+                            allOutlineNodes.append((wire, fill, item.transform))
+                        }
+                        for cls in result.detectedClasses {
+                            detectedSet.insert(cls)
+                        }
+                    }
+                }
+
                 DispatchQueue.main.async {
                     for entry in built {
                         let node = SCNNode(geometry: entry.geometry)
@@ -179,6 +249,36 @@ struct CombinedMeshView: UIViewRepresentable {
                         self.coloredGeometries[entry.item.id] = entry.geometry
                         self.flatGeometries[entry.item.id] = entry.flat
                     }
+
+                    // Add semantics wireframes
+                    let semNode = SCNNode()
+                    let fillNode = SCNNode()
+                    for entry in allOutlineNodes {
+                        let wireWrapper = SCNNode()
+                        wireWrapper.simdTransform = entry.transform
+                        wireWrapper.addChildNode(entry.wireNode)
+                        semNode.addChildNode(wireWrapper)
+
+                        let fillWrapper = SCNNode()
+                        fillWrapper.simdTransform = entry.transform
+                        fillWrapper.addChildNode(entry.fillNode)
+                        fillNode.addChildNode(fillWrapper)
+                    }
+                    semNode.isHidden = !semanticViewMode.showOutlines
+                    fillNode.isHidden = !semanticViewMode.showFills
+                    contentNode.addChildNode(semNode)
+                    contentNode.addChildNode(fillNode)
+                    self.semanticsNode = semNode
+                    self.semanticFillsNode = fillNode
+
+                    // Apply initial mesh visibility
+                    if !semanticViewMode.showMesh {
+                        for (_, node) in self.meshNodes { node.isHidden = true }
+                    }
+
+                    self.allDetectedClasses = SemanticClass.allCases.filter { detectedSet.contains($0) && $0 != .none }
+                    detectedClassesBinding.wrappedValue = self.allDetectedClasses
+
                     self.applyTint(colorByMap: colorByMap)
                     self.frameCamera(scene: scene, contentNode: contentNode, scnView: scnView)
                     onLoaded()
@@ -195,6 +295,13 @@ struct CombinedMeshView: UIViewRepresentable {
             for (id, node) in meshNodes {
                 node.geometry = colorByMap ? flatGeometries[id] : coloredGeometries[id]
             }
+        }
+
+        /// Applies the 3-mode visibility: mesh, outlines, and fills.
+        func applyViewMode(_ mode: SemanticViewMode) {
+            for (_, node) in meshNodes { node.isHidden = !mode.showMesh }
+            semanticsNode?.isHidden = !mode.showOutlines
+            semanticFillsNode?.isHidden = !mode.showFills
         }
 
         /// A flat per-map variant of `geometry`: same vertices/normals/elements, but the per-vertex

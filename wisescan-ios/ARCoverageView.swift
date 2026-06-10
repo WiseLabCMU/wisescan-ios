@@ -1,6 +1,7 @@
 import SwiftUI
 import RealityKit
 import ARKit
+import RoomPlan
 import Synchronization
 
 // swiftlint:disable type_body_length
@@ -23,6 +24,9 @@ struct ARCoverageView: UIViewRepresentable {
     /// relocalized session's world frame. Computed by CaptureView (which has the ModelContext) and
     /// rendered as labeled markers on record-start when rescanning an existing space. Empty otherwise.
     var connectorAnchors: [ConnectorAnchor] = []
+    /// RoomPlan: binding to receive the final CapturedRoom when recording stops.
+    /// Written by the Coordinator in stopRoomPlanSession(); consumed by finishStopRecording for export.
+    @Binding var finalCapturedRoom: CapturedRoom?
 
     /// Well-known name for boundary anchors so they can be identified across sessions.
     static let boundaryAnchorName = "Scan4D_Boundary_Anchor"
@@ -65,6 +69,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.isRecording.store(false, ordering: .relaxed)
         context.coordinator.isSessionReadyBinding = $isSessionReady
         context.coordinator.vioCompromisedBinding = $vioCompromised
+        context.coordinator.finalCapturedRoomBinding = $finalCapturedRoom
         context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
         context.coordinator.scanStore = scanStore
 
@@ -263,15 +268,8 @@ struct ARCoverageView: UIViewRepresentable {
                 // Upgrade to full scene reconstruction — preserve world map for coordinate continuity
                 let config = ARWorldTrackingConfiguration()
                 if Self.supportsLiDAR {
-                    // Use .meshWithClassification for semantic labeling when available and not
-                    // disabled via Developer Mode kill-switch. Same LiDAR requirement as .mesh.
-                    let semanticEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
-                    if semanticEnabled,
-                       ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
-                        config.sceneReconstruction = .meshWithClassification
-                    } else {
-                        config.sceneReconstruction = .mesh
-                    }
+                    // RoomPlan handles semantic labeling; ARKit only needs raw mesh for reconstruction.
+                    config.sceneReconstruction = .mesh
                 }
                 config.environmentTexturing = .automatic
                 // Preserve the relocalized coordinate system by keeping the world map
@@ -308,6 +306,8 @@ struct ARCoverageView: UIViewRepresentable {
                 // Active wireframe is now rendered via procedural geometry (not .showSceneUnderstanding)
                 // Entities are built incrementally in session(_:didAdd:) and session(_:didUpdate:)
                 context.coordinator.resetForRecording()
+                // Start RoomPlan session alongside ARKit (shares the same ARSession)
+                context.coordinator.startRoomPlanSession(arSession: uiView.session)
                 // Add coverage overlay green quad in AR mode
                 if captureMode == .ar {
                     context.coordinator.addCoverageGreenQuad(to: uiView)
@@ -335,6 +335,8 @@ struct ARCoverageView: UIViewRepresentable {
                 context.coordinator.renderRescanConnectorsIfReady(arView: uiView)
             } else {
                 // Downgrade to nominal: pure camera passthrough — no overlays
+                // Stop RoomPlan and capture final CapturedRoom BEFORE reset clears state
+                context.coordinator.stopRoomPlanSession()
                 context.coordinator.resetForNominal()
                 context.coordinator.removeCoverageGreenQuad()
 
@@ -448,6 +450,8 @@ struct ARCoverageView: UIViewRepresentable {
         /// Once armed, a drop to `.notAvailable`/`.relocalizing` means the world frame is lost and
         /// everything captured afterward is corrupt — so we trip the guard (halt + prompt) once.
         var vioCompromisedBinding: Binding<Bool>?
+        /// RoomPlan: binding to push the final CapturedRoom snapshot back to CaptureView for export.
+        var finalCapturedRoomBinding: Binding<CapturedRoom?>?
         private var vioGuardArmed = false
         /// ARFrame timestamp when tracking first went degraded (0 = currently fine). Used to
         /// measure *continuous* degradation for the VIO guard. Touched on the delegate queue.
@@ -486,16 +490,17 @@ struct ARCoverageView: UIViewRepresentable {
         /// Minimum interval between wireframe rebuilds for the same anchor (seconds).
         private let wireframeThrottleInterval: TimeInterval = 0.5
 
-        // Semantic Classification outline properties
-        /// Per-anchor class bounds accumulated on the delegate queue. Merged into global
-        /// per-class bounding boxes before rendering. Keyed by anchor UUID.
-        private var anchorClassBounds: [UUID: [SemanticClass: (min: SIMD3<Float>, max: SIMD3<Float>)]] = [:]
-        /// Single global classification entity (replaces per-anchor entities to avoid overlapping outlines).
-        private var globalClassificationEntity: AnchorEntity?
-        /// Throttle: last time global classification outlines were rebuilt.
-        private var lastGlobalClassificationTime: Date = .distantPast
-        /// Whether a global classification rebuild is already pending (prevents duplicate dispatches).
-        private var classificationRebuildPending = false
+        // RoomPlan: structured room detection alongside ARKit mesh
+        /// Active RoomPlan session sharing our ARSession. Provides oriented surfaces/objects.
+        private var roomCaptureSession: RoomCaptureSession?
+        /// Latest room snapshot from RoomPlan (updated in real-time via delegate).
+        private var latestCapturedRoom: CapturedRoom?
+        /// Final CapturedRoom snapshot captured at recording stop (for export).
+        var finalCapturedRoom: CapturedRoom?
+        /// Single anchor holding all RoomPlan outline entities.
+        private var roomPlanOutlineEntity: AnchorEntity?
+        /// Throttle: last time RoomPlan outlines were rebuilt.
+        private var lastRoomPlanOutlineTime: Date = .distantPast
         /// Accumulated set of detected semantic classes (published to ScanStats for HUD).
         private var detectedSemanticClasses: Set<String> = []
 
@@ -579,9 +584,6 @@ struct ARCoverageView: UIViewRepresentable {
                 self.anchorVertexCounts.removeAll()
                 self.anchorFaceCounts.removeAll()
                 self.lastAnchorWireframeTime.removeAll()
-                self.anchorClassBounds.removeAll()
-                self.lastGlobalClassificationTime = .distantPast
-                self.classificationRebuildPending = false
                 self.detectedSemanticClasses.removeAll()
                 self.trackingDegradationCount = 0
                 self.totalTrackingUpdates = 0
@@ -594,7 +596,10 @@ struct ARCoverageView: UIViewRepresentable {
             }
             // Clear any stale wireframe entities from a previous recording (RealityKit → main)
             removeAllActiveMeshEntities()
-            removeAllClassificationEntities()
+            removeRoomPlanOutlines()
+            latestCapturedRoom = nil
+            finalCapturedRoom = nil
+            lastRoomPlanOutlineTime = .distantPast
 
             scanStats?.hasBoundaryAnchor = false
             scanStats?.detectedClasses.removeAll()
@@ -621,9 +626,6 @@ struct ARCoverageView: UIViewRepresentable {
                 self.anchorVertexCounts.removeAll()
                 self.anchorFaceCounts.removeAll()
                 self.lastAnchorWireframeTime.removeAll()
-                self.anchorClassBounds.removeAll()
-                self.lastGlobalClassificationTime = .distantPast
-                self.classificationRebuildPending = false
                 self.detectedSemanticClasses.removeAll()
                 self.trackingDegradationCount = 0
                 self.totalTrackingUpdates = 0
@@ -633,7 +635,10 @@ struct ARCoverageView: UIViewRepresentable {
 
             // Remove all active mesh wireframe entities from the scene (RealityKit → main)
             removeAllActiveMeshEntities()
-            removeAllClassificationEntities()
+            removeRoomPlanOutlines()
+            // Stop RoomPlan session if still running
+            roomCaptureSession?.stop(pauseARSession: false)
+            roomCaptureSession = nil
 
             // Remove boundary anchor visual from the scene
             if let existing = boundaryAnchorEntity {
@@ -812,234 +817,179 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
-        // MARK: - Semantic Classification Outlines
+        // MARK: - RoomPlan Outlines
 
-        /// Removes the global classification outline entity from the AR scene.
-        private func removeAllClassificationEntities() {
-            globalClassificationEntity?.removeFromParent()
-            globalClassificationEntity = nil
+        /// Removes the RoomPlan outline entity from the AR scene.
+        private func removeRoomPlanOutlines() {
+            roomPlanOutlineEntity?.removeFromParent()
+            roomPlanOutlineEntity = nil
         }
 
-        /// Extracts per-face classification bounds from a single ARMeshAnchor and stores them.
-        /// Does minimal work on the delegate queue: reads classification IDs + vertex positions
-        /// for min/max expansion only. Schedules a coalesced global rebuild if throttle allows.
-        private func buildClassificationOutlines(_ meshAnchor: ARMeshAnchor) {
-            let anchorId = meshAnchor.identifier
-            let geometry = meshAnchor.geometry
-            let vertices = geometry.vertices
-            let faces = geometry.faces
-            let anchorTransform = meshAnchor.transform
-
-            // Classification buffer is optional — nil if .mesh (not .meshWithClassification)
-            guard let classificationSource = geometry.classification else { return }
-            guard faces.bytesPerIndex == 4, faces.indexCountPerPrimitive == 3 else { return }
-
-            // Transform vertices to world space
-            var worldPositions = [SIMD3<Float>]()
-            worldPositions.reserveCapacity(vertices.count)
-            for idx in 0..<vertices.count {
-                let ptr = vertices.buffer.contents().advanced(by: idx * vertices.stride)
-                let local = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                let worldPos = anchorTransform * SIMD4<Float>(local.x, local.y, local.z, 1.0)
-                worldPositions.append(SIMD3<Float>(worldPos.x, worldPos.y, worldPos.z))
-            }
-
-            // Read per-face classification and compute per-class bounding boxes for this anchor
-            var classBounds: [SemanticClass: (min: SIMD3<Float>, max: SIMD3<Float>)] = [:]
-            let vertexCount = worldPositions.count
-            let faceStride = faces.bytesPerIndex * faces.indexCountPerPrimitive
-
-            for faceIdx in 0..<faces.count {
-                let classPtr = classificationSource.buffer.contents()
-                    .advanced(by: faceIdx * classificationSource.stride)
-                let classValue = classPtr.assumingMemoryBound(to: UInt8.self).pointee
-                let arkitClass = ARMeshClassification(rawValue: Int(classValue)) ?? .none
-                let semanticClass = SemanticClass.from(arkitClass)
-                guard semanticClass != .none else { continue }
-
-                let facePtr = faces.buffer.contents().advanced(by: faceIdx * faceStride)
-                let indices = facePtr.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
-                guard Int(indices.0) < vertexCount, Int(indices.1) < vertexCount, Int(indices.2) < vertexCount else { continue }
-
-                for idx in [Int(indices.0), Int(indices.1), Int(indices.2)] {
-                    let vtx = worldPositions[idx]
-                    if var existing = classBounds[semanticClass] {
-                        existing.min = simd_min(existing.min, vtx)
-                        existing.max = simd_max(existing.max, vtx)
-                        classBounds[semanticClass] = existing
-                    } else {
-                        classBounds[semanticClass] = (min: vtx, max: vtx)
-                    }
-                }
-
-                detectedSemanticClasses.insert(semanticClass.rawValue)
-            }
-            // ── ARMeshAnchor buffers are no longer accessed past this point ──
-
-            // Store this anchor's bounds (overwrite previous version)
-            anchorClassBounds[anchorId] = classBounds.isEmpty ? nil : classBounds
-
-            // Schedule a coalesced global rebuild (skip if one is already pending or throttled)
-            scheduleGlobalClassificationRebuild()
+        /// Starts RoomPlan alongside the existing ARSession.
+        /// Call on main thread after recording starts.
+        func startRoomPlanSession(arSession: ARSession) {
+            let semanticEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
+            guard semanticEnabled else { return }
+            roomCaptureSession = RoomCaptureSession(arSession: arSession)
+            roomCaptureSession?.delegate = self
+            let config = RoomCaptureSession.Configuration()
+            roomCaptureSession?.run(configuration: config)
+            PerfDiag.log("RoomPlan session started (sharing ARSession)")
         }
 
-        /// Removes an anchor's stored classification bounds and schedules a global rebuild.
-        private func removeClassificationForAnchor(_ anchorId: UUID) {
-            anchorClassBounds.removeValue(forKey: anchorId)
-            scheduleGlobalClassificationRebuild()
+        /// Stops RoomPlan and stores the final CapturedRoom for export.
+        /// Call on main thread before recording cleanup.
+        func stopRoomPlanSession() {
+            guard let session = roomCaptureSession else { return }
+            finalCapturedRoom = latestCapturedRoom
+            // Push through binding so CaptureView.finishStopRecording can access it for export
+            finalCapturedRoomBinding?.wrappedValue = finalCapturedRoom
+            session.stop(pauseARSession: false) // keep ARKit alive
+            roomCaptureSession = nil
+            PerfDiag.log("RoomPlan session stopped (ARSession preserved)")
         }
 
-        /// Schedules a single coalesced rebuild of global classification outlines.
-        /// Collects per-anchor bounds, runs greedy overlap-merge per class (using per-class
-        /// mergeThreshold), builds wireframe geometry on a background queue, and creates
-        /// RealityKit entities on main.
-        private func scheduleGlobalClassificationRebuild() {
-            // Throttle: skip if rebuilt too recently
-            guard Date().timeIntervalSince(lastGlobalClassificationTime) >= AppConstants.semanticThrottleInterval else { return }
-            // De-duplicate: skip if a rebuild is already in flight
-            guard !classificationRebuildPending else { return }
+        /// Renders oriented bounding-box wireframes from the latest CapturedRoom.
+        /// Each Surface/Object becomes a set of 12 colored edges (thin boxes) with the
+        /// correct transform. Throttled to avoid per-frame rebuilds.
+        private func renderRoomPlanOutlines() {
+            guard let room = latestCapturedRoom, let arView = arView else { return }
 
-            classificationRebuildPending = true
-            lastGlobalClassificationTime = Date()
+            // Throttle: rebuild at most every 0.5s
+            guard Date().timeIntervalSince(lastRoomPlanOutlineTime) >= AppConstants.semanticThrottleInterval else { return }
+            lastRoomPlanOutlineTime = Date()
 
-            // Collect all per-anchor boxes grouped by class
-            var boxesByClass: [SemanticClass: [(min: SIMD3<Float>, max: SIMD3<Float>)]] = [:]
-            for (_, perClass) in anchorClassBounds {
-                for (cls, bounds) in perClass {
-                    boxesByClass[cls, default: []].append(bounds)
-                }
+            // Remove old outlines
+            roomPlanOutlineEntity?.removeFromParent()
+
+            let anchorEntity = AnchorEntity(world: .zero)
+
+            // Camera world position — used to lift surface outlines toward the
+            // viewer so they draw on top of the co-planar occlusion mesh instead
+            // of z-fighting with it. Objects get no lift so the mesh occludes them.
+            let cameraPosition = arView.cameraTransform.translation
+
+            // Collect detected classes for HUD
+            var classes = Set<String>()
+
+            // Render surfaces (walls, floors, doors, windows, openings) — lifted
+            // toward the camera so they always render on top of the scan mesh.
+            for surface in room.walls + room.floors + room.doors + room.windows + room.openings {
+                let semantic = SemanticClass.from(surface.category)
+                guard semantic != .none else { continue }
+                classes.insert(semantic.rawValue)
+                Self.addWireframeEdges(
+                    to: anchorEntity, dimensions: surface.dimensions,
+                    transform: surface.transform, color: semantic.color,
+                    liftTowardCamera: cameraPosition
+                )
             }
 
-            // Greedy overlap-merge: for each class, merge boxes whose gap < mergeThreshold.
-            // Repeat until no more merges occur. O(n²) per class but n is typically <20.
-            var mergedBounds: [(semanticClass: SemanticClass, min: SIMD3<Float>, max: SIMD3<Float>)] = []
-            for (cls, var boxes) in boxesByClass {
-                let threshold = cls.mergeThreshold
-                var merged = true
-                while merged {
-                    merged = false
-                    outer: for idxA in 0..<boxes.count {
-                        for idxB in (idxA + 1)..<boxes.count {
-                            // Check if the gap between boxes is within threshold on all axes.
-                            // Gap = max(0, separation on each axis). If any axis gap > threshold, skip.
-                            let gap = SIMD3<Float>(
-                                max(0, boxes[idxA].min.x - boxes[idxB].max.x),
-                                max(0, boxes[idxA].min.y - boxes[idxB].max.y),
-                                max(0, boxes[idxA].min.z - boxes[idxB].max.z)
-                            )
-                            let gapReverse = SIMD3<Float>(
-                                max(0, boxes[idxB].min.x - boxes[idxA].max.x),
-                                max(0, boxes[idxB].min.y - boxes[idxA].max.y),
-                                max(0, boxes[idxB].min.z - boxes[idxA].max.z)
-                            )
-                            let maxGap = simd_max(gap, gapReverse)
-                            if maxGap.x <= threshold && maxGap.y <= threshold && maxGap.z <= threshold {
-                                // Merge: union of both boxes, remove the two originals, add merged
-                                let unionMin = simd_min(boxes[idxA].min, boxes[idxB].min)
-                                let unionMax = simd_max(boxes[idxA].max, boxes[idxB].max)
-                                boxes.remove(at: idxB)
-                                boxes.remove(at: idxA)
-                                boxes.append((min: unionMin, max: unionMax))
-                                merged = true
-                                break outer
-                            }
-                        }
-                    }
-                }
-                for box in boxes {
-                    mergedBounds.append((semanticClass: cls, min: box.min, max: box.max))
-                }
+            // Render objects (tables, chairs, beds, etc.) — no lift, so they are
+            // naturally occluded by the scan mesh while scanning.
+            for object in room.objects {
+                let semantic = SemanticClass.from(object.category)
+                guard semantic != .none else { continue }
+                classes.insert(semantic.rawValue)
+                Self.addWireframeEdges(
+                    to: anchorEntity, dimensions: object.dimensions,
+                    transform: object.transform, color: semantic.color,
+                    liftTowardCamera: nil
+                )
             }
 
-            let classesForHUD = detectedSemanticClasses
+            arView.scene.addAnchor(anchorEntity)
+            roomPlanOutlineEntity = anchorEntity
 
-            guard !mergedBounds.isEmpty else {
-                classificationRebuildPending = false
-                DispatchQueue.main.async { [weak self] in
-                    self?.scanStats?.detectedClasses = classesForHUD
-                }
-                return
-            }
-
-            // Build MeshDescriptor geometry on a background queue (pure data, no RealityKit objects).
-            // ALL RealityKit object creation (UnlitMaterial, MeshResource, ModelEntity) MUST happen
-            // on the main thread — creating them off-main causes EXC_BREAKPOINT crashes.
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                var classDescriptors: [(semanticClass: SemanticClass, descriptors: [MeshDescriptor])] = []
-
-                for entry in mergedBounds {
-                    let edges = Self.buildBoundingBoxEdges(min: entry.min, max: entry.max, thickness: 0.003)
-                    guard !edges.isEmpty else { continue }
-                    classDescriptors.append((semanticClass: entry.semanticClass, descriptors: edges))
-                }
-
-                DispatchQueue.main.async { [weak self] in
-                    guard let self = self, let arView = self.arView, self.isRecording.load(ordering: .relaxed) else {
-                        self?.classificationRebuildPending = false
-                        return
-                    }
-
-                    // Remove old global entity
-                    self.globalClassificationEntity?.removeFromParent()
-
-                    let anchorEntity = AnchorEntity(world: .zero)
-                    for entry in classDescriptors {
-                        let color = entry.semanticClass.color
-                        let material = UnlitMaterial(color: UIColor(
-                            red: CGFloat(color.x), green: CGFloat(color.y),
-                            blue: CGFloat(color.z), alpha: 1.0
-                        ))
-                        for desc in entry.descriptors {
-                            if let mesh = try? MeshResource.generate(from: [desc]) {
-                                anchorEntity.addChild(ModelEntity(mesh: mesh, materials: [material]))
-                            }
-                        }
-                    }
-                    arView.scene.addAnchor(anchorEntity)
-                    self.globalClassificationEntity = anchorEntity
-                    self.scanStats?.detectedClasses = classesForHUD
-
-                    // Allow next rebuild
-                    self.sessionDelegateQueue.async {
-                        self.classificationRebuildPending = false
-                    }
-                }
+            let classesForHUD = classes
+            detectedSemanticClasses.formUnion(classes)
+            DispatchQueue.main.async { [weak self] in
+                self?.scanStats?.detectedClasses = self?.detectedSemanticClasses ?? classesForHUD
             }
         }
 
-        /// Builds 12-edge wireframe box geometry from min/max corners.
-        private static func buildBoundingBoxEdges(
-            min minCorner: SIMD3<Float>,
-            max maxCorner: SIMD3<Float>,
-            thickness: Float
-        ) -> [MeshDescriptor] {
-            let size = maxCorner - minCorner
-            // Skip degenerate boxes (too small to be meaningful)
-            guard size.x > 0.01, size.y > 0.01, size.z > 0.01 else { return [] }
+        /// Edge thickness for RoomPlan wireframe outlines (10mm).
+        private static let edgeThickness: Float = 0.01
 
-            // 8 corners of the AABB
-            let corners: [SIMD3<Float>] = [
-                SIMD3<Float>(minCorner.x, minCorner.y, minCorner.z),
-                SIMD3<Float>(maxCorner.x, minCorner.y, minCorner.z),
-                SIMD3<Float>(maxCorner.x, maxCorner.y, minCorner.z),
-                SIMD3<Float>(minCorner.x, maxCorner.y, minCorner.z),
-                SIMD3<Float>(minCorner.x, minCorner.y, maxCorner.z),
-                SIMD3<Float>(maxCorner.x, minCorner.y, maxCorner.z),
-                SIMD3<Float>(maxCorner.x, maxCorner.y, maxCorner.z),
-                SIMD3<Float>(minCorner.x, maxCorner.y, maxCorner.z)
-            ]
+        /// Adds 12 thin box entities representing the edges of an oriented bounding box.
+        /// Each edge is a thin box with the given color.
+        ///
+        /// - Parameter liftTowardCamera: when non-nil (the camera world position),
+        ///   the whole box is nudged along its dominant face normal toward the
+        ///   camera by `AppConstants.surfaceOutlineLiftDistance`, so surface outlines draw on top of
+        ///   the co-planar occlusion mesh. Pass `nil` for objects so they remain
+        ///   embedded in the mesh and are occluded naturally.
+        private static func addWireframeEdges(
+            to parent: Entity,
+            dimensions: SIMD3<Float>,
+            transform: simd_float4x4,
+            color: SIMD4<Float>,
+            liftTowardCamera cameraPosition: SIMD3<Float>? = nil
+        ) {
+            let t = edgeThickness
+            let w = max(dimensions.x, 0.001)
+            let h = max(dimensions.y, 0.001)
+            let d = max(dimensions.z, 0.001)
+            let hw = w / 2, hh = h / 2, hd = d / 2
 
-            // 12 edges (pairs of corner indices)
-            let edgePairs: [(Int, Int)] = [
-                (0, 1), (1, 2), (2, 3), (3, 0), // bottom face
-                (4, 5), (5, 6), (6, 7), (7, 4), // top face
-                (0, 4), (1, 5), (2, 6), (3, 7)  // vertical edges
-            ]
+            let material = UnlitMaterial(color: UIColor(
+                red: CGFloat(color.x), green: CGFloat(color.y),
+                blue: CGFloat(color.z), alpha: 1.0
+            ))
 
-            return MeshParser.buildWireframeDescriptors(
-                edges: edgePairs.map { (corners[$0.0], corners[$0.1]) },
-                thickness: thickness
-            )
+            // Container entity carries the RoomPlan transform
+            let container = Entity()
+            container.transform = Transform(matrix: transform)
+
+            // Lift surface outlines toward the camera along the surface's normal.
+            // RoomPlan surfaces are thin slabs whose normal is the local axis with
+            // the smallest dimension; flip it to face the camera, then offset the
+            // container in world space (parent anchor is at world origin).
+            if let camera = cameraPosition {
+                let xAxis = SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z)
+                let yAxis = SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z)
+                let zAxis = SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
+                let center = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+
+                // Pick the local axis with the smallest extent as the slab normal.
+                var normal = zAxis
+                if d <= w && d <= h { normal = zAxis }
+                else if h <= w && h <= d { normal = yAxis }
+                else { normal = xAxis }
+                normal = simd_normalize(normal)
+
+                // Orient the normal toward the camera so the lift moves the outline
+                // in front of the wall from wherever it's currently being viewed.
+                if simd_dot(normal, camera - center) < 0 { normal = -normal }
+                container.position += normal * AppConstants.surfaceOutlineLiftDistance
+            }
+
+            // 12 edges: 4 along each axis
+            // Edges along X (width) — at the 4 vertical corners
+            let xEdge = MeshResource.generateBox(width: w, height: t, depth: t)
+            for (y, z) in [(-hh, -hd), (-hh, hd), (hh, -hd), (hh, hd)] as [(Float, Float)] {
+                let e = ModelEntity(mesh: xEdge, materials: [material])
+                e.position = SIMD3(0, y, z)
+                container.addChild(e)
+            }
+
+            // Edges along Y (height) — at the 4 horizontal corners
+            let yEdge = MeshResource.generateBox(width: t, height: h, depth: t)
+            for (x, z) in [(-hw, -hd), (-hw, hd), (hw, -hd), (hw, hd)] as [(Float, Float)] {
+                let e = ModelEntity(mesh: yEdge, materials: [material])
+                e.position = SIMD3(x, 0, z)
+                container.addChild(e)
+            }
+
+            // Edges along Z (depth) — at the 4 remaining corners
+            let zEdge = MeshResource.generateBox(width: t, height: t, depth: d)
+            for (x, y) in [(-hw, -hh), (-hw, hh), (hw, -hh), (hw, hh)] as [(Float, Float)] {
+                let e = ModelEntity(mesh: zEdge, materials: [material])
+                e.position = SIMD3(x, y, 0)
+                container.addChild(e)
+            }
+
+            parent.addChild(container)
         }
 
         // MARK: - Coverage Overlay (3D Occlusion)
@@ -1341,9 +1291,11 @@ struct ARCoverageView: UIViewRepresentable {
                     intrinsics: intrinsics,
                     privacyFilter: privFilter
                 )
-                // Seamless transition: flip camera feed → black background on first rendered frame.
-                // This avoids showing an empty black scene before points appear.
-                if !(self?.vrBackgroundSet ?? true),
+                // Seamless transition: flip camera feed → black background on first rendered frame,
+                // unless semantic labeling is on (keep camera feed to overlay RoomPlan outlines).
+                let semanticOn = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
+                if !semanticOn,
+                   !(self?.vrBackgroundSet ?? true),
                    pcm.hasRenderedFirstFrame,
                    let arView = self?.arView {
                     arView.environment.background = .color(.black)
@@ -1391,7 +1343,6 @@ struct ARCoverageView: UIViewRepresentable {
                     anchorVertexCounts[mesh.identifier] = mesh.geometry.vertices.count
                     anchorFaceCounts[mesh.identifier] = mesh.geometry.faces.count
                     buildWireframeForAnchor(mesh)
-                    buildClassificationOutlines(mesh)
                 }
             }
             updateStats(in: session)
@@ -1422,7 +1373,6 @@ struct ARCoverageView: UIViewRepresentable {
                     anchorVertexCounts[mesh.identifier] = mesh.geometry.vertices.count
                     anchorFaceCounts[mesh.identifier] = mesh.geometry.faces.count
                     buildWireframeForAnchor(mesh)
-                    buildClassificationOutlines(mesh)
                 }
             }
             updateStats(in: session)
@@ -1437,7 +1387,6 @@ struct ARCoverageView: UIViewRepresentable {
                     anchorVertexCounts.removeValue(forKey: id)
                     anchorFaceCounts.removeValue(forKey: id)
                     lastAnchorWireframeTime.removeValue(forKey: id)
-                    removeClassificationForAnchor(id)
 
                     // Remove the wireframe entity on main — RealityKit is main-only.
                     DispatchQueue.main.async { [weak self] in
@@ -1462,14 +1411,11 @@ struct ARCoverageView: UIViewRepresentable {
             // totals and anchor counts after the entities are gone (e.g. switching into VR capture).
             sessionDelegateQueue.async { [weak self] in
                 self?.lastAnchorWireframeTime.removeAll()
-                self?.anchorClassBounds.removeAll()
-                self?.lastGlobalClassificationTime = .distantPast
-                self?.classificationRebuildPending = false
                 self?.anchorUpdateCounts.removeAll()
                 self?.anchorVertexCounts.removeAll()
                 self?.anchorFaceCounts.removeAll()
             }
-            removeAllClassificationEntities()
+            removeRoomPlanOutlines()
         }
 
         private func updateStats(in session: ARSession) {
@@ -1709,12 +1655,11 @@ struct ARCoverageView: UIViewRepresentable {
 
     // MARK: - Export
 
-    /// Result of a mesh export including optional semantic classification data.
+    /// Result of a mesh export.
     struct MeshExportResult {
         let data: Data
         let vertexCount: Int
         let faceCount: Int
-        let semantics: SemanticsData?
     }
 
     // swiftlint:disable:next function_body_length
@@ -1752,10 +1697,7 @@ struct ARCoverageView: UIViewRepresentable {
         var totalVertices = 0
         var totalFaces = 0
 
-        // Semantic classification tracking
-        var anchorSemanticsList: [AnchorSemantics] = []
-        var allDetectedClasses = Set<String>()
-        var hasAnyClassification = false
+
 
         for anchor in currentFrame.anchors {
             guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
@@ -1798,40 +1740,10 @@ struct ARCoverageView: UIViewRepresentable {
                 continue
             }
 
-            // Read classification buffer if available
-            let classificationSource = geometry.classification
-            let hasClassification = classificationSource != nil
-            if hasClassification { hasAnyClassification = true }
-            var perFaceClassifications: [Int] = []
-            if hasClassification {
-                perFaceClassifications.reserveCapacity(faces.count)
-            }
-            var currentGroupName: String?
-
             for faceIdx in 0..<faces.count {
                 let pointer = faces.buffer.contents().advanced(by: faceIdx * faceBytes)
                 let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
 
-                // Read classification for this face
-                if hasClassification, let classSource = classificationSource {
-                    let classPtr = classSource.buffer.contents()
-                        .advanced(by: faceIdx * classSource.stride)
-                    let classValue = classPtr.assumingMemoryBound(to: UInt8.self).pointee
-                    let arkitClass = ARMeshClassification(rawValue: Int(classValue)) ?? .none
-                    let semanticClass = SemanticClass.from(arkitClass)
-                    perFaceClassifications.append(semanticClass.classIndex)
-
-                    if semanticClass != .none {
-                        allDetectedClasses.insert(semanticClass.rawValue)
-                    }
-
-                    // Emit OBJ group statement when classification changes
-                    let groupName = semanticClass.rawValue
-                    if groupName != currentGroupName {
-                        objData.append(contentsOf: "g \(groupName)\n".utf8)
-                        currentGroupName = groupName
-                    }
-                }
 
                 // Skip person faces if privacy filter is on
                 if privacyFilter {
@@ -1850,14 +1762,7 @@ struct ARCoverageView: UIViewRepresentable {
                 totalFaces += 1
             }
 
-            // Accumulate per-anchor semantics
-            if hasClassification {
-                anchorSemanticsList.append(AnchorSemantics(
-                    anchorId: meshAnchor.identifier,
-                    faceCount: faces.count,
-                    classifications: perFaceClassifications
-                ))
-            }
+
 
             vertexOffset += vertices.count
         }
@@ -1868,11 +1773,7 @@ struct ARCoverageView: UIViewRepresentable {
 
         guard !objData.isEmpty else { return nil }
 
-        let semantics: SemanticsData? = hasAnyClassification
-            ? SemanticsData(anchors: anchorSemanticsList, classesDetected: allDetectedClasses)
-            : nil
-
-        return MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces, semantics: semantics)
+        return MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces)
     }
 
     /// Returns a fresh ARWorldTrackingConfiguration with no scene reconstruction
@@ -1900,14 +1801,8 @@ struct ARCoverageView: UIViewRepresentable {
         let config = ARWorldTrackingConfiguration()
         if supportsLiDAR {
             if enableMeshReconstruction {
-                // Prefer .meshWithClassification for semantic labeling when not killed by Developer Mode
-                let semanticEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
-                if semanticEnabled,
-                   ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
-                    config.sceneReconstruction = .meshWithClassification
-                } else {
-                    config.sceneReconstruction = .mesh
-                }
+                // RoomPlan handles semantic labeling; ARKit only needs raw mesh.
+                config.sceneReconstruction = .mesh
             } else {
                 config.sceneReconstruction = []
             }
@@ -1929,4 +1824,37 @@ struct ARCoverageView: UIViewRepresentable {
         return config
     }
 
+}
+
+// MARK: - RoomCaptureSessionDelegate
+
+/// RoomPlan delegate — receives real-time room structure updates. Runs on arbitrary queue.
+extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
+    func captureSession(_ session: RoomCaptureSession, didUpdate room: CapturedRoom) {
+        latestCapturedRoom = room
+        // Continuously push latest room to CaptureView so finishStopRecording can access it
+        // before the isRecording→false transition triggers updateUIView.
+        finalCapturedRoomBinding?.wrappedValue = room
+        // Trigger outline re-render on main thread (MeshResource requires main/Metal context)
+        DispatchQueue.main.async { [weak self] in
+            self?.renderRoomPlanOutlines()
+        }
+    }
+
+    func captureSession(_ session: RoomCaptureSession, didEndWith data: CapturedRoomData, error: (any Error)?) {
+        if let error = error {
+            PerfDiag.log("RoomPlan session ended with error: \(error.localizedDescription)")
+        } else {
+            PerfDiag.log("RoomPlan session ended cleanly")
+        }
+    }
+
+    func captureSession(_ session: RoomCaptureSession, didStartWith configuration: RoomCaptureSession.Configuration) {
+        PerfDiag.log("RoomPlan session started scanning")
+    }
+
+    // iOS 17+ provides instruction updates — log them for debugging, ignore otherwise.
+    func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
+        PerfDiag.log("RoomPlan instruction: \(instruction)")
+    }
 }

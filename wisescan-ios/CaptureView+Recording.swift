@@ -111,6 +111,8 @@ extension CaptureView {
         // in-progress rescan look like a brand-new location and triggering prompts on a dead view.
         let locationId = scanStore.activeLocationForScan
         let scanCase = scanStore.activeScanCase
+        // Snapshot detected semantic display classes for metadata (populated by RoomPlan coordinator)
+        capSession.semanticClassesDetected = scanStats.detectedClasses
         DispatchQueue.global(qos: .utility).async {
             let rawDataPath = capSession.stop()
             DispatchQueue.main.async {
@@ -155,7 +157,7 @@ extension CaptureView {
                 let dummyObj = "v -0.5 -0.5 -0.5\nv 0.5 -0.5 -0.5\nv 0.5 0.5 -0.5\nf 1 2 3\n"
                 if let dummyObjData = dummyObj.data(using: .utf8) {
                     finalMeshResult = ARCoverageView.MeshExportResult(
-                        data: dummyObjData, vertexCount: 3, faceCount: 1, semantics: nil
+                        data: dummyObjData, vertexCount: 3, faceCount: 1
                     )
                 }
             }
@@ -253,10 +255,9 @@ extension CaptureView {
                         try? result.data.write(to: meshFileURL)
                         let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
                         try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
-                        // Write semantics.json sidecar if classification data is available
-                        if let semantics = result.semantics {
-                            let semanticsURL = rawDir.appendingPathComponent("semantics.json")
-                            SemanticsExporter.writeSemantics(semantics, to: semanticsURL)
+                        // Write roomplan.json + roomplan_raw.json if RoomPlan captured room data
+                        if let room = self.finalCapturedRoom {
+                            RoomPlanExporter.writeRoomPlan(room, to: rawDir)
                         }
                     }
 
@@ -275,8 +276,7 @@ extension CaptureView {
                             vertexColors: vertexColors,
                             worldMapURL: mapURL,
                             thumbnailData: thumbnailData,
-                            scanCase: capturedScanCase,
-                            semantics: result.semantics
+                            scanCase: capturedScanCase
                         )
                         self.frameCaptureSession = FrameCaptureSession()
                         MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
@@ -297,8 +297,7 @@ extension CaptureView {
                             vertexColors: vertexColors,
                             worldMapURL: mapURL,
                             thumbnailData: thumbnailData,
-                            scanCase: capturedScanCase,
-                            semantics: result.semantics
+                            scanCase: capturedScanCase
                         )
 
                         // Release frame capture session memory
@@ -482,8 +481,7 @@ extension CaptureView {
             vertexColors: pending.vertexColors,
             worldMapURL: pending.worldMapURL,
             thumbnailData: pending.thumbnailData,
-            scanCase: pending.scanCase,
-            semantics: pending.semantics
+            scanCase: pending.scanCase
         )
 
         // Write deferred stitching.json now that we have the real target scan ID
