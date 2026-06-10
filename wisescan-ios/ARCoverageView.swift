@@ -931,7 +931,7 @@ struct ARCoverageView: UIViewRepresentable {
                 }
 
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self, let arView = self.arView, self.isRecording else {
+                    guard let self = self, let arView = self.arView, self.isRecording.load(ordering: .relaxed) else {
                         self?.classificationRebuildPending = false
                         return
                     }
