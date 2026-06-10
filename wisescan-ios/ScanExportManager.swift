@@ -310,14 +310,16 @@ struct ScanExportManager {
                     }
                 }
 
-                // Include semantics.json if classification data was captured
-                let semanticsURL = scanDir.appendingPathComponent("semantics.json")
-                if fm.fileExists(atPath: semanticsURL.path) {
-                    do {
-                        try fm.copyItem(at: semanticsURL, to: stagingDir.appendingPathComponent("semantics.json"))
-                        print("[prepareExport] ✓ included semantics.json")
-                    } catch {
-                        print("[prepareExport] ✗ failed to copy semantics.json: \(error.localizedDescription)")
+                // Include roomplan.json + roomplan_raw.json if RoomPlan data was captured
+                for rpFile in ["roomplan.json", "roomplan_raw.json"] {
+                    let rpURL = scanDir.appendingPathComponent(rpFile)
+                    if fm.fileExists(atPath: rpURL.path) {
+                        do {
+                            try fm.copyItem(at: rpURL, to: stagingDir.appendingPathComponent(rpFile))
+                            print("[prepareExport] ✓ included \(rpFile)")
+                        } catch {
+                            print("[prepareExport] ✗ failed to copy \(rpFile): \(error.localizedDescription)")
+                        }
                     }
                 }
 

@@ -1,6 +1,7 @@
 import SwiftUI
 import ARKit
 import RealityKit
+import RoomPlan
 import SwiftData
 
 // swiftlint:disable file_length type_body_length
@@ -57,6 +58,9 @@ struct CaptureView: View {
     /// ARCoverageView, which renders one labeled marker per connector when rescanning an existing
     /// space. Empty unless `activeScanCase == .rescanSpace` with linked scans.
     @State var connectorAnchors: [ConnectorAnchor] = []
+    /// RoomPlan: final CapturedRoom snapshot captured at recording stop. Populated by the
+    /// ARCoverageView Coordinator; consumed by finishStopRecording for export.
+    @State var finalCapturedRoom: CapturedRoom?
     @State private var isARSessionReady = false
     @State var messageVersion = 0
     @State var hapticGenerator = UIImpactFeedbackGenerator(style: .medium)
@@ -93,7 +97,6 @@ struct CaptureView: View {
         let worldMapURL: URL?
         let thumbnailData: Data?
         let scanCase: ScanCase
-        let semantics: SemanticsData?
     }
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State.
@@ -152,6 +155,7 @@ struct CaptureView: View {
                 initialGhostMeshData: cachedGhostMeshData,
                 scanStore: scanStore,
                 connectorAnchors: connectorAnchors,
+                finalCapturedRoom: $finalCapturedRoom,
                 ghostYRotation: ghostYRotation,
                 ghostXOffset: ghostXOffset,
                 ghostZOffset: ghostZOffset,

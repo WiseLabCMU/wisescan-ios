@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ARKit
+import RoomPlan
 import SwiftUI
 
 /// Centralized repository for UI constants, app defaults, and magic numbers
@@ -115,41 +116,50 @@ enum SemanticClass: String, CaseIterable, Codable {
         }
     }
 
-    /// Maximum gap (meters) between two bounding boxes of the same class before they are
-    /// considered separate instances. Large planar surfaces get a wider threshold to bridge
-    /// anchor boundaries; discrete objects use a tighter threshold to avoid collapsing distinct items.
-    var mergeThreshold: Float {
-        switch self {
-        case .none:                           return 0
-        case .wall, .floor, .ceiling:         return 0.3   // Large planar surfaces
-        case .table, .seat, .door, .window:   return 0.15  // Discrete objects
-        }
-    }
-
     /// SwiftUI color for HUD display and legend.
     var swiftUIDisplayColor: Color {
         let rgba = color
         return Color(red: Double(rgba.x), green: Double(rgba.y), blue: Double(rgba.z))
     }
 
-    /// Map from ARKit's ARMeshClassification to SemanticClass.
-    static func from(_ arkitClass: ARMeshClassification) -> SemanticClass {
-        switch arkitClass {
-        case .wall:    return .wall
-        case .floor:   return .floor
-        case .ceiling: return .ceiling
-        case .table:   return .table
-        case .seat:    return .seat
-        case .door:    return .door
-        case .window:  return .window
-        case .none:    return .none
-        @unknown default: return .none
+    /// Map from RoomPlan Surface.Category to SemanticClass.
+    static func from(_ surfaceCategory: CapturedRoom.Surface.Category) -> SemanticClass {
+        switch surfaceCategory {
+        case .wall:              return .wall
+        case .floor:             return .floor
+        case .door(isOpen: _):   return .door
+        case .window:            return .window
+        case .opening:           return .door    // openings treated as door-like for rendering
+        @unknown default:    return .none
         }
     }
 
-    /// Integer index for compact JSON export (matches allCases ordering).
-    var classIndex: Int {
-        SemanticClass.allCases.firstIndex(of: self) ?? 0
+    /// Map from RoomPlan Object.Category to SemanticClass.
+    static func from(_ objectCategory: CapturedRoom.Object.Category) -> SemanticClass {
+        switch objectCategory {
+        case .table:                       return .table
+        case .chair:                       return .seat
+        case .sofa:                        return .seat
+        case .bed:                         return .seat   // beds rendered as seat-colored
+        case .storage, .refrigerator,
+             .stove, .sink, .washerDryer,
+             .dishwasher, .oven,
+             .fireplace, .television,
+             .bathtub, .toilet:            return .table  // appliances/fixtures as table-colored
+        @unknown default:                  return .none
+        }
+    }
+
+    /// Map from string object category (as stored in roomplan.json) to SemanticClass.
+    static func fromObjectCategory(_ category: String) -> SemanticClass {
+        switch category {
+        case "table":                                       return .table
+        case "chair", "sofa", "bed":                        return .seat
+        case "storage", "refrigerator", "stove", "sink",
+             "washer_dryer", "dishwasher", "oven",
+             "fireplace", "television", "bathtub", "toilet": return .table
+        default:                                            return .none
+        }
     }
 }
 
