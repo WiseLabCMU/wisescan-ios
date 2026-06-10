@@ -821,28 +821,37 @@ struct ARCoverageView: UIViewRepresentable {
 
             let anchorEntity = AnchorEntity(world: .zero)
 
+            // Camera world position — used to lift surface outlines toward the
+            // viewer so they draw on top of the co-planar occlusion mesh instead
+            // of z-fighting with it. Objects get no lift so the mesh occludes them.
+            let cameraPosition = arView.cameraTransform.translation
+
             // Collect detected classes for HUD
             var classes = Set<String>()
 
-            // Render surfaces (walls, floors, doors, windows, openings)
+            // Render surfaces (walls, floors, doors, windows, openings) — lifted
+            // toward the camera so they always render on top of the scan mesh.
             for surface in room.walls + room.floors + room.doors + room.windows + room.openings {
                 let semantic = SemanticClass.from(surface.category)
                 guard semantic != .none else { continue }
                 classes.insert(semantic.rawValue)
                 Self.addWireframeEdges(
                     to: anchorEntity, dimensions: surface.dimensions,
-                    transform: surface.transform, color: semantic.color
+                    transform: surface.transform, color: semantic.color,
+                    liftTowardCamera: cameraPosition
                 )
             }
 
-            // Render objects (tables, chairs, beds, etc.)
+            // Render objects (tables, chairs, beds, etc.) — no lift, so they are
+            // naturally occluded by the scan mesh while scanning.
             for object in room.objects {
                 let semantic = SemanticClass.from(object.category)
                 guard semantic != .none else { continue }
                 classes.insert(semantic.rawValue)
                 Self.addWireframeEdges(
                     to: anchorEntity, dimensions: object.dimensions,
-                    transform: object.transform, color: semantic.color
+                    transform: object.transform, color: semantic.color,
+                    liftTowardCamera: nil
                 )
             }
 
@@ -861,14 +870,18 @@ struct ARCoverageView: UIViewRepresentable {
 
         /// Adds 12 thin box entities representing the edges of an oriented bounding box.
         /// Each edge is a thin box with the given color.
-        /// Note: edges may be occluded by co-planar mesh geometry (z-fighting).
-        /// A future improvement could use a custom Metal shader with depth-test disabled
-        /// for surface outlines.
+        ///
+        /// - Parameter liftTowardCamera: when non-nil (the camera world position),
+        ///   the whole box is nudged along its dominant face normal toward the
+        ///   camera by `AppConstants.surfaceOutlineLiftDistance`, so surface outlines draw on top of
+        ///   the co-planar occlusion mesh. Pass `nil` for objects so they remain
+        ///   embedded in the mesh and are occluded naturally.
         private static func addWireframeEdges(
             to parent: Entity,
             dimensions: SIMD3<Float>,
             transform: simd_float4x4,
-            color: SIMD4<Float>
+            color: SIMD4<Float>,
+            liftTowardCamera cameraPosition: SIMD3<Float>? = nil
         ) {
             let t = edgeThickness
             let w = max(dimensions.x, 0.001)
@@ -884,6 +897,29 @@ struct ARCoverageView: UIViewRepresentable {
             // Container entity carries the RoomPlan transform
             let container = Entity()
             container.transform = Transform(matrix: transform)
+
+            // Lift surface outlines toward the camera along the surface's normal.
+            // RoomPlan surfaces are thin slabs whose normal is the local axis with
+            // the smallest dimension; flip it to face the camera, then offset the
+            // container in world space (parent anchor is at world origin).
+            if let camera = cameraPosition {
+                let xAxis = SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z)
+                let yAxis = SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z)
+                let zAxis = SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
+                let center = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+
+                // Pick the local axis with the smallest extent as the slab normal.
+                var normal = zAxis
+                if d <= w && d <= h { normal = zAxis }
+                else if h <= w && h <= d { normal = yAxis }
+                else { normal = xAxis }
+                normal = simd_normalize(normal)
+
+                // Orient the normal toward the camera so the lift moves the outline
+                // in front of the wall from wherever it's currently being viewed.
+                if simd_dot(normal, camera - center) < 0 { normal = -normal }
+                container.position += normal * AppConstants.surfaceOutlineLiftDistance
+            }
 
             // 12 edges: 4 along each axis
             // Edges along X (width) — at the 4 vertical corners

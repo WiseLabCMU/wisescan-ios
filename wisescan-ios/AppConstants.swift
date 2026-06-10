@@ -93,6 +93,7 @@ enum AppConstants {
     static let stabilizationPollIntervalMs: Int = 200         // ms between tracking-state polls after session reset
     static let stabilizationMaxPolls: Int = 25                // max polls before timeout (total = interval × polls)
     static let semanticThrottleInterval: TimeInterval = 0.5   // min seconds between classification outline rebuilds per anchor
+    static let surfaceOutlineLiftDistance: Float = 0.06       // meters surface outlines are lifted toward the camera to draw on top of the co-planar scan mesh (must clear ARKit mesh noise)
 }
 
 // MARK: - Semantic View Mode
