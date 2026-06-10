@@ -69,11 +69,20 @@ enum StitchGraphBuilder {
         // cascade delete keeps these consistent, but a link's endpoint scan/location can still be
         // absent from `locations` (e.g. filtered view) — keep only links whose source AND target
         // scans both resolve to a location in this set, mirroring the old endpoint-existence guard.
+        // Fetch-based incident query (see StitchLinkStore.incidentLinks) — the inverse arrays can
+        // drop one direction, which would silently omit edges from the graph. Fetch ONCE into a
+        // scan-id index rather than per scan (this walks every scan of every location).
+        let linkIndex: [UUID: [StitchLink]]
+        if let context = locations.first?.modelContext {
+            linkIndex = StitchLinkStore.incidentLinksByScanId(in: context)
+        } else {
+            linkIndex = [:]
+        }
         var links: [StitchLink] = []
         var seenLinks = Set<UUID>()
         for loc in locations {
             for scan in loc.scans {
-                for link in (scan.linksAsA + scan.linksAsB) where seenLinks.insert(link.id).inserted {
+                for link in (linkIndex[scan.id] ?? []) where seenLinks.insert(link.id).inserted {
                     guard let srcLoc = link.sourceScan?.location, let tgtLoc = link.targetScan?.location,
                           byId[srcLoc.id] != nil, byId[tgtLoc.id] != nil else { continue }
                     links.append(link)
