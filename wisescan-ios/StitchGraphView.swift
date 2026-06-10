@@ -74,10 +74,10 @@ struct StitchGraphView: View {
             Image(systemName: "point.3.connected.trianglepath.dotted")
                 .font(.system(size: 48))
                 .foregroundColor(.gray)
-            Text("No linked scans")
+            Text("No connected maps")
                 .font(.headline)
                 .foregroundColor(.gray)
-            Text("Capture an adjacent space to link scans together")
+            Text("Capture an adjacent space to connect maps together")
                 .font(.caption)
                 .foregroundColor(.gray.opacity(0.7))
                 .multilineTextAlignment(.center)
@@ -167,7 +167,7 @@ private struct ClusterView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "link")
                         .foregroundColor(.green)
-                    Text("\(nodes.count) linked \(nodes.count == 1 ? "map" : "maps")")
+                    Text("\(nodes.count) connected \(nodes.count == 1 ? "map" : "maps")")
                         .foregroundColor(.white)
                 }
                 .font(.headline)
@@ -204,7 +204,7 @@ private struct ClusterView: View {
                     // gesture path used for touch.
                     .accessibilityElement(children: .combine)
                     .accessibilityLabel("Render together")
-                    .accessibilityHint("Shows all linked maps in a single combined view")
+                    .accessibilityHint("Shows all connected maps in a single combined view")
                     .accessibilityAddTraits(.isButton)
                     .accessibilityAction { onRender() }
                 }

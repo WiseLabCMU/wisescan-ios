@@ -92,7 +92,7 @@ struct LocationDetailView: View {
                                 HStack(spacing: 6) {
                                     Image(systemName: "link.circle.fill")
                                         .foregroundColor(.green)
-                                    Text("Linked to adjacent space")
+                                    Text("Connected to adjacent space")
                                         .font(.caption)
                                         .foregroundColor(.green)
                                 }
@@ -356,7 +356,7 @@ struct LocationDetailView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("The relocalization world map for this scan is missing, so it can't be rescanned " +
-                 "or linked to an adjacent space — both relocalize against the saved world map. " +
+                 "or connected to an adjacent space — both relocalize against the saved world map. " +
                  "Capture a new scan of this space to create one.")
         }
         .confirmationDialog(
@@ -369,9 +369,9 @@ struct LocationDetailView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             if bulkDeleteLinkedMapCount > 0 {
-                Text("This map is linked to \(bulkDeleteLinkedMapCount) other " +
+                Text("This map is connected to \(bulkDeleteLinkedMapCount) other " +
                      "map\(bulkDeleteLinkedMapCount == 1 ? "" : "s"). Deleting these scans will " +
-                     "remove those spatial links.\n\nThis will permanently delete the selected " +
+                     "remove those connections.\n\nThis will permanently delete the selected " +
                      "scans and their data.")
             } else {
                 Text("This will permanently delete the selected scans and their data.")

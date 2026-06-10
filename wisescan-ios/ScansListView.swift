@@ -190,9 +190,9 @@ struct ScansListView: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 if bulkDeleteLinkedMapCount > 0 {
-                    Text("\(bulkDeleteLinkedMapCount == 1 ? "This map is" : "These maps are") linked to " +
+                    Text("\(bulkDeleteLinkedMapCount == 1 ? "This map is" : "These maps are") connected to " +
                          "\(bulkDeleteLinkedMapCount) other map\(bulkDeleteLinkedMapCount == 1 ? "" : "s"). " +
-                         "Deleting will remove those spatial links.\n\n" + bulkDeleteMessage)
+                         "Deleting will remove those connections.\n\n" + bulkDeleteMessage)
                 } else {
                     Text(bulkDeleteMessage)
                 }

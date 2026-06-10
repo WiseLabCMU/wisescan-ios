@@ -135,7 +135,7 @@ extension CaptureView {
 
                 didLinkSuccessfully = true
                 self.showExtendOverlay = false
-                self.showTransientMessage("📍 Linked! Scanning new space...", duration: 3)
+                self.showTransientMessage("📍 Connected! Scanning new space...", duration: 3)
             }
         }
     }
