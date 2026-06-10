@@ -97,10 +97,12 @@ enum AppConstants {
 
 // MARK: - Semantic Classification
 
-/// ARKit mesh classification categories with fixed color palette.
-/// Colors are chosen to avoid the default active mesh (Green) and ghost mesh (Magenta) colors.
+/// Semantic display classes for AR/VR overlays, HUD, and preview rendering.
+/// This is a **display-level** superset covering both ARKit `ARMeshClassification` and
+/// RoomPlan categories. Fine-grained sub-categories (e.g., "sofa", "bathtub") are preserved
+/// in `roomplan.json`; these display classes control visualization grouping and color.
 enum SemanticClass: String, CaseIterable, Codable {
-    case none, wall, floor, ceiling, table, seat, door, window
+    case none, wall, floor, ceiling, table, seat, door, window, fixture
 
     /// Fixed color palette for classification outlines.
     var color: SIMD4<Float> {
@@ -108,11 +110,12 @@ enum SemanticClass: String, CaseIterable, Codable {
         case .none:    return .zero                              // Hidden (no outline rendered)
         case .wall:    return SIMD4<Float>(0.2, 0.4, 1.0, 1.0)  // Blue
         case .floor:   return SIMD4<Float>(1.0, 0.6, 0.2, 1.0)  // Orange
-        case .ceiling: return SIMD4<Float>(0.0, 0.9, 0.9, 1.0)  // Cyan
+        case .ceiling: return SIMD4<Float>(0.6, 0.6, 0.6, 1.0)  // Light Gray
         case .table:   return SIMD4<Float>(1.0, 0.9, 0.2, 1.0)  // Yellow
         case .seat:    return SIMD4<Float>(1.0, 0.2, 0.2, 1.0)  // Red
-        case .door:    return SIMD4<Float>(1.0, 1.0, 1.0, 1.0)  // White
-        case .window:  return SIMD4<Float>(0.6, 0.6, 0.6, 1.0)  // Gray
+        case .door:    return SIMD4<Float>(0.0, 0.9, 0.9, 1.0)  // Cyan
+        case .window:  return SIMD4<Float>(1.0, 1.0, 1.0, 1.0)  // White
+        case .fixture: return SIMD4<Float>(0.7, 0.3, 0.9, 1.0)  // Purple
         }
     }
 
@@ -140,12 +143,12 @@ enum SemanticClass: String, CaseIterable, Codable {
         case .table:                       return .table
         case .chair:                       return .seat
         case .sofa:                        return .seat
-        case .bed:                         return .seat   // beds rendered as seat-colored
+        case .bed:                         return .seat
         case .storage, .refrigerator,
              .stove, .sink, .washerDryer,
              .dishwasher, .oven,
              .fireplace, .television,
-             .bathtub, .toilet:            return .table  // appliances/fixtures as table-colored
+             .bathtub, .toilet, .stairs:   return .fixture
         @unknown default:                  return .none
         }
     }
@@ -157,7 +160,8 @@ enum SemanticClass: String, CaseIterable, Codable {
         case "chair", "sofa", "bed":                        return .seat
         case "storage", "refrigerator", "stove", "sink",
              "washer_dryer", "dishwasher", "oven",
-             "fireplace", "television", "bathtub", "toilet": return .table
+             "fireplace", "television", "bathtub", "toilet",
+             "stairs":                                      return .fixture
         default:                                            return .none
         }
     }

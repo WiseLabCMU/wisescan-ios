@@ -14,6 +14,7 @@ struct CombinedMeshItem: Identifiable {
     let name: String
     let meshURL: URL
     let colorsURL: URL?
+    let scanDirectoryURL: URL?
     let transform: simd_float4x4
     /// Distinct hue used when "color by map" is enabled.
     let tint: UIColor
@@ -27,6 +28,8 @@ struct CombinedMeshScreen: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var colorByMap = false
+    @State private var showSemantics = false
+    @State private var detectedClasses: [SemanticClass] = []
     @State private var isLoading = true
 
     /// Items whose mesh file actually exists on disk.
@@ -49,8 +52,34 @@ struct CombinedMeshScreen: View {
                             .foregroundColor(.gray)
                     }
                 } else {
-                    CombinedMeshView(items: presentItems, colorByMap: colorByMap, onLoaded: { isLoading = false })
-                        .ignoresSafeArea(edges: .bottom)
+                    CombinedMeshView(
+                        items: presentItems, colorByMap: colorByMap,
+                        showSemantics: showSemantics,
+                        detectedClasses: $detectedClasses,
+                        onLoaded: { isLoading = false }
+                    )
+                    .ignoresSafeArea(edges: .bottom)
+                    .overlay(alignment: .bottomLeading) {
+                        if showSemantics && !detectedClasses.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(detectedClasses, id: \.rawValue) { cls in
+                                    HStack(spacing: 6) {
+                                        Circle()
+                                            .fill(cls.swiftUIDisplayColor)
+                                            .frame(width: 10, height: 10)
+                                        Text(cls.rawValue)
+                                            .font(.caption2)
+                                            .foregroundColor(.white)
+                                    }
+                                }
+                            }
+                            .padding(10)
+                            .background(Color.black.opacity(0.7))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .padding(.leading, 16)
+                            .padding(.bottom, 40)
+                        }
+                    }
                 }
 
                 if isLoading && !presentItems.isEmpty {
@@ -87,12 +116,21 @@ struct CombinedMeshScreen: View {
                     Button("Done") { dismiss() }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        colorByMap.toggle()
-                    } label: {
-                        Image(systemName: colorByMap ? "paintpalette.fill" : "paintpalette")
+                    HStack(spacing: 12) {
+                        Button {
+                            showSemantics.toggle()
+                        } label: {
+                            Image(systemName: showSemantics ? "tag.fill" : "tag")
+                        }
+                        .disabled(presentItems.isEmpty)
+
+                        Button {
+                            colorByMap.toggle()
+                        } label: {
+                            Image(systemName: colorByMap ? "paintpalette.fill" : "paintpalette")
+                        }
+                        .disabled(presentItems.isEmpty)
                     }
-                    .disabled(presentItems.isEmpty)
                 }
             }
             .preferredColorScheme(.dark)
@@ -105,6 +143,8 @@ struct CombinedMeshScreen: View {
 struct CombinedMeshView: UIViewRepresentable {
     let items: [CombinedMeshItem]
     let colorByMap: Bool
+    let showSemantics: Bool
+    @Binding var detectedClasses: [SemanticClass]
     var onLoaded: () -> Void = {}
 
     func makeUIView(context: Context) -> SCNView {
@@ -137,27 +177,38 @@ struct CombinedMeshView: UIViewRepresentable {
         fill.eulerAngles = SCNVector3(Float.pi / 4, -Float.pi / 3, 0)
         scene.rootNode.addChildNode(fill)
 
-        context.coordinator.load(into: scnView, items: items, colorByMap: colorByMap, onLoaded: onLoaded)
+        context.coordinator.load(
+            into: scnView, items: items, colorByMap: colorByMap,
+            showSemantics: showSemantics, detectedClassesBinding: $detectedClasses,
+            onLoaded: onLoaded
+        )
         return scnView
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         // Re-tint in place when the toggle changes (no reload needed).
         context.coordinator.applyTint(colorByMap: colorByMap)
+        context.coordinator.applySemantics(show: showSemantics)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     final class Coordinator {
         private var meshNodes: [UUID: SCNNode] = [:]
+        private var semanticsNode: SCNNode?
+        private var allDetectedClasses: [SemanticClass] = []
+        private var detectedClassesBinding: Binding<[SemanticClass]>?
         // Two geometries per mesh, swapped on toggle (no runtime shader): the real per-vertex
         // colors, and a flat per-map color. The flat one omits the `.color` source so the map hue
         // isn't multiplied into the vertex/normal colors, but keeps `.normal` so it's still lit.
         private var coloredGeometries: [UUID: SCNGeometry] = [:]
         private var flatGeometries: [UUID: SCNGeometry] = [:]
 
-        func load(into scnView: SCNView, items: [CombinedMeshItem], colorByMap: Bool, onLoaded: @escaping () -> Void) {
+        func load(into scnView: SCNView, items: [CombinedMeshItem], colorByMap: Bool,
+                  showSemantics: Bool, detectedClassesBinding: Binding<[SemanticClass]>,
+                  onLoaded: @escaping () -> Void) {
             guard let scene = scnView.scene else { onLoaded(); return }
+            self.detectedClassesBinding = detectedClassesBinding
             let contentNode = SCNNode()
             scene.rootNode.addChildNode(contentNode)
 
@@ -170,6 +221,23 @@ struct CombinedMeshView: UIViewRepresentable {
                     built.append((item, geometry, Self.makeFlatTinted(from: geometry, tint: item.tint)))
                 }
 
+                // Build RoomPlan outlines for each scan
+                var allOutlineNodes: [(node: SCNNode, transform: simd_float4x4)] = []
+                var detectedSet = Set<SemanticClass>()
+                for item in items {
+                    if let result = MeshPreviewView.buildRoomPlanOutlines(
+                        scanDirectoryURL: item.scanDirectoryURL
+                    ) {
+                        for outline in result.outlineNodes {
+                            let node = SCNNode(geometry: outline.geometry)
+                            allOutlineNodes.append((node, item.transform))
+                        }
+                        for cls in result.detectedClasses {
+                            detectedSet.insert(cls)
+                        }
+                    }
+                }
+
                 DispatchQueue.main.async {
                     for entry in built {
                         let node = SCNNode(geometry: entry.geometry)
@@ -179,6 +247,22 @@ struct CombinedMeshView: UIViewRepresentable {
                         self.coloredGeometries[entry.item.id] = entry.geometry
                         self.flatGeometries[entry.item.id] = entry.flat
                     }
+
+                    // Add semantics node with all outline children
+                    let semNode = SCNNode()
+                    for (outlineNode, itemTransform) in allOutlineNodes {
+                        let wrapper = SCNNode()
+                        wrapper.simdTransform = itemTransform
+                        wrapper.addChildNode(outlineNode)
+                        semNode.addChildNode(wrapper)
+                    }
+                    semNode.isHidden = !showSemantics
+                    contentNode.addChildNode(semNode)
+                    self.semanticsNode = semNode
+
+                    self.allDetectedClasses = SemanticClass.allCases.filter { detectedSet.contains($0) && $0 != .none }
+                    detectedClassesBinding.wrappedValue = self.allDetectedClasses
+
                     self.applyTint(colorByMap: colorByMap)
                     self.frameCamera(scene: scene, contentNode: contentNode, scnView: scnView)
                     onLoaded()
@@ -195,6 +279,11 @@ struct CombinedMeshView: UIViewRepresentable {
             for (id, node) in meshNodes {
                 node.geometry = colorByMap ? flatGeometries[id] : coloredGeometries[id]
             }
+        }
+
+        /// Toggles RoomPlan semantic outline visibility.
+        func applySemantics(show: Bool) {
+            semanticsNode?.isHidden = !show
         }
 
         /// A flat per-map variant of `geometry`: same vertices/normals/elements, but the per-vertex

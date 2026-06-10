@@ -9,6 +9,7 @@ import simd
 /// fields needed for downstream visualization, coaching, and pipeline integration.
 struct RoomPlanExportData: Codable {
     let version: Int
+    let source: String
     let surfaces: [ExportSurface]
     let objects: [ExportObject]
 
@@ -86,6 +87,7 @@ enum RoomPlanExporter {
 
         let exportData = RoomPlanExportData(
             version: schemaVersion,
+            source: "roomplan",
             surfaces: exportSurfaces,
             objects: exportObjects
         )
@@ -140,6 +142,7 @@ enum RoomPlanExporter {
         case .television:   return "television"
         case .bathtub:      return "bathtub"
         case .toilet:       return "toilet"
+        case .stairs:       return "stairs"
         @unknown default:   return "unknown"
         }
     }

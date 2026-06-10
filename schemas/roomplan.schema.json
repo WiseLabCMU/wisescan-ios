@@ -8,6 +8,10 @@
       "type": "integer",
       "description": "Schema version. Currently 1."
     },
+    "source": {
+      "type": "string",
+      "description": "Detection system that produced this data (e.g. 'roomplan', 'arkit_mesh_classification'). Enables downstream consumers to handle data from different detection backends."
+    },
     "surfaces": {
       "type": "array",
       "description": "Detected planar surfaces: walls, floors, doors, windows, and openings.",
@@ -19,7 +23,7 @@
       "items": { "$ref": "#/definitions/object" }
     }
   },
-  "required": ["version", "surfaces", "objects"],
+  "required": ["version", "source", "surfaces", "objects"],
   "definitions": {
     "surface": {
       "type": "object",

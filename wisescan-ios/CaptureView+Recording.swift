@@ -110,6 +110,8 @@ extension CaptureView {
         // in-progress rescan look like a brand-new location and triggering prompts on a dead view.
         let locationId = scanStore.activeLocationForScan
         let scanCase = scanStore.activeScanCase
+        // Snapshot detected semantic display classes for metadata (populated by RoomPlan coordinator)
+        capSession.semanticClassesDetected = scanStats.detectedClasses
         DispatchQueue.global(qos: .utility).async {
             let rawDataPath = capSession.stop()
             DispatchQueue.main.async {

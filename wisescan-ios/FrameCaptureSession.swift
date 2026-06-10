@@ -57,6 +57,10 @@ class FrameCaptureSession {
     }
     private var faceAnchors: [AnchorAccumulator] = []
 
+    /// Semantic display classes detected during this session (e.g. "wall", "floor", "fixture").
+    /// Set by the AR coordinator before stop() so metadata includes the detected classes.
+    var semanticClassesDetected: Set<String> = []
+
     /// Drop low-confidence anchors (seen in too few frames → likely transient segmentation noise)
     /// then coalesce any survivors still within the merge radius, so the saved `face_anchors` are
     /// few and representative of the live view — the persist-and-coalesce analog of the live gate.
@@ -738,6 +742,9 @@ class FrameCaptureSession {
         // Semantic labeling: record whether classification was enabled for this session
         let semanticEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
         metadata["semantic_labeling"] = semanticEnabled
+        if semanticEnabled && !semanticClassesDetected.isEmpty {
+            metadata["semantic_classes_detected"] = Array(semanticClassesDetected).sorted()
+        }
 
         let jsonPath = directory.appendingPathComponent("scan4d_metadata.json")
         if let jsonData = try? JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted) {

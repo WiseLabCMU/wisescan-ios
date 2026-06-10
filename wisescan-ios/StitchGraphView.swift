@@ -98,6 +98,7 @@ struct StitchGraphView: View {
                 name: name,
                 meshURL: scan.meshFileURL,
                 colorsURL: scan.colorsFileURL,
+                scanDirectoryURL: scan.scanDirectory,
                 transform: placed.transform,
                 tint: CombinedMeshItem.palette[idx % CombinedMeshItem.palette.count]
             ))
