@@ -95,6 +95,41 @@ enum AppConstants {
     static let semanticThrottleInterval: TimeInterval = 0.5   // min seconds between classification outline rebuilds per anchor
 }
 
+// MARK: - Semantic View Mode
+
+/// Controls what is visible in the 3D mesh preview and combined mesh views.
+/// Cycles through states via a single toolbar button tap.
+enum SemanticViewMode: String, CaseIterable {
+    /// Mesh geometry only — no semantic overlays.
+    case meshOnly
+    /// Mesh geometry with wireframe semantic outlines overlaid.
+    case meshWithOutlines
+    /// Semantic boxes only (no mesh) — filled at 75% opacity with wireframe edges. "Floor plan" mode.
+    case semanticOnly
+
+    /// SF Symbol name for the toolbar button.
+    var iconName: String {
+        switch self {
+        case .meshOnly:        return "cube"
+        case .meshWithOutlines: return "cube.fill"
+        case .semanticOnly:    return "square.3.layers.3d"
+        }
+    }
+
+    /// Advance to the next mode in the cycle.
+    var next: SemanticViewMode {
+        switch self {
+        case .meshOnly:        return .meshWithOutlines
+        case .meshWithOutlines: return .semanticOnly
+        case .semanticOnly:    return .meshOnly
+        }
+    }
+
+    var showMesh: Bool { self != .semanticOnly }
+    var showOutlines: Bool { self != .meshOnly }
+    var showFills: Bool { self == .semanticOnly }
+}
+
 // MARK: - Semantic Classification
 
 /// Semantic display classes for AR/VR overlays, HUD, and preview rendering.

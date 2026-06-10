@@ -28,7 +28,7 @@ struct CombinedMeshScreen: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var colorByMap = false
-    @State private var showSemantics = false
+    @State private var semanticViewMode: SemanticViewMode = .meshOnly
     @State private var detectedClasses: [SemanticClass] = []
     @State private var isLoading = true
 
@@ -54,13 +54,13 @@ struct CombinedMeshScreen: View {
                 } else {
                     CombinedMeshView(
                         items: presentItems, colorByMap: colorByMap,
-                        showSemantics: showSemantics,
+                        semanticViewMode: semanticViewMode,
                         detectedClasses: $detectedClasses,
                         onLoaded: { isLoading = false }
                     )
                     .ignoresSafeArea(edges: .bottom)
                     .overlay(alignment: .bottomLeading) {
-                        if showSemantics && !detectedClasses.isEmpty {
+                        if semanticViewMode.showOutlines && !detectedClasses.isEmpty {
                             VStack(alignment: .leading, spacing: 4) {
                                 ForEach(detectedClasses, id: \.rawValue) { cls in
                                     HStack(spacing: 6) {
@@ -118,9 +118,9 @@ struct CombinedMeshScreen: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     HStack(spacing: 12) {
                         Button {
-                            showSemantics.toggle()
+                            semanticViewMode = semanticViewMode.next
                         } label: {
-                            Image(systemName: showSemantics ? "tag.fill" : "tag")
+                            Image(systemName: semanticViewMode.iconName)
                         }
                         .disabled(presentItems.isEmpty)
 
@@ -143,7 +143,7 @@ struct CombinedMeshScreen: View {
 struct CombinedMeshView: UIViewRepresentable {
     let items: [CombinedMeshItem]
     let colorByMap: Bool
-    let showSemantics: Bool
+    let semanticViewMode: SemanticViewMode
     @Binding var detectedClasses: [SemanticClass]
     var onLoaded: () -> Void = {}
 
@@ -179,7 +179,7 @@ struct CombinedMeshView: UIViewRepresentable {
 
         context.coordinator.load(
             into: scnView, items: items, colorByMap: colorByMap,
-            showSemantics: showSemantics, detectedClassesBinding: $detectedClasses,
+            semanticViewMode: semanticViewMode, detectedClassesBinding: $detectedClasses,
             onLoaded: onLoaded
         )
         return scnView
@@ -188,7 +188,7 @@ struct CombinedMeshView: UIViewRepresentable {
     func updateUIView(_ uiView: SCNView, context: Context) {
         // Re-tint in place when the toggle changes (no reload needed).
         context.coordinator.applyTint(colorByMap: colorByMap)
-        context.coordinator.applySemantics(show: showSemantics)
+        context.coordinator.applyViewMode(semanticViewMode)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -196,6 +196,7 @@ struct CombinedMeshView: UIViewRepresentable {
     final class Coordinator {
         private var meshNodes: [UUID: SCNNode] = [:]
         private var semanticsNode: SCNNode?
+        private var semanticFillsNode: SCNNode?
         private var allDetectedClasses: [SemanticClass] = []
         private var detectedClassesBinding: Binding<[SemanticClass]>?
         // Two geometries per mesh, swapped on toggle (no runtime shader): the real per-vertex
@@ -205,7 +206,7 @@ struct CombinedMeshView: UIViewRepresentable {
         private var flatGeometries: [UUID: SCNGeometry] = [:]
 
         func load(into scnView: SCNView, items: [CombinedMeshItem], colorByMap: Bool,
-                  showSemantics: Bool, detectedClassesBinding: Binding<[SemanticClass]>,
+                  semanticViewMode: SemanticViewMode, detectedClassesBinding: Binding<[SemanticClass]>,
                   onLoaded: @escaping () -> Void) {
             guard let scene = scnView.scene else { onLoaded(); return }
             self.detectedClassesBinding = detectedClassesBinding
@@ -221,16 +222,17 @@ struct CombinedMeshView: UIViewRepresentable {
                     built.append((item, geometry, Self.makeFlatTinted(from: geometry, tint: item.tint)))
                 }
 
-                // Build RoomPlan outlines for each scan
-                var allOutlineNodes: [(node: SCNNode, transform: simd_float4x4)] = []
+                // Build RoomPlan outlines + fills for each scan
+                var allOutlineNodes: [(wireNode: SCNNode, fillNode: SCNNode, transform: simd_float4x4)] = []
                 var detectedSet = Set<SemanticClass>()
                 for item in items {
                     if let result = MeshPreviewView.buildRoomPlanOutlines(
                         scanDirectoryURL: item.scanDirectoryURL
                     ) {
                         for outline in result.outlineNodes {
-                            let node = SCNNode(geometry: outline.geometry)
-                            allOutlineNodes.append((node, item.transform))
+                            let wire = SCNNode(geometry: outline.geometry)
+                            let fill = SCNNode(geometry: outline.fillGeometry)
+                            allOutlineNodes.append((wire, fill, item.transform))
                         }
                         for cls in result.detectedClasses {
                             detectedSet.insert(cls)
@@ -248,17 +250,31 @@ struct CombinedMeshView: UIViewRepresentable {
                         self.flatGeometries[entry.item.id] = entry.flat
                     }
 
-                    // Add semantics node with all outline children
+                    // Add semantics wireframes
                     let semNode = SCNNode()
-                    for (outlineNode, itemTransform) in allOutlineNodes {
-                        let wrapper = SCNNode()
-                        wrapper.simdTransform = itemTransform
-                        wrapper.addChildNode(outlineNode)
-                        semNode.addChildNode(wrapper)
+                    let fillNode = SCNNode()
+                    for entry in allOutlineNodes {
+                        let wireWrapper = SCNNode()
+                        wireWrapper.simdTransform = entry.transform
+                        wireWrapper.addChildNode(entry.wireNode)
+                        semNode.addChildNode(wireWrapper)
+
+                        let fillWrapper = SCNNode()
+                        fillWrapper.simdTransform = entry.transform
+                        fillWrapper.addChildNode(entry.fillNode)
+                        fillNode.addChildNode(fillWrapper)
                     }
-                    semNode.isHidden = !showSemantics
+                    semNode.isHidden = !semanticViewMode.showOutlines
+                    fillNode.isHidden = !semanticViewMode.showFills
                     contentNode.addChildNode(semNode)
+                    contentNode.addChildNode(fillNode)
                     self.semanticsNode = semNode
+                    self.semanticFillsNode = fillNode
+
+                    // Apply initial mesh visibility
+                    if !semanticViewMode.showMesh {
+                        for (_, node) in self.meshNodes { node.isHidden = true }
+                    }
 
                     self.allDetectedClasses = SemanticClass.allCases.filter { detectedSet.contains($0) && $0 != .none }
                     detectedClassesBinding.wrappedValue = self.allDetectedClasses
@@ -281,9 +297,11 @@ struct CombinedMeshView: UIViewRepresentable {
             }
         }
 
-        /// Toggles RoomPlan semantic outline visibility.
-        func applySemantics(show: Bool) {
-            semanticsNode?.isHidden = !show
+        /// Applies the 3-mode visibility: mesh, outlines, and fills.
+        func applyViewMode(_ mode: SemanticViewMode) {
+            for (_, node) in meshNodes { node.isHidden = !mode.showMesh }
+            semanticsNode?.isHidden = !mode.showOutlines
+            semanticFillsNode?.isHidden = !mode.showFills
         }
 
         /// A flat per-map variant of `geometry`: same vertices/normals/elements, but the per-vertex
