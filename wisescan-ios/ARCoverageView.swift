@@ -807,8 +807,8 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         /// Renders oriented bounding-box wireframes from the latest CapturedRoom.
-        /// Each Surface/Object becomes a thin box with the correct transform (rotation + position)
-        /// and dimensions. Throttled to avoid per-frame rebuilds.
+        /// Each Surface/Object becomes a set of 12 colored edges (thin boxes) with the
+        /// correct transform. Throttled to avoid per-frame rebuilds.
         private func renderRoomPlanOutlines() {
             guard let room = latestCapturedRoom, let arView = arView else { return }
 
@@ -829,19 +829,10 @@ struct ARCoverageView: UIViewRepresentable {
                 let semantic = SemanticClass.from(surface.category)
                 guard semantic != .none else { continue }
                 classes.insert(semantic.rawValue)
-
-                let dims = surface.dimensions
-                let w = max(dims.x, 0.001), h = max(dims.y, 0.001), d = max(dims.z, 0.001)
-                let box = MeshResource.generateBox(width: w, height: h, depth: d)
-                let color = semantic.color
-                var material = UnlitMaterial(color: UIColor(
-                    red: CGFloat(color.x), green: CGFloat(color.y),
-                    blue: CGFloat(color.z), alpha: 0.6
-                ))
-                material.blending = .transparent(opacity: .init(floatLiteral: 1.0))
-                let entity = ModelEntity(mesh: box, materials: [material])
-                entity.transform = Transform(matrix: surface.transform)
-                anchorEntity.addChild(entity)
+                Self.addWireframeEdges(
+                    to: anchorEntity, dimensions: surface.dimensions,
+                    transform: surface.transform, color: semantic.color
+                )
             }
 
             // Render objects (tables, chairs, beds, etc.)
@@ -849,19 +840,10 @@ struct ARCoverageView: UIViewRepresentable {
                 let semantic = SemanticClass.from(object.category)
                 guard semantic != .none else { continue }
                 classes.insert(semantic.rawValue)
-
-                let dims = object.dimensions
-                let w = max(dims.x, 0.001), h = max(dims.y, 0.001), d = max(dims.z, 0.001)
-                let box = MeshResource.generateBox(width: w, height: h, depth: d)
-                let color = semantic.color
-                var material = UnlitMaterial(color: UIColor(
-                    red: CGFloat(color.x), green: CGFloat(color.y),
-                    blue: CGFloat(color.z), alpha: 0.6
-                ))
-                material.blending = .transparent(opacity: .init(floatLiteral: 1.0))
-                let entity = ModelEntity(mesh: box, materials: [material])
-                entity.transform = Transform(matrix: object.transform)
-                anchorEntity.addChild(entity)
+                Self.addWireframeEdges(
+                    to: anchorEntity, dimensions: object.dimensions,
+                    transform: object.transform, color: semantic.color
+                )
             }
 
             arView.scene.addAnchor(anchorEntity)
@@ -872,6 +854,63 @@ struct ARCoverageView: UIViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 self?.scanStats?.detectedClasses = self?.detectedSemanticClasses ?? classesForHUD
             }
+        }
+
+        /// Edge thickness for RoomPlan wireframe outlines (10mm).
+        private static let edgeThickness: Float = 0.01
+
+        /// Adds 12 thin box entities representing the edges of an oriented bounding box.
+        /// Each edge is a thin box with the given color.
+        /// Note: edges may be occluded by co-planar mesh geometry (z-fighting).
+        /// A future improvement could use a custom Metal shader with depth-test disabled
+        /// for surface outlines.
+        private static func addWireframeEdges(
+            to parent: Entity,
+            dimensions: SIMD3<Float>,
+            transform: simd_float4x4,
+            color: SIMD4<Float>
+        ) {
+            let t = edgeThickness
+            let w = max(dimensions.x, 0.001)
+            let h = max(dimensions.y, 0.001)
+            let d = max(dimensions.z, 0.001)
+            let hw = w / 2, hh = h / 2, hd = d / 2
+
+            let material = UnlitMaterial(color: UIColor(
+                red: CGFloat(color.x), green: CGFloat(color.y),
+                blue: CGFloat(color.z), alpha: 1.0
+            ))
+
+            // Container entity carries the RoomPlan transform
+            let container = Entity()
+            container.transform = Transform(matrix: transform)
+
+            // 12 edges: 4 along each axis
+            // Edges along X (width) — at the 4 vertical corners
+            let xEdge = MeshResource.generateBox(width: w, height: t, depth: t)
+            for (y, z) in [(-hh, -hd), (-hh, hd), (hh, -hd), (hh, hd)] as [(Float, Float)] {
+                let e = ModelEntity(mesh: xEdge, materials: [material])
+                e.position = SIMD3(0, y, z)
+                container.addChild(e)
+            }
+
+            // Edges along Y (height) — at the 4 horizontal corners
+            let yEdge = MeshResource.generateBox(width: t, height: h, depth: t)
+            for (x, z) in [(-hw, -hd), (-hw, hd), (hw, -hd), (hw, hd)] as [(Float, Float)] {
+                let e = ModelEntity(mesh: yEdge, materials: [material])
+                e.position = SIMD3(x, 0, z)
+                container.addChild(e)
+            }
+
+            // Edges along Z (depth) — at the 4 remaining corners
+            let zEdge = MeshResource.generateBox(width: t, height: t, depth: d)
+            for (x, y) in [(-hw, -hh), (-hw, hh), (hw, -hh), (hw, hh)] as [(Float, Float)] {
+                let e = ModelEntity(mesh: zEdge, materials: [material])
+                e.position = SIMD3(x, y, 0)
+                container.addChild(e)
+            }
+
+            parent.addChild(container)
         }
 
         // MARK: - Coverage Overlay (3D Occlusion)
