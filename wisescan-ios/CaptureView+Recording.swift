@@ -2,6 +2,7 @@ import SwiftUI
 import ARKit
 import RealityKit
 import SwiftData
+import os
 
 // MARK: - Recording Controls
 
@@ -396,8 +397,7 @@ extension CaptureView {
         let tgtDescriptor = FetchDescriptor<CapturedScan>(predicate: #Predicate { $0.id == targetScanId })
         guard let sourceScan = try? modelContext.fetch(srcDescriptor).first,
               let targetScan = try? modelContext.fetch(tgtDescriptor).first else {
-            print("[StitchLink] WARNING: could not resolve endpoint scans (source=\(srcId.uuidString.prefix(8)) "
-                + "target=\(targetScanId.uuidString.prefix(8)))")
+            stitchLog.error("could not resolve endpoint scans (source=\(srcId.uuidString.prefix(8), privacy: .public) target=\(targetScanId.uuidString.prefix(8), privacy: .public))")
             self.showTransientMessage("⚠️ Scan saved but spatial link failed to write", duration: 5)
             scanStore.pendingStitchLink = nil
             return
@@ -416,9 +416,9 @@ extension CaptureView {
                 linkType: pending.linkType,
                 in: modelContext
             )
-            print("[StitchLink] Created link source=\(srcId.uuidString.prefix(8)) target=\(targetScanId.uuidString.prefix(8))")
+            stitchLog.info("created link source=\(srcId.uuidString.prefix(8), privacy: .public) target=\(targetScanId.uuidString.prefix(8), privacy: .public)")
         } catch {
-            print("[StitchLink] WARNING: failed to save link: \(error.localizedDescription)")
+            stitchLog.error("failed to save link: \(error.localizedDescription, privacy: .public)")
             self.showTransientMessage("⚠️ Scan saved but spatial link failed to write", duration: 5)
         }
         scanStore.pendingStitchLink = nil
