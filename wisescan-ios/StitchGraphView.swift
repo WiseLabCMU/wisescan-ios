@@ -323,6 +323,7 @@ private struct CompactLocationTile: View {
     var isEditing: Bool = false
     var isSelected: Bool = false
     @State private var thumbnail: UIImage?
+    @State private var hasMissingWorldMap = false
 
     private var latestScan: CapturedScan? {
         location.scans.max(by: { $0.capturedAt < $1.capturedAt })
@@ -365,6 +366,28 @@ private struct CompactLocationTile: View {
                     .stroke(isEditing && isSelected ? Color.cyan : Color.white.opacity(0.12),
                             lineWidth: isEditing && isSelected ? 2 : 1)
             )
+            .overlay(alignment: .topLeading) {
+                if hasMissingWorldMap {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.yellow)
+                        .padding(4)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(Circle())
+                        .padding(4)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if !isEditing && !location.scans.isEmpty && location.scans.allSatisfy({ $0.isUploaded }) {
+                    Image(systemName: "checkmark.icloud.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.green)
+                        .padding(4)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(Circle())
+                        .padding(4)
+                }
+            }
             .opacity(isEditing ? 0.85 : 1.0)
 
             if isEditing {
@@ -376,15 +399,29 @@ private struct CompactLocationTile: View {
             }
         }
         .task(id: location.updatedAt) {
-            guard let latest = latestScan else { thumbnail = nil; return }
+            guard let latest = latestScan else {
+                thumbnail = nil
+                hasMissingWorldMap = false
+                return
+            }
             let fm = FileManager.default
             let url = [latest.modelPreviewURL, latest.thumbnailURL]
                 .first(where: { fm.fileExists(atPath: $0.path) }) ?? latest.thumbnailURL
-            thumbnail = await Task.detached(priority: .utility) {
-                guard FileManager.default.fileExists(atPath: url.path),
-                      let data = try? Data(contentsOf: url) else { return nil as UIImage? }
-                return UIImage(data: data)
+            let worldMapPaths = location.scans.map { $0.worldMapURL.path }
+
+            let resolved = await Task.detached(priority: .utility) {
+                let fm = FileManager.default
+                let img: UIImage? = {
+                    guard fm.fileExists(atPath: url.path),
+                          let data = try? Data(contentsOf: url) else { return nil }
+                    return UIImage(data: data)
+                }()
+                let missingMap = worldMapPaths.contains(where: { !fm.fileExists(atPath: $0) })
+                return (img, missingMap)
             }.value
+
+            thumbnail = resolved.0
+            hasMissingWorldMap = resolved.1
         }
     }
 }

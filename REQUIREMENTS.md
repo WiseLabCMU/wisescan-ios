@@ -303,8 +303,8 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Save to Files via share sheet. HTTP PUT upload to configurable URL with status tracking (pending → uploading → success/failed). ZIP packaging for RAW/Polycam. |
-| **Source** | [ScansListView.swift](wisescan-ios/ScansListView.swift) — `ScanCard`, `uploadScan()`, `saveToFiles()` |
+| **Description** | Save to Files via share sheet. HTTP PUT upload to configurable URL with status tracking (pending → uploading → success/failed). ZIP packaging for RAW/Polycam. On successful upload (HTTP 2xx), `lastUploadedAt` is stamped with the current date/time and persisted via SwiftData. The ScanCard displays the uploaded date for server cross-reference; the LocationGridTile shows a checkmark overlay when all scans in a location have been uploaded. |
+| **Source** | [ScansListView.swift](wisescan-ios/ScansListView.swift) — `ScanCard`, `uploadScan()`, `saveToFiles()` · [LocationDetailView.swift](wisescan-ios/LocationDetailView.swift) — `bulkUpload()` |
 
 ### REQ-008: Server Status & Settings
 | | |
@@ -459,6 +459,7 @@ classDiagram
         +String selectedFormatStr
         +Double uploadProgress
         +String uploadStatusStr
+        +Date? lastUploadedAt
     }
 
     class ScanStore {

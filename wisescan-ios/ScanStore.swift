@@ -17,6 +17,9 @@ class CapturedScan {
     var uploadStatusStr: String
     var uploadProgress: Double
     var isColored: Bool = false
+    /// Timestamp of the last successful upload to the server. `nil` means never uploaded.
+    /// Updated automatically on HTTP 2xx; persists across launches for server cross-reference.
+    var lastUploadedAt: Date?
 
     @Relationship(inverse: \ScanLocation.scans)
     var location: ScanLocation?
@@ -85,6 +88,16 @@ class CapturedScan {
                 uploadProgress = prog
             }
         }
+    }
+
+    @Transient var isUploaded: Bool { lastUploadedAt != nil }
+
+    @Transient var formattedUploadDate: String? {
+        guard let date = lastUploadedAt else { return nil }
+        let fmt = DateFormatter()
+        fmt.dateStyle = .medium
+        fmt.timeStyle = .short
+        return fmt.string(from: date)
     }
 
     // Configurable base Directory

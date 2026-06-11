@@ -22,6 +22,8 @@ struct LocationDetailView: View {
     /// Shown when a bulk-color selection mixes already-colored and uncolored scans,
     /// so the user can choose to color only the uncolored ones or recolor everything.
     @State private var showBulkColorMixedPrompt = false
+    /// Shown when a bulk-upload selection mixes already-uploaded and un-uploaded scans.
+    @State private var showBulkUploadMixedPrompt = false
     /// Per-scan coloring progress during a bulk colorize, keyed by scan id. SwiftUI @State so the
     /// cards reliably re-render as it updates (a SwiftData @Transient model prop is not observed).
     @State private var bulkColoringMessages: [PersistentIdentifier: String] = [:]
@@ -357,6 +359,16 @@ struct LocationDetailView: View {
             colored: selectedColorSplit.colored,
             colorize: { bulkColorize(scans: $0) }
         ))
+        .modifier(BulkUploadMixedDialog(
+            isPresented: $showBulkUploadMixedPrompt,
+            notUploaded: selectedUploadSplit.notUploaded,
+            uploaded: selectedUploadSplit.uploaded,
+            upload: { scans in
+                bulkUpload(scans: scans)
+                isEditing = false
+                selectedScans.removeAll()
+            }
+        ))
         .confirmationDialog(
             "Delete Scans",
             isPresented: $showBulkDeleteConfirm
@@ -493,6 +505,7 @@ struct LocationDetailView: View {
                             } else if let httpResponse = response as? HTTPURLResponse,
                                       (200...299).contains(httpResponse.statusCode) {
                                 scan.uploadStatus = .success
+                                scan.lastUploadedAt = Date()
                             } else {
                                 scan.uploadStatus = .failed("Server error")
                             }
@@ -523,10 +536,7 @@ struct LocationDetailView: View {
             .disabled(selectedScans.isEmpty)
 
             Button(action: {
-                let scansToUpload = sortedScans.filter { selectedScans.contains($0.id) }
-                bulkUpload(scans: scansToUpload)
-                isEditing = false
-                selectedScans.removeAll()
+                requestBulkUpload(sortedScans: sortedScans)
             }, label: {
                 Text("Upload")
                     .font(.headline)
@@ -584,6 +594,27 @@ struct LocationDetailView: View {
         return (selected.filter { !$0.isColored }, selected.filter { $0.isColored })
     }
 
+    /// Selected scans, split into already-uploaded and not-yet-uploaded.
+    private var selectedUploadSplit: (notUploaded: [CapturedScan], uploaded: [CapturedScan]) {
+        let selected = location.scans.filter { selectedScans.contains($0.id) }
+        return (selected.filter { !$0.isUploaded }, selected.filter { $0.isUploaded })
+    }
+
+    /// Entry point for the bulk Upload button. Uploads directly when the selection is
+    /// uniform (all uploaded or all un-uploaded); when it's mixed, prompts the user.
+    private func requestBulkUpload(sortedScans: [CapturedScan]) {
+        let scansToUpload = sortedScans.filter { selectedScans.contains($0.id) }
+        let split = (notUploaded: scansToUpload.filter { !$0.isUploaded },
+                     uploaded: scansToUpload.filter { $0.isUploaded })
+        guard !scansToUpload.isEmpty else { return }
+        if split.notUploaded.isEmpty || split.uploaded.isEmpty {
+            bulkUpload(scans: scansToUpload)
+            isEditing = false
+            selectedScans.removeAll()
+        } else {
+            showBulkUploadMixedPrompt = true
+        }
+    }
 
     /// Entry point for the bulk Color button. Colors directly when the selection is
     /// uniform (all colored or all uncolored); when it's mixed, prompts the user to
@@ -678,6 +709,28 @@ private struct BulkColorMixedDialog: ViewModifier {
         } message: {
             Text("\(colored.count) of the selected scans are already colored. " +
                  "Color only the uncolored scans, or recolor everything?")
+        }
+    }
+}
+
+private struct BulkUploadMixedDialog: ViewModifier {
+    @Binding var isPresented: Bool
+    let notUploaded: [CapturedScan]
+    let uploaded: [CapturedScan]
+    let upload: ([CapturedScan]) -> Void
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            "Upload Scans",
+            isPresented: $isPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Upload \(notUploaded.count) Un-uploaded Only") { upload(notUploaded) }
+            Button("Re-upload All \(notUploaded.count + uploaded.count)") { upload(notUploaded + uploaded) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(uploaded.count) of the selected scans have already been uploaded. " +
+                 "Upload only the un-uploaded scans, or re-upload everything?")
         }
     }
 }

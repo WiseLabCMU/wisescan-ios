@@ -32,6 +32,8 @@ struct ScansListView: View {
     @State private var isBulkColoring = false
     /// Shown when a bulk-color selection mixes already-colored and uncolored scans.
     @State private var showBulkColorMixedPrompt = false
+    /// Shown when a bulk-upload selection mixes already-uploaded and un-uploaded scans.
+    @State private var showBulkUploadMixedPrompt = false
     @State private var bulkProgressMessage: String?
     @State private var isBulkExporting = false
     @State private var exportItems: [ZipExportItem] = []
@@ -217,6 +219,24 @@ struct ScansListView: View {
                 Text("\(split.colored.count) of the selected scans are already colored. " +
                      "Color only the uncolored scans, or recolor everything?")
             }
+            .confirmationDialog(
+                "Upload Scans",
+                isPresented: $showBulkUploadMixedPrompt,
+                titleVisibility: .visible
+            ) {
+                let split = targetUploadSplit
+                Button("Upload \(split.notUploaded.count) Un-uploaded Only") {
+                    bulkUpload(scans: split.notUploaded)
+                }
+                Button("Re-upload All \(split.notUploaded.count + split.uploaded.count)") {
+                    bulkUpload(scans: split.notUploaded + split.uploaded)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                let split = targetUploadSplit
+                Text("\(split.uploaded.count) of the selected scans have already been uploaded. " +
+                     "Upload only the un-uploaded scans, or re-upload everything?")
+            }
             .preferredColorScheme(.dark)
             .overlay {
                 if scanStore.isProcessingScan {
@@ -286,7 +306,7 @@ struct ScansListView: View {
                 .disabled(selectedLocations.isEmpty)
 
                 // Upload
-                Button(action: { bulkUpload() }) {
+                Button(action: { requestBulkUpload() }) {
                     Text("Upload")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
@@ -509,8 +529,7 @@ struct ScansListView: View {
 
     /// Upload selected scans to the configured server. Each scan is exported and uploaded
     /// independently on a background queue. Banner tracks per-scan completion and upload progress.
-    private func bulkUpload() {
-        let scans = resolveTargetScans()
+    private func bulkUpload(scans: [CapturedScan]) {
         guard !scans.isEmpty, !uploadURL.isEmpty else { return }
         let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
@@ -561,6 +580,7 @@ struct ScansListView: View {
                             } else if let httpResponse = response as? HTTPURLResponse,
                                       (200...299).contains(httpResponse.statusCode) {
                                 scan.uploadStatus = .success
+                                scan.lastUploadedAt = Date()
                             } else {
                                 scan.uploadStatus = .failed("Server error")
                             }
@@ -588,6 +608,25 @@ struct ScansListView: View {
     private var targetColorSplit: (uncolored: [CapturedScan], colored: [CapturedScan]) {
         let selected = resolveTargetScans()
         return (selected.filter { !$0.isColored }, selected.filter { $0.isColored })
+    }
+
+    /// Target scans split into already-uploaded and not-yet-uploaded.
+    private var targetUploadSplit: (notUploaded: [CapturedScan], uploaded: [CapturedScan]) {
+        let selected = resolveTargetScans()
+        return (selected.filter { !$0.isUploaded }, selected.filter { $0.isUploaded })
+    }
+
+    /// Entry point for the bulk Upload button. Uploads directly when the selection is
+    /// uniform (all uploaded or all un-uploaded); when it's mixed, prompts the user.
+    private func requestBulkUpload() {
+        let split = targetUploadSplit
+        let selected = split.notUploaded + split.uploaded
+        guard !selected.isEmpty else { return }
+        if split.notUploaded.isEmpty || split.uploaded.isEmpty {
+            bulkUpload(scans: selected)
+        } else {
+            showBulkUploadMixedPrompt = true
+        }
     }
 
     /// Entry point for the bulk Color button. Colors directly when the selection is
@@ -757,6 +796,17 @@ struct LocationGridTile: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundColor(.yellow)
+                    .padding(6)
+                    .background(Color.black.opacity(0.5))
+                    .clipShape(Circle())
+                    .padding(8)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if !location.scans.isEmpty && location.scans.allSatisfy({ $0.isUploaded }) {
+                Image(systemName: "checkmark.icloud.fill")
+                    .font(.caption)
+                    .foregroundColor(.green)
                     .padding(6)
                     .background(Color.black.opacity(0.5))
                     .clipShape(Circle())
@@ -1076,6 +1126,15 @@ struct ScanCard: View {
                     .font(.caption2)
                     .foregroundColor(.cyan)
 
+                if let uploadDate = scan.formattedUploadDate {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.icloud")
+                        Text("Uploaded \(uploadDate)")
+                    }
+                    .font(.caption2)
+                    .foregroundColor(.green.opacity(0.8))
+                }
+
                 if let counts = itemCounts {
                     itemCountsText(counts)
                 }
@@ -1252,6 +1311,7 @@ struct ScanCard: View {
                         self.scan.uploadStatus = .failed(uploadError.localizedDescription)
                     } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
                         self.scan.uploadStatus = .success
+                        self.scan.lastUploadedAt = Date()
                     } else {
                         self.scan.uploadStatus = .failed("Server error")
                     }
