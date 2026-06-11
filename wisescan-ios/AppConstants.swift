@@ -88,6 +88,9 @@ enum AppConstants {
     static let consecutiveBlurThreshold: Int = 5             // blurred frames before warning triggers
     static let motionBlurVelocity: Float = 0.5               // m/s threshold for motion blur detection
     static let depthOcclusionToleranceMM: Float = 150.0      // mm tolerance for depth occlusion test
+    static let colorizationMaxObservations: Int = 12         // max per-vertex observations kept (top-N by quality) for the weighted-median colorizer
+    static let colorizationMinDistanceM: Float = 0.3         // distance floor (m) for the inverse-square distance weight, so very close frames don't dominate
+    static let colorizationOcclusionToleranceMM: Float = 50.0 // tighter mm tolerance used during colorization to cull backface/occluded samples (lower = more aggressive culling, but ARKit mesh noise can reject valid samples)
     static let thumbnailMaxWidth: CGFloat = 800              // max width for scan thumbnails
     static let thumbnailJpegQuality: CGFloat = 0.6           // JPEG quality for thumbnails
     static let stabilizationPollIntervalMs: Int = 200         // ms between tracking-state polls after session reset

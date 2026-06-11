@@ -30,6 +30,8 @@ struct ScansListView: View {
     @State private var graphVisibleLocationIds: Set<PersistentIdentifier> = []
     @State private var bulkScope: BulkScope = .latest
     @State private var isBulkColoring = false
+    /// Shown when a bulk-color selection mixes already-colored and uncolored scans.
+    @State private var showBulkColorMixedPrompt = false
     @State private var bulkProgressMessage: String?
     @State private var isBulkExporting = false
     @State private var exportItems: [ZipExportItem] = []
@@ -197,6 +199,24 @@ struct ScansListView: View {
                     Text(bulkDeleteMessage)
                 }
             }
+            .confirmationDialog(
+                "Color Scans",
+                isPresented: $showBulkColorMixedPrompt,
+                titleVisibility: .visible
+            ) {
+                let split = targetColorSplit
+                Button("Color \(split.uncolored.count) Uncolored Only") {
+                    bulkColorize(scans: split.uncolored)
+                }
+                Button("Recolor All \(split.uncolored.count + split.colored.count)") {
+                    bulkColorize(scans: split.uncolored + split.colored)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                let split = targetColorSplit
+                Text("\(split.colored.count) of the selected scans are already colored. " +
+                     "Color only the uncolored scans, or recolor everything?")
+            }
             .preferredColorScheme(.dark)
             .overlay {
                 if scanStore.isProcessingScan {
@@ -291,7 +311,7 @@ struct ScansListView: View {
                 .disabled(selectedLocations.isEmpty || isBulkExporting)
 
                 // Color
-                Button(action: { bulkColorize() }) {
+                Button(action: { requestBulkColorize() }) {
                     HStack(spacing: 4) {
                         Image(systemName: "paintbrush.fill")
                         Text("Color")
@@ -316,7 +336,8 @@ struct ScansListView: View {
     }
 
     private var colorDisabled: Bool {
-        resolveTargetScans().filter({ !$0.isColored }).isEmpty || isBulkColoring
+        // Enabled whenever there are target scans — already-colored scans can be recolored.
+        resolveTargetScans().isEmpty || isBulkColoring
     }
 
     /// Returns the set of location PersistentIdentifiers that are visible in the current view mode.
@@ -563,10 +584,29 @@ struct ScansListView: View {
         exitEditModeWithBanner("✓ Uploaded \(total) scan\(total == 1 ? "" : "s")")
     }
 
-    /// Serial colorize of selected uncolored scans on a utility queue.
+    /// Target scans split into already-colored and not-yet-colored.
+    private var targetColorSplit: (uncolored: [CapturedScan], colored: [CapturedScan]) {
+        let selected = resolveTargetScans()
+        return (selected.filter { !$0.isColored }, selected.filter { $0.isColored })
+    }
+
+    /// Entry point for the bulk Color button. Colors directly when the selection is
+    /// uniform (all colored or all uncolored); when it's mixed, prompts the user to
+    /// choose between coloring only the uncolored scans or recoloring everything.
+    private func requestBulkColorize() {
+        let split = targetColorSplit
+        let selected = split.uncolored + split.colored
+        guard !selected.isEmpty else { return }
+        if split.uncolored.isEmpty || split.colored.isEmpty {
+            bulkColorize(scans: selected)   // uniform selection — no need to ask
+        } else {
+            showBulkColorMixedPrompt = true
+        }
+    }
+
+    /// Serial colorize of the given scans on a utility queue.
     /// Progress is throttled to whole-percent updates to avoid flooding the main thread.
-    private func bulkColorize() {
-        let scans = resolveTargetScans().filter { !$0.isColored }
+    private func bulkColorize(scans: [CapturedScan]) {
         guard !scans.isEmpty else { return }
         isBulkColoring = true
 
@@ -1097,7 +1137,8 @@ struct ScanCard: View {
                 .disabled(uploadButtonDisabled)
             }
 
-            if !scan.isColored {
+            // Always offered: a colored scan can be recolored (overwrites colors.bin).
+            do {
                 Button(action: { colorizeScan() }) {
                     HStack {
                         Image(systemName: "paintbrush.fill")

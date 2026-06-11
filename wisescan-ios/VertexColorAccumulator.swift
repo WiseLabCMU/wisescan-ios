@@ -125,11 +125,26 @@ enum VertexColorAccumulator {
     }
 
     /// Colorize OBJ mesh vertices using saved camera frames (post-processing).
+    ///
+    /// Rebuilt as a robust, quality-weighted estimator rather than the old
+    /// "latest frame with visibility wins" strategy, which let a single late
+    /// frame with a drifted pose (after a tracking hiccup) overwrite all the
+    /// good earlier samples and smear color across the mesh.
+    ///
+    /// For each vertex we collect up to `AppConstants.colorizationMaxObservations`
+    /// observations across all sampled frames, keeping the highest-quality ones,
+    /// then take the per-channel **weighted median** of those observations. The
+    /// median is inherently robust: a few misaligned (drifted-frame) colors don't
+    /// move it the way they move a mean. Each observation is weighted by:
+    ///   - view angle: |normal · viewDir| — head-on views beat grazing ones
+    ///   - distance:   inverse-square (floored) — closer frames resolve the
+    ///                 surface at higher pixel density
+    ///
+    /// Depth occlusion and nearest-pixel sampling are unchanged from before.
     /// Reads saved JPEG images and camera JSON transforms from `rawDataDir`,
-    /// parses vertices from `objData`, and projects each vertex into camera frames
-    /// to sample RGB color.
-    /// Vertex-colors the mesh by sampling saved frames. `progress` (0...1) is called after each
-    /// sampled frame on the calling (background) thread — callers hop to main to update UI.
+    /// parses vertices from `objData`, and projects each vertex into camera frames.
+    /// `progress` (0...1) is called after each sampled frame on the calling
+    /// (background) thread — callers hop to main to update UI.
     static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?, progress: ((Double) -> Void)? = nil) -> Data? {
         guard let rawDir = rawDataDir else { return nil }
         let fm = FileManager.default
@@ -138,6 +153,20 @@ enum VertexColorAccumulator {
         guard let parsed = MeshParser.parseOBJ(from: objData) else { return nil }
         let vertices = parsed.vertices
         guard !vertices.isEmpty else { return nil }
+
+        // Per-vertex surface normals (area-weighted face normals) drive the
+        // view-angle weight. Sign/winding may be inconsistent across the mesh,
+        // so the weight uses |normal · viewDir| and is sign-agnostic.
+        var normals = [SIMD3<Float>](repeating: .zero, count: vertices.count)
+        for face in parsed.faces {
+            let i0 = Int(face.0), i1 = Int(face.1), i2 = Int(face.2)
+            guard i0 < vertices.count, i1 < vertices.count, i2 < vertices.count else { continue }
+            let n = simd_cross(vertices[i1] - vertices[i0], vertices[i2] - vertices[i0])
+            normals[i0] += n; normals[i1] += n; normals[i2] += n
+        }
+        for i in normals.indices {
+            normals[i] = simd_length(normals[i]) > 0 ? simd_normalize(normals[i]) : SIMD3<Float>(0, 0, 1)
+        }
 
         // Find saved camera JSONs
         let camerasDir = rawDir.appendingPathComponent("cameras")
@@ -156,9 +185,16 @@ enum VertexColorAccumulator {
         let stride = max(1, cameraFiles.count / maxFrames)
         let sampledFiles = Swift.stride(from: 0, to: cameraFiles.count, by: stride).prefix(maxFrames).map { cameraFiles[$0] }
 
-        // Initialize color array (gray default for unsampled vertices)
-        var colors = [SIMD3<Float>](repeating: SIMD3<Float>(0.5, 0.5, 0.5), count: vertices.count)
-        var colored = [Bool](repeating: false, count: vertices.count)
+        // Per-vertex top-N observation buffers (flat, row = K entries per vertex).
+        // Colors are kept as 8-bit (the source precision) to bound memory.
+        let K = max(1, AppConstants.colorizationMaxObservations)
+        let vertexCount = vertices.count
+        var obsR = [UInt8](repeating: 0, count: vertexCount * K)
+        var obsG = [UInt8](repeating: 0, count: vertexCount * K)
+        var obsB = [UInt8](repeating: 0, count: vertexCount * K)
+        var obsW = [Float](repeating: 0, count: vertexCount * K)
+        var obsCount = [UInt8](repeating: 0, count: vertexCount)
+        let distFloor = max(AppConstants.colorizationMinDistanceM, 0.001)
 
         // Downscale factor — vertex coloring doesn't need full-res images
         let downscaleFactor = 2
@@ -202,6 +238,9 @@ enum VertexColorAccumulator {
             ))
             // World-to-camera
             let world2Cam = cam2World.inverse
+            // Camera position in world space (translation column of cam2World) —
+            // used for the per-observation view-angle and distance weights.
+            let camWorld = SIMD3<Float>(t03, t13, t23)
 
             // Load corresponding image
             guard let imagePath = json["image_path"] as? String else { return }
@@ -300,37 +339,110 @@ enum VertexColorAccumulator {
                         if depthMM == 0 { continue }
 
                         // If expected distance is > tolerance farther than what the depth sensor saw, we are occluded
-                        if expectedMM > depthMM + AppConstants.depthOcclusionToleranceMM { continue }
+                        if expectedMM > depthMM + AppConstants.colorizationOcclusionToleranceMM { continue }
                     }
                 }
 
-                let offset = py * bytesPerRow + px * bytesPerPixel
-                let r = Float(ptr[offset]) / 255.0
-                let g = Float(ptr[offset + 1]) / 255.0
-                let b = Float(ptr[offset + 2]) / 255.0
+                // Quality weight: head-on views and closer frames win.
+                let toCam = camWorld - vertex
+                let dist = simd_length(toCam)
+                guard dist > 0 else { continue }
+                let viewDir = toCam / dist
+                let angleWeight = abs(simd_dot(normals[i], viewDir))   // 1 = head-on, 0 = grazing
+                let clampedDist = max(dist, distFloor)
+                let distWeight = 1.0 / (clampedDist * clampedDist)     // inverse-square, floored
+                let weight = angleWeight * distWeight
+                guard weight > 1e-6 else { continue }
 
-                // Latest frame with visibility wins (simple strategy)
-                colors[i] = SIMD3<Float>(r, g, b)
-                colored[i] = true
+                let offset = py * bytesPerRow + px * bytesPerPixel
+                let r = ptr[offset]
+                let g = ptr[offset + 1]
+                let b = ptr[offset + 2]
+
+                // Keep the top-K observations by weight for this vertex.
+                let base = i * K
+                let cnt = Int(obsCount[i])
+                if cnt < K {
+                    obsR[base + cnt] = r; obsG[base + cnt] = g; obsB[base + cnt] = b
+                    obsW[base + cnt] = weight
+                    obsCount[i] = UInt8(cnt + 1)
+                } else {
+                    // Replace the lowest-weight slot if this observation is better.
+                    var minIdx = base
+                    var minW = obsW[base]
+                    for k in 1..<K where obsW[base + k] < minW {
+                        minW = obsW[base + k]; minIdx = base + k
+                    }
+                    if weight > minW {
+                        obsR[minIdx] = r; obsG[minIdx] = g; obsB[minIdx] = b
+                        obsW[minIdx] = weight
+                    }
+                }
             }
             _ = depthPixelDataBuffer // Silence compiler warning while ensuring CFData buffer outlives the pointer
           } // autoreleasepool (per frame)
             progress?(Double(frameIdx + 1) / Double(sampledFiles.count))
         }
 
-        let coloredCount = colored.reduce(0) { $0 + ($1 ? 1 : 0) }
-        print("[VertexColor] Colored \(coloredCount)/\(vertices.count) vertices from \(sampledFiles.count) frames")
+        // Reduce each vertex's observations to a per-channel weighted median.
+        // Unsampled vertices keep a neutral gray so they read as "no data".
+        var coloredCount = 0
+        // Scratch buffers reused across vertices (sized K) to avoid per-vertex allocations.
+        var sV = [Float](repeating: 0, count: K)
+        var sW = [Float](repeating: 0, count: K)
 
-        // Convert to SIMD4<Float> with alpha=1 (matches buildColorData format), filling the
-        // output Data in place to avoid an intermediate [SIMD4<Float>] allocation.
-        var data = Data(count: colors.count * MemoryLayout<SIMD4<Float>>.stride)
+        var data = Data(count: vertexCount * MemoryLayout<SIMD4<Float>>.stride)
         data.withUnsafeMutableBytes { raw in
             let out = raw.bindMemory(to: SIMD4<Float>.self)
-            for i in colors.indices {
-                let c = colors[i]
-                out[i] = SIMD4<Float>(c.x, c.y, c.z, 1.0)
+            for i in 0..<vertexCount {
+                let cnt = Int(obsCount[i])
+                if cnt == 0 {
+                    out[i] = SIMD4<Float>(0.5, 0.5, 0.5, 1.0)
+                    continue
+                }
+                let base = i * K
+                let r = Self.weightedMedian(values: obsR, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
+                let g = Self.weightedMedian(values: obsG, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
+                let b = Self.weightedMedian(values: obsB, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
+                out[i] = SIMD4<Float>(r / 255.0, g / 255.0, b / 255.0, 1.0)
+                coloredCount += 1
             }
         }
+        print("[VertexColor] Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (weighted median, K=\(K))")
         return data
+    }
+
+    /// Weighted median of one color channel over a vertex's observations.
+    /// `values`/`weights` are the flat top-K buffers; `base..<base+count` is this
+    /// vertex's slice. `sV`/`sW` are caller-owned scratch buffers (length ≥ count)
+    /// reused across vertices to avoid per-vertex allocation. Returns the channel
+    /// value at which cumulative weight first reaches half the total weight.
+    private static func weightedMedian(
+        values: [UInt8], weights: [Float], base: Int, count: Int,
+        sV: inout [Float], sW: inout [Float]
+    ) -> Float {
+        // Copy this vertex's slice into scratch, then insertion-sort by value
+        // (count ≤ K is small, so insertion sort is the right tool).
+        for k in 0..<count {
+            sV[k] = Float(values[base + k])
+            sW[k] = weights[base + k]
+        }
+        for k in 1..<count {
+            let v = sV[k], w = sW[k]
+            var j = k - 1
+            while j >= 0 && sV[j] > v {
+                sV[j + 1] = sV[j]; sW[j + 1] = sW[j]; j -= 1
+            }
+            sV[j + 1] = v; sW[j + 1] = w
+        }
+        var total: Float = 0
+        for k in 0..<count { total += sW[k] }
+        let half = total / 2
+        var cum: Float = 0
+        for k in 0..<count {
+            cum += sW[k]
+            if cum >= half { return sV[k] }
+        }
+        return sV[count - 1]
     }
 }

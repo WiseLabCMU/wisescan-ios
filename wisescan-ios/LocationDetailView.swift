@@ -19,6 +19,9 @@ struct LocationDetailView: View {
     @State private var showRenameAlert = false
     @State private var showNoWorldMapAlert = false
     @State private var isBulkColoring = false
+    /// Shown when a bulk-color selection mixes already-colored and uncolored scans,
+    /// so the user can choose to color only the uncolored ones or recolor everything.
+    @State private var showBulkColorMixedPrompt = false
     /// Per-scan coloring progress during a bulk colorize, keyed by scan id. SwiftUI @State so the
     /// cards reliably re-render as it updates (a SwiftData @Transient model prop is not observed).
     @State private var bulkColoringMessages: [PersistentIdentifier: String] = [:]
@@ -348,6 +351,12 @@ struct LocationDetailView: View {
                  "or connected to an adjacent space — both relocalize against the saved world map. " +
                  "Capture a new scan of this space to create one.")
         }
+        .modifier(BulkColorMixedDialog(
+            isPresented: $showBulkColorMixedPrompt,
+            uncolored: selectedColorSplit.uncolored,
+            colored: selectedColorSplit.colored,
+            colorize: { bulkColorize(scans: $0) }
+        ))
         .confirmationDialog(
             "Delete Scans",
             isPresented: $showBulkDeleteConfirm
@@ -546,10 +555,7 @@ struct LocationDetailView: View {
             })
             .disabled(selectedScans.isEmpty || isBulkExporting)
 
-            Button(action: {
-                let scansToColor = sortedScans.filter { selectedScans.contains($0.id) && !$0.isColored }
-                bulkColorize(scans: scansToColor)
-            }, label: {
+            Button(action: { requestBulkColorize() }, label: {
                 HStack(spacing: 4) {
                     Image(systemName: "paintbrush.fill")
                     Text("Color")
@@ -568,8 +574,29 @@ struct LocationDetailView: View {
     }
 
     private var bulkColorDisabled: Bool {
-        let selectedUncolored = location.scans.filter { selectedScans.contains($0.id) && !$0.isColored }
-        return selectedUncolored.isEmpty || isBulkColoring
+        // Enabled whenever any scan is selected — already-colored scans can be recolored.
+        selectedScans.isEmpty || isBulkColoring
+    }
+
+    /// Selected scans, split into already-colored and not-yet-colored.
+    private var selectedColorSplit: (uncolored: [CapturedScan], colored: [CapturedScan]) {
+        let selected = location.scans.filter { selectedScans.contains($0.id) }
+        return (selected.filter { !$0.isColored }, selected.filter { $0.isColored })
+    }
+
+
+    /// Entry point for the bulk Color button. Colors directly when the selection is
+    /// uniform (all colored or all uncolored); when it's mixed, prompts the user to
+    /// choose between coloring only the uncolored scans or recoloring everything.
+    private func requestBulkColorize() {
+        let split = selectedColorSplit
+        let selected = split.uncolored + split.colored
+        guard !selected.isEmpty else { return }
+        if split.uncolored.isEmpty || split.colored.isEmpty {
+            bulkColorize(scans: selected)   // uniform selection — no need to ask
+        } else {
+            showBulkColorMixedPrompt = true
+        }
     }
 
     private func bulkColorize(scans: [CapturedScan]) {
@@ -624,6 +651,33 @@ struct LocationDetailView: View {
                 self.isEditing = false
                 self.selectedScans.removeAll()
             }
+        }
+    }
+}
+
+// MARK: - Bulk Color Mixed-Selection Dialog
+
+/// Prompt shown when a bulk-color selection mixes already-colored and uncolored
+/// scans. Hosted as a `ViewModifier` so its dialog content type-checks in its own
+/// `body` rather than inflating LocationDetailView's already-large `body`.
+private struct BulkColorMixedDialog: ViewModifier {
+    @Binding var isPresented: Bool
+    let uncolored: [CapturedScan]
+    let colored: [CapturedScan]
+    let colorize: ([CapturedScan]) -> Void
+
+    func body(content: Content) -> some View {
+        content.confirmationDialog(
+            "Color Scans",
+            isPresented: $isPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Color \(uncolored.count) Uncolored Only") { colorize(uncolored) }
+            Button("Recolor All \(uncolored.count + colored.count)") { colorize(uncolored + colored) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(colored.count) of the selected scans are already colored. " +
+                 "Color only the uncolored scans, or recolor everything?")
         }
     }
 }
