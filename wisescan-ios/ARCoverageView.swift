@@ -1213,25 +1213,43 @@ struct ARCoverageView: UIViewRepresentable {
             }
 
             // ── VIO starvation guard ──
-            // Once tracking has been .normal during recording (armed), trip if EITHER ARKit just
-            // stalled (a large frame-delivery gap → VIO almost certainly diverged — the original
-            // freeze signature) OR tracking stayed degraded continuously past a threshold
-            // (excessiveMotion/insufficientFeatures/relocalizing/notAvailable). Data captured after
-            // VIO loss is corrupt, so we halt + prompt. Benign startup (initializing, and anything
-            // before the first .normal) is ignored. See CaptureView.handleVIOCompromised().
+            // Once tracking has been .normal during recording (armed), trip if EITHER a large
+            // frame-delivery gap was FOLLOWED by hard-degraded tracking (gap + the recovering frame
+            // still notAvailable/excessiveMotion/insufficientFeatures → VIO diverged through the
+            // stall) OR tracking stayed degraded continuously past a threshold for such a NON-recovery
+            // reason. Data captured after VIO loss is corrupt, so we halt + prompt. **Relocalization
+            // is the recovery we must wait for** — ARKit enters `.relocalizing` after a loss and it
+            // routinely takes longer than vioDegradedTripSeconds, so (like `.initializing`) it is
+            // benign and resets the timer rather than tripping. A bare frame gap does NOT trip: a
+            // compute hiccup (not real VIO failure) drops frames yet resumes .normal, and cutting
+            // those sessions was the false-positive we're fixing. See CaptureView.handleVIOCompromised().
             if isRecording.load(ordering: .relaxed) {
                 switch frame.camera.trackingState {
                 case .normal:
                     vioGuardArmed = true
                     vioDegradedSince = 0
-                case .limited(.initializing):
-                    break // benign startup; neither arms nor accumulates
+                case .limited(.initializing), .limited(.relocalizing):
+                    // Benign: startup or active relocalization recovery. Don't accumulate toward the
+                    // sustained-degradation trip; give relocalization a fresh window to succeed.
+                    vioDegradedSince = 0
                 default:
                     if vioGuardArmed && vioDegradedSince == 0 { vioDegradedSince = ts }
                 }
                 if vioGuardArmed {
                     let sustainedDegraded = vioDegradedSince > 0 && (ts - vioDegradedSince) > AppConstants.vioDegradedTripSeconds
-                    let stalled = frameGap > AppConstants.vioFrameGapTripSeconds
+                    // A large frame gap alone is NOT proof VIO diverged. A compute stall (GPU/main-thread
+                    // spike, heavy voxel/mesh burst) drops frames for >1.5s, yet ARKit resumes tracking
+                    // cleanly — the old instant-trip-on-gap cut those sessions for nothing. The gap branch
+                    // only ever evaluates on the FIRST frame after the gap (frames have already resumed),
+                    // so inspect that frame: only treat the gap as a stall if tracking came back
+                    // hard-degraded (notAvailable / excessiveMotion / insufficientFeatures). If it returned
+                    // .normal — or .relocalizing/.initializing (actively recovering) — let it ride.
+                    let recovered: Bool
+                    switch frame.camera.trackingState {
+                    case .normal, .limited(.relocalizing), .limited(.initializing): recovered = true
+                    default: recovered = false
+                    }
+                    let stalled = frameGap > AppConstants.vioFrameGapTripSeconds && !recovered
                     if sustainedDegraded || stalled {
                         vioGuardArmed = false // fire once per recording
                         vioDegradedSince = 0
