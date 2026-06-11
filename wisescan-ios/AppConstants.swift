@@ -43,6 +43,7 @@ enum AppConstants {
         static let perfDiagnostics = "perfDiagnostics"
         static let pauseVRCompute = "pauseVRCompute"
         static let semanticLabeling = "semanticLabeling"
+        static let enabledSemanticClasses = "enabledSemanticClasses"
     }
 
     // MARK: - Default Values
@@ -69,7 +70,15 @@ enum AppConstants {
     static let hideLivePoints: Bool = false
     static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
-    static let semanticLabeling: Bool = true    // Semantic classification: always-on when LiDAR available; Developer Mode kill-switch
+    static let semanticLabeling: Bool = true    // Developer Mode: disable entire RoomPlan pipeline to reduce memory
+
+    /// Default enabled semantic classes (JSON-encoded Set<String>).
+    /// Walls and doors are on by default; all others off. Ceiling is not yet
+    /// supported by RoomPlan and is marked non-configurable.
+    static let enabledSemanticClassesDefault: String = {
+        let defaults: Set<String> = ["wall", "door"]
+        return (try? JSONEncoder().encode(defaults)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+    }()
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
@@ -142,6 +151,30 @@ enum SemanticViewMode: String, CaseIterable {
 /// in `roomplan.json`; these display classes control visualization grouping and color.
 enum SemanticClass: String, CaseIterable, Codable {
     case none, wall, floor, ceiling, table, seat, door, window, fixture
+
+    /// Whether the user can toggle this class on/off in Settings.
+    /// Ceiling is future-proofed but not yet detected by RoomPlan.
+    var isConfigurable: Bool {
+        switch self {
+        case .none, .ceiling: return false
+        default: return true
+        }
+    }
+
+    /// Brief description of what this class covers (for Settings UI).
+    var classDescription: String {
+        switch self {
+        case .none:    return ""
+        case .wall:    return "Walls and partitions"
+        case .floor:   return "Floor surfaces"
+        case .ceiling: return "Not yet supported by RoomPlan"
+        case .table:   return "Tables and desks"
+        case .seat:    return "Chairs, sofas, and beds"
+        case .door:    return "Doors, openings, and entryways"
+        case .window:  return "Windows"
+        case .fixture: return "Appliances, stairs, and fixtures"
+        }
+    }
 
     /// Fixed color palette for classification outlines.
     var color: SIMD4<Float> {
@@ -219,6 +252,34 @@ extension String {
         case "gray": return SIMD4<Float>(0.5, 0.5, 0.5, 1)
         case "black": return SIMD4<Float>(0, 0, 0, 1)
         default: return SIMD4<Float>(0, 1, 0, 1)
+        }
+    }
+}
+
+// MARK: - Semantic Class Preference Helper
+
+/// Reads/writes the user's enabled semantic class set from UserDefaults.
+/// Used by the AR/VR capture overlay to filter which classes render in real time.
+/// Mesh previews always show all classes regardless of this preference.
+enum SemanticClassPreference {
+    static func load() -> Set<String> {
+        guard let json = UserDefaults.standard.string(forKey: AppConstants.Key.enabledSemanticClasses),
+              let data = json.data(using: .utf8),
+              let set = try? JSONDecoder().decode(Set<String>.self, from: data) else {
+            // First launch or corrupt: return the compiled-in default set
+            if let data = AppConstants.enabledSemanticClassesDefault.data(using: .utf8),
+               let set = try? JSONDecoder().decode(Set<String>.self, from: data) {
+                return set
+            }
+            return ["wall", "door"]
+        }
+        return set
+    }
+
+    static func save(_ set: Set<String>) {
+        if let data = try? JSONEncoder().encode(set),
+           let json = String(data: data, encoding: .utf8) {
+            UserDefaults.standard.set(json, forKey: AppConstants.Key.enabledSemanticClasses)
         }
     }
 }

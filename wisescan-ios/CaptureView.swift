@@ -546,7 +546,7 @@ struct CaptureView: View {
                                         .foregroundColor(.white)
                                 }
 
-                                // Row 1.5: Semantic classes detected (colored dots)
+                                // Row 1.5: Semantic classes detected (colored dot + label)
                                 if !scanStats.detectedClasses.isEmpty {
                                     HStack(spacing: 6) {
                                         Image(systemName: "tag.fill")
@@ -554,9 +554,14 @@ struct CaptureView: View {
                                             .foregroundColor(.gray)
                                         ForEach(SemanticClass.allCases.filter { $0 != .none && scanStats.detectedClasses.contains($0.rawValue) },
                                                 id: \.rawValue) { cls in
-                                            Circle()
-                                                .fill(cls.swiftUIDisplayColor)
-                                                .frame(width: 8, height: 8)
+                                            HStack(spacing: 2) {
+                                                Circle()
+                                                    .fill(cls.swiftUIDisplayColor)
+                                                    .frame(width: 8, height: 8)
+                                                Text(cls.rawValue.capitalized)
+                                                    .font(.system(size: 9))
+                                                    .foregroundColor(.white.opacity(0.7))
+                                            }
                                         }
                                         Spacer()
                                     }

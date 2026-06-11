@@ -869,6 +869,11 @@ struct ARCoverageView: UIViewRepresentable {
             // of z-fighting with it. Objects get no lift so the mesh occludes them.
             let cameraPosition = arView.cameraTransform.translation
 
+            // User-configurable filter: only render enabled classes as overlays.
+            // All detected classes are still tracked in detectedSemanticClasses so
+            // roomplan.json export contains full data regardless of capture-time filter.
+            let enabledClasses = SemanticClassPreference.load()
+
             // Collect detected classes for HUD
             var classes = Set<String>()
 
@@ -878,6 +883,7 @@ struct ARCoverageView: UIViewRepresentable {
                 let semantic = SemanticClass.from(surface.category)
                 guard semantic != .none else { continue }
                 classes.insert(semantic.rawValue)
+                guard enabledClasses.contains(semantic.rawValue) else { continue }
                 Self.addWireframeEdges(
                     to: anchorEntity, dimensions: surface.dimensions,
                     transform: surface.transform, color: semantic.color,
@@ -891,6 +897,7 @@ struct ARCoverageView: UIViewRepresentable {
                 let semantic = SemanticClass.from(object.category)
                 guard semantic != .none else { continue }
                 classes.insert(semantic.rawValue)
+                guard enabledClasses.contains(semantic.rawValue) else { continue }
                 Self.addWireframeEdges(
                     to: anchorEntity, dimensions: object.dimensions,
                     transform: object.transform, color: semantic.color,
@@ -901,10 +908,11 @@ struct ARCoverageView: UIViewRepresentable {
             arView.scene.addAnchor(anchorEntity)
             roomPlanOutlineEntity = anchorEntity
 
-            let classesForHUD = classes
+            // Track all detected classes (for export) but only publish enabled ones to HUD.
             detectedSemanticClasses.formUnion(classes)
+            let enabledForHUD = detectedSemanticClasses.filter { enabledClasses.contains($0) }
             DispatchQueue.main.async { [weak self] in
-                self?.scanStats?.detectedClasses = self?.detectedSemanticClasses ?? classesForHUD
+                self?.scanStats?.detectedClasses = enabledForHUD
             }
         }
 

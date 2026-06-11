@@ -186,6 +186,63 @@ struct SettingsView: View {
                     }
                     .listRowBackground(Color.white.opacity(0.05))
 
+                    // MARK: - Semantic Classes
+                    Section {
+                        ForEach(SemanticClass.allCases.filter { $0 != .none }, id: \.rawValue) { cls in
+                            if cls.isConfigurable {
+                                Toggle(isOn: Binding(
+                                    get: { SemanticClassPreference.load().contains(cls.rawValue) },
+                                    set: { enabled in
+                                        var current = SemanticClassPreference.load()
+                                        if enabled { current.insert(cls.rawValue) } else { current.remove(cls.rawValue) }
+                                        SemanticClassPreference.save(current)
+                                    }
+                                )) {
+                                    HStack(spacing: 8) {
+                                        Circle()
+                                            .fill(cls.swiftUIDisplayColor)
+                                            .frame(width: 12, height: 12)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(cls.rawValue.capitalized)
+                                                .foregroundColor(.white)
+                                            Text(cls.classDescription)
+                                                .font(.caption2)
+                                                .foregroundColor(.gray)
+                                        }
+                                    }
+                                }
+                                .tint(.cyan)
+                                .padding(.vertical, 2)
+                            } else {
+                                // Ceiling: non-configurable, shown as disabled
+                                HStack(spacing: 8) {
+                                    Circle()
+                                        .fill(cls.swiftUIDisplayColor.opacity(0.3))
+                                        .frame(width: 12, height: 12)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(cls.rawValue.capitalized)
+                                            .foregroundColor(.gray)
+                                        Text(cls.classDescription)
+                                            .font(.caption2)
+                                            .foregroundColor(.gray.opacity(0.7))
+                                    }
+                                    Spacer()
+                                    Toggle("", isOn: .constant(false))
+                                        .labelsHidden()
+                                        .disabled(true)
+                                }
+                                .padding(.vertical, 2)
+                            }
+                        }
+                    } header: {
+                        Text("SEMANTIC SCAN OUTLINE VISIBILITY")
+                    } footer: {
+                        Text("Choose which semantic classes are shown as outlines during AR/VR capture. All classes are always collected for export. Mesh previews show all detected classes.")
+                            .font(.caption2)
+                            .foregroundColor(.gray)
+                    }
+                    .listRowBackground(Color.white.opacity(0.05))
+
                     // MARK: - Data Management
                     Section {
                         Button(role: .destructive) {
@@ -321,7 +378,7 @@ struct SettingsView: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("Semantic Labeling")
                                         .foregroundColor(.white)
-                                    Text("Enables ARKit mesh classification (wall, floor, ceiling, etc.) and renders colored bounding outlines per class during scanning. Disable to reduce GPU load if classification outlines cause frame drops.")
+                                    Text("Enables RoomPlan semantic classification (walls, floors, doors, etc.) during scanning. Disable to reduce memory usage on constrained devices.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }
