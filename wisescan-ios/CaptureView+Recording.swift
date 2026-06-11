@@ -95,6 +95,17 @@ extension CaptureView {
     }
 
     func performStopRecording(completion: ((CapturedScan?) -> Void)? = nil) {
+        // Re-entrancy guard. The pipeline below hops to a background queue (capSession.stop() flushes
+        // every per-frame JSON — seconds on a long scan) BEFORE finishStopRecording sets the flags the
+        // capture button's .disabled watches. Until this fix, isRecording stayed true and the button
+        // stayed enabled/"Tap to stop" across that whole gap, so a second tap launched a SECOND save
+        // pipeline → duplicate scan. Claim the in-flight state synchronously on this tap: disables the
+        // button immediately and short-circuits any re-entrant call. saveMessage gives instant feedback
+        // (the missing feedback is what made users tap again). Reset on every early-exit path below.
+        guard !isProcessingMesh && !isWaitingToSave else { return }
+        isProcessingMesh = true
+        saveMessage = "Finishing scan…"
+
         // Flush the per-frame capture JSONs OFF the main thread (O(frames)) so ending a long scan
         // doesn't freeze the UI or starve ARKit (perf fix ported from main). The mesh export and
         // world-map co-framing that follow must run on main with the AR session still live, so we
@@ -166,6 +177,7 @@ extension CaptureView {
         guard let result = finalMeshResult, !result.data.isEmpty else {
             // Switch to nominal mode (drops mesh anchors, frees AR memory)
             isRecording = false
+            isProcessingMesh = false  // release the re-entrancy claim from performStopRecording
             saveMessage = "No Mesh Data"
             frameCaptureSession = FrameCaptureSession()
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
@@ -225,7 +237,22 @@ extension CaptureView {
         // drops the mesh anchors so they don't bloat the map, while preserving the
         // world origin (no resetTracking) so the map stays co-framed with the OBJ.
         // The identity-transform origin anchor marks that shared frame's origin.
-        currentARSession?.run(ARCoverageView.makeConfiguration())
+        //
+        // CRITICAL: mutate the *live* configuration rather than re-running a fresh
+        // makeConfiguration(). A fresh config has initialWorldMap=nil; re-running it
+        // (even without resetTracking) discarded every feature point this session had
+        // *inherited* from the loaded map, so getCurrentWorldMap then returned only the
+        // handful this session observed itself. A baseline scan (no inherited map) was
+        // unaffected — but a relocalized generation saved a near-empty map (~100s of
+        // features instead of 1000s), and the *next* generation couldn't relocalize
+        // against it at all. Keeping the live config (initialWorldMap intact, no reset)
+        // preserves the full merged map while still turning mesh reconstruction off.
+        if let liveConfig = currentARSession?.configuration as? ARWorldTrackingConfiguration {
+            liveConfig.sceneReconstruction = []
+            currentARSession?.run(liveConfig)
+        } else {
+            currentARSession?.run(ARCoverageView.makeConfiguration())
+        }
         saveMessage = "Saving World Map..."
         let originAnchor = ARAnchor(name: "Scan4D_Mesh_Origin", transform: matrix_identity_float4x4)
         currentARSession?.add(anchor: originAnchor)
