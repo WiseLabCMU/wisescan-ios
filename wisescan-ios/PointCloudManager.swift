@@ -872,6 +872,22 @@ class PointCloudManager {
         lastIntegrationIntrinsics = nil
         lastIntegrationDepthMap = nil
         integrationFrameCounter = 0
+        // Also blank the *rendered* voxel mesh, not just the accumulation grid. The voxel
+        // entity lives under AnchorEntity(world:.zero); on a tracking loss the relocalization
+        // correction snaps the world origin, so a stale cloud left on screen visibly flies off
+        // into a corner (it's baked in the pre-correction frame). Dropping the part's index
+        // count to 0 renders nothing until the next post-reloc extraction repopulates it in the
+        // corrected frame. RealityKit mutation → main.
+        DispatchQueue.main.async { [weak self] in
+            self?.voxelLowLevelMesh?.parts.replaceAll([
+                LowLevelMesh.Part(
+                    indexCount: 0,
+                    topology: .triangle,
+                    materialIndex: 0,
+                    bounds: BoundingBox(min: [-100, -100, -100], max: [100, 100, 100])
+                )
+            ])
+        }
     }
 
     // MARK: - Cleanup

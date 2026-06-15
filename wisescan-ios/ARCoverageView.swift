@@ -1279,14 +1279,25 @@ struct ARCoverageView: UIViewRepresentable {
             // Skip VR updates when tracking is degraded — prevents accumulating
             // voxels with wrong coordinates during SLAM re-initialization.
             guard frame.camera.trackingState == .normal else {
-                // If tracking just went to relocalizing/initializing, the coordinate
-                // system may have shifted. Clear accumulated voxels to prevent ghosting.
-                if case .limited(let reason) = frame.camera.trackingState,
-                   reason == .initializing || reason == .relocalizing {
+                // Clear accumulated voxels only for the states where the coordinate frame can
+                // *shift* under us — relocalizing / initializing / notAvailable — since a
+                // post-recovery correction would otherwise leave the old cloud baked in the
+                // wrong frame (visibly flying off). excessiveMotion / insufficientFeatures keep
+                // tracking in the same frame (just noisier), so don't wipe the viz for those.
+                // Capture the tracking *state value* (not the ARFrame) before hopping to main —
+                // forwarding `frame` into the closure would retain ARFrame memory.
+                let state = frame.camera.trackingState
+                let frameMayShift: Bool
+                switch state {
+                case .notAvailable: frameMayShift = true
+                case .limited(.initializing), .limited(.relocalizing): frameMayShift = true
+                default: frameMayShift = false
+                }
+                if frameMayShift {
                     DispatchQueue.main.async { [weak self] in
                         if let pcm = self?.pointCloudManager {
                             pcm.resetVoxels()
-                            print("[VR] Tracking degraded (\(reason)) — cleared accumulated voxels")
+                            print("[VR] Tracking degraded (frame may shift) — cleared accumulated voxels")
                         }
                     }
                 }
