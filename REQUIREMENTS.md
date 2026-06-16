@@ -8,7 +8,7 @@
 
 ## System Context
 
-Scan4D is a time-series reality capture application built on the WiSEScan research platform. It captures RGB, pose, and (on LiDAR-equipped devices) mesh and depth data. Non-LiDAR devices operate in **Lite Mode**, capturing images and camera poses for server-side photogrammetry. It can operate standalone (local capture + export) or connect to a self-hosted backend for orchestrated reconstruction pipelines.
+Scan4D is a time-series reality capture application built on the WiSEScan research platform. It captures RGB, pose, and (on LiDAR-equipped devices) mesh and depth data. Non-LiDAR devices operate in **Lite Mode**, capturing images and camera poses for server-side photogrammetry (Note: Lite Mode is only available on local debug builds; Release builds strictly require LiDAR). It can operate standalone (local capture + export) or connect to a self-hosted backend for orchestrated reconstruction pipelines.
 
 ```mermaid
 graph LR
@@ -189,7 +189,7 @@ graph TD
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Non-LiDAR devices (iPhone 16, older iPads) run in Lite Mode: camera passthrough + image/pose capture for server-side photogrammetry. No mesh, depth, coverage overlay, or 3D face anchors. A blue "Lite Mode" banner is shown in CaptureView. ContentView shows an informational alert on launch. |
+| **Description** | Non-LiDAR devices (iPhone 16, older iPads) run in Lite Mode: camera passthrough + image/pose capture for server-side photogrammetry. No mesh, depth, coverage overlay, or 3D face anchors. A blue "Lite Mode" banner is shown in CaptureView. ContentView shows an informational alert on launch. **Note:** Lite mode is limited to Local Debug builds. TestFlight and App Store (Release builds) enforce a LiDAR hardware requirement via `UIRequiredDeviceCapabilities`. |
 | **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `supportsLiDAR`, [CaptureView.swift](wisescan-ios/CaptureView.swift) — lite mode banner, [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — optional depth |
 | **Dependencies** | ARKit (required), LiDAR (optional) |
 

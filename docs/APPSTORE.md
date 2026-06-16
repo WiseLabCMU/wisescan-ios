@@ -33,7 +33,6 @@ Capture, re-scan, and export high-fidelity 3D scans with LiDAR depth, RGB, and c
 ```
 Scan4D is a professional-grade reality capture app for iPhone and iPad. It turns your device's LiDAR sensor and camera into a powerful 3D scanner, capturing detailed meshes, depth maps, and camera poses for downstream reconstruction, photogrammetry, and spatial computing.
 
-FULL MODE (LiDAR devices)
 • AR mode: real-time mesh with procedural wireframe overlay and 3D occlusion-based coverage visualization
 • VR mode: live accumulated depth point cloud with bloom and confidence decay on a dark background
 • 16-bit depth maps with confidence maps captured at adaptive frame rates
@@ -41,11 +40,6 @@ FULL MODE (LiDAR devices)
 • Interactive 3D mesh preview with camera-sampled vertex coloring and loading indicator
 • Privacy filtering: person segmentation removes humans from meshes, face blurring in RGB exports
 • VIO tracking guard: automatic halt and save prompt on mid-scan tracking loss
-
-LITE MODE (all devices)
-• RGB frame capture with ARKit camera poses
-• Server-side photogrammetry via exported image bundles
-• Automatic detection — no configuration needed
 
 PROXY MODE (Meta Ray-Ban Smart Glasses)
 • Stream frames from Meta Ray-Ban glasses via Bluetooth
@@ -85,7 +79,7 @@ DEVELOPER MODE
 
 Designed for researchers, 3D scanning professionals, and spatial computing developers who need raw, high-fidelity sensor data with full control over the reconstruction pipeline.
 
-Requires ARKit-capable device. LiDAR-equipped iPhone or iPad Pro recommended for full functionality. Meta Ray-Ban Smart Glasses supported for proxy frame capture.
+Requires a LiDAR-equipped iPhone or iPad Pro. Meta Ray-Ban Smart Glasses supported for proxy frame capture.
 ```
 
 ---
