@@ -699,7 +699,7 @@ struct MeshPreviewView: UIViewRepresentable {
 
         // Build outlines for surfaces
         for surface in roomData.surfaces {
-            let cls = SemanticClass(rawValue: surface.category) ?? .none
+            let cls = SemanticClass.fromSurfaceCategory(surface.category)
             guard cls != .none else { continue }
             detectedSet.insert(cls)
 
@@ -708,8 +708,10 @@ struct MeshPreviewView: UIViewRepresentable {
             let wireframe = buildOrientedBoxLineGeometry(
                 dimensions: dims, transform: transform, color: cls.color
             )
+            // Mitigate z-fighting by lowering opacity for co-planar features
+            let opacity: CGFloat = (cls == .door || cls == .window) ? 0.3 : 0.75
             let fill = buildOrientedBoxFillGeometry(
-                dimensions: dims, transform: transform, color: cls.color, opacity: 0.75
+                dimensions: dims, transform: transform, color: cls.color, opacity: opacity
             )
             outlineNodes.append(SemanticOutlineResult.OutlineNode(geometry: wireframe, fillGeometry: fill))
         }

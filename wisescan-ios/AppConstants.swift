@@ -237,6 +237,17 @@ enum SemanticClass: String, CaseIterable, Codable {
         default:                                            return .none
         }
     }
+
+    /// Map from string surface category (as stored in roomplan.json) to SemanticClass.
+    static func fromSurfaceCategory(_ category: String) -> SemanticClass {
+        switch category {
+        case "wall":             return .wall
+        case "floor":            return .floor
+        case "door", "opening":  return .door    // openings treated as door-like for rendering
+        case "window":           return .window
+        default:                 return .none
+        }
+    }
 }
 
 extension String {
