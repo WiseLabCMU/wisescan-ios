@@ -88,6 +88,9 @@ struct CaptureView: View {
     @State var bakedGhostTransform: simd_float4x4?
     @State private var showRelocDialog = false
     @State var showManualAdjust = false
+    @State var scanCoach = ScanCoach()
+    @AppStorage(AppConstants.Key.scanCoachingEnabled) var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
+    @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
 
     struct PendingScanData {
         let locationId: UUID?
@@ -220,22 +223,8 @@ struct CaptureView: View {
             PermissionsOverlay(locationManager: locationManager)
                 .ignoresSafeArea()
 
+            // Centered startup/tracking pills (kept separate from ScanCoach)
             VStack(spacing: 12) {
-                if isRecording, let warning = frameCaptureSession.blurWarningReason {
-                    Text(warning == .fastMotion ?
-                         "⚠️ Slow down — moving too fast" :
-                         "⚠️ Hold steady — regaining tracking")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                        .background((warning == .fastMotion ? Color.orange : Color.blue).opacity(0.85))
-                        .cornerRadius(20)
-                        .shadow(radius: 5)
-                        .transition(.scale.combined(with: .opacity))
-                        .animation(.easeInOut(duration: 0.2), value: frameCaptureSession.blurWarningReason)
-                }
-
                 if cachedGhostMeshData != nil && scanStats.trackingStatus == .limited(reason: .relocalizing) {
                     HStack(spacing: 8) {
                         Text("🔄 Move camera to relocalize with previous scan")
@@ -482,25 +471,11 @@ struct CaptureView: View {
 
                 Spacer()
 
-                // Capacity Warning Banner (above HUD, only during recording)
-                if isRecording && scanStats.isNearCapacity {
-                    HStack(spacing: 8) {
-                        Image(systemName: scanStats.isAtCapacity ?
-                              "exclamationmark.octagon.fill" :
-                              "exclamationmark.triangle.fill")
-                            .foregroundColor(.white)
-                        Text(scanStats.isAtCapacity
-                             ? "Session at capacity — save now to avoid quality loss"
-                             : "Approaching session limits — consider saving and starting a new scan")
-                            .font(.caption2).bold()
-                            .foregroundColor(.white)
+                // ScanCoach Bar (above HUD, only during recording)
+                if isRecording {
+                    CoachBarView(tip: scanCoach.currentTip) {
+                        scanCoach.dismissCurrentTip()
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity)
-                    .background(scanStats.isAtCapacity ? Color.red.opacity(0.9) : Color.orange.opacity(0.9))
-                    .cornerRadius(12)
-                    .padding(.horizontal)
                 }
 
                 // Bottom HUD and Capture Button
@@ -1022,6 +997,29 @@ struct CaptureView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        // ScanCoach evaluation: triggered by anchor count changes (~10Hz from ARKit,
+        // but ScanCoach internally throttles to ~1Hz). Also clears tips when recording stops.
+        .onChange(of: scanStats.anchorCount) {
+            evaluateScanCoach()
+        }
+        .onChange(of: isRecording) { _, recording in
+            if !recording {
+                scanCoach.evaluate(
+                    scanStats: scanStats,
+                    frameCaptureSession: frameCaptureSession,
+                    capturedRoom: finalCapturedRoom,
+                    semanticLabelingEnabled: semanticLabeling,
+                    isRecording: false,
+                    coachingEnabled: scanCoachingEnabled
+                )
+            }
+        }
+        .onChange(of: frameCaptureSession.isBlurWarningActive) {
+            evaluateScanCoach()
+        }
+        .onChange(of: scanStats.trackingStatus) {
+            evaluateScanCoach()
+        }
     }
 
     private var qualityColor: Color {
@@ -1035,6 +1033,21 @@ struct CaptureView: View {
         let minutes = recordingSeconds / 60
         let seconds = recordingSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    /// Evaluates ScanCoach rules engine with current scan state.
+    /// Respects the Settings toggle: CRITICAL/WARNING always evaluate,
+    /// GUIDANCE/INFO are suppressed when coaching is disabled.
+    private func evaluateScanCoach() {
+        guard isRecording else { return }
+        scanCoach.evaluate(
+            scanStats: scanStats,
+            frameCaptureSession: frameCaptureSession,
+            capturedRoom: finalCapturedRoom,
+            semanticLabelingEnabled: semanticLabeling,
+            isRecording: isRecording,
+            coachingEnabled: scanCoachingEnabled
+        )
     }
 
     // Recording / save / stitching methods are organized into extension files:
