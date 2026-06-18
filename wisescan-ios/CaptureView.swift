@@ -71,6 +71,8 @@ struct CaptureView: View {
     @State var showInsufficientTrackingAlert = false // SwiftUI alert for poor mapping status
     @State var sessionStabilizationTask: Task<Void, Never>? // Cancellable task for AR session warm-up after extend
     @State var isConfirmingAlignment = false // Re-entry guard for confirmAlignment double-tap
+    @State var showStopMenu = false
+    @State var showExtendErrorAlert = false
 
     @State private var showSettings = false
     @State private var activeLocationName: String?
@@ -498,25 +500,6 @@ struct CaptureView: View {
                     .frame(maxWidth: .infinity)
                     .background(scanStats.isAtCapacity ? Color.red.opacity(0.9) : Color.orange.opacity(0.9))
                     .cornerRadius(12)
-                    .padding(.horizontal)
-                }
-
-                // Pin & Extend Button — available during any recording session
-                if isRecording && scanStore.capturePhase == .recording && scanStats.hasEnoughFeaturesForRelocalization {
-                    Button(action: { pinAndExtend() }, label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "mappin.and.ellipse")
-                                .font(.title3)
-                                Text("Save Scan & Place Connector")
-                                    .font(.subheadline).bold()
-                        }
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                        .background(Color.orange.opacity(0.85))
-                        .cornerRadius(20)
-                        .shadow(radius: 5)
-                    })
                     .padding(.horizontal)
                 }
 
@@ -1006,6 +989,24 @@ struct CaptureView: View {
             Text("This scan's mapping status is '\(scanStats.mappingStatus)'. Relocalizing or extending it "
                 + "later requires a 'mapped' world map. Keep scanning the area to improve it, or discard "
                 + "and start over.")
+        }
+        .confirmationDialog("Stop Recording", isPresented: $showStopMenu, titleVisibility: .visible) {
+            Button("Save & End") {
+                stopRecording()
+            }
+            Button("Save & Scan Adjacent") {
+                if scanStats.hasEnoughFeaturesForRelocalization {
+                    pinAndExtend()
+                } else {
+                    showExtendErrorAlert = true
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        }
+        .alert("Not Enough Features", isPresented: $showExtendErrorAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Move the device around to map more of the environment before placing a connector.")
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
