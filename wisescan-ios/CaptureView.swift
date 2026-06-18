@@ -967,6 +967,7 @@ struct CaptureView: View {
                     savePendingScan()
                 }
             })
+            .disabled(newLocationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Button("Cancel", role: .cancel) {
                 // Nothing consumes the pending scan after cancel, so remove its temp artifacts —
                 // both live in FileManager.temporaryDirectory and saveScan would normally move them.

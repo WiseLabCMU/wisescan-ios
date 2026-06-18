@@ -26,6 +26,9 @@ struct Scan4DApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     init() {
+        // Add clear button to all text fields globally (especially useful in alerts for long names)
+        UITextField.appearance().clearButtonMode = .whileEditing
+        
         // Register defaults for keys read via UserDefaults.standard.bool() (not @AppStorage).
         // @AppStorage provides its own default, but direct UserDefaults reads need registration.
         UserDefaults.standard.register(defaults: [

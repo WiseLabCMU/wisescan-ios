@@ -339,11 +339,13 @@ struct LocationDetailView: View {
         .alert("Rename Location", isPresented: $showRenameAlert) {
             TextField("New Name", text: $newLocationName)
             Button("Save") {
-                if !newLocationName.isEmpty {
-                    location.name = newLocationName
+                let trimmedName = newLocationName.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedName.isEmpty {
+                    location.name = trimmedName
                     try? modelContext.save()
                 }
             }
+            .disabled(newLocationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             Button("Cancel", role: .cancel) {}
         }
         .alert("World Map Missing", isPresented: $showNoWorldMapAlert) {
