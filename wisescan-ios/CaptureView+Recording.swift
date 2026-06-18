@@ -10,7 +10,7 @@ extension CaptureView {
 
     func toggleRecording() {
         if isRecording {
-            if scanStore.activeScanCase == .rescanSpace {
+            if scanStore.activeScanCase == .rescanSpace && scanStore.activeLocationForScan != nil {
                 stopRecording()
             } else {
                 showStopMenu = true

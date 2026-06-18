@@ -947,6 +947,16 @@ struct CaptureView: View {
             sessionStabilizationTask = nil
             activeLocationName = nil
         }
+        .onChange(of: scanStore.activeLocationForScan) { _, newLocId in
+            if let locId = newLocId {
+                let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
+                if let loc = try? modelContext.fetch(descriptor).first {
+                    activeLocationName = loc.name
+                }
+            } else {
+                activeLocationName = nil
+            }
+        }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
             Button("Save", action: {
