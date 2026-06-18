@@ -520,6 +520,7 @@ extension CaptureView {
 
         saveMessage = "Scan Saved!"
         pendingScan = nil
+        isWaitingToSave = false
 
         // Reset the FULL capture state so a scan started before the delayed tab switch below can't
         // inherit stale link/rescan routing (activeScanToExtend, activeScanCase, boundary fields).
