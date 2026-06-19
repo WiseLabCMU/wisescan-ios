@@ -108,6 +108,12 @@ class FrameCaptureSession {
     struct FrameData {
         let index: Int
         let transform: simd_float4x4
+        // Whether a depth/confidence PNG was actually written for this frame. The per-frame metadata
+        // (transforms.json / Polycam cameras) references these paths only when true, so the export
+        // never points at files that don't exist (depth is unavailable on some frames, e.g. while
+        // RoomPlan owns the session or on non-LiDAR devices).
+        let hasDepth: Bool
+        let hasConfidence: Bool
     }
 
     struct CameraIntrinsics {
@@ -561,14 +567,18 @@ class FrameCaptureSession {
 
             do {
                 try finalJpegData.write(to: rgbPath, options: .atomic)
+                var wroteDepth = false
                 if let depthData = validDepthData, let depthDir = self.depthDir {
                     let depthPath = depthDir.appendingPathComponent("frame_\(paddedIndex).png")
                     try depthData.write(to: depthPath, options: .atomic)
+                    wroteDepth = true
                 }
 
+                var wroteConfidence = false
                 if let confMap = confidenceMap, let confData = PerfDiag.timed("confidence_png", warnOverMs: 40, { self.confidenceMapToPNG(confMap) }), let confDir = self.confidenceDir {
                     let confPath = confDir.appendingPathComponent("frame_\(paddedIndex).png")
                     try confData.write(to: confPath, options: .atomic)
+                    wroteConfidence = true
                 }
 
                 if self.globalIntrinsics == nil {
@@ -582,7 +592,7 @@ class FrameCaptureSession {
                     )
                 }
 
-                self.frames.append(FrameData(index: index, transform: transform))
+                self.frames.append(FrameData(index: index, transform: transform, hasDepth: wroteDepth, hasConfidence: wroteConfidence))
                 let newlyAddedCount = self.frames.count
 
                 DispatchQueue.main.async {
@@ -607,10 +617,8 @@ class FrameCaptureSession {
             // ARKit uses the same convention as OpenGL for camera space,
             // but we need to ensure the transform_matrix is camera-to-world
             let paddedIndex = String(format: "%05d", frame.index)
-            let entry: [String: Any] = [
+            var entry: [String: Any] = [
                 "file_path": "images/frame_\(paddedIndex).jpg",
-                "depth_file_path": "depth/frame_\(paddedIndex).png",
-                "confidence_file_path": "confidence/frame_\(paddedIndex).png",
                 "transform_matrix": [
                     [mat.columns.0.x, mat.columns.0.y, mat.columns.0.z, mat.columns.0.w],
                     [mat.columns.1.x, mat.columns.1.y, mat.columns.1.z, mat.columns.1.w],
@@ -618,6 +626,9 @@ class FrameCaptureSession {
                     [mat.columns.3.x, mat.columns.3.y, mat.columns.3.z, mat.columns.3.w]
                 ]
             ]
+            // Reference depth/confidence only when the file was actually written for this frame.
+            if frame.hasDepth { entry["depth_file_path"] = "depth/frame_\(paddedIndex).png" }
+            if frame.hasConfidence { entry["confidence_file_path"] = "confidence/frame_\(paddedIndex).png" }
             frameEntries.append(entry)
         }
 
@@ -650,7 +661,7 @@ class FrameCaptureSession {
 
             // Polycam uses t_00..t_23 (3×4 flattened, row-major, omitting last row [0,0,0,1])
             // ARKit transform is column-major, so we transpose
-            let cameraJSON: [String: Any] = [
+            var cameraJSON: [String: Any] = [
                 "t_00": mat.columns.0.x, "t_01": mat.columns.1.x, "t_02": mat.columns.2.x, "t_03": mat.columns.3.x,
                 "t_10": mat.columns.0.y, "t_11": mat.columns.1.y, "t_12": mat.columns.2.y, "t_13": mat.columns.3.y,
                 "t_20": mat.columns.0.z, "t_21": mat.columns.1.z, "t_22": mat.columns.2.z, "t_23": mat.columns.3.z,
@@ -661,10 +672,11 @@ class FrameCaptureSession {
                 "width": imageWidth,
                 "height": imageHeight,
                 "blur_score": 1.0, // frames passed blur rejection are assumed sharp
-                "image_path": "images/frame_\(paddedIndex).jpg",
-                "depth_path": "depth/frame_\(paddedIndex).png",
-                "confidence_path": "confidence/frame_\(paddedIndex).png"
+                "image_path": "images/frame_\(paddedIndex).jpg"
             ]
+            // Reference depth/confidence only when the file was actually written for this frame.
+            if frame.hasDepth { cameraJSON["depth_path"] = "depth/frame_\(paddedIndex).png" }
+            if frame.hasConfidence { cameraJSON["confidence_path"] = "confidence/frame_\(paddedIndex).png" }
 
             let jsonPath = camerasDir.appendingPathComponent("frame_\(paddedIndex).json")
             if let jsonData = try? JSONSerialization.data(withJSONObject: cameraJSON, options: .prettyPrinted) {
