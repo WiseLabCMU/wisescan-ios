@@ -175,7 +175,11 @@ struct ScansListView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView()
             }
-            .sheet(isPresented: $showExportSheet) {
+            .sheet(isPresented: $showExportSheet, onDismiss: {
+                // Safety net: if dismissed via swipe-down before the completion handler fires,
+                // reset so the Save button isn't stuck disabled.
+                isBulkExporting = false
+            }) {
                 ShareSheet(activityItems: exportItems.map { $0.url }) { _, _, _, _ in
                     isBulkExporting = false
                     exitEditModeWithBanner("✓ Saved \(exportItems.count) scan\(exportItems.count == 1 ? "" : "s")")

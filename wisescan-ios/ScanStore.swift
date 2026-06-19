@@ -514,8 +514,11 @@ class ScanFileManager {
         worldMapURL: URL?,
         thumbnailData: Data? = nil,
         scanCase: ScanCase = .rescanSpace
-    ) -> CapturedScan {
+    ) -> CapturedScan? {
         let targetLocation: ScanLocation
+        // Track a location we create here so we can roll it back if the required mesh write fails
+        // (otherwise a failed save would leave behind an empty, undeletable location).
+        var createdLocation: ScanLocation?
 
         if let locId = locationId {
             let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
@@ -524,11 +527,13 @@ class ScanFileManager {
             } else {
                 targetLocation = ScanLocation(name: "Default Location", scanCase: scanCase)
                 context.insert(targetLocation)
+                createdLocation = targetLocation
             }
         } else {
             // Create a new location with the provided name
             targetLocation = ScanLocation(name: name.isEmpty ? "New Space" : name, scanCase: scanCase)
             context.insert(targetLocation)
+            createdLocation = targetLocation
         }
 
         // Auto-generate scan name based on count: "Scan 1", "Scan 2", ...
@@ -542,18 +547,22 @@ class ScanFileManager {
             hardwareDeviceModel: hardwareDeviceModel
         )
 
-        targetLocation.scans.append(newScan)
-        newScan.location = targetLocation
-        targetLocation.updatedAt = Date() // Bump to top of workflow list
-        context.insert(newScan)
-
-        // Create scan directory and write mesh (required)
+        // Create scan directory and write mesh (required). Do this BEFORE inserting the record:
+        // a CapturedScan whose mesh.obj never reached disk is an unrecoverable orphan (blank
+        // preview, every export fails), so on failure persist nothing and report the failure.
         do {
             try FileManager.default.createDirectory(at: newScan.scanDirectory, withIntermediateDirectories: true)
             try meshData.write(to: newScan.meshFileURL)
         } catch {
-            print("[ScanFileManager] Failed to create scan directory or write mesh: \(error)")
+            print("[ScanFileManager] Failed to create scan directory or write mesh; aborting save: \(error)")
+            if let created = createdLocation { context.delete(created) }
+            return nil
         }
+
+        targetLocation.scans.append(newScan)
+        newScan.location = targetLocation
+        targetLocation.updatedAt = Date() // Bump to top of workflow list
+        context.insert(newScan)
 
         // Optional files — failures must not block the critical raw data move
         if let colors = vertexColors {
