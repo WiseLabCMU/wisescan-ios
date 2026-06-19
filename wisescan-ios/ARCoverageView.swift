@@ -494,6 +494,12 @@ struct ARCoverageView: UIViewRepresentable {
         // RoomPlan: structured room detection alongside ARKit mesh
         /// Active RoomPlan session sharing our ARSession. Provides oriented surfaces/objects.
         private var roomCaptureSession: RoomCaptureSession?
+        /// Set when RoomPlan has reconfigured the shared session (dropping our frame semantics) but
+        /// tracking isn't `.normal` yet. cameraDidChangeTrackingState re-asserts the semantics once
+        /// tracking stabilizes — re-running session.run() mid-initialization destabilizes VIO and
+        /// causes RoomPlan "world tracking failure" / zero frames on cold first scans. Cross-queue
+        /// (RoomPlan queue → main, ARSession delegate queue), so Atomic.
+        let needsSemanticReassert = Atomic<Bool>(false)
         /// Latest room snapshot from RoomPlan (updated in real-time via delegate).
         private var latestCapturedRoom: CapturedRoom?
         /// Final CapturedRoom snapshot captured at recording stop (for export).
@@ -880,6 +886,7 @@ struct ARCoverageView: UIViewRepresentable {
             finalCapturedRoomBinding?.wrappedValue = finalCapturedRoom
             session.stop(pauseARSession: false) // keep ARKit alive
             roomCaptureSession = nil
+            needsSemanticReassert.store(false, ordering: .relaxed) // cancel any pending deferred re-assert
             PerfDiag.log("RoomPlan session stopped (ARSession preserved)")
         }
 
@@ -1077,6 +1084,14 @@ struct ARCoverageView: UIViewRepresentable {
                 default:
                     break
                 }
+            }
+
+            // Deferred frame-semantics re-assert: RoomPlan dropped our semantics but tracking wasn't
+            // .normal yet (see didStartWith). Now that it is, re-assert once — safe to re-run the
+            // session config here because VIO is established. One-shot via compareExchange.
+            if camera.trackingState == .normal,
+               needsSemanticReassert.compareExchange(expected: true, desired: false, ordering: .relaxed).exchanged {
+                DispatchQueue.main.async { [weak self] in self?.reassertFrameSemantics() }
             }
 
             // Track relocalization state for ghost mesh placement
@@ -1935,10 +1950,17 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
 
     func captureSession(_ session: RoomCaptureSession, didStartWith configuration: RoomCaptureSession.Configuration) {
         PerfDiag.log("RoomPlan session started scanning")
-        // RoomPlan just reconfigured the shared ARSession with its own config, dropping the frame
-        // semantics we need for depth/confidence capture and privacy segmentation. Re-assert them.
+        // RoomPlan just reconfigured the shared ARSession, dropping the frame semantics we need for
+        // depth/confidence capture and privacy segmentation. Re-assert them — but ONLY once tracking
+        // is .normal. Re-running session.run() while tracking is still initializing destabilizes VIO
+        // and makes RoomPlan fail with "world tracking failure" (zero frames) on cold first scans.
         DispatchQueue.main.async { [weak self] in
-            self?.reassertFrameSemantics()
+            guard let self = self else { return }
+            if self.arView?.session.currentFrame?.camera.trackingState == .normal {
+                self.reassertFrameSemantics()
+            } else {
+                self.needsSemanticReassert.store(true, ordering: .relaxed) // deferred to tracking .normal
+            }
         }
     }
 
