@@ -8,6 +8,20 @@ import MWDATMockDevice
 #endif
 import CoreMedia
 import UIKit
+import CoreImage
+
+/// Shared CIContext for off-main pixel-buffer → JPEG fallback encoding. CIContext is thread-safe
+/// and expensive to create, so reuse a single instance rather than allocating one per frame.
+private let fallbackJPEGContext = CIContext()
+
+/// Encodes a CVPixelBuffer to JPEG synchronously. Must be called while the buffer is still owned
+/// by the caller (e.g. on the SDK frame-listener thread) — the wearable SDK recycles its frame
+/// buffers, so the raw buffer must never be read after the listener closure returns.
+private func pixelBufferToJPEG(_ pixelBuffer: CVPixelBuffer, compression: CGFloat) -> Data? {
+    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+    guard let cgImage = fallbackJPEGContext.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+    return UIImage(cgImage: cgImage).jpegData(compressionQuality: compression)
+}
 
 /// Manages background Bluetooth connections and data streaming for Meta Ray-Ban proxy devices
 /// using the Meta Wearables Device Access Toolkit (DAT) SDK.
@@ -615,18 +629,21 @@ class MetaWearableManager {
 
                 if let pixelBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer) {
 
-                    // Wrap the non-Sendable CVPixelBuffer to safely cross the boundary to the MainActor
-                    struct SendableBuffer: @unchecked Sendable {
-                        let buffer: CVPixelBuffer
-                    }
-                    let sendableBuf = SendableBuffer(buffer: pixelBuffer)
-
                     // Decode the frame here (the SDK `frame` is not Sendable, so don't capture
                     // it in the Task). Read settings directly — UserDefaults is thread-safe and
                     // AppConstants is a plain constant, so no MainActor hop is needed.
                     let rawImage = frame.makeUIImage()
                     let isPrivacyEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.privacyFilter)
                     let compression = AppConstants.jpegCompressionQuality
+
+                    // Fallback JPEG, encoded NOW while the SDK pixel buffer is still valid. The SDK
+                    // recycles its frame buffers, so the raw CVPixelBuffer must never be read later on
+                    // the Task / MainActor (use-after-free). Only needed when the frame failed to
+                    // decode to a UIImage, and never in privacy mode (raw buffer would leak an
+                    // un-blurred frame), so the normal path pays nothing.
+                    let fallbackJpeg: Data? = (!isPrivacyEnabled && rawImage == nil)
+                        ? pixelBufferToJPEG(pixelBuffer, compression: compression)
+                        : nil
 
                     Task {
                         var finalJpegData: Data?
@@ -644,7 +661,7 @@ class MetaWearableManager {
                             finalUIImage = rawImage
                         }
 
-                        let safeJpegData = finalJpegData
+                        let safeJpegData = finalJpegData ?? fallbackJpeg
                         let safeUIImage = finalUIImage
 
                         await MainActor.run { [weak self] in
@@ -659,7 +676,7 @@ class MetaWearableManager {
                             if let jpeg = safeJpegData {
                                 self.activeCaptureSession?.captureProxyFrameData(jpeg)
                             } else {
-                                self.activeCaptureSession?.captureProxyFrame(pixelBuffer: sendableBuf.buffer)
+                                print("[MetaWearable] Dropped frame — no decodable image data")
                             }
                         }
                     }

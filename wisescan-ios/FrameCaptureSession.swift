@@ -174,7 +174,7 @@ class FrameCaptureSession {
         self.overlapMax = overlapMax
         self.rejectBlur = rejectBlur
         self.privacyFilter = privacyFilter
-        self.faceAnchors = []
+        ioQueue.async { self.faceAnchors = [] } // ioQueue owns faceAnchors (see frame loop); ordered before frame work
         self.boundaryAnchorTransform = nil
         self.boundaryAnchorId = nil
         self.boundaryAnchorCompassHeading = nil
@@ -474,7 +474,8 @@ class FrameCaptureSession {
 
                         CVPixelBufferLockBaseAddress(dMap, .readOnly)
                         if let base = CVPixelBufferGetBaseAddress(dMap)?.assumingMemoryBound(to: Float32.self) {
-                            // Accumulate into a local copy to avoid data race with main thread
+                            // Mutate a local copy, then store it back — all on ioQueue, the single
+                            // owner of faceAnchors (see the store below).
                             var localAnchors = self.faceAnchors
                             for uv in centers {
                                 let px = Int(uv.x * CGFloat(depthWidth))
@@ -527,11 +528,10 @@ class FrameCaptureSession {
                                     localAnchors.append(AnchorAccumulator(position: point3D, weight: 1))
                                 }
                             }
-                            // Publish updated anchors on main thread
-                            let updatedAnchors = localAnchors
-                            DispatchQueue.main.async {
-                                self.faceAnchors = updatedAnchors
-                            }
+                            // Store on ioQueue — the single owner of faceAnchors (accumulated here,
+                            // finalized in stop() via ioQueue.sync, reset on ioQueue at start). The
+                            // previous DispatchQueue.main.async write raced this same-block read.
+                            self.faceAnchors = localAnchors
                         }
                         CVPixelBufferUnlockBaseAddress(dMap, .readOnly)
                     }
