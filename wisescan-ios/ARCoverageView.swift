@@ -70,7 +70,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.isSessionReadyBinding = $isSessionReady
         context.coordinator.vioCompromisedBinding = $vioCompromised
         context.coordinator.finalCapturedRoomBinding = $finalCapturedRoom
-        context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
+        context.coordinator.hasWorldMap.store(config.initialWorldMap != nil, ordering: .relaxed)
         context.coordinator.scanStore = scanStore
 
         // Always start with the live camera feed — even in VR mode.
@@ -208,7 +208,7 @@ struct ARCoverageView: UIViewRepresentable {
                 uiView.scene.removeAnchor(oldAnchor)
             }
             context.coordinator.ghostAnchorEntity = nil
-            context.coordinator.hasAddedGhostMesh = false
+            context.coordinator.hasAddedGhostMesh.store(false, ordering: .relaxed)
 
             if let ghostData = initialGhostMeshData {
                 // Load the world map for relocalization
@@ -218,8 +218,8 @@ struct ARCoverageView: UIViewRepresentable {
                 )
 
                 let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
-                context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
-                context.coordinator.hasSeenRelocalizing = false
+                context.coordinator.hasWorldMap.store(config.initialWorldMap != nil, ordering: .relaxed)
+                context.coordinator.hasSeenRelocalizing.store(false, ordering: .relaxed)
                 uiView.session.run(config, options: runOptions)
 
                 // Background parse the new ghost mesh
@@ -231,7 +231,7 @@ struct ARCoverageView: UIViewRepresentable {
         if dismissGhostMesh, let ghostAnchor = context.coordinator.ghostAnchorEntity {
             uiView.scene.removeAnchor(ghostAnchor)
             context.coordinator.ghostAnchorEntity = nil
-            context.coordinator.hasAddedGhostMesh = false
+            context.coordinator.hasAddedGhostMesh.store(false, ordering: .relaxed)
         }
 
         // Clear a stale boundary visual when the app cleared the boundary anchor state without an
@@ -402,13 +402,14 @@ struct ARCoverageView: UIViewRepresentable {
 
                 // Only add immediately if no world map is loaded (no relocalization needed)
                 // or if the session has already relocalized.
-                let canAdd = !coordinator.hasWorldMap || coordinator.hasSeenRelocalizing
-                if canAdd && arView.session.currentFrame?.camera.trackingState == .normal && !coordinator.hasAddedGhostMesh {
-                    if let ghostAnchor = coordinator.ghostAnchorEntity {
-                        print("Ghost mesh ready, adding immediately (hasWorldMap=\(coordinator.hasWorldMap), relocalized=\(coordinator.hasSeenRelocalizing))")
-                        arView.scene.addAnchor(ghostAnchor)
-                        coordinator.hasAddedGhostMesh = true
-                    }
+                let canAdd = !coordinator.hasWorldMap.load(ordering: .relaxed) || coordinator.hasSeenRelocalizing.load(ordering: .relaxed)
+                if canAdd && arView.session.currentFrame?.camera.trackingState == .normal,
+                   let ghostAnchor = coordinator.ghostAnchorEntity,
+                   // Atomic test-and-set: only the path that flips false→true adds the anchor, so the
+                   // delegate-queue add-path can never double-add the same AnchorEntity.
+                   coordinator.hasAddedGhostMesh.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged {
+                    print("Ghost mesh ready, adding immediately (hasWorldMap=\(coordinator.hasWorldMap.load(ordering: .relaxed)), relocalized=\(coordinator.hasSeenRelocalizing.load(ordering: .relaxed)))")
+                    arView.scene.addAnchor(ghostAnchor)
                 }
             }
         }
@@ -510,9 +511,13 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Ghost Mesh properties
         var ghostAnchorEntity: AnchorEntity?
-        var hasAddedGhostMesh = false
-        var hasWorldMap = false
-        var hasSeenRelocalizing = false
+        // Written on main (updateUIView / loadGhostMesh) and on the AR delegate queue
+        // (cameraDidChangeTrackingState); read on both. Atomic (relaxed) for formally race-free
+        // cross-queue access — same rationale as `isRecording`. hasAddedGhostMesh additionally uses
+        // compareExchange as an atomic test-and-set so the main and delegate add-paths can't both fire.
+        let hasAddedGhostMesh = Atomic<Bool>(false)
+        let hasWorldMap = Atomic<Bool>(false)
+        let hasSeenRelocalizing = Atomic<Bool>(false)
         var lastGhostMeshDataCount: Int? // Track changes to ghost mesh data
 
         // Boundary Anchor tracking
@@ -532,8 +537,10 @@ struct ARCoverageView: UIViewRepresentable {
         // frame and never correct (unlike ARKit-owned anchors). `rescanConnectorsRendered` gates
         // the one-shot render; reset on every record/nominal transition so they re-render.
         var rescanConnectorAnchors: [ConnectorAnchor] = []
-        var isRescanForConnectors = false
-        var rescanConnectorsRendered = false
+        // Written on main (syncRescanConnectors / reset paths) and read on the AR delegate queue
+        // (session(_:didUpdate:)). Atomic (relaxed) — same cross-queue rationale as `isRecording`.
+        let isRescanForConnectors = Atomic<Bool>(false)
+        let rescanConnectorsRendered = Atomic<Bool>(false)
 
         /// Mirror the rescan connector set from updateUIView. Resets the render gate when the set
         /// changes so the new markers paint on the next relocalization check.
@@ -541,20 +548,20 @@ struct ARCoverageView: UIViewRepresentable {
             let wanted = isRescan ? anchors : []
             if wanted.map(\.id) != rescanConnectorAnchors.map(\.id) {
                 rescanConnectorAnchors = wanted
-                rescanConnectorsRendered = false
+                rescanConnectorsRendered.store(false, ordering: .relaxed)
             }
-            isRescanForConnectors = isRescan
+            isRescanForConnectors.store(isRescan, ordering: .relaxed)
         }
 
         /// Renders the named connector markers once the session has relocalized to the saved world
         /// map (tracking `.normal`, and — if a map was loaded — relocalization confirmed). Idempotent
         /// and main-thread only (RealityKit scene mutation).
         func renderRescanConnectorsIfReady(arView: ARView) {
-            guard isRescanForConnectors, !rescanConnectorsRendered, !rescanConnectorAnchors.isEmpty else { return }
-            let relocalized = (!hasWorldMap || hasSeenRelocalizing)
+            guard isRescanForConnectors.load(ordering: .relaxed), !rescanConnectorsRendered.load(ordering: .relaxed), !rescanConnectorAnchors.isEmpty else { return }
+            let relocalized = (!hasWorldMap.load(ordering: .relaxed) || hasSeenRelocalizing.load(ordering: .relaxed))
                 && arView.session.currentFrame?.camera.trackingState == .normal
             guard relocalized else { return }
-            rescanConnectorsRendered = true
+            rescanConnectorsRendered.store(true, ordering: .relaxed)
             renderConnectorMarkers(rescanConnectorAnchors, in: arView)
         }
 
@@ -614,7 +621,7 @@ struct ARCoverageView: UIViewRepresentable {
             // Clear any rescan connector markers and reset the render gate so they re-paint in the
             // recording frame (preserved relocalized frame → still valid; render gated on .normal).
             removeConnectorMarkers()
-            rescanConnectorsRendered = false
+            rescanConnectorsRendered.store(false, ordering: .relaxed)
         }
 
         /// Reset coordinator state when returning to nominal (idle) mode.
@@ -648,7 +655,7 @@ struct ARCoverageView: UIViewRepresentable {
             boundaryAnchorId = nil
             // Clear any rescan connector markers and reset the render gate.
             removeConnectorMarkers()
-            rescanConnectorsRendered = false
+            rescanConnectorsRendered.store(false, ordering: .relaxed)
 
             DispatchQueue.main.async { [weak self] in
                 // Zero out scan stats
@@ -1047,23 +1054,25 @@ struct ARCoverageView: UIViewRepresentable {
 
             // Track relocalization state for ghost mesh placement
             if case .limited(.relocalizing) = camera.trackingState {
-                if !hasSeenRelocalizing {
-                    hasSeenRelocalizing = true
+                if !hasSeenRelocalizing.load(ordering: .relaxed) {
+                    hasSeenRelocalizing.store(true, ordering: .relaxed)
                     print("[GhostMesh] Session entered relocalizing state — will wait for .normal before placing ghost mesh")
                 }
             }
 
             // Only add ghost mesh after confirmed relocalization (if world map was loaded)
-            if camera.trackingState == .normal && !hasAddedGhostMesh {
-                let canAdd = !hasWorldMap || hasSeenRelocalizing
-                if canAdd, let ghostAnchor = ghostAnchorEntity, let arView = arView {
-                    hasAddedGhostMesh = true // set on the delegate queue to prevent re-entry next frame
-                    let sawReloc = hasSeenRelocalizing, hadMap = hasWorldMap
+            if camera.trackingState == .normal && !hasAddedGhostMesh.load(ordering: .relaxed) {
+                let canAdd = !hasWorldMap.load(ordering: .relaxed) || hasSeenRelocalizing.load(ordering: .relaxed)
+                // Atomic test-and-set so this delegate path and the main loadGhostMesh path can't
+                // both add the same anchor (compareExchange returns exchanged == true for the winner).
+                if canAdd, let ghostAnchor = ghostAnchorEntity, let arView = arView,
+                   hasAddedGhostMesh.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged {
+                    let sawReloc = hasSeenRelocalizing.load(ordering: .relaxed), hadMap = hasWorldMap.load(ordering: .relaxed)
                     DispatchQueue.main.async { // RealityKit scene mutation must be on main
                         print("[GhostMesh] Session relocalized (hasWorldMap=\(hadMap), sawRelocalizing=\(sawReloc)). Adding Ghost Mesh overlay.")
                         arView.scene.addAnchor(ghostAnchor)
                     }
-                } else if hasWorldMap && !hasSeenRelocalizing {
+                } else if hasWorldMap.load(ordering: .relaxed) && !hasSeenRelocalizing.load(ordering: .relaxed) {
                     print("[GhostMesh] Tracking is .normal but relocalization not yet confirmed — deferring ghost mesh placement")
                 }
 
@@ -1074,8 +1083,8 @@ struct ARCoverageView: UIViewRepresentable {
                 // concurrent read during reassignment can race on the array's storage). The Bool gates
                 // below are a cheap delegate-queue early-out only; `renderRescanConnectorsIfReady`
                 // re-checks the gate and reads the array on main (one-shot; idempotent).
-                if (!hasWorldMap || hasSeenRelocalizing),
-                   isRescanForConnectors, !rescanConnectorsRendered,
+                if (!hasWorldMap.load(ordering: .relaxed) || hasSeenRelocalizing.load(ordering: .relaxed)),
+                   isRescanForConnectors.load(ordering: .relaxed), !rescanConnectorsRendered.load(ordering: .relaxed),
                    let arView = arView {
                     DispatchQueue.main.async { [weak self] in
                         self?.renderRescanConnectorsIfReady(arView: arView)
@@ -1145,9 +1154,9 @@ struct ARCoverageView: UIViewRepresentable {
             // In Link Adjacent, `.loadingWorldMap` means this flow expects relocalization
             // against a source scan. If loading failed and `hasWorldMap` is false, do not
             // treat that the same as a no-world-map flow.
-            let worldMapWasRequested = phase == .loadingWorldMap || hasWorldMap
+            let worldMapWasRequested = phase == .loadingWorldMap || hasWorldMap.load(ordering: .relaxed)
 
-            if phase == .loadingWorldMap && !hasWorldMap {
+            if phase == .loadingWorldMap && !hasWorldMap.load(ordering: .relaxed) {
                 // The world map file was missing or corrupted and failed to load
                 DispatchQueue.main.async { [weak self] in
                     self?.scanStore?.mapLoadFailed = true
@@ -1156,7 +1165,7 @@ struct ARCoverageView: UIViewRepresentable {
                 return
             }
 
-            let isRelocalized = isTrackingNormal && (!worldMapWasRequested || hasSeenRelocalizing)
+            let isRelocalized = isTrackingNormal && (!worldMapWasRequested || hasSeenRelocalizing.load(ordering: .relaxed))
 
             // Optionally update distance to boundary anchor if one exists (visual only)
             if let anchorTransform = scanStore?.boundaryAnchorTransform {
@@ -1875,13 +1884,17 @@ struct ARCoverageView: UIViewRepresentable {
 /// RoomPlan delegate — receives real-time room structure updates. Runs on arbitrary queue.
 extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
     func captureSession(_ session: RoomCaptureSession, didUpdate room: CapturedRoom) {
-        latestCapturedRoom = room
-        // Continuously push latest room to CaptureView so finishStopRecording can access it
-        // before the isRecording→false transition triggers updateUIView.
-        finalCapturedRoomBinding?.wrappedValue = room
-        // Trigger outline re-render on main thread (MeshResource requires main/Metal context)
+        // This delegate runs on an arbitrary queue. latestCapturedRoom is read on main
+        // (stopRoomPlanSession / renderRoomPlanOutlines) and finalCapturedRoomBinding is a SwiftUI
+        // @Binding, so both must be touched on main — hop once and do all three together.
         DispatchQueue.main.async { [weak self] in
-            self?.renderRoomPlanOutlines()
+            guard let self = self else { return }
+            self.latestCapturedRoom = room
+            // Continuously push latest room to CaptureView so finishStopRecording can access it
+            // before the isRecording→false transition triggers updateUIView.
+            self.finalCapturedRoomBinding?.wrappedValue = room
+            // Outline re-render (MeshResource requires main/Metal context)
+            self.renderRoomPlanOutlines()
         }
     }
 
