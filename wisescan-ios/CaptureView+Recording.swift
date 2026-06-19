@@ -314,6 +314,13 @@ extension CaptureView {
                         MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
                         self.isProcessingMesh = false
 
+                        guard let savedScan else {
+                            // Required mesh write failed — nothing was persisted.
+                            self.showTransientMessage("Save failed — scan not stored", duration: 4)
+                            completion?(nil)
+                            return
+                        }
+
                         // Write deferred stitching.json now that we have the real target scan ID
                         self.writeStitchingLinkIfPending(targetScanId: savedScan.id)
 
@@ -515,6 +522,14 @@ extension CaptureView {
             thumbnailData: pending.thumbnailData,
             scanCase: pending.scanCase
         )
+
+        guard let savedScan else {
+            // Required mesh write failed — nothing was persisted. Keep pendingScan intact so the
+            // user can retry rather than silently losing the capture, and surface the failure.
+            saveMessage = "Save failed — please try again"
+            isWaitingToSave = false
+            return
+        }
 
         // Write deferred stitching.json now that we have the real target scan ID
         writeStitchingLinkIfPending(targetScanId: savedScan.id)

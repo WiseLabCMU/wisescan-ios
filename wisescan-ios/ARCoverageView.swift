@@ -1781,6 +1781,13 @@ struct ARCoverageView: UIViewRepresentable {
                 let pointer = faces.buffer.contents().advanced(by: faceIdx * faceBytes)
                 let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
 
+                // Validate indices are within vertex bounds — corrupted geometry
+                // from recycled ARFrame buffers can produce wild index values.
+                guard Int(indices.0) < vertices.count,
+                      Int(indices.1) < vertices.count,
+                      Int(indices.2) < vertices.count else {
+                    continue
+                }
 
                 // Skip person faces if privacy filter is on
                 if privacyFilter {

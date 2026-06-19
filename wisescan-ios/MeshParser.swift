@@ -83,7 +83,14 @@ enum MeshParser {
         }
 
         guard !vertices.isEmpty, !faces.isEmpty else { return nil }
-        return OBJData(vertices: vertices, faces: faces)
+
+        // Drop faces referencing out-of-range vertices (malformed/truncated OBJ) so every
+        // downstream consumer can index `vertices` without its own bounds check.
+        let validFaces = faces.filter {
+            Int($0.0) < vertices.count && Int($0.1) < vertices.count && Int($0.2) < vertices.count
+        }
+        guard !validFaces.isEmpty else { return nil }
+        return OBJData(vertices: vertices, faces: validFaces)
     }
 
     /// Reconstructs a MeshResource from an `.obj` file format string.
@@ -300,8 +307,12 @@ enum MeshParser {
         var outIndices = [UInt32]()
         outIndices.reserveCapacity(triCount * 3)
 
+        let vertexCount = vertices.count
         var idx: UInt32 = 0
         for (a, b, c) in faces {
+            // Skip triangles referencing out-of-range vertices (malformed OBJ or
+            // corrupted ARMeshAnchor geometry) rather than trapping.
+            guard Int(a) < vertexCount, Int(b) < vertexCount, Int(c) < vertexCount else { continue }
             outPositions.append(vertices[Int(a)])
             outPositions.append(vertices[Int(b)])
             outPositions.append(vertices[Int(c)])
