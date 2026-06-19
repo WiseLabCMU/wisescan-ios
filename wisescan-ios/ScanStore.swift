@@ -547,22 +547,25 @@ class ScanFileManager {
             hardwareDeviceModel: hardwareDeviceModel
         )
 
-        // Create scan directory and write mesh (required). Do this BEFORE inserting the record:
-        // a CapturedScan whose mesh.obj never reached disk is an unrecoverable orphan (blank
-        // preview, every export fails), so on failure persist nothing and report the failure.
+        // Link to the location FIRST: scanDirectory/meshFileURL derive from location?.id, so the
+        // files must be written under the final, location-scoped path (not "unknown_location").
+        targetLocation.scans.append(newScan)
+        newScan.location = targetLocation
+        targetLocation.updatedAt = Date() // Bump to top of workflow list
+        context.insert(newScan)
+
+        // Create scan directory and write mesh (required). If this fails, roll back the inserted
+        // record (and any location we just created) so we never persist an orphan whose mesh.obj
+        // never reached disk (blank preview, every export fails).
         do {
             try FileManager.default.createDirectory(at: newScan.scanDirectory, withIntermediateDirectories: true)
             try meshData.write(to: newScan.meshFileURL)
         } catch {
             print("[ScanFileManager] Failed to create scan directory or write mesh; aborting save: \(error)")
+            context.delete(newScan)
             if let created = createdLocation { context.delete(created) }
             return nil
         }
-
-        targetLocation.scans.append(newScan)
-        newScan.location = targetLocation
-        targetLocation.updatedAt = Date() // Bump to top of workflow list
-        context.insert(newScan)
 
         // Optional files — failures must not block the critical raw data move
         if let colors = vertexColors {
