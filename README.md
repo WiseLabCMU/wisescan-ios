@@ -24,7 +24,8 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 ## Features
 
 - **AR + VR Capture Modes:** AR mode uses camera passthrough with live wireframe mesh overlay; VR mode renders a live depth point cloud on a black background using Metal shaders. Toggle between modes in Settings.
-- **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay, capacity HUD, and real-time tracking guidance banners (LiDAR devices only).
+- **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay, capacity HUD, and real-time scan coaching (LiDAR devices only).
+- **Scan Coaching:** A unified 4-tier coaching system (`ScanCoach`) provides real-time scanning tips during capture — tracking/capacity warnings always show; pattern-based guidance and progress encouragement can be toggled in Settings.
 - **Lite Mode:** Non-LiDAR devices capture images + camera poses for server-side photogrammetry. A persistent banner indicates lite mode. *(Note: Lite mode is only available in local debug builds for testing. TestFlight and App Store releases strictly require LiDAR-equipped devices.)*
 - **Scan4D (Rescan & Link Adjacent):** Group scans by Location and set the workflow intent when saving. The two intents capture different dimensions of a space: **Rescan Space** is *temporal* — re-capture the same physical area at a later time so the backend can diff or merge versions; **Link Adjacent Space** is *spatial* — capture a neighboring area and stitch the chunks into one larger model. Both relocalize against the previous scan's `ARWorldMap` and show a configurable ghost-mesh overlay (default: magenta) of that prior capture. Adjacent chunks join at a shared boundary anchor: drop one mid-scan with **Pin & Extend**, or relocalize back to it in a later session through a guided alignment overlay.
 - **Linked-Scan Graph & Combined Mesh:** Each boundary link is recorded in a per-location `stitching.json` manifest (paired anchor transforms + compass headings) and bundled in every Scan4D export. The Scans tab visualizes chained scans as a node graph and can render all linked scans together in one combined-mesh viewer.
@@ -64,6 +65,8 @@ wisescan-ios/
 ├── LocationManager.swift        # GPS/heading updates for scan metadata
 ├── PermissionsOverlay.swift     # Camera/AR permission request UI
 ├── SettingsView.swift           # Upload URL, RAW settings, capture mode, Developer Mode
+├── ScanCoach.swift              # Rules engine: 4-tier priority coaching tips (~1Hz evaluation)
+├── CoachBarView.swift           # Coach bar UI: color-coded tip banner with swipe-to-dismiss
 ├── UserGuideView.swift          # In-app workflow guide
 ├── DemoDataSeeder.swift         # Orphan scan discovery + SwiftData seeding
 ├── TestDataGenerator.swift      # Mock camera intrinsics for testing
