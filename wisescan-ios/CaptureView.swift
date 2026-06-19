@@ -70,6 +70,7 @@ struct CaptureView: View {
     @State var extendPhaseText = "" // Text shown in the extend overlay
     @State var showInsufficientTrackingAlert = false // SwiftUI alert for poor mapping status
     @State var sessionStabilizationTask: Task<Void, Never>? // Cancellable task for AR session warm-up after extend
+    @State var saveNavigationTask: Task<Void, Never>? // Delayed post-save tab switch; cancelled if the view leaves first
     @State var isConfirmingAlignment = false // Re-entry guard for confirmAlignment double-tap
     @State var showStopMenu = false
     @State var showExtendErrorAlert = false
@@ -920,6 +921,8 @@ struct CaptureView: View {
             isARSessionReady = false
             sessionStabilizationTask?.cancel()
             sessionStabilizationTask = nil
+            saveNavigationTask?.cancel()
+            saveNavigationTask = nil
             activeLocationName = nil
         }
         .onChange(of: scanStore.activeLocationForScan) { _, newLocId in
