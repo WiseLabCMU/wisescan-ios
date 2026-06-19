@@ -844,6 +844,33 @@ struct ARCoverageView: UIViewRepresentable {
             PerfDiag.log("RoomPlan session started (sharing ARSession)")
         }
 
+        /// RoomPlan's `run(configuration:)` reconfigures the shared ARSession with its own config,
+        /// dropping the `.sceneDepth` / `.personSegmentationWithDepth` frame semantics we set at
+        /// record-start. Without them `frame.sceneDepth` goes nil (no depth/confidence captured) and
+        /// the privacy filter falls back to the slow Vision path every frame. Re-assert the semantics
+        /// onto whatever config RoomPlan applied, running with NO reset options so tracking, the world
+        /// map, and RoomPlan itself all keep running — we only add the two semantics.
+        /// Called from the RoomPlan `didStartWith` delegate, which fires after RoomPlan's config lands.
+        func reassertFrameSemantics() {
+            guard let session = arView?.session,
+                  let config = session.configuration as? ARWorldTrackingConfiguration else { return }
+            var changed = false
+            if privacyFilter,
+               ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth),
+               !config.frameSemantics.contains(.personSegmentationWithDepth) {
+                config.frameSemantics.insert(.personSegmentationWithDepth)
+                changed = true
+            }
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth),
+               !config.frameSemantics.contains(.sceneDepth) {
+                config.frameSemantics.insert(.sceneDepth)
+                changed = true
+            }
+            guard changed else { return }
+            session.run(config, options: []) // no reset → preserve tracking/world map and RoomPlan
+            PerfDiag.log("Re-asserted frame semantics after RoomPlan (sceneDepth + personSegmentation)")
+        }
+
         /// Stops RoomPlan and stores the final CapturedRoom for export.
         /// Call on main thread before recording cleanup.
         func stopRoomPlanSession() {
@@ -1908,6 +1935,11 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
 
     func captureSession(_ session: RoomCaptureSession, didStartWith configuration: RoomCaptureSession.Configuration) {
         PerfDiag.log("RoomPlan session started scanning")
+        // RoomPlan just reconfigured the shared ARSession with its own config, dropping the frame
+        // semantics we need for depth/confidence capture and privacy segmentation. Re-assert them.
+        DispatchQueue.main.async { [weak self] in
+            self?.reassertFrameSemantics()
+        }
     }
 
     // iOS 17+ provides instruction updates — log them for debugging, ignore otherwise.
