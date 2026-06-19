@@ -546,9 +546,12 @@ extension CaptureView {
         // Programmatically navigate to the created LocationDetailView
         let savedLoc = savedScan.location
 
-        // Switch to Scans tab after a brief delay (cancellable via structured concurrency)
-        Task { @MainActor in
+        // Switch to Scans tab after a brief delay. Stored + cancelled in onDisappear so that if the
+        // user navigates away from capture during the delay, we don't yank them to the Scans tab and
+        // push navigation onto a view they already left.
+        saveNavigationTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(1000))
+            guard !Task.isCancelled else { return }
             selectedTab = 2
             if let loc = savedLoc {
                 scanStore.navigationPath = NavigationPath()

@@ -58,6 +58,12 @@ class LocationManager: NSObject, CLLocationManagerDelegate {
         authorizationStatus = manager.authorizationStatus
         if authorizationStatus == .authorizedWhenInUse || authorizationStatus == .authorizedAlways {
             startUpdating()
+        } else {
+            // Access revoked (or never granted) — stop updates and drop any stale fix so consumers
+            // (currentLocation / bestHeading) don't keep anchoring scans to a position the user revoked.
+            stopUpdating()
+            currentLocation = nil
+            currentHeading = nil
         }
     }
 

@@ -60,24 +60,36 @@ struct PermissionsOverlay: View {
     }
 
     private func requestPermissions() {
+        // A denied/restricted permission can only be changed in Settings — re-prompting is a no-op.
+        let cameraBlocked = (cameraStatus == .denied || cameraStatus == .restricted)
+
         if cameraStatus == .notDetermined {
             AVCaptureDevice.requestAccess(for: .video) { _ in
                 DispatchQueue.main.async {
                     self.cameraStatus = AVCaptureDevice.authorizationStatus(for: .video)
-                    // Once camera is resolved, ask for location
+                    // Once camera is resolved, chain the location prompt if it's still undetermined;
+                    // otherwise a permission is denied, so route to Settings rather than dead-ending.
                     if self.locationManager.authorizationStatus == .notDetermined {
                         self.locationManager.requestPermissions()
+                    } else {
+                        self.openSettings()
                     }
                 }
             }
-        } else if locationManager.authorizationStatus == .notDetermined {
-            // Camera already resolved, just ask for location
+        } else if locationManager.authorizationStatus == .notDetermined && !cameraBlocked {
+            // Camera is fine and location can still be prompted in-app.
             locationManager.requestPermissions()
         } else {
-            // Both are already resolved. If they are denied, punt to settings.
-            if let url = URL(string: UIApplication.openSettingsURLString) {
-                UIApplication.shared.open(url)
-            }
+            // Nothing left to prompt for in-app (a permission is denied/restricted) — Settings is the
+            // only path forward. This covers the camera-denied + location-undetermined case that
+            // previously only re-prompted location and left the user stuck.
+            openSettings()
+        }
+    }
+
+    private func openSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) {
+            UIApplication.shared.open(url)
         }
     }
 }

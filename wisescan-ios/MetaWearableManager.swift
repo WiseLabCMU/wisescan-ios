@@ -71,9 +71,11 @@ class MetaWearableManager {
     private var deviceSession: DeviceSession?
     private var streamSession: MWDATCamera.Stream?
 
-    // Store SDK Announcer subscription tokens if required by the interface
-    private var stateToken: Any?
-    private var frameToken: Any?
+    // SDK Announcer subscription tokens. Held so the stream's state/frame listeners can be
+    // cancelled on teardown — otherwise they keep firing into a torn-down (or freshly-recreated)
+    // session. AnyListenerToken.cancel() is async, so cancellation is detached (see cancelStreamListeners).
+    private var stateToken: (any AnyListenerToken)?
+    private var frameToken: (any AnyListenerToken)?
 
     // Timestamp for frame throttling (thread-safe for background video publisher)
     private final class FrameThrottle: @unchecked Sendable {
@@ -170,8 +172,9 @@ class MetaWearableManager {
     }
 
     func checkPermissions() {
-        guard !permissionGranted else { return } // Already confirmed this session
-        // Cancel any existing permission check loop to prevent concurrent retry storms
+        // Re-check every time (e.g. on each foreground): permission can be revoked in the Meta AI
+        // app, so this must be able to flip permissionGranted back to false, not just false→true.
+        // Cancel any existing permission check loop to prevent concurrent retry storms.
         permissionCheckTask?.cancel()
         hasLoggedPermissionRetry = false
         permissionCheckTask = Task { [weak self] in
@@ -179,7 +182,7 @@ class MetaWearableManager {
             let maxRetries = 10
             while retryCount < maxRetries {
                 guard !Task.isCancelled else { return }
-                guard let self = self, !self.permissionGranted else { return }
+                guard let self = self else { return }
                 do {
                     let status = try await Wearables.shared.checkPermissionStatus(.camera)
                     let statusStr = String(describing: status).lowercased()
@@ -334,8 +337,24 @@ class MetaWearableManager {
 
     /// Called by CaptureView.onDisappear — stops the camera stream to save resources.
     /// Synchronously clears session state to prevent startStreaming() race conditions.
+    /// Cancels the stream's state/frame listeners so they stop firing into a torn-down session.
+    /// Clears the tokens synchronously (so a re-subscribe can't race a pending cancel) and cancels
+    /// the SDK subscriptions asynchronously.
+    private func cancelStreamListeners() {
+        let state = stateToken
+        let frame = frameToken
+        stateToken = nil
+        frameToken = nil
+        guard state != nil || frame != nil else { return }
+        Task {
+            await state?.cancel()
+            await frame?.cancel()
+        }
+    }
+
     func stopStreaming() {
         isStreamingRequested = false
+        cancelStreamListeners()
         // Capture references before clearing — clear synchronously to prevent races
         let stream = self.streamSession
         let devSession = self.deviceSession
@@ -380,6 +399,7 @@ class MetaWearableManager {
     }
 
     func disconnect(deviceId: String) {
+        cancelStreamListeners()
         Task {
             // SDK handles disconnect implicitly; simply teardown our active stream
             await self.streamSession?.stop()
@@ -390,6 +410,7 @@ class MetaWearableManager {
     }
 
     func unregister() {
+        cancelStreamListeners()
         Task {
             // Drop stream and clear local devices list to ensure SDK fully releases
             await self.streamSession?.stop()
@@ -586,6 +607,9 @@ class MetaWearableManager {
             print("[MetaWearable] DeviceSession + Stream created")
 
             // --- MWDAT ANNOUNCER SUBSCRIPTION ---
+            // Cancel any listeners from a prior session before subscribing, so we never leak a
+            // stale subscription that outlives the session it was created for.
+            self.cancelStreamListeners()
             self.stateToken = session.statePublisher.listen { state in
                 print("[MetaWearable] Stream state changed: \(state)")
                 Task { @MainActor [weak self] in
@@ -602,6 +626,9 @@ class MetaWearableManager {
                         self.streamSession = nil
                         self.deviceSession?.stop()
                         self.deviceSession = nil
+                        // Stop our own listeners too, so this torn-down session's lingering events
+                        // can't nil out a stream the user re-creates moments later.
+                        self.cancelStreamListeners()
                     }
                 }
             }
