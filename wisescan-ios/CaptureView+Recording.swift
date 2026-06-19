@@ -49,6 +49,7 @@ extension CaptureView {
         }
         recordingSeconds = 0
         saveMessage = nil
+        scanCoach.reset()
 
         // Start frame capture for raw data export
         if let session = currentARSession {

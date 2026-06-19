@@ -1893,5 +1893,8 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
     // iOS 17+ provides instruction updates — log them for debugging, ignore otherwise.
     func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
         PerfDiag.log("RoomPlan instruction: \(instruction)")
+        DispatchQueue.main.async { [weak self] in
+            self?.scanStats?.roomPlanInstruction = instruction
+        }
     }
 }

@@ -117,6 +117,14 @@ class FrameCaptureSession {
         let cy: Float
     }
 
+    /// Returns the last `count` camera-to-world transforms from captured frames.
+    /// Lightweight — copies only the simd_float4x4 values, no pixel data.
+    /// Called by ScanCoach at ~1Hz for spatial pattern analysis.
+    func recentTransforms(count: Int = 30) -> [simd_float4x4] {
+        let slice = frames.suffix(count)
+        return slice.map { $0.transform }
+    }
+
     /// Start capturing frames from the given AR session.
     /// - Parameters:
     ///   - overlapMax: Maximum overlap percentage (10-100). Higher = more frames.

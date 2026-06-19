@@ -44,6 +44,7 @@ enum AppConstants {
         static let pauseVRCompute = "pauseVRCompute"
         static let semanticLabeling = "semanticLabeling"
         static let enabledSemanticClasses = "enabledSemanticClasses"
+        static let scanCoachingEnabled = "scanCoachingEnabled"
     }
 
     // MARK: - Default Values
@@ -106,6 +107,17 @@ enum AppConstants {
     static let stabilizationMaxPolls: Int = 25                // max polls before timeout (total = interval × polls)
     static let semanticThrottleInterval: TimeInterval = 0.5   // min seconds between classification outline rebuilds per anchor
     static let surfaceOutlineLiftDistance: Float = 0.06       // meters surface outlines are lifted toward the camera to draw on top of the co-planar scan mesh (must clear ARKit mesh noise)
+
+    // MARK: - ScanCoach Constants
+    static let coachEvaluationInterval: TimeInterval = 1.0    // seconds between ScanCoach rule evaluations (~1Hz)
+    static let guidanceCooldownSeconds: TimeInterval = 30.0   // min seconds before a GUIDANCE tip re-shows
+    static let infoCooldownSeconds: TimeInterval = 60.0       // min seconds before an INFO tip re-shows
+    static let warningAutoDismissSeconds: TimeInterval = 8.0   // WARNING tips auto-dismiss after this duration (or when resolved)
+    static let guidanceAutoDismissSeconds: TimeInterval = 6.0  // GUIDANCE tips auto-dismiss after this duration
+    static let infoAutoDismissSeconds: TimeInterval = 5.0      // INFO tips auto-dismiss after this duration
+    static let earlyScanThresholdSeconds: TimeInterval = 30.0  // first N seconds considered "early scan" for pattern tips
+    static let coachMaxDismissCount: Int = 2                   // after this many manual dismissals, tip won't re-show for the session
+    static let scanCoachingEnabled: Bool = true                // default for the scan coaching toggle
 }
 
 // MARK: - Semantic View Mode

@@ -22,6 +22,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
+    @AppStorage(AppConstants.Key.scanCoachingEnabled) private var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -181,6 +182,19 @@ struct SettingsView: View {
                             }
                         }
                         .padding(.vertical, 4)
+
+                        Toggle(isOn: $scanCoachingEnabled) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Scan Coaching")
+                                    .foregroundColor(.white)
+                                Text("Show real-time scanning tips and guidance during capture. Critical warnings (tracking, capacity) always display.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                        .tint(.cyan)
+                        .padding(.vertical, 4)
+
                     } header: {
                         Text("SCAN CAPTURE")
                     }

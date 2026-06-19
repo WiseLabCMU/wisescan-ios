@@ -37,6 +37,7 @@ Scan4D is a professional-grade reality capture app for iPhone and iPad. It turns
 • VR mode: live accumulated depth point cloud with bloom and confidence decay on a dark background
 • 16-bit depth maps with confidence maps captured at adaptive frame rates
 • Scan capacity metrics: polygon count, drift tracking, session duration
+• Scan coaching: real-time tips guide scanning technique with 4-tier priority (tracking warnings, pattern hints, progress encouragement)
 • Interactive 3D mesh preview with camera-sampled vertex coloring and loading indicator
 • Privacy filtering: person segmentation removes humans from meshes, face blurring in RGB exports
 • VIO tracking guard: automatic halt and save prompt on mid-scan tracking loss
@@ -53,7 +54,6 @@ TIME-SERIES SCANNING
 • Adjacent stitching: scan neighboring areas with shared coordinate frames
 • ARWorldMap relocalization with rejection and manual ghost mesh alignment
 • Linked-scan graph visualization with combined-mesh viewer
-• Tracking instruction banners guide you through scanning and relocalization
 
 BULK OPERATIONS
 • Multi-select locations for bulk delete
@@ -92,6 +92,7 @@ Requires a LiDAR-equipped iPhone or iPad Pro. Meta Ray-Ban Smart Glasses support
 • AR coverage overlay: 3D occlusion-based visualization shows scanned vs. unscanned areas
 • Procedural wireframe: replaced depth rainbow with a color-controlled wireframe shader
 • Tracking safety: VIO starvation guard halts the scan and prompts save on tracking loss
+• Scan coaching: real-time 4-tier guidance system (tracking + capacity warnings, pattern tips, progress encouragement) with swipe-to-dismiss and Settings toggle
 • Relocalization rejection and manual ghost mesh alignment for rescan/stitch workflows
 • Linked-scan graph and combined-mesh viewer for adjacent-space stitching
 • Bulk operations: multi-select locations and scans for Save, Upload, and Delete

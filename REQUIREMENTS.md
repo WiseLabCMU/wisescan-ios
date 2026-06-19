@@ -166,6 +166,8 @@ graph TD
 | [LocationManager.swift](wisescan-ios/LocationManager.swift) | GPS/heading updates for scan metadata | `LocationManager` |
 | [PermissionsOverlay.swift](wisescan-ios/PermissionsOverlay.swift) | Camera/AR permission request UI | `PermissionsOverlay` |
 | [SettingsView.swift](wisescan-ios/SettingsView.swift) | Upload URL, RAW settings, capture mode, Developer Mode | `SettingsView`, `developerMode`, `flipCameraEnabled` |
+| [ScanCoach.swift](wisescan-ios/ScanCoach.swift) | Rules engine: 4-tier priority coaching tips (~1Hz eval) | `ScanCoach`, `CoachTip`, `TipPriority`, `evaluate()` |
+| [CoachBarView.swift](wisescan-ios/CoachBarView.swift) | Coach bar UI: color-coded tip banner with swipe-to-dismiss | `CoachBarView` |
 | [UserGuideView.swift](wisescan-ios/UserGuideView.swift) | In-app workflow guide | `UserGuideView` |
 | [DemoDataSeeder.swift](wisescan-ios/DemoDataSeeder.swift) | Orphan scan discovery + SwiftData seeding | `DemoDataSeeder`, `seedIfNeeded()` |
 | [TestDataGenerator.swift](wisescan-ios/TestDataGenerator.swift) | Mock camera intrinsics for testing | `TestDataGenerator` |
@@ -355,8 +357,8 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Live HUD showing polygon count, anchor count (~area), drift level, and session duration. Composite capacity score (0–1) using `max(polygonPressure, memoryPressure, anchorPressure, driftEstimate)`. Color-coded progress bar (green→yellow→red). Warning banners at >80% and >95% capacity. Memory tracks delta from session baseline, not absolute footprint. |
-| **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanStats.capacityScore`, `currentMemoryUsageMB()` · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `Coordinator.updateStats()`, drift tracking · [CaptureView.swift](wisescan-ios/CaptureView.swift) — redesigned HUD |
+| **Description** | Live HUD showing polygon count, anchor count (~area), drift level, and session duration. Composite capacity score (0–1) using `max(polygonPressure, memoryPressure, anchorPressure, driftEstimate)`. Color-coded progress bar (green→yellow→red). Capacity warnings are now surfaced through the unified ScanCoach system (REQ-029) at WARNING priority. Memory tracks delta from session baseline, not absolute footprint. |
+| **Source** | [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanStats.capacityScore`, `currentMemoryUsageMB()` · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `Coordinator.updateStats()`, drift tracking · [CaptureView.swift](wisescan-ios/CaptureView.swift) — redesigned HUD · [ScanCoach.swift](wisescan-ios/ScanCoach.swift) — `warning.nearCapacity`, `warning.atCapacity` tips |
 | **Design Doc** | [Scan4D_Architecture.md](docs/design/Scan4D_Architecture.md) — "Large-Space Scanning & Map Stitching" section |
 
 ### REQ-015: Location Rename
@@ -414,6 +416,7 @@ sequenceDiagram
 | REQ-026 | Orientation Locking | ✅ **Implemented** — see REQ-026 below | — |
 | REQ-027 | Capture Performance, Session Lifecycle & VIO Integrity | ✅ **Implemented** — see REQ-027 below | — |
 | REQ-028 | Semantic Labeling | ✅ **Implemented** — see REQ-028 below | — |
+| REQ-029 | Scan Coaching | ✅ **Implemented** — see REQ-029 below | — |
 
 ---
 
@@ -424,6 +427,15 @@ sequenceDiagram
 | **Description** | Apple **RoomPlan** API integration for live semantic labeling and data export. Replaces the previous per-face `ARMeshClassification` approach (greedy AABB merge of per-anchor face labels) with RoomPlan's oriented bounding boxes. **(1) AR/VR live rendering:** oriented wireframe edge outlines (12 thin boxes per detected element, 10mm thickness) rendered with `UnlitMaterial`. Surfaces (walls, floors, doors, windows, openings) and objects (tables, chairs, beds, etc.) are rendered with per-category colors from `SemanticClass`. Only user-enabled classes are rendered; disabled classes are still tracked for export. Throttled at 500ms to avoid per-frame rebuilds. `RoomCaptureSession` shares the existing `ARSession` (`pauseARSession: false` on stop to preserve tracking). **(2) Export:** `roomplan.json` sidecar with per-surface and per-object oriented bounding boxes (dimensions + 4×4 column-major transform + confidence). `roomplan_raw.json` contains Apple's native `CapturedRoom` Codable for round-tripping. **(3) 3D Preview:** `MeshPreviewView` parses `roomplan.json`, reconstructs oriented wireframe boxes via `buildOrientedBoxLineGeometry`, renders as SceneKit `.line` geometry. Toggle via toolbar button + color legend overlay. Always shows all classes regardless of capture-time filter. **(4) HUD:** colored-dot + label row showing detected enabled classes during recording. **(5) Configuration:** per-class toggles in Settings (wall, floor, door enabled by default; ceiling permanently disabled — not yet supported by RoomPlan). `SemanticClassPreference` helper reads/writes a JSON-encoded `Set<String>` via `@AppStorage`. Developer Mode kill-switch toggle disables the entire RoomPlan pipeline. |
 | **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `RoomCaptureSession` lifecycle, `renderRoomPlanOutlines`, `addWireframeEdges` · [AppConstants.swift](wisescan-ios/AppConstants.swift) — `SemanticClass` enum with RoomPlan category mappings + color palette + `SemanticClassPreference` helper · [RoomPlanExporter.swift](wisescan-ios/RoomPlanExporter.swift) — `roomplan.json` + `roomplan_raw.json` writer · [MeshPreviewView.swift](wisescan-ios/MeshPreviewView.swift) — `buildRoomPlanOutlines` + oriented wireframe rendering + legend · [CaptureView.swift](wisescan-ios/CaptureView.swift) — HUD class dots + labels · [SettingsView.swift](wisescan-ios/SettingsView.swift) — Semantic Classes per-class toggles + Developer Mode kill-switch · [ScanExportManager.swift](wisescan-ios/ScanExportManager.swift) — Scan4D ZIP inclusion |
 | **Notes** | RoomPlan provides oriented bounding boxes with instance-level detection (separate chairs are separate objects). Edge wireframes may be partially occluded by co-planar mesh geometry; a future improvement could use a custom Metal shader with depth-test disabled for surface outlines. |
+
+---
+
+### REQ-029: Scan Coaching
+| | |
+|:--|:--|
+| **Status** | ✅ Complete |
+| **Description** | Unified 4-tier priority coaching system replacing the previous inline warning pills ("slow down", "hold steady") and capacity warning banner. A standalone `@Observable` rules engine (`ScanCoach`) evaluates live scan data at ~1Hz on a background queue and produces a single highest-priority `CoachTip`. **Tiers:** `CRITICAL` (red — tracking lost/degraded, stays until resolved), `WARNING` (orange — fast motion, near/at capacity, auto-dismiss 8s), `GUIDANCE` (indigo — scan pattern hints like "scan all walls", "vary height", semantic tips, auto-dismiss 6s, 30s cooldown), `INFO` (green — progress encouragement, auto-dismiss 5s, 60s cooldown). **Anti-nag:** per-tip cooldowns, session-scoped dismiss counts (suppressed after 2 manual dismissals), swipe-up-to-dismiss gesture. **Spatial analysis:** camera extent, height variance, and movement pattern ratio computed from recent transforms. **Semantic tips** (walls/floors/objects) use live `CapturedRoom` data when Semantic Labeling is enabled. **Settings toggle:** `Scan Coaching` (default ON) suppresses GUIDANCE/INFO; CRITICAL/WARNING always evaluate. **UI:** `CoachBarView` renders a color-coded bar above the bottom HUD with SF Symbol icon + message text. The centered "relocalize" and "move to start mesh" pills are kept as standalone elements. |
+| **Source** | [ScanCoach.swift](wisescan-ios/ScanCoach.swift) — rules engine, `CoachTip`, `TipPriority`, spatial helpers · [CoachBarView.swift](wisescan-ios/CoachBarView.swift) — SwiftUI coach bar with swipe-to-dismiss · [CaptureView.swift](wisescan-ios/CaptureView.swift) — `evaluateScanCoach()`, `.onChange` triggers, `CoachBarView` integration · [CaptureView+Recording.swift](wisescan-ios/CaptureView+Recording.swift) — `scanCoach.reset()` on `startRecording` · [AppConstants.swift](wisescan-ios/AppConstants.swift) — tuning constants (`coachEvaluationInterval`, cooldowns, auto-dismiss durations) · [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanStats.roomPlanInstruction` · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — RoomPlan instruction forwarding · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `recentTransforms()` accessor · [SettingsView.swift](wisescan-ios/SettingsView.swift) — Scan Coaching toggle |
 
 ---
 

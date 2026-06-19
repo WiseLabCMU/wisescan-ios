@@ -2,6 +2,7 @@ import SwiftUI
 import Observation
 import SwiftData
 import simd
+import RoomPlan
 
 // MARK: - Captured Scan Model
 
@@ -389,6 +390,7 @@ class ScanStats {
     var driftEstimate: Double = 0 // 0.0 to 1.0
     var mappingStatus: String = "notAvailable" // ARFrame.WorldMappingStatus for cumulative relocalization quality
     var detectedClasses: Set<String> = [] // Semantic classes detected so far (for HUD display)
+    var roomPlanInstruction: RoomCaptureSession.Instruction? // Latest RoomPlan coaching instruction
 
     // Capacity thresholds (tunable)
     private let maxPolygons: Double = 2_000_000
