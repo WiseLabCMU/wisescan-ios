@@ -867,7 +867,8 @@ struct ScanCard: View {
     @State private var exportItem: ZipExportItem?
     @State private var showExportError = false
     @State private var showDeleteConfirm = false
-    @State private var itemCounts: (images: Int, proxy: Int, depth: Int, cameras: Int)?
+    @State private var itemCounts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int)?
+    @State private var showDataIntegrityAlert = false
     @State private var showMeshPreview = false
     @State private var showMissingRelocAlert = false
     // Disk-derived values resolved off the main thread in `.task` (see below) so the
@@ -975,6 +976,11 @@ struct ScanCard: View {
         } message: {
             Text("This scan is missing relocalization data (arworldmap.map). It cannot be reliably extended or aligned in the future.")
         }
+        .alert("Incomplete Capture", isPresented: $showDataIntegrityAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(dataIntegrityWarning ?? "")
+        }
         .alert("No Data Available", isPresented: $showExportError) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -993,10 +999,11 @@ struct ScanCard: View {
             let fm = FileManager.default
 
             let resolved = await Task.detached(priority: .utility) {
-                () -> (counts: (Int, Int, Int, Int), relocMissing: Bool, sizeMB: Double) in
+                () -> (counts: (Int, Int, Int, Int, Int), relocMissing: Bool, sizeMB: Double) in
                 let iCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("images").path))?.count ?? 0
                 let pCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("proxy_images").path))?.count ?? 0
                 let dCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("depth").path))?.count ?? 0
+                let confCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("confidence").path))?.count ?? 0
                 let cCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("cameras").path))?.count ?? 0
 
                 let relocMissing = !fm.fileExists(atPath: worldMapPath)
@@ -1006,7 +1013,7 @@ struct ScanCard: View {
                 if let attr = try? fm.attributesOfItem(atPath: colorsPath) { bytes += attr[.size] as? Int64 ?? 0 }
                 let sizeMB = (bytes > 0 ? Double(bytes) : Double(fallbackBytes)) / (1024.0 * 1024.0)
 
-                return ((iCount, pCount, dCount, cCount), relocMissing, sizeMB)
+                return ((iCount, pCount, dCount, confCount, cCount), relocMissing, sizeMB)
             }.value
 
             itemCounts = resolved.counts
@@ -1049,7 +1056,7 @@ struct ScanCard: View {
         .buttonStyle(.plain)
         .contentShape(Rectangle())
         .overlay(editingOverlay)
-        .overlay(alignment: .topLeading) { relocWarningOverlay }
+        .overlay(alignment: .topLeading) { warningsOverlay }
         .overlay {
             if let msg = activeColoringMessage {
                 ZStack {
@@ -1086,17 +1093,26 @@ struct ScanCard: View {
     }
 
     @ViewBuilder
-    private var relocWarningOverlay: some View {
-        if isRelocMissing {
-            Button(action: { showMissingRelocAlert = true }) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.title2)
-                    .foregroundColor(.yellow)
-                    .padding(8)
-                    .background(Color.black.opacity(0.5))
-                    .clipShape(Circle())
+    private var warningsOverlay: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if isRelocMissing {
+                warningBadge(color: .yellow) { showMissingRelocAlert = true }
             }
-            .padding(8)
+            if dataIntegrityWarning != nil {
+                warningBadge(color: .orange) { showDataIntegrityAlert = true }
+            }
+        }
+        .padding(8)
+    }
+
+    private func warningBadge(color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title2)
+                .foregroundColor(color)
+                .padding(8)
+                .background(Color.black.opacity(0.5))
+                .clipShape(Circle())
         }
     }
 
@@ -1149,7 +1165,7 @@ struct ScanCard: View {
     }
 
     @ViewBuilder
-    private func itemCountsText(_ counts: (images: Int, proxy: Int, depth: Int, cameras: Int)) -> some View {
+    private func itemCountsText(_ counts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int)) -> some View {
         let parts = buildItemCountParts(counts)
         if !parts.isEmpty {
             Text(parts.joined(separator: " · "))
@@ -1158,13 +1174,35 @@ struct ScanCard: View {
         }
     }
 
-    private func buildItemCountParts(_ counts: (images: Int, proxy: Int, depth: Int, cameras: Int)) -> [String] {
+    private func buildItemCountParts(_ counts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int)) -> [String] {
         var parts: [String] = []
         if counts.images > 0 { parts.append("\(counts.images) images") }
         if counts.proxy > 0 { parts.append("\(counts.proxy) proxy") }
         if counts.depth > 0 { parts.append("\(counts.depth) depth") }
+        if counts.confidence > 0 { parts.append("\(counts.confidence) confidence") }
         if counts.cameras > 0 { parts.append("\(counts.cameras) cameras") }
         return parts
+    }
+
+    /// Flags a gross capture-modality disparity. Every captured frame writes an image + camera, but
+    /// depth/confidence can silently fall out mid-scan (e.g. RoomPlan reconfiguring the session). A
+    /// handful missing is tolerable; when depth or confidence is present in far fewer than the frame
+    /// count, the capture is likely unusable for downstream reconstruction. Returns a user-facing
+    /// message, or nil when the capture looks complete enough to judge.
+    private var dataIntegrityWarning: String? {
+        // Only LiDAR devices capture depth/confidence. On non-LiDAR ("lite mode") devices their
+        // absence is expected, not a defect — never warn there.
+        guard ARCoverageView.supportsLiDAR else { return nil }
+        guard let c = itemCounts else { return nil }
+        let frames = max(c.images, c.cameras)
+        guard frames >= AppConstants.captureIntegrityMinFrames else { return nil } // too small to judge
+        let floorCount = Int(Double(frames) * AppConstants.captureIntegrityMinFraction)
+        var deficient: [String] = []
+        if c.depth < floorCount { deficient.append("depth (\(c.depth)/\(frames))") }
+        if c.confidence < floorCount { deficient.append("confidence (\(c.confidence)/\(frames))") }
+        guard !deficient.isEmpty else { return nil }
+        return "This scan recorded \(frames) frames but only \(deficient.joined(separator: " and ")). "
+            + "The capture is grossly incomplete and is likely unusable for 3D reconstruction downstream — consider re-scanning."
     }
 
     @ViewBuilder

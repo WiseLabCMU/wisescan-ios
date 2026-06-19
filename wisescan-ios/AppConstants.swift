@@ -93,6 +93,8 @@ enum AppConstants {
     static let overlapBaseThreshold: Float = 0.15            // movement threshold base for frame capture
     static let overlapMinThreshold: Float = 0.01             // minimum movement threshold
     static let maxColorizationFrames: Int = 150              // max sampled frames for vertex coloring
+    static let captureIntegrityMinFrames: Int = 4            // min captured frames before judging modality completeness (too few to be meaningful below this)
+    static let captureIntegrityMinFraction: Double = 0.5     // a modality (depth/confidence) present in fewer than this fraction of frames = grossly incomplete capture → warn the user
     static let jpegCompressionQuality: CGFloat = 0.85        // JPEG quality for captured frames
     static let blurWarningTimeout: TimeInterval = 1.5        // seconds before blur warning auto-dismisses
     static let consecutiveBlurThreshold: Int = 5             // blurred frames before warning triggers
