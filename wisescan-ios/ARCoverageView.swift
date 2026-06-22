@@ -77,6 +77,13 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.finalCapturedRoomBinding = $finalCapturedRoom
         context.coordinator.hasWorldMap.store(config.initialWorldMap != nil, ordering: .relaxed)
         context.coordinator.scanStore = scanStore
+        // Genuine map-load failure on the fresh-view path (requested but archive missing/corrupt) —
+        // knowable synchronously here. Mirror of the updateUIView relocalization branch; replaces the
+        // racy per-frame inference removed from driveAlignmentPhase (see that comment + git log).
+        if initialWorldMapURL != nil && config.initialWorldMap == nil {
+            let coord = context.coordinator
+            DispatchQueue.main.async { coord.scanStore?.mapLoadFailed = true }
+        }
 
         // Always start with the live camera feed — even in VR mode.
         // The VR point cloud + skybox are activated only when recording starts (in updateUIView).
@@ -232,6 +239,18 @@ struct ARCoverageView: UIViewRepresentable {
                 let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
                 context.coordinator.hasWorldMap.store(config.initialWorldMap != nil, ordering: .relaxed)
                 context.coordinator.hasSeenRelocalizing.store(false, ordering: .relaxed)
+                // A GENUINE map-load failure (a relocalization map was requested but the archive was
+                // missing/corrupt) is knowable HERE, synchronously, the instant the config is built.
+                // Surface it now — do NOT infer it per-frame from `phase==.loadingWorldMap &&
+                // !hasWorldMap`: that check ran on the AR delegate's background queue and raced THIS
+                // main-thread config apply. On a stalled main thread (multi-second AR stalls on
+                // marginal devices) the per-frame check won, saw hasWorldMap still false, and
+                // FALSE-flagged a failure → mapLoadFailed → resetCaptureState wiped the just-armed
+                // link-adjacent routing → ungated record button + 90°/offset ghost. (See git log.)
+                if initialWorldMapURL != nil && config.initialWorldMap == nil {
+                    let coord = context.coordinator
+                    DispatchQueue.main.async { coord.scanStore?.mapLoadFailed = true }
+                }
                 uiView.session.run(config, options: runOptions)
 
                 // Background parse the new ghost mesh
@@ -1313,14 +1332,13 @@ struct ARCoverageView: UIViewRepresentable {
             // treat that the same as a no-world-map flow.
             let worldMapWasRequested = phase == .loadingWorldMap || hasWorldMap.load(ordering: .relaxed)
 
-            if phase == .loadingWorldMap && !hasWorldMap.load(ordering: .relaxed) {
-                // The world map file was missing or corrupted and failed to load
-                DispatchQueue.main.async { [weak self] in
-                    self?.scanStore?.mapLoadFailed = true
-                    self?.scanStore?.capturePhase = .idle
-                }
-                return
-            }
+            // NOTE: map-load failure is NOT inferred here anymore. This delegate runs on a background
+            // queue, so on a stalled main thread it could observe `phase==.loadingWorldMap` (set
+            // synchronously by Connect Adjacent) BEFORE updateUIView/makeUIView had applied the
+            // world-map config (which sets hasWorldMap) — and false-flag a failure that wiped the
+            // link-adjacent routing. Genuine failure is now detected synchronously at the config-build
+            // sites (makeUIView + the updateUIView relocalization branch), where the load result is
+            // known for certain. Here we simply wait for relocalization to complete.
 
             let isRelocalized = isTrackingNormal && (!worldMapWasRequested || hasSeenRelocalizing.load(ordering: .relaxed))
 

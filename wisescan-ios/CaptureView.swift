@@ -991,13 +991,6 @@ struct CaptureView: View {
 
             showExtendPrompt = (scanStore.activeScanToExtend != nil)
 
-            // DIAGNOSTIC (perf flag only): routing state as the capture view appears. Compare against
-            // the 🔗 Connect-Adjacent-armed log (should match) and the later ⏺️ toggleRecording tap
-            // (if it differs, a 🧹 resetCaptureState fired in between). Remove once root-caused.
-            PerfDiag.log("👁️ CaptureView.onAppear: case=\(scanStore.activeScanCase.rawValue) "
-                + "toExtend=\(scanStore.activeScanToExtend != nil) loc=\(scanStore.activeLocationForScan != nil) "
-                + "phase=\(scanStore.capturePhase) ghost=\(cachedGhostMeshData != nil) tab=\(selectedTab)")
-
             // Prepare haptic engine for pin drop
             hapticGenerator.prepare()
 

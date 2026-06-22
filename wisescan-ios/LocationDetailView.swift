@@ -154,12 +154,6 @@ struct LocationDetailView: View {
                                         // off). CaptureView.onDisappear → resetCaptureState clears this
                                         // if the user backs out.
                                         scanStore.capturePhase = .loadingWorldMap
-                                        // DIAGNOSTIC (perf flag only): link-adjacent flow armed. The
-                                        // capture view's 👁️ onAppear should report the same state;
-                                        // any 🧹 resetCaptureState between here and the ⏺️ record tap
-                                        // is the bug. Remove once root-caused.
-                                        PerfDiag.log("🔗 Connect Adjacent armed: case=\(scanStore.activeScanCase.rawValue) "
-                                            + "toExtend=set loc=set phase=\(scanStore.capturePhase) → tab 1")
                                         selectedTab = 1
                                     }, label: {
                                         HStack {
