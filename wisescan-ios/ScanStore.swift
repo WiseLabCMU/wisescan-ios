@@ -335,7 +335,14 @@ class ScanStore {
 
     /// Resets all capture-related state to idle defaults.
     /// Call from `onDisappear`, `cancelAlignment`, or any flow that abandons the current capture.
-    func resetCaptureState() {
+    func resetCaptureState(_ callerFile: String = #fileID, _ callerLine: Int = #line, _ caller: String = #function) {
+        // DIAGNOSTIC (perf flag only): record every reset with its EXACT call site + the routing it is
+        // about to wipe. #fileID/#line/#function default args evaluate at the call site, so this names
+        // the caller with zero call-site edits. Tracking down what clears link-adjacent routing
+        // (activeScanCase/activeScanToExtend) mid-flow → un-aligned ghost-jump scan. Remove once found.
+        PerfDiag.log("🧹 resetCaptureState ← \(callerFile):\(callerLine) \(caller) | "
+            + "was case=\(activeScanCase.rawValue) toExtend=\(activeScanToExtend != nil) "
+            + "loc=\(activeLocationForScan != nil) phase=\(capturePhase) relocMap=\(activeRelocalizationMap != nil)")
         activeLocationForScan = nil
         activeRelocalizationMap = nil
         activeScanToExtend = nil

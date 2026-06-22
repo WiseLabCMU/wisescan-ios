@@ -726,6 +726,71 @@ struct CaptureView: View {
                 )
             }
 
+            // Stop Recording menu — anchored at the BOTTOM, just above the record button.
+            // Replaces a .confirmationDialog, which iPad rendered as a centered/top popover far
+            // from the record button the user just tapped. Same three actions.
+            if showStopMenu {
+                ZStack(alignment: .bottom) {
+                    Color.black.opacity(0.45)
+                        .ignoresSafeArea()
+                        .onTapGesture { showStopMenu = false }
+
+                    VStack(spacing: 12) {
+                        Text("Stop Recording")
+                            .font(.headline)
+                            .foregroundColor(.white)
+
+                        Button(action: {
+                            showStopMenu = false
+                            stopRecording()
+                        }, label: {
+                            Text("Save & End")
+                                .font(.body.bold())
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                                .background(Color.cyan.opacity(0.85))
+                                .foregroundColor(.white)
+                                .cornerRadius(14)
+                        })
+
+                        Button(action: {
+                            showStopMenu = false
+                            if scanStats.hasEnoughFeaturesForRelocalization {
+                                pinAndExtend()
+                            } else {
+                                showExtendErrorAlert = true
+                            }
+                        }, label: {
+                            Text("Save & Scan Adjacent")
+                                .font(.body.bold())
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                                .background(Color.indigo.opacity(0.85))
+                                .foregroundColor(.white)
+                                .cornerRadius(14)
+                        })
+
+                        Button(action: { showStopMenu = false }, label: {
+                            Text("Cancel")
+                                .font(.body)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 14)
+                                .background(.ultraThinMaterial)
+                                .foregroundColor(.white)
+                                .cornerRadius(14)
+                        })
+                    }
+                    .padding(20)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(24)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 130) // sit just above the record button
+                }
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.2), value: showStopMenu)
+                .zIndex(10)
+            }
+
             // Ghost-mesh manual nudger (restored from main): a bottom-left status chip that opens an
             // alignment dialog, plus a slider overlay to rotate/translate the ghost when
             // relocalization is imperfect. Complements the anchor-based AlignmentOverlayView above;
@@ -926,6 +991,13 @@ struct CaptureView: View {
 
             showExtendPrompt = (scanStore.activeScanToExtend != nil)
 
+            // DIAGNOSTIC (perf flag only): routing state as the capture view appears. Compare against
+            // the 🔗 Connect-Adjacent-armed log (should match) and the later ⏺️ toggleRecording tap
+            // (if it differs, a 🧹 resetCaptureState fired in between). Remove once root-caused.
+            PerfDiag.log("👁️ CaptureView.onAppear: case=\(scanStore.activeScanCase.rawValue) "
+                + "toExtend=\(scanStore.activeScanToExtend != nil) loc=\(scanStore.activeLocationForScan != nil) "
+                + "phase=\(scanStore.capturePhase) ghost=\(cachedGhostMeshData != nil) tab=\(selectedTab)")
+
             // Prepare haptic engine for pin drop
             hapticGenerator.prepare()
 
@@ -1075,19 +1147,6 @@ struct CaptureView: View {
             Text("This scan's mapping status is '\(scanStats.mappingStatus)'. Relocalizing or extending it "
                 + "later requires a 'mapped' world map. Keep scanning the area to improve it, or discard "
                 + "and start over.")
-        }
-        .confirmationDialog("Stop Recording", isPresented: $showStopMenu, titleVisibility: .visible) {
-            Button("Save & End") {
-                stopRecording()
-            }
-            Button("Save & Scan Adjacent") {
-                if scanStats.hasEnoughFeaturesForRelocalization {
-                    pinAndExtend()
-                } else {
-                    showExtendErrorAlert = true
-                }
-            }
-            Button("Cancel", role: .cancel) { }
         }
         .alert("Not Enough Features", isPresented: $showExtendErrorAlert) {
             Button("OK", role: .cancel) { }

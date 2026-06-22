@@ -16,6 +16,12 @@ extension CaptureView {
                 showStopMenu = true
             }
         } else {
+            // DIAGNOSTIC (perf flag only): state seen by a MANUAL record tap. If this logs with
+            // case != linkAdjacent during a Connect Adjacent flow, the routing was wiped upstream
+            // (see the 🧹 resetCaptureState logs just before this). Remove once root-caused.
+            PerfDiag.log("⏺️ toggleRecording(start tap): case=\(scanStore.activeScanCase.rawValue) "
+                + "phase=\(scanStore.capturePhase) toExtend=\(scanStore.activeScanToExtend != nil) "
+                + "loc=\(scanStore.activeLocationForScan != nil) tracking=\(scanStats.trackingStatus)")
             // Link-adjacent recording ALWAYS starts programmatically after the user aligns to the
             // previous scan: confirmAlignment / pinAndExtend capture Pin A, reset into the new map,
             // place Pin B, then call startRecording() directly (awaitStabilizationAndPlacePinB),
