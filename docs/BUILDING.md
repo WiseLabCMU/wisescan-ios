@@ -8,6 +8,11 @@ CLI build, lint, and CI-validation workflows for Scan4D (wisescan-ios). For loca
   sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
   ```
 - SwiftLint installed via Homebrew: `brew install swiftlint`
+- Git hooks (one-time, after cloning) — install the pre-commit hook:
+  ```bash
+  ./scripts/install-hooks.sh
+  ```
+  It blocks a commit if Xcode's project serializer has silently stripped the `x-release-please-version` markers from `project.pbxproj`. Xcode rewrites that file whenever you open the project or change a build setting, so it's easy to stage a reserialized version with the markers gone — the hook catches it before it lands. See [CONTRIBUTING.md](../CONTRIBUTING.md) for why the markers matter.
 
 ## Build (CLI)
 ```bash
