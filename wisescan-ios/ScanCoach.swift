@@ -209,12 +209,18 @@ class ScanCoach {
                         self.tipShowCounts[newTip.id, default: 0] += 1
                         self.tipCooldowns[newTip.id] = now
                     }
-                } else if let current = self.currentTip, current.priority >= .critical {
-                    // CRITICAL/WARNING condition resolved — clear immediately
-                    if current.priority == .critical || current.priority == .warning {
-                        self.currentTip = nil
-                        self.tipShownAt = nil
-                    }
+                } else if let current = self.currentTip, current.priority >= .warning {
+                    // CRITICAL/WARNING condition resolved (no candidate tip this eval) — clear
+                    // immediately rather than waiting out the full auto-dismiss timer. The guard MUST
+                    // be `>= .warning`: `.critical` is the top tier, so the old `>= .critical` only
+                    // ever matched critical and the inner `== .warning` branch was dead code — which
+                    // is why a resolved WARNING (e.g. "Slow down — moving too fast" after the blur
+                    // flag clears at blurWarningTimeout = 1.5s) lingered for the full
+                    // warningAutoDismissSeconds (8s) instead of dismissing when the user held still.
+                    // Guidance/info tips are time/cooldown-driven (not condition-driven), so the
+                    // `>= .warning` guard correctly leaves them to their own auto-dismiss.
+                    self.currentTip = nil
+                    self.tipShownAt = nil
                 }
             }
         }
