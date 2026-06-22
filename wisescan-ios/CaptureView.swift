@@ -988,24 +988,39 @@ struct CaptureView: View {
             MetaWearableManager.shared.stopStreaming()
             MetaWearableManager.shared.activeCaptureSession = nil
 
-            if isRecording {
-                stopRecording(force: true)
+            // A transient onDisappear can arrive when we are NOT actually leaving the capture tab
+            // (selectedTab == 1): SwiftUI tab-churn during a Connect Adjacent / Rescan hand-off —
+            // aggravated by the multi-second main-thread stalls these AR sessions hit on marginal
+            // devices — can deliver this callback AFTER we've already switched back to capture and
+            // armed the next flow. Running the leaving-capture teardown then is the ROOT of the
+            // link-adjacent ghost-jump bug: resetCaptureState reverts activeScanCase /
+            // activeScanToExtend / activeLocationForScan to defaults while the ghost mesh (a separate
+            // @State) stays on screen — so the record button goes live + ungated (activeScanCase is no
+            // longer .linkAdjacent, defeating both the button .disabled and the toggleRecording guard)
+            // AND the resulting scan is context-less (stop prompts to name a brand-new location). Only
+            // tear down when genuinely leaving the capture tab. Mirrors the selectedTab != 1 guard the
+            // idle-teardown timer above already uses, and the routing snapshot performStopRecording
+            // takes to survive this same clobber on the stop path.
+            if selectedTab != 1 {
+                if isRecording {
+                    stopRecording(force: true)
+                }
+                // Always clear ghost state when leaving Capture.
+                // Preserve pendingStitchLink for in-flight saves — the async pipeline
+                // needs it to write stitching.json. It's consumed and nilled out by
+                // writeStitchingLinkIfPending when the save completes.
+                let inflightStitchLink = scanStore.pendingStitchLink
+                scanStore.resetCaptureState()
+                scanStore.pendingStitchLink = inflightStitchLink
+                cachedGhostMeshData = nil
+                showExtendOverlay = false
+                isARSessionReady = false
+                sessionStabilizationTask?.cancel()
+                sessionStabilizationTask = nil
+                saveNavigationTask?.cancel()
+                saveNavigationTask = nil
+                activeLocationName = nil
             }
-            // Always clear ghost state when leaving Capture.
-            // Preserve pendingStitchLink for in-flight saves — the async pipeline
-            // needs it to write stitching.json. It's consumed and nilled out by
-            // writeStitchingLinkIfPending when the save completes.
-            let inflightStitchLink = scanStore.pendingStitchLink
-            scanStore.resetCaptureState()
-            scanStore.pendingStitchLink = inflightStitchLink
-            cachedGhostMeshData = nil
-            showExtendOverlay = false
-            isARSessionReady = false
-            sessionStabilizationTask?.cancel()
-            sessionStabilizationTask = nil
-            saveNavigationTask?.cancel()
-            saveNavigationTask = nil
-            activeLocationName = nil
         }
         .onChange(of: scanStore.activeLocationForScan) { _, newLocId in
             if let locId = newLocId {
