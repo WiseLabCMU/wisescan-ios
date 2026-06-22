@@ -403,6 +403,23 @@ class ScanStats {
     var detectedClasses: Set<String> = [] // Semantic classes detected so far (for HUD display)
     var roomPlanInstruction: RoomCaptureSession.Instruction? // Latest RoomPlan coaching instruction
 
+    // MARK: - Space Analysis (pre-scan staging check)
+    /// Latest ambient intensity from ARFrame.lightEstimate (lumens, ~0–2000). Updated per-frame
+    /// during analysis phase; also available during recording for ScanCoach if desired.
+    var ambientIntensity: CGFloat = 0
+    /// Running average ambient intensity over the analysis window.
+    var averageAmbientIntensity: CGFloat = 0
+    /// Count of ambient light samples collected (for running average).
+    var ambientLightSampleCount: Int = 0
+    /// Latest CapturedRoom from RoomPlan (analysis or recording). Checked by SpaceAnalyzer
+    /// for door/screen detection.
+    var analysisRoom: CapturedRoom?
+    /// Whether any person was detected (via segmentation stencil) during the analysis window.
+    var personDetectedDuringAnalysis: Bool = false
+    /// Latest camera yaw (radians, ±π) forwarded from ARFrame. SpaceAnalyzer uses this to
+    /// track 360° coverage progress.
+    var analysisYaw: Float = 0
+
     // Capacity thresholds (tunable)
     private let maxPolygons: Double = 2_000_000
     private let maxMemoryDeltaMB: Double = 800 // Memory growth from scanning, not total app memory
