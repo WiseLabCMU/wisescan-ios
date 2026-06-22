@@ -635,7 +635,13 @@ struct CaptureView: View {
                             // After Stop, the mesh export/save runs while isRecording is already
                             // false; block taps during that window so a new recording can't start
                             // on top of the in-flight export. Also block during analysis.
-                            .disabled(isProcessingMesh || isWaitingToSave || isAnalyzing || showAnalysisReport)
+                            // And in a link-adjacent flow recording starts programmatically after
+                            // alignment, never from this button — disable it for the whole
+                            // pre-recording window so a tap can't race ahead of the alignment overlay
+                            // and start an un-aligned scan (the ~90°/offset ghost-jump race).
+                            // activeScanCase is set synchronously at the trigger; cleared on save.
+                            .disabled(isProcessingMesh || isWaitingToSave || isAnalyzing || showAnalysisReport
+                                      || (scanStore.activeScanCase == .linkAdjacent && !isRecording))
                             .offset(y: isRecording ? -20 : 0)
                         }
                     }

@@ -16,15 +16,22 @@ extension CaptureView {
                 showStopMenu = true
             }
         } else {
-            // Link-adjacent must align to the previous scan FIRST — that alignment (Pin A) establishes
-            // the shared world frame, then recording starts programmatically (confirmAlignment →
-            // awaitStabilizationAndPlacePinB → startRecording). Block a manual record-start until then.
-            // This also closes a race: the alignment phase is set in ARCoverageView.onAppear (after the
-            // first render), so on a warm/chained session the record button can be live while
-            // capturePhase is still .idle; tapping it would start a normal, UN-aligned scan and the
-            // ghost/world frame ends up wrong (~90° off). Programmatic starts bypass toggleRecording.
-            if scanStore.activeScanCase == .linkAdjacent && scanStore.activeScanToExtend != nil
-                && scanStore.capturePhase != .recording {
+            // Link-adjacent recording ALWAYS starts programmatically after the user aligns to the
+            // previous scan: confirmAlignment / pinAndExtend capture Pin A, reset into the new map,
+            // place Pin B, then call startRecording() directly (awaitStabilizationAndPlacePinB),
+            // bypassing toggleRecording. A MANUAL record tap in a link-adjacent flow is therefore never
+            // the intended path — allowing it starts an un-aligned scan whose world frame is wrong
+            // (~90° off, or a smaller offset). Block it unconditionally for the whole pre-recording
+            // window.
+            //
+            // Keyed on activeScanCase ALONE — not activeScanToExtend or capturePhase — because both are
+            // cleared/late-set inside the flow: confirmAlignment/pinAndExtend nil out activeScanToExtend,
+            // and capturePhase enters the alignment set only in ARCoverageView.onAppear (after the first
+            // render). Either left a window where the live record button could start an un-aligned scan
+            // (the ~90°/offset ghost-jump race). activeScanCase is set synchronously at the trigger
+            // (LocationDetailView / pinAndExtend) and reset to .rescanSpace on save/abort, so it is true
+            // for exactly the pre-recording window and never blocks normal scans or rescans.
+            if scanStore.activeScanCase == .linkAdjacent {
                 showTransientMessage("Align with the previous scan first", duration: 3)
                 return
             }
