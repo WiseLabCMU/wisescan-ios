@@ -16,6 +16,16 @@ extension CaptureView {
                 showStopMenu = true
             }
         } else {
+            // Gate user-initiated record-start on tracking being out of the cold-init state, so a scan
+            // can't begin while VIO is still initializing (those frames have no reliable world frame —
+            // the cause of stuck/empty cold first scans). Only blocks .initializing/.notAvailable;
+            // .relocalizing is allowed so rescan/link-adjacent relocalization flows still start. The
+            // programmatic extend/alignment start path (awaitStabilizationAndPlacePinB) bypasses
+            // toggleRecording and already waits for .normal, so chained scans are unaffected.
+            guard scanStats.trackingStatus.isReadyToStartRecording else {
+                showTransientMessage("Hold steady — establishing tracking…", duration: 3)
+                return
+            }
             startRecording()
         }
     }

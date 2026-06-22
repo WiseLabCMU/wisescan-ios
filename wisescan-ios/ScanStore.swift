@@ -371,6 +371,17 @@ enum TrackingStatus: Equatable {
 
     /// Whether the session has full positional tracking.
     var isNormal: Bool { self == .normal }
+
+    /// Whether tracking is established enough to BEGIN a recording. Blocks only the cold-start states
+    /// where VIO isn't up yet (frames captured then have no reliable world frame). `.relocalizing` is
+    /// intentionally allowed — rescan/adjacent flows establish their world frame via relocalization —
+    /// and transient `.limited` reasons (motion/features) are left to ScanCoach rather than blocking.
+    var isReadyToStartRecording: Bool {
+        switch self {
+        case .notAvailable, .limited(reason: .initializing): return false
+        default: return true
+        }
+    }
 }
 
 @Observable
