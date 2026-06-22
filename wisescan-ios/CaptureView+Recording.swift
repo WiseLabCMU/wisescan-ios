@@ -16,6 +16,18 @@ extension CaptureView {
                 showStopMenu = true
             }
         } else {
+            // Link-adjacent must align to the previous scan FIRST — that alignment (Pin A) establishes
+            // the shared world frame, then recording starts programmatically (confirmAlignment →
+            // awaitStabilizationAndPlacePinB → startRecording). Block a manual record-start until then.
+            // This also closes a race: the alignment phase is set in ARCoverageView.onAppear (after the
+            // first render), so on a warm/chained session the record button can be live while
+            // capturePhase is still .idle; tapping it would start a normal, UN-aligned scan and the
+            // ghost/world frame ends up wrong (~90° off). Programmatic starts bypass toggleRecording.
+            if scanStore.activeScanCase == .linkAdjacent && scanStore.activeScanToExtend != nil
+                && scanStore.capturePhase != .recording {
+                showTransientMessage("Align with the previous scan first", duration: 3)
+                return
+            }
             // Gate user-initiated record-start on tracking being out of the cold-init state, so a scan
             // can't begin while VIO is still initializing (those frames have no reliable world frame —
             // the cause of stuck/empty cold first scans). Only blocks .initializing/.notAvailable;
