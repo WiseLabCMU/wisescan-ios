@@ -122,9 +122,10 @@ enum AppConstants {
     static let scanCoachingEnabled: Bool = true                // default for the scan coaching toggle
 
     // MARK: - Space Analysis Constants
-    static let analysisAmbientLightThreshold: CGFloat = 500     // lumens below which lighting is "Low"
-    static let analysisTimeoutSeconds: TimeInterval = 30        // fallback timeout if 360° not reached
-    static let analysisYawCompletionDeg: Float = 330            // yaw coverage (degrees) to count as "360°" (allow slight gap)
+    static let analysisAmbientLightAlertThreshold: CGFloat = 250  // lux below which lighting is "Very Low" (alert tier — RGB nearly useless)
+    static let analysisAmbientLightWarnThreshold: CGFloat = 500   // lux below which lighting is "Dim" (warning tier — reduced quality)
+    static let analysisTimeoutSeconds: TimeInterval = 30          // fallback timeout if 360° not reached
+    static let analysisYawCompletionDeg: Float = 330              // yaw coverage (degrees) to count as "360°" (allow slight gap)
 }
 
 // MARK: - Semantic View Mode

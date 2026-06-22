@@ -1102,7 +1102,7 @@ struct CaptureView: View {
         // Space Analysis: feed camera yaw to the analyzer for 360° progress
         .onChange(of: scanStats.analysisYaw) {
             if isAnalyzing {
-                spaceAnalyzer.updateYaw(scanStats.analysisYaw)
+                spaceAnalyzer.updateYaw(scanStats.analysisYaw, currentLux: scanStats.ambientIntensity)
             }
         }
         // Space Analysis: auto-complete when 360° is covered
@@ -1111,7 +1111,11 @@ struct CaptureView: View {
                 stopAnalysis(cancelled: false)
             }
         }
-        .sheet(isPresented: $showAnalysisReport) {
+        .sheet(isPresented: $showAnalysisReport, onDismiss: {
+            // Safety net: ensure analysis state is fully cleaned up when the report is dismissed.
+            // The normal flow stops analysis before showing the report, but this guards edge cases.
+            if isAnalyzing { isAnalyzing = false }
+        }) {
             if let result = analysisResult {
                 ScanAnalysisReportView(result: result)
             }

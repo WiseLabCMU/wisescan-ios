@@ -955,6 +955,11 @@ struct ARCoverageView: UIViewRepresentable {
             isAnalysisRoomPlan = false
             needsSemanticReassert.store(false, ordering: .relaxed)
 
+            // Clean up any outline entities RoomPlan may have rendered during analysis,
+            // and clear latestCapturedRoom so stale data doesn't bleed into a future recording.
+            latestCapturedRoom = nil
+            removeRoomPlanOutlines()
+
             // Remove temporarily-added personSegmentation if privacy filter is still OFF
             if addedSegForAnalysis,
                let arSession = arView?.session,
@@ -966,7 +971,7 @@ struct ARCoverageView: UIViewRepresentable {
             }
             addedSegForAnalysis = false
 
-            PerfDiag.log("RoomPlan analysis session stopped")
+            PerfDiag.log("RoomPlan analysis session stopped (outlines cleared)")
         }
 
         // MARK: - Person Detection Helper

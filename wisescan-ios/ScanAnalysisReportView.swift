@@ -105,6 +105,9 @@ struct ScanAnalysisReportView: View {
         case .warn:
             return Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundColor(.orange)
+        case .alert:
+            return Image(systemName: "xmark.octagon.fill")
+                .foregroundColor(.red)
         case .skipped:
             return Image(systemName: "questionmark.circle.fill")
                 .foregroundColor(.gray)
@@ -113,7 +116,7 @@ struct ScanAnalysisReportView: View {
 
     private func statusMessage(for status: SpaceAnalysisResult.CheckStatus) -> String {
         switch status {
-        case .pass(let msg), .warn(let msg), .skipped(let msg):
+        case .pass(let msg), .warn(let msg), .alert(let msg), .skipped(let msg):
             return msg
         }
     }
@@ -122,6 +125,7 @@ struct ScanAnalysisReportView: View {
         switch status {
         case .pass: return .secondary
         case .warn: return .primary
+        case .alert: return .primary
         case .skipped: return .secondary
         }
     }
@@ -130,6 +134,7 @@ struct ScanAnalysisReportView: View {
         switch status {
         case .pass: return Color.green.opacity(0.08)
         case .warn: return Color.orange.opacity(0.08)
+        case .alert: return Color.red.opacity(0.10)
         case .skipped: return Color(.secondarySystemGroupedBackground)
         }
     }

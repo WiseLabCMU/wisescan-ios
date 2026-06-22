@@ -195,6 +195,18 @@ struct SettingsView: View {
                         .tint(.cyan)
                         .padding(.vertical, 4)
 
+                        Toggle(isOn: $semanticLabeling) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Semantic Labeling")
+                                    .foregroundColor(.white)
+                                Text("Enables room structure detection (walls, floors, doors) during scanning for semantic labels in exports and AR overlays.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                        .tint(.cyan)
+                        .padding(.vertical, 4)
+
                     } header: {
                         Text("SCAN CAPTURE")
                     }
@@ -381,18 +393,6 @@ struct SettingsView: View {
                                     Text("Pause VR Compute")
                                         .foregroundColor(.white)
                                     Text("Skips the entire VR GPU pipeline (point-cloud projection, voxel integration, extraction, and bloom) — not just hides it. Isolation test: if the freeze disappears with this on, the GPU pipeline is implicated. Applied per frame in VR capture.")
-                                        .font(.caption)
-                                        .foregroundColor(.gray)
-                                }
-                            }
-                            .tint(.orange)
-                            .padding(.vertical, 4)
-
-                            Toggle(isOn: $semanticLabeling) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Semantic Labeling")
-                                        .foregroundColor(.white)
-                                    Text("Enables RoomPlan semantic classification (walls, floors, doors, etc.) during scanning. Disable to reduce memory usage on constrained devices.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }
