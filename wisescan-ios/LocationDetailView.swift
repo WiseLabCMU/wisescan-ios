@@ -145,6 +145,15 @@ struct LocationDetailView: View {
                                         scanStore.activeRelocalizationMap = latestScan.worldMapURL
                                         scanStore.activeScanToExtend = latestScan.id
                                         scanStore.activeScanCase = .linkAdjacent
+                                        // Enter the alignment phase synchronously, BEFORE navigating to
+                                        // capture, so the "align with previous scan" overlay is up on
+                                        // first render. Otherwise the phase is only set in
+                                        // ARCoverageView.onAppear (after first render), leaving a window
+                                        // where the record button is live but capturePhase is still
+                                        // .idle — a fast tap then starts an un-aligned scan (ghost ~90°
+                                        // off). CaptureView.onDisappear → resetCaptureState clears this
+                                        // if the user backs out.
+                                        scanStore.capturePhase = .loadingWorldMap
                                         selectedTab = 1
                                     }, label: {
                                         HStack {
