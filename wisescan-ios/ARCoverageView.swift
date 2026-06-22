@@ -869,11 +869,16 @@ struct ARCoverageView: UIViewRepresentable {
         /// onto whatever config RoomPlan applied, running with NO reset options so tracking, the world
         /// map, and RoomPlan itself all keep running — we only add the two semantics.
         /// Called from the RoomPlan `didStartWith` delegate, which fires after RoomPlan's config lands.
+        ///
+        /// During analysis mode, personSegmentation is also re-asserted even when privacy filter is
+        /// OFF, since we temporarily enable it for person detection (see `startAnalysisRoomPlanSession`).
         func reassertFrameSemantics() {
             guard let session = arView?.session,
                   let config = session.configuration as? ARWorldTrackingConfiguration else { return }
             var changed = false
-            if privacyFilter,
+            // Re-assert personSegmentation if: (a) privacy filter is on, OR (b) analysis mode
+            // (where we temporarily enable segmentation for person detection regardless of filter).
+            if (privacyFilter || isAnalysisRoomPlan),
                ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth),
                !config.frameSemantics.contains(.personSegmentationWithDepth) {
                 config.frameSemantics.insert(.personSegmentationWithDepth)
@@ -908,11 +913,29 @@ struct ARCoverageView: UIViewRepresentable {
         /// When true, `stopAnalysisRoomPlanSession` cleans up without touching finalCapturedRoom.
         private(set) var isAnalysisRoomPlan = false
 
+        /// True if we temporarily added personSegmentation for the analysis phase (privacy filter was OFF).
+        /// On analysis stop we'll remove it to restore the pre-analysis AR config.
+        private var addedSegForAnalysis = false
+
         /// Starts RoomPlan for the space analysis phase, regardless of the Semantic Labeling toggle.
-        /// This enables door/screen detection even when the user has labeling turned off for scans.
+        /// Also ensures `personSegmentationWithDepth` is active so we can detect people even when
+        /// the Privacy Filter is off. This enables door/screen/person detection unconditionally.
         func startAnalysisRoomPlanSession(arSession: ARSession) {
             guard roomCaptureSession == nil else { return } // don't double-start
             isAnalysisRoomPlan = true
+            addedSegForAnalysis = false
+
+            // Ensure person segmentation is available for analysis even when Privacy Filter is OFF
+            if !privacyFilter,
+               ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth),
+               let config = arSession.configuration as? ARWorldTrackingConfiguration,
+               !config.frameSemantics.contains(.personSegmentationWithDepth) {
+                config.frameSemantics.insert(.personSegmentationWithDepth)
+                arSession.run(config, options: []) // no reset — preserve tracking
+                addedSegForAnalysis = true
+                PerfDiag.log("Analysis: temporarily enabled personSegmentation (privacy filter OFF)")
+            }
+
             roomCaptureSession = RoomCaptureSession(arSession: arSession)
             roomCaptureSession?.delegate = self
             let config = RoomCaptureSession.Configuration()
@@ -922,7 +945,8 @@ struct ARCoverageView: UIViewRepresentable {
 
         /// Stops the analysis-mode RoomPlan session. Does NOT touch finalCapturedRoom/binding
         /// (that's for the recording flow). Pushes the latest room to scanStats.analysisRoom
-        /// so SpaceAnalyzer can read it.
+        /// so SpaceAnalyzer can read it. If we temporarily added personSegmentation for the
+        /// analysis phase, remove it to restore the pre-analysis state.
         func stopAnalysisRoomPlanSession() {
             guard let session = roomCaptureSession, isAnalysisRoomPlan else { return }
             scanStats?.analysisRoom = latestCapturedRoom
@@ -930,6 +954,18 @@ struct ARCoverageView: UIViewRepresentable {
             roomCaptureSession = nil
             isAnalysisRoomPlan = false
             needsSemanticReassert.store(false, ordering: .relaxed)
+
+            // Remove temporarily-added personSegmentation if privacy filter is still OFF
+            if addedSegForAnalysis,
+               let arSession = arView?.session,
+               let config = arSession.configuration as? ARWorldTrackingConfiguration,
+               config.frameSemantics.contains(.personSegmentationWithDepth) {
+                config.frameSemantics.remove(.personSegmentationWithDepth)
+                arSession.run(config, options: [])
+                PerfDiag.log("Analysis: removed temporary personSegmentation (privacy filter OFF)")
+            }
+            addedSegForAnalysis = false
+
             PerfDiag.log("RoomPlan analysis session stopped")
         }
 

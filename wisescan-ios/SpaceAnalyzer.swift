@@ -2,7 +2,7 @@ import Foundation
 import RoomPlan
 
 /// Results of a pre-scan space analysis. Each check is either `.pass` (good), `.warn` (actionable),
-/// or `.skipped` (could not evaluate, e.g. privacy filter off for person detection).
+/// or `.skipped` (could not evaluate, e.g. RoomPlan not available for doors/screens).
 struct SpaceAnalysisResult {
     enum CheckStatus {
         case pass(String)         // Green: condition is good, with description
@@ -142,18 +142,16 @@ class SpaceAnalyzer {
         }
 
         // ── People/Pets ──
+        // Person segmentation is always active during analysis (temporarily enabled even when
+        // Privacy Filter is OFF), so we can always report on detection results.
         if stats.personDetectedDuringAnalysis {
             if privacyFilterOn {
                 result.people = .warn("People detected. They will be masked from raw data.\nNote: Person detections still appear in previews.")
             } else {
-                result.people = .warn("People detected. They will currently appear in raw data.\nTip: Enable the Privacy Filter to remove people from raw data.\nNote: Person detections still appear in previews.")
+                result.people = .warn("People detected. They will appear in raw data.\nTip: Enable the Privacy Filter to remove people from raw data.\nNote: Person detections still appear in previews.")
             }
-        } else if privacyFilterOn {
-            // Privacy filter is on, segmentation is available, and no people found = clear
-            result.people = .pass("No people detected")
         } else {
-            // Privacy filter off = segmentation buffer unavailable, can't detect
-            result.people = .skipped("Enable the Privacy Filter to check for people in the scene.")
+            result.people = .pass("No people detected")
         }
 
         return result
