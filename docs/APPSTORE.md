@@ -38,6 +38,7 @@ Scan4D is a professional-grade reality capture app for iPhone and iPad. It turns
 • 16-bit depth maps with confidence maps captured at adaptive frame rates
 • Scan capacity metrics: polygon count, drift tracking, session duration
 • Scan coaching: real-time tips guide scanning technique with 4-tier priority (tracking warnings, pattern hints, progress encouragement)
+• Space staging analyzer: optional pre-scan 360° sweep checks lighting, doors, screens, and people; presents a report with actionable tips before recording
 • Interactive 3D mesh preview with camera-sampled vertex coloring and loading indicator
 • Privacy filtering: person segmentation removes humans from meshes, face blurring in RGB exports
 • VIO tracking guard: automatic halt and save prompt on mid-scan tracking loss

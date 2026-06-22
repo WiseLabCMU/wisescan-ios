@@ -43,6 +43,11 @@ struct ARCoverageView: UIViewRepresentable {
     /// nominal config (the "Initializing" overlay covers it — non-blocking now the delegate is off-main).
     var pauseARSession: Bool = false
 
+    /// Space Analysis: when true, start a temporary RoomPlan session for staging checks (door/screen
+    /// detection) regardless of the Semantic Labeling toggle. The Coordinator's `didUpdate room:`
+    /// delegate pushes updates to `scanStats.analysisRoom`. Set false to stop and snapshot results.
+    @Binding var isAnalyzing: Bool
+
     /// Whether this device has LiDAR for scene reconstruction and depth capture.
     static let supportsLiDAR = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
 
@@ -130,6 +135,13 @@ struct ARCoverageView: UIViewRepresentable {
         if activeMeshColor != context.coordinator.activeMeshColor {
             context.coordinator.activeMeshColor = activeMeshColor
             context.coordinator.recolorActiveMeshEntities()
+        }
+
+        // Space Analysis: start/stop the analysis-mode RoomPlan session
+        if isAnalyzing && !context.coordinator.isAnalysisRoomPlan {
+            context.coordinator.startAnalysisRoomPlanSession(arSession: uiView.session)
+        } else if !isAnalyzing && context.coordinator.isAnalysisRoomPlan {
+            context.coordinator.stopAnalysisRoomPlanSession()
         }
 
         let modeChanged = (captureMode != context.coordinator.captureMode)
@@ -890,6 +902,68 @@ struct ARCoverageView: UIViewRepresentable {
             PerfDiag.log("RoomPlan session stopped (ARSession preserved)")
         }
 
+        // MARK: - Analysis-Mode RoomPlan
+
+        /// Whether the current RoomPlan session was started for analysis (not recording).
+        /// When true, `stopAnalysisRoomPlanSession` cleans up without touching finalCapturedRoom.
+        private(set) var isAnalysisRoomPlan = false
+
+        /// Starts RoomPlan for the space analysis phase, regardless of the Semantic Labeling toggle.
+        /// This enables door/screen detection even when the user has labeling turned off for scans.
+        func startAnalysisRoomPlanSession(arSession: ARSession) {
+            guard roomCaptureSession == nil else { return } // don't double-start
+            isAnalysisRoomPlan = true
+            roomCaptureSession = RoomCaptureSession(arSession: arSession)
+            roomCaptureSession?.delegate = self
+            let config = RoomCaptureSession.Configuration()
+            roomCaptureSession?.run(configuration: config)
+            PerfDiag.log("RoomPlan analysis session started (sharing ARSession)")
+        }
+
+        /// Stops the analysis-mode RoomPlan session. Does NOT touch finalCapturedRoom/binding
+        /// (that's for the recording flow). Pushes the latest room to scanStats.analysisRoom
+        /// so SpaceAnalyzer can read it.
+        func stopAnalysisRoomPlanSession() {
+            guard let session = roomCaptureSession, isAnalysisRoomPlan else { return }
+            scanStats?.analysisRoom = latestCapturedRoom
+            session.stop(pauseARSession: false)
+            roomCaptureSession = nil
+            isAnalysisRoomPlan = false
+            needsSemanticReassert.store(false, ordering: .relaxed)
+            PerfDiag.log("RoomPlan analysis session stopped")
+        }
+
+        // MARK: - Person Detection Helper
+
+        /// Quick strided scan of a segmentation stencil for person pixels. Returns true if the
+        /// buffer contains enough person-labeled pixels to indicate a real person (not noise).
+        /// Runs on the delegate queue so it must not retain the ARFrame.
+        static func hasPersonPixels(in mask: CVPixelBuffer) -> Bool {
+            CVPixelBufferLockBaseAddress(mask, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
+            guard let base = CVPixelBufferGetBaseAddress(mask) else { return false }
+            let w = CVPixelBufferGetWidth(mask)
+            let h = CVPixelBufferGetHeight(mask)
+            guard w > 0, h > 0 else { return false }
+            let stride = CVPixelBufferGetBytesPerRow(mask)
+            let ptr = base.assumingMemoryBound(to: UInt8.self)
+            let step = 8 // coarse sample for speed
+            var count = 0
+            let threshold = 20 // ~20 sampled pixels = real person, not noise
+            var y = 0
+            while y < h {
+                let row = ptr + y * stride
+                var x = 0
+                while x < w {
+                    if row[x] > 128 { count += 1 }
+                    if count >= threshold { return true }
+                    x += step
+                }
+                y += step
+            }
+            return false
+        }
+
         /// Renders oriented bounding-box wireframes from the latest CapturedRoom.
         /// Each Surface/Object becomes a set of 12 colored edges (thin boxes) with the
         /// correct transform. Throttled to avoid per-frame rebuilds.
@@ -1250,6 +1324,34 @@ struct ARCoverageView: UIViewRepresentable {
                 let camTransform = frame.camera.transform
                 DispatchQueue.main.async { [weak self] in
                     self?.updateConnectorBillboards(cameraTransform: camTransform)
+                }
+            }
+
+            // ── Space Analysis: ambient light + person detection ──
+            // Forward ambient light intensity to ScanStats every frame (cheap read). During analysis
+            // mode, also detect person presence via segmentation stencil and forward the camera yaw
+            // for 360° progress tracking. These are read by SpaceAnalyzer on main.
+            if let lightEstimate = frame.lightEstimate {
+                let intensity = lightEstimate.ambientIntensity
+                // Person detection: segmentation buffer is only present when privacy filter is ON
+                // (personSegmentationWithDepth is in frame semantics). When available, check if
+                // any person pixels exist. SpaceAnalyzer handles the "privacy off" case separately.
+                var hasPerson = false
+                if let seg = frame.segmentationBuffer {
+                    hasPerson = Self.hasPersonPixels(in: seg)
+                }
+                let yaw = frame.camera.eulerAngles.y // radians, ±π
+                DispatchQueue.main.async { [weak self] in
+                    guard let stats = self?.scanStats else { return }
+                    stats.ambientIntensity = intensity
+                    // Running average for the analysis report
+                    stats.ambientLightSampleCount += 1
+                    let n = CGFloat(stats.ambientLightSampleCount)
+                    stats.averageAmbientIntensity = stats.averageAmbientIntensity * ((n - 1) / n) + intensity / n
+                    // Person detection: latch true if ANY frame has person pixels
+                    if hasPerson { stats.personDetectedDuringAnalysis = true }
+                    // Yaw for 360° progress (stored as raw radians, SpaceAnalyzer tracks coverage)
+                    stats.analysisYaw = yaw
                 }
             }
 
@@ -1932,11 +2034,14 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.latestCapturedRoom = room
-            // Continuously push latest room to CaptureView so finishStopRecording can access it
-            // before the isRecording→false transition triggers updateUIView.
-            self.finalCapturedRoomBinding?.wrappedValue = room
-            // Outline re-render (MeshResource requires main/Metal context)
-            self.renderRoomPlanOutlines()
+            if self.isAnalysisRoomPlan {
+                // Analysis mode: push to scanStats for SpaceAnalyzer, skip outline rendering
+                self.scanStats?.analysisRoom = room
+            } else {
+                // Recording mode: push to CaptureView for export + render outlines
+                self.finalCapturedRoomBinding?.wrappedValue = room
+                self.renderRoomPlanOutlines()
+            }
         }
     }
 

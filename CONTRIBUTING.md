@@ -95,6 +95,15 @@ The `wisescan-ios` repository uses [Release Please](https://github.com/googleapi
 
 For CLI build and lint commands (CI / no-signing validation, SwiftLint baseline diffing), see [docs/BUILDING.md](docs/BUILDING.md). For the full release process, see [docs/RELEASE.md](docs/RELEASE.md).
 
+### Documentation Updates for New Features
+
+When adding a new feature, update the following docs alongside the source code:
+
+1. **[README.md](README.md)** — Add a bullet under Features and an entry under Architecture.
+2. **[REQUIREMENTS.md](REQUIREMENTS.md)** — Add a REQ-NNN entry (feature matrix row + detailed section) with source map entries.
+3. **[docs/APPSTORE.md](docs/APPSTORE.md)** — Add a line to the App Store description.
+4. **[docs/PRIVACY.md](docs/PRIVACY.md)** — Update if the feature touches data collection, camera usage, or personal data processing.
+
 ## Stitching / Scan Linking — Implementation Contract
 
 Hard-won invariants for the Extend Scan / map-stitching flow (REQ-003, REQ-012). Design rationale lives in [docs/design/Scan4D_Architecture.md](docs/design/Scan4D_Architecture.md).

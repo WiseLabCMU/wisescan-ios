@@ -120,6 +120,11 @@ enum AppConstants {
     static let earlyScanThresholdSeconds: TimeInterval = 30.0  // first N seconds considered "early scan" for pattern tips
     static let coachMaxDismissCount: Int = 2                   // after this many manual dismissals, tip won't re-show for the session
     static let scanCoachingEnabled: Bool = true                // default for the scan coaching toggle
+
+    // MARK: - Space Analysis Constants
+    static let analysisAmbientLightThreshold: CGFloat = 500     // lumens below which lighting is "Low"
+    static let analysisTimeoutSeconds: TimeInterval = 30        // fallback timeout if 360° not reached
+    static let analysisYawCompletionDeg: Float = 330            // yaw coverage (degrees) to count as "360°" (allow slight gap)
 }
 
 // MARK: - Semantic View Mode

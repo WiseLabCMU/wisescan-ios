@@ -93,6 +93,12 @@ struct CaptureView: View {
     @AppStorage(AppConstants.Key.scanCoachingEnabled) var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
 
+    // MARK: - Space Analysis (pre-scan staging check)
+    @State var isAnalyzing = false
+    @State var spaceAnalyzer = SpaceAnalyzer()
+    @State private var analysisResult: SpaceAnalysisResult?
+    @State private var showAnalysisReport = false
+
     struct PendingScanData {
         let locationId: UUID?
         let meshData: Data
@@ -177,7 +183,8 @@ struct CaptureView: View {
                 ghostZOffset: ghostZOffset,
                 dismissGhostMesh: dismissGhostMesh,
                 bakedGhostTransform: bakedGhostTransform,
-                pauseARSession: pauseARSession
+                pauseARSession: pauseARSession,
+                isAnalyzing: $isAnalyzing
             )
                 .ignoresSafeArea()
                 // Fix phase race: set .loadingWorldMap before the AR session starts
@@ -572,45 +579,114 @@ struct CaptureView: View {
                             .padding(.horizontal)
                         }
 
-                        // Capture Button
-                        Button(action: { toggleRecording() }, label: {
-                            ZStack {
-                                Circle()
-                                    .fill(.ultraThinMaterial)
-                                    .frame(width: 80, height: 80)
-                                    .overlay(Circle().stroke(isRecording ? Color.red : Color.cyan, lineWidth: 2))
-
-                                if isRecording {
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .fill(Color.red)
-                                        .frame(width: 28, height: 28)
-                                } else {
-                                    Circle()
-                                        .fill(Color.white)
-                                        .frame(width: 30, height: 30)
-                                }
-
-                                if let msg = saveMessage {
-                                    Text(msg)
-                                        .font(.caption2).bold()
-                                        .foregroundColor(.white)
-                                        .offset(y: 50)
-                                } else {
-                                    Text(isRecording ? "Tap to stop" : "Tap to scan")
-                                        .font(.caption2)
-                                        .foregroundColor(.white.opacity(0.7))
-                                        .offset(y: 50)
-                                }
+                        // Capture Button + Analyze Space Button
+                        HStack(spacing: 24) {
+                            // Analyze Space button — visible when not recording
+                            if !isRecording {
+                                Button(action: { startAnalysis() }, label: {
+                                    VStack(spacing: 4) {
+                                        Image(systemName: "scope")
+                                            .font(.system(size: 22))
+                                            .foregroundColor(.cyan)
+                                            .frame(width: 44, height: 44)
+                                            .background(.ultraThinMaterial)
+                                            .clipShape(Circle())
+                                            .overlay(Circle().stroke(Color.cyan.opacity(0.5), lineWidth: 1))
+                                        Text("Analyze")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.white.opacity(0.7))
+                                    }
+                                })
+                                .disabled(isAnalyzing || isProcessingMesh || isWaitingToSave)
+                                .opacity(isAnalyzing ? 0.4 : 1.0)
                             }
-                        })
-                        // After Stop, the mesh export/save runs while isRecording is already
-                        // false; block taps during that window so a new recording can't start
-                        // on top of the in-flight export.
-                        .disabled(isProcessingMesh || isWaitingToSave)
-                        .offset(y: isRecording ? -20 : 0)
+
+                            // Record button
+                            Button(action: { toggleRecording() }, label: {
+                                ZStack {
+                                    Circle()
+                                        .fill(.ultraThinMaterial)
+                                        .frame(width: 80, height: 80)
+                                        .overlay(Circle().stroke(isRecording ? Color.red : Color.cyan, lineWidth: 2))
+
+                                    if isRecording {
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .fill(Color.red)
+                                            .frame(width: 28, height: 28)
+                                    } else {
+                                        Circle()
+                                            .fill(Color.white)
+                                            .frame(width: 30, height: 30)
+                                    }
+
+                                    if let msg = saveMessage {
+                                        Text(msg)
+                                            .font(.caption2).bold()
+                                            .foregroundColor(.white)
+                                            .offset(y: 50)
+                                    } else {
+                                        Text(isRecording ? "Tap to stop" : "Tap to scan")
+                                            .font(.caption2)
+                                            .foregroundColor(.white.opacity(0.7))
+                                            .offset(y: 50)
+                                    }
+                                }
+                            })
+                            // After Stop, the mesh export/save runs while isRecording is already
+                            // false; block taps during that window so a new recording can't start
+                            // on top of the in-flight export. Also block during analysis.
+                            .disabled(isProcessingMesh || isWaitingToSave || isAnalyzing || showAnalysisReport)
+                            .offset(y: isRecording ? -20 : 0)
+                        }
                     }
                 }
                 .padding(.bottom, 20)
+            }
+
+            // Analysis progress overlay (shown during the 360° sweep)
+            if isAnalyzing {
+                ZStack {
+                    Color.black.opacity(0.5).ignoresSafeArea()
+                    VStack(spacing: 20) {
+                        Image(systemName: "scope")
+                            .font(.system(size: 48))
+                            .foregroundColor(.cyan)
+                            .symbolEffect(.pulse, isActive: true)
+
+                        Text("Analyzing Space")
+                            .font(.title2.bold())
+                            .foregroundColor(.white)
+
+                        Text(spaceAnalyzer.progressLabel)
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.8))
+                            .multilineTextAlignment(.center)
+
+                        // Progress ring
+                        ZStack {
+                            Circle()
+                                .stroke(Color.white.opacity(0.2), lineWidth: 6)
+                            Circle()
+                                .trim(from: 0, to: CGFloat(spaceAnalyzer.progress))
+                                .stroke(Color.cyan, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                                .animation(.easeInOut(duration: 0.3), value: spaceAnalyzer.progress)
+                            Text("\(Int(spaceAnalyzer.progress * 100))%")
+                                .font(.title3.bold())
+                                .foregroundColor(.white)
+                        }
+                        .frame(width: 100, height: 100)
+
+                        Button("Cancel") {
+                            stopAnalysis(cancelled: true)
+                        }
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.7))
+                        .padding(.top, 8)
+                    }
+                }
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.3), value: isAnalyzing)
             }
             // Extend transition overlay (semi-transparent over live AR)
             if showExtendOverlay {
@@ -1023,6 +1099,23 @@ struct CaptureView: View {
         .onChange(of: scanStats.trackingStatus) {
             evaluateScanCoach()
         }
+        // Space Analysis: feed camera yaw to the analyzer for 360° progress
+        .onChange(of: scanStats.analysisYaw) {
+            if isAnalyzing {
+                spaceAnalyzer.updateYaw(scanStats.analysisYaw)
+            }
+        }
+        // Space Analysis: auto-complete when 360° is covered
+        .onChange(of: spaceAnalyzer.isComplete) { _, complete in
+            if complete && isAnalyzing {
+                stopAnalysis(cancelled: false)
+            }
+        }
+        .sheet(isPresented: $showAnalysisReport) {
+            if let result = analysisResult {
+                ScanAnalysisReportView(result: result)
+            }
+        }
     }
 
     private var qualityColor: Color {
@@ -1051,6 +1144,32 @@ struct CaptureView: View {
             isRecording: isRecording,
             coachingEnabled: scanCoachingEnabled
         )
+    }
+
+    // MARK: - Space Analysis
+
+    /// Begins the pre-scan space analysis: resets stats, starts the SpaceAnalyzer yaw tracker,
+    /// and sets `isAnalyzing` (which triggers ARCoverageView to start the analysis RoomPlan session).
+    func startAnalysis() {
+        spaceAnalyzer.resetStats(scanStats)
+        spaceAnalyzer.start()
+        withAnimation { isAnalyzing = true }
+    }
+
+    /// Ends the analysis phase. If not cancelled, builds the report and presents the modal.
+    /// - Parameter cancelled: If true, skip the report and just clean up.
+    func stopAnalysis(cancelled: Bool) {
+        withAnimation { isAnalyzing = false }
+
+        if cancelled {
+            spaceAnalyzer.resetStats(scanStats)
+            return
+        }
+
+        // Build the report from accumulated stats
+        let result = spaceAnalyzer.buildReport(from: scanStats, privacyFilterOn: isPrivacyFilterOn)
+        analysisResult = result
+        showAnalysisReport = true
     }
 
     // Recording / save / stitching methods are organized into extension files:

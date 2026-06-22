@@ -168,6 +168,8 @@ graph TD
 | [SettingsView.swift](wisescan-ios/SettingsView.swift) | Upload URL, RAW settings, capture mode, Developer Mode | `SettingsView`, `developerMode`, `flipCameraEnabled` |
 | [ScanCoach.swift](wisescan-ios/ScanCoach.swift) | Rules engine: 4-tier priority coaching tips (~1Hz eval) | `ScanCoach`, `CoachTip`, `TipPriority`, `evaluate()` |
 | [CoachBarView.swift](wisescan-ios/CoachBarView.swift) | Coach bar UI: color-coded tip banner with swipe-to-dismiss | `CoachBarView` |
+| [SpaceAnalyzer.swift](wisescan-ios/SpaceAnalyzer.swift) | Pre-scan analysis engine: 360° yaw tracker, report builder | `SpaceAnalyzer`, `SpaceAnalysisResult` |
+| [ScanAnalysisReportView.swift](wisescan-ios/ScanAnalysisReportView.swift) | Space analysis report modal: per-check pass/warn/skip cards | `ScanAnalysisReportView` |
 | [UserGuideView.swift](wisescan-ios/UserGuideView.swift) | In-app workflow guide | `UserGuideView` |
 | [DemoDataSeeder.swift](wisescan-ios/DemoDataSeeder.swift) | Orphan scan discovery + SwiftData seeding | `DemoDataSeeder`, `seedIfNeeded()` |
 | [TestDataGenerator.swift](wisescan-ios/TestDataGenerator.swift) | Mock camera intrinsics for testing | `TestDataGenerator` |
@@ -417,6 +419,7 @@ sequenceDiagram
 | REQ-027 | Capture Performance, Session Lifecycle & VIO Integrity | ✅ **Implemented** — see REQ-027 below | — |
 | REQ-028 | Semantic Labeling | ✅ **Implemented** — see REQ-028 below | — |
 | REQ-029 | Scan Coaching | ✅ **Implemented** — see REQ-029 below | — |
+| REQ-030 | Space Staging Analyzer | ✅ **Implemented** — see REQ-030 below | — |
 
 ---
 
@@ -436,6 +439,14 @@ sequenceDiagram
 | **Status** | ✅ Complete |
 | **Description** | Unified 4-tier priority coaching system replacing the previous inline warning pills ("slow down", "hold steady") and capacity warning banner. A standalone `@Observable` rules engine (`ScanCoach`) evaluates live scan data at ~1Hz on a background queue and produces a single highest-priority `CoachTip`. **Tiers:** `CRITICAL` (red — tracking lost/degraded, stays until resolved), `WARNING` (orange — fast motion, near/at capacity, auto-dismiss 8s), `GUIDANCE` (indigo — scan pattern hints like "scan all walls", "vary height", semantic tips, auto-dismiss 6s, 30s cooldown), `INFO` (green — progress encouragement, auto-dismiss 5s, 60s cooldown). **Anti-nag:** per-tip cooldowns, session-scoped dismiss counts (suppressed after 2 manual dismissals), swipe-up-to-dismiss gesture. **Spatial analysis:** camera extent, height variance, and movement pattern ratio computed from recent transforms. **Semantic tips** (walls/floors/objects) use live `CapturedRoom` data when Semantic Labeling is enabled. **Settings toggle:** `Scan Coaching` (default ON) suppresses GUIDANCE/INFO; CRITICAL/WARNING always evaluate. **UI:** `CoachBarView` renders a color-coded bar above the bottom HUD with SF Symbol icon + message text. The centered "relocalize" and "move to start mesh" pills are kept as standalone elements. |
 | **Source** | [ScanCoach.swift](wisescan-ios/ScanCoach.swift) — rules engine, `CoachTip`, `TipPriority`, spatial helpers · [CoachBarView.swift](wisescan-ios/CoachBarView.swift) — SwiftUI coach bar with swipe-to-dismiss · [CaptureView.swift](wisescan-ios/CaptureView.swift) — `evaluateScanCoach()`, `.onChange` triggers, `CoachBarView` integration · [CaptureView+Recording.swift](wisescan-ios/CaptureView+Recording.swift) — `scanCoach.reset()` on `startRecording` · [AppConstants.swift](wisescan-ios/AppConstants.swift) — tuning constants (`coachEvaluationInterval`, cooldowns, auto-dismiss durations) · [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanStats.roomPlanInstruction` · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — RoomPlan instruction forwarding · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `recentTransforms()` accessor · [SettingsView.swift](wisescan-ios/SettingsView.swift) — Scan Coaching toggle |
+---
+
+### REQ-030: Space Staging Analyzer
+| | |
+|:--|:--|
+| **Status** | ✅ Complete |
+| **Description** | Pre-scan space analysis phase to help users stage their environment before committing to a 3D scan. An "Analyze Space" button appears near the Record button (visible during initial capture and ghost mesh phases, hidden once recording begins). When tapped, the app enters a 360° analysis mode: a temporary RoomPlan session starts (regardless of the Semantic Labeling toggle) alongside ambient light measurement and person detection via the segmentation stencil. The overlay tracks camera yaw coverage (0–360°) using ARFrame euler angles, showing real-time progress ("Keep panning slowly… 42%", "Almost done… 89%"). Once 360° is covered (or a 30s timeout hits), a `ScanAnalysisReportView` modal presents results: **Lighting** (good >500 lumens / low), **Screens** (TV detected via RoomPlan / clear), **Doors** (detected via RoomPlan / clear), **People** (privacy-aware messaging: detected with Privacy ON = "masked from raw data", detected with Privacy OFF = "will appear in raw data, tip: enable Privacy Filter", clear, or skipped if detection unavailable). The Record button stays disabled until the report is dismissed, preventing accidental recordings during analysis. |
+| **Source** | [SpaceAnalyzer.swift](wisescan-ios/SpaceAnalyzer.swift) — analysis engine: 360° yaw tracker, result aggregation, `SpaceAnalysisResult` model · [ScanAnalysisReportView.swift](wisescan-ios/ScanAnalysisReportView.swift) — report modal with per-check pass/warn/skip cards · [CaptureView.swift](wisescan-ios/CaptureView.swift) — `startAnalysis()`, `stopAnalysis()`, Analyze button, analysis overlay, report sheet · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `isAnalyzing` binding, analysis-mode RoomPlan start/stop, ambient light forwarding, `hasPersonPixels` helper · [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanStats` analysis fields (`ambientIntensity`, `analysisRoom`, `personDetectedDuringAnalysis`, `analysisYaw`) · [AppConstants.swift](wisescan-ios/AppConstants.swift) — tuning constants (`analysisAmbientLightThreshold`, `analysisTimeoutSeconds`, `analysisYawCompletionDeg`) |
 
 ---
 
