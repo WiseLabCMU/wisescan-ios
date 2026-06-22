@@ -38,7 +38,7 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 
 > **Note:** For a comprehensive list of all features, architecture diagrams, and detailed implementation status, please see [REQUIREMENTS.md](REQUIREMENTS.md).
 >
-> See also: **[CHANGELOG.md](CHANGELOG.md)** · **[RELEASE.md](docs/RELEASE.md)** · **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**
+> See also: **[CHANGELOG.md](CHANGELOG.md)** · **[RELEASE.md](docs/RELEASE.md)** · **[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** · **[SCAN_GUIDANCE.md](docs/SCAN_GUIDANCE.md)**
 
 ## Architecture
 

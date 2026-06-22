@@ -19,6 +19,7 @@ Orientation for agents (and humans) working in this repo. Detailed docs live in 
 - [docs/design/Scan4D_Architecture.md](docs/design/Scan4D_Architecture.md) — design rationale (Backend-First philosophy, large-space stitching strategies).
 - [docs/design/DESIGN.md](docs/design/DESIGN.md) — original UI/UX design spec.
 - [docs/design/voxel-accumulated-point-cloud.md](docs/design/voxel-accumulated-point-cloud.md) — VR voxel point-cloud accumulation design.
+- [docs/SCAN_GUIDANCE.md](docs/SCAN_GUIDANCE.md) — complete reference of pre-scan analysis checks (lighting, screens, doors, people) and mid-scan coaching tips (critical/warning/guidance/info) with conditions and messages.
 
 ## Export formats & data contracts
 - [schemas/README.md](schemas/README.md) — export archive structure and JSON schemas for every persisted/exported file: `scan4d_metadata.json`, `stitching.json` (spatial links), `transforms.json`, Polycam `cameras/*.json`, `mesh_info.json`. JSON Schema files live alongside it in [schemas/](schemas/).
