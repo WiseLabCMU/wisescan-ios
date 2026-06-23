@@ -78,6 +78,12 @@ fastlane/screenshots/**/*.png
 fastlane/test_output
 build.log
 
+# Fastlane-downloaded signing assets — NEVER commit (contain private keys)
+*.p12
+*.cer
+*.certSigningRequest
+*.mobileprovision
+
 # AI tooling
 .claude/
 
