@@ -305,14 +305,24 @@ enum PrivacyBlurUtil {
     /// CIImage (e.g. a camera/glasses frame) can use this to avoid an extra JPEG
     /// encode→decode round trip. On any failure returns `fallbackData` (nil if none).
     nonisolated static func pixelatePersonsAndGetFaceCenters(ciImage: CIImage, orientation: CGImagePropertyOrientation = .up, fallbackData: Data? = nil) -> (Data?, [CGPoint]) {
-        let handler = VNImageRequestHandler(ciImage: ciImage, orientation: orientation, options: [:])
+        // Perf (capture FALLBACK path only — ARKit's person-stencil fast path is untouched): this
+        // runs Vision per frame on a background queue and was the capture pipeline's worst hot spot
+        // (200–1200ms each, also pinning an ARKit-pool buffer that whole time → frame-pool pressure).
+        // Two compounding speedups: run Vision on a DOWNSCALED copy, and use `.balanced` instead of
+        // `.accurate`. Face boxes are normalized (downscale doesn't move them); the person mask is
+        // scaled back to full res below for the blend, which a 40px pixelation doesn't need at full
+        // res. Validate coverage on-device — if a person's edge leaks, raise
+        // AppConstants.privacyBlurVisionScale toward 1.0 and/or restore `.accurate`.
+        let s = AppConstants.privacyBlurVisionScale
+        let visionInput = ciImage.transformed(by: CGAffineTransform(scaleX: s, y: s))
+        let handler = VNImageRequestHandler(ciImage: visionInput, orientation: orientation, options: [:])
 
         // 1. Face detection for 3D anchors
         let faceRequest = VNDetectFaceRectanglesRequest()
 
         // 2. Person segmentation for pixelation
         let segRequest = VNGeneratePersonSegmentationRequest()
-        segRequest.qualityLevel = .accurate
+        segRequest.qualityLevel = .balanced
         segRequest.outputPixelFormat = kCVPixelFormatType_OneComponent8
 
         do {
