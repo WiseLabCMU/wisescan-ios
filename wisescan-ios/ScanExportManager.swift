@@ -2,26 +2,13 @@ import Foundation
 import SwiftData
 
 struct ScanExportManager {
-    // Lazily-opened container pointing at the SAME on-disk store the app uses (default
-    // Application Support location, default `ModelConfiguration`, identical Schema —
-    // mirrors AppDelegate.sharedModelContainer). `prepareExport` runs off the main actor
-    // and has no injected ModelContext, so stitching/graph serialization fetches through
-    // this shared store on a @MainActor hop. Cached so we don't reopen the SQLite file per
-    // export. Isolated to the main actor: the only accessor (`exportModelContainer`) is
-    // @MainActor, so this needs no `nonisolated(unsafe)` escape hatch.
-    @MainActor private static var cachedContainer: ModelContainer?
-
+    // `prepareExport` runs off the main actor with no injected ModelContext, so it fetches through
+    // the app's shared container on a @MainActor hop (creating its own background ModelContext).
+    // Reuse the SINGLE app container rather than opening a second one over the same SQLite store —
+    // two persistent-store coordinators on one file risk stale reads / lock contention.
     @MainActor
     private static func exportModelContainer() -> ModelContainer? {
-        if let cachedContainer { return cachedContainer }
-        let schema = Schema([ScanLocation.self, CapturedScan.self, StitchLink.self])
-        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-        guard let container = try? ModelContainer(for: schema, configurations: [config]) else {
-            print("[prepareExport] ✗ could not open model store for stitching export")
-            return nil
-        }
-        cachedContainer = container
-        return container
+        Scan4DApp.sharedModelContainer
     }
 
     /// Holder for the two serialized export artifacts. `Data` is Sendable, so this can cross

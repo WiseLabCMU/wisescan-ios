@@ -155,8 +155,18 @@ struct CaptureView: View {
         // could otherwise repeat if both its endpoints are scans of THIS location. The links are
         // fetched ONCE via the scan-id index, not per scan.
         let linkIndex = StitchLinkStore.incidentLinksByScanId(in: modelContext)
+        // Frame-invariant guard: aggregating connectors across ALL the location's scans is only
+        // correct when we relocalize against the LATEST scan (every scan then shares its world frame
+        // via the rescan→latest chain). Today rescan always targets latest, so this aggregates all —
+        // but if a non-latest scan ever becomes the target, restrict to ITS connectors so we never
+        // render another scan's connectors in the wrong frame (the failure the comment above warns of).
+        let latestId = location.scans.max(by: { $0.capturedAt < $1.capturedAt })?.id
+        let target = scanStore.activeScanToExtend
+        let scansForConnectors: [CapturedScan] = (target == nil || target == latestId)
+            ? location.scans
+            : location.scans.filter { $0.id == target }
         var seenConnectors = Set<UUID>()
-        connectorAnchors = location.scans
+        connectorAnchors = scansForConnectors
             .flatMap { StitchLinkStore.connectorAnchors(for: $0, from: linkIndex[$0.id] ?? []) }
             .filter { seenConnectors.insert($0.id).inserted }
     }

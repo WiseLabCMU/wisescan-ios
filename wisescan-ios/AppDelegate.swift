@@ -43,7 +43,12 @@ struct Scan4DApp: App {
         }
     }
 
-    var sharedModelContainer: ModelContainer = {
+    /// Single shared container — used both for SwiftUI's `.modelContainer` injection and by off-main
+    /// consumers (e.g. `ScanExportManager`) that need a background `ModelContext` on the SAME store.
+    /// `static` so there is exactly ONE persistent-store coordinator for the app's SQLite file:
+    /// `ScanExportManager` previously opened a SECOND container over the same store (stale-read / lock
+    /// risk); it now reuses this. Multiple `ModelContext`s on one container is the supported pattern.
+    static let sharedModelContainer: ModelContainer = {
         let schema = Schema([
             ScanLocation.self,
             CapturedScan.self,
@@ -89,6 +94,6 @@ struct Scan4DApp: App {
                     }
             }
         }
-        .modelContainer(sharedModelContainer)
+        .modelContainer(Self.sharedModelContainer)
     }
 }
