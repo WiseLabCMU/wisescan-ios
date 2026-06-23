@@ -737,6 +737,27 @@ struct ScansListView: View {
     }
 }
 
+// MARK: - Capture Integrity (shared rule)
+
+/// Whether a scan's raw capture is grossly missing depth/confidence relative to its frame count.
+/// Shared by the per-scan card badge (`ScanCard.dataIntegrityWarning`) and the location-tile
+/// rollup so both apply the identical threshold. LiDAR-only: non-LiDAR ("lite mode") devices never
+/// capture depth/confidence, so their absence is expected there, not a defect.
+enum CaptureIntegrity {
+    /// Modalities that fell below the floor (e.g. "depth (1/40)"), or `[]` if the capture is OK,
+    /// too small to judge, or non-LiDAR. Counts come from the scan's raw_data subdirectories.
+    static func deficiencies(images: Int, cameras: Int, depth: Int, confidence: Int) -> [String] {
+        guard ARCoverageView.supportsLiDAR else { return [] }
+        let frames = max(images, cameras)
+        guard frames >= AppConstants.captureIntegrityMinFrames else { return [] } // too small to judge
+        let floorCount = Int(Double(frames) * AppConstants.captureIntegrityMinFraction)
+        var deficient: [String] = []
+        if depth < floorCount { deficient.append("depth (\(depth)/\(frames))") }
+        if confidence < floorCount { deficient.append("confidence (\(confidence)/\(frames))") }
+        return deficient
+    }
+}
+
 // MARK: - Location Grid Tile
 
 struct LocationGridTile: View {
@@ -744,11 +765,22 @@ struct LocationGridTile: View {
     @State private var thumbnailImage: UIImage?
     // Resolved off the main thread in `.task` so the body performs no FileManager I/O.
     @State private var hasMissingWorldMap = false
+    @State private var hasIncompleteCaptureScan = false
 
     var latestScan: CapturedScan? {
         // Single O(n) pass with no intermediate sorted-array allocation; this is read
         // multiple times per body evaluation.
         location.scans.max(by: { $0.capturedAt < $1.capturedAt })
+    }
+
+    /// Small corner indicator for the top-leading overlay (matches the per-scan card style).
+    private func tileWarningBadge(_ color: Color) -> some View {
+        Image(systemName: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundColor(color)
+            .padding(6)
+            .background(Color.black.opacity(0.5))
+            .clipShape(Circle())
     }
 
     var body: some View {
@@ -796,15 +828,14 @@ struct LocationGridTile: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(alignment: .topLeading) {
-            if hasMissingWorldMap {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundColor(.yellow)
-                    .padding(6)
-                    .background(Color.black.opacity(0.5))
-                    .clipShape(Circle())
-                    .padding(8)
+            // Stacked rollup indicators (mirrors the per-scan card): yellow = at least one scan is
+            // missing its world map (can't relocalize/extend); orange = at least one scan's
+            // depth/confidence capture is grossly incomplete. Both resolved off-main in `.task`.
+            VStack(alignment: .leading, spacing: 6) {
+                if hasMissingWorldMap { tileWarningBadge(.yellow) }
+                if hasIncompleteCaptureScan { tileWarningBadge(.orange) }
             }
+            .padding(8)
         }
         .overlay(alignment: .topTrailing) {
             if !location.scans.isEmpty && location.scans.allSatisfy({ $0.isUploaded }) {
@@ -818,21 +849,38 @@ struct LocationGridTile: View {
             }
         }
         .task(id: location.updatedAt) {
-            // Resolve thumbnail + missing-worldmap state off the main thread to avoid
-            // main-thread FileManager I/O during layout/scroll (#5/#7).
+            // Resolve thumbnail + missing-worldmap + incomplete-capture state off the main thread
+            // to avoid main-thread FileManager I/O during layout/scroll (#5/#7).
             guard let latest = latestScan else {
                 thumbnailImage = nil
                 hasMissingWorldMap = false
+                hasIncompleteCaptureScan = false
                 return
             }
             let previewURL = latest.modelPreviewURL
             let fallbackURL = latest.thumbnailURL
             let worldMapPaths = location.scans.map { $0.worldMapURL.path }
+            let rawDirs = location.scans.map { $0.rawDataPath }
 
             // Missing-worldmap flag off-main.
             hasMissingWorldMap = await Task.detached(priority: .utility) {
                 let fm = FileManager.default
                 return worldMapPaths.contains(where: { !fm.fileExists(atPath: $0) })
+            }.value
+
+            // Incomplete-capture rollup off-main: true if ANY scan is grossly missing depth/
+            // confidence vs its frame count (same CaptureIntegrity rule as the per-scan badge).
+            hasIncompleteCaptureScan = await Task.detached(priority: .utility) {
+                let fm = FileManager.default
+                func count(_ dir: URL, _ sub: String) -> Int {
+                    (try? fm.contentsOfDirectory(atPath: dir.appendingPathComponent(sub).path))?.count ?? 0
+                }
+                return rawDirs.contains { dir in
+                    !CaptureIntegrity.deficiencies(
+                        images: count(dir, "images"), cameras: count(dir, "cameras"),
+                        depth: count(dir, "depth"), confidence: count(dir, "confidence")
+                    ).isEmpty
+                }
             }.value
 
             // Downsampled, cached thumbnail (prefer the colored model preview).
@@ -1190,17 +1238,12 @@ struct ScanCard: View {
     /// count, the capture is likely unusable for downstream reconstruction. Returns a user-facing
     /// message, or nil when the capture looks complete enough to judge.
     private var dataIntegrityWarning: String? {
-        // Only LiDAR devices capture depth/confidence. On non-LiDAR ("lite mode") devices their
-        // absence is expected, not a defect — never warn there.
-        guard ARCoverageView.supportsLiDAR else { return nil }
         guard let c = itemCounts else { return nil }
-        let frames = max(c.images, c.cameras)
-        guard frames >= AppConstants.captureIntegrityMinFrames else { return nil } // too small to judge
-        let floorCount = Int(Double(frames) * AppConstants.captureIntegrityMinFraction)
-        var deficient: [String] = []
-        if c.depth < floorCount { deficient.append("depth (\(c.depth)/\(frames))") }
-        if c.confidence < floorCount { deficient.append("confidence (\(c.confidence)/\(frames))") }
+        // Shared rule with the location-tile rollup (see CaptureIntegrity). Returns [] on
+        // non-LiDAR / too-few-frames, so we never warn where depth absence is expected.
+        let deficient = CaptureIntegrity.deficiencies(images: c.images, cameras: c.cameras, depth: c.depth, confidence: c.confidence)
         guard !deficient.isEmpty else { return nil }
+        let frames = max(c.images, c.cameras)
         return "This scan recorded \(frames) frames but only \(deficient.joined(separator: " and ")). "
             + "The capture is grossly incomplete and is likely unusable for 3D reconstruction downstream — consider re-scanning."
     }
