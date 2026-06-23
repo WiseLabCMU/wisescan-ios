@@ -625,6 +625,12 @@ struct CaptureView: View {
                                     RoundedRectangle(cornerRadius: 4)
                                         .fill(Color.red)
                                         .frame(width: 28, height: 28)
+                                } else if isProcessingMesh || isWaitingToSave {
+                                    // Previous scan's export/coloring still running — recording is
+                                    // blocked until it finishes. Show a spinner so the disabled button
+                                    // isn't a silent dead tap (a spinner that never clears = a stuck
+                                    // isProcessingMesh/isWaitingToSave reset, a separate bug).
+                                    ProgressView().tint(.white)
                                 } else {
                                     Circle()
                                         .fill(Color.white)
@@ -637,7 +643,9 @@ struct CaptureView: View {
                                         .foregroundColor(.white)
                                         .offset(y: 50)
                                 } else {
-                                    Text(isRecording ? "Tap to stop" : "Tap to scan")
+                                    Text(isRecording ? "Tap to stop"
+                                         : (isProcessingMesh || isWaitingToSave) ? "Processing previous scan…"
+                                         : "Tap to scan")
                                         .font(.caption2)
                                         .foregroundColor(.white.opacity(0.7))
                                         .offset(y: 50)

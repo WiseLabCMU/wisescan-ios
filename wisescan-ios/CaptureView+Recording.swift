@@ -483,7 +483,13 @@ extension CaptureView {
     }
 
     func savePendingScan() {
-        guard let pending = pendingScan else { return }
+        guard let pending = pendingScan else {
+            // Nothing to save — clear any processing/waiting flags so the record button can't stay
+            // disabled ("Processing previous scan…") forever on a stray call.
+            isProcessingMesh = false
+            isWaitingToSave = false
+            return
+        }
 
         let locationId: UUID?
         var finalName = "New Space"
@@ -516,6 +522,11 @@ extension CaptureView {
 
         saveMessage = "Scan Saved!"
         pendingScan = nil
+        // Release the processing/waiting claim now that the save is done — otherwise isWaitingToSave
+        // (set in finishStopRecording's rescan branch / the name-prompt Save) leaks true and leaves the
+        // record button disabled ("Processing previous scan…") indefinitely on the next scan.
+        isProcessingMesh = false
+        isWaitingToSave = false
 
         // Reset the FULL capture state so a scan started before the delayed tab switch below can't
         // inherit stale link/rescan routing (activeScanToExtend, activeScanCase, boundary fields).
