@@ -143,13 +143,17 @@ class PointCloudManager {
     // MARK: - Skybox
 
     private func setupSkybox(in parentEntity: Entity, activeMeshColor: String) {
+        // Skybox sphere radius (viewed from inside) + the plain dark fill used when the grid texture
+        // can't be built — both were repeated inline across the three paths below; named here once.
+        let skyboxRadius: Float = 50.0
+        let skyboxFallbackColor = UIColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1.0)
         // Generate a procedural grid texture (active mesh color lines on black)
         // High resolution (2048) to support dense grid lines without aliasing
         let texSize = 2048
         guard let gridTexture = generateGridTexture(size: texSize, colorString: activeMeshColor) else {
             print("[PointCloudManager] Failed to generate grid texture, using fallback")
-            let fallback = UnlitMaterial(color: UIColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1.0))
-            let skybox = ModelEntity(mesh: .generateSphere(radius: 50.0), materials: [fallback])
+            let fallback = UnlitMaterial(color: skyboxFallbackColor)
+            let skybox = ModelEntity(mesh: .generateSphere(radius: skyboxRadius), materials: [fallback])
             skybox.scale = SIMD3<Float>(-1, 1, 1) // Invert to view from inside
             skybox.isEnabled = false  // Hidden until first voxel frame
             parentEntity.addChild(skybox)
@@ -161,15 +165,15 @@ class PointCloudManager {
             let textureResource = try TextureResource(image: gridTexture, options: .init(semantic: .color))
             var material = UnlitMaterial()
             material.color = .init(tint: .white, texture: .init(textureResource))
-            let skybox = ModelEntity(mesh: .generateSphere(radius: 50.0), materials: [material])
+            let skybox = ModelEntity(mesh: .generateSphere(radius: skyboxRadius), materials: [material])
             skybox.scale = SIMD3<Float>(-1, 1, 1)
             skybox.isEnabled = false  // Hidden until first voxel frame
             parentEntity.addChild(skybox)
             self.skyboxEntity = skybox
         } catch {
             print("[PointCloudManager] Failed to create skybox texture resource: \(error)")
-            let fallback = UnlitMaterial(color: UIColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1.0))
-            let skybox = ModelEntity(mesh: .generateSphere(radius: 50.0), materials: [fallback])
+            let fallback = UnlitMaterial(color: skyboxFallbackColor)
+            let skybox = ModelEntity(mesh: .generateSphere(radius: skyboxRadius), materials: [fallback])
             skybox.scale = SIMD3<Float>(-1, 1, 1)
             skybox.isEnabled = false  // Hidden until first voxel frame
             parentEntity.addChild(skybox)

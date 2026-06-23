@@ -4,6 +4,14 @@ import ARKit
 import RoomPlan
 import Synchronization
 
+/// Dedups the repeated `UnlitMaterial(color: UIColor(red: CGFloat(c.x), …))` construction from a
+/// SIMD4 color (x,y,z as RGB; `alpha` defaults opaque). Fileprivate to ARCoverageView.
+private extension UnlitMaterial {
+    init(rgb c: SIMD4<Float>, alpha: CGFloat = 1.0) {
+        self.init(color: UIColor(red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: alpha))
+    }
+}
+
 // swiftlint:disable type_body_length
 struct ARCoverageView: UIViewRepresentable {
     @Binding var arSession: ARSession?
@@ -413,9 +421,7 @@ struct ARCoverageView: UIViewRepresentable {
                 let ghostColorStr = UserDefaults.standard.string(forKey: AppConstants.Key.ghostMeshColor) ?? AppConstants.ghostMeshColor
                 let color = ghostColorStr.toSIMD4Color
                 // Fully opaque UnlitMaterial — the only stable material in ARView
-                let material = UnlitMaterial(color: UIColor(
-                    red: CGFloat(color.x), green: CGFloat(color.y), blue: CGFloat(color.z), alpha: 1.0
-                ))
+                let material = UnlitMaterial(rgb: color)
 
                 let containerEntity = Entity()
 
@@ -732,9 +738,7 @@ struct ARCoverageView: UIViewRepresentable {
         /// Uses entity replacement (not in-place mutation) to avoid render thread races.
         func recolorActiveMeshEntities() {
             let c = activeMeshColor.toSIMD4Color
-            let material = UnlitMaterial(color: UIColor(
-                red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1.0
-            ))
+            let material = UnlitMaterial(rgb: c)
             for (_, entry) in activeMeshEntities {
                 // The stored `model` is a container Entity. Iterate its children (the chunks).
                 let children = entry.model.children.map { $0 }
@@ -824,9 +828,7 @@ struct ARCoverageView: UIViewRepresentable {
                     guard let self = self, let arView = self.arView, self.isRecording.load(ordering: .relaxed) else { return }
 
                     let c = colorStr.toSIMD4Color
-                    let material = UnlitMaterial(color: UIColor(
-                        red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 1.0
-                    ))
+                    let material = UnlitMaterial(rgb: c)
 
                     let containerEntity = Entity()
 
@@ -1121,10 +1123,7 @@ struct ARCoverageView: UIViewRepresentable {
             let d = max(dimensions.z, 0.001)
             let hw = w / 2, hh = h / 2, hd = d / 2
 
-            let material = UnlitMaterial(color: UIColor(
-                red: CGFloat(color.x), green: CGFloat(color.y),
-                blue: CGFloat(color.z), alpha: 1.0
-            ))
+            let material = UnlitMaterial(rgb: color)
 
             // Container entity carries the RoomPlan transform
             let container = Entity()
@@ -1192,9 +1191,7 @@ struct ARCoverageView: UIViewRepresentable {
             // 200m × 200m at 50m distance covers the full camera frustum generously.
             let mesh = MeshResource.generatePlane(width: 200, height: 200)
             let c = activeMeshColor.toSIMD4Color
-            var material = UnlitMaterial(color: UIColor(
-                red: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: 0.3
-            ))
+            var material = UnlitMaterial(rgb: c, alpha: 0.3)
             material.blending = .transparent(opacity: 1.0)
             let model = ModelEntity(mesh: mesh, materials: [material])
             // Place 50m ahead of camera (in camera-local space, -Z is forward)
