@@ -19,6 +19,17 @@ extension CaptureView {
             return
         }
 
+        // HARDENING: refuse to capture Pin A while tracking is degraded. Pin A is the
+        // source-side half of the stitch bridge (R = pinA · inverse(pinB)); a pose taken
+        // when trackingState != .normal is unreliable and bakes rotation error into the
+        // inter-scan transform — the dominant source of multi-scan misalignment. Pin B is
+        // already gated this way in awaitStabilizationAndPlacePinB; gate Pin A symmetrically
+        // so a bad source pose is never stored in the first place.
+        guard frame.camera.trackingState == .normal else {
+            showTransientMessage("Tracking unstable — hold steady, then tap Pin & Extend again", duration: 3)
+            return
+        }
+
         // Haptic feedback
         hapticGenerator.impactOccurred()
 

@@ -19,6 +19,16 @@ extension CaptureView {
         guard !isConfirmingAlignment else { return }
         guard let frame = currentARSession?.currentFrame else { return }
 
+        // HARDENING: only capture Pin A once relocalization into Map A has completed and
+        // tracking is solid. While trackingState is .limited(.relocalizing) the camera pose
+        // is not yet reliably expressed in Map A's coordinates, so Pin A would be captured in
+        // a mis-aligned frame and bake rotation error into the stitch transform. Requiring
+        // .normal here both confirms relocalization finished and mirrors the Pin B gate.
+        guard frame.camera.trackingState == .normal else {
+            showTransientMessage("Hold still — still relocalizing. Tap Confirm again once tracking is solid.", duration: 3)
+            return
+        }
+
         isConfirmingAlignment = true
 
         // Cancel any in-flight stabilization task from a prior attempt
