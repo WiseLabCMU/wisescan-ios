@@ -176,6 +176,17 @@ extension CaptureView {
         let currentFrame = currentARSession?.currentFrame
         let meshResult = ARCoverageView.exportMeshOBJ(from: currentFrame, privacyFilter: isPrivacyFilterOn)
 
+        // FIX (semantic ↔ mesh ~90° drift): snapshot the CapturedRoom NOW, co-temporal with the mesh
+        // export above, and write THIS snapshot below — never the live finalCapturedRoom. RoomPlan
+        // keeps running and re-basing the room through the post-Stop window (the user turning + ARKit
+        // re-initializing tracking), and the roomplan write happens LATE (after the world-map export +
+        // an async color-gen hop). Reading the live room there captured the drifted frame and rotated
+        // the saved semantics ~90° off the Stop-frozen mesh — intermittently, a timing race (sometimes
+        // the read landed before the re-base, sometimes after). Pinning the room to the mesh's instant
+        // makes mesh + semantics share one world frame every time. CapturedRoom is a value type, so
+        // this copy is an immutable freeze, unaffected by later RoomPlan didUpdate callbacks.
+        let capturedRoomAtStop = finalCapturedRoom
+
         // Capture a 2D thumbnail from the current camera frame
         var thumbnailData: Data?
         if let currentFrame = currentFrame {
@@ -316,8 +327,11 @@ extension CaptureView {
                         try? result.data.write(to: meshFileURL)
                         let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
                         try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
-                        // Write roomplan.json + roomplan_raw.json if RoomPlan captured room data
-                        if let room = self.finalCapturedRoom {
+                        // Write roomplan.json + roomplan_raw.json from the room SNAPSHOT taken at mesh
+                        // export (capturedRoomAtStop) — NOT the live finalCapturedRoom, which RoomPlan
+                        // keeps re-basing through the post-Stop window. This pins the saved semantics to
+                        // the mesh's world frame. See the snapshot rationale at the top of this method.
+                        if let room = capturedRoomAtStop {
                             RoomPlanExporter.writeRoomPlan(room, to: rawDir)
                         }
                     }
