@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.4.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.3.0...v0.4.0) (2026-06-23)
+
+
+### Features
+
+* add edit-mode selection to StitchGraphView ([1977ea5](https://github.com/WiseLabCMU/wisescan-ios/commit/1977ea5dbcea3e15cade54ed13822f6d18655487))
+* add pre-scan space staging analyzer (REQ-030) ([c777eb5](https://github.com/WiseLabCMU/wisescan-ios/commit/c777eb539e38ec4a7935f48f92f670fff449d05c))
+* add ScanCoach scan guidance system with coach bar UI ([d934137](https://github.com/WiseLabCMU/wisescan-ios/commit/d9341379bc5b91c6433ad6267568c85b74848570))
+* add ScanCoach scan guidance system with coach bar UI ([92bec65](https://github.com/WiseLabCMU/wisescan-ios/commit/92bec652d8e8bf755c51452bfe36b74b202c5741))
+* bulk ops toolbar for ScansListView ([b4b743c](https://github.com/WiseLabCMU/wisescan-ios/commit/b4b743c16a44b87c88e79e810eaf39be64eab2bc))
+* confirm before deleting linked maps; clean up orphaned location dirs ([bd4186f](https://github.com/WiseLabCMU/wisescan-ios/commit/bd4186fda8fdc6e6760af0279758352aba8c2f05))
+* enforce LiDAR requirement for App Store release builds ([e80819d](https://github.com/WiseLabCMU/wisescan-ios/commit/e80819dfd7459364fb6bc77cf4fb24469a8e4226))
+* gate user record-start until ARKit tracking is out of cold init ([a6e9432](https://github.com/WiseLabCMU/wisescan-ios/commit/a6e9432148cb08ebcc0fd8f1cef7d954b1b040b3))
+* generate stitch JSON from DB on export; undirected graph edges ([f97af0e](https://github.com/WiseLabCMU/wisescan-ios/commit/f97af0eb88105cfc4c127b592b0a109c7e68426a))
+* per-class semantic outline visibility toggles in Settings ([4dd1366](https://github.com/WiseLabCMU/wisescan-ios/commit/4dd136612edfbc02c0bef7cdc662a456c8bcdec4))
+* render labeled 3D connector markers for linked maps ([8787b7c](https://github.com/WiseLabCMU/wisescan-ios/commit/8787b7c8a00653f1a4cc63556ed52dd6e6ff6992))
+* robust weighted-median vertex colorizer + always-allow recolor ([f3c114a](https://github.com/WiseLabCMU/wisescan-ios/commit/f3c114acce14f310d309c1190f3493b0a3625eec))
+* roll up incomplete-capture warning to the location card ([649fabf](https://github.com/WiseLabCMU/wisescan-ios/commit/649fabfb7259371cec491373262d92fa6168abe4))
+* semantic labeling with ARKit mesh classification ([#2](https://github.com/WiseLabCMU/wisescan-ios/issues/2)) ([#15](https://github.com/WiseLabCMU/wisescan-ios/issues/15)) ([e7ebb38](https://github.com/WiseLabCMU/wisescan-ios/commit/e7ebb38be6e0c9914c2513139d51535e201885e8))
+* track per-scan upload success with lastUploadedAt timestamp ([3ca92fa](https://github.com/WiseLabCMU/wisescan-ios/commit/3ca92fa793007b58a621cc65b4a52eacdf1b3584))
+* **ux:** global clear buttons for inputs and block empty names ([6a60b9d](https://github.com/WiseLabCMU/wisescan-ios/commit/6a60b9dba6b1b24fa95e605865364cbbe21dbf2f))
+* **ux:** unify Stop Recording action sheet and remove floating connector button ([2f19e64](https://github.com/WiseLabCMU/wisescan-ios/commit/2f19e649021225b2f2046022aa652c58e2d08a07))
+* warn on grossly incomplete captures (depth/confidence vs frame count) ([591a418](https://github.com/WiseLabCMU/wisescan-ios/commit/591a41891f544f09c8f72a898a3c8f4fc91bb411))
+
+
+### Bug Fixes
+
+* 3-tier lighting, outline cleanup, semantic toggle placement ([6db37e9](https://github.com/WiseLabCMU/wisescan-ios/commit/6db37e9c348f81aaf70a6bbc6fe1fce4815e7548))
+* auto-delete empty locations after bulk scan delete ([e3fa3c0](https://github.com/WiseLabCMU/wisescan-ios/commit/e3fa3c0558d6b69e460bfdde3e9c045c7507c98f))
+* block manual record-start during link-adjacent alignment (race → 90° ghost) ([48f64d5](https://github.com/WiseLabCMU/wisescan-ios/commit/48f64d523ecdcfdbca06cabf3deb4176c67bd9c9))
+* block manual record-start for ALL link-adjacent flows (close ghost-jump race) ([e24c5f5](https://github.com/WiseLabCMU/wisescan-ios/commit/e24c5f5f4fd81b986219bb9aa9c3e657dcab74fe))
+* clear rendered voxel cloud on tracking loss so it doesn't fly off ([2458c8d](https://github.com/WiseLabCMU/wisescan-ios/commit/2458c8d1edc87187884203009ac4dbaeb55fd8ea))
+* correct wearable/location/permission lifecycle and post-save navigation ([224f0e8](https://github.com/WiseLabCMU/wisescan-ios/commit/224f0e8c40884ef0a5ef3f2e472d86340f6aa6be))
+* defer RoomPlan frame-semantics re-assert until tracking is .normal ([da06e45](https://github.com/WiseLabCMU/wisescan-ios/commit/da06e456bc13aaca5442cf8450e4587dee17065d))
+* detect people during analysis regardless of Privacy Filter ([b73b890](https://github.com/WiseLabCMU/wisescan-ios/commit/b73b890d6ba17be1b18b7604ba3c9522a347b50a))
+* dismiss resolved WARNING coach tips promptly (&gt;= .warning guard) ([46ff7d5](https://github.com/WiseLabCMU/wisescan-ios/commit/46ff7d50dbb7e2b0dd6f4f53cf5320e1170183ee))
+* don't halt scan on a bare frame gap; wait through relocalization ([b7e9b91](https://github.com/WiseLabCMU/wisescan-ios/commit/b7e9b911a9e32341788811d23080a871e4c85ba8))
+* don't reset capture routing on a transient onDisappear (root of ghost-jump) ([58c0423](https://github.com/WiseLabCMU/wisescan-ios/commit/58c0423e57b058692670bedb92e86b5779412225))
+* eliminate wearable frame use-after-free and faceAnchors data race ([481108f](https://github.com/WiseLabCMU/wisescan-ios/commit/481108fe70a6a761753cad7f942129a2ef96430d))
+* enter link-adjacent alignment phase before navigating to capture ([ba0e322](https://github.com/WiseLabCMU/wisescan-ios/commit/ba0e32218ea13427f384664ddb1706dc7a03c1a7))
+* gate connector Pin A capture on normal tracking (harden multi-scan connect flow) ([54a7fb2](https://github.com/WiseLabCMU/wisescan-ios/commit/54a7fb2d704b343afd26ab0a408132e73f0879c1))
+* guard mesh face-index OOB crashes and prevent orphan scan records ([c10b6a7](https://github.com/WiseLabCMU/wisescan-ios/commit/c10b6a7fe89808db419ed56b53127d6201d9a895))
+* make ARCoverageView cross-queue flags race-free and ghost-add idempotent ([1f1ea99](https://github.com/WiseLabCMU/wisescan-ios/commit/1f1ea99441893a16540cf66b73a356e5c40f3a44))
+* make filled action buttons fully tappable; guard re-entrant taps ([5c6557b](https://github.com/WiseLabCMU/wisescan-ios/commit/5c6557b1a4ea0f36fd637db13664f6dbe3a60192))
+* mitigate semantic z-fighting and centralize surface heuristic ([a3082a7](https://github.com/WiseLabCMU/wisescan-ios/commit/a3082a7da27789fef03640454e480bc45913526d))
+* pin saved roomplan semantics to the mesh's world frame (snapshot CapturedRoom at Stop) ([bf529fe](https://github.com/WiseLabCMU/wisescan-ios/commit/bf529fe032a308ff3e9982dd5c4291c36610ca6f))
+* pr review issues ([ac75b0d](https://github.com/WiseLabCMU/wisescan-ios/commit/ac75b0de7af7ed6a3342c9bb2527a707c3d9cf6d))
+* preserve loaded worldmap, guard double-save ([e976c11](https://github.com/WiseLabCMU/wisescan-ios/commit/e976c11c3fb2d51857f69afcdbd1574943a74d39))
+* re-assert sceneDepth/person-seg after RoomPlan reconfigures the session ([8792f6a](https://github.com/WiseLabCMU/wisescan-ios/commit/8792f6a8635f06e7d867a9a01080b01aa6ebda25))
+* reference depth/confidence in metadata only when the files exist ([e9a1f7e](https://github.com/WiseLabCMU/wisescan-ios/commit/e9a1f7e62f775f7471f00baa2a763be471b86b4b))
+* reliable link queries; self-healing migration ([262cf41](https://github.com/WiseLabCMU/wisescan-ios/commit/262cf4137716f8703046941e650e41aa1bf4c01e))
+* render all connectors both ways on rescan ([12e05d3](https://github.com/WiseLabCMU/wisescan-ios/commit/12e05d37162d505b5e6b09bbd9f8b1d46da1c95a))
+* review issues, refactor batch ([b5901dc](https://github.com/WiseLabCMU/wisescan-ios/commit/b5901dc3efd55304e9d527e480083d18f36fc098))
+* stop false map-load-failure from wiping link-adjacent routing (ghost-jump root cause) ([48a50a0](https://github.com/WiseLabCMU/wisescan-ios/commit/48a50a03796c0018dd4b27d8357063c0afc5dba9))
+* update missed 'link' to 'connect' wording ([7c887f9](https://github.com/WiseLabCMU/wisescan-ios/commit/7c887f99ed09511d54efd89e134e34271d736b80))
+* use Atomic&lt;Bool&gt;.load for isRecording in classification rebuild ([c336025](https://github.com/WiseLabCMU/wisescan-ios/commit/c33602536153ee60a288f1dc5a1043a8719b1627))
+* **ux:** dynamic CaptureView titles and toggleRecording first-scan fix ([8779db2](https://github.com/WiseLabCMU/wisescan-ios/commit/8779db2774dd9a81d275f381c584523ad4c2e3ee))
+* **ux:** reset isWaitingToSave flag after scan saves to prevent stuck disabled state ([0ddb034](https://github.com/WiseLabCMU/wisescan-ios/commit/0ddb0344dce839cf969a191d8ffd58181ad752de))
+* write scan files under the correct location path (regression from 759b100) ([3dbb670](https://github.com/WiseLabCMU/wisescan-ios/commit/3dbb670cafbb7b43b9e89d3927b261bca7d981d4))
+
+
+### Performance Improvements
+
+* cut the privacy-blur Vision fallback cost (downscale input + .balanced tier) ([4f09b10](https://github.com/WiseLabCMU/wisescan-ios/commit/4f09b104511655ab6338bb569aca7fcde1320efa))
+* stop the RoomPlan session promptly at Stop (not 15-25s later) ([5f4ffe5](https://github.com/WiseLabCMU/wisescan-ios/commit/5f4ffe54b532d26f3bb44102e3a7fe6acbfee30f))
+
 ## [0.3.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.2.1...v0.3.0) (2026-06-05)
 
 
