@@ -170,11 +170,17 @@ extension CaptureView {
     // swiftlint:disable:next function_body_length cyclomatic_complexity
     private func finishStopRecording(rawDataPath: URL?, locationId: UUID?, scanCase: ScanCase,
                                      completion: ((CapturedScan?) -> Void)? = nil) {
-        // Export mesh from the still-active AR session. exportMeshOBJ now takes the ARFrame directly
-        // (main's change — reading currentFrame inside pinned ARFrame memory), so grab it once here
-        // and reuse it for the thumbnail below.
+        // SNAPSHOT the mesh from the still-active AR session: a handful of memcpys (raw vertex/face
+        // buffers + segmentation pixels + camera matrices), all by value. This is the only mesh work
+        // that must stay on the main/AR thread at Stop, so the copied data is co-framed (same instant,
+        // same world frame) with the segmentation — including through the scan-adjacent/extend flow,
+        // which routes through this same path. ALL the heavy work — the per-vertex world transform,
+        // the privacy person-projection, AND the OBJ string formatting (together the old multi-second
+        // main-thread freeze that stalled the name prompt) — is deferred to buildMeshOBJ(from:) in the
+        // off-main block below. snapshotMeshBuffers reads currentFrame inside pinned ARFrame memory, so
+        // grab it once here and reuse it for the thumbnail below.
         let currentFrame = currentARSession?.currentFrame
-        let meshResult = ARCoverageView.exportMeshOBJ(from: currentFrame, privacyFilter: isPrivacyFilterOn)
+        let meshSnapshot = ARCoverageView.snapshotMeshBuffers(from: currentFrame, privacyFilter: isPrivacyFilterOn)
 
         // FIX (semantic ↔ mesh ~90° drift): snapshot the CapturedRoom NOW, co-temporal with the mesh
         // export above, and write THIS snapshot below — never the live finalCapturedRoom. RoomPlan
@@ -213,21 +219,16 @@ extension CaptureView {
             }
         }
 
-        var finalMeshResult = meshResult
+        var finalSnapshot = meshSnapshot
 
         // If test modes are active and no mesh was generated (e.g. Simulator), inject a dummy mesh
-        if finalMeshResult == nil || finalMeshResult!.data.isEmpty {
+        if finalSnapshot == nil {
             if developerMode && (mockCameraImages || mockIMU || mockDepthMaps) {
-                let dummyObj = "v -0.5 -0.5 -0.5\nv 0.5 -0.5 -0.5\nv 0.5 0.5 -0.5\nf 1 2 3\n"
-                if let dummyObjData = dummyObj.data(using: .utf8) {
-                    finalMeshResult = ARCoverageView.MeshExportResult(
-                        data: dummyObjData, vertexCount: 3, faceCount: 1
-                    )
-                }
+                finalSnapshot = ARCoverageView.dummyMeshSnapshot()
             }
         }
 
-        guard let result = finalMeshResult, !result.data.isEmpty else {
+        guard let snapshot = finalSnapshot else {
             // Switch to nominal mode (drops mesh anchors, frees AR memory)
             isRecording = false
             isProcessingMesh = false  // release the re-entrancy claim from performStopRecording
@@ -326,6 +327,26 @@ extension CaptureView {
             // isColored = true. Scans saved here keep isColored = false (saveScan never sets it),
             // so that button is still offered.
             DispatchQueue.global(qos: .utility).async {
+                // Build the OBJ off-main from the Stop-instant snapshot: per-vertex world transform,
+                // privacy person-projection, and float→string formatting. This is the whole multi-second
+                // cost that used to run on main and stall the name prompt; the snapshot taken on main at
+                // Stop is what keeps it co-framed with the segmentation. `snapshot` has vertices (the
+                // guard above returns nil only when empty), so this is non-nil in practice; bail safely
+                // on the impossible nil so the UI never hangs.
+                guard let result = ARCoverageView.buildMeshOBJ(from: snapshot) else {
+                    DispatchQueue.main.async {
+                        self.isRecording = false
+                        self.isProcessingMesh = false
+                        self.isWaitingToSave = false
+                        self.showNamePrompt = false
+                        self.frameCaptureSession = FrameCaptureSession()
+                        MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
+                        self.showTransientMessage("Save failed — mesh could not be built", duration: 4)
+                        completion?(nil)
+                    }
+                    return
+                }
+
                 let vertexColors = VertexColorAccumulator.generateNormalsColors(objData: result.data)
 
                 DispatchQueue.main.async {

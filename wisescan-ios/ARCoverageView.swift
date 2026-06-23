@@ -1914,125 +1914,226 @@ struct ARCoverageView: UIViewRepresentable {
         let faceCount: Int
     }
 
-    // swiftlint:disable:next function_body_length
-    static func exportMeshOBJ(from currentFrame: ARFrame?, privacyFilter: Bool = false) -> MeshExportResult? {
+    /// Raw, co-framed buffer snapshot taken on the main/AR thread the instant recording stops.
+    /// Holds *copies* (by value) of the live ARFrame's mesh vertex/face buffers, the segmentation
+    /// pixels, and the camera matrices — so nothing here references recycled ARKit memory and the
+    /// whole thing is safe to hand to a background thread. Taking the snapshot is just a handful of
+    /// memcpys (cheap, safe on main at Stop). ALL the expensive work — the per-vertex world
+    /// transform, the privacy person-projection, and the float→string OBJ formatting — is deferred
+    /// to `buildMeshOBJ(from:)` off-main. This snapshot-at-Stop is what keeps mesh + segmentation
+    /// co-framed (same instant, same world frame) while moving the cost off the main thread.
+    struct RawMeshSnapshot: Sendable {
+        struct Anchor: Sendable {
+            let transform: simd_float4x4
+            let vertexData: Data            // raw vertex buffer bytes (vertexCount * vertexStride)
+            let vertexCount: Int
+            let vertexStride: Int
+            let faceData: Data              // raw face buffer bytes (faceCount * faceBytesPerPrimitive)
+            let faceCount: Int
+            let faceBytesPerPrimitive: Int  // bytesPerIndex * indexCountPerPrimitive
+            let faceFormatValid: Bool       // bytesPerIndex == 4 && indexCountPerPrimitive == 3
+        }
+        struct Segmentation: Sendable {
+            let pixels: Data
+            let width: Int
+            let height: Int
+            let stride: Int
+        }
+        let anchors: [Anchor]
+        let viewMatrix: simd_float4x4
+        let projMatrix: simd_float4x4
+        let segmentation: Segmentation?     // non-nil only when privacy filtering is on
+    }
+
+    /// Snapshot the live mesh / segmentation / camera state on the main thread — fast memcpys only,
+    /// no transforms or projection. See `RawMeshSnapshot` for why the split exists. Returns nil when
+    /// there's no mesh to export (no ARMeshAnchors with vertices), matching the old empty-OBJ guard.
+    static func snapshotMeshBuffers(from currentFrame: ARFrame?, privacyFilter: Bool = false) -> RawMeshSnapshot? {
         guard let currentFrame = currentFrame else { return nil }
 
-        // Get person segmentation for privacy filtering
-        // swiftlint:disable:next large_tuple
-        var personPixels: (buffer: CVPixelBuffer, width: Int, height: Int, stride: Int, base: UnsafeMutableRawPointer)?
+        // Copy the person-segmentation pixels (privacy filtering) while the buffer is locked, then
+        // unlock immediately. The per-vertex projection that consumes them runs later, off-main,
+        // against this copy — so the live buffer is held for only the duration of one memcpy.
+        var segmentation: RawMeshSnapshot.Segmentation?
         if privacyFilter, let segBuffer = currentFrame.segmentationBuffer {
             CVPixelBufferLockBaseAddress(segBuffer, .readOnly)
             if let base = CVPixelBufferGetBaseAddress(segBuffer) {
-                personPixels = (segBuffer, CVPixelBufferGetWidth(segBuffer), CVPixelBufferGetHeight(segBuffer),
-                                CVPixelBufferGetBytesPerRow(segBuffer), base)
+                let height = CVPixelBufferGetHeight(segBuffer)
+                let stride = CVPixelBufferGetBytesPerRow(segBuffer)
+                segmentation = RawMeshSnapshot.Segmentation(
+                    pixels: Data(bytes: base, count: height * stride),
+                    width: CVPixelBufferGetWidth(segBuffer),
+                    height: height,
+                    stride: stride
+                )
             }
+            CVPixelBufferUnlockBaseAddress(segBuffer, .readOnly)
         }
 
         let camera = currentFrame.camera
-        // .landscapeRight is correct here because we're projecting mesh vertices into the
-        // segmentation buffer's coordinate space, which is always in native sensor orientation
-        // (landscape-right). This is independent of the device's display orientation or
-        // capture mode. (This method is used for AR mode mesh export; VR mode uses
-        // PointCloudManager for its own geometry pipeline.)
-        // See FaceBlurOverlay.swift for full orientation architecture documentation.
+        // .landscapeRight: the mesh vertices are projected into the segmentation buffer's coordinate
+        // space, which is always native sensor orientation (landscape-right), independent of display
+        // orientation. (AR-mode export; VR mode uses PointCloudManager.) See FaceBlurOverlay.swift
+        // for the full orientation architecture. These matrices are snapshotted here so the off-main
+        // projection uses the Stop-instant camera, co-framed with the mesh.
         let viewMatrix = camera.viewMatrix(for: .landscapeRight)
         let imageRes = camera.imageResolution
         let projMatrix = camera.projectionMatrix(for: .landscapeRight, viewportSize: imageRes, zNear: 0.001, zFar: 100)
 
-        // Write OBJ directly to a Data buffer to avoid intermediate [String] array
-        // and the large joined String copy. For large meshes (~300K+ vertices) this
-        // roughly halves peak memory vs the array-join approach.
+        var anchors: [RawMeshSnapshot.Anchor] = []
+        var totalVertices = 0
+        for anchor in currentFrame.anchors {
+            guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
+            let geometry = meshAnchor.geometry
+            let vertices = geometry.vertices
+            let faces = geometry.faces
+            guard vertices.count > 0 else { continue }
+
+            let faceBytesPerPrimitive = faces.bytesPerIndex * faces.indexCountPerPrimitive
+            // memcpy the raw buffers. Data(bytes:count:) copies, so these survive ARFrame recycling.
+            // Copy exactly count*stride / count*faceBytes bytes; the off-main reader stays in bounds.
+            let vertexData = Data(bytes: vertices.buffer.contents(), count: vertices.count * vertices.stride)
+            let faceData = Data(bytes: faces.buffer.contents(), count: faces.count * faceBytesPerPrimitive)
+
+            anchors.append(RawMeshSnapshot.Anchor(
+                transform: meshAnchor.transform,
+                vertexData: vertexData,
+                vertexCount: vertices.count,
+                vertexStride: vertices.stride,
+                faceData: faceData,
+                faceCount: faces.count,
+                faceBytesPerPrimitive: faceBytesPerPrimitive,
+                faceFormatValid: faces.bytesPerIndex == 4 && faces.indexCountPerPrimitive == 3
+            ))
+            totalVertices += vertices.count
+        }
+
+        guard totalVertices > 0 else { return nil }
+
+        return RawMeshSnapshot(
+            anchors: anchors, viewMatrix: viewMatrix, projMatrix: projMatrix, segmentation: segmentation
+        )
+    }
+
+    /// Turn a `RawMeshSnapshot` into OBJ text. Pure CPU work over copied buffers — no live ARKit
+    /// dependency — so this is intended to run OFF the main thread. This is where the old main-thread
+    /// freeze now lives: the per-vertex world transform, the privacy person-projection, and the
+    /// float→string formatting for ~300K+ vertices. Output is byte-identical to the historical
+    /// on-main exporter (per-anchor `v` lines then `f` lines, 1-based indices with a running offset).
+    // swiftlint:disable:next function_body_length cyclomatic_complexity
+    static func buildMeshOBJ(from snapshot: RawMeshSnapshot) -> MeshExportResult? {
+        let viewMatrix = snapshot.viewMatrix
+        let projMatrix = snapshot.projMatrix
+        let seg = snapshot.segmentation
+
+        // Write OBJ directly to a Data buffer to avoid an intermediate [String] array and the large
+        // joined String copy. For large meshes (~300K+ vertices) this roughly halves peak memory.
         var objData = Data()
-        objData.reserveCapacity(1024 * 1024) // Pre-allocate 1MB; grows as needed
+        objData.reserveCapacity(1024 * 1024)
         var vertexOffset = 1
         var totalVertices = 0
         var totalFaces = 0
 
+        for anchor in snapshot.anchors {
+            let transform = anchor.transform
+            let vCount = anchor.vertexCount
+            let vStride = anchor.vertexStride
+            var isPersonVertex = [Bool](repeating: false, count: vCount)
 
+            anchor.vertexData.withUnsafeBytes { (vBuf: UnsafeRawBufferPointer) in
+                for idx in 0..<vCount {
+                    let base = idx * vStride
+                    // Read x/y/z as three 4-byte floats (12 bytes) — the lanes the original SIMD3
+                    // read actually used — so we never over-read past the copied count*stride bytes.
+                    let x = vBuf.loadUnaligned(fromByteOffset: base, as: Float.self)
+                    let y = vBuf.loadUnaligned(fromByteOffset: base + 4, as: Float.self)
+                    let z = vBuf.loadUnaligned(fromByteOffset: base + 8, as: Float.self)
+                    let worldPos = transform * SIMD4<Float>(x, y, z, 1.0)
 
-        for anchor in currentFrame.anchors {
-            guard let meshAnchor = anchor as? ARMeshAnchor else { continue }
-            let geometry = meshAnchor.geometry
-            let transform = meshAnchor.transform
+                    objData.append(contentsOf: "v \(worldPos.x) \(worldPos.y) \(worldPos.z)\n".utf8)
 
-            let vertices = geometry.vertices
-            var isPersonVertex = [Bool](repeating: false, count: vertices.count)
-
-            for idx in 0..<vertices.count {
-                let pointer = vertices.buffer.contents().advanced(by: idx * vertices.stride)
-                let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                let localPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
-                let worldPos = transform * localPos
-
-                objData.append(contentsOf: "v \(worldPos.x) \(worldPos.y) \(worldPos.z)\n".utf8)
-
-                // Check person segmentation
-                if let pp = personPixels {
-                    let camPos = viewMatrix * worldPos
-                    let clipPos = projMatrix * camPos
-                    if clipPos.w > 0 {
-                        let px = Int((clipPos.x / clipPos.w * 0.5 + 0.5) * Float(pp.width))
-                        let py = Int((1.0 - (clipPos.y / clipPos.w * 0.5 + 0.5)) * Float(pp.height))
-                        if px >= 0 && px < pp.width && py >= 0 && py < pp.height {
-                            let pixel = pp.base.advanced(by: py * pp.stride + px).assumingMemoryBound(to: UInt8.self).pointee
-                            isPersonVertex[idx] = pixel > 128
+                    // Person segmentation projection (privacy). seg is non-nil only when filtering.
+                    if let seg = seg {
+                        let camPos = viewMatrix * worldPos
+                        let clipPos = projMatrix * camPos
+                        if clipPos.w > 0 {
+                            let px = Int((clipPos.x / clipPos.w * 0.5 + 0.5) * Float(seg.width))
+                            let py = Int((1.0 - (clipPos.y / clipPos.w * 0.5 + 0.5)) * Float(seg.height))
+                            if px >= 0 && px < seg.width && py >= 0 && py < seg.height {
+                                isPersonVertex[idx] = seg.pixels[py * seg.stride + px] > 128
+                            }
                         }
                     }
                 }
             }
-            totalVertices += vertices.count
+            totalVertices += vCount
 
-            let faces = geometry.faces
-            let faceBytes = faces.bytesPerIndex * faces.indexCountPerPrimitive
-
-            // Validate face format before iterating
-            guard faces.bytesPerIndex == 4, faces.indexCountPerPrimitive == 3 else {
-                vertexOffset += vertices.count
+            // Validate face format before iterating (mirrors the original guard).
+            guard anchor.faceFormatValid else {
+                vertexOffset += vCount
                 continue
             }
 
-            for faceIdx in 0..<faces.count {
-                let pointer = faces.buffer.contents().advanced(by: faceIdx * faceBytes)
-                let indices = pointer.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
+            let faceBytes = anchor.faceBytesPerPrimitive
+            anchor.faceData.withUnsafeBytes { (fBuf: UnsafeRawBufferPointer) in
+                for faceIdx in 0..<anchor.faceCount {
+                    let base = faceIdx * faceBytes
+                    let i0 = fBuf.loadUnaligned(fromByteOffset: base, as: UInt32.self)
+                    let i1 = fBuf.loadUnaligned(fromByteOffset: base + 4, as: UInt32.self)
+                    let i2 = fBuf.loadUnaligned(fromByteOffset: base + 8, as: UInt32.self)
 
-                // Validate indices are within vertex bounds — corrupted geometry
-                // from recycled ARFrame buffers can produce wild index values.
-                guard Int(indices.0) < vertices.count,
-                      Int(indices.1) < vertices.count,
-                      Int(indices.2) < vertices.count else {
-                    continue
-                }
+                    // Validate indices are within vertex bounds — corrupted geometry can produce
+                    // wild index values.
+                    guard Int(i0) < vCount, Int(i1) < vCount, Int(i2) < vCount else { continue }
 
-                // Skip person faces if privacy filter is on
-                if privacyFilter {
-                    let i0 = Int(indices.0)
-                    let i1 = Int(indices.1)
-                    let i2 = Int(indices.2)
-                    if isPersonVertex[i0] || isPersonVertex[i1] || isPersonVertex[i2] {
+                    // Skip person faces if privacy filter is on
+                    if seg != nil, isPersonVertex[Int(i0)] || isPersonVertex[Int(i1)] || isPersonVertex[Int(i2)] {
                         continue
                     }
-                }
 
-                let v1 = Int(indices.0) + vertexOffset
-                let v2 = Int(indices.1) + vertexOffset
-                let v3 = Int(indices.2) + vertexOffset
-                objData.append(contentsOf: "f \(v1) \(v2) \(v3)\n".utf8)
-                totalFaces += 1
+                    let v1 = Int(i0) + vertexOffset
+                    let v2 = Int(i1) + vertexOffset
+                    let v3 = Int(i2) + vertexOffset
+                    objData.append(contentsOf: "f \(v1) \(v2) \(v3)\n".utf8)
+                    totalFaces += 1
+                }
             }
 
-
-
-            vertexOffset += vertices.count
-        }
-
-        if let pp = personPixels {
-            CVPixelBufferUnlockBaseAddress(pp.buffer, .readOnly)
+            vertexOffset += vCount
         }
 
         guard !objData.isEmpty else { return nil }
 
         return MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces)
+    }
+
+    /// A tiny single-triangle snapshot used only in developer/mock modes (e.g. Simulator) where no
+    /// real ARMesh exists, so the save pipeline still has geometry to write. `buildMeshOBJ(from:)`
+    /// turns it into the same OBJ the old dummy string produced: three vertices + one face.
+    static func dummyMeshSnapshot() -> RawMeshSnapshot {
+        let verts: [Float] = [-0.5, -0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, -0.5]
+        var vertexData = Data(capacity: verts.count * 4)
+        for f in verts { withUnsafeBytes(of: f) { vertexData.append(contentsOf: $0) } }
+        let indices: [UInt32] = [0, 1, 2]
+        var faceData = Data(capacity: indices.count * 4)
+        for i in indices { withUnsafeBytes(of: i) { faceData.append(contentsOf: $0) } }
+        let anchor = RawMeshSnapshot.Anchor(
+            transform: matrix_identity_float4x4,
+            vertexData: vertexData, vertexCount: 3, vertexStride: 12,
+            faceData: faceData, faceCount: 1, faceBytesPerPrimitive: 12, faceFormatValid: true
+        )
+        return RawMeshSnapshot(
+            anchors: [anchor], viewMatrix: matrix_identity_float4x4,
+            projMatrix: matrix_identity_float4x4, segmentation: nil
+        )
+    }
+
+    /// Convenience wrapper: snapshot + build on the calling thread. The Stop pipeline calls
+    /// `snapshotMeshBuffers` (on main, co-framed) and `buildMeshOBJ(from:)` (off-main) separately so
+    /// the heavy work can't freeze the UI; this single-call form is kept for other callers.
+    static func exportMeshOBJ(from currentFrame: ARFrame?, privacyFilter: Bool = false) -> MeshExportResult? {
+        guard let snapshot = snapshotMeshBuffers(from: currentFrame, privacyFilter: privacyFilter) else { return nil }
+        return buildMeshOBJ(from: snapshot)
     }
 
     /// Returns a fresh ARWorldTrackingConfiguration with no scene reconstruction
