@@ -331,6 +331,16 @@ class ScanStore {
     /// Shared navigation path to allow programmatic pushes from capture to scan detail.
     var navigationPath = NavigationPath()
 
+    // MARK: - AR View Hooks
+
+    /// Stops the active recording-mode RoomPlan session promptly, populated by ARCoverageView.
+    /// The stop normally happens in updateUIView's nominal-downgrade branch, but that runs on the
+    /// main thread — which the post-Stop save pipeline stalls for 15–25s — so RoomPlan kept running
+    /// (and re-basing its room, plus burning battery) long after Stop. The stop flow calls this right
+    /// after snapshotting the room so RoomPlan ends immediately instead. `@ObservationIgnored`: it's a
+    /// plumbing callback, not observable view state. Captures the coordinator weakly (no retain cycle).
+    @ObservationIgnored var requestStopRoomPlan: (() -> Void)?
+
     // MARK: - State Reset
 
     /// Resets all capture-related state to idle defaults.

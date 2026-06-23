@@ -187,6 +187,14 @@ extension CaptureView {
         // this copy is an immutable freeze, unaffected by later RoomPlan didUpdate callbacks.
         let capturedRoomAtStop = finalCapturedRoom
 
+        // Now that the room is snapshotted (and the mesh frozen above), end the recording-mode RoomPlan
+        // session immediately rather than waiting for updateUIView's nominal-downgrade branch — which the
+        // post-Stop save pipeline stalls for 15–25s, so RoomPlan kept running, re-basing its room and
+        // burning battery long after Stop. Stopping here can't affect the saved data (already
+        // snapshotted) or the mesh export (already done). Idempotent — updateUIView's later
+        // stopRoomPlanSession() guard-returns once roomCaptureSession is nil.
+        scanStore.requestStopRoomPlan?()
+
         // Capture a 2D thumbnail from the current camera frame
         var thumbnailData: Data?
         if let currentFrame = currentFrame {

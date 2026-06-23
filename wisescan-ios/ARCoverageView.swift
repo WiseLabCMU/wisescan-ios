@@ -77,6 +77,12 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.finalCapturedRoomBinding = $finalCapturedRoom
         context.coordinator.hasWorldMap.store(config.initialWorldMap != nil, ordering: .relaxed)
         context.coordinator.scanStore = scanStore
+        // Let the stop flow end the recording-mode RoomPlan session promptly (see ScanStore). Weak
+        // coordinator capture → no retain cycle; stopRoomPlanSession is idempotent + main-thread-only,
+        // and the stop flow invokes this on the main thread.
+        scanStore?.requestStopRoomPlan = { [weak coordinator = context.coordinator] in
+            coordinator?.stopRoomPlanSession()
+        }
         // Genuine map-load failure on the fresh-view path (requested but archive missing/corrupt) —
         // knowable synchronously here. Mirror of the updateUIView relocalization branch; replaces the
         // racy per-frame inference removed from driveAlignmentPhase (see that comment + git log).
