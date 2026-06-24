@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.4.0...v0.4.1) (2026-06-24)
+
+
+### Bug Fixes
+
+* drop invalid 'lidar' UIRequiredDeviceCapabilities value (App Store rejects 90098) ([c2adee5](https://github.com/WiseLabCMU/wisescan-ios/commit/c2adee5aa2825d4a5eb9c2e91eefd606c20360a9))
+
 ## [0.4.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.3.0...v0.4.0) (2026-06-23)
 
 
