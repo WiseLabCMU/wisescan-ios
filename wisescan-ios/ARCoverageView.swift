@@ -57,9 +57,18 @@ struct ARCoverageView: UIViewRepresentable {
         arView.renderOptions.insert(.disablePersonOcclusion)
 
         // Start in nominal mode: camera passthrough only, no scene reconstruction
-        // EXCEPT if we are extending a scan, in which case we load the map right away
-        let config = Self.makeConfiguration(worldMapURL: initialWorldMapURL)
+        // EXCEPT if we are extending a scan, in which case we load the map right away.
+        // Phase-2.1 precursor: when diagnostics are on AND we're relocalizing into a map, enable mesh
+        // *during the alignment phase* (normally off until record-start) so a live LiDAR cloud
+        // accumulates before recording — that's the only window in which to measure/ICP-refine the
+        // relocalization offset before the origin is baked. No-op in production (perfDiag off).
+        let alignmentMesh = PerfDiag.enabled && initialWorldMapURL != nil
+        let config = Self.makeConfiguration(enableMeshReconstruction: alignmentMesh, worldMapURL: initialWorldMapURL)
         let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
+        if PerfDiag.enabled, let m = config.initialWorldMap {
+            context.coordinator.locDiagSummary.recordMap(m, name: initialWorldMapURL?.lastPathComponent) // 0.x: start a fresh per-run summary
+            context.coordinator.locDiagBeginRun() // reset per-run settle state (delegate queue)
+        }
 
         context.coordinator.scanStats = scanStats
         context.coordinator.arView = arView
@@ -220,11 +229,20 @@ struct ARCoverageView: UIViewRepresentable {
             context.coordinator.hasAddedGhostMesh = false
 
             if let ghostData = initialGhostMeshData {
-                // Load the world map for relocalization
+                // Load the world map for relocalization. Phase-2.1 precursor: also enable mesh during
+                // the pre-record alignment phase when diagnostics are on (see makeUIView) so the live
+                // cloud exists to ICP-measure the relocalization offset before record-start.
                 let config = Self.makeConfiguration(
-                    enableMeshReconstruction: isRecording,
+                    enableMeshReconstruction: isRecording || (PerfDiag.enabled && initialWorldMapURL != nil),
                     worldMapURL: initialWorldMapURL
                 )
+                if PerfDiag.enabled, let m = config.initialWorldMap {
+                    context.coordinator.locDiagSummary.recordMap(m, name: initialWorldMapURL?.lastPathComponent) // 0.x: fresh per-run summary
+                    context.coordinator.locDiagBeginRun() // reset per-run settle state (delegate queue)
+                    context.coordinator.pendingICPBake = nil // Phase 2.1: drop any stale correction from a prior/cancelled alignment
+                    context.coordinator.icpRefineCandidates.removeAll() // and the stale candidate buffer
+                    scanStore?.icpAlignReady = nil
+                }
 
                 let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
                 context.coordinator.hasWorldMap = (config.initialWorldMap != nil)
@@ -306,6 +324,27 @@ struct ARCoverageView: UIViewRepresentable {
                     : "record-start: new scan → .removeExistingAnchors (clear prior scan's mesh)")
                 uiView.session.run(config, options: runOptions)
 
+                // Phase 2.1 (perfDiag, dev-only): bake the gravity-locked ICP correction from the
+                // alignment-phase refine into the world origin so recorded geometry lands in the
+                // canonical/ghost frame regardless of how the user approached. Only trusted fits reach
+                // here (pendingICPBake is nil for untrusted/none-ready/off → raw relocalized frame, as
+                // today). Applied BEFORE the manual nudge so any nudge composes on the aligned frame.
+                if let icpBake = context.coordinator.pendingICPBake {
+                    uiView.session.setWorldOrigin(relativeTransform: icpBake)
+                    let t = icpBake.columns.3
+                    let trans = simd_length(SIMD3<Float>(t.x, t.y, t.z))
+                    let yaw = atan2(icpBake.columns.2.x, icpBake.columns.2.z) * 180 / .pi
+                    PerfDiag.log(String(format: "[LocDiag BAKE] applied gravity-locked ICP correction: trans=%.1fcm yaw=%.2f° — re-measuring post-bake", trans * 100, yaw))
+                    context.coordinator.locDiagSummary.bakedTransM = trans
+                    context.coordinator.locDiagSummary.bakedYawDeg = yaw
+                    context.coordinator.pendingICPBake = nil
+                    context.coordinator.icpRefineCandidates.removeAll() // alignment phase is over; drop candidates
+                    scanStore?.icpAlignReady = nil
+                    // Re-measure post-bake during recording: if the bake's sign/magnitude are right, the
+                    // residual trans collapses toward ~0 (overwrites summary.icp with the post-bake report).
+                    context.coordinator.locDiagRearmICPForPostBake()
+                }
+
                 // If the user manually aligned the ghost mesh, bake that transform into the ARKit world origin
                 if let baked = bakedGhostTransform {
                     uiView.session.setWorldOrigin(relativeTransform: baked)
@@ -315,6 +354,12 @@ struct ARCoverageView: UIViewRepresentable {
                 // Active wireframe is now rendered via procedural geometry (not .showSceneUnderstanding)
                 // Entities are built incrementally in session(_:didAdd:) and session(_:didUpdate:)
                 context.coordinator.resetForRecording()
+                // Phase-0 diag: mark this run as recorded so stop emits a summary. A no-map run
+                // has nothing to relocalize → start the summary fresh (drops any stale map/settle).
+                if PerfDiag.enabled {
+                    if config.initialWorldMap == nil { context.coordinator.locDiagSummary = .init() }
+                    context.coordinator.locDiagSummary.didRecord = true
+                }
                 // Start RoomPlan session alongside ARKit (shares the same ARSession)
                 context.coordinator.startRoomPlanSession(arSession: uiView.session)
                 // Add coverage overlay green quad in AR mode
@@ -343,6 +388,13 @@ struct ARCoverageView: UIViewRepresentable {
                 // markers are visible during relocalization too, not just once recording begins.
                 context.coordinator.renderRescanConnectorsIfReady(arView: uiView)
             } else {
+                // Phase-0 diag: emit the one-line per-run summary at stop for every recorded run.
+                // No-map (baseline) runs print "map=none" so the absence of relocalization is
+                // explicit rather than a silently-missing line. ICP may still be in flight → it
+                // logs "pending" and the separate [LocDiag ICP] line carries the values.
+                if PerfDiag.enabled, context.coordinator.locDiagSummary.didRecord {
+                    LocalizationDiag.logSummary(context.coordinator.locDiagSummary)
+                }
                 // Downgrade to nominal: pure camera passthrough — no overlays
                 // Stop RoomPlan and capture final CapturedRoom BEFORE reset clears state
                 context.coordinator.stopRoomPlanSession()
@@ -376,6 +428,17 @@ struct ARCoverageView: UIViewRepresentable {
     /// pipeline (fsSurfaceMeshShadowCasterProgrammableBlending crashes due to missing
     /// videoRuntimeFunctionConstants buffer bindings).
     private static func loadGhostMesh(data: Data, coordinator: Coordinator, arView: ARView) {
+        // 0.2: keep the ghost (prior/canonical) OBJ as the ICP target for the residual probe, and
+        // build its surfel cloud ONCE here (off the delegate queue) so the per-refine path doesn't
+        // re-parse the whole mesh every ~2 s (a thermal/compute load that can destabilize tracking).
+        if PerfDiag.enabled {
+            DispatchQueue.main.async { coordinator.locDiagSummary.ghostLoaded = true }
+            coordinator.sessionDelegateQueue.async { coordinator.locDiagGhostSurfels = nil } // drop stale
+            DispatchQueue.global(qos: .utility).async {
+                let surfels = LocalizationDiag.buildGhostSurfels(from: data)
+                coordinator.sessionDelegateQueue.async { coordinator.locDiagGhostSurfels = surfels }
+            }
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             // Build procedural wireframe: thin 3D quads for each unique edge
             let descriptors = MeshParser.generateWireframeDescriptors(from: data)
@@ -477,6 +540,42 @@ struct ARCoverageView: UIViewRepresentable {
         /// Perf diagnostics: timestamp of the previous ARFrame, to detect gaps in frame
         /// delivery (the signature of ARKit VIO being starved). Touched only on the delegate queue.
         private var lastFrameTimestamp: TimeInterval = 0
+
+        // ── Phase-0 localization diagnostics (log-only; see docs/fix-localization-plan.md).
+        //    All delegate-queue state. ──
+        /// 0.1: one-shot guard + start stamp for the relocalization-settle ε log.
+        private var locDiagLoggedSettle = false
+        private var locDiagRelocStart: TimeInterval = 0
+        private var locDiagSawReloc = false
+        /// 0.2: the ghost (prior/canonical) surfel cloud (face centroids + normals) used as the ICP
+        /// target — parsed/built from the ghost OBJ **once** at ghost-load and reused every refine.
+        /// (The parse over a 100k–700k-face mesh was being redone every ~2 s, a real thermal/compute
+        /// load that could throttle VIO into a tracking breakdown.) Built on a background queue,
+        /// stored + read on the delegate queue; plus a per-anchor sample of live world-space verts
+        /// accumulated during recording, run through ICP once enough has accumulated.
+        var locDiagGhostSurfels: (pts: [SIMD3<Float>], nrm: [SIMD3<Float>])?
+        private var locDiagLiveSamples: [UUID: [SIMD3<Float>]] = [:]
+        private var locDiagRanICP = false
+        /// 0.3: detects the frame-correction "snap" that baked world:.zero overlays don't follow.
+        private var locDiagSnap = LocalizationDiag.SnapTracker()
+        /// Phase 2.1 item 2 (production signal, NOT perfDiag-gated): detects a genuine mid-scan frame
+        /// discontinuity (loop-closure / relocalization snap under continuous `.normal` tracking) that
+        /// splits the saved mesh. Delegate-queue state; reset at record-start, fires the ScanStore flag.
+        private var trackingStability = TrackingStabilityMonitor()
+        /// Per-run consolidated summary. **Main-thread only** — delegate/ICP-queue probes hop to
+        /// main to populate it (see LocalizationDiag.Summary). Emitted at stop-recording.
+        var locDiagSummary = LocalizationDiag.Summary()
+        /// Phase 2.1 (perfDiag, dev-only): the gravity-locked correction from the alignment-phase
+        /// refine, gated to trusted fits, waiting to be baked into the world origin at record-start.
+        /// **Main-thread only** (set on the ICP-completion main hop, read in updateUIView's record-start).
+        var pendingICPBake: simd_float4x4?
+        /// Phase 2.1 polish: a short rolling buffer of recent **trusted** refines (passed `BakeGate`
+        /// and above the min-offset floor). The pre-record refine re-runs every ~2 s and its quality
+        /// swings wildly in feature-desert rooms, so `pendingICPBake` tracks the *best* of these by
+        /// `LocalizationDiag.refineQuality`, not the latest. **Main-thread only** (same as
+        /// `pendingICPBake`); cleared at map load and once a bake is consumed at record-start.
+        var icpRefineCandidates: [(report: LocalizationDiag.ICPReport, bake: simd_float4x4)] = []
+        private let icpRefineBufferMax = 6
 
         // Session capacity tracking
         private var sessionStartTime: Date = Date()
@@ -602,6 +701,13 @@ struct ARCoverageView: UIViewRepresentable {
                 // it arms on the first `.normal` frame (see session(_:didUpdate:)).
                 self.vioGuardArmed = (self.arView?.session.currentFrame?.camera.trackingState == .normal)
                 self.vioDegradedSince = 0
+                // Item 2: fresh tracking-stability accumulators for this scan.
+                self.trackingStability.reset()
+                // Phase-2.1: the ICP probe is now armed at map load (locDiagBeginRun), NOT here, so a
+                // measurement taken during the pre-record alignment phase (the moment 2.1 bakes the
+                // correction) survives into recording rather than being clobbered by a record-time
+                // re-run. If alignment never fired it (e.g. too little mesh pre-record), it's still
+                // armed and fires during recording as before. (Settle flags likewise reset at load.)
             }
             // Clear any stale wireframe entities from a previous recording (RealityKit → main)
             removeAllActiveMeshEntities()
@@ -640,6 +746,10 @@ struct ARCoverageView: UIViewRepresentable {
                 self.totalTrackingUpdates = 0
                 self.vioGuardArmed = false
                 self.vioDegradedSince = 0
+                // Phase-0 diag: clear a prior alignment attempt's settle state.
+                self.locDiagLoggedSettle = false
+                self.locDiagRelocStart = 0
+                self.locDiagSawReloc = false
             }
 
             // Remove all active mesh wireframe entities from the scene (RealityKit → main)
@@ -760,6 +870,8 @@ struct ARCoverageView: UIViewRepresentable {
                 faceIndices.append(face)
             }
             // ── ARMeshAnchor reference is now released — geometry buffers won't retain ARFrame ──
+            // (0.2 ICP live-sample feed moved to the anchor handlers via locDiagSampleAnchorForICP
+            //  so it runs in VR mode too — this wireframe path early-returns in VR.)
 
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let descriptors = MeshParser.buildWireframeDescriptors(
@@ -823,6 +935,168 @@ struct ARCoverageView: UIViewRepresentable {
                         self.activeMeshEntities[anchorId] = (anchor: anchorEntity, model: containerEntity)
                     }
                 }
+            }
+        }
+
+        /// Phase-0 diag (delegate queue): reset per-run settle state at the start of a new run
+        /// (map load). Settle flags are delegate-owned, so hop onto the delegate queue. Called from
+        /// main at the recordMap sites — NOT from resetForRecording, so a settle observed during
+        /// pre-record alignment survives into recording.
+        func locDiagBeginRun() {
+            sessionDelegateQueue.async { [weak self] in
+                self?.locDiagLoggedSettle = false
+                self?.locDiagRelocStart = 0
+                self?.locDiagSawReloc = false
+                // Arm the one-shot ICP probe per run at map load (not at record-start) so it can fire
+                // during the pre-record alignment phase — see resetForRecording.
+                self?.locDiagRanICP = false
+                self?.locDiagLiveSamples.removeAll()
+            }
+        }
+
+        /// 0.2 helper (delegate queue): extract a bounded sample of an ARMeshAnchor's world-space
+        /// verts for the ICP probe. Sourced from the anchor directly (NOT the wireframe path, which
+        /// is AR-only) so the probe also works in **VR** capture mode. Reads geometry synchronously
+        /// so no ARFrame reference is retained, matching buildWireframeForAnchor's discipline.
+        private func locDiagSampleAnchorForICP(_ mesh: ARMeshAnchor) {
+            guard PerfDiag.enabled, hasWorldMap, !locDiagRanICP, locDiagGhostSurfels != nil else { return }
+            let vertices = mesh.geometry.vertices
+            guard vertices.count > 0 else { return }
+            let anchorTransform = mesh.transform
+            let cap = 400
+            let step = max(1, vertices.count / cap)
+            var samples = [SIMD3<Float>]()
+            samples.reserveCapacity(min(cap, vertices.count))
+            var i = 0
+            while i < vertices.count {
+                let ptr = vertices.buffer.contents().advanced(by: i * vertices.stride)
+                let local = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
+                let w = anchorTransform * SIMD4<Float>(local.x, local.y, local.z, 1.0)
+                samples.append(SIMD3<Float>(w.x, w.y, w.z))
+                i += step
+            }
+            locDiagAccumulateAndMaybeRunICP(anchorId: mesh.identifier, worldPositions: samples)
+        }
+
+        /// 0.2 helper (delegate queue): keep a bounded per-anchor sample of live world-space
+        /// verts; once enough has accumulated during a relocalized recording, run the point-to-
+        /// plane ICP residual probe once against the ghost (prior/canonical) mesh. The initial
+        /// residual it logs is how far this relocalization landed off — the gross-failure signal.
+        private func locDiagAccumulateAndMaybeRunICP(anchorId: UUID, worldPositions: [SIMD3<Float>]) {
+            guard hasWorldMap, !locDiagRanICP, let ghostSurfels = locDiagGhostSurfels else { return }
+            // Cap each anchor's contribution so one large surface can't dominate the cloud.
+            let cap = 400
+            if worldPositions.count <= cap {
+                locDiagLiveSamples[anchorId] = worldPositions
+            } else {
+                let step = worldPositions.count / cap
+                var s = [SIMD3<Float>](); s.reserveCapacity(cap)
+                var i = 0; while i < worldPositions.count { s.append(worldPositions[i]); i += step }
+                locDiagLiveSamples[anchorId] = s
+            }
+            let total = locDiagLiveSamples.values.reduce(0) { $0 + $1.count }
+            // Phase 2.1: fire SOONER pre-record (the alignment window rarely accumulates 4000 verts
+            // before the user taps record, so the bake had no correction ready), full budget while
+            // recording (post-bake re-measure / the 0.2 probe).
+            let preRecord = !isRecording.load(ordering: .relaxed)
+            let threshold = preRecord ? 2000 : 4000
+            guard total >= threshold else { return }
+            locDiagRanICP = true
+            let live = locDiagLiveSamples.values.flatMap { $0 }
+            locDiagLiveSamples.removeAll() // free the buffer; the probe is one-shot per fire
+            DispatchQueue.main.async { [weak self] in self?.locDiagSummary.icpPending = true }
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let report = LocalizationDiag.runICPResidualLog(liveWorldVertices: live,
+                                                                targetPts: ghostSurfels.pts, targetNrm: ghostSurfels.nrm)
+                // Pre-record: re-arm after a throttle so the correction stays fresh and is ready
+                // whenever the user records (uses the latest/most alignment mesh). Recording fires are
+                // one-shot. Guarded so a re-arm can't reopen the probe once recording has started.
+                if preRecord {
+                    self?.sessionDelegateQueue.asyncAfter(deadline: .now() + 2.0) {
+                        guard let self = self, !self.isRecording.load(ordering: .relaxed) else { return }
+                        self.locDiagRanICP = false
+                        self.locDiagLiveSamples.removeAll()
+                    }
+                }
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    // Classify by DISPATCH-time state (preRecord), not completion-time: a pre-record
+                    // refine still in flight at record-start sampled the cloud BEFORE the bake, so it's
+                    // a stale straggler — ignore it entirely (don't overwrite summary.icp, don't judge it
+                    // as a post-bake re-measure). Only a refine dispatched DURING recording is post-bake.
+                    if preRecord {
+                        // Pre-bake measurement → candidate correction, only valid while record hasn't
+                        // started. If recording began, this is a stale straggler → drop it.
+                        guard !self.isRecording.load(ordering: .relaxed) else { return }
+                        self.locDiagSummary.icp = report
+                        if let r = report, let bake = LocalizationDiag.bakeTransform(from: r) {
+                            let t = bake.columns.3
+                            let trans = simd_length(SIMD3<Float>(t.x, t.y, t.z))
+                            if trans < LocalizationDiag.BakeGate.minTransM {
+                                // Trusted fit, but the offset is within the measurement-noise floor —
+                                // relocalization is already aligned, so a correction would be within
+                                // error of nothing. Skip (common small/cramped-space case); chip stays
+                                // hidden, so "no chip" reads as "already aligned, nothing to correct".
+                                // Leave the candidate buffer untouched — a sub-floor reading is "no
+                                // correction needed", not a competing correction.
+                                PerfDiag.log(String(format: "[LocDiag BAKE SKIP] offset %.1fcm within ~%.0fcm noise floor — relocalization already aligned, no bake", trans * 100, LocalizationDiag.BakeGate.minTransM * 100))
+                            } else {
+                                // Phase 2.1 polish: buffer this trusted refine and bake the BEST recent
+                                // one by quality, not the latest. Refine quality swings wildly in
+                                // feature-desert rooms; the latest fit is often worse than one seconds old.
+                                self.icpRefineCandidates.append((r, bake))
+                                if self.icpRefineCandidates.count > self.icpRefineBufferMax {
+                                    self.icpRefineCandidates.removeFirst()
+                                }
+                                guard let best = self.icpRefineCandidates.max(by: {
+                                    LocalizationDiag.refineQuality($0.report) < LocalizationDiag.refineQuality($1.report)
+                                }) else { return }
+                                self.pendingICPBake = best.bake
+                                let bt = best.bake.columns.3
+                                let bestTrans = simd_length(SIMD3<Float>(bt.x, bt.y, bt.z))
+                                let yaw = atan2(best.bake.columns.2.x, best.bake.columns.2.z) * 180 / .pi
+                                self.scanStore?.icpAlignReady = ScanStore.ICPAlignReady(transCm: bestTrans * 100, yawDeg: yaw)
+                                if self.icpRefineCandidates.count > 1 {
+                                    let inlierPct = best.report.sourcePoints > 0
+                                        ? Float(best.report.correspondences) / Float(best.report.sourcePoints) * 100 : 0
+                                    PerfDiag.log(String(format: "[LocDiag BAKE PICK] best of %d recent refines: quality=%.3f trans=%.1fcm horizMin=%.2f inliers=%.0f%% finalRMS=%.1fmm",
+                                                        self.icpRefineCandidates.count, LocalizationDiag.refineQuality(best.report),
+                                                        bestTrans * 100, best.report.horizMinObservability, inlierPct, best.report.finalRMS * 1000))
+                                }
+                            }
+                        }
+                    } else {
+                        // Dispatched DURING recording: a genuine post-bake re-measure (or, if nothing was
+                        // baked, a plain recording-phase probe). Either way it's the trustworthy current
+                        // measurement, so it owns summary.icp.
+                        self.locDiagSummary.icp = report
+                        if let r = report, let baked = self.locDiagSummary.bakedTransM {
+                            // Post-bake verdict, three outcomes:
+                            // - baked below the ~residual-noise floor → INCONCLUSIVE (can't see a collapse
+                            //   under the noise; a near-noise bake is also low-value). Need a larger offset.
+                            // - residual clearly smaller than baked → OK (genuine collapse).
+                            // - residual not smaller → WARN (inverted sign, bad lock, or rough tracking).
+                            let residual = r.correctionTransM
+                            let noiseFloor: Float = 0.06 // post-bake residual noise (~2–5cm clean, more if rough)
+                            if baked < noiseFloor {
+                                PerfDiag.log(String(format: "[LocDiag BAKE INCONCLUSIVE] baked %.1fcm is below the ~%.0fcm residual-noise floor — post-bake %.1fcm can't confirm a collapse; need a larger offset (farther approach) to validate", baked * 100, noiseFloor * 100, residual * 100))
+                            } else if residual < baked * 0.6 {
+                                PerfDiag.log(String(format: "[LocDiag BAKE OK] post-bake residual trans=%.1fcm collapsed below baked %.1fcm — bake nulled the offset", residual * 100, baked * 100))
+                            } else {
+                                PerfDiag.log(String(format: "[LocDiag BAKE WARN] post-bake residual trans=%.1fcm did NOT collapse below baked %.1fcm — inverted sign, bad lock, or rough tracking", residual * 100, baked * 100))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /// Phase 2.1: re-arm the one-shot ICP on the delegate queue so it re-measures during recording
+        /// (used after a bake to capture the POST-bake residual — the on-device sign/efficacy check).
+        func locDiagRearmICPForPostBake() {
+            sessionDelegateQueue.async { [weak self] in
+                self?.locDiagRanICP = false
+                self?.locDiagLiveSamples.removeAll()
             }
         }
 
@@ -1166,6 +1440,8 @@ struct ARCoverageView: UIViewRepresentable {
             }
 
             let isRelocalized = isTrackingNormal && (!worldMapWasRequested || hasSeenRelocalizing)
+            // (0.1 settle detection lives in session(_:didUpdate:) now — it must run for ALL
+            //  flows/modes, but this alignment FSM only engages for linkAdjacent.)
 
             // Optionally update distance to boundary anchor if one exists (visual only)
             if let anchorTransform = scanStore?.boundaryAnchorTransform {
@@ -1199,6 +1475,70 @@ struct ARCoverageView: UIViewRepresentable {
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
             // Pre-recording relocalization/alignment phase driver (no-op outside those phases).
             driveAlignmentPhase(frame)
+
+            // 0.3: log the camera-pose discontinuities (the frame-correction "snap" baked
+            // world:.zero overlays don't follow). No-op unless perfDiagnostics is on.
+            if PerfDiag.enabled,
+               let jump = locDiagSnap.observe(frame.camera.transform, tracking: frame.camera.trackingState) {
+                DispatchQueue.main.async { [weak self] in
+                    self?.locDiagSummary.recordSnap(dPos: jump.dPos, dRotDeg: jump.dRotDeg)
+                }
+            }
+
+            // Item 2 (reframed 2026-06-25): mid-scan tracking-stability. A SINGLE non-physical jump is
+            // benign — the saved mesh re-pins on export (see TrackingStabilityMonitor / [[saved-mesh-
+            // repins-immune-to-snaps]]). But a STORM of them (self-similar-room relocalization oscillating
+            // under nominal `.normal` tracking) is a real "session destabilized" collapse the VIO guard
+            // misses. Only flag on the storm. Recording-only (when geometry is committed).
+            if isRecording.load(ordering: .relaxed),
+               let snap = trackingStability.observe(frame.camera.transform,
+                                                    tracking: frame.camera.trackingState,
+                                                    timestamp: frame.timestamp) {
+                let count = trackingStability.snapCount
+                PerfDiag.log(String(format: "[TrackStab] jump #%d: Δpos=%.1fcm Δrot=%.2f° (%.1f m/s)%@",
+                                    count, snap.dPosM * 100, snap.dRotDeg, snap.velocityMS,
+                                    snap.stormActive ? " — STORM (session destabilizing)" : " — isolated (benign; mesh re-pins)"))
+                if snap.stormJustTriggered {
+                    PerfDiag.log(String(format: "[TrackStab] SNAP STORM: ≥%d non-physical jumps within %.0fs under .normal tracking — relocalization oscillating / session destabilized (VIO guard misses this — tracking still reports normal)",
+                                        TrackingStabilityMonitor.stormThreshold, TrackingStabilityMonitor.stormWindow))
+                }
+                if snap.stormActive {
+                    let maxPosCm = trackingStability.maxSnapPosM * 100
+                    let maxRotDeg = trackingStability.maxSnapRotDeg
+                    DispatchQueue.main.async { [weak self] in
+                        self?.scanStore?.trackingUnreliable = ScanStore.TrackingUnreliable(
+                            snapCount: count, maxPosCm: maxPosCm, maxRotDeg: maxRotDeg)
+                    }
+                }
+            }
+
+            // 0.1: relocalization-settle detection — FSM-independent (runs for every flow/mode,
+            // unlike driveAlignmentPhase which only engages for linkAdjacent). Against a loaded
+            // map, the first `.normal` frame IS the relocalization lock; log the camera pose there
+            // (re-stand at a marked spot across generations → the pose drifts by the compounding ε).
+            // Reset per run via locDiagBeginRun() at map load — NOT at record-start — so the
+            // alignment-time settle survives into recording.
+            if PerfDiag.enabled, hasWorldMap {
+                let now = frame.timestamp
+                if locDiagRelocStart == 0 { locDiagRelocStart = now }
+                if case .limited(.relocalizing) = frame.camera.trackingState, !locDiagSawReloc {
+                    locDiagSawReloc = true
+                    DispatchQueue.main.async { [weak self] in self?.locDiagSummary.sawRelocalizing = true }
+                }
+                if frame.camera.trackingState == .normal, !locDiagLoggedSettle {
+                    locDiagLoggedSettle = true
+                    let secs = now - locDiagRelocStart
+                    let sawReloc = locDiagSawReloc
+                    LocalizationDiag.logSettle(camera: frame.camera, secondsToSettle: secs)
+                    let t = frame.camera.transform
+                    let pos = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+                    let yaw = atan2(t.columns.2.x, t.columns.2.z) * 180 / .pi
+                    DispatchQueue.main.async { [weak self] in
+                        self?.locDiagSummary.recordSettle(pos: pos, yaw: yaw, secs: secs)
+                        self?.locDiagSummary.sawRelocalizing = sawReloc
+                    }
+                }
+            }
 
             // Billboard connector/boundary markers toward the camera (Track C). RealityKit mutations
             // must run on main; extract the camera transform here so the ARFrame isn't forwarded.
@@ -1382,6 +1722,16 @@ struct ARCoverageView: UIViewRepresentable {
                 }
             }
 
+            // Phase-2.1 precursor: feed the ICP during the pre-record alignment phase, so the
+            // relocalization offset is measured at the moment 2.1 will bake the correction. Mesh is
+            // only enabled pre-record when perfDiag is on (see makeConfiguration); gate on a
+            // relocalized world map so the verts are already in the map frame. The probe is one-shot
+            // (locDiagRanICP) — whichever of this or the recording path hits the vertex budget first
+            // wins, and during alignment it's this one. No-op in production.
+            if PerfDiag.enabled, hasWorldMap, hasSeenRelocalizing, !isRecording.load(ordering: .relaxed) {
+                for case let mesh as ARMeshAnchor in anchors { locDiagSampleAnchorForICP(mesh) }
+            }
+
             guard isRecording.load(ordering: .relaxed) else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
@@ -1389,6 +1739,7 @@ struct ARCoverageView: UIViewRepresentable {
                     anchorVertexCounts[mesh.identifier] = mesh.geometry.vertices.count
                     anchorFaceCounts[mesh.identifier] = mesh.geometry.faces.count
                     buildWireframeForAnchor(mesh)
+                    locDiagSampleAnchorForICP(mesh) // 0.2 ICP feed (AR + VR; no-op unless perfDiag)
                 }
             }
             updateStats(in: session)
@@ -1412,6 +1763,11 @@ struct ARCoverageView: UIViewRepresentable {
                 }
             }
 
+            // Phase-2.1 precursor: feed the ICP during the pre-record alignment phase (see didAdd).
+            if PerfDiag.enabled, hasWorldMap, hasSeenRelocalizing, !isRecording.load(ordering: .relaxed) {
+                for case let mesh as ARMeshAnchor in anchors { locDiagSampleAnchorForICP(mesh) }
+            }
+
             guard isRecording.load(ordering: .relaxed) else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
@@ -1419,6 +1775,7 @@ struct ARCoverageView: UIViewRepresentable {
                     anchorVertexCounts[mesh.identifier] = mesh.geometry.vertices.count
                     anchorFaceCounts[mesh.identifier] = mesh.geometry.faces.count
                     buildWireframeForAnchor(mesh)
+                    locDiagSampleAnchorForICP(mesh) // 0.2 ICP feed (AR + VR; no-op unless perfDiag)
                 }
             }
             updateStats(in: session)
@@ -1858,6 +2215,7 @@ struct ARCoverageView: UIViewRepresentable {
            let data = try? Data(contentsOf: mapURL),
            let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
             config.initialWorldMap = worldMap
+            LocalizationDiag.logMapStats(worldMap, context: mapURL.lastPathComponent) // 0.1: prove compounding/map growth
         }
         if enableFrameSemantics {
             if ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {

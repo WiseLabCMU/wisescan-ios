@@ -305,6 +305,35 @@ class ScanStore {
     /// Whether the cross-session world map failed to load
     var mapLoadFailed: Bool = false
 
+    // MARK: ICP Auto-Align (Phase 2.1, perfDiagnostics-only)
+
+    /// A trusted ICP auto-align correction is queued and will bake into the world origin at
+    /// record-start. Set during the pre-record alignment phase once the refine converges + passes the
+    /// trust gate; its presence is the "alignment sweep is done — safe to record" cue (surfaced as a
+    /// chip in CaptureView). Only ever populated under `perfDiagnostics`, so it's inherently dev-gated.
+    var icpAlignReady: ICPAlignReady?
+
+    struct ICPAlignReady: Equatable {
+        let transCm: Float
+        let yawDeg: Float
+    }
+
+    // MARK: Tracking Stability (Phase 2.1 build order item 2)
+
+    /// Set when `TrackingStabilityMonitor` confirms a genuine mid-scan frame discontinuity (a
+    /// loop-closure / relocalization snap during continuous `.normal` tracking, distinct from the
+    /// degraded-tracking loss the VIO guard handles). A snap splits the saved mesh across two world
+    /// frames, so the captured geometry may be misaligned regardless of the ICP bake. Surfaced as a
+    /// warning during recording; cleared at record-start and on capture reset. Carries the worst snap
+    /// seen so the message can quantify it.
+    var trackingUnreliable: TrackingUnreliable?
+
+    struct TrackingUnreliable: Equatable {
+        var snapCount: Int
+        var maxPosCm: Float
+        var maxRotDeg: Float
+    }
+
     // MARK: Boundary Anchor State
 
     /// World transform of the boundary anchor (set by AR delegate or pin drop).
@@ -344,6 +373,8 @@ class ScanStore {
         boundaryAnchorId = nil
         distanceToBoundaryAnchor = nil
         pendingStitchLink = nil
+        icpAlignReady = nil
+        trackingUnreliable = nil
         // Clear the map-load failure latch too — otherwise a reset via a path that bypasses
         // CaptureView's onChange self-reset (onDisappear / cancelAlignment) leaves it true, and a
         // later identical failure can't re-fire the handler (no value change) → stuck failed state.

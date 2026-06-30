@@ -11,7 +11,29 @@ extension CaptureView {
     func toggleRecording() {
         if isRecording {
             stopRecording()
-        } else {
+            return
+        }
+        // Phase 2.1 (perfDiag): if we're relocalized into a rescan but the auto-align correction isn't
+        // ready yet (the green chip hasn't appeared), briefly hold so it can land and bake — the ghost
+        // mesh being visible is NOT the same as the correction being locked. Times out → record raw
+        // (feature-poor spaces that never produce a trusted correction aren't blocked). Removes the
+        // "recorded a hair before the refine completed → no bake" miss.
+        let shouldAwaitAlignment = PerfDiag.enabled
+            && cachedGhostMeshData != nil
+            && scanStats.trackingStatus.isNormal
+            && scanStore.icpAlignReady == nil
+            && !isAwaitingAlignment
+        guard shouldAwaitAlignment else {
+            startRecording()
+            return
+        }
+        isAwaitingAlignment = true
+        Task { @MainActor in
+            defer { isAwaitingAlignment = false }
+            let deadline = Date().addingTimeInterval(8)
+            while scanStore.icpAlignReady == nil, Date() < deadline {
+                try? await Task.sleep(nanoseconds: 150_000_000) // 150 ms
+            }
             startRecording()
         }
     }
@@ -36,6 +58,9 @@ extension CaptureView {
         showManualAdjust = false // dismiss the manual-adjust panel once recording begins
 
         isRecording = true
+        // Item 2: clear any prior scan's tracking-unreliable warning so it doesn't bleed into this run
+        // (the coordinator's TrackingStabilityMonitor accumulators reset in resetForRecording).
+        scanStore.trackingUnreliable = nil
         // Baseline for the "move the camera to start the live mesh" cue. In a relocalized ghost /
         // stitch-boundary flow `totalVertices` already starts high, so the cue is shown until enough
         // NEW vertices appear relative to this baseline (not an absolute count).

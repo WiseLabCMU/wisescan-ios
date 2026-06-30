@@ -71,6 +71,7 @@ struct CaptureView: View {
     @State var showInsufficientTrackingAlert = false // SwiftUI alert for poor mapping status
     @State var sessionStabilizationTask: Task<Void, Never>? // Cancellable task for AR session warm-up after extend
     @State var isConfirmingAlignment = false // Re-entry guard for confirmAlignment double-tap
+    @State var isAwaitingAlignment = false // Phase 2.1 (perfDiag): briefly holding record for the auto-align correction
 
     @State private var showSettings = false
     @State private var activeLocationName: String?
@@ -248,6 +249,24 @@ struct CaptureView: View {
                         .shadow(radius: 5)
                         .transition(.scale.combined(with: .opacity))
                         .animation(.easeInOut(duration: 0.2), value: scanStats.trackingStatus)
+                }
+
+                // Item 2 (perfDiag-gated during dev validation; reframed 2026-06-25 to a STORM signal):
+                // a burst of non-physical mid-scan jumps means relocalization is oscillating / the session
+                // has destabilized (a self-similar space ARKit can't lock onto) — distinct from a single
+                // benign snap (the mesh re-pins). The flag is only set on a storm, and latches for the scan.
+                if isRecording, PerfDiag.enabled, let unreliable = scanStore.trackingUnreliable {
+                    Text(String(format: "⚠️ Tracking unstable — %d sudden jumps mid-scan; relocalization may be failing", unreliable.snapCount))
+                        .font(.headline)
+                        .foregroundColor(.white)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(Color.red.opacity(0.85))
+                        .cornerRadius(20)
+                        .shadow(radius: 5)
+                        .transition(.scale.combined(with: .opacity))
+                        .animation(.easeInOut(duration: 0.2), value: unreliable)
                 }
 
                 let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
@@ -682,6 +701,24 @@ struct CaptureView: View {
                 .animation(.easeInOut(duration: 0.3), value: showExtendOverlay)
             }
 
+            // Phase 2.1 (perfDiag): briefly holding record while the auto-align correction lands.
+            if isAwaitingAlignment {
+                ZStack {
+                    Color.black.opacity(0.5).ignoresSafeArea()
+                    VStack(spacing: 16) {
+                        ProgressView().scaleEffect(1.5).tint(.green)
+                        Text("📐 Finalizing alignment…")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                        Text("Holding for the auto-align correction")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                }
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.2), value: isAwaitingAlignment)
+            }
+
             // Alignment overlay for cross-session resume (Flow B)
             if scanStore.capturePhase == .loadingWorldMap
                 || scanStore.capturePhase == .aligning
@@ -700,6 +737,47 @@ struct CaptureView: View {
             if cachedGhostMeshData != nil && !dismissGhostMesh {
                 VStack {
                     Spacer()
+                    // Phase 2.1 (perfDiagnostics-only): "alignment sweep done — correction locked"
+                    // cue. icpAlignReady is set only when a trusted ICP refine has converged during
+                    // the pre-record phase; its appearance tells the user it's safe to record (the
+                    // gravity-locked correction will bake into the world origin at record-start).
+                    if !isRecording, let align = scanStore.icpAlignReady {
+                        HStack {
+                            HStack(spacing: 6) {
+                                Image(systemName: "checkmark.circle.fill")
+                                Text(String(format: "Auto-aligned · %.1f cm / %.1f° — ready to record", align.transCm, align.yawDeg))
+                                    .font(.caption2.bold())
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.green.opacity(0.85))
+                            .cornerRadius(20)
+                            Spacer()
+                        }
+                        .padding(.leading, 16)
+                        .padding(.bottom, 8)
+                    } else if !isRecording, PerfDiag.enabled, scanStats.trackingStatus.isNormal {
+                        // Not-yet-ready cue: relocalized, correction still computing. The ABSENCE of the
+                        // green chip is otherwise ambiguous ("nothing to do" vs "still working") — this
+                        // tells the user to wait for green before recording (the ghost mesh appearing is
+                        // NOT the same as the correction being locked).
+                        HStack {
+                            HStack(spacing: 6) {
+                                ProgressView().scaleEffect(0.7).tint(.white)
+                                Text("📐 Aligning — wait for green before recording")
+                                    .font(.caption2.bold())
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.orange.opacity(0.85))
+                            .cornerRadius(20)
+                            Spacer()
+                        }
+                        .padding(.leading, 16)
+                        .padding(.bottom, 8)
+                    }
                     HStack {
                         Button(action: { showRelocDialog = true }, label: {
                             HStack(spacing: 6) {
