@@ -89,6 +89,15 @@ struct ARCoverageView: UIViewRepresentable {
         if let ghostData = initialGhostMeshData {
             Self.loadGhostMesh(data: ghostData, coordinator: context.coordinator, arView: arView)
         }
+        // Record the ghost-data count we just consumed. makeUIView has already loaded the map (in
+        // `config`) and the ghost above, so without this the FIRST updateUIView sees `nil → count` as a
+        // change and re-runs the entire load — a second `makeConfiguration` (re-deserializing the same
+        // world map, the expensive bring-up step) plus a second `session.run(.resetTracking)` that
+        // restarts the relocalization makeUIView just began. That double bring-up both wastes the
+        // deserialize and destabilizes the lock (observed: two identical `[LocDiag ε] map load` lines +
+        // a slow/snappy settle). Seeding the counter here makes updateUIView a no-op for the unchanged
+        // ghost; it still fires correctly if the user later switches to a *different* ghost/map.
+        context.coordinator.lastGhostMeshDataCount = initialGhostMeshData?.count
 
         DispatchQueue.main.async {
             self.arSession = arView.session
