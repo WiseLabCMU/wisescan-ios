@@ -33,6 +33,11 @@ enum VertexColorAccumulator {
                 return
             }
 
+            // Feature count of the map we're about to persist. A relocalized generation
+            // should save *more* features than it loaded (inherited + newly observed); a
+            // sudden collapse here is the inherited map being dropped before export.
+            LocalizationDiag.logMapStats(map, context: "save (about to persist)")
+
             do {
                 let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
                 let filename = "worldmap_\(UUID().uuidString.prefix(8)).worldmap"
