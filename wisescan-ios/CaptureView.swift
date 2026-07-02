@@ -106,6 +106,14 @@ struct CaptureView: View {
     @State var spaceAnalyzer = SpaceAnalyzer()
     @State private var analysisResult: SpaceAnalysisResult?
     @State private var showAnalysisReport = false
+    // Relocalization-timeout watchdog (item 3): a rescan can hang forever on "move camera to
+    // relocalize" when the space is feature-poor / self-similar (ARKit never reaches `.normal` —
+    // false loop-closure, a fundamental limit). If we're still `.relocalizing` after
+    // AppConstants.relocalizationTimeoutSeconds, `relocTimedOut` flips and the prompt becomes a
+    // guidance panel with escape routes (Try Again / Go Back). Non-blocking: clears itself if
+    // relocalization then succeeds.
+    @State private var relocTimeoutTimer: Timer?
+    @State private var relocTimedOut = false
 
     struct PendingScanData {
         let locationId: UUID?
@@ -190,6 +198,68 @@ struct CaptureView: View {
             .filter { seenConnectors.insert($0.id).inserted }
     }
 
+    // MARK: - Relocalization timeout (item 3)
+
+    /// Arms/cancels the relocalization watchdog from the relevant state changes. Called from the
+    /// `.onChange` handlers below. The timer fires once (no auto-restart on intermediate tracking-state
+    /// flips); it stands down — and clears any timed-out flag — the moment relocalization succeeds
+    /// (`.normal`), recording starts, or the ghost is cleared.
+    private func evaluateRelocalizationTimeout() {
+        let relocalizing = cachedGhostMeshData != nil
+            && !isRecording
+            && scanStats.trackingStatus == .limited(reason: .relocalizing)
+        if relocalizing {
+            // Arm once. Don't restart if already running or already timed out.
+            guard relocTimeoutTimer == nil && !relocTimedOut else { return }
+            relocTimeoutTimer = Timer.scheduledTimer(
+                withTimeInterval: AppConstants.relocalizationTimeoutSeconds,
+                repeats: false
+            ) { _ in
+                // Fires on the main run loop. Re-check we're still stuck (a success/back-out would
+                // have cancelled us via onChange, but guard against the race).
+                if cachedGhostMeshData != nil && !isRecording
+                    && scanStats.trackingStatus == .limited(reason: .relocalizing) {
+                    relocTimedOut = true
+                }
+                relocTimeoutTimer = nil
+            }
+        } else {
+            relocTimeoutTimer?.invalidate()
+            relocTimeoutTimer = nil
+            // Only drop the timed-out banner when we genuinely left the relocalizing-with-ghost
+            // state (relocalized, or ghost gone) — not on a transient flip while still recording.
+            if scanStats.trackingStatus.isNormal || cachedGhostMeshData == nil {
+                relocTimedOut = false
+            }
+        }
+    }
+
+    /// "Try Again" — restart relocalization from scratch by reloading the world map (toggling the
+    /// ghost data, the proven `showRelocDialog` Re-relocalize path). Re-arms the watchdog.
+    private func retryRelocalization() {
+        relocTimeoutTimer?.invalidate()
+        relocTimeoutTimer = nil
+        relocTimedOut = false
+        ghostYRotation = 0
+        ghostXOffset = 0
+        ghostZOffset = 0
+        let savedData = cachedGhostMeshData
+        cachedGhostMeshData = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            cachedGhostMeshData = savedData
+        }
+    }
+
+    /// "Go Back" — bail out of a relocalization that won't lock. Returns to the Scans tab (where the
+    /// rescan was launched from); onDisappear handles the capture teardown (resetCaptureState, ghost
+    /// clear, session). Matches the post-save navigation (selectedTab = 2).
+    private func exitCaptureFromRelocTimeout() {
+        relocTimeoutTimer?.invalidate()
+        relocTimeoutTimer = nil
+        relocTimedOut = false
+        selectedTab = 2
+    }
+
     var body: some View {
         ZStack {
             // Live ARKit Scene Reconstruction View
@@ -263,19 +333,62 @@ struct CaptureView: View {
             // Centered startup/tracking pills (kept separate from ScanCoach)
             VStack(spacing: 12) {
                 if cachedGhostMeshData != nil && scanStats.trackingStatus == .limited(reason: .relocalizing) {
-                    HStack(spacing: 8) {
-                        Text("🔄 Move camera to relocalize with previous scan")
-                        OctahedronIcon(color: ghostMeshColor.swiftUIColor)
-                    }
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                        .background(Color.blue.opacity(0.85))
+                    if relocTimedOut {
+                        // Watchdog fired — relocalization is taking unusually long / may never lock
+                        // (feature-poor or self-similar space). Replace the indefinite "move camera"
+                        // prompt with actionable guidance + escape routes so the user is never stuck.
+                        VStack(spacing: 12) {
+                            Text("🔄 Having trouble recognizing this spot")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                                .multilineTextAlignment(.center)
+                            Text("This area may look too similar to other places or lack distinct features. Move to a more recognizable spot — aim at corners, furniture, or textured surfaces — and make sure it's well lit.")
+                                .font(.subheadline)
+                                .foregroundColor(.white.opacity(0.9))
+                                .multilineTextAlignment(.center)
+                            HStack(spacing: 12) {
+                                Button(action: { retryRelocalization() }, label: {
+                                    Label("Try Again", systemImage: "arrow.clockwise")
+                                        .font(.subheadline.bold())
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 10)
+                                        .background(Color.blue.opacity(0.9))
+                                        .cornerRadius(12)
+                                })
+                                Button(action: { exitCaptureFromRelocTimeout() }, label: {
+                                    Label("Go Back", systemImage: "chevron.left")
+                                        .font(.subheadline.bold())
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 10)
+                                        .background(.ultraThinMaterial)
+                                        .cornerRadius(12)
+                                })
+                            }
+                        }
+                        .padding(20)
+                        .background(Color.orange.opacity(0.9))
                         .cornerRadius(20)
                         .shadow(radius: 5)
+                        .padding(.horizontal, 16)
                         .transition(.scale.combined(with: .opacity))
-                        .animation(.easeInOut(duration: 0.2), value: scanStats.trackingStatus)
+                        .animation(.easeInOut(duration: 0.2), value: relocTimedOut)
+                    } else {
+                        HStack(spacing: 8) {
+                            Text("🔄 Move camera to relocalize with previous scan")
+                            OctahedronIcon(color: ghostMeshColor.swiftUIColor)
+                        }
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 12)
+                            .background(Color.blue.opacity(0.85))
+                            .cornerRadius(20)
+                            .shadow(radius: 5)
+                            .transition(.scale.combined(with: .opacity))
+                            .animation(.easeInOut(duration: 0.2), value: scanStats.trackingStatus)
+                    }
                 }
 
                 // Item 2 (perfDiag-gated during dev validation; reframed 2026-06-25 to a STORM signal):
@@ -1139,6 +1252,14 @@ struct CaptureView: View {
                 scanStore.mapLoadFailed = false // reset
             }
         }
+        // Relocalization-timeout watchdog (item 3): arm/cancel whenever the inputs to the
+        // relocalizing-with-ghost state change.
+        .onChange(of: scanStats.trackingStatus) { evaluateRelocalizationTimeout() }
+        // Key on `.count` (Int?), not the multi-MB `Data` — a value compare of the whole mesh on
+        // every frequent stats-driven update cycle would be needlessly expensive; the count captures
+        // the meaningful transitions (loaded / cleared / reloaded).
+        .onChange(of: cachedGhostMeshData?.count) { evaluateRelocalizationTimeout() }
+        .onChange(of: isRecording) { evaluateRelocalizationTimeout() }
         .onDisappear {
             mainThreadWatchdog.stop()
             memoryPressureMonitor.stop()
@@ -1207,6 +1328,10 @@ struct CaptureView: View {
                 saveNavigationTask?.cancel()
                 saveNavigationTask = nil
                 activeLocationName = nil
+                // Relocalization watchdog (item 3): cancel + reset so it can't fire after we leave.
+                relocTimeoutTimer?.invalidate()
+                relocTimeoutTimer = nil
+                relocTimedOut = false
             }
         }
         .onChange(of: scanStore.activeLocationForScan) { _, newLocId in
