@@ -331,101 +331,7 @@ struct CaptureView: View {
                 .ignoresSafeArea()
 
             // Centered startup/tracking pills (kept separate from ScanCoach)
-            VStack(spacing: 12) {
-                if cachedGhostMeshData != nil && scanStats.trackingStatus == .limited(reason: .relocalizing) {
-                    if relocTimedOut {
-                        // Watchdog fired — relocalization is taking unusually long / may never lock
-                        // (feature-poor or self-similar space). Replace the indefinite "move camera"
-                        // prompt with actionable guidance + escape routes so the user is never stuck.
-                        VStack(spacing: 12) {
-                            Text("🔄 Having trouble recognizing this spot")
-                                .font(.headline)
-                                .foregroundColor(.white)
-                                .multilineTextAlignment(.center)
-                            Text("This area may look too similar to other places or lack distinct features. Move to a more recognizable spot — aim at corners, furniture, or textured surfaces — and make sure it's well lit.")
-                                .font(.subheadline)
-                                .foregroundColor(.white.opacity(0.9))
-                                .multilineTextAlignment(.center)
-                            HStack(spacing: 12) {
-                                Button(action: { retryRelocalization() }, label: {
-                                    Label("Try Again", systemImage: "arrow.clockwise")
-                                        .font(.subheadline.bold())
-                                        .foregroundColor(.white)
-                                        .padding(.horizontal, 16)
-                                        .padding(.vertical, 10)
-                                        .background(Color.blue.opacity(0.9))
-                                        .cornerRadius(12)
-                                })
-                                Button(action: { exitCaptureFromRelocTimeout() }, label: {
-                                    Label("Go Back", systemImage: "chevron.left")
-                                        .font(.subheadline.bold())
-                                        .foregroundColor(.white)
-                                        .padding(.horizontal, 16)
-                                        .padding(.vertical, 10)
-                                        .background(.ultraThinMaterial)
-                                        .cornerRadius(12)
-                                })
-                            }
-                        }
-                        .padding(20)
-                        .background(Color.orange.opacity(0.9))
-                        .cornerRadius(20)
-                        .shadow(radius: 5)
-                        .padding(.horizontal, 16)
-                        .transition(.scale.combined(with: .opacity))
-                        .animation(.easeInOut(duration: 0.2), value: relocTimedOut)
-                    } else {
-                        HStack(spacing: 8) {
-                            Text("🔄 Move camera to relocalize with previous scan")
-                            OctahedronIcon(color: ghostMeshColor.swiftUIColor)
-                        }
-                            .font(.headline)
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 20)
-                            .padding(.vertical, 12)
-                            .background(Color.blue.opacity(0.85))
-                            .cornerRadius(20)
-                            .shadow(radius: 5)
-                            .transition(.scale.combined(with: .opacity))
-                            .animation(.easeInOut(duration: 0.2), value: scanStats.trackingStatus)
-                    }
-                }
-
-                // Item 2 (perfDiag-gated during dev validation; reframed 2026-06-25 to a STORM signal):
-                // a burst of non-physical mid-scan jumps means relocalization is oscillating / the session
-                // has destabilized (a self-similar space ARKit can't lock onto) — distinct from a single
-                // benign snap (the mesh re-pins). The flag is only set on a storm, and latches for the scan.
-                if isRecording, PerfDiag.enabled, let unreliable = scanStore.trackingUnreliable {
-                    Text(String(format: "⚠️ Tracking unstable — %d sudden jumps mid-scan; relocalization may be failing", unreliable.snapCount))
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                        .background(Color.red.opacity(0.85))
-                        .cornerRadius(20)
-                        .shadow(radius: 5)
-                        .transition(.scale.combined(with: .opacity))
-                        .animation(.easeInOut(duration: 0.2), value: unreliable)
-                }
-
-                let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
-                let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
-                if isRecording && needsLiveMeshCue &&
-                   scanStats.trackingStatus != .limited(reason: .relocalizing) &&
-                   !frameCaptureSession.isBlurWarningActive {
-                    Text("📷 Move the camera to start the live mesh")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                        .background(Color.indigo.opacity(0.85))
-                        .cornerRadius(20)
-                        .shadow(radius: 5)
-                        .transition(.scale.combined(with: .opacity))
-                        .animation(.easeInOut(duration: 0.2), value: needsLiveMeshCue)
-                }
-            }
+            centeredTrackingPills
 
             // Lite mode banner for non-LiDAR devices
             if !ARCoverageView.supportsLiDAR {
@@ -797,9 +703,7 @@ struct CaptureView: View {
                                             .foregroundColor(.white)
                                             .offset(y: 50)
                                     } else {
-                                        Text(isRecording ? "Tap to stop"
-                                             : (isProcessingMesh || isWaitingToSave) ? "Processing previous scan…"
-                                             : "Tap to scan")
+                                        Text(recordButtonCaption)
                                             .font(.caption2)
                                             .foregroundColor(.white.opacity(0.7))
                                             .offset(y: 50)
@@ -890,22 +794,7 @@ struct CaptureView: View {
             }
 
             // Phase 2.1 (perfDiag): briefly holding record while the auto-align correction lands.
-            if isAwaitingAlignment {
-                ZStack {
-                    Color.black.opacity(0.5).ignoresSafeArea()
-                    VStack(spacing: 16) {
-                        ProgressView().scaleEffect(1.5).tint(.green)
-                        Text("📐 Finalizing alignment…")
-                            .font(.headline)
-                            .foregroundColor(.white)
-                        Text("Holding for the auto-align correction")
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.7))
-                    }
-                }
-                .transition(.opacity)
-                .animation(.easeInOut(duration: 0.2), value: isAwaitingAlignment)
-            }
+            awaitingAlignmentOverlay
 
             // Alignment overlay for cross-session resume (Flow B)
             if scanStore.capturePhase == .loadingWorldMap
@@ -988,71 +877,7 @@ struct CaptureView: View {
             // relocalization is imperfect. Complements the anchor-based AlignmentOverlayView above;
             // startRecording bakes any offset into the world origin so mesh + world map stay co-framed.
             if cachedGhostMeshData != nil && !dismissGhostMesh {
-                VStack {
-                    Spacer()
-                    // Phase 2.1 (perfDiagnostics-only): "alignment sweep done — correction locked"
-                    // cue. icpAlignReady is set only when a trusted ICP refine has converged during
-                    // the pre-record phase; its appearance tells the user it's safe to record (the
-                    // gravity-locked correction will bake into the world origin at record-start).
-                    if !isRecording, let align = scanStore.icpAlignReady {
-                        HStack {
-                            HStack(spacing: 6) {
-                                Image(systemName: "checkmark.circle.fill")
-                                Text(String(format: "Auto-aligned · %.1f cm / %.1f° — ready to record", align.transCm, align.yawDeg))
-                                    .font(.caption2.bold())
-                            }
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(Color.green.opacity(0.85))
-                            .cornerRadius(20)
-                            Spacer()
-                        }
-                        .padding(.leading, 16)
-                        .padding(.bottom, 8)
-                    } else if !isRecording, PerfDiag.enabled, scanStats.trackingStatus.isNormal {
-                        // Not-yet-ready cue: relocalized, correction still computing. The ABSENCE of the
-                        // green chip is otherwise ambiguous ("nothing to do" vs "still working") — this
-                        // tells the user to wait for green before recording (the ghost mesh appearing is
-                        // NOT the same as the correction being locked).
-                        HStack {
-                            HStack(spacing: 6) {
-                                ProgressView().scaleEffect(0.7).tint(.white)
-                                Text("📐 Aligning — wait for green before recording")
-                                    .font(.caption2.bold())
-                            }
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(Color.orange.opacity(0.85))
-                            .cornerRadius(20)
-                            Spacer()
-                        }
-                        .padding(.leading, 16)
-                        .padding(.bottom, 8)
-                    }
-                    HStack {
-                        Button(action: { showRelocDialog = true }, label: {
-                            HStack(spacing: 6) {
-                                OctahedronIcon(color: ghostMeshColor.swiftUIColor)
-                                Text("Ghost Mesh")
-                                    .font(.caption2.bold())
-                            }
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(.ultraThinMaterial)
-                            .cornerRadius(20)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 20)
-                                    .stroke(Color.white.opacity(0.3), lineWidth: 1)
-                            )
-                        })
-                        Spacer()
-                    }
-                    .padding(.leading, 16)
-                    .padding(.bottom, 100)
-                }
+                ghostMeshChipStack
             }
 
             // Manual alignment slider overlay
@@ -1252,14 +1077,6 @@ struct CaptureView: View {
                 scanStore.mapLoadFailed = false // reset
             }
         }
-        // Relocalization-timeout watchdog (item 3): arm/cancel whenever the inputs to the
-        // relocalizing-with-ghost state change.
-        .onChange(of: scanStats.trackingStatus) { evaluateRelocalizationTimeout() }
-        // Key on `.count` (Int?), not the multi-MB `Data` — a value compare of the whole mesh on
-        // every frequent stats-driven update cycle would be needlessly expensive; the count captures
-        // the meaningful transitions (loaded / cleared / reloaded).
-        .onChange(of: cachedGhostMeshData?.count) { evaluateRelocalizationTimeout() }
-        .onChange(of: isRecording) { evaluateRelocalizationTimeout() }
         .onDisappear {
             mainThreadWatchdog.stop()
             memoryPressureMonitor.stop()
@@ -1440,6 +1257,228 @@ struct CaptureView: View {
                 ScanAnalysisReportView(result: result)
             }
         }
+    }
+
+    /// Centered startup/tracking pills (kept separate from ScanCoach). Extracted from `body` to
+    /// keep its expression type-checkable (the body ZStack is at the compiler's budget).
+    private var centeredTrackingPills: some View {
+        VStack(spacing: 12) {
+            if cachedGhostMeshData != nil && scanStats.trackingStatus == .limited(reason: .relocalizing) {
+                if relocTimedOut {
+                    relocTimeoutPanel
+                } else {
+                    relocalizingPrompt
+                }
+            }
+
+            stormWarningBanner
+
+            let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
+            let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
+            if isRecording && needsLiveMeshCue &&
+               scanStats.trackingStatus != .limited(reason: .relocalizing) &&
+               !frameCaptureSession.isBlurWarningActive {
+                Text("📷 Move the camera to start the live mesh")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(Color.indigo.opacity(0.85))
+                    .cornerRadius(20)
+                    .shadow(radius: 5)
+                    .transition(.scale.combined(with: .opacity))
+                    .animation(.easeInOut(duration: 0.2), value: needsLiveMeshCue)
+            }
+        }
+        // Relocalization-timeout watchdog (item 3): arm/cancel whenever the inputs to the
+        // relocalizing-with-ghost state change. Attached here (an always-present subtree) rather
+        // than to the body chain, which is at the type-checker's expression budget.
+        .onChange(of: scanStats.trackingStatus) { _, _ in evaluateRelocalizationTimeout() }
+        // Key on `.count` (Int?), not the multi-MB `Data` — a value compare of the whole mesh on
+        // every frequent stats-driven update cycle would be needlessly expensive; the count captures
+        // the meaningful transitions (loaded / cleared / reloaded).
+        .onChange(of: cachedGhostMeshData?.count) { _, _ in evaluateRelocalizationTimeout() }
+        .onChange(of: isRecording) { _, _ in evaluateRelocalizationTimeout() }
+    }
+
+    // Item 2 (perfDiag-gated during dev validation; reframed 2026-06-25 to a STORM signal):
+    // a burst of non-physical mid-scan jumps means relocalization is oscillating / the session
+    // has destabilized (a self-similar space ARKit can't lock onto) — distinct from a single
+    // benign snap (the mesh re-pins). The flag is only set on a storm, and latches for the scan.
+    @ViewBuilder private var stormWarningBanner: some View {
+        if isRecording, PerfDiag.enabled, let unreliable = scanStore.trackingUnreliable {
+            Text(String(format: "⚠️ Tracking unstable — %d sudden jumps mid-scan; relocalization may be failing", unreliable.snapCount))
+                .font(.headline)
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(Color.red.opacity(0.85))
+                .cornerRadius(20)
+                .shadow(radius: 5)
+                .transition(.scale.combined(with: .opacity))
+                .animation(.easeInOut(duration: 0.2), value: unreliable)
+        }
+    }
+
+    /// Phase 2.1 (perfDiag): full-screen hold shown while toggleRecording briefly waits for the
+    /// auto-align correction to land before starting the recording.
+    @ViewBuilder private var awaitingAlignmentOverlay: some View {
+        if isAwaitingAlignment {
+            ZStack {
+                Color.black.opacity(0.5).ignoresSafeArea()
+                VStack(spacing: 16) {
+                    ProgressView().scaleEffect(1.5).tint(.green)
+                    Text("📐 Finalizing alignment…")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                    Text("Holding for the auto-align correction")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.7))
+                }
+            }
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.2), value: isAwaitingAlignment)
+        }
+    }
+
+    /// Bottom-left ghost-mesh chip column: the Phase-2.1 align-status chips (green "correction
+    /// locked" / orange "still computing", perfDiag-gated) above the Ghost Mesh dialog chip.
+    private var ghostMeshChipStack: some View {
+        VStack {
+            Spacer()
+            // Phase 2.1 (perfDiagnostics-only): "alignment sweep done — correction locked"
+            // cue. icpAlignReady is set only when a trusted ICP refine has converged during
+            // the pre-record phase; its appearance tells the user it's safe to record (the
+            // gravity-locked correction will bake into the world origin at record-start).
+            if !isRecording, let align = scanStore.icpAlignReady {
+                HStack {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                        Text(String(format: "Auto-aligned · %.1f cm / %.1f° — ready to record", align.transCm, align.yawDeg))
+                            .font(.caption2.bold())
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.green.opacity(0.85))
+                    .cornerRadius(20)
+                    Spacer()
+                }
+                .padding(.leading, 16)
+                .padding(.bottom, 8)
+            } else if !isRecording, PerfDiag.enabled, scanStats.trackingStatus.isNormal {
+                // Not-yet-ready cue: relocalized, correction still computing. The ABSENCE of the
+                // green chip is otherwise ambiguous ("nothing to do" vs "still working") — this
+                // tells the user to wait for green before recording (the ghost mesh appearing is
+                // NOT the same as the correction being locked).
+                HStack {
+                    HStack(spacing: 6) {
+                        ProgressView().scaleEffect(0.7).tint(.white)
+                        Text("📐 Aligning — wait for green before recording")
+                            .font(.caption2.bold())
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.orange.opacity(0.85))
+                    .cornerRadius(20)
+                    Spacer()
+                }
+                .padding(.leading, 16)
+                .padding(.bottom, 8)
+            }
+            HStack {
+                Button(action: { showRelocDialog = true }, label: {
+                    HStack(spacing: 6) {
+                        OctahedronIcon(color: ghostMeshColor.swiftUIColor)
+                        Text("Ghost Mesh")
+                            .font(.caption2.bold())
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(20)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20)
+                            .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                    )
+                })
+                Spacer()
+            }
+            .padding(.leading, 16)
+            .padding(.bottom, 100)
+        }
+    }
+
+    /// The indefinite "move camera" pill shown while ARKit relocalizes against the loaded map.
+    /// Extracted from `body` (with `relocTimeoutPanel`) to keep the body expression type-checkable.
+    private var relocalizingPrompt: some View {
+        HStack(spacing: 8) {
+            Text("🔄 Move camera to relocalize with previous scan")
+            OctahedronIcon(color: ghostMeshColor.swiftUIColor)
+        }
+        .font(.headline)
+        .foregroundColor(.white)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(Color.blue.opacity(0.85))
+        .cornerRadius(20)
+        .shadow(radius: 5)
+        .transition(.scale.combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.2), value: scanStats.trackingStatus)
+    }
+
+    /// Watchdog fired — relocalization is taking unusually long / may never lock (feature-poor or
+    /// self-similar space). Replaces the indefinite "move camera" prompt with actionable guidance +
+    /// escape routes so the user is never stuck.
+    private var relocTimeoutPanel: some View {
+        VStack(spacing: 12) {
+            Text("🔄 Having trouble recognizing this spot")
+                .font(.headline)
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+            Text("This area may look too similar to other places or lack distinct features. Move to a more recognizable spot — aim at corners, furniture, or textured surfaces — and make sure it's well lit.")
+                .font(.subheadline)
+                .foregroundColor(.white.opacity(0.9))
+                .multilineTextAlignment(.center)
+            HStack(spacing: 12) {
+                Button(action: { retryRelocalization() }, label: {
+                    Label("Try Again", systemImage: "arrow.clockwise")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.blue.opacity(0.9))
+                        .cornerRadius(12)
+                })
+                Button(action: { exitCaptureFromRelocTimeout() }, label: {
+                    Label("Go Back", systemImage: "chevron.left")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(12)
+                })
+            }
+        }
+        .padding(20)
+        .background(Color.orange.opacity(0.9))
+        .cornerRadius(20)
+        .shadow(radius: 5)
+        .padding(.horizontal, 16)
+        .transition(.scale.combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.2), value: relocTimedOut)
+    }
+
+    /// Caption under the record button. A computed String (not a chained ternary in `body`) so the
+    /// body expression stays type-checkable.
+    private var recordButtonCaption: String {
+        if isRecording { return "Tap to stop" }
+        if isProcessingMesh || isWaitingToSave { return "Processing previous scan…" }
+        return "Tap to scan"
     }
 
     private var qualityColor: Color {
