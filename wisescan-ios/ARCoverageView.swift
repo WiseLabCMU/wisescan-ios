@@ -1717,6 +1717,10 @@ struct ARCoverageView: UIViewRepresentable {
                 }
                 PerfDiag.log(String(format: "[MemDiag] t=%.0fs footprint=%.0fMB compressed=%.0fMB avail=%.0fMB resident=%.0fMB faces=%d verts=%d anchors=%d fps=%.0f cpu=%.0f%% thermal=%@ rp=%@",
                                     duration, footprint, compressed, avail, memoryMB, totalFaces, totalVerts, anchorCount, fps, cpu, thermal, rpOn ? "on" : "off"))
+                // Second line: per-thread CPU attribution — which subsystem/queue is burning the cores.
+                // The end-of-scan FPS collapse is compute-bound (not memory/thermal), so this is the
+                // signal that says WHICH pass to optimize. Separate line to keep the main line parseable.
+                PerfDiag.log("[MemDiag]   cpu-by-thread: \(ScanStats.currentCPUByThreadString())")
             }
 
             DispatchQueue.main.async { [weak self] in

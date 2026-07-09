@@ -618,6 +618,55 @@ class ScanStats {
         return total
     }
 
+    /// [MemDiag] Per-thread-name CPU breakdown → attribute the total CPU% to subsystems WITHOUT
+    /// Instruments. Groups live non-idle threads by their pthread name (GCD names a worker thread with
+    /// its queue label while a block runs, so our `org.arenaxr.scan4d.*` queues, Apple's
+    /// `com.apple.arkit.*` / RealityKit render threads, etc. surface) and sums each group's
+    /// instantaneous `cpu_usage`. A 1 Hz snapshot catches whatever hot pass is executing at that
+    /// instant. Names are shortened to their last dot-component; unnamed threads (incl. main) group as
+    /// "unnamed". Returns the `topN` heaviest contributors, descending.
+    static func currentCPUByThread(topN: Int = 6) -> [(name: String, percent: Double)] {
+        var threadList: thread_act_array_t?
+        var threadCount = mach_msg_type_number_t(0)
+        guard task_threads(mach_task_self_, &threadList, &threadCount) == KERN_SUCCESS,
+              let threadList else { return [] }
+        defer {
+            vm_deallocate(mach_task_self_,
+                          vm_address_t(UInt(bitPattern: threadList)),
+                          vm_size_t(Int(threadCount) * MemoryLayout<thread_t>.stride))
+        }
+        var byName: [String: Double] = [:]
+        var nameBuf = [CChar](repeating: 0, count: 64)
+        for i in 0..<Int(threadCount) {
+            var info = thread_basic_info()
+            var count = mach_msg_type_number_t(MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
+            let kr = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                    thread_info(threadList[i], thread_flavor_t(THREAD_BASIC_INFO), $0, &count)
+                }
+            }
+            guard kr == KERN_SUCCESS, info.flags & TH_FLAGS_IDLE == 0 else { continue }
+            let pct = Double(info.cpu_usage) / Double(TH_USAGE_SCALE) * 100.0
+            if pct < 1 { continue } // ignore threads doing effectively nothing
+            var label = "unnamed"
+            if let pt = pthread_from_mach_thread_np(threadList[i]),
+               pthread_getname_np(pt, &nameBuf, 64) == 0 {
+                let full = String(cString: nameBuf)
+                if !full.isEmpty { label = full.components(separatedBy: ".").last ?? full }
+            }
+            byName[label, default: 0] += pct
+        }
+        return byName.sorted { $0.value > $1.value }.prefix(topN).map { (name: $0.key, percent: $0.value) }
+    }
+
+    /// [MemDiag] Compact one-line rendering of `currentCPUByThread` for the timeline, e.g.
+    /// "voxel=180% arkit=142% unnamed=90%".
+    static func currentCPUByThreadString(topN: Int = 6) -> String {
+        currentCPUByThread(topN: topN)
+            .map { String(format: "%@=%.0f%%", $0.name, $0.percent) }
+            .joined(separator: " ")
+    }
+
     /// Cumulative CPU *time* (seconds) consumed by the whole task: terminated-thread time
     /// (TASK_BASIC_INFO) + live-thread time (TASK_THREAD_TIMES_INFO). The sum is monotonic (a thread's
     /// time moves from the live bucket to the terminated bucket when it exits), so a delta across a
