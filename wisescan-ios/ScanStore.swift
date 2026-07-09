@@ -632,8 +632,12 @@ class ScanStats {
     /// zone and decommits, real overhead we never want in the normal teardown path. No-op when off.
     /// Note: only touches malloc — Metal/GPU buffers (mesh wireframe, voxels) free on RealityKit's
     /// schedule, so this makes the delta a *floor* on what a subsystem releases, not the whole story.
+    /// Double-gated: the reclaim only makes sense while measuring teardown deltas, so it also requires
+    /// Perf Diagnostics on — matches the Settings copy and avoids paying the expensive main-thread pass
+    /// with no diagnostics output if the dev flag is left set.
     static func forceReclaimIfEnabled() {
-        guard UserDefaults.standard.bool(forKey: AppConstants.Key.memDiagForceReclaim) else { return }
+        guard PerfDiag.enabled,
+              UserDefaults.standard.bool(forKey: AppConstants.Key.memDiagForceReclaim) else { return }
         malloc_zone_pressure_relief(nil, 0)
     }
 

@@ -2268,10 +2268,14 @@ final class DeferredRoomBuild: @unchecked Sendable {
     private var data: CapturedRoomData?
     private let dataReady = DispatchSemaphore(value: 0)
     private var signaled = false
+    private var abandoned = false
 
     /// Stash the captured data (RoomPlan delegate queue). Cheap — no reconstruction.
     func provide(_ data: CapturedRoomData) {
         lock.lock()
+        // If buildRoom already gave up (data-wait timeout), a late didEndWith would otherwise leave a
+        // potentially large CapturedRoomData buffer lingering in the box until the next recording. Drop it.
+        if abandoned { lock.unlock(); return }
         self.data = data
         let first = !signaled
         signaled = true
@@ -2289,6 +2293,9 @@ final class DeferredRoomBuild: @unchecked Sendable {
         // the whole reconstruction timeout. The reconstruction itself then gets the full `timeout`.
         let dataWait = AppConstants.roomPlanDataWaitSeconds
         guard dataReady.wait(timeout: .now() + dataWait) == .success else {
+            // Abandon the box so a late provide() (didEndWith firing after we gave up) discards its buffer
+            // instead of stranding it in memory; drop anything a race already stashed.
+            lock.withLock { abandoned = true; data = nil }
             Self.log.warning("Deferred RoomPlan: no CapturedRoomData within \(Int(dataWait))s — RoomPlan produced nothing this scan; saving without a room")
             return nil
         }
@@ -2300,11 +2307,14 @@ final class DeferredRoomBuild: @unchecked Sendable {
         // [MemDiag] Bracket RoomBuilder to quantify the deferred build's save-time overhead — the cost
         // run 3 (skip-consume + drop) never paid. wall = latency added to the save; cpu-seconds ÷ wall
         // = average cores busy; footprintΔ = its transient working set. Runs after OBJ/colorize, so the
-        // app's CPU in this window is dominated by RoomBuilder (a fair attribution).
+        // app's CPU in this window is dominated by RoomBuilder (a fair attribution). The CPU/footprint
+        // reads walk the thread list / hit task_info, so gate them behind PerfDiag so the production save
+        // path stays syscall-free.
+        let diag = PerfDiag.enabled
         let wall0 = Date()
-        let cpu0 = ScanStats.currentCPUTimeSeconds()
-        let foot0 = ScanStats.currentFootprintMB()
-        PerfDiag.log(String(format: "[MemDiag] EVENT RP-BUILD-START footprint=%.0fMB", foot0))
+        let cpu0 = diag ? ScanStats.currentCPUTimeSeconds() : 0
+        let foot0 = diag ? ScanStats.currentFootprintMB() : 0
+        if diag { PerfDiag.log(String(format: "[MemDiag] EVENT RP-BUILD-START footprint=%.0fMB", foot0)) }
 
         let done = DispatchSemaphore(value: 0)
         let result = ResultBox()
@@ -2323,13 +2333,15 @@ final class DeferredRoomBuild: @unchecked Sendable {
             Self.log.warning("Deferred RoomBuilder exceeded \(Int(timeout))s — cancelled; saving without a room")
         }
 
-        let wall = Date().timeIntervalSince(wall0)
-        let cpuSecs = ScanStats.currentCPUTimeSeconds() - cpu0
-        let foot1 = ScanStats.currentFootprintMB()
-        PerfDiag.log(String(format: "[MemDiag] EVENT RP-BUILD-END wall=%.1fs cpu=%.1fs (%.0f%% of 1 core)"
-                            + " footprint=%.0fMB (Δ%+.0f) built=%@%@",
-                            wall, cpuSecs, wall > 0.01 ? cpuSecs / wall * 100 : 0, foot1, foot1 - foot0,
-                            builtRoom == nil ? "NO" : "yes", timedOut ? " (TIMEOUT→cancelled)" : ""))
+        if diag {
+            let wall = Date().timeIntervalSince(wall0)
+            let cpuSecs = ScanStats.currentCPUTimeSeconds() - cpu0
+            let foot1 = ScanStats.currentFootprintMB()
+            PerfDiag.log(String(format: "[MemDiag] EVENT RP-BUILD-END wall=%.1fs cpu=%.1fs (%.0f%% of 1 core)"
+                                + " footprint=%.0fMB (Δ%+.0f) built=%@%@",
+                                wall, cpuSecs, wall > 0.01 ? cpuSecs / wall * 100 : 0, foot1, foot1 - foot0,
+                                builtRoom == nil ? "NO" : "yes", timedOut ? " (TIMEOUT→cancelled)" : ""))
+        }
         return builtRoom
     }
 
