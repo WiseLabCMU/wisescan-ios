@@ -138,3 +138,38 @@ final class MainThreadWatchdog: NSObject, @unchecked Sendable {
         monitorQueue.async { [weak self] in self?.stallActive = false }
     }
 }
+
+/// [MemDiag] Redline trip-flag: logs when the OS raises a memory-pressure event (warn / critical)
+/// against the app. These are the kernel's own "you're near the jetsam limit" signals — the last
+/// warning before a kill — so a `MEM-PRESSURE` marker tells us which scan phase actually walks the
+/// app up to the edge on a real device (the low-RAM iPhones sooner than the iPad). Stamps footprint +
+/// remaining headroom at the moment of the event. No-op unless Perf Diagnostics is on; start/stop on
+/// the main thread tied to the capture-view lifecycle, alongside MainThreadWatchdog.
+final class MemoryPressureMonitor: @unchecked Sendable {
+    private var source: DispatchSourceMemoryPressure?
+    private let queue = DispatchQueue(label: "org.arenaxr.scan4d.perf.mempressure", qos: .utility)
+
+    /// Snapshot closure supplied by the owner (footprint/avail live in ScanStats, which PerfDiag
+    /// can't see). Called on the monitor queue when an event fires; returns the marker suffix.
+    private let snapshot: () -> String
+
+    init(snapshot: @escaping () -> String) { self.snapshot = snapshot }
+
+    func start() {
+        guard PerfDiag.enabled, source == nil else { return }
+        let src = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: queue)
+        src.setEventHandler { [weak self] in
+            guard let self else { return }
+            let level = src.data.contains(.critical) ? "CRITICAL" : "warning"
+            PerfDiag.log("[MemDiag] EVENT MEM-PRESSURE \(level) \(self.snapshot())")
+        }
+        src.resume()
+        source = src
+        PerfDiag.log("MemoryPressureMonitor started")
+    }
+
+    func stop() {
+        source?.cancel()
+        source = nil
+    }
+}

@@ -3,6 +3,7 @@ import Observation
 import SwiftData
 import simd
 import RoomPlan
+import os               // os_proc_available_memory (per-app jetsam headroom)
 
 // MARK: - Captured Scan Model
 
@@ -549,6 +550,42 @@ class ScanStats {
             }
         }
         return result == KERN_SUCCESS ? Double(info.phys_footprint) / (1024.0 * 1024.0) : 0
+    }
+
+    /// VM compressor size (TASK_VM_INFO `compressed`) — bytes of the app's pages the kernel has
+    /// squeezed into the compressor rather than paged out (iOS has no swap). It's counted INTO
+    /// phys_footprint, so a rising `compressed` while footprint plateaus means the app is being held
+    /// together by compression — and the CPU cost of (de)compressing pages is the leading suspect for
+    /// the end-of-scan slowdown. Log it beside footprint to confirm that theory on-device.
+    static func currentCompressedMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? Double(info.compressed) / (1024.0 * 1024.0) : 0
+    }
+
+    /// Bytes remaining before THIS app hits its jetsam limit (`os_proc_available_memory`, iOS 13+).
+    /// This is the real, per-device ceiling — a 12 GB iPhone hands the app a lower limit than the
+    /// 16 GB iPad, which is exactly the lower ceiling observed anecdotally. Pairs with footprint:
+    /// footprint + available ≈ the limit. Returns 0 if the OS can't report it (e.g. unlimited).
+    static func currentAvailableMemoryMB() -> Double {
+        Double(os_proc_available_memory()) / (1024.0 * 1024.0)
+    }
+
+    /// [MemDiag] Force the malloc allocator to return free-list pages to the OS so a subsequent
+    /// footprint read reflects actually-reclaimed memory, not pages malloc is still caching — the fix
+    /// for the lazy-free caveat that otherwise makes teardown free-deltas under-count. Dev-flag gated
+    /// (`memDiagForceReclaim`, off by default even in dev): `malloc_zone_pressure_relief` walks every
+    /// zone and decommits, real overhead we never want in the normal teardown path. No-op when off.
+    /// Note: only touches malloc — Metal/GPU buffers (mesh wireframe, voxels) free on RealityKit's
+    /// schedule, so this makes the delta a *floor* on what a subsystem releases, not the whole story.
+    static func forceReclaimIfEnabled() {
+        guard UserDefaults.standard.bool(forKey: AppConstants.Key.memDiagForceReclaim) else { return }
+        malloc_zone_pressure_relief(nil, 0)
     }
 
     /// Instantaneous total CPU usage across all cores, as a percentage (can exceed 100 — e.g. 250 =

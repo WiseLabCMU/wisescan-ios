@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.hideLivePoints) private var hideLivePoints: Bool = AppConstants.hideLivePoints
     @AppStorage(AppConstants.Key.perfDiagnostics) private var perfDiagnostics: Bool = AppConstants.perfDiagnostics
     @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
+    @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
@@ -393,6 +394,18 @@ struct SettingsView: View {
                                     Text("Pause VR Compute")
                                         .foregroundColor(.white)
                                     Text("Skips the entire VR GPU pipeline (point-cloud projection, voxel integration, extraction, and bloom) — not just hides it. Isolation test: if the freeze disappears with this on, the GPU pipeline is implicated. Applied per frame in VR capture.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $memDiagForceReclaim) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("MemDiag Force Reclaim")
+                                        .foregroundColor(.white)
+                                    Text("Memory attribution only. Forces freed pages back to the OS before [MemDiag] teardown snapshots so free-deltas reflect real reclaim, not cached pages. Expensive — leave OFF except when profiling. Needs Perf Diagnostics on.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

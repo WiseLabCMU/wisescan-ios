@@ -43,6 +43,7 @@ enum AppConstants {
         static let perfDiagnostics = "perfDiagnostics"
         static let pauseVRCompute = "pauseVRCompute"
         static let semanticLabeling = "semanticLabeling"
+        static let memDiagForceReclaim = "memDiagForceReclaim"
         static let enabledSemanticClasses = "enabledSemanticClasses"
         static let scanCoachingEnabled = "scanCoachingEnabled"
     }
@@ -72,6 +73,13 @@ enum AppConstants {
     static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
     static let semanticLabeling: Bool = true    // Developer Mode: disable entire RoomPlan pipeline to reduce memory
+    /// Developer Mode, OFF by default even in dev. When on, [MemDiag] teardown brackets call
+    /// `malloc_zone_pressure_relief` before measuring footprint, forcing the allocator to return
+    /// free-list pages to the OS so a teardown free-delta reflects actually-reclaimed memory rather
+    /// than pages malloc is still caching. Expensive (walks every zone + decommits) — flip on only for
+    /// an attribution session, never leave it on. Doesn't reclaim Metal/GPU buffers (those free on
+    /// RealityKit's schedule), so the delta is a floor on what a subsystem releases.
+    static let memDiagForceReclaim: Bool = false
     /// Deferred RoomPlan build: max time the save pipeline waits (off-main) for RoomBuilder to
     /// reconstruct the room from CapturedRoomData before writing roomplan.json. RoomBuilder is kicked
     /// off at RoomPlan's didEndWith (post-stop) and runs concurrently with the multi-second OBJ build,

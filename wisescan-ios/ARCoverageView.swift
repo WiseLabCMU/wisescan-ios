@@ -391,6 +391,12 @@ struct ARCoverageView: UIViewRepresentable {
                 context.coordinator.renderRescanConnectorsIfReady(arView: uiView)
             } else {
                 // Downgrade to nominal: pure camera passthrough — no overlays
+                // [MemDiag] snapshot the peak BEFORE any teardown free — pairs with the deferred
+                // TEARDOWN marker below to give the AGGREGATE free-delta of the whole scan's resident
+                // set (RoomPlan + mesh anchors + wireframe mirror + ghost). Per-step deltas aren't
+                // honestly measurable here (the frees hop across the delegate/main queues and Metal
+                // releases lazily), so we bracket the sum, which is the reliable number.
+                PerfDiag.log("[MemDiag] EVENT PRE-TEARDOWN \(context.coordinator.memMarker())")
                 // Stop RoomPlan and capture final CapturedRoom BEFORE reset clears state
                 context.coordinator.stopRoomPlanSession()
                 context.coordinator.resetForNominal()
@@ -405,9 +411,14 @@ struct ARCoverageView: UIViewRepresentable {
                 uiView.session.run(config)
                 // Clear ALL debug options for pure passthrough (or VR background)
                 uiView.debugOptions = []
-                // [MemDiag] post-teardown floor: RoomPlan stopped + mesh config dropped. Compare to
-                // the run's peak to see how much memory actually releases when RoomPlan goes away.
-                PerfDiag.log("[MemDiag] EVENT TEARDOWN \(context.coordinator.memMarker())")
+                // [MemDiag] post-teardown floor: RoomPlan stopped + mesh config dropped. Deferred one
+                // runloop turn so the synchronous removeFromParent + queued frees above have landed
+                // before we measure; forceReclaimIfEnabled() then (dev-flag-gated) decommits malloc's
+                // free-list so the PRE→post delta reflects reclaimed pages, not cached ones.
+                DispatchQueue.main.async {
+                    ScanStats.forceReclaimIfEnabled()
+                    PerfDiag.log("[MemDiag] EVENT TEARDOWN \(context.coordinator.memMarker())")
+                }
             }
         }
 
@@ -1772,6 +1783,8 @@ struct ARCoverageView: UIViewRepresentable {
                 memDiagFrameCount = 0
                 lastMemDiagLogTime = now
                 let footprint = ScanStats.currentFootprintMB()
+                let compressed = ScanStats.currentCompressedMB()   // rising = compressor churn (slowdown suspect)
+                let avail = ScanStats.currentAvailableMemoryMB()    // headroom to THIS device's jetsam limit
                 let cpu = ScanStats.currentCPUUsagePercent()
                 let rpOn = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
                 let thermal: String
@@ -1782,8 +1795,8 @@ struct ARCoverageView: UIViewRepresentable {
                 case .critical: thermal = "critical"
                 @unknown default: thermal = "?"
                 }
-                PerfDiag.log(String(format: "[MemDiag] t=%.0fs footprint=%.0fMB resident=%.0fMB faces=%d verts=%d anchors=%d fps=%.0f cpu=%.0f%% thermal=%@ rp=%@",
-                                    duration, footprint, memoryMB, totalFaces, totalVerts, anchorCount, fps, cpu, thermal, rpOn ? "on" : "off"))
+                PerfDiag.log(String(format: "[MemDiag] t=%.0fs footprint=%.0fMB compressed=%.0fMB avail=%.0fMB resident=%.0fMB faces=%d verts=%d anchors=%d fps=%.0f cpu=%.0f%% thermal=%@ rp=%@",
+                                    duration, footprint, compressed, avail, memoryMB, totalFaces, totalVerts, anchorCount, fps, cpu, thermal, rpOn ? "on" : "off"))
             }
 
             DispatchQueue.main.async { [weak self] in
@@ -1804,14 +1817,17 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
-        /// [MemDiag] one footprint+resident snapshot string for lifecycle event markers.
-        /// Only mach `task_info` calls → thread-safe from any queue (main / delegate / RoomPlan).
-        /// Wrapped in the `PerfDiag.log` autoclosure at every call site, so it costs nothing when
-        /// diagnostics are off. Pairs with the periodic timeline line to bracket where the peak lives.
+        /// [MemDiag] one footprint+compressed+avail+resident snapshot for lifecycle event markers.
+        /// Only mach `task_info` / `os_proc_available_memory` calls → thread-safe from any queue (main /
+        /// delegate / RoomPlan). Wrapped in the `PerfDiag.log` autoclosure at every call site, so it
+        /// costs nothing when diagnostics are off. Because it carries footprint, the paired enter/exit
+        /// markers around a teardown step give the free-delta (see the teardown brackets in
+        /// CaptureView+Recording) — the cleanest per-subsystem memory attribution we have.
         /// `fileprivate` (not `private`) so `updateUIView` (ARCoverageView struct) can bracket record-start.
         fileprivate func memMarker() -> String {
-            String(format: "footprint=%.0fMB resident=%.0fMB cpu=%.0f%%",
-                   ScanStats.currentFootprintMB(), ScanStats.currentMemoryUsageMB(), ScanStats.currentCPUUsagePercent())
+            String(format: "footprint=%.0fMB compressed=%.0fMB avail=%.0fMB resident=%.0fMB cpu=%.0f%%",
+                   ScanStats.currentFootprintMB(), ScanStats.currentCompressedMB(), ScanStats.currentAvailableMemoryMB(),
+                   ScanStats.currentMemoryUsageMB(), ScanStats.currentCPUUsagePercent())
         }
 
         // MARK: - Connector Markers (Track C)

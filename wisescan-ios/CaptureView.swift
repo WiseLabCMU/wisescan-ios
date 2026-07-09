@@ -40,6 +40,12 @@ struct CaptureView: View {
     @State var frameCaptureSession = FrameCaptureSession()
     // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
     @State private var mainThreadWatchdog = MainThreadWatchdog()
+    /// [MemDiag] logs a MEM-PRESSURE marker (footprint + headroom) when the OS flags the app near its
+    /// jetsam limit — the redline trip-flag. No-op unless Perf Diagnostics is on.
+    @State private var memoryPressureMonitor = MemoryPressureMonitor {
+        String(format: "footprint=%.0fMB avail=%.0fMB compressed=%.0fMB",
+               ScanStats.currentFootprintMB(), ScanStats.currentAvailableMemoryMB(), ScanStats.currentCompressedMB())
+    }
     // colorAccumulator removed — vertex coloring now deferred to post-processing
     @AppStorage(AppConstants.Key.rawOverlapMax) var overlapMax: Double = AppConstants.overlapMax
     @AppStorage(AppConstants.Key.rawRejectBlur) var rejectBlur: Bool = AppConstants.rejectBlur
@@ -948,6 +954,7 @@ struct CaptureView: View {
             // stall watchdog for this capture session (both no-ops unless Perf Diagnostics is on).
             PerfDiag.refresh()
             mainThreadWatchdog.start()
+            memoryPressureMonitor.start()
 
             // Battery: returning to the capture tab — cancel any pending idle teardown and resume
             // the AR session if it was paused while we were away.
@@ -1031,6 +1038,7 @@ struct CaptureView: View {
         }
         .onDisappear {
             mainThreadWatchdog.stop()
+            memoryPressureMonitor.stop()
 
             // Battery: left the capture tab — after an idle period, pause the AR session (camera +
             // sensors off). Guarded at fire time so we never pause mid-recording or during post-scan
