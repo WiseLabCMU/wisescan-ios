@@ -1711,10 +1711,12 @@ struct ARCoverageView: UIViewRepresentable {
             let anchorCount = anchorVertexCounts.count
             let totalUpdates = anchorUpdateCounts.values.reduce(0, +)
 
-            // Compute capacity metrics
+            // Compute capacity metrics. ONE TASK_VM_INFO fetch → footprint + resident + compressed
+            // (the perfDiag block below reuses vm.* instead of re-issuing the same syscall per field).
             let duration = Date().timeIntervalSince(sessionStartTime)
-            let memoryMB = ScanStats.currentMemoryUsageMB()
-            let footprintMB = ScanStats.currentFootprintMB()          // capacity bar: true ceiling
+            let vm = ScanStats.currentVMInfoMB()
+            let memoryMB = vm.resident
+            let footprintMB = vm.footprint                            // capacity bar: true ceiling
             let availableMB = ScanStats.currentAvailableMemoryMB()
             let drift: Double = totalTrackingUpdates > 0
                 ? min(Double(trackingDegradationCount) / Double(totalTrackingUpdates), 1.0)
@@ -1732,9 +1734,9 @@ struct ARCoverageView: UIViewRepresentable {
                 let fps = elapsed > 0 && elapsed < 1000 ? Double(memDiagFrameCount) / elapsed : 0
                 memDiagFrameCount = 0
                 lastMemDiagLogTime = now
-                let footprint = ScanStats.currentFootprintMB()
-                let compressed = ScanStats.currentCompressedMB()   // rising = compressor churn (slowdown suspect)
-                let avail = ScanStats.currentAvailableMemoryMB()    // headroom to THIS device's jetsam limit
+                let footprint = footprintMB                        // reuse the single VM-info fetch above
+                let compressed = vm.compressed                     // rising = compressor churn (slowdown suspect)
+                let avail = availableMB                            // headroom to THIS device's jetsam limit
                 let cpu = ScanStats.currentCPUUsagePercent()
                 let rpOn = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
                 let thermal: String

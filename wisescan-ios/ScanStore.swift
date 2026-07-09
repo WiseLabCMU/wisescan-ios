@@ -584,6 +584,23 @@ class ScanStats {
         return result == KERN_SUCCESS ? Double(info.phys_footprint) / (1024.0 * 1024.0) : 0
     }
 
+    /// One TASK_VM_INFO fetch → footprint + resident + compressed together (all three are fields of the
+    /// same struct). Use this on hot paths (updateStats, 10 Hz) instead of calling currentFootprintMB /
+    /// currentMemoryUsageMB / currentCompressedMB separately — each of those issues its own identical
+    /// syscall for one field. All in MB; zeros on failure.
+    static func currentVMInfoMB() -> (footprint: Double, resident: Double, compressed: Double) {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return (0, 0, 0) }
+        let mb = 1024.0 * 1024.0
+        return (Double(info.phys_footprint) / mb, Double(info.resident_size) / mb, Double(info.compressed) / mb)
+    }
+
     /// VM compressor size (TASK_VM_INFO `compressed`) — bytes of the app's pages the kernel has
     /// squeezed into the compressor rather than paged out (iOS has no swap). It's counted INTO
     /// phys_footprint, so a rising `compressed` while footprint plateaus means the app is being held
