@@ -214,6 +214,9 @@ struct SettingsView: View {
                     .listRowBackground(Color.white.opacity(0.05))
 
                     // MARK: - Semantic Classes
+                    // NOTE: post deferred-build migration these no longer gate LIVE outlines (we don't
+                    // render them during capture) — the selection now controls semantic-class visibility
+                    // in the saved-map / mesh-preview viewer. Kept for that reason.
                     Section {
                         ForEach(SemanticClass.allCases.filter { $0 != .none }, id: \.rawValue) { cls in
                             if cls.isConfigurable {
@@ -262,9 +265,9 @@ struct SettingsView: View {
                             }
                         }
                     } header: {
-                        Text("SEMANTIC SCAN OUTLINE VISIBILITY")
+                        Text("SEMANTIC CLASS VISIBILITY")
                     } footer: {
-                        Text("Choose which semantic classes are shown as outlines during AR/VR capture. All classes are always collected for export. Mesh previews show all detected classes.")
+                        Text("Choose which semantic classes are shown in saved-map and mesh previews. All classes are always collected for export.")
                             .font(.caption2)
                             .foregroundColor(.gray)
                     }

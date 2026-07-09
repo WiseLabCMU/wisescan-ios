@@ -540,7 +540,12 @@ struct CaptureView: View {
                                         .foregroundColor(.white)
                                 }
 
-                                // Row 1.5: Semantic classes detected (colored dot + label)
+                                // Row 1.5: Semantic classes detected (colored dot + label).
+                                // DISABLED with the deferred-build migration: we no longer render live
+                                // RoomPlan outlines, so the color legend maps to nothing on screen.
+                                // detectedClasses is still collected (extractRoomMetadata → saved
+                                // semanticClassesDetected). Restore this if a visualize-RoomPlan mode lands.
+                                /*
                                 if !scanStats.detectedClasses.isEmpty {
                                     HStack(spacing: 6) {
                                         Image(systemName: "tag.fill")
@@ -560,6 +565,7 @@ struct CaptureView: View {
                                         Spacer()
                                     }
                                 }
+                                */
 
                                 // Row 2: Capacity bar
                                 VStack(spacing: 4) {
