@@ -413,10 +413,11 @@ extension CaptureView {
                 // moving this stage is just moving this call. THE ONE HARD CONSTRAINT: it must still run
                 // AFTER the world-map export, or RoomBuilder's CPU can perturb the pose-sensitive
                 // capture (the whole reason it was deferred). grep "[DEFERRED-ROOMPLAN]" for all sites.
-                let semanticOn = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
-                let builtRoom: CapturedRoom? = semanticOn
-                    ? self.scanStore.awaitDeferredRoomPlan?(AppConstants.roomBuilderTimeoutSeconds)
-                    : nil
+                // Keyed on the deferred BOX existing (created at record-start iff RoomPlan was on),
+                // NOT the live semanticLabeling toggle: keying on the toggle would discard a real
+                // capture if the user flipped RoomPlan off mid-scan. awaitDeferredRoomPlan returns nil
+                // fast when no box exists (RoomPlan was off), so this is safe to always call.
+                let builtRoom: CapturedRoom? = self.scanStore.awaitDeferredRoomPlan?(AppConstants.roomBuilderTimeoutSeconds)
                 // └── [DEFERRED-ROOMPLAN] end build trigger ─────────────────────────────────────────
 
                 DispatchQueue.main.async {

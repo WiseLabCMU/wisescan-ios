@@ -674,7 +674,7 @@ struct CaptureView: View {
                             // pre-recording window so a tap can't race ahead of the alignment overlay
                             // and start an un-aligned scan (the ~90°/offset ghost-jump race).
                             // activeScanCase is set synchronously at the trigger; cleared on save.
-                            .disabled(isProcessingMesh || isWaitingToSave || isAnalyzing || showAnalysisReport
+                            .disabled(isProcessingMesh || isWaitingToSave || isStabilizingBeforeSave || isAnalyzing || showAnalysisReport
                                       || (scanStore.activeScanCase == .linkAdjacent && !isRecording))
                             .offset(y: isRecording ? -20 : 0)
                         }

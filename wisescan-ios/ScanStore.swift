@@ -491,8 +491,11 @@ class ScanStats {
     /// proxy: it redlined at ~34% of the real ceiling on high-RAM devices. This is truthful and
     /// per-device (binds on the 12 GB iPhone; slack on the 16 GB iPad, where `fpsPressure` binds first).
     var memoryPressure: Double {
+        // availableMB == 0 means os_proc_available_memory couldn't report a limit (Simulator, or the
+        // documented "unlimited" case) — treat as NO SIGNAL, not "zero headroom". Guarding only on
+        // ceiling > 0 would let footprint/footprint = 1.0 falsely peg the bar whenever avail is 0.
+        guard availableMB > 0 else { return 0 }
         let ceiling = footprintMB + availableMB
-        guard ceiling > 0 else { return 0 }
         return min((footprintMB / ceiling) / memoryWarnFraction, 1.0)
     }
     var anchorPressure: Double { min(Double(anchorCount) / maxAnchors, 1.0) }

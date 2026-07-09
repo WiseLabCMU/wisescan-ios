@@ -85,6 +85,12 @@ enum AppConstants {
     /// off at RoomPlan's didEndWith (post-stop) and runs concurrently with the multi-second OBJ build,
     /// so this rarely elapses; it's a backstop so a RoomBuilder stall can't hang the save.
     static let roomBuilderTimeoutSeconds: TimeInterval = 20
+    /// Deferred RoomPlan build: max time to wait for the CapturedRoomData itself (separate from the
+    /// reconstruction timeout above). The data is provided at RoomPlan's didEndWith, which fires at
+    /// Stop — long before the save reaches the build — so it's normally already present. Kept short so
+    /// a cold/failed RoomPlan session (didEndWith never fires) bails fast instead of blocking the save
+    /// queue for the full reconstruction timeout.
+    static let roomPlanDataWaitSeconds: TimeInterval = 3
 
     /// Default enabled semantic classes (JSON-encoded Set<String>).
     /// Walls and doors are on by default; all others off. Ceiling is not yet

@@ -3,6 +3,7 @@ import RealityKit
 import ARKit
 import RoomPlan
 import Synchronization
+import os               // always-on Logger for deferred-build timeout warnings
 
 /// Dedups the repeated `UnlitMaterial(color: UIColor(red: CGFloat(c.x), …))` construction from a
 /// SIMD4 color (x,y,z as RGB; `alpha` defaults opaque). Fileprivate to ARCoverageView.
@@ -707,9 +708,6 @@ struct ARCoverageView: UIViewRepresentable {
             // [MemDiag] re-arm the model-load one-shots so each recording measures load fresh.
             loggedRoomPlanReady.store(false, ordering: .relaxed)
             loggedSegModelReady.store(false, ordering: .relaxed)
-            // Fresh fps state so the capacity bar doesn't inherit the last scan's low rate.
-            prodFrameCount = 0
-            smoothedFPSValue = 60
             // Clear delegate-owned counters/flags ON the delegate queue (never on main): the
             // ARSession callbacks mutate these dictionaries, and a concurrent mutation would crash.
             sessionDelegateQueue.async { [weak self] in
@@ -721,6 +719,10 @@ struct ARCoverageView: UIViewRepresentable {
                 self.detectedSemanticClasses.removeAll()
                 self.trackingDegradationCount = 0
                 self.totalTrackingUpdates = 0
+                // Fresh fps state so the capacity bar doesn't inherit the last scan's low rate.
+                // Delegate-queue-owned (mutated in didUpdate/updateStats) → reset HERE, not on main.
+                self.prodFrameCount = 0
+                self.smoothedFPSValue = 60
                 self.sessionStartTime = Date()
                 self.lastStatsUpdateTime = .distantPast // let the first stats update publish immediately
                 self.lastMemDiagLogTime = .distantPast  // [MemDiag] first memory sample lands immediately too
@@ -1665,6 +1667,7 @@ struct ARCoverageView: UIViewRepresentable {
             // queue, so this timestamp needs no synchronization. Resets (on stop) write
             // scanStats directly and bypass this path, so they remain immediate.
             let now = Date()
+            let wasFirstSample = lastStatsUpdateTime == .distantPast // reset() seeds .distantPast
             let fpsElapsed = now.timeIntervalSince(lastStatsUpdateTime) // window since last publish
             guard fpsElapsed >= statsUpdateInterval else { return }
             lastStatsUpdateTime = now
@@ -1672,10 +1675,13 @@ struct ARCoverageView: UIViewRepresentable {
             // PRODUCTION fps → capacity bar (ungated). Frames this window / elapsed, EMA-smoothed
             // (~sub-second) so a single stall doesn't slam the bar but a sustained drop does. updateStats
             // is driven by frame callbacks, so when fps craters this fires less often and the window
-            // widens — the ratio stays correct. Guard against a stale/huge first gap.
+            // widens — the ratio stays correct, and a genuine multi-second stall MUST decay the EMA
+            // (that stall is the signal). So we skip only the first post-reset sample (huge .distantPast
+            // gap) and app-suspend-scale gaps (>10s, frames paused, not slow); everything in between
+            // — including a 2–8s hang — folds in and correctly drops fpsPressure.
             let frames = prodFrameCount
             prodFrameCount = 0
-            if fpsElapsed > 0, fpsElapsed < 2 {
+            if !wasFirstSample, fpsElapsed > 0, fpsElapsed < 10 {
                 let instantFPS = Double(frames) / fpsElapsed
                 smoothedFPSValue = smoothedFPSValue <= 0 ? instantFPS : smoothedFPSValue * 0.8 + instantFPS * 0.2
             }
@@ -2275,10 +2281,15 @@ final class DeferredRoomBuild: @unchecked Sendable {
     /// return the room. Call from a background queue AFTER pose-sensitive capture; blocks that queue
     /// only. Returns nil on timeout or reconstruction failure (→ scan saves without a room, no hang).
     func buildRoom(timeout: TimeInterval) -> CapturedRoom? {
-        // Single wall-clock deadline shared by BOTH waits (data-arrival + reconstruction) so the total
-        // block is bounded by `timeout`, not 2× it — the value AppConstants documents as the max wait.
-        let deadline = DispatchTime.now() + timeout
-        guard dataReady.wait(timeout: deadline) == .success else { return nil }
+        // TWO separate waits. The CapturedRoomData is provided at didEndWith (fires at Stop, well before
+        // the save reaches here), so wait only briefly for it: if RoomPlan produced nothing this scan
+        // (cold/failed session, didEndWith never fired) bail FAST instead of blocking the save queue for
+        // the whole reconstruction timeout. The reconstruction itself then gets the full `timeout`.
+        let dataWait = AppConstants.roomPlanDataWaitSeconds
+        guard dataReady.wait(timeout: .now() + dataWait) == .success else {
+            Self.log.warning("Deferred RoomPlan: no CapturedRoomData within \(Int(dataWait))s — RoomPlan produced nothing this scan; saving without a room")
+            return nil
+        }
         // Take the data AND release the box's reference: RoomBuilder holds `captured` for the build, so
         // once we hand it off the (potentially large) CapturedRoomData buffer frees when this returns
         // instead of lingering in the box until the next recording.
@@ -2299,11 +2310,16 @@ final class DeferredRoomBuild: @unchecked Sendable {
             defer { done.signal() }
             result.value = try? await RoomBuilder(options: [.beautifyObjects]).capturedRoom(from: captured)
         }
-        // On timeout, cancel the build so a runaway RoomBuilder can't keep burning CPU/memory after
-        // the save has already given up and moved on. (RoomBuilder may not abort mid-reconstruction —
-        // cancellation is cooperative — but it stops any continuation and drops the result cleanly.)
-        let timedOut = done.wait(timeout: deadline) == .timedOut
-        if timedOut { task.cancel() }
+        let timedOut = done.wait(timeout: .now() + timeout) == .timedOut
+        // Read result.value ONLY when done was signaled (!timedOut). On timeout the detached Task may
+        // STILL be writing result.value (cooperative cancel doesn't guarantee it stopped), so touching
+        // it here would be a data race — treat a timeout as no-room without reading the box.
+        let builtRoom = timedOut ? nil : result.value
+        if timedOut {
+            // Cancel so a runaway RoomBuilder can't keep burning CPU/memory after the save moved on.
+            task.cancel()
+            Self.log.warning("Deferred RoomBuilder exceeded \(Int(timeout))s — cancelled; saving without a room")
+        }
 
         let wall = Date().timeIntervalSince(wall0)
         let cpuSecs = ScanStats.currentCPUTimeSeconds() - cpu0
@@ -2311,10 +2327,13 @@ final class DeferredRoomBuild: @unchecked Sendable {
         PerfDiag.log(String(format: "[MemDiag] EVENT RP-BUILD-END wall=%.1fs cpu=%.1fs (%.0f%% of 1 core)"
                             + " footprint=%.0fMB (Δ%+.0f) built=%@%@",
                             wall, cpuSecs, wall > 0.01 ? cpuSecs / wall * 100 : 0, foot1, foot1 - foot0,
-                            result.value == nil ? "NO" : "yes", timedOut ? " (TIMEOUT→cancelled)" : ""))
-        return timedOut ? nil : result.value
+                            builtRoom == nil ? "NO" : "yes", timedOut ? " (TIMEOUT→cancelled)" : ""))
+        return builtRoom
     }
 
+    /// Always-on (NOT perfDiag-gated) logger for the two failure paths above, so a real RoomPlan
+    /// stall/no-data is diagnosable in the field without Developer Mode.
+    private static let log = Logger(subsystem: PerfDiag.subsystem, category: "roomplan")
     private final class ResultBox: @unchecked Sendable { var value: CapturedRoom? }
 }
 
@@ -2343,6 +2362,7 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
                 // (finalCapturedRoom) and extract semantic classes for the HUD + saved metadata — but
                 // NOT the outline geometry (that was the ~215MB the migration removed). The live room
                 // is overwritten at save by the RoomBuilder reconstruction (better geometry for export).
+                self.latestCapturedRoom = room   // so stopRoomPlanSession's finalCapturedRoom hand-off isn't nil'd
                 self.finalCapturedRoomBinding?.wrappedValue = room
                 self.extractRoomMetadata(from: room)
                 if self.loggedRoomPlanReady.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged {
