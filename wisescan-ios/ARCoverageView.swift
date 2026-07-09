@@ -616,9 +616,7 @@ struct ARCoverageView: UIViewRepresentable {
         func awaitAndBuildDeferredRoom(timeout: TimeInterval) -> CapturedRoom? {
             currentDeferredRoomBox()?.buildRoom(timeout: timeout)
         }
-        /// Single anchor holding all RoomPlan outline entities.
-        private var roomPlanOutlineEntity: AnchorEntity?
-        /// Throttle: last time RoomPlan outlines were rebuilt.
+        /// Throttle: last time RoomPlan semantic metadata was extracted (see extractRoomMetadata).
         private var lastRoomPlanOutlineTime: Date = .distantPast
         /// Accumulated set of detected semantic classes (published to ScanStats for HUD).
         private var detectedSemanticClasses: Set<String> = []
@@ -725,7 +723,6 @@ struct ARCoverageView: UIViewRepresentable {
             }
             // Clear any stale wireframe entities from a previous recording (RealityKit → main)
             removeAllActiveMeshEntities()
-            removeRoomPlanOutlines()
             latestCapturedRoom = nil
             finalCapturedRoom = nil
             lastRoomPlanOutlineTime = .distantPast
@@ -764,7 +761,6 @@ struct ARCoverageView: UIViewRepresentable {
 
             // Remove all active mesh wireframe entities from the scene (RealityKit → main)
             removeAllActiveMeshEntities()
-            removeRoomPlanOutlines()
             // Stop RoomPlan session if still running
             roomCaptureSession?.stop(pauseARSession: false)
             roomCaptureSession = nil
@@ -1062,10 +1058,8 @@ struct ARCoverageView: UIViewRepresentable {
             isAnalysisRoomPlan = false
             needsSemanticReassert.store(false, ordering: .relaxed)
 
-            // Clean up any outline entities RoomPlan may have rendered during analysis,
-            // and clear latestCapturedRoom so stale data doesn't bleed into a future recording.
+            // Clear latestCapturedRoom so stale analysis data doesn't bleed into a future recording.
             latestCapturedRoom = nil
-            removeRoomPlanOutlines()
 
             // Remove temporarily-added personSegmentation if privacy filter is still OFF
             if addedSegForAnalysis,
@@ -1115,149 +1109,36 @@ struct ARCoverageView: UIViewRepresentable {
         /// Renders oriented bounding-box wireframes from the latest CapturedRoom.
         /// Each Surface/Object becomes a set of 12 colored edges (thin boxes) with the
         /// correct transform. Throttled to avoid per-frame rebuilds.
-        private func renderRoomPlanOutlines() {
-            guard let room = latestCapturedRoom, let arView = arView else { return }
-
-            // Throttle: rebuild at most every 0.5s
+        /// [DEFERRED-ROOMPLAN] Tier-2 metadata consume — the CHEAP half of the former
+        /// `renderRoomPlanOutlines`: collect the detected semantic classes (for the live HUD and the
+        /// saved `semanticClassesDetected`) WITHOUT building the per-surface RealityKit outline
+        /// geometry. The geometry was the expensive part the deferred-build migration removed (the
+        /// during-scan footprint); reading class names off the value-type room is nearly free. Called
+        /// on main from the recording-mode `didUpdate room`; throttled like the old outline rebuild.
+        private func extractRoomMetadata(from room: CapturedRoom) {
             guard Date().timeIntervalSince(lastRoomPlanOutlineTime) >= AppConstants.semanticThrottleInterval else { return }
             lastRoomPlanOutlineTime = Date()
 
-            // Remove old outlines
-            roomPlanOutlineEntity?.removeFromParent()
-
-            let anchorEntity = AnchorEntity(world: .zero)
-
-            // Camera world position — used to lift surface outlines toward the
-            // viewer so they draw on top of the co-planar occlusion mesh instead
-            // of z-fighting with it. Objects get no lift so the mesh occludes them.
-            let cameraPosition = arView.cameraTransform.translation
-
-            // User-configurable filter: only render enabled classes as overlays.
-            // All detected classes are still tracked in detectedSemanticClasses so
-            // roomplan.json export contains full data regardless of capture-time filter.
+            // All detected classes are tracked in detectedSemanticClasses (so roomplan.json export +
+            // the saved metadata carry full data); only the user-enabled ones publish to the HUD.
             let enabledClasses = SemanticClassPreference.load()
-
-            // Collect detected classes for HUD
             var classes = Set<String>()
-
-            // Render surfaces (walls, floors, doors, windows, openings) — lifted
-            // toward the camera so they always render on top of the scan mesh.
             for surface in room.walls + room.floors + room.doors + room.windows + room.openings {
                 let semantic = SemanticClass.from(surface.category)
                 guard semantic != .none else { continue }
                 classes.insert(semantic.rawValue)
-                guard enabledClasses.contains(semantic.rawValue) else { continue }
-                Self.addWireframeEdges(
-                    to: anchorEntity, dimensions: surface.dimensions,
-                    transform: surface.transform, color: semantic.color,
-                    liftTowardCamera: cameraPosition
-                )
             }
-
-            // Render objects (tables, chairs, beds, etc.) — no lift, so they are
-            // naturally occluded by the scan mesh while scanning.
             for object in room.objects {
                 let semantic = SemanticClass.from(object.category)
                 guard semantic != .none else { continue }
                 classes.insert(semantic.rawValue)
-                guard enabledClasses.contains(semantic.rawValue) else { continue }
-                Self.addWireframeEdges(
-                    to: anchorEntity, dimensions: object.dimensions,
-                    transform: object.transform, color: semantic.color,
-                    liftTowardCamera: nil
-                )
             }
 
-            arView.scene.addAnchor(anchorEntity)
-            roomPlanOutlineEntity = anchorEntity
-
-            // Track all detected classes (for export) but only publish enabled ones to HUD.
             detectedSemanticClasses.formUnion(classes)
             let enabledForHUD = detectedSemanticClasses.filter { enabledClasses.contains($0) }
             DispatchQueue.main.async { [weak self] in
                 self?.scanStats?.detectedClasses = enabledForHUD
             }
-        }
-
-        /// Edge thickness for RoomPlan wireframe outlines (10mm).
-        private static let edgeThickness: Float = 0.01
-
-        /// Adds 12 thin box entities representing the edges of an oriented bounding box.
-        /// Each edge is a thin box with the given color.
-        ///
-        /// - Parameter liftTowardCamera: when non-nil (the camera world position),
-        ///   the whole box is nudged along its dominant face normal toward the
-        ///   camera by `AppConstants.surfaceOutlineLiftDistance`, so surface outlines draw on top of
-        ///   the co-planar occlusion mesh. Pass `nil` for objects so they remain
-        ///   embedded in the mesh and are occluded naturally.
-        private static func addWireframeEdges(
-            to parent: Entity,
-            dimensions: SIMD3<Float>,
-            transform: simd_float4x4,
-            color: SIMD4<Float>,
-            liftTowardCamera cameraPosition: SIMD3<Float>? = nil
-        ) {
-            let t = edgeThickness
-            let w = max(dimensions.x, 0.001)
-            let h = max(dimensions.y, 0.001)
-            let d = max(dimensions.z, 0.001)
-            let hw = w / 2, hh = h / 2, hd = d / 2
-
-            let material = UnlitMaterial(rgb: color)
-
-            // Container entity carries the RoomPlan transform
-            let container = Entity()
-            container.transform = Transform(matrix: transform)
-
-            // Lift surface outlines toward the camera along the surface's normal.
-            // RoomPlan surfaces are thin slabs whose normal is the local axis with
-            // the smallest dimension; flip it to face the camera, then offset the
-            // container in world space (parent anchor is at world origin).
-            if let camera = cameraPosition {
-                let xAxis = SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z)
-                let yAxis = SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z)
-                let zAxis = SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
-                let center = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
-
-                // Pick the local axis with the smallest extent as the slab normal.
-                var normal = zAxis
-                if d <= w && d <= h { normal = zAxis }
-                else if h <= w && h <= d { normal = yAxis }
-                else { normal = xAxis }
-                normal = simd_normalize(normal)
-
-                // Orient the normal toward the camera so the lift moves the outline
-                // in front of the wall from wherever it's currently being viewed.
-                if simd_dot(normal, camera - center) < 0 { normal = -normal }
-                container.position += normal * AppConstants.surfaceOutlineLiftDistance
-            }
-
-            // 12 edges: 4 along each axis
-            // Edges along X (width) — at the 4 vertical corners
-            let xEdge = MeshResource.generateBox(width: w, height: t, depth: t)
-            for (y, z) in [(-hh, -hd), (-hh, hd), (hh, -hd), (hh, hd)] as [(Float, Float)] {
-                let e = ModelEntity(mesh: xEdge, materials: [material])
-                e.position = SIMD3(0, y, z)
-                container.addChild(e)
-            }
-
-            // Edges along Y (height) — at the 4 horizontal corners
-            let yEdge = MeshResource.generateBox(width: t, height: h, depth: t)
-            for (x, z) in [(-hw, -hd), (-hw, hd), (hw, -hd), (hw, hd)] as [(Float, Float)] {
-                let e = ModelEntity(mesh: yEdge, materials: [material])
-                e.position = SIMD3(x, 0, z)
-                container.addChild(e)
-            }
-
-            // Edges along Z (depth) — at the 4 remaining corners
-            let zEdge = MeshResource.generateBox(width: t, height: t, depth: d)
-            for (x, y) in [(-hw, -hh), (-hw, hh), (hw, -hh), (hw, hh)] as [(Float, Float)] {
-                let e = ModelEntity(mesh: zEdge, materials: [material])
-                e.position = SIMD3(x, y, 0)
-                container.addChild(e)
-            }
-
-            parent.addChild(container)
         }
 
         // MARK: - Coverage Overlay (3D Occlusion)
@@ -1757,7 +1638,6 @@ struct ARCoverageView: UIViewRepresentable {
                 self?.anchorVertexCounts.removeAll()
                 self?.anchorFaceCounts.removeAll()
             }
-            removeRoomPlanOutlines()
         }
 
         private func updateStats(in session: ARSession) {
@@ -2322,7 +2202,7 @@ struct ARCoverageView: UIViewRepresentable {
 
 /// [DEFERRED-ROOMPLAN] grep this token for every site of the deferred-build feature: this box, the
 /// coordinator storage + currentDeferredRoomBox/awaitAndBuildDeferredRoom, startRoomPlanSession
-/// (create), startAnalysisRoomPlanSession (clear), didUpdate (recording no-op), didEndWith (provide),
+/// (create), startAnalysisRoomPlanSession (clear), didUpdate (recording metadata consume), didEndWith (provide),
 /// makeUIView (wire awaitDeferredRoomPlan), ScanStore.awaitDeferredRoomPlan, and the save-block build
 /// trigger in CaptureView+Recording. Only the trigger is location-bound (must run after world-map
 /// export); everything else is plumbing that stays put if the stage moves.
@@ -2402,25 +2282,32 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
         // This delegate runs on an arbitrary queue; latestCapturedRoom / the SwiftUI binding are
         // main-only, so hop once.
         //
-        // DEFERRED BUILD: recording mode no longer consumes the live incremental room. Consuming it
-        // (retaining CapturedRoom every update + rendering outlines) cost ~215 MB of contested
-        // during-scan footprint and competed with VIO for compute. Instead we let RoomCaptureSession
-        // just capture, grab its CapturedRoomData at didEndWith, and reconstruct with RoomBuilder AFTER
-        // the scan (see below) — a better model, built when tracking is done and there's nothing to
-        // starve. Analysis mode (pre-scan SpaceAnalyzer) still consumes live: it's short, runs before
-        // the heavy mesh scan, and needs the room in real time for staging feedback.
+        // DEFERRED BUILD: recording mode consumes the live room ONLY for cheap metadata (semantic
+        // classes for the HUD/saved data + the room handed to ScanCoach) — NOT the outline geometry.
+        // Building outlines (RealityKit mesh per surface every update) was the ~215 MB of contested
+        // during-scan footprint that competed with VIO; that's gone. The export-quality room is
+        // reconstructed by RoomBuilder from CapturedRoomData AFTER the scan (see below) — a better
+        // model, built when tracking is done and there's nothing to starve. Analysis mode (pre-scan
+        // SpaceAnalyzer) consumes the full room live: it's short, runs before the heavy mesh scan.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             if self.isAnalysisRoomPlan {
                 self.latestCapturedRoom = room
                 self.scanStats?.analysisRoom = room
-            } else if self.loggedRoomPlanReady.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged {
-                // [MemDiag] First recording-mode room update = RoomPlan's CoreML models have run once
-                // and are resident. RP-START→RP-READY delta ≈ the model-load cost (the mesh is still
-                // near-empty this early, so the delta is RoomPlan-dominated). See loggedRoomPlanReady.
-                PerfDiag.log("[MemDiag] EVENT RP-READY \(self.memMarker())")
+            } else {
+                // [DEFERRED-ROOMPLAN] Tier-2 recording-mode consume: feed the live room to ScanCoach
+                // (finalCapturedRoom) and extract semantic classes for the HUD + saved metadata — but
+                // NOT the outline geometry (that was the ~215MB the migration removed). The live room
+                // is overwritten at save by the RoomBuilder reconstruction (better geometry for export).
+                self.finalCapturedRoomBinding?.wrappedValue = room
+                self.extractRoomMetadata(from: room)
+                if self.loggedRoomPlanReady.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged {
+                    // [MemDiag] First recording-mode room update = RoomPlan's CoreML models have run
+                    // once and are resident. RP-START→RP-READY delta ≈ model-load cost (mesh still
+                    // near-empty this early, so the delta is RoomPlan-dominated). See loggedRoomPlanReady.
+                    PerfDiag.log("[MemDiag] EVENT RP-READY \(self.memMarker())")
+                }
             }
-            // [DEFERRED-ROOMPLAN] Recording mode: intentionally do nothing — room reconstructed post-scan.
         }
     }
 
