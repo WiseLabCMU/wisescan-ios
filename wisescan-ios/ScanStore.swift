@@ -424,6 +424,11 @@ class ScanStats {
     /// compute-headroom signal — drives `fpsPressure`. Defaults to 60 so the bar reads healthy before
     /// the first sample lands.
     var smoothedFPS: Double = 60
+    /// Smoothed total CPU usage across all cores as a percentage (100 = one core fully busy), published
+    /// from updateStats. Divided by this device's core budget it becomes `cpuPressure` — the LEADING
+    /// compute signal: it ramps as reconstruction scales, well before `fpsPressure` (which stays pinned
+    /// at 60 fps until the device finally can't keep up). Defaults to 0 (healthy) pre-first-sample.
+    var cpuPercent: Double = 0
     var driftEstimate: Double = 0 // 0.0 to 1.0
     var mappingStatus: String = "notAvailable" // ARFrame.WorldMappingStatus for cumulative relocalization quality
     var detectedClasses: Set<String> = [] // Semantic classes detected so far (for HUD display)
@@ -455,6 +460,15 @@ class ScanStats {
     /// zone: at 30 the bar saturates across sustained-mid-20s-fps scans and can't tell "rough" (~28,
     /// ~0.8) from "broken" (single digits, 1.0). Roughening is still ~0.67 by 40 fps.
     private let fpsFloor: Double = 20.0
+    /// This device's total logical-core budget (×100 = the CPU% at full all-core saturation). Normalizing
+    /// CPU% by THIS turns an absolute number that means nothing across chips into a device-relative
+    /// saturation FRACTION: a faster or older device simply saturates at a different workload and the
+    /// fraction self-adjusts — no per-device table. activeProcessorCount (not just the perflevel0 P-cores)
+    /// because the reconstruction worker spills across P+E cores; total-core matched the observed fps
+    /// behavior on the M1 iPad (0.63 at the heavy tail, where fps still held 60).
+    private let cpuCoreBudget = Double(ProcessInfo.processInfo.activeProcessorCount) * 100.0
+    /// Bar is full when CPU reaches this fraction of all-core saturation (margin before frames drop).
+    private let cpuWarnFraction: Double = 0.85
 
     var estimatedSizeMB: Double {
         let bytes = (totalVertices * 12) + (totalFaces * 12)
@@ -508,10 +522,23 @@ class ScanStats {
         min(max(0, (60.0 - smoothedFPS) / (60.0 - fpsFloor)), 1.0)
     }
 
+    /// Compute-saturation pressure: fraction of THIS device's cores in use, scaled so the bar is full at
+    /// `cpuWarnFraction` of all-core saturation. The LEADING compute axis — it ramps with reconstruction
+    /// load while `fpsPressure` is still 0 (fps holds 60 until the cliff, giving no runway). Portable by
+    /// construction: the denominator is the device's own core count, so the same fraction means the same
+    /// relative load on any chip. `fpsPressure` stays the device-INdependent backstop if this axis's
+    /// calibration is off for a given device — the two cover each other (see the M1 iPad profiling run,
+    /// where memory AND fps both read ~0 for the whole scan while CPU climbed to 0.63).
+    var cpuPressure: Double {
+        guard cpuCoreBudget > 0 else { return 0 }
+        return min((cpuPercent / cpuCoreBudget) / cpuWarnFraction, 1.0)
+    }
+
     /// Composite capacity: highest pressure factor wins (0.0 = fresh, 1.0 = at limit). On a
-    /// compute-bound scan `fpsPressure` drives it; on a memory-bound one `memoryPressure` does.
+    /// compute-bound scan `cpuPressure` leads (then `fpsPressure` confirms); on a memory-bound one
+    /// `memoryPressure` drives it.
     var capacityScore: Double {
-        max(polygonPressure, memoryPressure, anchorPressure, driftEstimate, fpsPressure)
+        max(polygonPressure, memoryPressure, anchorPressure, driftEstimate, fpsPressure, cpuPressure)
     }
 
     var isNearCapacity: Bool { capacityScore > 0.8 }

@@ -579,6 +579,13 @@ struct ARCoverageView: UIViewRepresentable {
         // Delegate-queue owned (incremented in didUpdate frame, consumed in updateStats — same queue).
         private var prodFrameCount: Int = 0
         private var smoothedFPSValue: Double = 60
+        // PRODUCTION cpu (ungated, drives the capacity bar's cpuPressure): total CPU% across all cores,
+        // sampled ~1 Hz (throttled — walking the thread list isn't free and the bar doesn't need 10 Hz
+        // CPU resolution) and EMA-smoothed (raw CPU% is noisy tick-to-tick). Sampled unconditionally so
+        // the bar works with PerfDiag OFF; the MemDiag log keeps its own raw read for per-thread parity.
+        private var smoothedCPUValue: Double = 0
+        private var lastCPUSampleTime: Date = .distantPast
+        private let cpuSampleInterval: TimeInterval = 0.9
 
         // Active Mesh Wireframe properties
         /// One wireframe entity per ARMeshAnchor, keyed by anchor UUID.
@@ -723,6 +730,8 @@ struct ARCoverageView: UIViewRepresentable {
                 // Delegate-queue-owned (mutated in didUpdate/updateStats) → reset HERE, not on main.
                 self.prodFrameCount = 0
                 self.smoothedFPSValue = 60
+                self.smoothedCPUValue = 0                // fresh cpu EMA → bar won't inherit last scan's load
+                self.lastCPUSampleTime = .distantPast    // first cpu sample lands immediately
                 self.sessionStartTime = Date()
                 self.lastStatsUpdateTime = .distantPast // let the first stats update publish immediately
                 self.lastMemDiagLogTime = .distantPast  // [MemDiag] first memory sample lands immediately too
@@ -1722,6 +1731,17 @@ struct ARCoverageView: UIViewRepresentable {
                 ? min(Double(trackingDegradationCount) / Double(totalTrackingUpdates), 1.0)
                 : 0
 
+            // ── Production CPU sample for the capacity bar (ungated, ~1 Hz, EMA) ──
+            // The LEADING compute-saturation signal (see ScanStats.cpuPressure). Must run with PerfDiag
+            // OFF, so it lives here, not in the diag block below. Throttled because currentCPUUsagePercent
+            // walks the thread list; smoothed because raw CPU% swings hard tick-to-tick.
+            if now.timeIntervalSince(lastCPUSampleTime) >= cpuSampleInterval {
+                let instantCPU = ScanStats.currentCPUUsagePercent()
+                smoothedCPUValue = smoothedCPUValue <= 0 ? instantCPU : smoothedCPUValue * 0.7 + instantCPU * 0.3
+                lastCPUSampleTime = now
+            }
+            let smoothedCPU = smoothedCPUValue
+
             // ── [MemDiag] RoomPlan memory timeline (perfDiag-gated, ~1 Hz) ──
             // Runs on the ARSession delegate queue, so anchor{Vertex,Face}Counts are read safely
             // here (same queue that mutates them). Logs phys_footprint (the OOM metric) + resident
@@ -1765,6 +1785,7 @@ struct ARCoverageView: UIViewRepresentable {
                 scanStats.footprintMB = footprintMB      // capacity bar: avail-based memoryPressure
                 scanStats.availableMB = availableMB
                 scanStats.smoothedFPS = smoothedFPS      // capacity bar: fpsPressure
+                scanStats.cpuPercent = smoothedCPU       // capacity bar: cpuPressure (leading compute axis)
                 scanStats.driftEstimate = drift
                 scanStats.mappingStatus = statusStr
                 if anchorCount > 0 {
