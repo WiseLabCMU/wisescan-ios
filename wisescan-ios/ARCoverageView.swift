@@ -518,8 +518,20 @@ struct ARCoverageView: UIViewRepresentable {
         if PerfDiag.enabled {
             DispatchQueue.main.async { coordinator.locDiagSummary.ghostLoaded = true }
             coordinator.sessionDelegateQueue.async { coordinator.locDiagGhostSurfels = nil } // drop stale
-            DispatchQueue.global(qos: .utility).async {
+            coordinator.locDiagICPQueue.async {
+                // [MemDiag] Bracket the one-time surfel build (OBJ parse → capped surfel cloud). The
+                // parse is the transient spike — the ghost OBJ can be 100k–700k faces (the old
+                // per-2 s re-parse was the earlier thermal confound; it's built once here now).
+                // footprintΔ = parse working set + retained cloud; wall = how long the load blocks a
+                // fresh correction from being available. Same load/unload footprint pattern as the
+                // mesh brackets. On the named `icp` queue so its CPU is attributable too.
+                let wall0 = Date()
+                let foot0 = ScanStats.currentFootprintMB()
                 let surfels = LocalizationDiag.buildGhostSurfels(from: data)
+                let foot1 = ScanStats.currentFootprintMB()
+                PerfDiag.log(String(format: "[MemDiag] EVENT ICP-SURFELS wall=%.2fs footprint=%.0fMB (Δ%+.0f) surfels=%d bytes=%d",
+                                    Date().timeIntervalSince(wall0), foot1, foot1 - foot0,
+                                    surfels?.pts.count ?? 0, data.count))
                 coordinator.sessionDelegateQueue.async { coordinator.locDiagGhostSurfels = surfels }
             }
         }
@@ -583,6 +595,13 @@ struct ARCoverageView: UIViewRepresentable {
         /// counters below are touched ONLY on this queue (so `resetForRecording/Nominal`, called
         /// from updateUIView on main, hop here to clear them — never mutate them on main).
         let sessionDelegateQueue = DispatchQueue(label: "org.arenaxr.scan4d.arsession.delegate")
+        /// [MemDiag] Dedicated NAMED serial queue for the Phase-2.1 ICP refine (was an anonymous
+        /// `DispatchQueue.global(qos:.utility)`, which lumped its CPU into "unnamed" on the
+        /// `cpu-by-thread` line). The label's last dotted component ("icp") is what
+        /// `ScanStats.currentCPUByThread` reports — so the refine's cost is now attributable as
+        /// `icp=N%` alongside `arkit=`/`voxel=`, isolating the perfDiag probe's contribution to the
+        /// thread contention that starves VIO. Serial so back-to-back refines can't overlap-contend.
+        let locDiagICPQueue = DispatchQueue(label: "org.arenaxr.scan4d.icp", qos: .utility)
         /// Tracks whether we paused the session for battery (idle on a non-capture tab), so we resume
         /// it exactly once on return rather than re-running the config on every update.
         var isSessionPausedForBattery = false
@@ -1145,9 +1164,29 @@ struct ARCoverageView: UIViewRepresentable {
             let live = locDiagLiveSamples.values.flatMap { $0 }
             locDiagLiveSamples.removeAll() // free the buffer; the probe is one-shot per fire
             DispatchQueue.main.async { [weak self] in self?.locDiagSummary.icpPending = true }
-            DispatchQueue.global(qos: .utility).async { [weak self] in
+            let targetCount = ghostSurfels.pts.count
+            locDiagICPQueue.async { [weak self] in
+                // [MemDiag] Bracket the refine to quantify the probe's compute cost — this runs
+                // adjacent to live VIO during the alignment phase (re-armed ~2 s pre-record), so its
+                // wall/CPU is exactly the sustained load that can throttle tracking. cpu-seconds ÷ wall
+                // = average cores busy; footprintΔ = the refine's transient working set. Same shape as
+                // the RP-BUILD-START/END save-time bracket. All reads are perfDiag-gated (syscalls).
+                let diag = PerfDiag.enabled
+                let wall0 = Date()
+                let cpu0 = diag ? ScanStats.currentCPUTimeSeconds() : 0
+                let foot0 = diag ? ScanStats.currentFootprintMB() : 0
                 let report = LocalizationDiag.runICPResidualLog(liveWorldVertices: live,
                                                                 targetPts: ghostSurfels.pts, targetNrm: ghostSurfels.nrm)
+                if diag {
+                    let wall = Date().timeIntervalSince(wall0)
+                    let cpuSecs = ScanStats.currentCPUTimeSeconds() - cpu0
+                    let foot1 = ScanStats.currentFootprintMB()
+                    PerfDiag.log(String(format: "[MemDiag] EVENT ICP-REFINE wall=%.2fs cpu=%.2fs (%.0f%% of 1 core)"
+                                        + " footprint=%.0fMB (Δ%+.0f) live=%d target=%d %@",
+                                        wall, cpuSecs, wall > 0.001 ? cpuSecs / wall * 100 : 0,
+                                        foot1, foot1 - foot0, live.count, targetCount,
+                                        preRecord ? "pre-record" : "recording"))
+                }
                 // Pre-record: re-arm after a throttle so the correction stays fresh and is ready
                 // whenever the user records (uses the latest/most alignment mesh). Recording fires are
                 // one-shot. Guarded so a re-arm can't reopen the probe once recording has started.
