@@ -60,6 +60,17 @@ struct ARCoverageView: UIViewRepresentable {
     /// Whether this device has LiDAR for scene reconstruction and depth capture.
     static let supportsLiDAR = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
 
+    /// Human-readable labels for each supported video format, for the dev settings picker.
+    static var availableVideoFormats: [String] {
+        ARWorldTrackingConfiguration.supportedVideoFormats.map { f in
+            let w = Int(f.imageResolution.width)
+            let h = Int(f.imageResolution.height)
+            let fps = f.framesPerSecond
+            let hiRes = f.isRecommendedForHighResolutionFrameCapturing ? " [hiRes]" : ""
+            return "\(w)×\(h) @ \(fps)fps\(hiRes)"
+        }
+    }
+
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
 

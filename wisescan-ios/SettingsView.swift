@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import ARKit
 
 struct SettingsView: View {
     var scrollToDevMode: Bool = false
@@ -409,6 +410,48 @@ struct SettingsView: View {
                                     Text("MemDiag Force Reclaim")
                                         .foregroundColor(.white)
                                     Text("Memory attribution only. Forces freed pages back to the OS before [MemDiag] teardown snapshots so free-deltas reflect real reclaim, not cached pages. Expensive — leave OFF except when profiling. Needs Perf Diagnostics on.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            // ── Capture Quality ──
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Video Format")
+                                    .foregroundColor(.white)
+                                Text("ARKit video stream resolution. Higher = better splat quality but more storage. Requires session restart.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                                Picker("Video Format", selection: Binding(
+                                    get: { UserDefaults.standard.integer(forKey: AppConstants.Key.videoFormatIndex) },
+                                    set: { UserDefaults.standard.set($0, forKey: AppConstants.Key.videoFormatIndex) }
+                                )) {
+                                    Text("Auto (Best Available)").tag(0)
+                                    ForEach(Array(ARCoverageView.availableVideoFormats.enumerated()), id: \.offset) { index, label in
+                                        Text(label).tag(index + 1)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .tint(.orange)
+                            }
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: Binding(
+                                get: {
+                                    // Default to true when key hasn't been set yet
+                                    UserDefaults.standard.object(forKey: AppConstants.Key.captureAudioEnabled) == nil
+                                        ? AppConstants.captureAudioEnabled
+                                        : UserDefaults.standard.bool(forKey: AppConstants.Key.captureAudioEnabled)
+                                },
+                                set: { UserDefaults.standard.set($0, forKey: AppConstants.Key.captureAudioEnabled) }
+                            )) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Capture Audio")
+                                        .foregroundColor(.white)
+                                    Text("Play shutter click when a sharp frame is captured at a stillness point, and a chime when entering stillness.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

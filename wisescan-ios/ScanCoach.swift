@@ -159,6 +159,10 @@ class ScanCoach {
         let detectedClasses = scanStats.detectedClasses
         let recentTransforms = frameCaptureSession.recentTransforms(count: 30)
         let roomPlanInstruction = scanStats.roomPlanInstruction
+        let sharpFrameCount = frameCaptureSession.sharpFrameCount
+        let totalCapturedFrameCount = frameCaptureSession.totalCapturedFrameCount
+        let isCurrentlyStill = frameCaptureSession.isCurrentlyStill
+        let lastSharpFrameTime = frameCaptureSession.lastSharpFrameTime
 
         // Capture RoomPlan data for semantic tips
         let hasWalls = capturedRoom?.walls.isEmpty == false
@@ -188,6 +192,10 @@ class ScanCoach {
                 hasFloors: hasFloors,
                 objectCount: objectCount,
                 surfaceCount: surfaceCount,
+                sharpFrameCount: sharpFrameCount,
+                totalCapturedFrameCount: totalCapturedFrameCount,
+                isCurrentlyStill: isCurrentlyStill,
+                lastSharpFrameTime: lastSharpFrameTime,
                 now: now,
                 coachingEnabled: coachingEnabled
             )
@@ -248,6 +256,10 @@ class ScanCoach {
         hasFloors: Bool,
         objectCount: Int,
         surfaceCount: Int,
+        sharpFrameCount: Int,
+        totalCapturedFrameCount: Int,
+        isCurrentlyStill: Bool,
+        lastSharpFrameTime: Date?,
         now: Date,
         coachingEnabled: Bool
     ) -> CoachTip? {
@@ -278,10 +290,11 @@ class ScanCoach {
 
         // ── WARNING ──
 
-        // Motion blur (fast motion)
+        // Motion blur (fast motion) — reframed as informational in the two-purpose capture
+        // paradigm: movement builds depth coverage (good!), but no sharp photos are captured.
         if isBlurActive, blurReason == .fastMotion {
             return tip("warning.fastMotion",
-                       "⚠️ Slow down — moving too fast",
+                       "⚡ Moving fast — depth only (pause for photos)",
                        icon: "hare.fill",
                        priority: .warning, now: now)
         }
@@ -322,7 +335,7 @@ class ScanCoach {
             let pattern = cameraMovementPattern(recentTransforms)
             if pattern < 0.3 { // Erratic movement (low directional progress ratio)
                 if let t = tip("guidance.systematicSweep",
-                               "↔️ Start from one wall, sweep to the opposite",
+                               "↔️ Walk the room for depth, pause at each area for photos",
                                icon: "arrow.left.and.right",
                                priority: .guidance, now: now) { return t }
             }
@@ -380,11 +393,31 @@ class ScanCoach {
 
         // ── INFO ──
 
+        // Sharp photo captured — positive reinforcement when the user pauses and captures
+        if isCurrentlyStill && sharpFrameCount > 0 && sharpFrameCount % 5 == 0 {
+            if let t = tip("info.sharpCapture",
+                           "📸 Sharp photo captured!",
+                           icon: "camera.fill",
+                           priority: .info, now: now) { return t }
+        }
+
         // Good coverage encouragement
         if !isEarlyScan && anchorCount >= 15 && capacityScore < 0.5 {
             if let t = tip("info.goodCoverage",
                            "⭐ Coverage looking good!",
                            priority: .info, now: now) { return t }
+        }
+
+        // Encourage pausing for photos — fires when the user has been moving for a while
+        // without capturing any sharp frames (>30s since last sharp frame or none yet)
+        if !isEarlyScan && !isCurrentlyStill && totalCapturedFrameCount > 20 {
+            let timeSinceSharp = lastSharpFrameTime.map { now.timeIntervalSince($0) } ?? sessionDuration
+            if timeSinceSharp > 30 {
+                if let t = tip("guidance.pauseForPhoto",
+                               "📸 Pause here for a sharp photo",
+                               icon: "camera.fill",
+                               priority: .guidance, now: now) { return t }
+            }
         }
 
         // Great coverage — consider finishing

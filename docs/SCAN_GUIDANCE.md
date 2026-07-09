@@ -62,7 +62,7 @@ Real-time tips during recording, evaluated at ~1 Hz by the `ScanCoach` rules eng
 
 | Tip ID | Condition | Message |
 |:-------|:----------|:--------|
-| `warning.fastMotion` | Motion blur active (fast motion) | "⚠️ Slow down — moving too fast" |
+| `warning.fastMotion` | Motion blur active (fast motion or rotation) | "⚡ Moving fast — depth only (pause for photos)" |
 | `warning.atCapacity` | Session at capacity | "Session at capacity — save now to avoid quality loss" |
 | `warning.nearCapacity` | Session near capacity | "Approaching session limits — consider saving" |
 
@@ -71,17 +71,17 @@ Real-time tips during recording, evaluated at ~1 Hz by the `ScanCoach` rules eng
 | Tip ID | Condition | Message |
 |:-------|:----------|:--------|
 | `guidance.scanWalls` | Early scan, <8 anchors, <3m spatial extent | "🏠 Scan all 4 walls quickly for layout context" |
-| `guidance.systematicSweep` | Early scan, erratic movement pattern (<0.3 ratio) | "↔️ Start from one wall, sweep to the opposite" |
+| `guidance.systematicSweep` | Early scan, erratic movement pattern (<0.3 ratio) | "↔️ Walk the room for depth, pause at each area for photos" |
 | `guidance.moveCloser` | Mid-scan, <200 faces/anchor (coarse geometry) | "🔍 Move closer to capture fine details" |
 | `guidance.varyHeight` | Mid-scan, height variance <0.02 (flat scanning) | "↕️ Try scanning from a different height" |
 | `guidance.semantic.scanFloor` | Semantic ON, walls detected but no floor | "🪟 Walls detected, try scanning the floor" |
 | `guidance.semantic.scanObjects` | Semantic ON, ≥3 surfaces but 0 objects | "🛋️ Don't forget furniture — scan objects up close" |
 | `guidance.semantic.lowerAngle` | Semantic ON, floor detected, <3 objects | "🔽 Try scanning from a lower angle for floor objects" |
+| `guidance.pauseForPhoto` | Mid-scan, >30s since last sharp frame, user moving | "📸 Pause here for a sharp photo" |
 
 #### 🟢 INFO — auto-dismiss 5s, 60s cooldown (suppressed when coaching OFF)
 
-| Tip ID | Condition | Message |
-|:-------|:----------|:--------|
+| `info.sharpCapture` | Device still, every 5th sharp frame captured | "📸 Sharp photo captured!" |
 | `info.goodCoverage` | Mid-scan, ≥15 anchors, capacity <50% | "⭐ Coverage looking good!" |
 | `info.considerFinishing` | >60s, mapped, ≥20 anchors, mesh growth slowed | "✅ Great coverage — consider finishing" |
 

@@ -375,6 +375,20 @@ struct CaptureView: View {
                             Text("REC \(formattedTime)")
                                 .font(.caption).bold()
                                 .foregroundColor(.white)
+
+                            // Sharp frame counter — shows frames captured while device was still
+                            if frameCaptureSession.sharpFrameCount > 0 {
+                                Divider()
+                                    .frame(height: 12)
+                                    .background(Color.white.opacity(0.5))
+                                HStack(spacing: 3) {
+                                    Image(systemName: "camera.fill")
+                                        .font(.caption2)
+                                    Text("\(frameCaptureSession.sharpFrameCount)")
+                                        .font(.caption).bold()
+                                }
+                                .foregroundColor(.green)
+                            }
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
@@ -566,6 +580,45 @@ struct CaptureView: View {
                                     }
                                 }
                                 */
+
+                                // Row 1.5b: Capture quality (sharp vs total frames)
+                                if frameCaptureSession.totalCapturedFrameCount > 0 {
+                                    HStack(spacing: 16) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "camera.fill")
+                                                .font(.caption2)
+                                                .foregroundColor(.green)
+                                            Text("\(frameCaptureSession.sharpFrameCount)")
+                                                .font(.caption2).bold()
+                                                .foregroundColor(.green)
+                                            Text("sharp")
+                                                .font(.caption2)
+                                                .foregroundColor(.gray)
+                                        }
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "photo.on.rectangle")
+                                                .font(.caption2)
+                                                .foregroundColor(.white.opacity(0.6))
+                                            Text("\(frameCaptureSession.totalCapturedFrameCount)")
+                                                .font(.caption2)
+                                                .foregroundColor(.white.opacity(0.6))
+                                            Text("total")
+                                                .font(.caption2)
+                                                .foregroundColor(.gray)
+                                        }
+                                        Spacer()
+                                        // Stillness indicator
+                                        if frameCaptureSession.isCurrentlyStill {
+                                            HStack(spacing: 3) {
+                                                Image(systemName: "hand.raised.fill")
+                                                    .font(.caption2)
+                                                Text("Still")
+                                                    .font(.caption2).bold()
+                                            }
+                                            .foregroundColor(.green)
+                                        }
+                                    }
+                                }
 
                                 // Row 2: Capacity bar
                                 VStack(spacing: 4) {

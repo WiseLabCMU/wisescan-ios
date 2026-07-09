@@ -47,6 +47,7 @@ enum AppConstants {
         static let enabledSemanticClasses = "enabledSemanticClasses"
         static let scanCoachingEnabled = "scanCoachingEnabled"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
+        static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
     }
 
     // MARK: - Default Values
@@ -57,7 +58,7 @@ enum AppConstants {
     static var uploadURL: String {
         isTestFlight ? "https://wiselambda4.lan.cmu.edu/wisescan-uploads/" : ""
     }
-    static let overlapMax: Double = 60.0
+    static let overlapMax: Double = 80.0                           // 80% default for best splat overlap coverage
     static let rejectBlur: Bool = true
     static let developerMode: Bool = false
     static let mockIMU: Bool = false
@@ -141,6 +142,14 @@ enum AppConstants {
     static let earlyScanThresholdSeconds: TimeInterval = 30.0  // first N seconds considered "early scan" for pattern tips
     static let coachMaxDismissCount: Int = 2                   // after this many manual dismissals, tip won't re-show for the session
     static let scanCoachingEnabled: Bool = true                // default for the scan coaching toggle
+    static let captureAudioEnabled: Bool = true                // default for shutter-click + chime sounds
+
+    // MARK: - Capture Quality Constants
+    static let motionBlurAngularVelocity: Float = 0.5          // rad/s (~30°/s) — rotational velocity above which frames are rejected as blurry
+    static let stillnessTranslationalThreshold: Float = 0.02   // m/s — translational velocity below this = "still"
+    static let stillnessAngularThreshold: Float = 0.1          // rad/s — rotational velocity below this = "still"
+    static let stillnessDurationRequired: TimeInterval = 0.3   // seconds device must be still before counting as "sharp" capture
+    static let stillnessShutterInterval: Int = 3               // play shutter click every Nth sharp frame (avoid audio spam)
 
     // MARK: - Space Analysis Constants
     static let analysisAmbientLightAlertThreshold: CGFloat = 250  // lux below which lighting is "Very Low" (alert tier — RGB nearly useless)

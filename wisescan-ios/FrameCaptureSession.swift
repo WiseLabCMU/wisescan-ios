@@ -1,6 +1,7 @@
 import Foundation
 import ARKit
 import UIKit
+import AudioToolbox
 import Observation
 import os
 
@@ -46,6 +47,19 @@ class FrameCaptureSession {
     var isBlurWarningActive: Bool { blurWarningReason != nil }
     private var blurWarningTimer: Timer?
     private var consecutiveBlurredFrames: Int = 0
+
+    // ── Stillness detection & capture quality ──
+    // Tracks device motion state to identify "sharp" frames (device stationary) vs
+    // "sweep" frames (device in motion). Sharp frames get audio feedback (shutter click)
+    // and are counted separately for the quality bar UI.
+    private var stillnessStartTime: TimeInterval?
+    private(set) var isCurrentlyStill: Bool = false
+    /// Number of frames captured while device was confirmed still (high confidence sharp).
+    private(set) var sharpFrameCount: Int = 0
+    /// Total frames captured this session (sharp + sweep).
+    private(set) var totalCapturedFrameCount: Int = 0
+    /// Time of last sharp frame capture (for ScanCoach "pause for photo" guidance).
+    private(set) var lastSharpFrameTime: Date?
 
     // Privacy logic
     /// Accumulating person anchor with an observation count, which acts as a confidence weight:
@@ -181,6 +195,11 @@ class FrameCaptureSession {
         self.consecutiveBlurredFrames = 0
         self.blurWarningTimer?.invalidate()
         self.blurWarningTimer = nil
+        self.stillnessStartTime = nil
+        self.isCurrentlyStill = false
+        self.sharpFrameCount = 0
+        self.totalCapturedFrameCount = 0
+        self.lastSharpFrameTime = nil
         self.overlapMax = overlapMax
         self.rejectBlur = rejectBlur
         self.privacyFilter = privacyFilter
@@ -303,14 +322,38 @@ class FrameCaptureSession {
             }
 
             // Otherwise, the camera pose moved too fast since the last capture (motion blur likely).
-            // Heuristic from pose velocity, not a pixel-sharpness measurement.
+            // Checks both translational velocity (fast walking) AND rotational velocity (panning in
+            // place) — the rotational check catches the common indoor scanning pattern where users
+            // stand still but rotate quickly, which the translational-only check misses entirely.
             if warning == nil, let lastTransform = lastCaptureTransform {
                 let timeDelta = frameTimestamp - lastCaptureTime
                 if timeDelta > 0 {
                     let movement = cameraMovement(from: lastTransform, to: transform)
                     let velocity = movement / Float(timeDelta)
-                    if velocity > AppConstants.motionBlurVelocity {
+                    let angularVelocity = extractRotationAngle(from: lastTransform, to: transform) / Float(timeDelta)
+
+                    if velocity > AppConstants.motionBlurVelocity ||
+                       angularVelocity > AppConstants.motionBlurAngularVelocity {
                         warning = .fastMotion
+                    }
+
+                    // ── Stillness detection ──
+                    // Track whether the device is stationary for sharp frame counting and audio.
+                    let isStill = velocity < AppConstants.stillnessTranslationalThreshold &&
+                                  angularVelocity < AppConstants.stillnessAngularThreshold
+                    if isStill && stillnessStartTime == nil {
+                        stillnessStartTime = frameTimestamp
+                    } else if !isStill {
+                        stillnessStartTime = nil
+                    }
+                    let wasStill = isCurrentlyStill
+                    let confirmedStill = isStill && (frameTimestamp - (stillnessStartTime ?? frameTimestamp)) >= AppConstants.stillnessDurationRequired
+                    if confirmedStill != isCurrentlyStill {
+                        DispatchQueue.main.async { self.isCurrentlyStill = confirmedStill }
+                    }
+                    // Play audio feedback on stillness transitions
+                    if confirmedStill && !wasStill {
+                        playStillnessChime()
                     }
                 }
             }
@@ -330,6 +373,16 @@ class FrameCaptureSession {
                 consecutiveBlurredFrames = 0
             }
         }
+
+        // Track sharp frame when device is confirmed still
+        if isCurrentlyStill {
+            sharpFrameCount += 1
+            if sharpFrameCount % AppConstants.stillnessShutterInterval == 1 {
+                playShutterClick()
+            }
+            DispatchQueue.main.async { self.lastSharpFrameTime = Date() }
+        }
+        DispatchQueue.main.async { self.totalCapturedFrameCount += 1 }
 
         // Skip frame if camera hasn't moved enough (based on overlap setting)
         if let lastTransform = lastCaptureTransform {
@@ -913,5 +966,38 @@ class FrameCaptureSession {
                 self?.blurWarningReason = nil
             }
         }
+    }
+
+    // MARK: - Capture Quality Helpers
+
+    /// Compute the total rotation angle (radians) between two 4×4 pose transforms.
+    /// Uses quaternion dot product for a robust, gimbal-lock-free angular delta.
+    private func extractRotationAngle(from a: simd_float4x4, to b: simd_float4x4) -> Float {
+        let qa = simd_quaternion(a)
+        let qb = simd_quaternion(b)
+        let dot = abs(simd_dot(qa, qb))
+        return 2.0 * acos(min(dot, 1.0))
+    }
+
+    /// Play a shutter-click system sound when a sharp frame is captured at a stillness point.
+    private func playShutterClick() {
+        guard UserDefaults.standard.bool(forKey: AppConstants.Key.captureAudioEnabled) ||
+              !UserDefaults.standard.contains(key: AppConstants.Key.captureAudioEnabled) else { return }
+        DispatchQueue.main.async { AudioServicesPlaySystemSound(1108) }
+    }
+
+    /// Play a gentle chime when the device enters confirmed stillness.
+    private func playStillnessChime() {
+        guard UserDefaults.standard.bool(forKey: AppConstants.Key.captureAudioEnabled) ||
+              !UserDefaults.standard.contains(key: AppConstants.Key.captureAudioEnabled) else { return }
+        DispatchQueue.main.async { AudioServicesPlaySystemSound(1057) }
+    }
+}
+
+// MARK: - UserDefaults extension for key-existence check
+
+private extension UserDefaults {
+    func contains(key: String) -> Bool {
+        return object(forKey: key) != nil
     }
 }
