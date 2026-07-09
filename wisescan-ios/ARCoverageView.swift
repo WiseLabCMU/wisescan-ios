@@ -940,17 +940,18 @@ struct ARCoverageView: UIViewRepresentable {
 
         // MARK: - RoomPlan Outlines
 
-        /// Removes the RoomPlan outline entity from the AR scene.
-        private func removeRoomPlanOutlines() {
-            roomPlanOutlineEntity?.removeFromParent()
-            roomPlanOutlineEntity = nil
-        }
-
         /// Starts RoomPlan alongside the existing ARSession.
         /// Call on main thread after recording starts.
         func startRoomPlanSession(arSession: ARSession) {
             let semanticEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
             guard semanticEnabled else { return }
+            // Guard against leaking a still-live session (e.g. an analysis session that wasn't torn
+            // down first): stop it before replacing the reference. Normally stopAnalysis runs first.
+            if roomCaptureSession != nil {
+                PerfDiag.log("startRoomPlanSession: a RoomCaptureSession was still live — stopping it first")
+                roomCaptureSession?.stop(pauseARSession: false)
+                roomCaptureSession = nil
+            }
             // [DEFERRED-ROOMPLAN] Fresh build box for this recording; didEndWith feeds it, save drains it.
             deferredRoomLock.withLock { deferredRoomBuild = DeferredRoomBuild() }
             roomCaptureSession = RoomCaptureSession(arSession: arSession)
@@ -1022,6 +1023,10 @@ struct ARCoverageView: UIViewRepresentable {
         /// the Privacy Filter is off. This enables door/screen/person detection unconditionally.
         func startAnalysisRoomPlanSession(arSession: ARSession) {
             guard roomCaptureSession == nil else { return } // don't double-start
+            // [MemDiag] Analysis runs a RoomCaptureSession BEFORE recording, so it pre-loads RoomPlan's
+            // (and personSeg's) CoreML models. This marker makes the log self-honest: if it appears
+            // before RECORD-START, a later RP-READY≈0 means "already loaded here", not "RoomPlan free".
+            PerfDiag.log("[MemDiag] EVENT ANALYSIS-START \(memMarker())")
             isAnalysisRoomPlan = true
             addedSegForAnalysis = false
             // [DEFERRED-ROOMPLAN] Analysis mode has no deferred build — clear any recording box so an
@@ -1072,7 +1077,11 @@ struct ARCoverageView: UIViewRepresentable {
             }
             addedSegForAnalysis = false
 
-            PerfDiag.log("RoomPlan analysis session stopped (outlines cleared)")
+            PerfDiag.log("RoomPlan analysis session stopped")
+            // [MemDiag] ANALYSIS-START→STOP brackets the pre-scan analysis footprint. Note the models
+            // stay resident (CoreML process-cached) past this point — this delta is analysis's own
+            // working set releasing, NOT the model unloading. See ANALYSIS-START.
+            PerfDiag.log("[MemDiag] EVENT ANALYSIS-STOP \(memMarker())")
         }
 
         // MARK: - Person Detection Helper
@@ -2255,20 +2264,24 @@ final class DeferredRoomBuild: @unchecked Sendable {
 
         let done = DispatchSemaphore(value: 0)
         let result = ResultBox()
-        Task.detached {
+        let task = Task.detached {
             defer { done.signal() }
             result.value = try? await RoomBuilder(options: [.beautifyObjects]).capturedRoom(from: captured)
         }
-        _ = done.wait(timeout: deadline)
+        // On timeout, cancel the build so a runaway RoomBuilder can't keep burning CPU/memory after
+        // the save has already given up and moved on. (RoomBuilder may not abort mid-reconstruction —
+        // cancellation is cooperative — but it stops any continuation and drops the result cleanly.)
+        let timedOut = done.wait(timeout: deadline) == .timedOut
+        if timedOut { task.cancel() }
 
         let wall = Date().timeIntervalSince(wall0)
         let cpuSecs = ScanStats.currentCPUTimeSeconds() - cpu0
         let foot1 = ScanStats.currentFootprintMB()
         PerfDiag.log(String(format: "[MemDiag] EVENT RP-BUILD-END wall=%.1fs cpu=%.1fs (%.0f%% of 1 core)"
-                            + " footprint=%.0fMB (Δ%+.0f) built=%@",
+                            + " footprint=%.0fMB (Δ%+.0f) built=%@%@",
                             wall, cpuSecs, wall > 0.01 ? cpuSecs / wall * 100 : 0, foot1, foot1 - foot0,
-                            result.value == nil ? "NO" : "yes"))
-        return result.value
+                            result.value == nil ? "NO" : "yes", timedOut ? " (TIMEOUT→cancelled)" : ""))
+        return timedOut ? nil : result.value
     }
 
     private final class ResultBox: @unchecked Sendable { var value: CapturedRoom? }
