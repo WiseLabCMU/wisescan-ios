@@ -52,6 +52,7 @@ struct CaptureView: View {
     @State var pendingScan: PendingScanData?
     @State var isProcessingMesh = false
     @State var isWaitingToSave = false
+    @State var isStabilizingBeforeSave = false // hold-steady settle window before the save pose is captured
     @State var cachedGhostMeshData: Data?
     /// Track C — connectors shared by the active location's scans with other maps, in the active
     /// scans' world frame. Computed here (CaptureView owns the ModelContext) and passed to

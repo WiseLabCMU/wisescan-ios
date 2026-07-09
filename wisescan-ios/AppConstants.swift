@@ -72,6 +72,11 @@ enum AppConstants {
     static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
     static let semanticLabeling: Bool = true    // Developer Mode: disable entire RoomPlan pipeline to reduce memory
+    /// Deferred RoomPlan build: max time the save pipeline waits (off-main) for RoomBuilder to
+    /// reconstruct the room from CapturedRoomData before writing roomplan.json. RoomBuilder is kicked
+    /// off at RoomPlan's didEndWith (post-stop) and runs concurrently with the multi-second OBJ build,
+    /// so this rarely elapses; it's a backstop so a RoomBuilder stall can't hang the save.
+    static let roomBuilderTimeoutSeconds: TimeInterval = 20
 
     /// Default enabled semantic classes (JSON-encoded Set<String>).
     /// Walls and doors are on by default; all others off. Ceiling is not yet

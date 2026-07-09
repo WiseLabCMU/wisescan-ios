@@ -341,6 +341,13 @@ class ScanStore {
     /// plumbing callback, not observable view state. Captures the coordinator weakly (no retain cycle).
     @ObservationIgnored var requestStopRoomPlan: (() -> Void)?
 
+    /// [DEFERRED-ROOMPLAN] build hook: called by the save pipeline on a BACKGROUND queue, AFTER all
+    /// pose-sensitive capture (mesh snapshot + world-map export) is finished. Waits (bounded) for the
+    /// RoomPlan capture data and runs RoomBuilder off the live session, returning the reconstructed
+    /// room to write into roomplan.json. Returns nil if RoomPlan was off / failed / timed out (scan
+    /// then saves without a room). Weakly captures the coordinator. `@ObservationIgnored`: plumbing.
+    @ObservationIgnored var awaitDeferredRoomPlan: ((TimeInterval) -> CapturedRoom?)?
+
     // MARK: - State Reset
 
     /// Resets all capture-related state to idle defaults.
@@ -527,6 +534,81 @@ class ScanStats {
             }
         }
         return result == KERN_SUCCESS ? Double(info.resident_size) / (1024.0 * 1024.0) : 0
+    }
+
+    /// `phys_footprint` (TASK_VM_INFO) — the metric jetsam actually kills on (dirty + compressed
+    /// pages counted against the app), NOT `resident_size` (which under-reports the memory the OS
+    /// holds the app responsible for). Use THIS for OOM/jetsam profiling; `currentMemoryUsageMB`
+    /// (resident) is kept for the existing capacity-score UI so those numbers stay comparable.
+    static func currentFootprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? Double(info.phys_footprint) / (1024.0 * 1024.0) : 0
+    }
+
+    /// Instantaneous total CPU usage across all cores, as a percentage (can exceed 100 — e.g. 250 =
+    /// 2.5 cores busy). Sums per-thread `cpu_usage` over all live, non-idle threads. Cheap enough to
+    /// sample at 1 Hz; perfDiag-gated at the call sites. This is the direct CPU signal the fps/thermal
+    /// proxies only hint at — use it to see RoomPlan's live CPU tax (on vs off) during a scan.
+    static func currentCPUUsagePercent() -> Double {
+        var threadList: thread_act_array_t?
+        var threadCount = mach_msg_type_number_t(0)
+        guard task_threads(mach_task_self_, &threadList, &threadCount) == KERN_SUCCESS,
+              let threadList else { return 0 }
+        defer {
+            vm_deallocate(mach_task_self_,
+                          vm_address_t(UInt(bitPattern: threadList)),
+                          vm_size_t(Int(threadCount) * MemoryLayout<thread_t>.stride))
+        }
+        var total = 0.0
+        for i in 0..<Int(threadCount) {
+            var info = thread_basic_info()
+            var count = mach_msg_type_number_t(MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
+            let kr = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                    thread_info(threadList[i], thread_flavor_t(THREAD_BASIC_INFO), $0, &count)
+                }
+            }
+            if kr == KERN_SUCCESS, info.flags & TH_FLAGS_IDLE == 0 {
+                total += Double(info.cpu_usage) / Double(TH_USAGE_SCALE) * 100.0
+            }
+        }
+        return total
+    }
+
+    /// Cumulative CPU *time* (seconds) consumed by the whole task: terminated-thread time
+    /// (TASK_BASIC_INFO) + live-thread time (TASK_THREAD_TIMES_INFO). The sum is monotonic (a thread's
+    /// time moves from the live bucket to the terminated bucket when it exits), so a delta across a
+    /// window measures CPU-seconds burned in that window — used to attribute the save-time RoomBuilder
+    /// cost (Δcpu-seconds ÷ wall = average cores busy).
+    static func currentCPUTimeSeconds() -> Double {
+        var total = 0.0
+        var basic = mach_task_basic_info()
+        var bcount = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+        if withUnsafeMutablePointer(to: &basic, {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(bcount)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &bcount)
+            }
+        }) == KERN_SUCCESS {
+            total += Double(basic.user_time.seconds) + Double(basic.user_time.microseconds) / 1e6
+            total += Double(basic.system_time.seconds) + Double(basic.system_time.microseconds) / 1e6
+        }
+        var times = task_thread_times_info()
+        var tcount = mach_msg_type_number_t(MemoryLayout<task_thread_times_info>.size) / 4
+        if withUnsafeMutablePointer(to: &times, {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(tcount)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_THREAD_TIMES_INFO), $0, &tcount)
+            }
+        }) == KERN_SUCCESS {
+            total += Double(times.user_time.seconds) + Double(times.user_time.microseconds) / 1e6
+            total += Double(times.system_time.seconds) + Double(times.system_time.microseconds) / 1e6
+        }
+        return total
     }
 }
 
