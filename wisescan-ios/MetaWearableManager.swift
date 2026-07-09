@@ -44,7 +44,7 @@ class MetaWearableManager {
                 // Tear down stale session created before we had permission
                 print("[MetaWearable] Permissions granted late — tearing down stale session")
                 Task {
-                    await self.streamSession?.stop()
+                    self.streamSession?.stop()
                     self.streamSession = nil
                     self.deviceSession?.stop()
                     self.deviceSession = nil
@@ -117,7 +117,7 @@ class MetaWearableManager {
     }
 
     #if canImport(MWDATMockDevice)
-    private var mockDevice: MockRaybanMeta?
+    private var mockDevice: MockGlasses?
     private var isMockWearableEnabled = false
     private var mockTimer: Timer?
     private var mockFrameIndex = 0
@@ -304,7 +304,7 @@ class MetaWearableManager {
             if !self.isMockWearableEnabled {
                 // Device went away, stop stream and clear session
                 Task {
-                    await self.streamSession?.stop()
+                    self.streamSession?.stop()
                     self.streamSession = nil
                     self.deviceSession?.stop()
                     self.deviceSession = nil
@@ -367,7 +367,7 @@ class MetaWearableManager {
         if stream != nil || devSession != nil {
             print("[MetaWearable] CaptureView dismissed — stopping stream")
             Task {
-                await stream?.stop()
+                stream?.stop()
                 devSession?.stop()
             }
         }
@@ -402,7 +402,7 @@ class MetaWearableManager {
         cancelStreamListeners()
         Task {
             // SDK handles disconnect implicitly; simply teardown our active stream
-            await self.streamSession?.stop()
+            self.streamSession?.stop()
             self.streamSession = nil
             self.deviceSession?.stop()
             self.deviceSession = nil
@@ -413,7 +413,7 @@ class MetaWearableManager {
         cancelStreamListeners()
         Task {
             // Drop stream and clear local devices list to ensure SDK fully releases
-            await self.streamSession?.stop()
+            self.streamSession?.stop()
             self.streamSession = nil
             self.deviceSession?.stop()
             self.deviceSession = nil
@@ -475,7 +475,7 @@ class MetaWearableManager {
             print("[MetaWearable] Device: \(device.nameOrId()) linkState=\(device.linkState) compat=\(device.compatibility()) type=\(device.deviceType())")
 
             // Check firmware compatibility — surface to UI but still attempt streaming
-            // (SDK 0.7.0 may report deviceUpdateRequired even when glasses firmware is current)
+            // (SDK 0.8.0 may report deviceUpdateRequired even when glasses firmware is current)
             let compat = device.compatibility()
             if compat == .deviceUpdateRequired {
                 self.deviceUpdateRequired = true
@@ -712,9 +712,9 @@ class MetaWearableManager {
                 }
             }
 
-            // Start the camera stream
+            // Start the camera stream (synchronous in SDK 0.8.0)
             print("[MetaWearable] Starting stream...")
-            await session.start()
+            session.start()
             print("[MetaWearable] Stream started")
         }
     }
