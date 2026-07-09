@@ -416,6 +416,14 @@ class ScanStats {
     var hasBoundaryAnchor: Bool = false
     var memoryUsageMB: Double = 0
     var baselineMemoryMB: Double = 0 // Captured at session start
+    /// phys_footprint (the OOM metric) + os_proc_available_memory headroom, published at 10 Hz from
+    /// updateStats. Drive `memoryPressure` off THESE (the true per-device ceiling), not resident.
+    var footprintMB: Double = 0
+    var availableMB: Double = 0
+    /// Smoothed ARKit frame rate (~1s EMA), published from updateStats. The direct, device-adaptive
+    /// compute-headroom signal — drives `fpsPressure`. Defaults to 60 so the bar reads healthy before
+    /// the first sample lands.
+    var smoothedFPS: Double = 60
     var driftEstimate: Double = 0 // 0.0 to 1.0
     var mappingStatus: String = "notAvailable" // ARFrame.WorldMappingStatus for cumulative relocalization quality
     var detectedClasses: Set<String> = [] // Semantic classes detected so far (for HUD display)
@@ -440,8 +448,13 @@ class ScanStats {
 
     // Capacity thresholds (tunable)
     private let maxPolygons: Double = 2_000_000
-    private let maxMemoryDeltaMB: Double = 800 // Memory growth from scanning, not total app memory
     private let maxAnchors: Double = 500
+    /// Bar is full when footprint reaches this fraction of the jetsam ceiling (margin before the kill).
+    private let memoryWarnFraction: Double = 0.80
+    /// FPS at/below which `fpsPressure` = 1.0. Set to 20 (not 30) to keep resolution INSIDE the danger
+    /// zone: at 30 the bar saturates across sustained-mid-20s-fps scans and can't tell "rough" (~28,
+    /// ~0.8) from "broken" (single digits, 1.0). Roughening is still ~0.67 by 40 fps.
+    private let fpsFloor: Double = 20.0
 
     var estimatedSizeMB: Double {
         let bytes = (totalVertices * 12) + (totalFaces * 12)
@@ -471,15 +484,31 @@ class ScanStats {
     // MARK: - Capacity Score
 
     var polygonPressure: Double { min(Double(totalFaces) / maxPolygons, 1.0) }
+
+    /// Fraction of THIS device's jetsam ceiling in use (footprint / (footprint + avail)), scaled so the
+    /// bar is full at `memoryWarnFraction` of the ceiling — a safety margin before the OS kills us.
+    /// Replaces the old (resident − baseline) / 800 heuristic, which was an indirect, miscalibrated
+    /// proxy: it redlined at ~34% of the real ceiling on high-RAM devices. This is truthful and
+    /// per-device (binds on the 12 GB iPhone; slack on the 16 GB iPad, where `fpsPressure` binds first).
     var memoryPressure: Double {
-        let delta = max(0, memoryUsageMB - baselineMemoryMB)
-        return min(delta / maxMemoryDeltaMB, 1.0)
+        let ceiling = footprintMB + availableMB
+        guard ceiling > 0 else { return 0 }
+        return min((footprintMB / ceiling) / memoryWarnFraction, 1.0)
     }
     var anchorPressure: Double { min(Double(anchorCount) / maxAnchors, 1.0) }
 
-    /// Composite capacity: highest pressure factor wins (0.0 = fresh, 1.0 = at limit)
+    /// Compute-headroom pressure from the smoothed frame rate. FPS is the direct, DEVICE-ADAPTIVE
+    /// signal for "the device can't turn more geometry into frames" — the wall a fixed polygon budget
+    /// can't see (FPS collapsed here at ~32% of maxPolygons). 0 above 60 fps; ~0.67 by 40 (roughening),
+    /// ramps to full by `fpsFloor` (20). Leads `driftEstimate` (VIO actually breaking).
+    var fpsPressure: Double {
+        min(max(0, (60.0 - smoothedFPS) / (60.0 - fpsFloor)), 1.0)
+    }
+
+    /// Composite capacity: highest pressure factor wins (0.0 = fresh, 1.0 = at limit). On a
+    /// compute-bound scan `fpsPressure` drives it; on a memory-bound one `memoryPressure` does.
     var capacityScore: Double {
-        max(polygonPressure, memoryPressure, anchorPressure, driftEstimate)
+        max(polygonPressure, memoryPressure, anchorPressure, driftEstimate, fpsPressure)
     }
 
     var isNearCapacity: Bool { capacityScore > 0.8 }

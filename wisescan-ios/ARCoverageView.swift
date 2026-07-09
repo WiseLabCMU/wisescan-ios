@@ -573,6 +573,11 @@ struct ARCoverageView: UIViewRepresentable {
         // "visible slowdown" is CPU/thermal throttle + memory-compressor churn stealing frames; this
         // quantifies it next to footprint/thermal so the A/B shows the compute cost, not just memory.
         private var memDiagFrameCount: Int = 0
+        // PRODUCTION fps (ungated, drives the capacity bar's fpsPressure — distinct from the perfDiag
+        // memDiag fps above): frames since the last updateStats publish, and the EMA-smoothed rate.
+        // Delegate-queue owned (incremented in didUpdate frame, consumed in updateStats — same queue).
+        private var prodFrameCount: Int = 0
+        private var smoothedFPSValue: Double = 60
 
         // Active Mesh Wireframe properties
         /// One wireframe entity per ARMeshAnchor, keyed by anchor UUID.
@@ -702,6 +707,9 @@ struct ARCoverageView: UIViewRepresentable {
             // [MemDiag] re-arm the model-load one-shots so each recording measures load fresh.
             loggedRoomPlanReady.store(false, ordering: .relaxed)
             loggedSegModelReady.store(false, ordering: .relaxed)
+            // Fresh fps state so the capacity bar doesn't inherit the last scan's low rate.
+            prodFrameCount = 0
+            smoothedFPSValue = 60
             // Clear delegate-owned counters/flags ON the delegate queue (never on main): the
             // ARSession callbacks mutate these dictionaries, and a concurrent mutation would crash.
             sessionDelegateQueue.async { [weak self] in
@@ -1346,6 +1354,7 @@ struct ARCoverageView: UIViewRepresentable {
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
             memDiagFrameCount &+= 1 // [MemDiag] frames/sample → measured FPS (the "visible slowdown")
+            prodFrameCount &+= 1    // production fps → capacity bar (ungated)
 
             // [MemDiag] First frame carrying a segmentation buffer = the person-segmentation CoreML
             // model (enabled by the privacy filter / analysis mode) is loaded and resident. The delta
@@ -1656,8 +1665,21 @@ struct ARCoverageView: UIViewRepresentable {
             // queue, so this timestamp needs no synchronization. Resets (on stop) write
             // scanStats directly and bypass this path, so they remain immediate.
             let now = Date()
-            guard now.timeIntervalSince(lastStatsUpdateTime) >= statsUpdateInterval else { return }
+            let fpsElapsed = now.timeIntervalSince(lastStatsUpdateTime) // window since last publish
+            guard fpsElapsed >= statsUpdateInterval else { return }
             lastStatsUpdateTime = now
+
+            // PRODUCTION fps → capacity bar (ungated). Frames this window / elapsed, EMA-smoothed
+            // (~sub-second) so a single stall doesn't slam the bar but a sustained drop does. updateStats
+            // is driven by frame callbacks, so when fps craters this fires less often and the window
+            // widens — the ratio stays correct. Guard against a stale/huge first gap.
+            let frames = prodFrameCount
+            prodFrameCount = 0
+            if fpsElapsed > 0, fpsElapsed < 2 {
+                let instantFPS = Double(frames) / fpsElapsed
+                smoothedFPSValue = smoothedFPSValue <= 0 ? instantFPS : smoothedFPSValue * 0.8 + instantFPS * 0.2
+            }
+            let smoothedFPS = smoothedFPSValue
 
             // ── Extract worldMappingStatus in a tight scope ──
             // Only read the enum value; do NOT iterate frame.anchors or access
@@ -1686,6 +1708,8 @@ struct ARCoverageView: UIViewRepresentable {
             // Compute capacity metrics
             let duration = Date().timeIntervalSince(sessionStartTime)
             let memoryMB = ScanStats.currentMemoryUsageMB()
+            let footprintMB = ScanStats.currentFootprintMB()          // capacity bar: true ceiling
+            let availableMB = ScanStats.currentAvailableMemoryMB()
             let drift: Double = totalTrackingUpdates > 0
                 ? min(Double(trackingDegradationCount) / Double(totalTrackingUpdates), 1.0)
                 : 0
@@ -1730,6 +1754,9 @@ struct ARCoverageView: UIViewRepresentable {
                 scanStats.sessionDuration = duration
                 scanStats.memoryUsageMB = memoryMB
                 scanStats.baselineMemoryMB = self?.baselineMemoryMB ?? memoryMB
+                scanStats.footprintMB = footprintMB      // capacity bar: avail-based memoryPressure
+                scanStats.availableMB = availableMB
+                scanStats.smoothedFPS = smoothedFPS      // capacity bar: fpsPressure
                 scanStats.driftEstimate = drift
                 scanStats.mappingStatus = statusStr
                 if anchorCount > 0 {
