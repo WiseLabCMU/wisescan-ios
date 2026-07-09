@@ -131,7 +131,18 @@ struct CaptureView: View {
             cachedGhostMeshData = nil
             return
         }
+        // [MemDiag] Ghost mesh = the ICP-source mesh, held resident ALONGSIDE the live scan mesh
+        // through a rescan — the genuine 2× mesh coexistence, and it happens during scan time. blob =
+        // exact bytes read in (the parse into a displayed RealityKit entity is a separate, later cost);
+        // footprintΔ is the Data buffer. Baseline read only when diagnostics are on → free otherwise.
+        let foot0 = PerfDiag.enabled ? ScanStats.currentFootprintMB() : 0
         cachedGhostMeshData = try? Data(contentsOf: targetScan.meshFileURL)
+        if PerfDiag.enabled {
+            let blobMB = Double(cachedGhostMeshData?.count ?? 0) / (1024.0 * 1024.0)
+            let foot1 = ScanStats.currentFootprintMB()
+            PerfDiag.log(String(format: "[MemDiag] EVENT GHOST-LOAD blob=%.1fMB footprint=%.0fMB (Δ%+.0f)",
+                                blobMB, foot1, foot1 - foot0))
+        }
     }
 
     /// Computes the connector anchors for the active location (Track C). Only populated when

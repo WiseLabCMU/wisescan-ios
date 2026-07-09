@@ -180,6 +180,10 @@ struct ARCoverageView: UIViewRepresentable {
         let wasShowingVR = (context.coordinator.pointCloudManager != nil)
 
         if shouldShowVR && !wasShowingVR {
+            // [MemDiag] VR-ENTER→VR-READY brackets the voxel + point-cloud allocation. VoxelGrid /
+            // PointCloudManager allocate their Metal buffers at capacity (350k voxels, 256×192×4
+            // verts) up front, so this delta is the fixed VR footprint — independent of scene size.
+            PerfDiag.log("[MemDiag] EVENT VR-ENTER \(context.coordinator.memMarker())")
             // Keep cameraFeed() background during setup — switch to black
             // only after the first point cloud frame renders (see session(_:didUpdate:)).
             context.coordinator.vrBackgroundSet = false
@@ -201,7 +205,12 @@ struct ARCoverageView: UIViewRepresentable {
                 uiView.session.run(config)
             }
             context.coordinator.removeAllMeshEntities()
+            PerfDiag.log("[MemDiag] EVENT VR-READY \(context.coordinator.memMarker())")
         } else if !shouldShowVR && wasShowingVR {
+            // [MemDiag] VR-EXIT free-delta: same pattern as the recording teardown — Metal buffers
+            // free on RealityKit's schedule, so defer one runloop turn + (dev-flag) force-reclaim
+            // before measuring so the delta reflects reclaimed pages, not cached ones.
+            PerfDiag.log("[MemDiag] EVENT VR-EXIT \(context.coordinator.memMarker())")
             uiView.environment.background = .cameraFeed()
             context.coordinator.pointCloudManager?.destroy()
             context.coordinator.pointCloudManager = nil
@@ -210,6 +219,10 @@ struct ARCoverageView: UIViewRepresentable {
 
             if captureMode == .vr {
                 context.coordinator.removeAllMeshEntities()
+            }
+            DispatchQueue.main.async {
+                ScanStats.forceReclaimIfEnabled()
+                PerfDiag.log("[MemDiag] EVENT VR-EXIT-DONE \(context.coordinator.memMarker())")
             }
         }
 
@@ -578,6 +591,13 @@ struct ARCoverageView: UIViewRepresentable {
         /// causes RoomPlan "world tracking failure" / zero frames on cold first scans. Cross-queue
         /// (RoomPlan queue → main, ARSession delegate queue), so Atomic.
         let needsSemanticReassert = Atomic<Bool>(false)
+        /// [MemDiag] one-shot latches for CoreML model-LOAD attribution. Both models load
+        /// asynchronously AFTER their session-config activation, so the activation marker (RP-START /
+        /// RECORD-START) captures the floor and these capture the moment the model's first output
+        /// proves it's resident — the delta between is the load cost. Reset per recording; ~0 on a
+        /// second scan means the framework cached the model process-wide. Cross-queue → Atomic.
+        let loggedRoomPlanReady = Atomic<Bool>(false)   // trips on first recording-mode didUpdate room
+        let loggedSegModelReady = Atomic<Bool>(false)   // trips on first frame carrying a segmentationBuffer
         /// Latest room snapshot from RoomPlan (updated in real-time via delegate).
         private var latestCapturedRoom: CapturedRoom?
         /// Final CapturedRoom snapshot captured at recording stop (for export).
@@ -681,6 +701,9 @@ struct ARCoverageView: UIViewRepresentable {
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
             baselineMemoryMB = ScanStats.currentMemoryUsageMB() // read on main in updateStats's publish block
+            // [MemDiag] re-arm the model-load one-shots so each recording measures load fresh.
+            loggedRoomPlanReady.store(false, ordering: .relaxed)
+            loggedSegModelReady.store(false, ordering: .relaxed)
             // Clear delegate-owned counters/flags ON the delegate queue (never on main): the
             // ARSession callbacks mutate these dictionaries, and a concurrent mutation would crash.
             sessionDelegateQueue.async { [weak self] in
@@ -1433,6 +1456,14 @@ struct ARCoverageView: UIViewRepresentable {
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
             memDiagFrameCount &+= 1 // [MemDiag] frames/sample → measured FPS (the "visible slowdown")
+
+            // [MemDiag] First frame carrying a segmentation buffer = the person-segmentation CoreML
+            // model (enabled by the privacy filter / analysis mode) is loaded and resident. The delta
+            // vs the preceding RECORD-START marker ≈ the model-load cost. See loggedSegModelReady.
+            if PerfDiag.enabled, frame.segmentationBuffer != nil,
+               loggedSegModelReady.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged {
+                PerfDiag.log("[MemDiag] EVENT SEG-READY \(memMarker())")
+            }
 
             // Pre-recording relocalization/alignment phase driver (no-op outside those phases).
             driveAlignmentPhase(frame)
@@ -2383,6 +2414,11 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
             if self.isAnalysisRoomPlan {
                 self.latestCapturedRoom = room
                 self.scanStats?.analysisRoom = room
+            } else if self.loggedRoomPlanReady.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged {
+                // [MemDiag] First recording-mode room update = RoomPlan's CoreML models have run once
+                // and are resident. RP-START→RP-READY delta ≈ the model-load cost (the mesh is still
+                // near-empty this early, so the delta is RoomPlan-dominated). See loggedRoomPlanReady.
+                PerfDiag.log("[MemDiag] EVENT RP-READY \(self.memMarker())")
             }
             // [DEFERRED-ROOMPLAN] Recording mode: intentionally do nothing — room reconstructed post-scan.
         }
