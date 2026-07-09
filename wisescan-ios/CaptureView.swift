@@ -40,6 +40,12 @@ struct CaptureView: View {
     @State var frameCaptureSession = FrameCaptureSession()
     // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
     @State private var mainThreadWatchdog = MainThreadWatchdog()
+    /// [MemDiag] logs a MEM-PRESSURE marker (footprint + headroom) when the OS flags the app near its
+    /// jetsam limit — the redline trip-flag. No-op unless Perf Diagnostics is on.
+    @State private var memoryPressureMonitor = MemoryPressureMonitor {
+        String(format: "footprint=%.0fMB avail=%.0fMB compressed=%.0fMB",
+               ScanStats.currentFootprintMB(), ScanStats.currentAvailableMemoryMB(), ScanStats.currentCompressedMB())
+    }
     // colorAccumulator removed — vertex coloring now deferred to post-processing
     @AppStorage(AppConstants.Key.rawOverlapMax) var overlapMax: Double = AppConstants.overlapMax
     @AppStorage(AppConstants.Key.rawRejectBlur) var rejectBlur: Bool = AppConstants.rejectBlur
@@ -52,6 +58,7 @@ struct CaptureView: View {
     @State var pendingScan: PendingScanData?
     @State var isProcessingMesh = false
     @State var isWaitingToSave = false
+    @State var isStabilizingBeforeSave = false // hold-steady settle window before the save pose is captured
     @State var cachedGhostMeshData: Data?
     /// Track C — connectors shared by the active location's scans with other maps, in the active
     /// scans' world frame. Computed here (CaptureView owns the ModelContext) and passed to
@@ -124,7 +131,18 @@ struct CaptureView: View {
             cachedGhostMeshData = nil
             return
         }
+        // [MemDiag] Ghost mesh = the ICP-source mesh, held resident ALONGSIDE the live scan mesh
+        // through a rescan — the genuine 2× mesh coexistence, and it happens during scan time. blob =
+        // exact bytes read in (the parse into a displayed RealityKit entity is a separate, later cost);
+        // footprintΔ is the Data buffer. Baseline read only when diagnostics are on → free otherwise.
+        let foot0 = PerfDiag.enabled ? ScanStats.currentFootprintMB() : 0
         cachedGhostMeshData = try? Data(contentsOf: targetScan.meshFileURL)
+        if PerfDiag.enabled {
+            let blobMB = Double(cachedGhostMeshData?.count ?? 0) / (1024.0 * 1024.0)
+            let foot1 = ScanStats.currentFootprintMB()
+            PerfDiag.log(String(format: "[MemDiag] EVENT GHOST-LOAD blob=%.1fMB footprint=%.0fMB (Δ%+.0f)",
+                                blobMB, foot1, foot1 - foot0))
+        }
     }
 
     /// Computes the connector anchors for the active location (Track C). Only populated when
@@ -522,7 +540,12 @@ struct CaptureView: View {
                                         .foregroundColor(.white)
                                 }
 
-                                // Row 1.5: Semantic classes detected (colored dot + label)
+                                // Row 1.5: Semantic classes detected (colored dot + label).
+                                // DISABLED with the deferred-build migration: we no longer render live
+                                // RoomPlan outlines, so the color legend maps to nothing on screen.
+                                // detectedClasses is still collected (extractRoomMetadata → saved
+                                // semanticClassesDetected). Restore this if a visualize-RoomPlan mode lands.
+                                /*
                                 if !scanStats.detectedClasses.isEmpty {
                                     HStack(spacing: 6) {
                                         Image(systemName: "tag.fill")
@@ -542,6 +565,7 @@ struct CaptureView: View {
                                         Spacer()
                                     }
                                 }
+                                */
 
                                 // Row 2: Capacity bar
                                 VStack(spacing: 4) {
@@ -650,7 +674,7 @@ struct CaptureView: View {
                             // pre-recording window so a tap can't race ahead of the alignment overlay
                             // and start an un-aligned scan (the ~90°/offset ghost-jump race).
                             // activeScanCase is set synchronously at the trigger; cleared on save.
-                            .disabled(isProcessingMesh || isWaitingToSave || isAnalyzing || showAnalysisReport
+                            .disabled(isProcessingMesh || isWaitingToSave || isStabilizingBeforeSave || isAnalyzing || showAnalysisReport
                                       || (scanStore.activeScanCase == .linkAdjacent && !isRecording))
                             .offset(y: isRecording ? -20 : 0)
                         }
@@ -947,6 +971,7 @@ struct CaptureView: View {
             // stall watchdog for this capture session (both no-ops unless Perf Diagnostics is on).
             PerfDiag.refresh()
             mainThreadWatchdog.start()
+            memoryPressureMonitor.start()
 
             // Battery: returning to the capture tab — cancel any pending idle teardown and resume
             // the AR session if it was paused while we were away.
@@ -1030,6 +1055,7 @@ struct CaptureView: View {
         }
         .onDisappear {
             mainThreadWatchdog.stop()
+            memoryPressureMonitor.stop()
 
             // Battery: left the capture tab — after an idle period, pause the AR session (camera +
             // sensors off). Guarded at fire time so we never pause mid-recording or during post-scan

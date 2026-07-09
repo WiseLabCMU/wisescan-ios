@@ -3,6 +3,7 @@ import Observation
 import SwiftData
 import simd
 import RoomPlan
+import os               // os_proc_available_memory (per-app jetsam headroom)
 
 // MARK: - Captured Scan Model
 
@@ -341,6 +342,13 @@ class ScanStore {
     /// plumbing callback, not observable view state. Captures the coordinator weakly (no retain cycle).
     @ObservationIgnored var requestStopRoomPlan: (() -> Void)?
 
+    /// [DEFERRED-ROOMPLAN] build hook: called by the save pipeline on a BACKGROUND queue, AFTER all
+    /// pose-sensitive capture (mesh snapshot + world-map export) is finished. Waits (bounded) for the
+    /// RoomPlan capture data and runs RoomBuilder off the live session, returning the reconstructed
+    /// room to write into roomplan.json. Returns nil if RoomPlan was off / failed / timed out (scan
+    /// then saves without a room). Weakly captures the coordinator. `@ObservationIgnored`: plumbing.
+    @ObservationIgnored var awaitDeferredRoomPlan: ((TimeInterval) -> CapturedRoom?)?
+
     // MARK: - State Reset
 
     /// Resets all capture-related state to idle defaults.
@@ -408,6 +416,14 @@ class ScanStats {
     var hasBoundaryAnchor: Bool = false
     var memoryUsageMB: Double = 0
     var baselineMemoryMB: Double = 0 // Captured at session start
+    /// phys_footprint (the OOM metric) + os_proc_available_memory headroom, published at 10 Hz from
+    /// updateStats. Drive `memoryPressure` off THESE (the true per-device ceiling), not resident.
+    var footprintMB: Double = 0
+    var availableMB: Double = 0
+    /// Smoothed ARKit frame rate (~1s EMA), published from updateStats. The direct, device-adaptive
+    /// compute-headroom signal — drives `fpsPressure`. Defaults to 60 so the bar reads healthy before
+    /// the first sample lands.
+    var smoothedFPS: Double = 60
     var driftEstimate: Double = 0 // 0.0 to 1.0
     var mappingStatus: String = "notAvailable" // ARFrame.WorldMappingStatus for cumulative relocalization quality
     var detectedClasses: Set<String> = [] // Semantic classes detected so far (for HUD display)
@@ -432,8 +448,13 @@ class ScanStats {
 
     // Capacity thresholds (tunable)
     private let maxPolygons: Double = 2_000_000
-    private let maxMemoryDeltaMB: Double = 800 // Memory growth from scanning, not total app memory
     private let maxAnchors: Double = 500
+    /// Bar is full when footprint reaches this fraction of the jetsam ceiling (margin before the kill).
+    private let memoryWarnFraction: Double = 0.80
+    /// FPS at/below which `fpsPressure` = 1.0. Set to 20 (not 30) to keep resolution INSIDE the danger
+    /// zone: at 30 the bar saturates across sustained-mid-20s-fps scans and can't tell "rough" (~28,
+    /// ~0.8) from "broken" (single digits, 1.0). Roughening is still ~0.67 by 40 fps.
+    private let fpsFloor: Double = 20.0
 
     var estimatedSizeMB: Double {
         let bytes = (totalVertices * 12) + (totalFaces * 12)
@@ -463,15 +484,34 @@ class ScanStats {
     // MARK: - Capacity Score
 
     var polygonPressure: Double { min(Double(totalFaces) / maxPolygons, 1.0) }
+
+    /// Fraction of THIS device's jetsam ceiling in use (footprint / (footprint + avail)), scaled so the
+    /// bar is full at `memoryWarnFraction` of the ceiling — a safety margin before the OS kills us.
+    /// Replaces the old (resident − baseline) / 800 heuristic, which was an indirect, miscalibrated
+    /// proxy: it redlined at ~34% of the real ceiling on high-RAM devices. This is truthful and
+    /// per-device (binds on the 12 GB iPhone; slack on the 16 GB iPad, where `fpsPressure` binds first).
     var memoryPressure: Double {
-        let delta = max(0, memoryUsageMB - baselineMemoryMB)
-        return min(delta / maxMemoryDeltaMB, 1.0)
+        // availableMB == 0 means os_proc_available_memory couldn't report a limit (Simulator, or the
+        // documented "unlimited" case) — treat as NO SIGNAL, not "zero headroom". Guarding only on
+        // ceiling > 0 would let footprint/footprint = 1.0 falsely peg the bar whenever avail is 0.
+        guard availableMB > 0 else { return 0 }
+        let ceiling = footprintMB + availableMB
+        return min((footprintMB / ceiling) / memoryWarnFraction, 1.0)
     }
     var anchorPressure: Double { min(Double(anchorCount) / maxAnchors, 1.0) }
 
-    /// Composite capacity: highest pressure factor wins (0.0 = fresh, 1.0 = at limit)
+    /// Compute-headroom pressure from the smoothed frame rate. FPS is the direct, DEVICE-ADAPTIVE
+    /// signal for "the device can't turn more geometry into frames" — the wall a fixed polygon budget
+    /// can't see (FPS collapsed here at ~32% of maxPolygons). 0 above 60 fps; ~0.67 by 40 (roughening),
+    /// ramps to full by `fpsFloor` (20). Leads `driftEstimate` (VIO actually breaking).
+    var fpsPressure: Double {
+        min(max(0, (60.0 - smoothedFPS) / (60.0 - fpsFloor)), 1.0)
+    }
+
+    /// Composite capacity: highest pressure factor wins (0.0 = fresh, 1.0 = at limit). On a
+    /// compute-bound scan `fpsPressure` drives it; on a memory-bound one `memoryPressure` does.
     var capacityScore: Double {
-        max(polygonPressure, memoryPressure, anchorPressure, driftEstimate)
+        max(polygonPressure, memoryPressure, anchorPressure, driftEstimate, fpsPressure)
     }
 
     var isNearCapacity: Bool { capacityScore > 0.8 }
@@ -527,6 +567,187 @@ class ScanStats {
             }
         }
         return result == KERN_SUCCESS ? Double(info.resident_size) / (1024.0 * 1024.0) : 0
+    }
+
+    /// `phys_footprint` (TASK_VM_INFO) — the metric jetsam actually kills on (dirty + compressed
+    /// pages counted against the app), NOT `resident_size` (which under-reports the memory the OS
+    /// holds the app responsible for). Use THIS for OOM/jetsam profiling; `currentMemoryUsageMB`
+    /// (resident) is kept for the existing capacity-score UI so those numbers stay comparable.
+    static func currentFootprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? Double(info.phys_footprint) / (1024.0 * 1024.0) : 0
+    }
+
+    /// One TASK_VM_INFO fetch → footprint + resident + compressed together (all three are fields of the
+    /// same struct). Use this on hot paths (updateStats, 10 Hz) instead of calling currentFootprintMB /
+    /// currentMemoryUsageMB / currentCompressedMB separately — each of those issues its own identical
+    /// syscall for one field. All in MB; zeros on failure.
+    static func currentVMInfoMB() -> (footprint: Double, resident: Double, compressed: Double) {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return (0, 0, 0) }
+        let mb = 1024.0 * 1024.0
+        return (Double(info.phys_footprint) / mb, Double(info.resident_size) / mb, Double(info.compressed) / mb)
+    }
+
+    /// VM compressor size (TASK_VM_INFO `compressed`) — bytes of the app's pages the kernel has
+    /// squeezed into the compressor rather than paged out (iOS has no swap). It's counted INTO
+    /// phys_footprint, so a rising `compressed` while footprint plateaus means the app is being held
+    /// together by compression — and the CPU cost of (de)compressing pages is the leading suspect for
+    /// the end-of-scan slowdown. Log it beside footprint to confirm that theory on-device.
+    static func currentCompressedMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? Double(info.compressed) / (1024.0 * 1024.0) : 0
+    }
+
+    /// Bytes remaining before THIS app hits its jetsam limit (`os_proc_available_memory`, iOS 13+).
+    /// This is the real, per-device ceiling — a 12 GB iPhone hands the app a lower limit than the
+    /// 16 GB iPad, which is exactly the lower ceiling observed anecdotally. Pairs with footprint:
+    /// footprint + available ≈ the limit. Returns 0 if the OS can't report it (e.g. unlimited).
+    static func currentAvailableMemoryMB() -> Double {
+        Double(os_proc_available_memory()) / (1024.0 * 1024.0)
+    }
+
+    /// [MemDiag] Force the malloc allocator to return free-list pages to the OS so a subsequent
+    /// footprint read reflects actually-reclaimed memory, not pages malloc is still caching — the fix
+    /// for the lazy-free caveat that otherwise makes teardown free-deltas under-count. Dev-flag gated
+    /// (`memDiagForceReclaim`, off by default even in dev): `malloc_zone_pressure_relief` walks every
+    /// zone and decommits, real overhead we never want in the normal teardown path. No-op when off.
+    /// Note: only touches malloc — Metal/GPU buffers (mesh wireframe, voxels) free on RealityKit's
+    /// schedule, so this makes the delta a *floor* on what a subsystem releases, not the whole story.
+    /// Double-gated: the reclaim only makes sense while measuring teardown deltas, so it also requires
+    /// Perf Diagnostics on — matches the Settings copy and avoids paying the expensive main-thread pass
+    /// with no diagnostics output if the dev flag is left set.
+    static func forceReclaimIfEnabled() {
+        guard PerfDiag.enabled,
+              UserDefaults.standard.bool(forKey: AppConstants.Key.memDiagForceReclaim) else { return }
+        malloc_zone_pressure_relief(nil, 0)
+    }
+
+    /// Instantaneous total CPU usage across all cores, as a percentage (can exceed 100 — e.g. 250 =
+    /// 2.5 cores busy). Sums per-thread `cpu_usage` over all live, non-idle threads. Cheap enough to
+    /// sample at 1 Hz; perfDiag-gated at the call sites. This is the direct CPU signal the fps/thermal
+    /// proxies only hint at — use it to see RoomPlan's live CPU tax (on vs off) during a scan.
+    static func currentCPUUsagePercent() -> Double {
+        var threadList: thread_act_array_t?
+        var threadCount = mach_msg_type_number_t(0)
+        guard task_threads(mach_task_self_, &threadList, &threadCount) == KERN_SUCCESS,
+              let threadList else { return 0 }
+        defer {
+            vm_deallocate(mach_task_self_,
+                          vm_address_t(UInt(bitPattern: threadList)),
+                          vm_size_t(Int(threadCount) * MemoryLayout<thread_t>.stride))
+        }
+        var total = 0.0
+        for i in 0..<Int(threadCount) {
+            var info = thread_basic_info()
+            var count = mach_msg_type_number_t(MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
+            let kr = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                    thread_info(threadList[i], thread_flavor_t(THREAD_BASIC_INFO), $0, &count)
+                }
+            }
+            if kr == KERN_SUCCESS, info.flags & TH_FLAGS_IDLE == 0 {
+                total += Double(info.cpu_usage) / Double(TH_USAGE_SCALE) * 100.0
+            }
+        }
+        return total
+    }
+
+    /// [MemDiag] Per-thread-name CPU breakdown → attribute the total CPU% to subsystems WITHOUT
+    /// Instruments. Groups live non-idle threads by their pthread name (GCD names a worker thread with
+    /// its queue label while a block runs, so our `org.arenaxr.scan4d.*` queues, Apple's
+    /// `com.apple.arkit.*` / RealityKit render threads, etc. surface) and sums each group's
+    /// instantaneous `cpu_usage`. A 1 Hz snapshot catches whatever hot pass is executing at that
+    /// instant. Names are shortened to their last dot-component; unnamed threads (incl. main) group as
+    /// "unnamed". Returns the `topN` heaviest contributors, descending.
+    static func currentCPUByThread(topN: Int = 6) -> [(name: String, percent: Double)] {
+        var threadList: thread_act_array_t?
+        var threadCount = mach_msg_type_number_t(0)
+        guard task_threads(mach_task_self_, &threadList, &threadCount) == KERN_SUCCESS,
+              let threadList else { return [] }
+        defer {
+            vm_deallocate(mach_task_self_,
+                          vm_address_t(UInt(bitPattern: threadList)),
+                          vm_size_t(Int(threadCount) * MemoryLayout<thread_t>.stride))
+        }
+        var byName: [String: Double] = [:]
+        var nameBuf = [CChar](repeating: 0, count: 64)
+        for i in 0..<Int(threadCount) {
+            var info = thread_basic_info()
+            var count = mach_msg_type_number_t(MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
+            let kr = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                    thread_info(threadList[i], thread_flavor_t(THREAD_BASIC_INFO), $0, &count)
+                }
+            }
+            guard kr == KERN_SUCCESS, info.flags & TH_FLAGS_IDLE == 0 else { continue }
+            let pct = Double(info.cpu_usage) / Double(TH_USAGE_SCALE) * 100.0
+            if pct < 1 { continue } // ignore threads doing effectively nothing
+            var label = "unnamed"
+            if let pt = pthread_from_mach_thread_np(threadList[i]),
+               pthread_getname_np(pt, &nameBuf, 64) == 0 {
+                let full = String(cString: nameBuf)
+                if !full.isEmpty { label = full.components(separatedBy: ".").last ?? full }
+            }
+            byName[label, default: 0] += pct
+        }
+        return byName.sorted { $0.value > $1.value }.prefix(topN).map { (name: $0.key, percent: $0.value) }
+    }
+
+    /// [MemDiag] Compact one-line rendering of `currentCPUByThread` for the timeline, e.g.
+    /// "voxel=180% arkit=142% unnamed=90%".
+    static func currentCPUByThreadString(topN: Int = 6) -> String {
+        currentCPUByThread(topN: topN)
+            .map { String(format: "%@=%.0f%%", $0.name, $0.percent) }
+            .joined(separator: " ")
+    }
+
+    /// Cumulative CPU *time* (seconds) consumed by the whole task: terminated-thread time
+    /// (TASK_BASIC_INFO) + live-thread time (TASK_THREAD_TIMES_INFO). The sum is monotonic (a thread's
+    /// time moves from the live bucket to the terminated bucket when it exits), so a delta across a
+    /// window measures CPU-seconds burned in that window — used to attribute the save-time RoomBuilder
+    /// cost (Δcpu-seconds ÷ wall = average cores busy).
+    static func currentCPUTimeSeconds() -> Double {
+        var total = 0.0
+        var basic = mach_task_basic_info()
+        var bcount = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+        if withUnsafeMutablePointer(to: &basic, {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(bcount)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &bcount)
+            }
+        }) == KERN_SUCCESS {
+            total += Double(basic.user_time.seconds) + Double(basic.user_time.microseconds) / 1e6
+            total += Double(basic.system_time.seconds) + Double(basic.system_time.microseconds) / 1e6
+        }
+        var times = task_thread_times_info()
+        var tcount = mach_msg_type_number_t(MemoryLayout<task_thread_times_info>.size) / 4
+        if withUnsafeMutablePointer(to: &times, {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(tcount)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_THREAD_TIMES_INFO), $0, &tcount)
+            }
+        }) == KERN_SUCCESS {
+            total += Double(times.user_time.seconds) + Double(times.user_time.microseconds) / 1e6
+            total += Double(times.system_time.seconds) + Double(times.system_time.microseconds) / 1e6
+        }
+        return total
     }
 }
 

@@ -3,6 +3,7 @@ import RealityKit
 import ARKit
 import RoomPlan
 import Synchronization
+import os               // always-on Logger for deferred-build timeout warnings
 
 /// Dedups the repeated `UnlitMaterial(color: UIColor(red: CGFloat(c.x), …))` construction from a
 /// SIMD4 color (x,y,z as RGB; `alpha` defaults opaque). Fileprivate to ARCoverageView.
@@ -91,6 +92,10 @@ struct ARCoverageView: UIViewRepresentable {
         scanStore?.requestStopRoomPlan = { [weak coordinator = context.coordinator] in
             coordinator?.stopRoomPlanSession()
         }
+        // [DEFERRED-ROOMPLAN] reconstruction hook, drained by the save pipeline off-main after pose capture.
+        scanStore?.awaitDeferredRoomPlan = { [weak coordinator = context.coordinator] timeout in
+            coordinator?.awaitAndBuildDeferredRoom(timeout: timeout)
+        }
         // Genuine map-load failure on the fresh-view path (requested but archive missing/corrupt) —
         // knowable synchronously here. Mirror of the updateUIView relocalization branch; replaces the
         // racy per-frame inference removed from driveAlignmentPhase (see that comment + git log).
@@ -176,6 +181,10 @@ struct ARCoverageView: UIViewRepresentable {
         let wasShowingVR = (context.coordinator.pointCloudManager != nil)
 
         if shouldShowVR && !wasShowingVR {
+            // [MemDiag] VR-ENTER→VR-READY brackets the voxel + point-cloud allocation. VoxelGrid /
+            // PointCloudManager allocate their Metal buffers at capacity (350k voxels, 256×192×4
+            // verts) up front, so this delta is the fixed VR footprint — independent of scene size.
+            PerfDiag.log("[MemDiag] EVENT VR-ENTER \(context.coordinator.memMarker())")
             // Keep cameraFeed() background during setup — switch to black
             // only after the first point cloud frame renders (see session(_:didUpdate:)).
             context.coordinator.vrBackgroundSet = false
@@ -197,7 +206,12 @@ struct ARCoverageView: UIViewRepresentable {
                 uiView.session.run(config)
             }
             context.coordinator.removeAllMeshEntities()
+            PerfDiag.log("[MemDiag] EVENT VR-READY \(context.coordinator.memMarker())")
         } else if !shouldShowVR && wasShowingVR {
+            // [MemDiag] VR-EXIT free-delta: same pattern as the recording teardown — Metal buffers
+            // free on RealityKit's schedule, so defer one runloop turn + (dev-flag) force-reclaim
+            // before measuring so the delta reflects reclaimed pages, not cached ones.
+            PerfDiag.log("[MemDiag] EVENT VR-EXIT \(context.coordinator.memMarker())")
             uiView.environment.background = .cameraFeed()
             context.coordinator.pointCloudManager?.destroy()
             context.coordinator.pointCloudManager = nil
@@ -206,6 +220,10 @@ struct ARCoverageView: UIViewRepresentable {
 
             if captureMode == .vr {
                 context.coordinator.removeAllMeshEntities()
+            }
+            DispatchQueue.main.async {
+                ScanStats.forceReclaimIfEnabled()
+                PerfDiag.log("[MemDiag] EVENT VR-EXIT-DONE \(context.coordinator.memMarker())")
             }
         }
 
@@ -351,6 +369,13 @@ struct ARCoverageView: UIViewRepresentable {
                 // Active wireframe is now rendered via procedural geometry (not .showSceneUnderstanding)
                 // Entities are built incrementally in session(_:didAdd:) and session(_:didUpdate:)
                 context.coordinator.resetForRecording()
+                // [MemDiag] baseline the instant recording begins — BEFORE RoomPlan starts, so the
+                // RP-START marker's delta isolates RoomPlan's bring-up cost from the mesh baseline.
+                // Stamp RoomPlan on/off so each run's log self-documents the mode (live consume is now
+                // always deferred, so there's no separate knob to stamp).
+                let sl = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
+                let mode = "mode(semanticLabeling=\(sl ? "on" : "off") liveConsume=deferred)"
+                PerfDiag.log("[MemDiag] EVENT RECORD-START \(context.coordinator.memMarker()) \(mode)")
                 // Start RoomPlan session alongside ARKit (shares the same ARSession)
                 context.coordinator.startRoomPlanSession(arSession: uiView.session)
                 // Add coverage overlay green quad in AR mode
@@ -380,6 +405,12 @@ struct ARCoverageView: UIViewRepresentable {
                 context.coordinator.renderRescanConnectorsIfReady(arView: uiView)
             } else {
                 // Downgrade to nominal: pure camera passthrough — no overlays
+                // [MemDiag] snapshot the peak BEFORE any teardown free — pairs with the deferred
+                // TEARDOWN marker below to give the AGGREGATE free-delta of the whole scan's resident
+                // set (RoomPlan + mesh anchors + wireframe mirror + ghost). Per-step deltas aren't
+                // honestly measurable here (the frees hop across the delegate/main queues and Metal
+                // releases lazily), so we bracket the sum, which is the reliable number.
+                PerfDiag.log("[MemDiag] EVENT PRE-TEARDOWN \(context.coordinator.memMarker())")
                 // Stop RoomPlan and capture final CapturedRoom BEFORE reset clears state
                 context.coordinator.stopRoomPlanSession()
                 context.coordinator.resetForNominal()
@@ -394,6 +425,14 @@ struct ARCoverageView: UIViewRepresentable {
                 uiView.session.run(config)
                 // Clear ALL debug options for pure passthrough (or VR background)
                 uiView.debugOptions = []
+                // [MemDiag] post-teardown floor: RoomPlan stopped + mesh config dropped. Deferred one
+                // runloop turn so the synchronous removeFromParent + queued frees above have landed
+                // before we measure; forceReclaimIfEnabled() then (dev-flag-gated) decommits malloc's
+                // free-list so the PRE→post delta reflects reclaimed pages, not cached ones.
+                DispatchQueue.main.async {
+                    ScanStats.forceReclaimIfEnabled()
+                    PerfDiag.log("[MemDiag] EVENT TEARDOWN \(context.coordinator.memMarker())")
+                }
             }
         }
 
@@ -526,6 +565,21 @@ struct ARCoverageView: UIViewRepresentable {
         private var lastStatsUpdateTime: Date = .distantPast
         private let statsUpdateInterval: TimeInterval = 0.1
 
+        // [MemDiag] RoomPlan memory profiling (perfDiagnostics-gated, log-only). Separate 1 Hz
+        // throttle so the memory timeline is readable — updateStats fires at 10 Hz. Reset on
+        // record-start alongside lastStatsUpdateTime so the first sample lands immediately.
+        private var lastMemDiagLogTime: Date = .distantPast
+        private let memDiagLogInterval: TimeInterval = 1.0
+        // Frames delivered since the last [MemDiag] sample → measured ARKit FPS. The end-of-scan
+        // "visible slowdown" is CPU/thermal throttle + memory-compressor churn stealing frames; this
+        // quantifies it next to footprint/thermal so the A/B shows the compute cost, not just memory.
+        private var memDiagFrameCount: Int = 0
+        // PRODUCTION fps (ungated, drives the capacity bar's fpsPressure — distinct from the perfDiag
+        // memDiag fps above): frames since the last updateStats publish, and the EMA-smoothed rate.
+        // Delegate-queue owned (incremented in didUpdate frame, consumed in updateStats — same queue).
+        private var prodFrameCount: Int = 0
+        private var smoothedFPSValue: Double = 60
+
         // Active Mesh Wireframe properties
         /// One wireframe entity per ARMeshAnchor, keyed by anchor UUID.
         private var activeMeshEntities: [UUID: (anchor: AnchorEntity, model: Entity)] = [:]
@@ -543,13 +597,32 @@ struct ARCoverageView: UIViewRepresentable {
         /// causes RoomPlan "world tracking failure" / zero frames on cold first scans. Cross-queue
         /// (RoomPlan queue → main, ARSession delegate queue), so Atomic.
         let needsSemanticReassert = Atomic<Bool>(false)
+        /// [MemDiag] one-shot latches for CoreML model-LOAD attribution. Both models load
+        /// asynchronously AFTER their session-config activation, so the activation marker (RP-START /
+        /// RECORD-START) captures the floor and these capture the moment the model's first output
+        /// proves it's resident — the delta between is the load cost. Reset per recording; ~0 on a
+        /// second scan means the framework cached the model process-wide. Cross-queue → Atomic.
+        let loggedRoomPlanReady = Atomic<Bool>(false)   // trips on first recording-mode didUpdate room
+        let loggedSegModelReady = Atomic<Bool>(false)   // trips on first frame carrying a segmentationBuffer
         /// Latest room snapshot from RoomPlan (updated in real-time via delegate).
         private var latestCapturedRoom: CapturedRoom?
         /// Final CapturedRoom snapshot captured at recording stop (for export).
         var finalCapturedRoom: CapturedRoom?
-        /// Single anchor holding all RoomPlan outline entities.
-        private var roomPlanOutlineEntity: AnchorEntity?
-        /// Throttle: last time RoomPlan outlines were rebuilt.
+
+        /// [DEFERRED-ROOMPLAN] build box for the current recording's RoomPlan capture. Created fresh in
+        /// startRoomPlanSession, fed the CapturedRoomData at didEndWith, and drained by the save
+        /// pipeline (which triggers RoomBuilder off-main, AFTER pose-sensitive capture). Guarded by a
+        /// lock because it's written on main (start/analysis) and read on the RoomPlan + save queues.
+        private let deferredRoomLock = NSLock()
+        private var deferredRoomBuild: DeferredRoomBuild?
+        /// The current recording box (nil for analysis-mode / RoomPlan-off). Thread-safe.
+        func currentDeferredRoomBox() -> DeferredRoomBuild? { deferredRoomLock.withLock { deferredRoomBuild } }
+        /// Called by the save pipeline on a background queue: waits for capture, runs RoomBuilder,
+        /// returns the reconstructed room (or nil). Never touches main; never overlaps pose capture.
+        func awaitAndBuildDeferredRoom(timeout: TimeInterval) -> CapturedRoom? {
+            currentDeferredRoomBox()?.buildRoom(timeout: timeout)
+        }
+        /// Throttle: last time RoomPlan semantic metadata was extracted (see extractRoomMetadata).
         private var lastRoomPlanOutlineTime: Date = .distantPast
         /// Accumulated set of detected semantic classes (published to ScanStats for HUD).
         private var detectedSemanticClasses: Set<String> = []
@@ -632,6 +705,9 @@ struct ARCoverageView: UIViewRepresentable {
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
             baselineMemoryMB = ScanStats.currentMemoryUsageMB() // read on main in updateStats's publish block
+            // [MemDiag] re-arm the model-load one-shots so each recording measures load fresh.
+            loggedRoomPlanReady.store(false, ordering: .relaxed)
+            loggedSegModelReady.store(false, ordering: .relaxed)
             // Clear delegate-owned counters/flags ON the delegate queue (never on main): the
             // ARSession callbacks mutate these dictionaries, and a concurrent mutation would crash.
             sessionDelegateQueue.async { [weak self] in
@@ -643,8 +719,13 @@ struct ARCoverageView: UIViewRepresentable {
                 self.detectedSemanticClasses.removeAll()
                 self.trackingDegradationCount = 0
                 self.totalTrackingUpdates = 0
+                // Fresh fps state so the capacity bar doesn't inherit the last scan's low rate.
+                // Delegate-queue-owned (mutated in didUpdate/updateStats) → reset HERE, not on main.
+                self.prodFrameCount = 0
+                self.smoothedFPSValue = 60
                 self.sessionStartTime = Date()
                 self.lastStatsUpdateTime = .distantPast // let the first stats update publish immediately
+                self.lastMemDiagLogTime = .distantPast  // [MemDiag] first memory sample lands immediately too
                 // VIO guard: arm immediately if tracking is already normal at record start; otherwise
                 // it arms on the first `.normal` frame (see session(_:didUpdate:)).
                 self.vioGuardArmed = (self.arView?.session.currentFrame?.camera.trackingState == .normal)
@@ -652,7 +733,6 @@ struct ARCoverageView: UIViewRepresentable {
             }
             // Clear any stale wireframe entities from a previous recording (RealityKit → main)
             removeAllActiveMeshEntities()
-            removeRoomPlanOutlines()
             latestCapturedRoom = nil
             finalCapturedRoom = nil
             lastRoomPlanOutlineTime = .distantPast
@@ -691,7 +771,6 @@ struct ARCoverageView: UIViewRepresentable {
 
             // Remove all active mesh wireframe entities from the scene (RealityKit → main)
             removeAllActiveMeshEntities()
-            removeRoomPlanOutlines()
             // Stop RoomPlan session if still running
             roomCaptureSession?.stop(pauseARSession: false)
             roomCaptureSession = nil
@@ -871,22 +950,26 @@ struct ARCoverageView: UIViewRepresentable {
 
         // MARK: - RoomPlan Outlines
 
-        /// Removes the RoomPlan outline entity from the AR scene.
-        private func removeRoomPlanOutlines() {
-            roomPlanOutlineEntity?.removeFromParent()
-            roomPlanOutlineEntity = nil
-        }
-
         /// Starts RoomPlan alongside the existing ARSession.
         /// Call on main thread after recording starts.
         func startRoomPlanSession(arSession: ARSession) {
             let semanticEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
             guard semanticEnabled else { return }
+            // Guard against leaking a still-live session (e.g. an analysis session that wasn't torn
+            // down first): stop it before replacing the reference. Normally stopAnalysis runs first.
+            if roomCaptureSession != nil {
+                PerfDiag.log("startRoomPlanSession: a RoomCaptureSession was still live — stopping it first")
+                roomCaptureSession?.stop(pauseARSession: false)
+                roomCaptureSession = nil
+            }
+            // [DEFERRED-ROOMPLAN] Fresh build box for this recording; didEndWith feeds it, save drains it.
+            deferredRoomLock.withLock { deferredRoomBuild = DeferredRoomBuild() }
             roomCaptureSession = RoomCaptureSession(arSession: arSession)
             roomCaptureSession?.delegate = self
             let config = RoomCaptureSession.Configuration()
             roomCaptureSession?.run(configuration: config)
             PerfDiag.log("RoomPlan session started (sharing ARSession)")
+            PerfDiag.log("[MemDiag] EVENT RP-START \(memMarker())")
         }
 
         /// RoomPlan's `run(configuration:)` reconfigures the shared ARSession with its own config,
@@ -932,6 +1015,7 @@ struct ARCoverageView: UIViewRepresentable {
             roomCaptureSession = nil
             needsSemanticReassert.store(false, ordering: .relaxed) // cancel any pending deferred re-assert
             PerfDiag.log("RoomPlan session stopped (ARSession preserved)")
+            PerfDiag.log("[MemDiag] EVENT RP-STOP \(memMarker())")
         }
 
         // MARK: - Analysis-Mode RoomPlan
@@ -949,8 +1033,15 @@ struct ARCoverageView: UIViewRepresentable {
         /// the Privacy Filter is off. This enables door/screen/person detection unconditionally.
         func startAnalysisRoomPlanSession(arSession: ARSession) {
             guard roomCaptureSession == nil else { return } // don't double-start
+            // [MemDiag] Analysis runs a RoomCaptureSession BEFORE recording, so it pre-loads RoomPlan's
+            // (and personSeg's) CoreML models. This marker makes the log self-honest: if it appears
+            // before RECORD-START, a later RP-READY≈0 means "already loaded here", not "RoomPlan free".
+            PerfDiag.log("[MemDiag] EVENT ANALYSIS-START \(memMarker())")
             isAnalysisRoomPlan = true
             addedSegForAnalysis = false
+            // [DEFERRED-ROOMPLAN] Analysis mode has no deferred build — clear any recording box so an
+            // analysis-session didEndWith can't feed a stale box (analysis consumes the room live).
+            deferredRoomLock.withLock { deferredRoomBuild = nil }
 
             // Ensure person segmentation is available for analysis even when Privacy Filter is OFF
             if !privacyFilter,
@@ -982,10 +1073,8 @@ struct ARCoverageView: UIViewRepresentable {
             isAnalysisRoomPlan = false
             needsSemanticReassert.store(false, ordering: .relaxed)
 
-            // Clean up any outline entities RoomPlan may have rendered during analysis,
-            // and clear latestCapturedRoom so stale data doesn't bleed into a future recording.
+            // Clear latestCapturedRoom so stale analysis data doesn't bleed into a future recording.
             latestCapturedRoom = nil
-            removeRoomPlanOutlines()
 
             // Remove temporarily-added personSegmentation if privacy filter is still OFF
             if addedSegForAnalysis,
@@ -998,7 +1087,11 @@ struct ARCoverageView: UIViewRepresentable {
             }
             addedSegForAnalysis = false
 
-            PerfDiag.log("RoomPlan analysis session stopped (outlines cleared)")
+            PerfDiag.log("RoomPlan analysis session stopped")
+            // [MemDiag] ANALYSIS-START→STOP brackets the pre-scan analysis footprint. Note the models
+            // stay resident (CoreML process-cached) past this point — this delta is analysis's own
+            // working set releasing, NOT the model unloading. See ANALYSIS-START.
+            PerfDiag.log("[MemDiag] EVENT ANALYSIS-STOP \(memMarker())")
         }
 
         // MARK: - Person Detection Helper
@@ -1035,149 +1128,36 @@ struct ARCoverageView: UIViewRepresentable {
         /// Renders oriented bounding-box wireframes from the latest CapturedRoom.
         /// Each Surface/Object becomes a set of 12 colored edges (thin boxes) with the
         /// correct transform. Throttled to avoid per-frame rebuilds.
-        private func renderRoomPlanOutlines() {
-            guard let room = latestCapturedRoom, let arView = arView else { return }
-
-            // Throttle: rebuild at most every 0.5s
+        /// [DEFERRED-ROOMPLAN] Tier-2 metadata consume — the CHEAP half of the former
+        /// `renderRoomPlanOutlines`: collect the detected semantic classes (for the live HUD and the
+        /// saved `semanticClassesDetected`) WITHOUT building the per-surface RealityKit outline
+        /// geometry. The geometry was the expensive part the deferred-build migration removed (the
+        /// during-scan footprint); reading class names off the value-type room is nearly free. Called
+        /// on main from the recording-mode `didUpdate room`; throttled like the old outline rebuild.
+        private func extractRoomMetadata(from room: CapturedRoom) {
             guard Date().timeIntervalSince(lastRoomPlanOutlineTime) >= AppConstants.semanticThrottleInterval else { return }
             lastRoomPlanOutlineTime = Date()
 
-            // Remove old outlines
-            roomPlanOutlineEntity?.removeFromParent()
-
-            let anchorEntity = AnchorEntity(world: .zero)
-
-            // Camera world position — used to lift surface outlines toward the
-            // viewer so they draw on top of the co-planar occlusion mesh instead
-            // of z-fighting with it. Objects get no lift so the mesh occludes them.
-            let cameraPosition = arView.cameraTransform.translation
-
-            // User-configurable filter: only render enabled classes as overlays.
-            // All detected classes are still tracked in detectedSemanticClasses so
-            // roomplan.json export contains full data regardless of capture-time filter.
+            // All detected classes are tracked in detectedSemanticClasses (so roomplan.json export +
+            // the saved metadata carry full data); only the user-enabled ones publish to the HUD.
             let enabledClasses = SemanticClassPreference.load()
-
-            // Collect detected classes for HUD
             var classes = Set<String>()
-
-            // Render surfaces (walls, floors, doors, windows, openings) — lifted
-            // toward the camera so they always render on top of the scan mesh.
             for surface in room.walls + room.floors + room.doors + room.windows + room.openings {
                 let semantic = SemanticClass.from(surface.category)
                 guard semantic != .none else { continue }
                 classes.insert(semantic.rawValue)
-                guard enabledClasses.contains(semantic.rawValue) else { continue }
-                Self.addWireframeEdges(
-                    to: anchorEntity, dimensions: surface.dimensions,
-                    transform: surface.transform, color: semantic.color,
-                    liftTowardCamera: cameraPosition
-                )
             }
-
-            // Render objects (tables, chairs, beds, etc.) — no lift, so they are
-            // naturally occluded by the scan mesh while scanning.
             for object in room.objects {
                 let semantic = SemanticClass.from(object.category)
                 guard semantic != .none else { continue }
                 classes.insert(semantic.rawValue)
-                guard enabledClasses.contains(semantic.rawValue) else { continue }
-                Self.addWireframeEdges(
-                    to: anchorEntity, dimensions: object.dimensions,
-                    transform: object.transform, color: semantic.color,
-                    liftTowardCamera: nil
-                )
             }
 
-            arView.scene.addAnchor(anchorEntity)
-            roomPlanOutlineEntity = anchorEntity
-
-            // Track all detected classes (for export) but only publish enabled ones to HUD.
             detectedSemanticClasses.formUnion(classes)
             let enabledForHUD = detectedSemanticClasses.filter { enabledClasses.contains($0) }
             DispatchQueue.main.async { [weak self] in
                 self?.scanStats?.detectedClasses = enabledForHUD
             }
-        }
-
-        /// Edge thickness for RoomPlan wireframe outlines (10mm).
-        private static let edgeThickness: Float = 0.01
-
-        /// Adds 12 thin box entities representing the edges of an oriented bounding box.
-        /// Each edge is a thin box with the given color.
-        ///
-        /// - Parameter liftTowardCamera: when non-nil (the camera world position),
-        ///   the whole box is nudged along its dominant face normal toward the
-        ///   camera by `AppConstants.surfaceOutlineLiftDistance`, so surface outlines draw on top of
-        ///   the co-planar occlusion mesh. Pass `nil` for objects so they remain
-        ///   embedded in the mesh and are occluded naturally.
-        private static func addWireframeEdges(
-            to parent: Entity,
-            dimensions: SIMD3<Float>,
-            transform: simd_float4x4,
-            color: SIMD4<Float>,
-            liftTowardCamera cameraPosition: SIMD3<Float>? = nil
-        ) {
-            let t = edgeThickness
-            let w = max(dimensions.x, 0.001)
-            let h = max(dimensions.y, 0.001)
-            let d = max(dimensions.z, 0.001)
-            let hw = w / 2, hh = h / 2, hd = d / 2
-
-            let material = UnlitMaterial(rgb: color)
-
-            // Container entity carries the RoomPlan transform
-            let container = Entity()
-            container.transform = Transform(matrix: transform)
-
-            // Lift surface outlines toward the camera along the surface's normal.
-            // RoomPlan surfaces are thin slabs whose normal is the local axis with
-            // the smallest dimension; flip it to face the camera, then offset the
-            // container in world space (parent anchor is at world origin).
-            if let camera = cameraPosition {
-                let xAxis = SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z)
-                let yAxis = SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z)
-                let zAxis = SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
-                let center = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
-
-                // Pick the local axis with the smallest extent as the slab normal.
-                var normal = zAxis
-                if d <= w && d <= h { normal = zAxis }
-                else if h <= w && h <= d { normal = yAxis }
-                else { normal = xAxis }
-                normal = simd_normalize(normal)
-
-                // Orient the normal toward the camera so the lift moves the outline
-                // in front of the wall from wherever it's currently being viewed.
-                if simd_dot(normal, camera - center) < 0 { normal = -normal }
-                container.position += normal * AppConstants.surfaceOutlineLiftDistance
-            }
-
-            // 12 edges: 4 along each axis
-            // Edges along X (width) — at the 4 vertical corners
-            let xEdge = MeshResource.generateBox(width: w, height: t, depth: t)
-            for (y, z) in [(-hh, -hd), (-hh, hd), (hh, -hd), (hh, hd)] as [(Float, Float)] {
-                let e = ModelEntity(mesh: xEdge, materials: [material])
-                e.position = SIMD3(0, y, z)
-                container.addChild(e)
-            }
-
-            // Edges along Y (height) — at the 4 horizontal corners
-            let yEdge = MeshResource.generateBox(width: t, height: h, depth: t)
-            for (x, z) in [(-hw, -hd), (-hw, hd), (hw, -hd), (hw, hd)] as [(Float, Float)] {
-                let e = ModelEntity(mesh: yEdge, materials: [material])
-                e.position = SIMD3(x, 0, z)
-                container.addChild(e)
-            }
-
-            // Edges along Z (depth) — at the 4 remaining corners
-            let zEdge = MeshResource.generateBox(width: t, height: t, depth: d)
-            for (x, y) in [(-hw, -hh), (-hw, hh), (hw, -hh), (hw, hh)] as [(Float, Float)] {
-                let e = ModelEntity(mesh: zEdge, materials: [material])
-                e.position = SIMD3(x, y, 0)
-                container.addChild(e)
-            }
-
-            parent.addChild(container)
         }
 
         // MARK: - Coverage Overlay (3D Occlusion)
@@ -1375,6 +1355,17 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
+            memDiagFrameCount &+= 1 // [MemDiag] frames/sample → measured FPS (the "visible slowdown")
+            prodFrameCount &+= 1    // production fps → capacity bar (ungated)
+
+            // [MemDiag] First frame carrying a segmentation buffer = the person-segmentation CoreML
+            // model (enabled by the privacy filter / analysis mode) is loaded and resident. The delta
+            // vs the preceding RECORD-START marker ≈ the model-load cost. See loggedSegModelReady.
+            if PerfDiag.enabled, frame.segmentationBuffer != nil,
+               loggedSegModelReady.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged {
+                PerfDiag.log("[MemDiag] EVENT SEG-READY \(memMarker())")
+            }
+
             // Pre-recording relocalization/alignment phase driver (no-op outside those phases).
             driveAlignmentPhase(frame)
 
@@ -1667,7 +1658,6 @@ struct ARCoverageView: UIViewRepresentable {
                 self?.anchorVertexCounts.removeAll()
                 self?.anchorFaceCounts.removeAll()
             }
-            removeRoomPlanOutlines()
         }
 
         private func updateStats(in session: ARSession) {
@@ -1677,8 +1667,25 @@ struct ARCoverageView: UIViewRepresentable {
             // queue, so this timestamp needs no synchronization. Resets (on stop) write
             // scanStats directly and bypass this path, so they remain immediate.
             let now = Date()
-            guard now.timeIntervalSince(lastStatsUpdateTime) >= statsUpdateInterval else { return }
+            let wasFirstSample = lastStatsUpdateTime == .distantPast // reset() seeds .distantPast
+            let fpsElapsed = now.timeIntervalSince(lastStatsUpdateTime) // window since last publish
+            guard fpsElapsed >= statsUpdateInterval else { return }
             lastStatsUpdateTime = now
+
+            // PRODUCTION fps → capacity bar (ungated). Frames this window / elapsed, EMA-smoothed
+            // (~sub-second) so a single stall doesn't slam the bar but a sustained drop does. updateStats
+            // is driven by frame callbacks, so when fps craters this fires less often and the window
+            // widens — the ratio stays correct, and a genuine multi-second stall MUST decay the EMA
+            // (that stall is the signal). So we skip only the first post-reset sample (huge .distantPast
+            // gap) and app-suspend-scale gaps (>10s, frames paused, not slow); everything in between
+            // — including a 2–8s hang — folds in and correctly drops fpsPressure.
+            let frames = prodFrameCount
+            prodFrameCount = 0
+            if !wasFirstSample, fpsElapsed > 0, fpsElapsed < 10 {
+                let instantFPS = Double(frames) / fpsElapsed
+                smoothedFPSValue = smoothedFPSValue <= 0 ? instantFPS : smoothedFPSValue * 0.8 + instantFPS * 0.2
+            }
+            let smoothedFPS = smoothedFPSValue
 
             // ── Extract worldMappingStatus in a tight scope ──
             // Only read the enum value; do NOT iterate frame.anchors or access
@@ -1704,12 +1711,49 @@ struct ARCoverageView: UIViewRepresentable {
             let anchorCount = anchorVertexCounts.count
             let totalUpdates = anchorUpdateCounts.values.reduce(0, +)
 
-            // Compute capacity metrics
+            // Compute capacity metrics. ONE TASK_VM_INFO fetch → footprint + resident + compressed
+            // (the perfDiag block below reuses vm.* instead of re-issuing the same syscall per field).
             let duration = Date().timeIntervalSince(sessionStartTime)
-            let memoryMB = ScanStats.currentMemoryUsageMB()
+            let vm = ScanStats.currentVMInfoMB()
+            let memoryMB = vm.resident
+            let footprintMB = vm.footprint                            // capacity bar: true ceiling
+            let availableMB = ScanStats.currentAvailableMemoryMB()
             let drift: Double = totalTrackingUpdates > 0
                 ? min(Double(trackingDegradationCount) / Double(totalTrackingUpdates), 1.0)
                 : 0
+
+            // ── [MemDiag] RoomPlan memory timeline (perfDiag-gated, ~1 Hz) ──
+            // Runs on the ARSession delegate queue, so anchor{Vertex,Face}Counts are read safely
+            // here (same queue that mutates them). Logs phys_footprint (the OOM metric) + resident
+            // + mesh size + RoomPlan on/off so the ON-vs-OFF A/B can attribute the peak to RoomPlan
+            // vs. the co-resident mesh. rp is read from the toggle (thread-safe), not the session ptr.
+            if PerfDiag.enabled, now.timeIntervalSince(lastMemDiagLogTime) >= memDiagLogInterval {
+                // FPS over the elapsed window (capture BEFORE bumping lastMemDiagLogTime). Thermal
+                // state is the SoC throttle level — the CPU/compute limit, distinct from the OOM limit.
+                let elapsed = now.timeIntervalSince(lastMemDiagLogTime)
+                let fps = elapsed > 0 && elapsed < 1000 ? Double(memDiagFrameCount) / elapsed : 0
+                memDiagFrameCount = 0
+                lastMemDiagLogTime = now
+                let footprint = footprintMB                        // reuse the single VM-info fetch above
+                let compressed = vm.compressed                     // rising = compressor churn (slowdown suspect)
+                let avail = availableMB                            // headroom to THIS device's jetsam limit
+                let cpu = ScanStats.currentCPUUsagePercent()
+                let rpOn = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
+                let thermal: String
+                switch ProcessInfo.processInfo.thermalState {
+                case .nominal: thermal = "nominal"
+                case .fair: thermal = "fair"
+                case .serious: thermal = "serious"
+                case .critical: thermal = "critical"
+                @unknown default: thermal = "?"
+                }
+                PerfDiag.log(String(format: "[MemDiag] t=%.0fs footprint=%.0fMB compressed=%.0fMB avail=%.0fMB resident=%.0fMB faces=%d verts=%d anchors=%d fps=%.0f cpu=%.0f%% thermal=%@ rp=%@",
+                                    duration, footprint, compressed, avail, memoryMB, totalFaces, totalVerts, anchorCount, fps, cpu, thermal, rpOn ? "on" : "off"))
+                // Second line: per-thread CPU attribution — which subsystem/queue is burning the cores.
+                // The end-of-scan FPS collapse is compute-bound (not memory/thermal), so this is the
+                // signal that says WHICH pass to optimize. Separate line to keep the main line parseable.
+                PerfDiag.log("[MemDiag]   cpu-by-thread: \(ScanStats.currentCPUByThreadString())")
+            }
 
             DispatchQueue.main.async { [weak self] in
                 scanStats.totalVertices = totalVerts
@@ -1718,6 +1762,9 @@ struct ARCoverageView: UIViewRepresentable {
                 scanStats.sessionDuration = duration
                 scanStats.memoryUsageMB = memoryMB
                 scanStats.baselineMemoryMB = self?.baselineMemoryMB ?? memoryMB
+                scanStats.footprintMB = footprintMB      // capacity bar: avail-based memoryPressure
+                scanStats.availableMB = availableMB
+                scanStats.smoothedFPS = smoothedFPS      // capacity bar: fpsPressure
                 scanStats.driftEstimate = drift
                 scanStats.mappingStatus = statusStr
                 if anchorCount > 0 {
@@ -1727,6 +1774,19 @@ struct ARCoverageView: UIViewRepresentable {
                     scanStats.averageQuality = 0.0
                 }
             }
+        }
+
+        /// [MemDiag] one footprint+compressed+avail+resident snapshot for lifecycle event markers.
+        /// Only mach `task_info` / `os_proc_available_memory` calls → thread-safe from any queue (main /
+        /// delegate / RoomPlan). Wrapped in the `PerfDiag.log` autoclosure at every call site, so it
+        /// costs nothing when diagnostics are off. Because it carries footprint, the paired enter/exit
+        /// markers around a teardown step give the free-delta (see the teardown brackets in
+        /// CaptureView+Recording) — the cleanest per-subsystem memory attribution we have.
+        /// `fileprivate` (not `private`) so `updateUIView` (ARCoverageView struct) can bracket record-start.
+        fileprivate func memMarker() -> String {
+            String(format: "footprint=%.0fMB compressed=%.0fMB avail=%.0fMB resident=%.0fMB cpu=%.0f%%",
+                   ScanStats.currentFootprintMB(), ScanStats.currentCompressedMB(), ScanStats.currentAvailableMemoryMB(),
+                   ScanStats.currentMemoryUsageMB(), ScanStats.currentCPUUsagePercent())
         }
 
         // MARK: - Connector Markers (Track C)
@@ -2186,24 +2246,145 @@ struct ARCoverageView: UIViewRepresentable {
 
 }
 
+// MARK: - Deferred RoomPlan Build  [DEFERRED-ROOMPLAN]
+
+/// [DEFERRED-ROOMPLAN] grep this token for every site of the deferred-build feature: this box, the
+/// coordinator storage + currentDeferredRoomBox/awaitAndBuildDeferredRoom, startRoomPlanSession
+/// (create), startAnalysisRoomPlanSession (clear), didUpdate (recording metadata consume), didEndWith (provide),
+/// makeUIView (wire awaitDeferredRoomPlan), ScanStore.awaitDeferredRoomPlan, and the save-block build
+/// trigger in CaptureView+Recording. Only the trigger is location-bound (must run after world-map
+/// export); everything else is plumbing that stays put if the stage moves.
+///
+/// One-shot coordination box for the deferred RoomPlan reconstruction. Separates the cheap capture
+/// (stash `CapturedRoomData` at `didEndWith`) from the expensive reconstruction (`RoomBuilder`), so
+/// the build can be triggered by the save pipeline AFTER every pose-sensitive step (mesh snapshot +
+/// world-map export) is finished — RoomBuilder never competes with pose capture for CPU.
+///
+/// A fresh box is created per recording (in `startRoomPlanSession`). `provide` is called once on the
+/// RoomPlan delegate queue; `buildRoom` is called once on the save's BACKGROUND queue and blocks only
+/// that queue (never main) while it waits for the data and runs the offline reconstruction.
+final class DeferredRoomBuild: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data: CapturedRoomData?
+    private let dataReady = DispatchSemaphore(value: 0)
+    private var signaled = false
+    private var abandoned = false
+
+    /// Stash the captured data (RoomPlan delegate queue). Cheap — no reconstruction.
+    func provide(_ data: CapturedRoomData) {
+        lock.lock()
+        // If buildRoom already gave up (data-wait timeout), a late didEndWith would otherwise leave a
+        // potentially large CapturedRoomData buffer lingering in the box until the next recording. Drop it.
+        if abandoned { lock.unlock(); return }
+        self.data = data
+        let first = !signaled
+        signaled = true
+        lock.unlock()
+        if first { dataReady.signal() }
+    }
+
+    /// Wait (bounded) for the captured data, then run `RoomBuilder` (offline reconstruction) and
+    /// return the room. Call from a background queue AFTER pose-sensitive capture; blocks that queue
+    /// only. Returns nil on timeout or reconstruction failure (→ scan saves without a room, no hang).
+    func buildRoom(timeout: TimeInterval) -> CapturedRoom? {
+        // TWO separate waits. The CapturedRoomData is provided at didEndWith (fires at Stop, well before
+        // the save reaches here), so wait only briefly for it: if RoomPlan produced nothing this scan
+        // (cold/failed session, didEndWith never fired) bail FAST instead of blocking the save queue for
+        // the whole reconstruction timeout. The reconstruction itself then gets the full `timeout`.
+        let dataWait = AppConstants.roomPlanDataWaitSeconds
+        guard dataReady.wait(timeout: .now() + dataWait) == .success else {
+            // Abandon the box so a late provide() (didEndWith firing after we gave up) discards its buffer
+            // instead of stranding it in memory; drop anything a race already stashed.
+            lock.withLock { abandoned = true; data = nil }
+            Self.log.warning("Deferred RoomPlan: no CapturedRoomData within \(Int(dataWait))s — RoomPlan produced nothing this scan; saving without a room")
+            return nil
+        }
+        // Take the data AND release the box's reference: RoomBuilder holds `captured` for the build, so
+        // once we hand it off the (potentially large) CapturedRoomData buffer frees when this returns
+        // instead of lingering in the box until the next recording.
+        guard let captured = lock.withLock({ defer { data = nil }; return data }) else { return nil }
+
+        // [MemDiag] Bracket RoomBuilder to quantify the deferred build's save-time overhead — the cost
+        // run 3 (skip-consume + drop) never paid. wall = latency added to the save; cpu-seconds ÷ wall
+        // = average cores busy; footprintΔ = its transient working set. Runs after OBJ/colorize, so the
+        // app's CPU in this window is dominated by RoomBuilder (a fair attribution). The CPU/footprint
+        // reads walk the thread list / hit task_info, so gate them behind PerfDiag so the production save
+        // path stays syscall-free.
+        let diag = PerfDiag.enabled
+        let wall0 = Date()
+        let cpu0 = diag ? ScanStats.currentCPUTimeSeconds() : 0
+        let foot0 = diag ? ScanStats.currentFootprintMB() : 0
+        if diag { PerfDiag.log(String(format: "[MemDiag] EVENT RP-BUILD-START footprint=%.0fMB", foot0)) }
+
+        let done = DispatchSemaphore(value: 0)
+        let result = ResultBox()
+        let task = Task.detached {
+            defer { done.signal() }
+            result.value = try? await RoomBuilder(options: [.beautifyObjects]).capturedRoom(from: captured)
+        }
+        let timedOut = done.wait(timeout: .now() + timeout) == .timedOut
+        // Read result.value ONLY when done was signaled (!timedOut). On timeout the detached Task may
+        // STILL be writing result.value (cooperative cancel doesn't guarantee it stopped), so touching
+        // it here would be a data race — treat a timeout as no-room without reading the box.
+        let builtRoom = timedOut ? nil : result.value
+        if timedOut {
+            // Cancel so a runaway RoomBuilder can't keep burning CPU/memory after the save moved on.
+            task.cancel()
+            Self.log.warning("Deferred RoomBuilder exceeded \(Int(timeout))s — cancelled; saving without a room")
+        }
+
+        if diag {
+            let wall = Date().timeIntervalSince(wall0)
+            let cpuSecs = ScanStats.currentCPUTimeSeconds() - cpu0
+            let foot1 = ScanStats.currentFootprintMB()
+            PerfDiag.log(String(format: "[MemDiag] EVENT RP-BUILD-END wall=%.1fs cpu=%.1fs (%.0f%% of 1 core)"
+                                + " footprint=%.0fMB (Δ%+.0f) built=%@%@",
+                                wall, cpuSecs, wall > 0.01 ? cpuSecs / wall * 100 : 0, foot1, foot1 - foot0,
+                                builtRoom == nil ? "NO" : "yes", timedOut ? " (TIMEOUT→cancelled)" : ""))
+        }
+        return builtRoom
+    }
+
+    /// Always-on (NOT perfDiag-gated) logger for the two failure paths above, so a real RoomPlan
+    /// stall/no-data is diagnosable in the field without Developer Mode.
+    private static let log = Logger(subsystem: PerfDiag.subsystem, category: "roomplan")
+    private final class ResultBox: @unchecked Sendable { var value: CapturedRoom? }
+}
+
 // MARK: - RoomCaptureSessionDelegate
 
 /// RoomPlan delegate — receives real-time room structure updates. Runs on arbitrary queue.
 extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
     func captureSession(_ session: RoomCaptureSession, didUpdate room: CapturedRoom) {
-        // This delegate runs on an arbitrary queue. latestCapturedRoom is read on main
-        // (stopRoomPlanSession / renderRoomPlanOutlines) and finalCapturedRoomBinding is a SwiftUI
-        // @Binding, so both must be touched on main — hop once and do all three together.
+        // This delegate runs on an arbitrary queue; latestCapturedRoom / the SwiftUI binding are
+        // main-only, so hop once.
+        //
+        // DEFERRED BUILD: recording mode consumes the live room ONLY for cheap metadata (semantic
+        // classes for the HUD/saved data + the room handed to ScanCoach) — NOT the outline geometry.
+        // Building outlines (RealityKit mesh per surface every update) was the ~215 MB of contested
+        // during-scan footprint that competed with VIO; that's gone. The export-quality room is
+        // reconstructed by RoomBuilder from CapturedRoomData AFTER the scan (see below) — a better
+        // model, built when tracking is done and there's nothing to starve. Analysis mode (pre-scan
+        // SpaceAnalyzer) consumes the full room live: it's short, runs before the heavy mesh scan.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.latestCapturedRoom = room
             if self.isAnalysisRoomPlan {
-                // Analysis mode: push to scanStats for SpaceAnalyzer, skip outline rendering
+                self.latestCapturedRoom = room
                 self.scanStats?.analysisRoom = room
             } else {
-                // Recording mode: push to CaptureView for export + render outlines
+                // [DEFERRED-ROOMPLAN] Tier-2 recording-mode consume: feed the live room to ScanCoach
+                // (finalCapturedRoom) and extract semantic classes for the HUD + saved metadata — but
+                // NOT the outline geometry (that was the ~215MB the migration removed). The live room
+                // is overwritten at save by the RoomBuilder reconstruction (better geometry for export).
+                self.latestCapturedRoom = room   // so stopRoomPlanSession's finalCapturedRoom hand-off isn't nil'd
                 self.finalCapturedRoomBinding?.wrappedValue = room
-                self.renderRoomPlanOutlines()
+                self.extractRoomMetadata(from: room)
+                if self.loggedRoomPlanReady.compareExchange(expected: false, desired: true, ordering: .relaxed).exchanged {
+                    // [MemDiag] First recording-mode room update = RoomPlan's CoreML models have run
+                    // once and are resident. RP-START→RP-READY delta ≈ model-load cost (mesh still
+                    // near-empty this early, so the delta is RoomPlan-dominated). See loggedRoomPlanReady.
+                    PerfDiag.log("[MemDiag] EVENT RP-READY \(self.memMarker())")
+                }
             }
         }
     }
@@ -2214,6 +2395,16 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
         } else {
             PerfDiag.log("RoomPlan session ended cleanly")
         }
+        PerfDiag.log("[MemDiag] EVENT RP-DIDEND \(memMarker())")
+
+        // [DEFERRED-ROOMPLAN] step 1 — STASH ONLY (no reconstruction here). RoomBuilder is deliberately
+        // NOT run at didEndWith: the world-map export (getCurrentWorldMap, the pose-sensitive save
+        // step) runs slightly LATER than this callback, so building here would peg CPU during that
+        // capture and risk a drifted/degraded world map. Instead we just hand the raw CapturedRoomData
+        // to the box; the save pipeline triggers the actual build AFTER all pose-sensitive capture is
+        // done (see CaptureView+Recording). `provide` is a no-op if no recording box exists
+        // (analysis-mode / RoomPlan-off), so those ends are ignored.
+        currentDeferredRoomBox()?.provide(data)
     }
 
     func captureSession(_ session: RoomCaptureSession, didStartWith configuration: RoomCaptureSession.Configuration) {

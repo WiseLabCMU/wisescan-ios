@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.hideLivePoints) private var hideLivePoints: Bool = AppConstants.hideLivePoints
     @AppStorage(AppConstants.Key.perfDiagnostics) private var perfDiagnostics: Bool = AppConstants.perfDiagnostics
     @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
+    @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
@@ -213,6 +214,9 @@ struct SettingsView: View {
                     .listRowBackground(Color.white.opacity(0.05))
 
                     // MARK: - Semantic Classes
+                    // NOTE: post deferred-build migration these no longer gate LIVE outlines (we don't
+                    // render them during capture) — the selection now controls semantic-class visibility
+                    // in the saved-map / mesh-preview viewer. Kept for that reason.
                     Section {
                         ForEach(SemanticClass.allCases.filter { $0 != .none }, id: \.rawValue) { cls in
                             if cls.isConfigurable {
@@ -261,9 +265,9 @@ struct SettingsView: View {
                             }
                         }
                     } header: {
-                        Text("SEMANTIC SCAN OUTLINE VISIBILITY")
+                        Text("SEMANTIC CLASS VISIBILITY")
                     } footer: {
-                        Text("Choose which semantic classes are shown as outlines during AR/VR capture. All classes are always collected for export. Mesh previews show all detected classes.")
+                        Text("Choose which semantic classes are shown in saved-map and mesh previews. All classes are always collected for export.")
                             .font(.caption2)
                             .foregroundColor(.gray)
                     }
@@ -393,6 +397,18 @@ struct SettingsView: View {
                                     Text("Pause VR Compute")
                                         .foregroundColor(.white)
                                     Text("Skips the entire VR GPU pipeline (point-cloud projection, voxel integration, extraction, and bloom) — not just hides it. Isolation test: if the freeze disappears with this on, the GPU pipeline is implicated. Applied per frame in VR capture.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $memDiagForceReclaim) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("MemDiag Force Reclaim")
+                                        .foregroundColor(.white)
+                                    Text("Memory attribution only. Forces freed pages back to the OS before [MemDiag] teardown snapshots so free-deltas reflect real reclaim, not cached pages. Expensive — leave OFF except when profiling. Needs Perf Diagnostics on.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

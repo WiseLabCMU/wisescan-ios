@@ -1,8 +1,10 @@
 # SwiftLint configuration for wisescan-ios
 
-line_length:
-  warning: 140
-  error: 200
+# line_length disabled: the codebase deliberately uses long single-line doc comments and inline
+# SwiftUI Text descriptions, which produced pervasive noise with no real signal. Turned off rather
+# than raising the threshold so no one has to reflow prose to satisfy the linter.
+disabled_rules:
+  - line_length
 
 excluded:
   - fastlane                       # Fastlane-generated helpers

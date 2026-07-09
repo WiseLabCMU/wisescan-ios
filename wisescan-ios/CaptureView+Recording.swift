@@ -2,6 +2,7 @@ import SwiftUI
 import ARKit
 import RealityKit
 import SwiftData
+import RoomPlan
 import os
 
 // MARK: - Recording Controls
@@ -109,16 +110,69 @@ extension CaptureView {
     func stopRecording(force: Bool = false) {
         // ── Extract all AR data BEFORE switching to nominal mode ──
         // (Setting isRecording = false triggers ARCoverageView to drop mesh anchors)
-        // Validate mapping status before allowing save (skip when force-stopping, e.g. onDisappear)
-        if !force && !scanStats.hasEnoughFeaturesForRelocalization {
-            showInsufficientTrackingAlert = true
+        //
+        // Force path (onDisappear teardown): NO gates, NO waits — it must never hang or block teardown.
+        if force {
+            recordingTimer?.invalidate()
+            recordingTimer = nil
+            performStopRecording()
             return
         }
 
-        recordingTimer?.invalidate()
-        recordingTimer = nil
+        // Re-entrancy guard for the async settle below. The record button stays live until
+        // performStopRecording claims isProcessingMesh, so without this a second tap during the
+        // hold-steady window would launch a second stop.
+        guard !isProcessingMesh && !isWaitingToSave && !isStabilizingBeforeSave else { return }
+        isStabilizingBeforeSave = true
 
-        performStopRecording()
+        // TWO GATES, reconciled. They guard DIFFERENT failures, so we keep both — and order matters:
+        //
+        //  (1) HOLD STEADY (new, soft): wait (bounded) for tracking == .normal so the mesh snapshot +
+        //      world-map export aren't captured mid-drift (handheld motion toward the Stop button).
+        //      Runs FIRST — deliberately — because it also DE-FLICKERS gate (2): mappingStatus is read
+        //      from the current frame, so a transient .limited at Stop can momentarily knock it off
+        //      "mapped" and FALSE-REJECT a genuinely good scan. Settling first makes gate (2) read a
+        //      stable state. It's SOFT: on timeout we fall through (the scan's data is already frozen,
+        //      the saved mesh re-pins on ARKit corrections, and the world-map export has its own hard
+        //      failure reprompt) — we never hard-reject a completed scan for failing to hold still.
+        //
+        //  (2) FEATURE GATE (existing, hard): require a "mapped" world map — a scan that can't
+        //      relocalize later isn't worth saving. Unchanged behavior (keep recording + prompt to map
+        //      more on failure), just evaluated AFTER the settle instead of on a possibly-dipped state.
+        //
+        // force bypasses BOTH (above). The direct performStopRecording() paths (extend / programmatic)
+        // are unaffected — they stabilize at their START via awaitStabilizationAndPlacePinB.
+        Task { @MainActor in
+            defer { isStabilizingBeforeSave = false }
+
+            _ = await awaitTrackingNormalForSave() // (1) soft settle
+
+            guard scanStats.hasEnoughFeaturesForRelocalization else { // (2) hard gate, post-settle
+                saveMessage = nil
+                showInsufficientTrackingAlert = true
+                return
+            }
+
+            recordingTimer?.invalidate()
+            recordingTimer = nil
+            performStopRecording()
+        }
+    }
+
+    /// Best-effort "hold steady" settle before the save pose is captured. Polls up to
+    /// `stabilizationMaxPolls` for tracking `.normal` so the mesh snapshot + world-map export aren't
+    /// taken mid-drift. Returns whether it settled; the caller proceeds regardless on timeout (see the
+    /// SOFT rationale in stopRecording). Silent in the common case — the message only shows if tracking
+    /// isn't already `.normal` on entry.
+    @MainActor
+    private func awaitTrackingNormalForSave() async -> Bool {
+        if currentARSession?.currentFrame?.camera.trackingState == .normal { return true }
+        saveMessage = "Hold steady — saving…"
+        for _ in 0..<AppConstants.stabilizationMaxPolls {
+            try? await Task.sleep(for: .milliseconds(AppConstants.stabilizationPollIntervalMs))
+            if currentARSession?.currentFrame?.camera.trackingState == .normal { return true }
+        }
+        return false
     }
 
     /// Resolves the current location name from the model context.
@@ -182,16 +236,12 @@ extension CaptureView {
         let currentFrame = currentARSession?.currentFrame
         let meshSnapshot = ARCoverageView.snapshotMeshBuffers(from: currentFrame, privacyFilter: isPrivacyFilterOn)
 
-        // FIX (semantic ↔ mesh ~90° drift): snapshot the CapturedRoom NOW, co-temporal with the mesh
-        // export above, and write THIS snapshot below — never the live finalCapturedRoom. RoomPlan
-        // keeps running and re-basing the room through the post-Stop window (the user turning + ARKit
-        // re-initializing tracking), and the roomplan write happens LATE (after the world-map export +
-        // an async color-gen hop). Reading the live room there captured the drifted frame and rotated
-        // the saved semantics ~90° off the Stop-frozen mesh — intermittently, a timing race (sometimes
-        // the read landed before the re-base, sometimes after). Pinning the room to the mesh's instant
-        // makes mesh + semantics share one world frame every time. CapturedRoom is a value type, so
-        // this copy is an immutable freeze, unaffected by later RoomPlan didUpdate callbacks.
-        let capturedRoomAtStop = finalCapturedRoom
+        // DEFERRED ROOMPLAN BUILD: we no longer snapshot a live CapturedRoom here — recording stopped
+        // consuming the live incremental room (it cost ~215 MB of contested during-scan memory and
+        // competed with VIO). The room is now reconstructed by RoomBuilder from CapturedRoomData in the
+        // background save block below, triggered AFTER the world-map export so its CPU can't perturb
+        // the pose-sensitive capture. The old semantic↔mesh ~90° drift race is gone with the live
+        // consume: RoomBuilder reconstructs in the world frame the scan was captured in, once, at end.
 
         // Now that the room is snapshotted (and the mesh frozen above), end the recording-mode RoomPlan
         // session immediately rather than waiting for updateUIView's nominal-downgrade branch — which the
@@ -349,6 +399,27 @@ extension CaptureView {
 
                 let vertexColors = VertexColorAccumulator.generateNormalsColors(objData: result.data)
 
+                // ┌── [DEFERRED-ROOMPLAN] BUILD TRIGGER (movable unit) ───────────────────────────────
+                // Run RoomBuilder HERE, off-main, only now: this is past the world-map export
+                // (getCurrentWorldMap ran earlier in exportWorldMapThenContinue) and past the OBJ build
+                // + colorize above, so RoomBuilder's compute overlaps NOTHING pose-sensitive and doesn't
+                // stack onto the save's heaviest passes. Blocks only this background queue (bounded);
+                // nil if RoomPlan was off / failed / timed out → save proceeds without a room rather
+                // than hang. The reconstructed room lands in the temp raw dir BEFORE saveScan moves it,
+                // so roomplan.json stays atomic with the scan.
+                //
+                // TO RELOCATE (separate RoomPlan stage before mesh reconstruction): the build itself is
+                // location-independent — DeferredRoomBuild.buildRoom() self-contains the wait+build, so
+                // moving this stage is just moving this call. THE ONE HARD CONSTRAINT: it must still run
+                // AFTER the world-map export, or RoomBuilder's CPU can perturb the pose-sensitive
+                // capture (the whole reason it was deferred). grep "[DEFERRED-ROOMPLAN]" for all sites.
+                // Keyed on the deferred BOX existing (created at record-start iff RoomPlan was on),
+                // NOT the live semanticLabeling toggle: keying on the toggle would discard a real
+                // capture if the user flipped RoomPlan off mid-scan. awaitDeferredRoomPlan returns nil
+                // fast when no box exists (RoomPlan was off), so this is safe to always call.
+                let builtRoom: CapturedRoom? = self.scanStore.awaitDeferredRoomPlan?(AppConstants.roomBuilderTimeoutSeconds)
+                // └── [DEFERRED-ROOMPLAN] end build trigger ─────────────────────────────────────────
+
                 DispatchQueue.main.async {
                     // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping.
                     if let rawDir = rawDataPath {
@@ -356,12 +427,12 @@ extension CaptureView {
                         try? result.data.write(to: meshFileURL)
                         let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
                         try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
-                        // Write roomplan.json + roomplan_raw.json from the room SNAPSHOT taken at mesh
-                        // export (capturedRoomAtStop) — NOT the live finalCapturedRoom, which RoomPlan
-                        // keeps re-basing through the post-Stop window. This pins the saved semantics to
-                        // the mesh's world frame. See the snapshot rationale at the top of this method.
-                        if let room = capturedRoomAtStop {
+                        // Write roomplan.json + roomplan_raw.json from the RoomBuilder reconstruction
+                        // (deferred, built above from CapturedRoomData in the scan's own world frame).
+                        if let room = builtRoom {
                             RoomPlanExporter.writeRoomPlan(room, to: rawDir)
+                            // Surface the room to the preview / ScanCoach (post-scan, not live).
+                            self.finalCapturedRoom = room
                         }
                     }
 
