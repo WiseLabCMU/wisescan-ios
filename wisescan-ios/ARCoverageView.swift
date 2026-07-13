@@ -339,19 +339,13 @@ struct ARCoverageView: UIViewRepresentable {
         if recordingChanged {
             context.coordinator.isRecording.store(isRecording, ordering: .relaxed)
             if isRecording {
-                // Upgrade to full scene reconstruction — preserve world map for coordinate continuity
-                let config = ARWorldTrackingConfiguration()
-                if Self.supportsLiDAR {
-                    // RoomPlan handles semantic labeling; ARKit only needs raw mesh for reconstruction.
-                    config.sceneReconstruction = .mesh
-                }
-                config.environmentTexturing = .automatic
-                // Preserve the relocalized coordinate system by keeping the world map
-                if let mapURL = initialWorldMapURL,
-                   let data = try? Data(contentsOf: mapURL),
-                   let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
-                    config.initialWorldMap = worldMap
-                }
+                // Upgrade to full scene reconstruction via makeConfiguration — ensures
+                // consistent video format (avoiding a 30fps→60fps switch that confuses
+                // Recon3D's internal SLAM on some devices, e.g. M2 iPad Pro).
+                let config = Self.makeConfiguration(
+                    enableMeshReconstruction: true,
+                    worldMapURL: initialWorldMapURL
+                )
                 if privacyFilter, ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
                     config.frameSemantics.insert(.personSegmentationWithDepth)
                 }
@@ -2289,25 +2283,19 @@ struct ARCoverageView: UIViewRepresentable {
             // Dev override: user selected a specific format in settings
             config.videoFormat = formats[preferredIndex]
         } else {
-            let appleRecommendation = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution
-            if let fourK = appleRecommendation,
-               !fourK.isRecommendedForHighResolutionFrameCapturing {
-                // Apple says this 4K format is safe for continuous AR (non-hiRes).
+            // Pick highest resolution standard (non-hiRes) format at 30fps.
+            // hiRes formats use 16:9 on iPads (3840×2160) which breaks Recon3D
+            // mesh integration (vio_initialized never clears → zero mesh).
+            let best30 = formats
+                .filter { $0.framesPerSecond == 30 && !$0.isRecommendedForHighResolutionFrameCapturing }
+                .max(by: { $0.imageResolution.width * $0.imageResolution.height
+                         < $1.imageResolution.width * $1.imageResolution.height })
+            if let best = best30 {
+                config.videoFormat = best
+            } else if let fourK = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
                 config.videoFormat = fourK
-            } else {
-                // Apple's pick is hiRes or unavailable — use highest standard 30fps.
-                let standard30 = formats
-                    .filter { $0.framesPerSecond == 30 && !$0.isRecommendedForHighResolutionFrameCapturing }
-                    .max(by: { $0.imageResolution.width * $0.imageResolution.height
-                             < $1.imageResolution.width * $1.imageResolution.height })
-                if let best = standard30 {
-                    config.videoFormat = best
-                } else if let fourK = appleRecommendation {
-                    // Last resort: hiRes is better than ARKit's default
-                    config.videoFormat = fourK
-                }
-                // else: keep ARKit default
             }
+            // else: keep ARKit default
         }
 
         let fmt = config.videoFormat
