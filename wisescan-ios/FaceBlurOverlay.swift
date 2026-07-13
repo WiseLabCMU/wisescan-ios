@@ -435,7 +435,7 @@ enum PrivacyBlurUtil {
     /// is what keeps the saved `face_anchors` from fragmenting into widely-spaced anchors that the
     /// 3D merge radius (~body width) can't rejoin once they've unprojected onto separate body parts.
     /// Cheap: one strided pass + a tiny connected-components merge over the ≤48-cell grid.
-    private nonisolated static func personCentroids(in mask: CVPixelBuffer) -> [CGPoint] {
+    nonisolated static func personCentroids(in mask: CVPixelBuffer) -> [CGPoint] {
         CVPixelBufferLockBaseAddress(mask, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(mask) else { return [] }

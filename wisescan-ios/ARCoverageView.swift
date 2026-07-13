@@ -2249,6 +2249,47 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
         config.environmentTexturing = .automatic
+
+        // ── Video format selection ──
+        // Default to the highest available resolution at 30fps for best downstream
+        // splat quality without overwhelming the capture pipeline. 60fps doubles
+        // frame delivery rate but doesn't improve mesh reconstruction or VIO — it
+        // only increases backpressure on the ioQueue (privacy blur, JPEG encode,
+        // depth PNG), which starves ARKit's frame pool on older devices (A12Z).
+        // Dev settings can override via videoFormatIndex.
+        let formats = ARWorldTrackingConfiguration.supportedVideoFormats
+        let preferredIndex = UserDefaults.standard.integer(forKey: AppConstants.Key.videoFormatIndex)
+        if preferredIndex > 0, preferredIndex < formats.count {
+            // Dev override: user selected a specific format in settings
+            config.videoFormat = formats[preferredIndex]
+        } else {
+            // Pick highest resolution at 30fps. Sort by pixel count descending,
+            // filter to 30fps, take first. Falls back to 4K API if no 30fps
+            // format found (shouldn't happen — every device has 30fps options).
+            let best30 = formats
+                .filter { $0.framesPerSecond == 30 }
+                .max(by: { $0.imageResolution.width * $0.imageResolution.height
+                         < $1.imageResolution.width * $1.imageResolution.height })
+            if let best = best30 {
+                config.videoFormat = best
+            } else if let fourK = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
+                config.videoFormat = fourK
+            }
+            // else: keep ARKit default
+        }
+
+        let fmt = config.videoFormat
+        print("[ARConfig] Selected video format: \(Int(fmt.imageResolution.width))×\(Int(fmt.imageResolution.height)) @ \(fmt.framesPerSecond)fps")
+
+        // Log all available formats once for device compatibility diagnostics
+        if PerfDiag.enabled {
+            for (i, f) in formats.enumerated() {
+                let tag = f == config.videoFormat ? " ◀ SELECTED" : ""
+                let hiRes = f.isRecommendedForHighResolutionFrameCapturing ? " [hiRes]" : ""
+                print("[ARConfig]   [\(i)] \(Int(f.imageResolution.width))×\(Int(f.imageResolution.height)) @ \(f.framesPerSecond)fps\(hiRes)\(tag)")
+            }
+        }
+
         if let mapURL = worldMapURL,
            let data = try? Data(contentsOf: mapURL),
            let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {

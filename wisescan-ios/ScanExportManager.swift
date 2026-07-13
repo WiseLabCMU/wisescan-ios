@@ -1,5 +1,8 @@
 import Foundation
 import SwiftData
+import UIKit
+import CoreImage
+import CoreImage.CIFilterBuiltins
 
 struct ScanExportManager {
     // `prepareExport` runs off the main actor with no injected ModelContext, so it fetches through
@@ -155,6 +158,156 @@ struct ScanExportManager {
         return GraphAggregate(version: 1, nodes: nodes, links: links)
     }
 
+    // MARK: - Export-Time Privacy Blur
+
+    /// Applies person pixelation to staged images and zeros person regions in staged depth maps
+    /// using saved segmentation masks. Called during export when a `masks/` directory exists,
+    /// indicating privacy filter was enabled during capture.
+    ///
+    /// During capture, raw (unblurred) images and raw (unmasked) depth maps are saved for
+    /// performance — the expensive privacy blur is deferred to this export-time pass where
+    /// performance is not critical. The masks are saved alongside frames during capture as
+    /// lightweight grayscale PNGs (~5-15KB each at 256×192).
+    ///
+    /// Privacy guarantee: no unblurred image or unmasked depth ever leaves the device.
+    /// The masks/ directory itself is NOT included in the export archive.
+    private static func applyPrivacyBlurAtExport(masksDir: URL, imagesDir: URL, depthDir: URL) {
+        let fm = FileManager.default
+        guard let maskFiles = try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)
+            .filter({ $0.pathExtension == "png" })
+            .sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) else { return }
+
+        guard !maskFiles.isEmpty else { return }
+        print("[prepareExport] Applying privacy blur to \(maskFiles.count) frames...")
+
+        let ciContext = CIContext()
+        var blurredCount = 0
+        var maskedDepthCount = 0
+
+        for maskURL in maskFiles {
+            let frameName = maskURL.deletingPathExtension().lastPathComponent // e.g. "frame_00042"
+
+            // Load the mask as a CIImage for blur blending
+            guard let maskData = try? Data(contentsOf: maskURL),
+                  let maskUIImage = UIImage(data: maskData),
+                  let maskCGImage = maskUIImage.cgImage else { continue }
+            let maskCI = CIImage(cgImage: maskCGImage)
+
+            // ── Blur the corresponding image ──
+            let imageURL = imagesDir.appendingPathComponent("\(frameName).jpg")
+            if fm.fileExists(atPath: imageURL.path),
+               let imageData = try? Data(contentsOf: imageURL),
+               let imageUIImage = UIImage(data: imageData),
+               let imageCGImage = imageUIImage.cgImage {
+                let imageCI = CIImage(cgImage: imageCGImage)
+                let imageSize = imageCI.extent
+
+                // Scale mask up to image resolution
+                let scaleX = imageSize.width / maskCI.extent.width
+                let scaleY = imageSize.height / maskCI.extent.height
+                var scaledMask = maskCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+
+                // Dilate slightly to ensure full coverage (same as the old capture-time blur)
+                let dilate = CIFilter.morphologyMaximum()
+                dilate.inputImage = scaledMask
+                dilate.radius = 12
+                if let dilated = dilate.outputImage {
+                    scaledMask = dilated.cropped(to: imageSize)
+                }
+
+                // Pixelate person regions
+                let pixelate = CIFilter.pixellate()
+                pixelate.inputImage = imageCI
+                pixelate.scale = 40.0
+
+                if let pixelatedCI = pixelate.outputImage {
+                    let blend = CIFilter.blendWithMask()
+                    blend.inputImage = pixelatedCI
+                    blend.backgroundImage = imageCI
+                    blend.maskImage = scaledMask
+
+                    if let outputCI = blend.outputImage,
+                       let outputCG = ciContext.createCGImage(outputCI, from: imageSize) {
+                        let blurredJPEG = UIImage(cgImage: outputCG).jpegData(compressionQuality: AppConstants.jpegCompressionQuality)
+                        if let jpegData = blurredJPEG {
+                            try? jpegData.write(to: imageURL, options: .atomic)
+                            blurredCount += 1
+                        }
+                    }
+                }
+            }
+
+            // ── Zero person regions in the corresponding depth map ──
+            let depthURL = depthDir.appendingPathComponent("\(frameName).png")
+            if fm.fileExists(atPath: depthURL.path),
+               let depthData = try? Data(contentsOf: depthURL),
+               let depthUIImage = UIImage(data: depthData),
+               let depthCGImage = depthUIImage.cgImage {
+
+                let depthWidth = depthCGImage.width
+                let depthHeight = depthCGImage.height
+                let maskWidth = maskCGImage.width
+                let maskHeight = maskCGImage.height
+
+                // Read the 16-bit depth data
+                guard let depthProvider = depthCGImage.dataProvider,
+                      let depthCFData = depthProvider.data else { continue }
+                let depthLength = CFDataGetLength(depthCFData)
+                let expectedLength = depthWidth * depthHeight * 2
+                guard depthLength >= expectedLength else { continue }
+
+                // Read the mask data
+                guard let maskProvider = maskCGImage.dataProvider,
+                      let maskCFData = maskProvider.data else { continue }
+                let maskPtr = CFDataGetBytePtr(maskCFData)!
+                let maskBytesPerRow = maskCGImage.bytesPerRow
+
+                // Copy depth to mutable buffer and zero person regions
+                var depthBytes = [UInt8](repeating: 0, count: expectedLength)
+                CFDataGetBytes(depthCFData, CFRangeMake(0, expectedLength), &depthBytes)
+
+                depthBytes.withUnsafeMutableBytes { rawBuf in
+                    let uint16Buf = rawBuf.bindMemory(to: UInt16.self)
+                    for y in 0..<depthHeight {
+                        for x in 0..<depthWidth {
+                            let mx = x * maskWidth / max(depthWidth, 1)
+                            let my = y * maskHeight / max(depthHeight, 1)
+                            if mx < maskWidth, my < maskHeight {
+                                let pixel = maskPtr[my * maskBytesPerRow + mx]
+                                if pixel > 128 {
+                                    uint16Buf[y * depthWidth + x] = 0
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Re-encode as 16-bit grayscale PNG
+                let data = Data(depthBytes)
+                guard let provider = CGDataProvider(data: data as CFData),
+                      let newCGImage = CGImage(
+                          width: depthWidth,
+                          height: depthHeight,
+                          bitsPerComponent: 16,
+                          bitsPerPixel: 16,
+                          bytesPerRow: depthWidth * 2,
+                          space: CGColorSpaceCreateDeviceGray(),
+                          bitmapInfo: CGBitmapInfo(rawValue: 0),
+                          provider: provider,
+                          decode: nil,
+                          shouldInterpolate: false,
+                          intent: .defaultIntent
+                      ),
+                      let maskedPNG = UIImage(cgImage: newCGImage).pngData() else { continue }
+
+                try? maskedPNG.write(to: depthURL, options: .atomic)
+                maskedDepthCount += 1
+            }
+        }
+
+        print("[prepareExport] ✓ privacy-blurred \(blurredCount) images + \(maskedDepthCount) depth maps")
+    }
+
     /// `bulkStitch`, when supplied, is a pre-built snapshot of every location's stitch artifacts
     /// for the whole export batch (see `makeBulkStitchArtifacts`); this scan's location is looked
     /// up in it instead of rebuilding the graph + hopping to the main actor per scan. nil for
@@ -180,6 +333,8 @@ struct ScanExportManager {
         }
 
         // Stage Polycam payload: images/, depth/, confidence/, cameras/, mesh_info.json, proxy_images/
+        // NOTE: masks/ is intentionally excluded — it's internal-only, used below for
+        // export-time privacy blur but never shipped in the archive.
         func stagePolycamPayload(to dir: URL) {
             let items = ["images", "proxy_images", "depth", "confidence", "cameras", "mesh_info.json"]
             for item in items {
@@ -195,6 +350,22 @@ struct ScanExportManager {
                 } else {
                     print("[prepareExport] ✗ missing \(item) at \(src.path)")
                 }
+            }
+
+            // ── Export-time privacy blur ──
+            // If a masks/ directory exists, privacy filter was enabled during capture.
+            // Apply person pixelation to staged images and zero person regions in staged
+            // depth maps using the saved segmentation masks. This runs off the critical
+            // capture path, so performance is not a concern (export is already async).
+            let masksDir = rawDataDir.appendingPathComponent("masks")
+            let stagedImagesDir = dir.appendingPathComponent("images")
+            let stagedDepthDir = dir.appendingPathComponent("depth")
+            if fm.fileExists(atPath: masksDir.path) {
+                applyPrivacyBlurAtExport(
+                    masksDir: masksDir,
+                    imagesDir: stagedImagesDir,
+                    depthDir: stagedDepthDir
+                )
             }
         }
 

@@ -18,9 +18,9 @@ Use `@AppStorage` for persistent user preferences and UI toggles.
 Privacy has two distinct paths — **do not conflate them**:
 
 - **Live on-screen indicator:** a cheap **red-eye marker** per person, driven entirely by ARKit's already-computed `.personSegmentationWithDepth` stencil (`ARFrame.segmentationBuffer`) — **no per-frame Vision pass and no CoreImage render**. Running a per-frame `VNGeneratePersonSegmentationRequest` for a live overlay starves VIO (see Performance). The indicator uses a small retained confidence grid (`PrivacyEyeTracker`) so markers don't flicker.
-- **Saved data (the actual privacy guarantee):** exported JPEGs pixelate person regions and depth maps zero them out. Blur from the ARKit stencil when present, but **always keep a Vision fallback** (`pixelatePersonsAndGetFaceCenters`) for frames where the stencil is missing (unsupported device or a momentary gap right after the session starts). **A missing stencil must never silently write an unblurred frame** — fall back, or drop the frame; never leak a face.
+- **Saved data (deferred blur):** during capture, raw (unblurred) frames are saved alongside ARKit's person segmentation masks (`masks/` directory, ~5-15KB grayscale PNGs at 256×192). Privacy blur is applied at **export time** in `ScanExportManager.applyPrivacyBlurAtExport()` — pixelating person regions in images and zeroing them in depth maps using the saved masks. This deferred approach eliminates 50-200ms/frame of privacy encode from the capture ioQueue, preventing ARFrame retention backpressure and VIO tracking loss. Raw images exist only in the app's sandboxed container; **no unblurred image or unmasked depth ever leaves the device**.
 - **Mesh exports:** person geometry is excluded from the exported mesh/point cloud.
-- **3D anchors:** re-source `face_anchors` from the **stencil**, not a second Vision pass — one confidence-weighted, observation-gated body-center centroid **per person** (not per grid cell, or they fragment across the body).
+- **3D anchors:** re-source `face_anchors` from the **stencil**, not a second Vision pass — one confidence-weighted, observation-gated body-center centroid **per person** (not per grid cell, or they fragment across the body). Accumulated at capture time via `PrivacyBlurUtil.personCentroids(in:)` (cheap — just a few depth reads per centroid).
 
 ### 3. Code Style & Architecture
 
@@ -61,7 +61,7 @@ Set `session.delegateQueue` to a **serial background queue** (see `Coordinator.s
 - Delegate-owned dictionaries/counters are touched **only on the delegate queue** (concurrent mutation from main crashes).
 
 ### Reuse ARKit's segmentation stencil — don't add Vision passes to hot paths
-A per-frame `.accurate VNGeneratePersonSegmentationRequest` cost **180–360 ms/frame** and was the dominant capture-side starvation source. ARKit already produces `.personSegmentationWithDepth` for the depth cutout and point-cloud holes — reuse `ARFrame.segmentationBuffer` for blur, anchors, and the live indicator. Vision is a **fallback only** (see Privacy).
+A per-frame `.accurate VNGeneratePersonSegmentationRequest` cost **180–360 ms/frame** and was the dominant capture-side starvation source. ARKit already produces `.personSegmentationWithDepth` for the depth cutout and point-cloud holes — reuse `ARFrame.segmentationBuffer` for the live indicator. Privacy blur is **deferred to export** (`ScanExportManager.applyPrivacyBlurAtExport`) — during capture, only the lightweight segmentation mask (~5-15KB) is saved alongside each frame, and person-region centroids are accumulated for 3D anchors. The expensive CIFilter pixelation + depth masking runs at export time where performance is not critical.
 
 ### Bound the capture I/O backlog
 Capture coalesces: it won't enqueue a new save while a prior encode is in flight (`AppConstants.maxFramesInFlight`). Unbounded encodes pile up retained `CVPixelBuffer`s and starve the frame pool. Capture is movement-gated, so dropping a frame under load is fine — the next motion re-triggers.

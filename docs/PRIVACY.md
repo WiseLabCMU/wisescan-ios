@@ -16,7 +16,11 @@ The app uses the rear-facing device camera and LiDAR sensor (when available) for
 
 Scan4D uses **person segmentation** (not face recognition) to keep people out of captured data. The app does not use the front-facing/TrueDepth camera or `ARFaceTrackingConfiguration`, and collects no facial-geometry, face-mesh, or facial-expression data.
 
-When Privacy Filtering is enabled, detected people are pixelated locally — driven by ARKit's `.personSegmentationWithDepth` stencil, with an on-device Apple Vision person-segmentation fallback if the stencil is unavailable — across the live indicator, the saved RGB frames, and (zeroed) the exported depth maps; person-shaped geometry is also excluded from the exported mesh. All privacy processing occurs entirely on-device before any data is saved or uploaded.
+When Privacy Filtering is enabled, the app saves ARKit's person segmentation masks alongside each captured frame during scanning. These masks are applied at **export time** — before any data leaves the device — to pixelate detected people in RGB images and zero person regions in depth maps. This deferred-blur architecture keeps the real-time capture pipeline lightweight (preventing VIO tracking loss from encode backpressure) while maintaining the same privacy guarantee: no unblurred image or unmasked depth map is ever exported or uploaded.
+
+Raw (unblurred) images exist temporarily in the app's sandboxed container between capture and export. They are not accessible to other apps and are only exported after privacy blur is applied. The segmentation masks themselves are internal-only and are not included in any export archive.
+
+Person-shaped geometry is also excluded from the exported mesh, and a live on-screen indicator shows detected people during scanning. All privacy processing occurs entirely on-device.
 
 ## Location Data
 

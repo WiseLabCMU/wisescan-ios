@@ -46,6 +46,7 @@ enum AppConstants {
         static let memDiagForceReclaim = "memDiagForceReclaim"
         static let enabledSemanticClasses = "enabledSemanticClasses"
         static let scanCoachingEnabled = "scanCoachingEnabled"
+        static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
     }
 
     // MARK: - Default Values
