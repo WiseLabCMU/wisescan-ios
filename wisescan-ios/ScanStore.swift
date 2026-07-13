@@ -924,7 +924,8 @@ class ScanFileManager {
         }
 
         // Generate 2D model preview if pose is available or default
-        if let img = MeshPreviewView.generateSnapshot(meshURL: newScan.meshFileURL, colorsURL: newScan.colorsFileURL, poseMatrix: targetLocation.imagingPoseMatrix),
+        if let img = MeshPreviewView.generateSnapshot(meshURL: newScan.meshFileURL, colorsURL: newScan.colorsFileURL, poseMatrix: targetLocation.imagingPoseMatrix,
+                                                      frameCenter: MeshPreviewView.canonicalFrameCenter(for: targetLocation)),
            let data = img.jpegData(compressionQuality: 0.8) {
             try? data.write(to: newScan.modelPreviewURL)
         }

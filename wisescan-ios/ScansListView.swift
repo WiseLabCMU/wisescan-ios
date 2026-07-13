@@ -662,6 +662,7 @@ struct ScansListView: View {
             let colorsURL: URL
             let previewURL: URL
             let pose: [Float]?
+            let frameCenter: SIMD3<Float>?
         }
         let infos: [(scan: CapturedScan, info: ScanColorizeInfo)] = scans.map { scan in
             (scan, ScanColorizeInfo(
@@ -669,7 +670,8 @@ struct ScansListView: View {
                 rawDataDir: scan.rawDataPath,
                 colorsURL: scan.colorsFileURL,
                 previewURL: scan.modelPreviewURL,
-                pose: scan.location?.imagingPoseMatrix
+                pose: scan.location?.imagingPoseMatrix,
+                frameCenter: MeshPreviewView.canonicalFrameCenter(for: scan.location)
             ))
         }
 
@@ -701,7 +703,8 @@ struct ScansListView: View {
                 }
 
                 if let img = MeshPreviewView.generateSnapshot(
-                    meshURL: entry.info.meshURL, colorsURL: entry.info.colorsURL, poseMatrix: entry.info.pose
+                    meshURL: entry.info.meshURL, colorsURL: entry.info.colorsURL,
+                    poseMatrix: entry.info.pose, frameCenter: entry.info.frameCenter
                 ),
                    let data = img.jpegData(compressionQuality: 0.8) {
                     try? data.write(to: entry.info.previewURL)
@@ -1461,6 +1464,7 @@ struct ScanCard: View {
         let colorsURL = scan.colorsFileURL
         let previewURL = scan.modelPreviewURL
         let pose = scan.location?.imagingPoseMatrix
+        let frameCenter = MeshPreviewView.canonicalFrameCenter(for: scan.location)
 
         DispatchQueue.global(qos: .utility).async {
             guard let meshData = try? Data(contentsOf: meshURL) else {
@@ -1492,7 +1496,8 @@ struct ScanCard: View {
             }
 
             // Regenerate 3D model preview
-            if let img = MeshPreviewView.generateSnapshot(meshURL: meshURL, colorsURL: colorsURL, poseMatrix: pose),
+            if let img = MeshPreviewView.generateSnapshot(meshURL: meshURL, colorsURL: colorsURL,
+                                                          poseMatrix: pose, frameCenter: frameCenter),
                let data = img.jpegData(compressionQuality: 0.8) {
                 try? data.write(to: previewURL)
             }

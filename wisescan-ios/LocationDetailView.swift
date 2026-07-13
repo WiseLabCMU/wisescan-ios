@@ -673,8 +673,10 @@ struct LocationDetailView: View {
                 }
 
                 let pose = scan.location?.imagingPoseMatrix
+                let frameCenter = MeshPreviewView.canonicalFrameCenter(for: scan.location)
                 if let img = MeshPreviewView.generateSnapshot(
-                    meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL, poseMatrix: pose
+                    meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL,
+                    poseMatrix: pose, frameCenter: frameCenter
                 ),
                    let data = img.jpegData(compressionQuality: 0.8) {
                     try? data.write(to: scan.modelPreviewURL)
