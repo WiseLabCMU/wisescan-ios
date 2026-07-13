@@ -44,6 +44,7 @@ enum AppConstants {
         static let pauseVRCompute = "pauseVRCompute"
         static let semanticLabeling = "semanticLabeling"
         static let memDiagForceReclaim = "memDiagForceReclaim"
+        static let meshClassifier = "meshClassifier"
         static let enabledSemanticClasses = "enabledSemanticClasses"
         static let scanCoachingEnabled = "scanCoachingEnabled"
     }
@@ -80,6 +81,13 @@ enum AppConstants {
     /// an attribution session, never leave it on. Doesn't reclaim Metal/GPU buffers (those free on
     /// RealityKit's schedule), so the delta is a floor on what a subsystem releases.
     static let memDiagForceReclaim: Bool = false
+    /// Use `.meshWithClassification` scene reconstruction instead of plain `.mesh`. Default ON:
+    /// benched 2026-07 (same room, on vs off, AR and VR modes) at no measurable CPU delta and
+    /// ~70–100 MB memory — affordable, and the per-face labels are what lets us split wall vs
+    /// non-wall geometry (plane registration ghost, decimated rescan reference). The toggle remains
+    /// in Developer Mode so the A/B stays re-runnable; each run stamps meshClassifier=on/off at
+    /// RECORD-START. Varies ONLY the ARKit classifier — RoomPlan (semanticLabeling) is independent.
+    static let meshClassifier: Bool = true
     /// Deferred RoomPlan build: max time the save pipeline waits (off-main) for RoomBuilder to
     /// reconstruct the room from CapturedRoomData before writing roomplan.json. RoomBuilder is kicked
     /// off at RoomPlan's didEndWith (post-stop) and runs concurrently with the multi-second OBJ build,

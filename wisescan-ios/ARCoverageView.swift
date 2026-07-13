@@ -358,8 +358,9 @@ struct ARCoverageView: UIViewRepresentable {
                 // Upgrade to full scene reconstruction — preserve world map for coordinate continuity
                 let config = ARWorldTrackingConfiguration()
                 if Self.supportsLiDAR {
-                    // RoomPlan handles semantic labeling; ARKit only needs raw mesh for reconstruction.
-                    config.sceneReconstruction = .mesh
+                    // Plain `.mesh` in production; `.meshWithClassification` when the bench toggle is on
+                    // (A/B its per-face classify cost — see meshReconstructionMode).
+                    config.sceneReconstruction = Self.meshReconstructionMode()
                 }
                 config.environmentTexturing = .automatic
                 // Preserve the relocalized coordinate system by keeping the world map
@@ -422,7 +423,8 @@ struct ARCoverageView: UIViewRepresentable {
                 // Stamp RoomPlan on/off so each run's log self-documents the mode (live consume is now
                 // always deferred, so there's no separate knob to stamp).
                 let sl = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
-                let mode = "mode(semanticLabeling=\(sl ? "on" : "off") liveConsume=deferred)"
+                let meshClass = (config.sceneReconstruction == .meshWithClassification)
+                let mode = "mode(semanticLabeling=\(sl ? "on" : "off") meshClassifier=\(meshClass ? "on" : "off") liveConsume=deferred)"
                 PerfDiag.log("[MemDiag] EVENT RECORD-START \(context.coordinator.memMarker()) \(mode)")
                 // Phase-0 diag: mark this run as recorded so stop emits a summary. A no-map run
                 // has nothing to relocalize → start the summary fresh (drops any stale map/settle).
@@ -2639,6 +2641,18 @@ struct ARCoverageView: UIViewRepresentable {
     ///   - worldMapURL: Optional URL to an `ARWorldMap` archive for relocalization continuity.
     ///   - enableFrameSemantics: When `true`, adds person segmentation and scene depth semantics.
     /// - Returns: A configured `ARWorldTrackingConfiguration` ready for `session.run()`.
+    /// Scene-reconstruction mode. Production is `.meshWithClassification` (meshClassifier defaults ON —
+    /// benched at no measurable CPU delta, ~70–100 MB memory; the per-face labels drive the wall/non-wall
+    /// split for plane registration and the rescan reference mesh). The Developer-Mode toggle drops back
+    /// to plain `.mesh` for re-running the A/B bench (compare the 1 Hz [MemDiag] cpu-by-thread / footprint
+    /// timeline + RECORD-START→TEARDOWN deltas). Falls back to `.mesh` if the device can't classify.
+    static func meshReconstructionMode() -> ARWorldTrackingConfiguration.SceneReconstruction {
+        guard UserDefaults.standard.bool(forKey: AppConstants.Key.meshClassifier),
+              ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification)
+        else { return .mesh }
+        return .meshWithClassification
+    }
+
     static func makeConfiguration(
         enableMeshReconstruction: Bool = false,
         worldMapURL: URL? = nil,
@@ -2647,8 +2661,8 @@ struct ARCoverageView: UIViewRepresentable {
         let config = ARWorldTrackingConfiguration()
         if supportsLiDAR {
             if enableMeshReconstruction {
-                // RoomPlan handles semantic labeling; ARKit only needs raw mesh.
-                config.sceneReconstruction = .mesh
+                // Plain `.mesh` in production; `.meshWithClassification` under the bench toggle.
+                config.sceneReconstruction = meshReconstructionMode()
             } else {
                 config.sceneReconstruction = []
             }

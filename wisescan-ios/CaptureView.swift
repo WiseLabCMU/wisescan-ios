@@ -146,6 +146,16 @@ struct CaptureView: View {
         // footprintΔ is the Data buffer. Baseline read only when diagnostics are on → free otherwise.
         let foot0 = PerfDiag.enabled ? ScanStats.currentFootprintMB() : 0
         cachedGhostMeshData = try? Data(contentsOf: targetScan.meshFileURL)
+        // DECISION 1 co-framing: if this scan's mesh was registered into the canonical frame at
+        // ITS save, undo that here — the live session relocalizes into the scan's RAW capture
+        // frame (the world map can't be re-based), and the ghost must share it (visual overlay,
+        // manual nudge, and the ICP probe all assume ghost ≡ live frame). One O(n) text pass,
+        // only for scans that actually carry an applied registration.
+        if let data = cachedGhostMeshData,
+           let undo = SaveRegistration.inverseForGhost(scanDirectory: targetScan.scanDirectory) {
+            cachedGhostMeshData = SaveRegistration.transformOBJ(data, by: undo)
+            print("[PlaneReg] ghost mesh de-registered back to its raw capture frame for relocalization overlay")
+        }
         if PerfDiag.enabled {
             let blobMB = Double(cachedGhostMeshData?.count ?? 0) / (1024.0 * 1024.0)
             let foot1 = ScanStats.currentFootprintMB()

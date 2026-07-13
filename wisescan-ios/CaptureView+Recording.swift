@@ -353,6 +353,21 @@ extension CaptureView {
         let capturedLocationId = locationId
         let capturedScanCase = scanCase
 
+        // ── DECISION 1: resolve the save-time registration target on MAIN (SwiftData) ──
+        // The canonical frame is owned by the location's ORIGINAL scan; its persisted clean
+        // roomplan.json is what this rescan's RoomBuilder room registers against in the
+        // background block below. Rescan-only: a link-adjacent capture is a DIFFERENT physical
+        // room — its walls must never be force-matched to the original's (false-lock risk).
+        var registrationTarget: (url: URL, scanId: UUID)?
+        if capturedScanCase == .rescanSpace, let locId = capturedLocationId {
+            let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
+            if let location = try? modelContext.fetch(descriptor).first,
+               let original = location.scans.min(by: { $0.capturedAt < $1.capturedAt }),
+               FileManager.default.fileExists(atPath: original.roomPlanFileURL.path) {
+                registrationTarget = (original.roomPlanFileURL, original.id)
+            }
+        }
+
         // ── Capture the ARWorldMap co-framed with the OBJ, BEFORE coloring ──
         // mesh.obj was just baked from the live world frame above. The world map
         // must be grabbed before the seconds-long vertex coloring step: across a
@@ -422,8 +437,6 @@ extension CaptureView {
                     return
                 }
 
-                let vertexColors = VertexColorAccumulator.generateNormalsColors(objData: result.data)
-
                 // ┌── [DEFERRED-ROOMPLAN] BUILD TRIGGER (movable unit) ───────────────────────────────
                 // Run RoomBuilder HERE, off-main, only now: this is past the world-map export
                 // (getCurrentWorldMap ran earlier in exportWorldMapThenContinue) and past the OBJ build
@@ -445,19 +458,45 @@ extension CaptureView {
                 let builtRoom: CapturedRoom? = self.scanStore.awaitDeferredRoomPlan?(AppConstants.roomBuilderTimeoutSeconds)
                 // └── [DEFERRED-ROOMPLAN] end build trigger ─────────────────────────────────────────
 
+                // ── DECISION 1: save-time registration into the canonical frame ──
+                // Register this rescan's built room against the original scan's persisted room
+                // (plane-to-plane; trusted-gated). A trusted fit is baked into the mesh RIGHT HERE,
+                // before coloring, so every downstream consumer (rawDir mesh.obj, saveScan,
+                // pendingScan) sees canonical-frame geometry. The world map stays raw (opaque);
+                // the ghost loader undoes this transform at the next rescan (SaveRegistration doc).
+                var meshData = result.data
+                var registration: SaveRegistration.Outcome?
+                if let room = builtRoom, let target = registrationTarget {
+                    registration = SaveRegistration.run(room: room, canonicalRoomPlanURL: target.url,
+                                                        targetScanId: target.scanId)
+                    if let t = registration?.appliedTransform {
+                        meshData = SaveRegistration.transformOBJ(meshData, by: t)
+                    }
+                }
+
+                let vertexColors = VertexColorAccumulator.generateNormalsColors(objData: meshData)
+
                 DispatchQueue.main.async {
                     // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping.
                     if let rawDir = rawDataPath {
                         let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
-                        try? result.data.write(to: meshFileURL)
+                        try? meshData.write(to: meshFileURL)
                         let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
                         try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
                         // Write roomplan.json + roomplan_raw.json from the RoomBuilder reconstruction
                         // (deferred, built above from CapturedRoomData in the scan's own world frame).
+                        // The clean roomplan gets the same canonical correction as the mesh so the
+                        // viewer's semantic outlines stay glued to it (raw stays capture-frame).
                         if let room = builtRoom {
-                            RoomPlanExporter.writeRoomPlan(room, to: rawDir)
+                            RoomPlanExporter.writeRoomPlan(room, to: rawDir,
+                                                           applying: registration?.appliedTransform)
                             // Surface the room to the preview / ScanCoach (post-scan, not live).
                             self.finalCapturedRoom = room
+                        }
+                        // Registration sidecar (applied or not — the not-applied record is the
+                        // gate-tuning diagnostic). Promoted to the scan dir top level by saveScan.
+                        if let registration {
+                            SaveRegistration.writeSidecar(registration.sidecar, to: rawDir)
                         }
                     }
 
@@ -468,7 +507,7 @@ extension CaptureView {
                             context: self.modelContext,
                             locationId: capturedLocationId,
                             name: autoSaveName,
-                            meshData: result.data,
+                            meshData: meshData,
                             vertexCount: result.vertexCount,
                             faceCount: result.faceCount,
                             hardwareDeviceModel: UIDevice.current.name,
@@ -497,7 +536,7 @@ extension CaptureView {
                         // Normal flow: store as pending scan
                         self.pendingScan = PendingScanData(
                             locationId: capturedLocationId,
-                            meshData: result.data,
+                            meshData: meshData,
                             vertexCount: result.vertexCount,
                             faceCount: result.faceCount,
                             rawDataPath: rawDataPath,

@@ -913,8 +913,10 @@ class ScanFileManager {
                 print("[ScanFileManager] Failed to move raw data: \(error)")
             }
 
-            // Promote RoomPlan files from raw_data to scan directory top level (for export lookup)
-            for rpFile in ["roomplan.json", "roomplan_raw.json"] {
+            // Promote RoomPlan + registration files from raw_data to scan directory top level
+            // (for export lookup, the viewer's outlines/canonical frame, and the ghost loader's
+            // registration.json check)
+            for rpFile in ["roomplan.json", "roomplan_raw.json", "registration.json"] {
                 let src = newScan.rawDataPath.appendingPathComponent(rpFile)
                 let dst = newScan.scanDirectory.appendingPathComponent(rpFile)
                 if FileManager.default.fileExists(atPath: src.path) {

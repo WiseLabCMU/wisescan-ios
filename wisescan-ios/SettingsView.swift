@@ -19,6 +19,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.perfDiagnostics) private var perfDiagnostics: Bool = AppConstants.perfDiagnostics
     @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
     @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
+    @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
@@ -409,6 +410,18 @@ struct SettingsView: View {
                                     Text("MemDiag Force Reclaim")
                                         .foregroundColor(.white)
                                     Text("Memory attribution only. Forces freed pages back to the OS before [MemDiag] teardown snapshots so free-deltas reflect real reclaim, not cached pages. Expensive — leave OFF except when profiling. Needs Perf Diagnostics on.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $meshClassifier) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Mesh Classifier")
+                                        .foregroundColor(.white)
+                                    Text("Per-face ARKit mesh classification (.meshWithClassification). ON by default — benched at no measurable CPU delta, ~70–100 MB memory — and provides the wall/non-wall labels used for plane registration and the rescan reference mesh. Turn OFF only to re-run the A/B bench (each run stamps meshClassifier=on/off at RECORD-START).")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }
