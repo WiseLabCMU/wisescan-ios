@@ -54,6 +54,10 @@ class FrameCaptureSession {
     // and are counted separately for the quality bar UI.
     private var stillnessStartTime: TimeInterval?
     private(set) var isCurrentlyStill: Bool = false
+    /// Whether a keyframe has already been saved for the current stillness period.
+    /// Prevents hundreds of near-identical frames from piling up when the camera is
+    /// stationary (sensor jitter crosses the tiny overlap threshold at 30fps).
+    private var hasStillnessKeyframe: Bool = false
     /// Number of frames captured while device was confirmed still (high confidence sharp).
     private(set) var sharpFrameCount: Int = 0
     /// Total frames captured this session (sharp + sweep).
@@ -197,6 +201,7 @@ class FrameCaptureSession {
         self.blurWarningTimer = nil
         self.stillnessStartTime = nil
         self.isCurrentlyStill = false
+        self.hasStillnessKeyframe = false
         self.sharpFrameCount = 0
         self.totalCapturedFrameCount = 0
         self.lastSharpFrameTime = nil
@@ -345,6 +350,7 @@ class FrameCaptureSession {
                         stillnessStartTime = frameTimestamp
                     } else if !isStill {
                         stillnessStartTime = nil
+                        hasStillnessKeyframe = false // reset so next stillness period gets a fresh keyframe
                     }
                     let wasStill = isCurrentlyStill
                     let confirmedStill = isStill && (frameTimestamp - (stillnessStartTime ?? frameTimestamp)) >= AppConstants.stillnessDurationRequired
@@ -374,16 +380,6 @@ class FrameCaptureSession {
             }
         }
 
-        // Track sharp frame when device is confirmed still
-        if isCurrentlyStill {
-            sharpFrameCount += 1
-            if sharpFrameCount % AppConstants.stillnessShutterInterval == 1 {
-                playShutterClick()
-            }
-            DispatchQueue.main.async { self.lastSharpFrameTime = Date() }
-        }
-        DispatchQueue.main.async { self.totalCapturedFrameCount += 1 }
-
         // Skip frame if camera hasn't moved enough (based on overlap setting)
         if let lastTransform = lastCaptureTransform {
             let movement = cameraMovement(from: lastTransform, to: transform)
@@ -395,6 +391,31 @@ class FrameCaptureSession {
                 return // skip — too much overlap with previous frame
             }
         }
+
+        // ── Stillness dedup ──
+        // When the device is confirmed still, capture exactly one keyframe at the
+        // start of the stillness period, then suppress further saves until the camera
+        // moves again. Without this gate, sensor noise jitter crosses the tiny overlap
+        // threshold (0.01-0.04m) at 30fps, producing hundreds of near-identical frames
+        // of the same spot.
+        if isCurrentlyStill && !isMockingIMU {
+            if hasStillnessKeyframe {
+                return // already captured a keyframe for this stillness period
+            }
+            hasStillnessKeyframe = true
+        }
+
+        // ── Counters & audio (post-filter) ──
+        // These run AFTER overlap + stillness checks so the UI frame count and shutter
+        // audio reflect actual saved frames, not the much higher pre-filter rate.
+        if isCurrentlyStill {
+            sharpFrameCount += 1
+            if sharpFrameCount % AppConstants.stillnessShutterInterval == 1 {
+                playShutterClick()
+            }
+            DispatchQueue.main.async { self.lastSharpFrameTime = Date() }
+        }
+        DispatchQueue.main.async { self.totalCapturedFrameCount += 1 }
 
         lastCaptureTransform = transform
         lastCaptureTime = frameTimestamp
@@ -846,21 +867,27 @@ class FrameCaptureSession {
 
         let width = CVPixelBufferGetWidth(depthBuffer)
         let height = CVPixelBufferGetHeight(depthBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthBuffer)
         guard let baseAddress = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
-
-        let floatBuffer = baseAddress.assumingMemoryBound(to: Float32.self)
 
         // Convert float meters to UInt16 millimeters.
         // Reuse a session-scoped buffer to avoid a per-frame allocation. Every pixel is
         // written exactly once below, so stale contents from the previous frame don't leak.
+        // Access rows via bytesPerRow stride — CVPixelBuffer may pad rows beyond width*4.
         let count = width * height
         if depthScratch.count != count {
             depthScratch = [UInt16](repeating: 0, count: count)
         }
+        let floatsPerRow = bytesPerRow / MemoryLayout<Float32>.stride
         depthScratch.withUnsafeMutableBufferPointer { out in
-            for i in 0..<count {
-                let meters = floatBuffer[i]
-                out[i] = meters.isFinite ? UInt16(min(max(meters * 1000.0, 0), 65535)) : 0
+            let floatBuffer = baseAddress.assumingMemoryBound(to: Float32.self)
+            for y in 0..<height {
+                let rowStart = y * floatsPerRow
+                let outStart = y * width
+                for x in 0..<width {
+                    let meters = floatBuffer[rowStart + x]
+                    out[outStart + x] = meters.isFinite ? UInt16(min(max(meters * 1000.0, 0), 65535)) : 0
+                }
             }
         }
 
