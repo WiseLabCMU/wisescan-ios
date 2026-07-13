@@ -2262,42 +2262,49 @@ struct ARCoverageView: UIViewRepresentable {
         config.environmentTexturing = .automatic
 
         // ── Video format selection ──
-        // Default to the highest available resolution at 30fps for best downstream
-        // splat quality without overwhelming the capture pipeline. 60fps doubles
-        // frame delivery rate but doesn't improve mesh reconstruction or VIO — it
-        // only increases backpressure on the ioQueue (privacy blur, JPEG encode,
-        // depth PNG), which starves ARKit's frame pool on older devices (A12Z).
-        // Dev settings can override via videoFormatIndex.
+        //
+        // Goal: highest resolution at 30fps that's compatible with continuous AR
+        // + LiDAR mesh reconstruction. 60fps doubles frame delivery without
+        // improving mesh/VIO and starves ARKit's frame pool on older devices.
+        //
+        // Device landscape (as of 2026):
+        //   • All 4K formats (3840×2160) are hiRes + 16:9. No device offers a
+        //     standard (non-hiRes) 4K format in the camera's native 4:3 ratio.
+        //   • hiRes 16:9 breaks Recon3D mesh integration on iPad: vio_initialized
+        //     never clears, producing zero mesh geometry (faces=0, verts=0).
+        //   • recommendedVideoFormatFor4KResolution returns hiRes 16:9 on iPads
+        //     (M2/M4), so it cannot be trusted blindly.
+        //
+        // Selection priority:
+        //   1. Apple's curated 4K pick — only if non-hiRes (iPhone 15 Pro+, if
+        //      Apple ever ships a standard 4K format for continuous AR).
+        //   2. Highest standard (non-hiRes) 30fps — typically 1920×1440 (4:3).
+        //   3. Apple's hiRes pick — last resort, better than ARKit default.
+        //   4. ARKit default.
+        //
+        // Dev settings can force any format index via videoFormatIndex override.
         let formats = ARWorldTrackingConfiguration.supportedVideoFormats
         let preferredIndex = UserDefaults.standard.integer(forKey: AppConstants.Key.videoFormatIndex)
         if preferredIndex > 0, preferredIndex < formats.count {
             // Dev override: user selected a specific format in settings
             config.videoFormat = formats[preferredIndex]
         } else {
-            // Strategy: Apple's curated 4K recommendation first, then our algorithm.
-            //
-            // recommendedVideoFormatFor4KResolution returns a format validated for
-            // continuous AR with depth + segmentation (available on iPhone 15 Pro+).
-            // When unavailable, pick the highest resolution standard (non-hiRes)
-            // format at 30fps. hiRes formats are designed for single-shot captures
-            // and may use aspect ratios (16:9) that differ from LiDAR's 4:3 depth,
-            // but the depth pipeline already handles resolution/aspect scaling.
-            // Standard formats are preferred for reliability; hiRes is the fallback.
-            if let fourK = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
+            let appleRecommendation = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution
+            if let fourK = appleRecommendation,
+               !fourK.isRecommendedForHighResolutionFrameCapturing {
+                // Apple says this 4K format is safe for continuous AR (non-hiRes).
                 config.videoFormat = fourK
             } else {
+                // Apple's pick is hiRes or unavailable — use highest standard 30fps.
                 let standard30 = formats
                     .filter { $0.framesPerSecond == 30 && !$0.isRecommendedForHighResolutionFrameCapturing }
                     .max(by: { $0.imageResolution.width * $0.imageResolution.height
                              < $1.imageResolution.width * $1.imageResolution.height })
-                let hiRes30 = formats
-                    .filter { $0.framesPerSecond == 30 && $0.isRecommendedForHighResolutionFrameCapturing }
-                    .max(by: { $0.imageResolution.width * $0.imageResolution.height
-                             < $1.imageResolution.width * $1.imageResolution.height })
                 if let best = standard30 {
                     config.videoFormat = best
-                } else if let best = hiRes30 {
-                    config.videoFormat = best
+                } else if let fourK = appleRecommendation {
+                    // Last resort: hiRes is better than ARKit's default
+                    config.videoFormat = fourK
                 }
                 // else: keep ARKit default
             }
