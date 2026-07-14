@@ -249,8 +249,10 @@ struct ScanExportManager {
                 let maskWidth = maskCGImage.width
                 let maskHeight = maskCGImage.height
 
-                // Read the 16-bit depth data
-                guard let depthProvider = depthCGImage.dataProvider,
+                // Read the 16-bit depth data. Anything but 16-bit single-channel means the
+                // decode didn't round-trip the capture format — skip rather than corrupt.
+                guard depthCGImage.bitsPerComponent == 16, depthCGImage.bitsPerPixel == 16,
+                      let depthProvider = depthCGImage.dataProvider,
                       let depthCFData = depthProvider.data else { continue }
                 let depthLength = CFDataGetLength(depthCFData)
                 let expectedLength = depthWidth * depthHeight * 2
@@ -282,7 +284,13 @@ struct ScanExportManager {
                     }
                 }
 
-                // Re-encode as 16-bit grayscale PNG
+                // Re-encode as 16-bit grayscale PNG. The bitmapInfo must carry the DECODED
+                // image's byte order (ImageIO returns little-endian): zeroed pixels are
+                // endian-neutral, so labeling the untouched bytes with their true order makes
+                // the rewrite value-preserving. Labeling them big-endian (rawValue: 0) instead
+                // byte-swaps every surviving pixel — which un-did the swap depthMapToPNG16 has
+                // always baked into these files and turned exported depth near-black.
+                let byteOrder = depthCGImage.bitmapInfo.intersection(.byteOrderMask)
                 let data = Data(depthBytes)
                 guard let provider = CGDataProvider(data: data as CFData),
                       let newCGImage = CGImage(
@@ -292,7 +300,7 @@ struct ScanExportManager {
                           bitsPerPixel: 16,
                           bytesPerRow: depthWidth * 2,
                           space: CGColorSpaceCreateDeviceGray(),
-                          bitmapInfo: CGBitmapInfo(rawValue: 0),
+                          bitmapInfo: byteOrder,
                           provider: provider,
                           decode: nil,
                           shouldInterpolate: false,
