@@ -476,14 +476,12 @@ class FrameCaptureSession {
             // When privacy filter is ON and ARKit provides a person stencil, save it as a
             // lightweight grayscale PNG alongside the frame. The export pipeline uses these
             // masks to apply blur to images and zero person regions in depth maps.
-            var wroteMask = false
             if self.privacyFilter, let seg = segBuffer, let masksDir = self.masksDir {
                 if let maskData = self.segmentationMaskToPNG(seg) {
                     let paddedIdx = String(format: "%05d", self.frames.count)
                     let maskPath = masksDir.appendingPathComponent("frame_\(paddedIdx).png")
                     do {
                         try maskData.write(to: maskPath, options: .atomic)
-                        wroteMask = true
                     } catch {
                         print("[FrameCapture] Failed to save mask: \(error.localizedDescription)")
                     }
@@ -755,6 +753,11 @@ class FrameCaptureSession {
             }
             metadata["boundary_anchor"] = boundaryDict
         }
+
+        // Privacy filter: lets the export pipeline apply its privacy passes even when zero
+        // segmentation masks were saved (e.g. the stencil never became available), instead
+        // of inferring the setting from the masks/ directory alone.
+        metadata["privacy_filter"] = privacyFilter
 
         // Semantic labeling: record whether classification was enabled for this session
         let semanticEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
