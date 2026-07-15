@@ -2447,11 +2447,13 @@ struct ARCoverageView: UIViewRepresentable {
         //   4. ARKit default.
         //
         // Dev settings can force any format index via videoFormatIndex override.
+        // The stored value is 1-based (0 = Auto sentinel): value N selects format N-1,
+        // matching the picker tags in SettingsView and the [ARConfig] log numbering.
         let formats = ARWorldTrackingConfiguration.supportedVideoFormats
         let preferredIndex = UserDefaults.standard.integer(forKey: AppConstants.Key.videoFormatIndex)
-        if preferredIndex > 0, preferredIndex < formats.count {
+        if preferredIndex > 0, preferredIndex <= formats.count {
             // Dev override: user selected a specific format in settings
-            config.videoFormat = formats[preferredIndex]
+            config.videoFormat = formats[preferredIndex - 1]
         } else {
             // Pick highest resolution standard (non-hiRes) format at 30fps.
             // hiRes formats use 16:9 on iPads (3840×2160) which breaks Recon3D

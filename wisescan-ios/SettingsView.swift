@@ -21,6 +21,8 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
     @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
+    // 0 = Auto (no override); N = force format index N-1 of supportedVideoFormats.
+    @AppStorage(AppConstants.Key.videoFormatIndex) private var videoFormatIndex: Int = 0
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
@@ -427,13 +429,13 @@ struct SettingsView: View {
                                 Text("ARKit video stream resolution. Higher = better splat quality but more storage. Requires session restart.")
                                     .font(.caption)
                                     .foregroundColor(.gray)
-                                Picker("Video Format", selection: Binding(
-                                    get: { UserDefaults.standard.integer(forKey: AppConstants.Key.videoFormatIndex) },
-                                    set: { UserDefaults.standard.set($0, forKey: AppConstants.Key.videoFormatIndex) }
-                                )) {
+                                // @AppStorage (not a raw UserDefaults Binding) so the menu
+                                // label refreshes when the selection changes. Tag N maps to
+                                // format index N-1; 0 is the Auto sentinel.
+                                Picker("Video Format", selection: $videoFormatIndex) {
                                     Text("Auto (Best Available)").tag(0)
                                     ForEach(Array(ARCoverageView.availableVideoFormats.enumerated()), id: \.offset) { index, label in
-                                        Text(label).tag(index + 1)
+                                        Text("[\(index)] \(label)").tag(index + 1)
                                     }
                                 }
                                 .pickerStyle(.menu)
