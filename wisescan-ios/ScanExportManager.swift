@@ -160,6 +160,77 @@ struct ScanExportManager {
 
     // MARK: - Export-Time Privacy Blur
 
+    /// Runs every export-time privacy pass over a staged payload directory, upholding the
+    /// PRIVACY.md guarantee — "no unblurred image or unmasked depth map is ever exported" —
+    /// for EVERY export format that stages images:
+    ///
+    /// 1. Mask-based pass (`applyPrivacyBlurAtExport`): pixelates main images and zeros depth
+    ///    using the ARKit stencils saved during capture.
+    /// 2. Vision fallback on main frames that have NO saved mask (the stencil hadn't warmed up
+    ///    yet — typically the first frames of a session). Capture used to run this fallback
+    ///    inline; deferring blur to export moved it here.
+    /// 3. Vision pass on proxy (glasses) images — a second camera the ARKit stencil never
+    ///    covers, so every proxy frame needs the Vision path.
+    ///
+    /// Gate: privacy filter was enabled during capture, signalled by saved masks or by the
+    /// `privacy_filter` flag in scan4d_metadata.json (older scans predate the flag; scans from
+    /// before the deferred-blur pipeline have no masks/ dir and were already blurred at
+    /// capture, so they correctly skip all passes).
+    private static func applyExportPrivacyPasses(rawDataDir: URL, stagedDir: URL) {
+        let fm = FileManager.default
+        let masksDir = rawDataDir.appendingPathComponent("masks")
+        let maskedFrames: Set<String> = ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "png" }
+            .reduce(into: Set()) { $0.insert($1.deletingPathExtension().lastPathComponent) }
+
+        var privacyWasOn = !maskedFrames.isEmpty
+        if !privacyWasOn,
+           let metaData = try? Data(contentsOf: rawDataDir.appendingPathComponent("scan4d_metadata.json")),
+           let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] {
+            privacyWasOn = meta["privacy_filter"] as? Bool ?? false
+        }
+        guard privacyWasOn else { return }
+
+        if !maskedFrames.isEmpty {
+            applyPrivacyBlurAtExport(
+                masksDir: masksDir,
+                imagesDir: stagedDir.appendingPathComponent("images"),
+                depthDir: stagedDir.appendingPathComponent("depth")
+            )
+        }
+        applyVisionBlurAtExport(
+            imagesDir: stagedDir.appendingPathComponent("images"),
+            skippingFrames: maskedFrames
+        )
+        applyVisionBlurAtExport(imagesDir: stagedDir.appendingPathComponent("proxy_images"))
+    }
+
+    /// Vision-based person pixelation for staged JPEGs that have no capture-time segmentation
+    /// mask. Slower than the mask-based pass (a Vision segmentation request per image), but it
+    /// only runs on frames the stencil missed — plus proxy frames, which never have stencils.
+    /// `pixelatePersonsAndGetFaceCenters` returns the original data on any failure, so a frame
+    /// is never dropped from the export; frames with no detected person re-encode visually
+    /// unchanged.
+    private static func applyVisionBlurAtExport(imagesDir: URL, skippingFrames: Set<String> = []) {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(at: imagesDir, includingPropertiesForKeys: nil)
+            .filter({ $0.pathExtension == "jpg" && !skippingFrames.contains($0.deletingPathExtension().lastPathComponent) })
+            .sorted(by: { $0.lastPathComponent < $1.lastPathComponent }),
+            !files.isEmpty else { return }
+
+        print("[prepareExport] Vision privacy blur on \(files.count) unmasked images in \(imagesDir.lastPathComponent)/...")
+        var written = 0
+        for url in files {
+            guard let data = try? Data(contentsOf: url) else { continue }
+            let (blurred, _) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: data)
+            if let blurred {
+                try? blurred.write(to: url, options: .atomic)
+                written += 1
+            }
+        }
+        print("[prepareExport] ✓ vision-blurred \(written)/\(files.count) images in \(imagesDir.lastPathComponent)/")
+    }
+
     /// Applies person pixelation to staged images and zeros person regions in staged depth maps
     /// using saved segmentation masks. Called during export when a `masks/` directory exists,
     /// indicating privacy filter was enabled during capture.
@@ -249,8 +320,10 @@ struct ScanExportManager {
                 let maskWidth = maskCGImage.width
                 let maskHeight = maskCGImage.height
 
-                // Read the 16-bit depth data
-                guard let depthProvider = depthCGImage.dataProvider,
+                // Read the 16-bit depth data. Anything but 16-bit single-channel means the
+                // decode didn't round-trip the capture format — skip rather than corrupt.
+                guard depthCGImage.bitsPerComponent == 16, depthCGImage.bitsPerPixel == 16,
+                      let depthProvider = depthCGImage.dataProvider,
                       let depthCFData = depthProvider.data else { continue }
                 let depthLength = CFDataGetLength(depthCFData)
                 let expectedLength = depthWidth * depthHeight * 2
@@ -282,7 +355,13 @@ struct ScanExportManager {
                     }
                 }
 
-                // Re-encode as 16-bit grayscale PNG
+                // Re-encode as 16-bit grayscale PNG. The bitmapInfo must carry the DECODED
+                // image's byte order (ImageIO returns little-endian): zeroed pixels are
+                // endian-neutral, so labeling the untouched bytes with their true order makes
+                // the rewrite value-preserving. Labeling them big-endian (rawValue: 0) instead
+                // byte-swaps every surviving pixel — which un-did the swap depthMapToPNG16 has
+                // always baked into these files and turned exported depth near-black.
+                let byteOrder = depthCGImage.bitmapInfo.intersection(.byteOrderMask)
                 let data = Data(depthBytes)
                 guard let provider = CGDataProvider(data: data as CFData),
                       let newCGImage = CGImage(
@@ -292,7 +371,7 @@ struct ScanExportManager {
                           bitsPerPixel: 16,
                           bytesPerRow: depthWidth * 2,
                           space: CGColorSpaceCreateDeviceGray(),
-                          bitmapInfo: CGBitmapInfo(rawValue: 0),
+                          bitmapInfo: byteOrder,
                           provider: provider,
                           decode: nil,
                           shouldInterpolate: false,
@@ -353,20 +432,9 @@ struct ScanExportManager {
             }
 
             // ── Export-time privacy blur ──
-            // If a masks/ directory exists, privacy filter was enabled during capture.
-            // Apply person pixelation to staged images and zero person regions in staged
-            // depth maps using the saved segmentation masks. This runs off the critical
-            // capture path, so performance is not a concern (export is already async).
-            let masksDir = rawDataDir.appendingPathComponent("masks")
-            let stagedImagesDir = dir.appendingPathComponent("images")
-            let stagedDepthDir = dir.appendingPathComponent("depth")
-            if fm.fileExists(atPath: masksDir.path) {
-                applyPrivacyBlurAtExport(
-                    masksDir: masksDir,
-                    imagesDir: stagedImagesDir,
-                    depthDir: stagedDepthDir
-                )
-            }
+            // Runs off the critical capture path, so performance is not a concern
+            // (export is already async). No-op unless privacy was on during capture.
+            applyExportPrivacyPasses(rawDataDir: rawDataDir, stagedDir: dir)
         }
 
         // Zip a staging directory and return the zip URL
@@ -505,6 +573,7 @@ struct ScanExportManager {
                         print("[prepareExport] RAW: failed to copy \(src): \(error.localizedDescription)")
                     }
                 }
+                applyExportPrivacyPasses(rawDataDir: rawDataDir, stagedDir: stagingDir)
                 return zipStaging(stagingDir)
             }
 
