@@ -242,6 +242,13 @@ enum VertexColorAccumulator {
             // used for the per-observation view-angle and distance weights.
             let camWorld = SIMD3<Float>(t03, t13, t23)
 
+            // Sharp stillness keyframes (hi-res stills captured while the device was
+            // stationary) carry far less motion blur than sweep frames, so their color
+            // observations get a weight bonus — where a keyframe saw a surface, its
+            // crisp samples dominate the weighted median over blur-prone sweep samples.
+            let frameWeight: Float = (json["is_keyframe"] as? Bool) == true
+                ? AppConstants.colorizationKeyframeWeight : 1.0
+
             // Load corresponding image
             guard let imagePath = json["image_path"] as? String else { return }
             let imageURL = rawDir.appendingPathComponent(imagePath)
@@ -351,7 +358,7 @@ enum VertexColorAccumulator {
                 let angleWeight = abs(simd_dot(normals[i], viewDir))   // 1 = head-on, 0 = grazing
                 let clampedDist = max(dist, distFloor)
                 let distWeight = 1.0 / (clampedDist * clampedDist)     // inverse-square, floored
-                let weight = angleWeight * distWeight
+                let weight = angleWeight * distWeight * frameWeight    // keyframes get a sharpness bonus
                 guard weight > 1e-6 else { continue }
 
                 let offset = py * bytesPerRow + px * bytesPerPixel

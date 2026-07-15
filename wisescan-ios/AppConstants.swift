@@ -149,7 +149,16 @@ enum AppConstants {
     static let stillnessTranslationalThreshold: Float = 0.02   // m/s — translational velocity below this = "still"
     static let stillnessAngularThreshold: Float = 0.1          // rad/s — rotational velocity below this = "still"
     static let stillnessDurationRequired: TimeInterval = 0.3   // seconds device must be still before counting as "sharp" capture
-    static let stillnessShutterInterval: Int = 3               // play shutter click every Nth sharp frame (avoid audio spam)
+    static let hiResCaptureTimeoutSeconds: TimeInterval = 5.0  // watchdog: re-request if a hi-res completion never arrives
+    static let hiResMaxFailures: Int = 3                       // consecutive hi-res failures before latching stream-frame fallback
+    static let stillnessHapticIntensity: CGFloat = 0.6         // soft haptic strength on entering confirmed stillness
+    static let captureFlashOpacity: Double = 0.5               // peak opacity of the white shutter flash on keyframe capture
+    static let captureFlashDuration: TimeInterval = 0.35       // fade-out duration of the shutter flash
+    static let photoCoverageMaxDistance: Float = 4.0           // m — max distance a keyframe photo credibly captures texture detail
+    static let photoTintColor = SIMD4<Float>(1.0, 0.72, 0.2, 1.0) // amber overlay marking depth-covered-but-unphotographed mesh
+    static let photoTintAlpha: CGFloat = 0.28                  // opacity of the amber "depth only" tint
+    static let photoTintInflation: Float = 0.004               // m — tint mesh inflation along normals (avoids z-fighting the occlusion fill)
+    static let colorizationKeyframeWeight: Float = 3.0         // vertex-color weight bonus for sharp stillness keyframes vs sweep frames
 
     // MARK: - Space Analysis Constants
     static let analysisAmbientLightAlertThreshold: CGFloat = 250  // lux below which lighting is "Very Low" (alert tier — RGB nearly useless)

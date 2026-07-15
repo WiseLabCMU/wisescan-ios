@@ -55,6 +55,10 @@
     "confidence_path": {
       "type": "string",
       "description": "Relative path to the associated depth confidence map."
+    },
+    "is_keyframe": {
+      "type": "boolean",
+      "description": "True for sharp stillness keyframes (hi-res stills captured while the device was stationary). These frames may have a higher width/height than the video-stream frames."
     }
   },
   "required": [

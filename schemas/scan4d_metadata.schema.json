@@ -79,6 +79,10 @@
       "type": "array",
       "description": "List of semantic class names detected during capture (e.g., wall, floor, table).",
       "items": { "type": "string" }
+    },
+    "keyframe_count": {
+      "type": "integer",
+      "description": "Number of sharp stillness keyframes captured (hi-res stills when the device supports them, stream frames otherwise)."
     }
   },
   "required": [

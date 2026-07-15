@@ -63,6 +63,34 @@
             },
             "minItems": 4,
             "maxItems": 4
+          },
+          "fl_x": {
+            "type": "number",
+            "description": "Per-frame focal length x override (present when this frame's resolution differs from the session globals, e.g. hi-res keyframes)."
+          },
+          "fl_y": {
+            "type": "number",
+            "description": "Per-frame focal length y override."
+          },
+          "cx": {
+            "type": "number",
+            "description": "Per-frame optical center x override."
+          },
+          "cy": {
+            "type": "number",
+            "description": "Per-frame optical center y override."
+          },
+          "w": {
+            "type": "integer",
+            "description": "Per-frame image width override."
+          },
+          "h": {
+            "type": "integer",
+            "description": "Per-frame image height override."
+          },
+          "is_keyframe": {
+            "type": "boolean",
+            "description": "True for sharp stillness keyframes (hi-res stills captured while the device was stationary); splat pipelines can weight these higher."
           }
         },
         "required": [

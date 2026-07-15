@@ -38,6 +38,8 @@ struct CaptureView: View {
     @State var recordingSeconds = 0
     @State var recordingTimer: Timer?
     @State var frameCaptureSession = FrameCaptureSession()
+    /// Opacity of the white shutter-flash overlay shown when a sharp keyframe is captured.
+    @State private var captureFlashOpacity: Double = 0
     // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
     @State private var mainThreadWatchdog = MainThreadWatchdog()
     /// [MemDiag] logs a MEM-PRESSURE marker (footprint + headroom) when the OS flags the app near its
@@ -206,6 +208,7 @@ struct CaptureView: View {
                 scanStore: scanStore,
                 connectorAnchors: connectorAnchors,
                 finalCapturedRoom: $finalCapturedRoom,
+                frameCaptureSession: frameCaptureSession,
                 ghostYRotation: ghostYRotation,
                 ghostXOffset: ghostXOffset,
                 ghostZOffset: ghostZOffset,
@@ -258,6 +261,16 @@ struct CaptureView: View {
             // Permissions Overlay (Preempts user if not authorized)
             PermissionsOverlay(locationManager: locationManager)
                 .ignoresSafeArea()
+
+            // Stillness reticle — the pause-shoot-move affordance. The ring fills as the
+            // device settles and locks green while confirmed still (when the hi-res
+            // keyframe is captured). Shown in both AR and VR modes: keyframes are
+            // captured in both. Wrapped in a host view so the 10Hz progress updates
+            // re-evaluate only the reticle's body, not this entire view.
+            if isRecording && isARSessionReady {
+                StillnessReticleHost(session: frameCaptureSession)
+                    .allowsHitTesting(false)
+            }
 
             // Centered startup/tracking pills (kept separate from ScanCoach)
             VStack(spacing: 12) {
@@ -994,6 +1007,25 @@ struct CaptureView: View {
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .animation(.spring(), value: showManualAdjust)
+            }
+
+            // Keyframe capture flash — a brief white blink (camera-app shutter language)
+            // each time a sharp keyframe is saved. Drawn last so it covers the full view.
+            Color.white
+                .opacity(captureFlashOpacity)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+        }
+        .onChange(of: frameCaptureSession.sharpFrameCount) { oldCount, newCount in
+            guard newCount > oldCount else { return } // ignore session-start reset to 0
+            // Two-phase so the peak actually renders: commit the peak opacity this
+            // update, then animate down on the next runloop turn — writing both in one
+            // transaction can coalesce to 0→0 and skip the flash entirely.
+            captureFlashOpacity = AppConstants.captureFlashOpacity
+            DispatchQueue.main.async {
+                withAnimation(.easeOut(duration: AppConstants.captureFlashDuration)) {
+                    captureFlashOpacity = 0
+                }
             }
         }
         .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
