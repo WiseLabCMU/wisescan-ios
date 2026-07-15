@@ -23,15 +23,15 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 
 ### Hi-Res Still Keyframe Resolution
 
-When the device is held still, the app requests a native-resolution still via `ARSession.captureHighResolutionFrame` (iOS 16+). **The still's resolution is determined by the active video format's camera configuration**, not by the device alone: standard (non-hiRes) video formats deliver a modestly upscaled sensor readout, while formats flagged `isRecommendedForHighResolutionFrameCapturing` bind the full photo sensor. The app defaults to a standard 4:3 format because hiRes **16:9** video formats break Recon3D mesh integration on iPads (zero mesh geometry); the 4:3 hiRes formats (e.g. `1920×1440 @ 30fps [hiRes]`) are the candidate path to full-sensor stills and can be tested per-device via the Developer Mode video-format picker.
+When the device is held still, the app requests a native-resolution still via `ARSession.captureHighResolutionFrame` (iOS 16+). **The still's resolution is determined by the active video format's camera configuration**, not by the device alone: standard (non-hiRes) video formats deliver a modestly upscaled sensor readout, while formats flagged `isRecommendedForHighResolutionFrameCapturing` bind the full photo sensor. hiRes **16:9** video formats break Recon3D mesh integration on iPads (zero mesh geometry), but the 4:3 hiRes formats (`1920×1440 @ 30fps [hiRes]`) are mesh-safe — **the app defaults to the highest 4:3 hiRes 30fps format**, falling back to the best standard 4:3 format when none exists. The Developer Mode video-format picker can force any format for per-device testing.
 
-| Device class | Standard 4:3 format (default) | 4:3 [hiRes] format |
+| Device class | Standard 4:3 format | 4:3 [hiRes] format (default) |
 | :--- | :--- | :--- |
-| iPad Pro M2/M4 | 2016×1512 (verified on-device) | 4032×3024 expected — mesh compatibility unverified |
+| iPad Pro M2/M4 | 2016×1512 (verified on-device) | **4032×3024 — verified on-device, mesh intact** |
 | iPhone Pro (13 Pro and later) | untested | 4032×3024 expected (per Apple's ARKit 6 guidance) — untested |
 | Non-Pro / no LiDAR | n/a (Lite Mode — stream frames only) | n/a |
 
-To check a device: the `[ARConfig]` launch log lists every supported format with its `[hiRes]` flag, and each captured keyframe logs `[FrameCapture] Hi-res keyframe captured: W×H`. Please update this table as devices are verified.
+To check a device: the `[ARConfig]` launch log lists every supported format with its `[hiRes]` flag and the `◀ SELECTED` marker, and each captured keyframe logs `[FrameCapture] Hi-res keyframe captured: W×H`. Please update this table as devices are verified.
 
 ## Features
 

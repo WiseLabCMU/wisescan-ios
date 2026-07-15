@@ -2427,23 +2427,24 @@ struct ARCoverageView: UIViewRepresentable {
 
         // ── Video format selection ──
         //
-        // Goal: highest resolution at 30fps that's compatible with continuous AR
-        // + LiDAR mesh reconstruction. 60fps doubles frame delivery without
+        // Goal: a 30fps format compatible with continuous AR + LiDAR mesh
+        // reconstruction whose camera configuration delivers the highest-resolution
+        // stills via captureHighResolutionFrame. 60fps doubles frame delivery without
         // improving mesh/VIO and starves ARKit's frame pool on older devices.
         //
-        // Device landscape (as of 2026):
-        //   • All 4K formats (3840×2160) are hiRes + 16:9. No device offers a
-        //     standard (non-hiRes) 4K format in the camera's native 4:3 ratio.
-        //   • hiRes 16:9 breaks Recon3D mesh integration on iPad: vio_initialized
-        //     never clears, producing zero mesh geometry (faces=0, verts=0).
+        // Device landscape (verified on M-series iPad Pro, 2026):
+        //   • hiRes 16:9 formats (3840×2160) break Recon3D mesh integration:
+        //     vio_initialized never clears, producing zero mesh geometry.
+        //   • hiRes 4:3 formats (1920×1440 [hiRes]) keep mesh integration intact
+        //     AND bind the full photo sensor: captureHighResolutionFrame returns
+        //     4032×3024 stills vs 2016×1512 on the standard format.
         //   • recommendedVideoFormatFor4KResolution returns hiRes 16:9 on iPads
         //     (M2/M4), so it cannot be trusted blindly.
         //
         // Selection priority:
-        //   1. Apple's curated 4K pick — only if non-hiRes (iPhone 15 Pro+, if
-        //      Apple ever ships a standard 4K format for continuous AR).
+        //   1. Highest hiRes 4:3 30fps — mesh-safe, full-sensor stills.
         //   2. Highest standard (non-hiRes) 30fps — typically 1920×1440 (4:3).
-        //   3. Apple's hiRes pick — last resort, better than ARKit default.
+        //   3. Apple's 4K pick — last resort, better than ARKit default.
         //   4. ARKit default.
         //
         // Dev settings can force any format index via videoFormatIndex override.
@@ -2455,14 +2456,21 @@ struct ARCoverageView: UIViewRepresentable {
             // Dev override: user selected a specific format in settings
             config.videoFormat = formats[preferredIndex - 1]
         } else {
-            // Pick highest resolution standard (non-hiRes) format at 30fps.
-            // hiRes formats use 16:9 on iPads (3840×2160) which breaks Recon3D
-            // mesh integration (vio_initialized never clears → zero mesh).
-            let best30 = formats
+            let byPixelCount: (ARConfiguration.VideoFormat, ARConfiguration.VideoFormat) -> Bool = {
+                $0.imageResolution.width * $0.imageResolution.height
+                    < $1.imageResolution.width * $1.imageResolution.height
+            }
+            // 4:3 check with tolerance (imageResolution is exact, but stay robust).
+            let isFourByThree: (ARConfiguration.VideoFormat) -> Bool = {
+                abs(($0.imageResolution.width / $0.imageResolution.height) - 4.0 / 3.0) < 0.01
+            }
+            let bestHiRes43 = formats
+                .filter { $0.framesPerSecond == 30 && $0.isRecommendedForHighResolutionFrameCapturing && isFourByThree($0) }
+                .max(by: byPixelCount)
+            let bestStandard30 = formats
                 .filter { $0.framesPerSecond == 30 && !$0.isRecommendedForHighResolutionFrameCapturing }
-                .max(by: { $0.imageResolution.width * $0.imageResolution.height
-                         < $1.imageResolution.width * $1.imageResolution.height })
-            if let best = best30 {
+                .max(by: byPixelCount)
+            if let best = bestHiRes43 ?? bestStandard30 {
                 config.videoFormat = best
             } else if let fourK = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
                 config.videoFormat = fourK
