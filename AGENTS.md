@@ -19,6 +19,7 @@ Orientation for agents (and humans) working in this repo. Detailed docs live in 
 - [docs/design/Scan4D_Architecture.md](docs/design/Scan4D_Architecture.md) — design rationale (Backend-First philosophy, large-space stitching strategies).
 - [docs/design/DESIGN.md](docs/design/DESIGN.md) — original UI/UX design spec.
 - [docs/design/voxel-accumulated-point-cloud.md](docs/design/voxel-accumulated-point-cloud.md) — VR voxel point-cloud accumulation design.
+- [docs/design/still-source-360.md](docs/design/still-source-360.md) — proposed pluggable still sources: onboard camera vs 360° camera rig (Theta Z1/X, Insta360 X3/X4), rig calibration + cube-map export plan.
 - [docs/SCAN_GUIDANCE.md](docs/SCAN_GUIDANCE.md) — complete reference of pre-scan analysis checks (lighting, screens, doors, people) and mid-scan coaching tips (critical/warning/guidance/info) with conditions and messages.
 
 ## Export formats & data contracts
