@@ -1814,7 +1814,7 @@ struct ARCoverageView: UIViewRepresentable {
             lastFrameTimestamp = ts
             if PerfDiag.enabled, frameGap > 0.1 {
                 let normal = frame.camera.trackingState == .normal
-                PerfDiag.log("ARKit frame gap \(Int(frameGap * 1000))ms (tracking \(normal ? "normal" : "degraded"))")
+                PerfDiag.log("[PerfDiag] ARKit frame gap \(Int(frameGap * 1000))ms (tracking \(normal ? "normal" : "degraded"))")
             }
 
             // ── VIO starvation guard ──
