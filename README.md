@@ -28,8 +28,16 @@ When the device is held still, the app requests a native-resolution still via `A
 | Device class | Standard 4:3 format | 4:3 [hiRes] format (default) |
 | :--- | :--- | :--- |
 | iPad Pro M2/M4 | 2016×1512 (verified on-device) | **4032×3024 — verified on-device, mesh intact** |
+| iPad Pro A12Z (2020) | untested | **4032×3024 — verified on-device (auto-selected), mesh intact**; 16:9 1080p [hiRes] also verified (4224×2376, narrower FOV) |
 | iPhone Pro (13 Pro and later) | untested | 4032×3024 expected (per Apple's ARKit 6 guidance) — untested |
 | Non-Pro / no LiDAR | n/a (Lite Mode — stream frames only) | n/a |
+
+Scope of the 16:9 mesh breakage: the zero-mesh failure has only been reproduced with the
+**3840×2160 hiRes formats on M-series iPads**. On the A12Z iPad (which offers no 4K
+formats), the 16:9 `1920×1080 @ 30fps [hiRes]` format ran with mesh fully intact — so
+the auto-selection's 4:3 preference is a conservative choice, not a hard requirement,
+and mixed-aspect captures are fine downstream because every frame exports per-frame
+intrinsics/resolution.
 
 To check a device: the `[ARConfig]` launch log lists every supported format with its `[hiRes]` flag and the `◀ SELECTED` marker, and each captured keyframe logs `[FrameCapture] Hi-res keyframe captured: W×H`. Please update this table as devices are verified.
 
