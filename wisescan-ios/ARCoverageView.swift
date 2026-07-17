@@ -2655,18 +2655,33 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
         }
         PerfDiag.log("[MemDiag] EVENT RP-DIDEND \(memMarker())")
 
-        // Mid-scan RoomPlan failure (e.g. "World tracking failure" from VIO drift under a
-        // fast sweep) surfaces here with a non-nil error while recording is still active —
-        // the intended-Stop path stores isRecording=false BEFORE calling stopRoomPlanSession,
-        // so a clean stop sees isRecording=false and won't enter this branch. When RoomPlan's
-        // SLAM diverges, ARKit's world frame is unreliable and frames captured past this point
-        // are geometrically corrupt, so route it through the same VIO-compromised halt that the
-        // ARKit frame-gap/degradation guard uses (halt + offer save/rescan) rather than waiting
-        // for ARKit tracking to degrade far enough to trip that guard separately.
+        // Mid-scan RoomPlan failure (e.g. "World tracking failure" from drift under a fast
+        // sweep) surfaces here with a non-nil error while recording is still active — the
+        // intended-Stop path stores isRecording=false BEFORE calling stopRoomPlanSession, so
+        // a clean stop won't enter this branch.
+        //
+        // CRUCIAL: RoomPlan (RSCaptureSession) runs its OWN SLAM that can fail independently
+        // of the main ARKit session. RoomPlan dying does NOT by itself mean the scan is bad —
+        // it just means we lose the structured-room data; the frames/mesh/poses from ARKit are
+        // still good as long as ARKit's tracking is healthy. So only escalate to the
+        // VIO-compromised halt when ARKit's OWN tracking is also degraded at this moment. If
+        // ARKit is normal, log and keep scanning; the ARKit frame-gap/sustained-degradation
+        // guard remains the backstop for genuine ARKit loss. (Checked on main, where arView
+        // and the ARSession are owned.)
         if error != nil, isRecording.load(ordering: .relaxed) {
-            PerfDiag.log("⛔️ RoomPlan world-tracking failure mid-scan — halting scan")
             DispatchQueue.main.async { [weak self] in
-                self?.vioCompromisedBinding?.wrappedValue = true
+                guard let self = self, self.isRecording.load(ordering: .relaxed) else { return }
+                let arTrackingNormal: Bool
+                switch self.arView?.session.currentFrame?.camera.trackingState {
+                case .normal: arTrackingNormal = true
+                default: arTrackingNormal = false
+                }
+                if arTrackingNormal {
+                    PerfDiag.log("RoomPlan world-tracking failure mid-scan, but ARKit tracking is normal — continuing (structured-room data lost, scan preserved)")
+                } else {
+                    PerfDiag.log("⛔️ RoomPlan failure + ARKit tracking degraded mid-scan — halting scan")
+                    self.vioCompromisedBinding?.wrappedValue = true
+                }
             }
         }
 
