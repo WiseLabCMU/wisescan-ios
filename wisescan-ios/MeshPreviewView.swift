@@ -19,6 +19,8 @@ struct MeshPreviewContainer: View {
     @State private var detectedClasses: [SemanticClass] = []
     @State private var hasPrivacyMarkers = false
     @State private var isMeshLoaded = false
+    @State private var keyframeMarkerMode: KeyframeMarkerMode = .none
+    @State private var hasKeyframeMarkers = false
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
@@ -32,7 +34,9 @@ struct MeshPreviewContainer: View {
                     isMeshLoaded: $isMeshLoaded,
                     semanticViewMode: $semanticViewMode,
                     detectedClasses: $detectedClasses,
-                    hasPrivacyMarkers: $hasPrivacyMarkers
+                    hasPrivacyMarkers: $hasPrivacyMarkers,
+                    keyframeMarkerMode: $keyframeMarkerMode,
+                    hasKeyframeMarkers: $hasKeyframeMarkers
                 )
 
                 // 2D overlay icons projected from 3D face anchor positions
@@ -49,10 +53,13 @@ struct MeshPreviewContainer: View {
                     }
                 }
 
-                // Bottom-left legend (semantic classes + privacy markers)
-                if (semanticViewMode.showOutlines && !detectedClasses.isEmpty) || (showPrivacyMarkers && hasPrivacyMarkers) {
+                // Bottom-left legend (semantic classes + privacy + capture markers)
+                let showSemanticLegend = semanticViewMode.showOutlines && !detectedClasses.isEmpty
+                let showPrivacyLegend = showPrivacyMarkers && hasPrivacyMarkers
+                let showStillsLegend = keyframeMarkerMode.showStills && hasKeyframeMarkers
+                if showSemanticLegend || showPrivacyLegend || showStillsLegend {
                     VStack(alignment: .leading, spacing: 4) {
-                        if semanticViewMode.showOutlines {
+                        if showSemanticLegend {
                             ForEach(detectedClasses, id: \.rawValue) { cls in
                                 HStack(spacing: 6) {
                                     Circle()
@@ -64,7 +71,7 @@ struct MeshPreviewContainer: View {
                                 }
                             }
                         }
-                        if showPrivacyMarkers && hasPrivacyMarkers {
+                        if showPrivacyLegend {
                             HStack(spacing: 6) {
                                 Image(systemName: "eye.slash.fill")
                                     .font(.system(size: 10))
@@ -72,6 +79,12 @@ struct MeshPreviewContainer: View {
                                 Text("Privacy")
                                     .font(.caption2)
                                     .foregroundColor(.white)
+                            }
+                        }
+                        if showStillsLegend {
+                            captureLegendRow(color: AppConstants.keyframeStillColor, label: "Stills")
+                            if keyframeMarkerMode.showMotion {
+                                captureLegendRow(color: AppConstants.keyframeMotionColor, label: "Motion")
                             }
                         }
                     }
@@ -132,6 +145,16 @@ struct MeshPreviewContainer: View {
                     }
                 }
             }
+            if hasKeyframeMarkers {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        keyframeMarkerMode = keyframeMarkerMode.next
+                    } label: {
+                        Image(systemName: keyframeMarkerMode.iconName)
+                            .foregroundColor(keyframeMarkerMode == .none ? .gray : .cyan)
+                    }
+                }
+            }
             if location != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: savePoseAndUpdate) {
@@ -149,6 +172,18 @@ struct MeshPreviewContainer: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 isViewerReady = true
             }
+        }
+    }
+
+    /// One legend row for a capture-marker group (colored square + label).
+    private func captureLegendRow(color: SIMD4<Float>, label: String) -> some View {
+        HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color(red: Double(color.x), green: Double(color.y), blue: Double(color.z)))
+                .frame(width: 10, height: 10)
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(.white)
         }
     }
 
@@ -248,6 +283,8 @@ struct MeshPreviewView: UIViewRepresentable {
     @Binding var semanticViewMode: SemanticViewMode
     @Binding var detectedClasses: [SemanticClass]
     @Binding var hasPrivacyMarkers: Bool
+    @Binding var keyframeMarkerMode: KeyframeMarkerMode
+    @Binding var hasKeyframeMarkers: Bool
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -322,6 +359,10 @@ struct MeshPreviewView: UIViewRepresentable {
                     scanDirectoryURL: self.scanDirectoryURL
                 )
 
+                // Build still + motion capture-pose frustum markers from the saved poses
+                // (transforms.json). Derived entirely from existing raw data — no capture-time
+                // cost. Both groups are built once; the three-tier mode toggles their visibility.
+
                 DispatchQueue.main.async {
                     let node = SCNNode(geometry: geometry)
                     node.name = "mesh"
@@ -368,6 +409,15 @@ struct MeshPreviewView: UIViewRepresentable {
                         self.detectedClasses = outlines.detectedClasses
                     }
 
+                    // Add still + motion capture-pose markers (built from raw_data/transforms.json,
+                    // same world frame + center offset as the mesh). Both groups are added; the
+                    // three-tier mode toggles their visibility. Built here on the (one-time) preview
+                    // load rather than during capture.
+                    let markerNodes = Self.buildKeyframeMarkerNodes(
+                        scanDirectoryURL: self.scanDirectoryURL, center: center
+                    )
+                    self.attachKeyframeMarkers(markerNodes, to: containerNode, coordinator: context.coordinator)
+
                     scene.rootNode.addChildNode(containerNode)
                     context.coordinator.meshNode = node
                     context.coordinator.semanticsNode = scene.rootNode
@@ -410,6 +460,8 @@ struct MeshPreviewView: UIViewRepresentable {
         context.coordinator.meshNode?.isHidden = !mode.showMesh
         context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
         context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
+        context.coordinator.keyframeStillsNode?.isHidden = !keyframeMarkerMode.showStills
+        context.coordinator.keyframeMotionNode?.isHidden = !keyframeMarkerMode.showMotion
     }
 
     func makeCoordinator() -> Coordinator {
@@ -424,6 +476,10 @@ struct MeshPreviewView: UIViewRepresentable {
         weak var semanticsNode: SCNNode?
         /// Reference to the semantics fill (translucent faces) node for toggling visibility.
         weak var semanticFillsNode: SCNNode?
+        /// Reference to the still (keyframe) capture-marker container for toggling visibility.
+        weak var keyframeStillsNode: SCNNode?
+        /// Reference to the motion (sweep) capture-marker container for toggling visibility.
+        weak var keyframeMotionNode: SCNNode?
 
         init(markerState: MarkerProjectionState) {
             self.markerState = markerState

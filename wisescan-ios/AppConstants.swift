@@ -163,6 +163,11 @@ enum AppConstants {
     static let photoCoverageAnchorFraction: Double = 0.5       // fraction of an anchor's mesh voxels that must be photo-covered to clear its amber tint
     static let photoCoverageDebtMinVoxels: Int = 40            // min mesh voxels before the coverage-debt coach tip can fire (too little geometry below this)
     static let photoCoverageDebtFraction: Double = 0.3         // coach nudges "pause for photos" while photo coverage is below this fraction of mesh
+    static let keyframeFrustumDepth: Float = 0.25             // m — length of the still-capture frustum wedge in the preview
+    static let keyframeStillColor = SIMD4<Float>(0.2, 0.85, 1.0, 1.0)  // cyan — sharp still (keyframe) capture markers
+    static let keyframeMotionColor = SIMD4<Float>(1.0, 0.6, 0.15, 1.0) // amber — motion (sweep) frame markers
+    static let keyframeApexSize: Float = 0.04                 // m — solid cube marking the exact still-capture position
+    static let keyframeMotionScale: Float = 0.6              // motion-frame wedges drawn smaller than stills (many of them; reduce clutter)
     static let colorizationKeyframeWeight: Float = 3.0         // vertex-color weight bonus for sharp stillness keyframes vs sweep frames
 
     // MARK: - Space Analysis Constants
@@ -205,6 +210,39 @@ enum SemanticViewMode: String, CaseIterable {
     var showMesh: Bool { self != .semanticOnly }
     var showOutlines: Bool { self != .meshOnly }
     var showFills: Bool { self == .semanticOnly }
+}
+
+/// Three-tier toggle for still/motion capture-pose frustum markers in the mesh preview.
+/// Mirrors `SemanticViewMode`'s cycle-button pattern; defaults to hidden so the preview
+/// stays clean until the user opts in.
+enum KeyframeMarkerMode: String, CaseIterable {
+    /// No capture markers.
+    case none
+    /// Sharp still (keyframe) capture poses only.
+    case stills
+    /// Still + motion (sweep) frame capture poses.
+    case stillsAndMotion
+
+    /// SF Symbol name for the toolbar button.
+    var iconName: String {
+        switch self {
+        case .none:            return "camera.metering.none"
+        case .stills:          return "camera.metering.partial"
+        case .stillsAndMotion: return "camera.metering.matrix"
+        }
+    }
+
+    /// Advance to the next mode in the cycle.
+    var next: KeyframeMarkerMode {
+        switch self {
+        case .none:            return .stills
+        case .stills:          return .stillsAndMotion
+        case .stillsAndMotion: return .none
+        }
+    }
+
+    var showStills: Bool { self != .none }
+    var showMotion: Bool { self == .stillsAndMotion }
 }
 
 // MARK: - Semantic Classification
