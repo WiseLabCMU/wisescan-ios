@@ -284,9 +284,51 @@ extension CaptureView {
         }
 
         guard let snapshot = finalSnapshot else {
-            // Switch to nominal mode (drops mesh anchors, frees AR memory)
+            // No live mesh to snapshot. This is the NORM when tracking is relocalizing at Stop:
+            // ARKit drops its mesh anchors during relocalization, so currentFrame carries no
+            // geometry — which is exactly the VIO-loss "Save Anyway" case. The raw frames
+            // (images + depth + camera poses) captured BEFORE the loss are still on disk and are
+            // the primary splat/photogrammetry payload, so preserve them as a mesh-less scan
+            // rather than discarding everything. (Backend reconstructs geometry from raw frames;
+            // the on-device OBJ is only a preview.) Only for the normal flow — a stitch/extend
+            // link needs a co-framed mesh + world map, so those still discard.
             isRecording = false
             isProcessingMesh = false  // release the re-entrancy claim from performStopRecording
+
+            let rawFrameCount: Int = rawDataPath.map {
+                (try? FileManager.default.contentsOfDirectory(atPath: $0.appendingPathComponent("images").path).count) ?? 0
+            } ?? 0
+
+            if completion == nil, rawFrameCount > 0 {
+                // Recover the raw capture: empty mesh (geometry comes from the frames downstream),
+                // no world map (a relocalizing session's map is unreliable / not extendable).
+                let recoveredName = newLocationName.isEmpty ? "Recovered Scan" : newLocationName
+                let savedScan = ScanFileManager.shared.saveScan(
+                    context: modelContext,
+                    locationId: locationId,
+                    name: recoveredName,
+                    meshData: Data(),
+                    vertexCount: 0,
+                    faceCount: 0,
+                    hardwareDeviceModel: UIDevice.current.name,
+                    rawDataPath: rawDataPath,
+                    vertexColors: nil,
+                    worldMapURL: nil,
+                    thumbnailData: thumbnailData,
+                    scanCase: scanCase
+                )
+                frameCaptureSession = FrameCaptureSession()
+                MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
+                saveMessage = savedScan != nil
+                    ? "Saved \(rawFrameCount) frames (mesh lost to tracking interruption)"
+                    : "Save failed"
+                scanStore.resetCaptureState()
+                clearMessage()
+                completion?(savedScan)
+                return
+            }
+
+            // Nothing usable to preserve (no frames), or a stitch/extend flow — discard.
             saveMessage = "No Mesh Data"
             frameCaptureSession = FrameCaptureSession()
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
