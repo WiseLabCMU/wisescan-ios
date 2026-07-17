@@ -2655,6 +2655,21 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
         }
         PerfDiag.log("[MemDiag] EVENT RP-DIDEND \(memMarker())")
 
+        // Mid-scan RoomPlan failure (e.g. "World tracking failure" from VIO drift under a
+        // fast sweep) surfaces here with a non-nil error while recording is still active —
+        // the intended-Stop path stores isRecording=false BEFORE calling stopRoomPlanSession,
+        // so a clean stop sees isRecording=false and won't enter this branch. When RoomPlan's
+        // SLAM diverges, ARKit's world frame is unreliable and frames captured past this point
+        // are geometrically corrupt, so route it through the same VIO-compromised halt that the
+        // ARKit frame-gap/degradation guard uses (halt + offer save/rescan) rather than waiting
+        // for ARKit tracking to degrade far enough to trip that guard separately.
+        if error != nil, isRecording.load(ordering: .relaxed) {
+            PerfDiag.log("⛔️ RoomPlan world-tracking failure mid-scan — halting scan")
+            DispatchQueue.main.async { [weak self] in
+                self?.vioCompromisedBinding?.wrappedValue = true
+            }
+        }
+
         // [DEFERRED-ROOMPLAN] step 1 — STASH ONLY (no reconstruction here). RoomBuilder is deliberately
         // NOT run at didEndWith: the world-map export (getCurrentWorldMap, the pose-sensitive save
         // step) runs slightly LATER than this callback, so building here would peg CPU during that
