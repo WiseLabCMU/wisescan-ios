@@ -25,6 +25,9 @@ Orientation for agents (and humans) working in this repo. Detailed docs live in 
 ## Export formats & data contracts
 - [schemas/README.md](schemas/README.md) — export archive structure and JSON schemas for every persisted/exported file: `scan4d_metadata.json`, `stitching.json` (spatial links), `transforms.json`, Polycam `cameras/*.json`, `mesh_info.json`. JSON Schema files live alongside it in [schemas/](schemas/).
 
+## In-app user guide (documentation written in Swift)
+- [wisescan-ios/UserGuideView.swift](wisescan-ios/UserGuideView.swift) — the in-app **User Guide** (Settings → User Guide & Documentation): the user-facing walkthrough (capture → save → rescan/link → export), scan-technique tips, export-format descriptions, supported wearables, and recommended viewers. Treat it as **documentation that happens to live in SwiftUI**: when user-facing workflows, scan suggestions, or export formats change, update it in the same change set — exactly as you would [README.md](README.md), [REQUIREMENTS.md](REQUIREMENTS.md), and [docs/APPSTORE.md](docs/APPSTORE.md). Its scan tips should stay consistent with [docs/SCAN_GUIDANCE.md](docs/SCAN_GUIDANCE.md) (the coaching/analyzer reference).
+
 ## Privacy & troubleshooting
 - [docs/PRIVACY.md](docs/PRIVACY.md) — privacy model (person-segmentation blur, on-device processing, what leaves the device).
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — known issues and recovery steps (Meta Wearables SDK, hardware quirks, relocalization/stitching alignment).
