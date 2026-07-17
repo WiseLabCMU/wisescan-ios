@@ -91,6 +91,14 @@
           "is_keyframe": {
             "type": "boolean",
             "description": "True for sharp stillness keyframes (hi-res stills captured while the device was stationary); splat pipelines can weight these higher."
+          },
+          "sharpness": {
+            "type": "number",
+            "description": "Measured keyframe sharpness: variance of the 3x3 Laplacian over the luma plane (higher = sharper). Only present on keyframes. Stills below the on-device floor were retried; a low value here means the retry budget was exhausted and this was the best capture."
+          },
+          "exposure_duration_s": {
+            "type": "number",
+            "description": "Camera exposure duration in seconds at keyframe capture. Long exposures (dim scenes) carry more handheld-blur risk. Only present on keyframes."
           }
         },
         "required": [

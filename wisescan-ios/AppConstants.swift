@@ -151,6 +151,9 @@ enum AppConstants {
     static let stillnessDurationRequired: TimeInterval = 0.3   // seconds device must be still before counting as "sharp" capture
     static let hiResCaptureTimeoutSeconds: TimeInterval = 5.0  // watchdog: re-request if a hi-res completion never arrives
     static let hiResMaxFailures: Int = 3                       // consecutive hi-res failures before latching stream-frame fallback
+    static let keyframeSharpnessFloor: Float = 20.0            // Laplacian variance below this = grossly blurred still → retry (conservative: plain walls still pass on sensor noise)
+    static let keyframeSharpnessStride: Int = 4                // sample every Nth luma pixel when measuring sharpness (~760K samples on a 12MP still)
+    static let keyframeMaxRetries: Int = 2                     // blurred-still retries per stillness period before accepting the best we got
     static let stillnessHapticIntensity: CGFloat = 0.6         // soft haptic strength on entering confirmed stillness
     static let captureFlashOpacity: Double = 0.5               // peak opacity of the white shutter flash on keyframe capture
     static let captureFlashDuration: TimeInterval = 0.35       // fade-out duration of the shutter flash
