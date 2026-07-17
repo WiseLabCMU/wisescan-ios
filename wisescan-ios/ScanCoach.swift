@@ -160,9 +160,9 @@ class ScanCoach {
         let recentTransforms = frameCaptureSession.recentTransforms(count: 30)
         let roomPlanInstruction = scanStats.roomPlanInstruction
         let sharpFrameCount = frameCaptureSession.sharpFrameCount
-        let totalCapturedFrameCount = frameCaptureSession.totalCapturedFrameCount
         let isCurrentlyStill = frameCaptureSession.isCurrentlyStill
-        let lastSharpFrameTime = frameCaptureSession.lastSharpFrameTime
+        let photoCoverageFraction = scanStats.photoCoverageFraction
+        let photoCoverageOccupied = scanStats.photoCoverageOccupied
 
         // Capture RoomPlan data for semantic tips
         let hasWalls = capturedRoom?.walls.isEmpty == false
@@ -193,9 +193,9 @@ class ScanCoach {
                 objectCount: objectCount,
                 surfaceCount: surfaceCount,
                 sharpFrameCount: sharpFrameCount,
-                totalCapturedFrameCount: totalCapturedFrameCount,
                 isCurrentlyStill: isCurrentlyStill,
-                lastSharpFrameTime: lastSharpFrameTime,
+                photoCoverageFraction: photoCoverageFraction,
+                photoCoverageOccupied: photoCoverageOccupied,
                 now: now,
                 coachingEnabled: coachingEnabled
             )
@@ -257,9 +257,9 @@ class ScanCoach {
         objectCount: Int,
         surfaceCount: Int,
         sharpFrameCount: Int,
-        totalCapturedFrameCount: Int,
         isCurrentlyStill: Bool,
-        lastSharpFrameTime: Date?,
+        photoCoverageFraction: Double,
+        photoCoverageOccupied: Int,
         now: Date,
         coachingEnabled: Bool
     ) -> CoachTip? {
@@ -408,16 +408,18 @@ class ScanCoach {
                            priority: .info, now: now) { return t }
         }
 
-        // Encourage pausing for photos — fires when the user has been moving for a while
-        // without capturing any sharp frames (>30s since last sharp frame or none yet)
-        if !isEarlyScan && !isCurrentlyStill && totalCapturedFrameCount > 20 {
-            let timeSinceSharp = lastSharpFrameTime.map { now.timeIntervalSince($0) } ?? sessionDuration
-            if timeSinceSharp > 30 {
-                if let t = tip("guidance.pauseForPhoto",
-                               "📸 Pause here for a sharp photo",
-                               icon: "camera.fill",
-                               priority: .guidance, now: now) { return t }
-            }
+        // Encourage pausing for photos, driven by actual photo-coverage debt: depth mesh
+        // is outrunning sharp-keyframe coverage. This replaces the old fixed 30s-since-last-
+        // sharp-frame timer with a signal that reflects where coverage is actually lacking
+        // (the amber regions of the overlay). Requires enough mesh to be meaningful, and the
+        // user to be moving (a pause is already producing a keyframe).
+        if !isEarlyScan && !isCurrentlyStill &&
+           photoCoverageOccupied >= AppConstants.photoCoverageDebtMinVoxels &&
+           photoCoverageFraction < AppConstants.photoCoverageDebtFraction {
+            if let t = tip("guidance.pauseForPhoto",
+                           "📸 Pause on the amber areas for sharp photos",
+                           icon: "camera.fill",
+                           priority: .guidance, now: now) { return t }
         }
 
         // Great coverage — consider finishing

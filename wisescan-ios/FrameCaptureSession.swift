@@ -87,10 +87,23 @@ class FrameCaptureSession {
     /// Set when capture stops (pause/stop/discard); a hi-res completion landing after
     /// this must not save — the metadata writers have already run.
     private var captureEnded = false
-    /// Called on the main thread after a sharp keyframe is saved (hi-res still or stream
-    /// fallback), with the capture pose, intrinsics, and pixel dimensions. The AR coverage
-    /// overlay uses this to mark mesh anchors as photo-covered (amber → clear).
-    @ObservationIgnored var onKeyframeCaptured: ((simd_float4x4, simd_float3x3, Int, Int) -> Void)?
+    /// A saved sharp keyframe (hi-res still or stream fallback), as delivered to the
+    /// coverage overlay via `onKeyframeCaptured`.
+    struct KeyframeStill {
+        let transform: simd_float4x4
+        let intrinsics: simd_float3x3
+        let width: Int
+        let height: Int
+        /// Scene depth at capture time, when available. Consumers must use it
+        /// synchronously inside the callback and not retain it — it's an ARKit
+        /// pool buffer, and holding it starves the frame pool (VIO loss).
+        let depthMap: CVPixelBuffer?
+    }
+
+    /// Called on the main thread after a sharp keyframe is saved. The AR coverage
+    /// overlay stamps the photo-coverage voxel grid from the keyframe's depth map and
+    /// updates mesh anchors' photo-covered state (amber → clear).
+    @ObservationIgnored var onKeyframeCaptured: ((KeyframeStill) -> Void)?
 
     // Privacy logic
     /// Accumulating person anchor with an observation count, which acts as a confidence weight:
@@ -106,6 +119,11 @@ class FrameCaptureSession {
     /// Semantic display classes detected during this session (e.g. "wall", "floor", "fixture").
     /// Set by the AR coordinator before stop() so metadata includes the detected classes.
     var semanticClassesDetected: Set<String> = []
+
+    /// Final photo-coverage voxel stats (covered = voxels stamped by keyframe depth,
+    /// occupied = voxels containing mesh). Set by the AR coordinator before stop() so
+    /// metadata records how much of the scanned geometry got photo-grade coverage.
+    var photoCoverageStats: (covered: Int, occupied: Int)?
 
     /// Drop low-confidence anchors (seen in too few frames → likely transient segmentation noise)
     /// then coalesce any survivors still within the merge radius, so the saved `face_anchors` are
@@ -252,6 +270,7 @@ class FrameCaptureSession {
         self.hiResFailureCount = 0
         self.hiResUnavailable = false
         self.captureEnded = false
+        self.photoCoverageStats = nil
         self.overlapMax = overlapMax
         self.rejectBlur = rejectBlur
         self.privacyFilter = privacyFilter
@@ -509,7 +528,7 @@ class FrameCaptureSession {
         // backlog guard dropped.
         if admitted {
             if isStillnessKeyframe {
-                noteKeyframeSaved(transform: transform, intrinsics: intrinsics, width: camW, height: camH)
+                noteKeyframeSaved(transform: transform, intrinsics: intrinsics, width: camW, height: camH, depthMap: depthMap)
             } else {
                 DispatchQueue.main.async { self.totalCapturedFrameCount += 1 }
             }
@@ -557,12 +576,21 @@ class FrameCaptureSession {
     /// Shared bookkeeping for a saved stillness keyframe (hi-res still or stream
     /// fallback): counters, coach timestamp, shutter feedback, and the coverage-overlay
     /// callback. Must be called on the main thread.
-    private func noteKeyframeSaved(transform: simd_float4x4, intrinsics: simd_float3x3, width: Int, height: Int) {
+    private func noteKeyframeSaved(
+        transform: simd_float4x4,
+        intrinsics: simd_float3x3,
+        width: Int,
+        height: Int,
+        depthMap: CVPixelBuffer?
+    ) {
         sharpFrameCount += 1
         totalCapturedFrameCount += 1
         lastSharpFrameTime = Date()
         playShutterClick()
-        onKeyframeCaptured?(transform, intrinsics, width, height)
+        onKeyframeCaptured?(KeyframeStill(
+            transform: transform, intrinsics: intrinsics,
+            width: width, height: height, depthMap: depthMap
+        ))
     }
 
     /// Requests a single still at the camera's native photo resolution and saves it as the
@@ -631,7 +659,7 @@ class FrameCaptureSession {
                 // Feedback and coverage marking only for frames that actually entered
                 // the save pipeline — a backlog drop re-arms the stillness period instead.
                 if admitted {
-                    self.noteKeyframeSaved(transform: transform, intrinsics: intrinsics, width: camW, height: camH)
+                    self.noteKeyframeSaved(transform: transform, intrinsics: intrinsics, width: camW, height: camH, depthMap: depthMap)
                 } else {
                     self.hasStillnessKeyframe = false
                 }
@@ -1069,6 +1097,18 @@ class FrameCaptureSession {
         // Sharp stillness keyframes (hi-res stills when supported) — counted from the frames
         // array (ioQueue-owned) rather than the main-thread UI counter to avoid a data race.
         metadata["keyframe_count"] = frames.filter { $0.isKeyframe }.count
+
+        // Photo-coverage voxel stats: how much of the depth-scanned geometry was covered
+        // by sharp keyframes. Lets the backend triage datasets (low fraction = splat
+        // texture quality will be sweep-frame limited).
+        if let stats = photoCoverageStats, stats.occupied > 0 {
+            metadata["photo_coverage"] = [
+                "covered_voxels": stats.covered,
+                "occupied_voxels": stats.occupied,
+                "fraction": Double(stats.covered) / Double(stats.occupied),
+                "voxel_size_m": Double(AppConstants.photoCoverageVoxelSize)
+            ]
+        }
 
         // Privacy filter: lets the export pipeline apply its privacy passes even when zero
         // segmentation masks were saved (e.g. the stencil never became available), instead

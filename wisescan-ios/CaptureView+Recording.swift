@@ -212,6 +212,11 @@ extension CaptureView {
         let scanCase = scanStore.activeScanCase
         // Snapshot detected semantic display classes for metadata (populated by RoomPlan coordinator)
         capSession.semanticClassesDetected = scanStats.detectedClasses
+        // Snapshot final photo-coverage stats for metadata (populated by the coverage grid)
+        if scanStats.photoCoverageOccupied > 0 {
+            capSession.photoCoverageStats = (covered: scanStats.photoCoverageCovered,
+                                             occupied: scanStats.photoCoverageOccupied)
+        }
         DispatchQueue.global(qos: .utility).async {
             let rawDataPath = capSession.stop()
             DispatchQueue.main.async {

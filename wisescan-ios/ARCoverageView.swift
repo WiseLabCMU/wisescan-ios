@@ -390,17 +390,13 @@ struct ARCoverageView: UIViewRepresentable {
                 if captureMode == .ar {
                     context.coordinator.addCoverageGreenQuad(to: uiView)
                 }
-                // Photo coverage: each sharp keyframe flips the anchors its frustum covers
-                // from amber ("depth only") to clear ("photo-grade"). Wired here so the
-                // callback lives exactly as long as the recording.
+                // Photo coverage: each sharp keyframe stamps the coverage grid from its
+                // depth map and flips any anchor that crossed the coverage threshold from
+                // amber ("depth only") to clear ("photo-grade"). Wired here so the callback
+                // lives exactly as long as the recording.
                 let coordinator = context.coordinator
-                frameCaptureSession?.onKeyframeCaptured = { [weak coordinator] pose, intrinsics, width, height in
-                    coordinator?.markPhotoCoverage(
-                        cameraTransform: pose,
-                        intrinsics: intrinsics,
-                        imageWidth: width,
-                        imageHeight: height
-                    )
+                frameCaptureSession?.onKeyframeCaptured = { [weak coordinator] keyframe in
+                    coordinator?.markPhotoCoverage(keyframe)
                 }
 
                 // Background parse the ghost mesh if we didn't already load it in nominal mode
@@ -618,12 +614,16 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Photo coverage (three-state overlay: green = unscanned, amber = depth only,
         // clear = photo-grade). Main-thread-owned — written when mesh entities are
-        // (re)built and when a sharp keyframe's frustum is tested against the anchors.
-        /// World-space AABB per mesh anchor, for keyframe frustum-coverage tests.
-        private var anchorBounds: [UUID: (min: SIMD3<Float>, max: SIMD3<Float>)] = [:]
-        /// Anchors covered by at least one sharp keyframe photo. Their amber "depth only"
-        /// tint is disabled, leaving clean camera passthrough (photo-grade).
+        // (re)built and when a sharp keyframe stamps the coverage grid.
+        /// Coverage-grid voxels occupied by each anchor's mesh (the denominator of the
+        /// anchor's photo-covered fraction). Rebuilt whenever the anchor's mesh rebuilds.
+        private var anchorVoxels: [UUID: Set<SIMD3<Int32>>] = [:]
+        /// Anchors whose photo-covered voxel fraction crossed the threshold. Their amber
+        /// "depth only" tint is disabled, leaving clean camera passthrough (photo-grade).
         private var photoCoveredAnchors: Set<UUID> = []
+        /// World-space voxel grid of surfaces covered by sharp keyframe photos, stamped
+        /// from each keyframe's depth map (occlusion-correct — no through-wall marking).
+        let photoCoverageGrid = PhotoCoverageGrid()
 
         // RoomPlan: structured room detection alongside ARKit mesh
         /// Active RoomPlan session sharing our ARSession. Provides oriented surfaces/objects.
@@ -850,8 +850,11 @@ struct ARCoverageView: UIViewRepresentable {
                 entry.anchor.removeFromParent()
             }
             activeMeshEntities.removeAll()
-            anchorBounds.removeAll()
+            anchorVoxels.removeAll()
             photoCoveredAnchors.removeAll()
+            photoCoverageGrid.reset()
+            scanStats?.photoCoverageCovered = 0
+            scanStats?.photoCoverageOccupied = 0
         }
 
         /// Recolors all existing active mesh wireframe entities with the current activeMeshColor.
@@ -981,11 +984,21 @@ struct ARCoverageView: UIViewRepresentable {
                             occlusionEntity.name = "occlusionFill"
                             containerEntity.addChild(occlusionEntity)
                         }
+                        // Record this rebuild's occupied voxels, then re-evaluate coverage:
+                        // an anchor can rebuild larger (new geometry) after it was already
+                        // photo-covered, so recompute against the grid rather than trusting
+                        // the prior flag.
+                        self.anchorVoxels[anchorId] = coverageData.occupiedVoxels
+                        let covered = self.isAnchorPhotoCovered(coverageData.occupiedVoxels)
+                        if covered {
+                            self.photoCoveredAnchors.insert(anchorId)
+                        } else {
+                            self.photoCoveredAnchors.remove(anchorId)
+                        }
                         // Amber "depth only" tint over the camera feed — skipped entirely
-                        // once a sharp keyframe photo covers this anchor: coverage is
-                        // permanent, so generating a disabled tint mesh on the main
-                        // thread would be pure wasted capture-time work.
-                        if !self.photoCoveredAnchors.contains(anchorId),
+                        // when the anchor is already photo-covered: generating a disabled
+                        // tint mesh on the main thread would be pure wasted capture-time work.
+                        if !covered,
                            let tintRes = try? MeshResource.generate(from: [coverageData.tintDescriptor]) {
                             var tintMaterial = UnlitMaterial(rgb: AppConstants.photoTintColor, alpha: AppConstants.photoTintAlpha)
                             tintMaterial.blending = .transparent(opacity: 1.0)
@@ -993,7 +1006,6 @@ struct ARCoverageView: UIViewRepresentable {
                             tintEntity.name = "photoTint"
                             containerEntity.addChild(tintEntity)
                         }
-                        self.anchorBounds[anchorId] = (min: coverageData.boundsMin, max: coverageData.boundsMax)
                     }
 
                     if let existing = self.activeMeshEntities[anchorId] {
@@ -1260,8 +1272,9 @@ struct ARCoverageView: UIViewRepresentable {
         /// Photo-coverage support data for a rebuilt anchor mesh: its world-space AABB (for
         /// keyframe frustum tests) and the amber tint mesh descriptor.
         struct PhotoCoverageData {
-            let boundsMin: SIMD3<Float>
-            let boundsMax: SIMD3<Float>
+            /// Coverage-grid voxels occupied by the anchor's vertices — the denominator
+            /// of the anchor's photo-covered fraction.
+            let occupiedVoxels: Set<SIMD3<Int32>>
             let tintDescriptor: MeshDescriptor
         }
 
@@ -1273,11 +1286,9 @@ struct ARCoverageView: UIViewRepresentable {
             worldPositions: [SIMD3<Float>],
             flatIndices: [UInt32]
         ) -> PhotoCoverageData {
-            var boundsMin = worldPositions[0]
-            var boundsMax = worldPositions[0]
+            var occupiedVoxels = Set<SIMD3<Int32>>()
             for position in worldPositions {
-                boundsMin = simd_min(boundsMin, position)
-                boundsMax = simd_max(boundsMax, position)
+                occupiedVoxels.insert(PhotoCoverageGrid.key(for: position))
             }
             var vertexNormals = [SIMD3<Float>](repeating: .zero, count: worldPositions.count)
             for base in stride(from: 0, to: flatIndices.count, by: 3) {
@@ -1301,72 +1312,57 @@ struct ARCoverageView: UIViewRepresentable {
                 }
             )
             tintDescriptor.primitives = .triangles(flatIndices)
-            return PhotoCoverageData(boundsMin: boundsMin, boundsMax: boundsMax, tintDescriptor: tintDescriptor)
+            return PhotoCoverageData(occupiedVoxels: occupiedVoxels, tintDescriptor: tintDescriptor)
         }
 
-        /// Marks mesh anchors whose bounds fall inside a sharp keyframe's camera frustum as
-        /// photo-covered, flipping their overlay from amber ("depth only") to clean camera
-        /// passthrough ("photo-grade"). Runs on main, only at keyframe-capture events (a few
-        /// times a minute) over dozens of anchor AABBs — negligible cost.
+        /// Whether an anchor's mesh is sufficiently photo-covered to drop its amber tint:
+        /// at least `photoCoverageAnchorFraction` of its occupied voxels appear in the
+        /// coverage grid.
+        private func isAnchorPhotoCovered(_ voxels: Set<SIMD3<Int32>>) -> Bool {
+            guard !voxels.isEmpty else { return false }
+            let hits = voxels.reduce(0) { $0 + (photoCoverageGrid.isCovered($1) ? 1 : 0) }
+            return Double(hits) / Double(voxels.count) >= AppConstants.photoCoverageAnchorFraction
+        }
+
+        /// Stamps the photo-coverage grid from a sharp keyframe's depth map, then flips any
+        /// anchor that crossed the coverage threshold from amber ("depth only") to clean
+        /// camera passthrough ("photo-grade"). Runs on main, only at keyframe-capture events
+        /// (a few times a minute).
         ///
-        /// The test is conservative at anchor granularity (~1m chunks): an AABB clipping the
-        /// frustum edge counts as covered. Good enough for the coverage read the user needs
-        /// ("that wall is still amber — go photograph it").
-        ///
-        /// Known limitation: no occlusion test — anchors behind nearer geometry (e.g. the
-        /// next room through a wall, within the far cap) are marked covered by a photo that
-        /// never saw them. A correct visibility test needs the keyframe's depth map sampled
-        /// per anchor; that belongs to the planned voxel-coverage-grid stage, not this
-        /// AABB pass.
-        func markPhotoCoverage(
-            cameraTransform: simd_float4x4,
-            intrinsics: simd_float3x3,
-            imageWidth: Int,
-            imageHeight: Int
-        ) {
-            guard captureMode == .ar, !anchorBounds.isEmpty else { return }
+        /// Coverage is occlusion-correct: only surfaces the depth map actually measured are
+        /// stamped, so geometry behind a wall is never marked covered through the wall (the
+        /// failure mode of the earlier frustum/AABB test this replaces).
+        func markPhotoCoverage(_ keyframe: FrameCaptureSession.KeyframeStill) {
+            guard captureMode == .ar, let depthMap = keyframe.depthMap else { return }
 
-            let camPos = SIMD3<Float>(cameraTransform.columns.3.x, cameraTransform.columns.3.y, cameraTransform.columns.3.z)
-            let rightAxis = SIMD3<Float>(cameraTransform.columns.0.x, cameraTransform.columns.0.y, cameraTransform.columns.0.z)
-            let upAxis = SIMD3<Float>(cameraTransform.columns.1.x, cameraTransform.columns.1.y, cameraTransform.columns.1.z)
-            // ARKit camera looks down -Z.
-            let forward = -SIMD3<Float>(cameraTransform.columns.2.x, cameraTransform.columns.2.y, cameraTransform.columns.2.z)
+            let newlyCovered = photoCoverageGrid.stamp(
+                depthMap: depthMap,
+                cameraTransform: keyframe.transform,
+                intrinsics: keyframe.intrinsics,
+                imageWidth: keyframe.width,
+                imageHeight: keyframe.height
+            )
+            guard newlyCovered > 0 else { return } // no grid change → no anchor can flip
 
-            // Half-angle tangents from the pinhole intrinsics.
-            let tanX = Float(imageWidth) * 0.5 / intrinsics[0][0]
-            let tanY = Float(imageHeight) * 0.5 / intrinsics[1][1]
-
-            // Inward-facing frustum planes: the four side planes pass through the camera
-            // position, plus a far plane at the coverage distance cap (texture detail from a
-            // photo isn't credible beyond a few meters). Inside means dot(n, p - o) >= 0.
-            let planes: [(normal: SIMD3<Float>, origin: SIMD3<Float>)] = [
-                (forward, camPos),                                                        // behind-camera cull
-                (-forward, camPos + forward * AppConstants.photoCoverageMaxDistance),     // far cap
-                (simd_normalize(rightAxis + tanX * forward), camPos),                     // left edge
-                (simd_normalize(-rightAxis + tanX * forward), camPos),                    // right edge
-                (simd_normalize(upAxis + tanY * forward), camPos),                        // bottom edge
-                (simd_normalize(-upAxis + tanY * forward), camPos)                        // top edge
-            ]
-
-            for (anchorId, bounds) in anchorBounds where !photoCoveredAnchors.contains(anchorId) {
-                var inside = true
-                for plane in planes {
-                    // Positive-vertex test: the AABB corner farthest along the plane normal.
-                    let farthestCorner = SIMD3<Float>(
-                        plane.normal.x >= 0 ? bounds.max.x : bounds.min.x,
-                        plane.normal.y >= 0 ? bounds.max.y : bounds.min.y,
-                        plane.normal.z >= 0 ? bounds.max.z : bounds.min.z
-                    )
-                    if simd_dot(plane.normal, farthestCorner - plane.origin) < 0 {
-                        inside = false
-                        break
-                    }
-                }
-                guard inside else { continue }
+            for (anchorId, voxels) in anchorVoxels where !photoCoveredAnchors.contains(anchorId) {
+                guard isAnchorPhotoCovered(voxels) else { continue }
                 photoCoveredAnchors.insert(anchorId)
                 // Disable the amber tint — this anchor is now photo-grade (clean camera feed).
                 activeMeshEntities[anchorId]?.model.findEntity(named: "photoTint")?.isEnabled = false
             }
+
+            publishCoverageStats()
+        }
+
+        /// Publishes photo-coverage progress (covered vs occupied voxels across all anchors)
+        /// to ScanStats for the coverage-debt coach tip and the final scan metadata.
+        /// Called on the main thread (keyframe-capture path), where ScanStats is written.
+        private func publishCoverageStats() {
+            var occupied = Set<SIMD3<Int32>>()
+            for voxels in anchorVoxels.values { occupied.formUnion(voxels) }
+            let coveredCount = occupied.reduce(0) { $0 + (photoCoverageGrid.isCovered($1) ? 1 : 0) }
+            scanStats?.photoCoverageCovered = coveredCount
+            scanStats?.photoCoverageOccupied = occupied.count
         }
 
         // Watch for relocalization success and track drift
@@ -1813,12 +1809,12 @@ struct ARCoverageView: UIViewRepresentable {
                     lastAnchorWireframeTime.removeValue(forKey: id)
 
                     // Remove the wireframe entity on main — RealityKit is main-only.
-                    // (anchorBounds/photoCoveredAnchors are main-owned too.)
+                    // (anchorVoxels/photoCoveredAnchors are main-owned too.)
                     DispatchQueue.main.async { [weak self] in
                         if let entry = self?.activeMeshEntities.removeValue(forKey: id) {
                             entry.anchor.removeFromParent()
                         }
-                        self?.anchorBounds.removeValue(forKey: id)
+                        self?.anchorVoxels.removeValue(forKey: id)
                         self?.photoCoveredAnchors.remove(id)
                     }
                 }

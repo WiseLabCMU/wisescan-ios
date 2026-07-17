@@ -434,6 +434,15 @@ class ScanStats {
     var detectedClasses: Set<String> = [] // Semantic classes detected so far (for HUD display)
     var roomPlanInstruction: RoomCaptureSession.Instruction? // Latest RoomPlan coaching instruction
 
+    // Photo coverage (sharp-keyframe voxel grid): how much of the depth-scanned mesh has
+    // been covered by hi-res stills. Drives the coverage-debt coach tip and scan metadata.
+    var photoCoverageCovered: Int = 0  // covered voxels
+    var photoCoverageOccupied: Int = 0 // mesh-occupied voxels (denominator)
+    /// Fraction of mesh voxels covered by sharp keyframes (0 when no geometry yet).
+    var photoCoverageFraction: Double {
+        photoCoverageOccupied > 0 ? Double(photoCoverageCovered) / Double(photoCoverageOccupied) : 0
+    }
+
     // MARK: - Space Analysis (pre-scan staging check)
     /// Latest ambient intensity from ARFrame.lightEstimate (lumens, ~0–2000). Updated per-frame
     /// during analysis phase; also available during recording for ScanCoach if desired.

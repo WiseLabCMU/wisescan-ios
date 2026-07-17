@@ -83,6 +83,28 @@
     "keyframe_count": {
       "type": "integer",
       "description": "Number of sharp stillness keyframes captured (hi-res stills when the device supports them, stream frames otherwise)."
+    },
+    "photo_coverage": {
+      "type": "object",
+      "description": "How much of the depth-scanned geometry was covered by sharp keyframe photos, measured on a coarse world-space voxel grid (occlusion-correct: only surfaces a keyframe's depth map actually measured are counted).",
+      "properties": {
+        "covered_voxels": {
+          "type": "integer",
+          "description": "Voxels containing mesh that were photographed by at least one sharp keyframe."
+        },
+        "occupied_voxels": {
+          "type": "integer",
+          "description": "Voxels containing mesh geometry (the coverage denominator)."
+        },
+        "fraction": {
+          "type": "number",
+          "description": "covered_voxels / occupied_voxels, 0..1. Low values mean splat texture quality will be limited to sweep-frame detail in the uncovered regions."
+        },
+        "voxel_size_m": {
+          "type": "number",
+          "description": "Edge length in meters of a coverage voxel cell."
+        }
+      }
     }
   },
   "required": [
