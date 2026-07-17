@@ -21,6 +21,7 @@ struct MeshPreviewContainer: View {
     @State private var isMeshLoaded = false
     @State private var keyframeMarkerMode: KeyframeMarkerMode = .none
     @State private var hasKeyframeMarkers = false
+    @State private var showSetPoseConfirm = false
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
@@ -157,15 +158,24 @@ struct MeshPreviewContainer: View {
             }
             if location != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: savePoseAndUpdate) {
-                        HStack {
-                            Image(systemName: "camera.viewfinder")
-                            Text("Set Default Pose")
-                        }
+                    // Icon-only to keep the trailing bar uncrowded alongside the privacy/
+                    // semantic/keyframe toggles. A confirmation dialog names the action for
+                    // sighted users; the accessibility label names it for VoiceOver.
+                    Button {
+                        showSetPoseConfirm = true
+                    } label: {
+                        Image(systemName: "camera.viewfinder")
                     }
+                    .accessibilityLabel("Set Default Pose")
                     .disabled(isUpdating || !isMeshLoaded)
                 }
             }
+        }
+        .confirmationDialog("Set Default Pose", isPresented: $showSetPoseConfirm, titleVisibility: .visible) {
+            Button("Set Default Pose") { savePoseAndUpdate() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Save the current view angle as this location's default preview pose, then regenerate every scan's thumbnail from this viewpoint.")
         }
         .onAppear {
             // Defer the heavy OBJ parsing to ensure the fullScreenCover animation completes smoothly
