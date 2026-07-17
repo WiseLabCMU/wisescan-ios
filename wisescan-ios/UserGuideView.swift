@@ -12,34 +12,45 @@ struct UserGuideView: View {
                 Section {
                     guideRow(
                         icon: "1.circle.fill",
-                        title: "Capture",
-                        text: "Point your device at a scene. Toggle Privacy Filter to exclude people from the scan. " +
-                              "Tap the capture button to start recording — " +
-                              "the mesh overlay shows scanning progress in real-time."
+                        title: "Analyze (Optional)",
+                        text: "Before recording, tap Analyze and sweep the room. The app checks " +
+                              "lighting, screens, open doors, and people, then reports what to fix " +
+                              "for the best scan quality."
                     )
                     guideRow(
                         icon: "2.circle.fill",
+                        title: "Capture",
+                        text: "Point your device at a scene. The Privacy Filter (on by default) masks " +
+                              "people out of the captured data. Tap the capture button to start recording — " +
+                              "the mesh overlay shows scanning progress in real-time, and coaching tips " +
+                              "appear when the scan needs attention (moving too fast, session near capacity)."
+                    )
+                    guideRow(
+                        icon: "3.circle.fill",
                         title: "Name & Save",
                         text: "Tap stop when done. Name your space to save it. " +
                               "Your scan appears on the Workflows tab under its specific Location."
                     )
                     guideRow(
-                        icon: "3.circle.fill",
+                        icon: "4.circle.fill",
                         title: "Rescan Space / Connect Adjacent Space",
                         text: "Tap 'Rescan Space' on any location to re-scan the identical area over time " +
-                              "— a red ghost overlay shows your previous scan for reference. " +
+                              "— a colored ghost overlay (default magenta, configurable in Settings) shows " +
+                              "your previous scan for reference. " +
                               "Tap 'Connect Adjacent Space' to scan a neighboring room: relocalize with your " +
                               "previous scan, walk to where the new connector should be, " +
-                              "and confirm to place the connector and start scanning the new space."
+                              "and confirm to place the connector and start scanning the new space. " +
+                              "You can also tap 'Pin & Extend' mid-scan to drop a connector and continue " +
+                              "into the next space without stopping."
                     )
                     guideRow(
-                        icon: "4.circle.fill",
+                        icon: "5.circle.fill",
                         title: "Choose Format",
                         text: "Select an export format (Scan4D, Polycam, OBJ, PLY, USDZ, or RAW) " +
                               "using the format picker on each scan card."
                     )
                     guideRow(
-                        icon: "5.circle.fill",
+                        icon: "6.circle.fill",
                         title: "Save or Upload",
                         text: "Save locally to Files, AirDrop to another device, or upload to your configured server."
                     )
@@ -48,11 +59,54 @@ struct UserGuideView: View {
                 }
                 .listRowBackground(Color.white.opacity(0.05))
 
+                // MARK: - Scan Tips
+                // User-facing distillation of the pre-scan analyzer checks and mid-scan
+                // coaching rules — keep consistent with docs/SCAN_GUIDANCE.md.
+                Section {
+                    guideRow(
+                        icon: "lightbulb.fill",
+                        title: "Light the Room",
+                        text: "Good, even lighting matters most — dim areas produce poor color data. " +
+                              "Turn on the lights, and run Analyze if you're unsure."
+                    )
+                    guideRow(
+                        icon: "tortoise.fill",
+                        title: "Move Slowly & Smoothly",
+                        text: "Fast motion blurs frames and can break tracking. Sweep steadily, and " +
+                              "follow the on-screen tip if the app asks you to slow down or hold steady."
+                    )
+                    guideRow(
+                        icon: "arrow.left.and.right",
+                        title: "Layout First, Details Second",
+                        text: "Quickly cover all four walls for layout context, sweeping systematically " +
+                              "from one wall to the opposite. Then move closer for fine detail and vary " +
+                              "your scanning height so surfaces are seen from more than one angle."
+                    )
+                    guideRow(
+                        icon: "tv.slash",
+                        title: "Avoid Screens, Mirrors & Open Doors",
+                        text: "TVs, monitors, mirrors, and glass confuse depth sensing — turn screens off. " +
+                              "Close doors so the scan doesn't trail into incomplete neighboring areas " +
+                              "(use Connect Adjacent Space for those instead)."
+                    )
+                    guideRow(
+                        icon: "gauge.with.needle",
+                        title: "Watch the Capacity Bar",
+                        text: "Long scans approach session limits — save when the capacity warning appears. " +
+                              "For large or multi-room spaces, capture several linked scans " +
+                              "(Pin & Extend or Connect Adjacent Space) instead of one huge scan."
+                    )
+                } header: {
+                    Text("SCAN TIPS")
+                }
+                .listRowBackground(Color.white.opacity(0.05))
+
                 // MARK: - Export Formats
                 Section {
                     formatRow(
                         format: "Scan4D",
                         desc: "Default format. Includes scan4d_metadata, relocalization worldmap, " +
+                              "room layout (roomplan) and spatial-link (stitching) metadata, " +
                               "plus the full Polycam raw import payload " +
                               "(images, depth, cameras, mesh_info). Zip archive."
                     )
