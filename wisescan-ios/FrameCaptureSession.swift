@@ -165,6 +165,10 @@ class FrameCaptureSession {
     @ObservationIgnored private let stillnessHaptic = UIImpactFeedbackGenerator(style: .light)
 
     private let ioQueue = DispatchQueue(label: "com.scan4d.capture.io", qos: .userInitiated)
+    /// Dedicated queue for the expensive ~12MP hi-res keyframe JPEG encode, kept OFF the
+    /// shared ioQueue so a >1s native-res encode can't head-of-line-block stream saves and
+    /// starve ARKit's frame pool. Only one hi-res request is in flight at a time, so serial.
+    private let keyframeEncodeQueue = DispatchQueue(label: "com.scan4d.capture.keyframe", qos: .utility)
     private let ciContext = CIContext()  // Reuse across frames to avoid GPU pipeline re-init
     /// Reusable 16-bit depth conversion buffer (depth resolution is fixed per session).
     /// Only touched inside depthMapToPNG16 on ioQueue, so no synchronization needed.
@@ -637,31 +641,54 @@ class FrameCaptureSession {
 
             print("[FrameCapture] Hi-res keyframe captured: \(camW)×\(camH) (depth: \(depthMap != nil))")
 
-            DispatchQueue.main.async {
-                self.hiResCaptureInFlight = false
-                self.hiResFailureCount = 0
-                // Recording may have stopped while the request was in flight — the
-                // metadata writers have already run, so a late save would write an
-                // orphan frame into the exported capture directory.
-                guard !self.captureEnded else { return }
-                let admitted = self.processAndSaveFrame(
-                    pixelBuffer: pixelBuffer,
-                    camW: camW,
-                    camH: camH,
-                    transform: transform,
-                    intrinsics: intrinsics,
-                    depthMap: depthMap,
-                    confidenceMap: confidenceMap,
-                    segBuffer: segBuffer,
-                    currentIndex: 0,
-                    isKeyframe: true
-                )
-                // Feedback and coverage marking only for frames that actually entered
-                // the save pipeline — a backlog drop re-arms the stillness period instead.
-                if admitted {
-                    self.noteKeyframeSaved(transform: transform, intrinsics: intrinsics, width: camW, height: camH, depthMap: depthMap)
-                } else {
-                    self.hasStillnessKeyframe = false
+            // Encode the ~12MP JPEG on a DEDICATED background queue — off both the main thread
+            // AND the shared ioQueue. A native-resolution encode can exceed a second; running
+            // it on the ioQueue head-of-line-blocks queued stream saves, pinning their live
+            // ARFrame pool buffers and starving ARKit (observed on device: a 1668ms encode →
+            // 1.5s frame gap → tracking loss → RoomPlan drift). We dispatch explicitly rather
+            // than run on the completion's own queue because ARKit doesn't document which queue
+            // that is (it may be main). The ioQueue closure below then only does the fast
+            // depth-PNG + file writes. The hi-res pixel buffer is not a live-pool ARFrame
+            // buffer, so retaining it across this hop doesn't affect ARKit's pool.
+            keyframeEncodeQueue.async {
+                guard let keyframeJPEG = PerfDiag.timed("jpeg_encode_hires", warnOverMs: 250, { self.pixelBufferToJPEG(pixelBuffer) }) else {
+                    print("[FrameCapture] Hi-res keyframe JPEG encode failed — dropping")
+                    DispatchQueue.main.async {
+                        self.hiResCaptureInFlight = false
+                        self.hasStillnessKeyframe = false // let the stillness period retry
+                    }
+                    return
+                }
+
+                DispatchQueue.main.async {
+                    self.hiResCaptureInFlight = false
+                    self.hiResFailureCount = 0
+                    // Recording may have stopped while the request was in flight — the
+                    // metadata writers have already run, so a late save would write an
+                    // orphan frame into the exported capture directory.
+                    guard !self.captureEnded else { return }
+                    // pixelBuffer: nil — the JPEG is pre-encoded, so the 12MP buffer isn't
+                    // retained across the ioQueue hop (depth/seg are separate small buffers).
+                    let admitted = self.processAndSaveFrame(
+                        pixelBuffer: nil,
+                        camW: camW,
+                        camH: camH,
+                        transform: transform,
+                        intrinsics: intrinsics,
+                        depthMap: depthMap,
+                        confidenceMap: confidenceMap,
+                        segBuffer: segBuffer,
+                        currentIndex: 0,
+                        isKeyframe: true,
+                        preEncodedJPEG: keyframeJPEG
+                    )
+                    // Feedback and coverage marking only for frames that actually entered
+                    // the save pipeline — a backlog drop re-arms the stillness period instead.
+                    if admitted {
+                        self.noteKeyframeSaved(transform: transform, intrinsics: intrinsics, width: camW, height: camH, depthMap: depthMap)
+                    } else {
+                        self.hasStillnessKeyframe = false
+                    }
                 }
             }
         }
@@ -733,15 +760,21 @@ class FrameCaptureSession {
         confidenceMap: CVPixelBuffer?,
         segBuffer: CVPixelBuffer?,
         currentIndex: Int,
-        isKeyframe: Bool = false
+        isKeyframe: Bool = false,
+        preEncodedJPEG: Data? = nil
     ) -> Bool {
         // Backlog guard: if frame encodes are falling behind, DROP this frame instead of piling
         // up retained CVPixelBuffers. That pile-up is what starves ARKit's frame pool ("retaining
         // N ARFrames") and ultimately stalls/loses VIO tracking — and any data captured after VIO
         // loss is corrupt. Capture is movement-gated, so the next motion re-triggers a save.
         // Admit-and-increment atomically; the ioQueue closure decrements in its defer.
+        //
+        // Keyframes are EXEMPT from the cap: they arrive pre-encoded (the expensive ~12MP JPEG
+        // encode already ran off-queue in the hi-res completion), carry no live-pool pixel buffer
+        // into the ioQueue closure, and are rare + high-value — so they can't contribute to pool
+        // starvation and must not be dropped by transient stream backlog.
         let admittedDepth: Int? = inFlightSaves.withLock { count -> Int? in
-            guard count < AppConstants.maxFramesInFlight else { return nil }
+            guard isKeyframe || count < AppConstants.maxFramesInFlight else { return nil }
             count += 1
             return count
         }
@@ -776,6 +809,10 @@ class FrameCaptureSession {
             var finalJpegData: Data
             if self.isMockingImages {
                 finalJpegData = TestDataGenerator.generateImage(for: currentIndex, w: camW, h: camH, transform: transform, intrinsics: intrinsics)
+            } else if let preEncodedJPEG = preEncodedJPEG {
+                // Keyframe path: the ~12MP encode already ran off-queue (hi-res completion),
+                // so the ioQueue only does the fast depth-PNG + file writes here.
+                finalJpegData = preEncodedJPEG
             } else {
                 guard let pBuf = pixelBuffer else { return }
                 guard let jpegData = PerfDiag.timed("jpeg_encode", warnOverMs: 50, { self.pixelBufferToJPEG(pBuf) }) else { return }
