@@ -145,6 +145,47 @@ enum VertexColorAccumulator {
     /// parses vertices from `objData`, and projects each vertex into camera frames.
     /// `progress` (0...1) is called after each sampled frame on the calling
     /// (background) thread — callers hop to main to update UI.
+    /// Selects up to `max` camera-JSON files to sample for vertex coloring, **always
+    /// including every sharp keyframe** and filling the remainder with evenly-spaced
+    /// sweep frames. Keyframes carry the least motion blur and best registration, so
+    /// guaranteeing their inclusion (rather than only weighting them if they happen to
+    /// land on an even-stride sample) sharpens the colored preview on scans that paused
+    /// for stills. A pure sweep with no keyframes falls back to plain even-stride, and
+    /// when keyframes alone exceed the budget they're even-strided among themselves.
+    /// `cameraFiles` must be sorted chronologically; the returned subset preserves that order.
+    static func selectColorizationFrames(from cameraFiles: [URL], max maxFrames: Int) -> [URL] {
+        guard cameraFiles.count > maxFrames, maxFrames > 0 else { return cameraFiles }
+
+        // `is_keyframe` is only written to the JSON when true, so its presence is the flag.
+        let isKeyframe: [Bool] = cameraFiles.map { url in
+            guard let data = try? Data(contentsOf: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            return (json["is_keyframe"] as? Bool) == true
+        }
+        let keyframeIdx = cameraFiles.indices.filter { isKeyframe[$0] }
+
+        func evenStride(_ indices: [Int], count: Int) -> [Int] {
+            guard indices.count > count else { return indices }
+            let step = Swift.max(1, indices.count / count)
+            return Swift.stride(from: 0, to: indices.count, by: step).prefix(count).map { indices[$0] }
+        }
+
+        let selected: [Int]
+        if keyframeIdx.isEmpty {
+            // No stills — even-stride across all frames (original behavior).
+            selected = evenStride(Array(cameraFiles.indices), count: maxFrames)
+        } else if keyframeIdx.count >= maxFrames {
+            // More keyframes than the budget — even-stride among the keyframes.
+            selected = evenStride(keyframeIdx, count: maxFrames)
+        } else {
+            // All keyframes, then even-stride fill from the sweep frames.
+            let nonKeyframeIdx = cameraFiles.indices.filter { !isKeyframe[$0] }
+            let fill = evenStride(nonKeyframeIdx, count: maxFrames - keyframeIdx.count)
+            selected = (keyframeIdx + fill).sorted()
+        }
+        return selected.map { cameraFiles[$0] }
+    }
+
     static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?, progress: ((Double) -> Void)? = nil) -> Data? {
         guard let rawDir = rawDataDir else { return nil }
         let fm = FileManager.default
@@ -180,10 +221,10 @@ enum VertexColorAccumulator {
 
         guard !cameraFiles.isEmpty else { return nil }
 
-        // Sample up to maxColorizationFrames evenly-spaced frames for high coverage
-        let maxFrames = min(cameraFiles.count, AppConstants.maxColorizationFrames)
-        let stride = max(1, cameraFiles.count / maxFrames)
-        let sampledFiles = Swift.stride(from: 0, to: cameraFiles.count, by: stride).prefix(maxFrames).map { cameraFiles[$0] }
+        // Sample up to maxColorizationFrames, preferring sharp keyframes (see helper).
+        let sampledFiles = Self.selectColorizationFrames(
+            from: cameraFiles, max: AppConstants.maxColorizationFrames
+        )
 
         // Per-vertex top-N observation buffers (flat, row = K entries per vertex).
         // Colors are kept as 8-bit (the source precision) to bound memory.
