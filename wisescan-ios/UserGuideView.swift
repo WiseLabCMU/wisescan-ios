@@ -23,7 +23,9 @@ struct UserGuideView: View {
                         text: "Point your device at a scene. The Privacy Filter (on by default) masks " +
                               "people out of the captured data. Tap the capture button to start recording — " +
                               "the mesh overlay shows scanning progress in real-time, and coaching tips " +
-                              "appear when the scan needs attention (moving too fast, session near capacity)."
+                              "appear when the scan needs attention (moving too fast, session near capacity). " +
+                              "The overlay color tells you what each area still needs: green = not yet " +
+                              "scanned, amber = depth captured but no photo yet, clear = photo-grade."
                     )
                     guideRow(
                         icon: "3.circle.fill",
@@ -74,6 +76,15 @@ struct UserGuideView: View {
                         title: "Move Slowly & Smoothly",
                         text: "Fast motion blurs frames and can break tracking. Sweep steadily, and " +
                               "follow the on-screen tip if the app asks you to slow down or hold steady."
+                    )
+                    guideRow(
+                        icon: "camera.fill",
+                        title: "Pause for Sharp Photos",
+                        text: "Hold still to capture a high-resolution photo: the center ring fills as " +
+                              "you settle, then a shutter click and flash confirm the shot, and the amber " +
+                              "overlay clears where the photo landed. Pause on every amber area — these " +
+                              "crisp stills drive the final texture quality. In the mesh preview, the " +
+                              "camera toggle shows where each still (and motion frame) was captured."
                     )
                     guideRow(
                         icon: "arrow.left.and.right",
@@ -191,11 +202,13 @@ struct UserGuideView: View {
         .navigationTitle("User Guide")
         .navigationBarTitleDisplayMode(.inline)
     }
+}
 
-    // MARK: - Helper Views
+// MARK: - Helper Views
 
+private extension UserGuideView {
     @ViewBuilder
-    private func guideRow(icon: String, title: String, text: String) -> some View {
+    func guideRow(icon: String, title: String, text: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: icon)
                 .foregroundColor(.cyan)
@@ -214,7 +227,7 @@ struct UserGuideView: View {
     }
 
     @ViewBuilder
-    private func formatRow(format: String, desc: String) -> some View {
+    func formatRow(format: String, desc: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Text(format)
                 .font(.caption).bold()
@@ -230,8 +243,8 @@ struct UserGuideView: View {
     }
 
     @ViewBuilder
-    private func appRow(name: String, icon: String, color: Color, desc: String,
-                        appStore: String? = nil, website: String? = nil) -> some View {
+    func appRow(name: String, icon: String, color: Color, desc: String,
+                appStore: String? = nil, website: String? = nil) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: icon)
                 .foregroundColor(color)
