@@ -156,8 +156,23 @@ enum VertexColorAccumulator {
 
         // Parse OBJ vertices using shared parser
         guard let parsed = MeshParser.parseOBJ(from: objData) else { return nil }
-        let vertices = parsed.vertices
+        var vertices = parsed.vertices
         guard !vertices.isEmpty else { return nil }
+
+        // Registered scans: mesh.obj is in the location's CANONICAL frame, but the saved camera
+        // poses/depth are in this scan's RAW capture frame — projecting canonical vertices through
+        // raw cameras would misproject by the applied registration transform (decimeters). Undo it
+        // here for the projection only; the emitted colors are per-vertex-ordered, so they attach
+        // to the canonical mesh unchanged. (Normals are derived from these remapped vertices below,
+        // keeping the view-angle weights frame-consistent.)
+        if let sidecar = SaveRegistration.loadSidecar(scanDirectory: rawDir.deletingLastPathComponent()),
+           sidecar.applied, let t = sidecar.transformMatrix {
+            let inv = t.inverse
+            for i in vertices.indices {
+                let p = inv * SIMD4<Float>(vertices[i], 1)
+                vertices[i] = SIMD3(p.x, p.y, p.z)
+            }
+        }
 
         // Per-vertex surface normals (area-weighted face normals) drive the
         // view-angle weight. Sign/winding may be inconsistent across the mesh,

@@ -22,6 +22,16 @@ class CapturedScan {
     /// Timestamp of the last successful upload to the server. `nil` means never uploaded.
     /// Updated automatically on HTTP 2xx; persists across launches for server cross-reference.
     var lastUploadedAt: Date?
+    /// DECISION 3: timestamp of the last completed Post-process run (structural steps — room /
+    /// registration / proxy — done to the tier achievable for this scan). `nil` = never run; the
+    /// per-artifact check in `ScanPostprocessor.pendingSteps` is the source of truth (this field
+    /// is a cheap display hint, not the gate).
+    var postprocessedAt: Date?
+    /// The ScanCase this scan was captured under ("RescanSpace" / "LinkAdjacent" / …). Persisted so
+    /// postprocess-time registration knows whether this scan should register into the location's
+    /// canonical frame (rescans yes; link-adjacent is a different physical room — never). Empty for
+    /// legacy scans (pre-DECISION-3): those fall back to "non-oldest scan in location ⇒ rescan".
+    var scanCaseRaw: String = ""
 
     @Relationship(inverse: \ScanLocation.scans)
     var location: ScanLocation?
@@ -121,6 +131,19 @@ class CapturedScan {
 
     @Transient var roomPlanFileURL: URL { scanDirectory.appendingPathComponent("roomplan.json") }
     @Transient var roomPlanRawFileURL: URL { scanDirectory.appendingPathComponent("roomplan_raw.json") }
+
+    // DECISION 3 (postprocess) artifacts. face_classes is a RAW input persisted at save; the
+    // other two are DERIVED outputs written by ScanPostprocessor (or, for legacy scans, by the
+    // old save-time pipeline). The room itself (roomplan.json/_raw above) is written by the
+    // deferred post-save RoomBuilder (CapturedRoomData cannot be persisted — Codable in
+    // signature only, so the build runs in-process shortly after save).
+    /// Per-face ARMeshClassification labels, one byte per face, index-aligned with mesh.obj's
+    /// face order (emitted by buildMeshOBJ so privacy-skipped faces can't desync the mapping).
+    @Transient var faceClassesURL: URL { scanDirectory.appendingPathComponent("face_classes.bin") }
+    /// Ghost proxy (walls→RoomPlan quads, content→lumpy mesh) — the rescan overlay LOD.
+    @Transient var meshProxyFileURL: URL { scanDirectory.appendingPathComponent("mesh_proxy.obj") }
+    /// Plane-registration sidecar (applied-or-not record; the ghost loader's de-registration input).
+    @Transient var registrationFileURL: URL { scanDirectory.appendingPathComponent("registration.json") }
 
     @Transient var estimatedSizeMB: Double {
         // Compute dynamically by checking disk if needed, or fallback to an estimate
@@ -307,18 +330,29 @@ class ScanStore {
     /// Whether the cross-session world map failed to load
     var mapLoadFailed: Bool = false
 
-    // MARK: ICP Auto-Align (Phase 2.1, perfDiagnostics-only)
+    // MARK: Auto-Align ready signal
 
-    /// A trusted ICP auto-align correction is queued and will bake into the world origin at
-    /// record-start. Set during the pre-record alignment phase once the refine converges + passes the
-    /// trust gate; its presence is the "alignment sweep is done — safe to record" cue (surfaced as a
-    /// chip in CaptureView). Only ever populated under `perfDiagnostics`, so it's inherently dev-gated.
+    /// A trusted auto-align fit exists — the "alignment sweep is done — safe to record" cue
+    /// (surfaced as the green chip in CaptureView). Two producers:
+    /// - **Plane auto-align** (primary, production): the ghost's RoomPlan planes registered onto
+    ///   live classified plane anchors; the ghost entity is visually seated and the save-time
+    ///   registration will land — nothing is baked into the world origin.
+    /// - **Mesh-ICP refine** (legacy, perfDiagnostics-only, engages only for scans with no proxy
+    ///   artifact): a trusted correction queued to bake into the world origin at record-start.
     var icpAlignReady: ICPAlignReady?
 
     struct ICPAlignReady: Equatable {
         let transCm: Float
         let yawDeg: Float
     }
+
+    // MARK: Post-process (DECISION 3)
+
+    /// Set (to the scan's name) by `ScanPostprocessor.scheduleBadScanCheck` when a saved scan turns
+    /// out to have NO room data after the post-save grace window — RoomPlan produced nothing, so
+    /// the scan can never build a room / register / render a proxy ghost (terminal state 3: bad).
+    /// Consumed by an alert prompting the user to redo the scan. Cleared by the alert dismissal.
+    var badScanWarning: String?
 
     // MARK: Tracking Stability (Phase 2.1 build order item 2)
 
@@ -371,12 +405,13 @@ class ScanStore {
     /// plumbing callback, not observable view state. Captures the coordinator weakly (no retain cycle).
     @ObservationIgnored var requestStopRoomPlan: (() -> Void)?
 
-    /// [DEFERRED-ROOMPLAN] build hook: called by the save pipeline on a BACKGROUND queue, AFTER all
-    /// pose-sensitive capture (mesh snapshot + world-map export) is finished. Waits (bounded) for the
-    /// RoomPlan capture data and runs RoomBuilder off the live session, returning the reconstructed
-    /// room to write into roomplan.json. Returns nil if RoomPlan was off / failed / timed out (scan
-    /// then saves without a room). Weakly captures the coordinator. `@ObservationIgnored`: plumbing.
-    @ObservationIgnored var awaitDeferredRoomPlan: ((TimeInterval) -> CapturedRoom?)?
+    /// [DEFERRED-ROOMPLAN] DECISION 3 (revised 2026-07-16): the save pipeline never waits on
+    /// RoomPlan. This hook arms the deferred post-save RoomBuilder — called on MAIN with the
+    /// saved scan's directory ONLY AFTER saveScan completes, which is the trigger gate that keeps
+    /// the in-process build (CapturedRoomData can't be persisted) off the pose-sensitive save
+    /// path. The box builds the room and writes roomplan.json/_raw whenever both the didEndWith
+    /// data and this destination are in hand. Weakly captures the coordinator.
+    @ObservationIgnored var setRoomDataPersistDir: ((URL) -> Void)?
 
     // MARK: - State Reset
 
@@ -863,6 +898,9 @@ class ScanFileManager {
             faceCount: faceCount,
             hardwareDeviceModel: hardwareDeviceModel
         )
+        // Persist the capture case so postprocess-time registration can tell rescans (register into
+        // the canonical frame) from link-adjacent captures (different physical room — never).
+        newScan.scanCaseRaw = scanCase.rawValue
 
         // Link to the location FIRST: scanDirectory/meshFileURL derive from location?.id, so the
         // files must be written under the final, location-scoped path (not "unknown_location").
@@ -913,10 +951,14 @@ class ScanFileManager {
                 print("[ScanFileManager] Failed to move raw data: \(error)")
             }
 
-            // Promote RoomPlan + registration files from raw_data to scan directory top level
-            // (for export lookup, the viewer's outlines/canonical frame, and the ghost loader's
-            // registration.json check)
-            for rpFile in ["roomplan.json", "roomplan_raw.json", "registration.json"] {
+            // Promote RoomPlan + registration + ghost-proxy files from raw_data to scan directory
+            // top level (export lookup, the viewer's outlines/canonical frame, the ghost loader's
+            // registration.json check + proxy pickup). The DECISION-3 classification sidecar
+            // (face_classes.bin — the proxy build's input) promotes the same way; roomplan.json/
+            // _raw are written directly to the scan dir by the deferred post-save RoomBuilder now,
+            // but stay in the list for legacy save-time-pipeline scans.
+            for rpFile in ["roomplan.json", "roomplan_raw.json", "registration.json", "mesh_proxy.obj",
+                           "face_classes.bin"] {
                 let src = newScan.rawDataPath.appendingPathComponent(rpFile)
                 let dst = newScan.scanDirectory.appendingPathComponent(rpFile)
                 if FileManager.default.fileExists(atPath: src.path) {

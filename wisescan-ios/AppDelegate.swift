@@ -34,7 +34,8 @@ struct Scan4DApp: App {
         UserDefaults.standard.register(defaults: [
             AppConstants.Key.semanticLabeling: AppConstants.semanticLabeling,
             AppConstants.Key.enabledSemanticClasses: AppConstants.enabledSemanticClassesDefault,
-            AppConstants.Key.meshClassifier: AppConstants.meshClassifier
+            AppConstants.Key.meshClassifier: AppConstants.meshClassifier,
+            AppConstants.Key.colorizeOnPostprocess: AppConstants.colorizeOnPostprocess
         ])
         print("Application directory: \(NSHomeDirectory())")
         do {

@@ -78,13 +78,22 @@ enum SaveRegistration {
     /// resolve the target URL/id on main first). Returns nil only if the target file can't be
     /// decoded (missing/corrupt) — there is then nothing to register against.
     static func run(room: CapturedRoom, canonicalRoomPlanURL: URL, targetScanId: UUID) -> Outcome? {
+        run(sourcePlanes: PlaneRegistration.planes(from: room),
+            canonicalRoomPlanURL: canonicalRoomPlanURL, targetScanId: targetScanId)
+    }
+    #endif
+
+    /// Plane-source variant (DECISION 3): ScanPostprocessor registers legacy scans whose room
+    /// already exists on disk (no in-memory CapturedRoom) — it passes raw-frame planes decoded
+    /// from the persisted roomplan instead. Same math, gates, and sidecar as the room variant.
+    static func run(sourcePlanes source: [PlaneRegistration.Plane],
+                    canonicalRoomPlanURL: URL, targetScanId: UUID) -> Outcome? {
         guard let data = try? Data(contentsOf: canonicalRoomPlanURL),
               let decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) else {
             print("[PlaneReg] no usable canonical roomplan at \(canonicalRoomPlanURL.lastPathComponent) — saving raw")
             return nil
         }
         let target = PlaneRegistration.planes(fromExportSurfaces: decoded.surfaces)
-        let source = PlaneRegistration.planes(from: room)
 
         guard let report = PlaneRegistration.register(source: source, target: target) else {
             print("[PlaneReg] REFUSED: no wall correspondence formed (src walls=\(source.filter { $0.category == .wall }.count) tgt walls=\(target.filter { $0.category == .wall }.count)) — saving raw")
@@ -130,7 +139,47 @@ enum SaveRegistration {
             targetScanId: targetScanId.uuidString, note: artifactNote),
             appliedTransform: applied ? report.transform : nil)
     }
-    #endif
+
+    /// DECISION 3 — legacy retroactive registration: premultiply an EXISTING clean roomplan.json's
+    /// surface/object transforms by the applied raw→canonical correction, so the viewer's semantic
+    /// outlines stay glued to the just-transformed mesh. (Fresh rooms take the transform at write
+    /// time via `RoomPlanExporter.writeRoomPlan(_:to:applying:)`; this path is for scans whose
+    /// roomplan was written before their registration ran.)
+    static func retransformRoomPlanJSON(at url: URL, by t: simd_float4x4) {
+        guard let data = try? Data(contentsOf: url),
+              var decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) else { return }
+        func premultiply(_ flat: [Float]) -> [Float] {
+            guard flat.count == 16 else { return flat }
+            let m = simd_float4x4(SIMD4(flat[0], flat[1], flat[2], flat[3]),
+                                  SIMD4(flat[4], flat[5], flat[6], flat[7]),
+                                  SIMD4(flat[8], flat[9], flat[10], flat[11]),
+                                  SIMD4(flat[12], flat[13], flat[14], flat[15]))
+            let r = t * m
+            return [r.columns.0.x, r.columns.0.y, r.columns.0.z, r.columns.0.w,
+                    r.columns.1.x, r.columns.1.y, r.columns.1.z, r.columns.1.w,
+                    r.columns.2.x, r.columns.2.y, r.columns.2.z, r.columns.2.w,
+                    r.columns.3.x, r.columns.3.y, r.columns.3.z, r.columns.3.w]
+        }
+        decoded = RoomPlanExportData(
+            version: decoded.version, source: decoded.source,
+            surfaces: decoded.surfaces.map {
+                RoomPlanExportData.ExportSurface(id: $0.id, category: $0.category,
+                                                 dimensions: $0.dimensions,
+                                                 transform: premultiply($0.transform),
+                                                 confidence: $0.confidence)
+            },
+            objects: decoded.objects.map {
+                RoomPlanExportData.ExportObject(id: $0.id, category: $0.category,
+                                                dimensions: $0.dimensions,
+                                                transform: premultiply($0.transform),
+                                                confidence: $0.confidence)
+            })
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let out = try? encoder.encode(decoded) {
+            try? out.write(to: url, options: .atomic)
+        }
+    }
 
     // MARK: - Sidecar IO
 
@@ -166,6 +215,35 @@ enum SaveRegistration {
               let t = sidecar.transformMatrix else { return nil }
         return t.inverse
     }
+
+    #if canImport(RoomPlan)
+    /// The ghost scan's room planes in its RAW capture frame — the frame the de-registered ghost
+    /// mesh, the world map, and hence the relocalized live session all share. Reference side of
+    /// the live ghost auto-align. [] when unavailable (auto-align then stays off; callers log).
+    ///
+    /// Source: the CLEAN `roomplan.json` (`RoomPlanExportData` — the schema we own; its decode is
+    /// exercised by the viewer daily). It's CANONICAL for registered scans, so the applied
+    /// registration is undone to land back in the raw frame (identity for unregistered scans).
+    /// (Originally decoded Apple's `CapturedRoom` back from `roomplan_raw.json` — an off-device-
+    /// untestable round-trip that could fail silently and disable auto-align; 2026-07-15 field
+    /// regression.)
+    static func rawFramePlanes(scanDirectory: URL) -> [PlaneRegistration.Plane] {
+        let candidates = [
+            scanDirectory.appendingPathComponent("roomplan.json"),
+            scanDirectory.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json")
+        ]
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url),
+                  let decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) else { continue }
+            var planes = PlaneRegistration.planes(fromExportSurfaces: decoded.surfaces)
+            if let undo = inverseForGhost(scanDirectory: scanDirectory) {
+                planes = planes.map { PlaneRegistration.applying(undo, to: $0) }
+            }
+            return planes
+        }
+        return []
+    }
+    #endif
 
     // MARK: - OBJ transform
 

@@ -18,6 +18,13 @@ struct LocationDetailView: View {
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
     @State private var showNoWorldMapAlert = false
+    /// DECISION 3 hard gate: rescan/connect/upload require the location's scans post-processed
+    /// (room + registration + proxy to the achievable tier). "You haven't post-processed this
+    /// map — do it now."
+    @State private var showPostprocessGate = false
+    /// DECISION 3 terminal state 3: a prerequisite scan has NO room data (RoomPlan produced
+    /// nothing and no sidecar exists) — the plane path is unrecoverable; warn to redo the scan.
+    @State private var showBadScanGate = false
     @State private var isBulkColoring = false
     /// Shown when a bulk-color selection mixes already-colored and uncolored scans,
     /// so the user can choose to color only the uncolored ones or recolor everything.
@@ -118,6 +125,11 @@ struct LocationDetailView: View {
                                             showNoWorldMapAlert = true
                                             return
                                         }
+                                        // DECISION 3 hard gate: the rescan consumes the LATEST
+                                        // scan's proxy/roomplan (ghost + auto-align reference) and
+                                        // the ORIGINAL's roomplan (registration target) — all
+                                        // post-process products.
+                                        guard postprocessGateAllows() else { return }
                                         scanStore.activeLocationForScan = location.id
                                         scanStore.activeRelocalizationMap = latestScan.worldMapURL
                                         scanStore.activeScanToExtend = latestScan.id
@@ -141,6 +153,9 @@ struct LocationDetailView: View {
                                             showNoWorldMapAlert = true
                                             return
                                         }
+                                        // DECISION 3 hard gate: connect loads the latest scan's
+                                        // ghost proxy/roomplan too (same alignment machinery).
+                                        guard postprocessGateAllows() else { return }
                                         scanStore.activeLocationForScan = location.id
                                         scanStore.activeRelocalizationMap = latestScan.worldMapURL
                                         scanStore.activeScanToExtend = latestScan.id
@@ -364,6 +379,17 @@ struct LocationDetailView: View {
                  "or connected to an adjacent space — both relocalize against the saved world map. " +
                  "Capture a new scan of this space to create one.")
         }
+        .modifier(PostprocessGateAlerts(
+            showPostprocessGate: $showPostprocessGate,
+            showBadScanGate: $showBadScanGate,
+            badScanWarning: Binding(
+                get: { scanStore.badScanWarning },
+                set: { scanStore.badScanWarning = $0 }
+            ),
+            postprocessNow: {
+                bulkPostprocess(scans: ScanPostprocessor.scansNeedingPostprocess(in: location))
+            }
+        ))
         .modifier(BulkColorMixedDialog(
             isPresented: $showBulkColorMixedPrompt,
             uncolored: selectedColorSplit.uncolored,
@@ -576,10 +602,10 @@ struct LocationDetailView: View {
             })
             .disabled(selectedScans.isEmpty || isBulkExporting)
 
-            Button(action: { requestBulkColorize() }, label: {
+            Button(action: { requestBulkPostprocess() }, label: {
                 HStack(spacing: 4) {
-                    Image(systemName: "paintbrush.fill")
-                    Text("Color")
+                    Image(systemName: "wand.and.stars")
+                    Text("Process")
                 }
                     .font(.headline)
                     .frame(maxWidth: .infinity)
@@ -615,6 +641,12 @@ struct LocationDetailView: View {
     /// uniform (all uploaded or all un-uploaded); when it's mixed, prompts the user.
     private func requestBulkUpload(sortedScans: [CapturedScan]) {
         let scansToUpload = sortedScans.filter { selectedScans.contains($0.id) }
+        // DECISION 3 hard gate: never upload a scan with pending structural post-process work
+        // (its roomplan/registration/proxy artifacts would be missing from the export).
+        if scansToUpload.contains(where: { ScanPostprocessor.needsPostprocess($0) }) {
+            showPostprocessGate = true
+            return
+        }
         let split = (notUploaded: scansToUpload.filter { !$0.isUploaded },
                      uploaded: scansToUpload.filter { $0.isUploaded })
         guard !scansToUpload.isEmpty else { return }
@@ -625,6 +657,63 @@ struct LocationDetailView: View {
         } else {
             showBulkUploadMixedPrompt = true
         }
+    }
+
+    // MARK: - Post-process (DECISION 3)
+
+    /// DECISION 3 gate for rescan/connect: true = proceed. BAD prerequisites (no room data ever —
+    /// unrecoverable, redo the scan) trump pending work (recoverable — post-process now). The
+    /// rescan consumes the LATEST scan's proxy/roomplan and the ORIGINAL's roomplan, so those two
+    /// are the bad-checked prerequisites; the pending check covers the whole location so one
+    /// post-process pass clears it (oldest-first — registration needs the canonical room first).
+    private func postprocessGateAllows() -> Bool {
+        let ordered = location.scans.sorted { $0.capturedAt < $1.capturedAt }
+        let prerequisites = [ordered.first, ordered.last].compactMap { $0 }
+        if prerequisites.contains(where: { ScanPostprocessor.isBad($0) }) {
+            showBadScanGate = true
+            return false
+        }
+        if !ScanPostprocessor.scansNeedingPostprocess(in: location).isEmpty {
+            showPostprocessGate = true
+            return false
+        }
+        return true
+    }
+
+    /// Entry point for the bulk Process button: run every achievable pending step (room /
+    /// registration / proxy, + colorize per the "Colorize during post-process" setting). When the
+    /// whole selection is already processed, falls through to the legacy re-color prompt (the one
+    /// deliberately re-runnable step).
+    private func requestBulkPostprocess() {
+        let selected = location.scans.filter { selectedScans.contains($0.id) }
+        guard !selected.isEmpty else { return }
+        let colorize = ScanPostprocessor.colorizeEnabled
+        let anyPending = selected.contains {
+            !ScanPostprocessor.pendingSteps(for: $0, includeColorize: colorize).isEmpty
+        }
+        if anyPending {
+            bulkPostprocess(scans: selected)
+        } else {
+            requestBulkColorize()
+        }
+    }
+
+    /// Run the postprocessor over `scans` (it re-sorts oldest-first internally). Reuses the bulk
+    /// coloring UI plumbing: per-card progress via `bulkColoringMessages`, `isBulkColoring` as the
+    /// in-flight flag.
+    private func bulkPostprocess(scans: [CapturedScan]) {
+        guard !scans.isEmpty else { return }
+        isBulkColoring = true
+        ScanPostprocessor.run(
+            scans: scans,
+            modelContext: modelContext,
+            progress: { scan, msg in bulkColoringMessages[scan.id] = msg },
+            completion: {
+                isBulkColoring = false
+                isEditing = false
+                selectedScans.removeAll()
+            }
+        )
     }
 
     /// Entry point for the bulk Color button. Colors directly when the selection is
@@ -696,6 +785,50 @@ struct LocationDetailView: View {
                 self.selectedScans.removeAll()
             }
         }
+    }
+}
+
+// MARK: - Post-process Gate Alerts (DECISION 3)
+
+/// The three DECISION-3 alerts, hosted as a `ViewModifier` so their content type-checks in its own
+/// `body` rather than inflating LocationDetailView's already-at-budget `body` (same pattern as the
+/// bulk-color/upload dialogs below):
+/// - hard gate ("post-process now") for rescan/connect/upload,
+/// - bad-prerequisite gate (a scan with no room data can't anchor a rescan — redo it),
+/// - the post-save bad-scan warning fired by `ScanPostprocessor.scheduleBadScanCheck`.
+private struct PostprocessGateAlerts: ViewModifier {
+    @Binding var showPostprocessGate: Bool
+    @Binding var showBadScanGate: Bool
+    @Binding var badScanWarning: String?
+    let postprocessNow: () -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .alert("Post-process Required", isPresented: $showPostprocessGate) {
+                Button("Post-process Now") { postprocessNow() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("You haven't post-processed this map — do it now. Rescanning, connecting, " +
+                     "and uploading need the processed room data (alignment reference and " +
+                     "registration).")
+            }
+            .alert("Scan Needs to Be Redone", isPresented: $showBadScanGate) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("A scan in this space captured no room data (RoomPlan produced nothing " +
+                     "during recording), so it can't be aligned, registered, or used as a rescan " +
+                     "reference. Delete it and scan the space again.")
+            }
+            .alert("Room Scan Is Bad", isPresented: Binding(
+                get: { badScanWarning != nil },
+                set: { if !$0 { badScanWarning = nil } }
+            )) {
+                Button("OK", role: .cancel) { badScanWarning = nil }
+            } message: {
+                Text("\"\(badScanWarning ?? "Scan")\" captured no room data — RoomPlan produced " +
+                     "nothing during recording. This scan can't be aligned or registered; redo " +
+                     "it while you're still at the space.")
+            }
     }
 }
 

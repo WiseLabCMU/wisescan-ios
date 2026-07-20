@@ -47,6 +47,7 @@ enum AppConstants {
         static let meshClassifier = "meshClassifier"
         static let enabledSemanticClasses = "enabledSemanticClasses"
         static let scanCoachingEnabled = "scanCoachingEnabled"
+        static let colorizeOnPostprocess = "colorizeOnPostprocess"
     }
 
     // MARK: - Default Values
@@ -88,17 +89,22 @@ enum AppConstants {
     /// in Developer Mode so the A/B stays re-runnable; each run stamps meshClassifier=on/off at
     /// RECORD-START. Varies ONLY the ARKit classifier — RoomPlan (semanticLabeling) is independent.
     static let meshClassifier: Bool = true
-    /// Deferred RoomPlan build: max time the save pipeline waits (off-main) for RoomBuilder to
-    /// reconstruct the room from CapturedRoomData before writing roomplan.json. RoomBuilder is kicked
-    /// off at RoomPlan's didEndWith (post-stop) and runs concurrently with the multi-second OBJ build,
-    /// so this rarely elapses; it's a backstop so a RoomBuilder stall can't hang the save.
-    static let roomBuilderTimeoutSeconds: TimeInterval = 20
-    /// Deferred RoomPlan build: max time to wait for the CapturedRoomData itself (separate from the
-    /// reconstruction timeout above). The data is provided at RoomPlan's didEndWith, which fires at
-    /// Stop — long before the save reaches the build — so it's normally already present. Kept short so
-    /// a cold/failed RoomPlan session (didEndWith never fires) bails fast instead of blocking the save
-    /// queue for the full reconstruction timeout.
-    static let roomPlanDataWaitSeconds: TimeInterval = 3
+    /// DECISION 3: RoomBuilder no longer runs at save (the 2026-07-13 large hot scan starved its
+    /// 3 s data-wait and the scan saved with no room/proxy/registration). It runs at POST-PROCESS
+    /// from the persisted CapturedRoomData sidecar, on a cool device. This is the postprocess-time
+    /// backstop only — generous, since nothing user-blocking waits on it (a wedged RoomBuilder
+    /// shouldn't hang the postprocess queue forever).
+    static let roomBuilderTimeoutSeconds: TimeInterval = 120
+    /// Grace period after a save completes before declaring a scan "bad" (no room data): RoomPlan's
+    /// didEndWith normally delivers CapturedRoomData within a second of Stop, but on a thermally
+    /// throttled device it can land many seconds late — the sidecar is written whenever it arrives,
+    /// so the bad-scan check just needs to wait out the realistic tail before warning the user to
+    /// redo the scan (while they're still standing in the room).
+    static let roomDataBadScanGraceSeconds: TimeInterval = 30
+    /// Colorize as part of Post-process (production setting, default ON). Off = structural-only
+    /// postprocess (room/registration/proxy — fast); coloring can still be run later (re-running
+    /// Post-process picks up whatever is pending).
+    static let colorizeOnPostprocess: Bool = true
 
     /// Default enabled semantic classes (JSON-encoded Set<String>).
     /// Walls and doors are on by default; all others off. Ceiling is not yet

@@ -3,6 +3,9 @@ import simd
 #if canImport(RoomPlan)
 import RoomPlan
 #endif
+#if canImport(ARKit)
+import ARKit
+#endif
 
 /// Plane-to-plane rigid registration — the PRIMARY rescan-registration engine
 /// (see "★ PRIMARY registration approach" in `docs/fix-localization-plan.md`).
@@ -103,6 +106,52 @@ enum PlaneRegistration {
         }
     }
     #endif
+
+    #if canImport(ARKit)
+    /// Planes from live `ARPlaneAnchor`s (the ghost auto-align's live side). Classification-gated:
+    /// only `.wall`/`.floor` anchors enter the fit (tables/seats/doors are content, not scaffold;
+    /// on non-classifying devices this returns [] and auto-align simply never engages). Small
+    /// anchors are dropped — early plane detections are unstable and area-weighting would already
+    /// mute them, but excluding them keeps the correspondence matching clean.
+    ///
+    /// ARPlaneAnchor frame: the plane lies in the anchor's local XZ (normal = local +Y);
+    /// `planeExtent` spans local X/Z after `rotationOnYAxis` about local Y.
+    static func planes(fromPlaneAnchors anchors: [ARPlaneAnchor], minArea: Float = 1.0) -> [Plane] {
+        anchors.compactMap { a in
+            let cat: Category
+            switch a.classification {
+            case .wall: cat = .wall
+            case .floor: cat = .floor
+            default: return nil
+            }
+            let ext = a.planeExtent
+            guard ext.width * ext.height >= minArea else { return nil }
+            let m = a.transform
+            let rot = simd_float3x3(SIMD3(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+                                    SIMD3(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+                                    SIMD3(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+            let spin = simd_quatf(angle: ext.rotationOnYAxis, axis: SIMD3(0, 1, 0))
+            let c = m * SIMD4<Float>(a.center.x, a.center.y, a.center.z, 1)
+            return Plane(center: SIMD3(c.x, c.y, c.z),
+                         normal: simd_normalize(rot * SIMD3(0, 1, 0)),
+                         xAxis: simd_normalize(rot * spin.act(SIMD3(1, 0, 0))),
+                         yAxis: simd_normalize(rot * spin.act(SIMD3(0, 0, 1))),
+                         width: ext.width, height: ext.height, category: cat)
+        }
+    }
+    #endif
+
+    /// Rigidly transform a plane — rotate its frame vectors, move its center (e.g. between the
+    /// raw capture frame and the canonical frame).
+    static func applying(_ m: simd_float4x4, to p: Plane) -> Plane {
+        let r = simd_float3x3(SIMD3(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+                              SIMD3(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+                              SIMD3(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+        let c = m * SIMD4<Float>(p.center.x, p.center.y, p.center.z, 1)
+        return Plane(center: SIMD3(c.x, c.y, c.z), normal: simd_normalize(r * p.normal),
+                     xAxis: simd_normalize(r * p.xAxis), yAxis: simd_normalize(r * p.yAxis),
+                     width: p.width, height: p.height, category: p.category)
+    }
 
     // MARK: - Report
 

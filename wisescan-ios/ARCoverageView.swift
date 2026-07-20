@@ -28,6 +28,15 @@ struct ARCoverageView: UIViewRepresentable {
     var captureMode: AppConstants.CaptureMode
     var initialWorldMapURL: URL? // Support for Scan4D anchoring
     var initialGhostMeshData: Data? // Raw OBJ data from the previous scan
+    /// Ghost auto-align reference: the ghost scan's room planes in its RAW capture frame (from
+    /// `SaveRegistration.rawFramePlanes`) — registered live against detected ARPlaneAnchors to keep
+    /// the ghost ENTITY visually seated on reality (user-confidence; never touches the world origin
+    /// or the recording frame — save-time registration stays the authority). Empty = feature off.
+    var ghostReferencePlanes: [PlaneRegistration.Plane] = []
+    /// True when `initialGhostMeshData` is the wall-subtracted proxy (DECISION 2): the ghost
+    /// renderer then draws `ghostReferencePlanes` as wall/floor quads in the SAME wireframe style
+    /// (one material → reads as one ghost). False for the full mesh (quads would double-draw).
+    var ghostIsProxy: Bool = false
     var scanStore: ScanStore? // Runtime state for boundary anchor tracking
     /// Track C — all connectors the active location's scans share with other maps, in the
     /// relocalized session's world frame. Computed by CaptureView (which has the ModelContext) and
@@ -76,8 +85,14 @@ struct ARCoverageView: UIViewRepresentable {
         // *during the alignment phase* (normally off until record-start) so a live LiDAR cloud
         // accumulates before recording — that's the only window in which to measure/ICP-refine the
         // relocalization offset before the origin is baked. No-op in production (perfDiag off).
-        let alignmentMesh = PerfDiag.enabled && initialWorldMapURL != nil
-        let config = Self.makeConfiguration(enableMeshReconstruction: alignmentMesh, worldMapURL: initialWorldMapURL)
+        // Alignment-phase mesh reconstruction exists ONLY to feed the dense mesh-ICP probe; a
+        // proxy ghost has no ICP target, so skip it — the "drop mesh-during-alignment" prize
+        // (plane detection below is far cheaper and serves the plane auto-align instead).
+        let alignmentMesh = PerfDiag.enabled && initialWorldMapURL != nil && !ghostIsProxy
+        // Plane detection ONLY when the ghost auto-align can actually engage (reference planes
+        // loaded) — never as free-floating load on the already-sensitive alignment phase.
+        let config = Self.makeConfiguration(enableMeshReconstruction: alignmentMesh, worldMapURL: initialWorldMapURL,
+                                            enablePlaneDetection: initialWorldMapURL != nil && !ghostReferencePlanes.isEmpty)
         let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
         if PerfDiag.enabled, let m = config.initialWorldMap {
             context.coordinator.locDiagSummary.recordMap(m, name: initialWorldMapURL?.lastPathComponent) // 0.x: start a fresh per-run summary
@@ -95,15 +110,19 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.finalCapturedRoomBinding = $finalCapturedRoom
         context.coordinator.hasWorldMap.store(config.initialWorldMap != nil, ordering: .relaxed)
         context.coordinator.scanStore = scanStore
+        context.coordinator.resetGhostAutoAlign(referencePlanes: ghostReferencePlanes)
+        context.coordinator.ghostIsProxy = ghostIsProxy
         // Let the stop flow end the recording-mode RoomPlan session promptly (see ScanStore). Weak
         // coordinator capture → no retain cycle; stopRoomPlanSession is idempotent + main-thread-only,
         // and the stop flow invokes this on the main thread.
         scanStore?.requestStopRoomPlan = { [weak coordinator = context.coordinator] in
             coordinator?.stopRoomPlanSession()
         }
-        // [DEFERRED-ROOMPLAN] reconstruction hook, drained by the save pipeline off-main after pose capture.
-        scanStore?.awaitDeferredRoomPlan = { [weak coordinator = context.coordinator] timeout in
-            coordinator?.awaitAndBuildDeferredRoom(timeout: timeout)
+        // [DEFERRED-ROOMPLAN] DECISION 3: no save-time reconstruction — the stop flow just tells the
+        // box where to persist the (possibly late-arriving) CapturedRoomData; ScanPostprocessor runs
+        // RoomBuilder from that sidecar later, on a cool device.
+        scanStore?.setRoomDataPersistDir = { [weak coordinator = context.coordinator] dir in
+            coordinator?.currentDeferredRoomBox()?.setPersistDirectory(dir)
         }
         // Genuine map-load failure on the fresh-view path (requested but archive missing/corrupt) —
         // knowable synchronously here. Mirror of the updateUIView relocalization branch; replaces the
@@ -278,14 +297,18 @@ struct ARCoverageView: UIViewRepresentable {
             }
             context.coordinator.ghostAnchorEntity = nil
             context.coordinator.hasAddedGhostMesh.store(false, ordering: .relaxed)
+            context.coordinator.resetGhostAutoAlign(
+                referencePlanes: initialGhostMeshData != nil ? ghostReferencePlanes : [])
+            context.coordinator.ghostIsProxy = ghostIsProxy
 
             if let ghostData = initialGhostMeshData {
                 // Load the world map for relocalization. Phase-2.1 precursor: also enable mesh during
                 // the pre-record alignment phase when diagnostics are on (see makeUIView) so the live
                 // cloud exists to ICP-measure the relocalization offset before record-start.
                 let config = Self.makeConfiguration(
-                    enableMeshReconstruction: isRecording || (PerfDiag.enabled && initialWorldMapURL != nil),
-                    worldMapURL: initialWorldMapURL
+                    enableMeshReconstruction: isRecording || (PerfDiag.enabled && initialWorldMapURL != nil && !ghostIsProxy),
+                    worldMapURL: initialWorldMapURL,
+                    enablePlaneDetection: initialWorldMapURL != nil && !ghostReferencePlanes.isEmpty
                 )
                 if PerfDiag.enabled, let m = config.initialWorldMap {
                     context.coordinator.locDiagSummary.recordMap(m, name: initialWorldMapURL?.lastPathComponent) // 0.x: fresh per-run summary
@@ -339,15 +362,25 @@ struct ARCoverageView: UIViewRepresentable {
             context.coordinator.refreshHasBillboardMarkers()
         }
 
-        // Apply manual alignment transform offset to ghost mesh
+        // Ghost transform: the user's manual nudge wins when active; otherwise the plane-based
+        // auto-align seats the ghost (visual-only — never baked into the world origin).
         if let ghostAnchor = context.coordinator.ghostAnchorEntity {
-            if isRecording {
-                // When recording, the offset is baked into the world origin, so the mesh stays at identity
-                ghostAnchor.transform = Transform.identity
+            let manualActive = ghostXOffset != 0 || ghostZOffset != 0 || ghostYRotation != 0
+            context.coordinator.manualNudgeActive.store(manualActive, ordering: .relaxed)
+            if manualActive {
+                if isRecording {
+                    // When recording, the manual offset is baked into the world origin, so the mesh stays at identity
+                    ghostAnchor.transform = Transform.identity
+                } else {
+                    let rotation = simd_quatf(angle: ghostYRotation, axis: [0, 1, 0])
+                    let translation = SIMD3<Float>(ghostXOffset, 0, ghostZOffset)
+                    ghostAnchor.transform = Transform(rotation: rotation, translation: translation)
+                }
             } else {
-                let rotation = simd_quatf(angle: ghostYRotation, axis: [0, 1, 0])
-                let translation = SIMD3<Float>(ghostXOffset, 0, ghostZOffset)
-                ghostAnchor.transform = Transform(rotation: rotation, translation: translation)
+                // Auto-align: held at its last pre-record value through recording (keeps the ghost
+                // seated — it was never baked, so identity would snap it back to misaligned);
+                // reset to identity when the dev ICP bake moves the world origin instead.
+                ghostAnchor.transform = Transform(matrix: context.coordinator.ghostAutoAlign)
             }
         }
 
@@ -404,6 +437,11 @@ struct ARCoverageView: UIViewRepresentable {
                     context.coordinator.pendingICPBake = nil
                     context.coordinator.icpRefineCandidates.removeAll() // alignment phase is over; drop candidates
                     scanStore?.icpAlignReady = nil
+                    // The bake moved the WORLD into the ghost frame; the visual auto-align
+                    // (measured pre-bake) is stale by exactly that correction — the ghost
+                    // belongs at identity again.
+                    context.coordinator.ghostAutoAlign = matrix_identity_float4x4
+                    context.coordinator.ghostAnchorEntity?.transform = Transform.identity
                     // Re-measure post-bake during recording: if the bake's sign/magnitude are right, the
                     // residual trans collapses toward ~0 (overwrites summary.icp with the post-bake report).
                     context.coordinator.locDiagRearmICPForPostBake()
@@ -517,7 +555,13 @@ struct ARCoverageView: UIViewRepresentable {
         // 0.2: keep the ghost (prior/canonical) OBJ as the ICP target for the residual probe, and
         // build its surfel cloud ONCE here (off the delegate queue) so the per-refine path doesn't
         // re-parse the whole mesh every ~2 s (a thermal/compute load that can destabilize tracking).
-        if PerfDiag.enabled {
+        if PerfDiag.enabled, coordinator.ghostIsProxy {
+            // Proxy ghost: no dense surfel target — the mesh-ICP probe/bake stay quiet for this
+            // session (plane auto-align + save-time registration own alignment now). Legacy scans
+            // without a proxy artifact still exercise the full ICP path below.
+            PerfDiag.log("[LocDiag ICP] n/a this session — proxy ghost (plane registration owns alignment)")
+            coordinator.sessionDelegateQueue.async { coordinator.locDiagGhostSurfels = nil }
+        } else if PerfDiag.enabled {
             DispatchQueue.main.async { coordinator.locDiagSummary.ghostLoaded = true }
             coordinator.sessionDelegateQueue.async { coordinator.locDiagGhostSurfels = nil } // drop stale
             coordinator.locDiagICPQueue.async {
@@ -537,16 +581,65 @@ struct ARCoverageView: UIViewRepresentable {
                 coordinator.sessionDelegateQueue.async { coordinator.locDiagGhostSurfels = surfels }
             }
         }
+        // Room-outline source: the ghost's plane rectangles (already de-registered into the
+        // ghost's raw frame — same frame as the proxy OBJ; set by resetGhostAutoAlign before
+        // every loadGhostMesh call site). Captured on main here, used on the build queue below.
+        let outlinePlanes = coordinator.ghostIsProxy ? coordinator.ghostReferencePlanes : []
         DispatchQueue.global(qos: .userInitiated).async {
-            // Build procedural wireframe: thin 3D quads for each unique edge
-            let descriptors = MeshParser.generateWireframeDescriptors(from: data)
+            // Build procedural wireframe: thin 3D quads for each unique edge. A proxy ghost's
+            // RoomPlan quads are already baked INTO the OBJ at save (coordinate-locked with the
+            // mesh remainder), so there is deliberately no dynamic assembly here — but the
+            // TRAILING lattice faces (count in the v4 header) render with thick lines: the sparse
+            // 1 m grid is sub-pixel at the mesh's 1 mm default beyond ~1.5 m and visually vanishes.
+            var descriptors: [MeshDescriptor]
+            if coordinator.ghostIsProxy,
+               let quadFaces = Self.ghostProxyQuadFaceCount(from: data), quadFaces > 0,
+               let parsed = MeshParser.parseOBJ(from: data), parsed.faces.count > quadFaces {
+                let split = parsed.faces.count - quadFaces
+                descriptors = MeshParser.buildWireframeDescriptors(
+                    vertices: parsed.vertices, faces: Array(parsed.faces[..<split]), thickness: 0.001)
+                // Cross-section (not flat-ribbon) lines for the lattice: a flat ribbon with a
+                // fixed perpendicular is edge-on/backface-invisible for axis-aligned grid lines
+                // on walls of particular orientations (the "clips on some walls" finding).
+                descriptors += MeshParser.buildCrossWireframeDescriptors(
+                    vertices: parsed.vertices, faces: Array(parsed.faces[split...]),
+                    thickness: Self.ghostProxyQuadLineThickness)
+            } else {
+                descriptors = MeshParser.generateWireframeDescriptors(from: data)
+            }
             guard !descriptors.isEmpty else { return }
+
+            // Room OUTLINE: each plane rectangle's 4 border edges — the wall-wall vertical
+            // corners, the wall-floor seams, and the ceiling line — drawn bolder and lighter than
+            // the interior lattice so the room's structural box reads at a glance (architectural-
+            // drawing emphasis). Adjacent rects contribute coincident borders (a wall's bottom ≈
+            // the floor's edge) — harmless, same color. Rendered as children of the same container
+            // so it rides auto-align / manual nudge / de-registration with everything else.
+            var outlineDescriptors: [MeshDescriptor] = []
+            if !outlinePlanes.isEmpty {
+                var edges: [(SIMD3<Float>, SIMD3<Float>)] = []
+                for p in outlinePlanes {
+                    let hx = p.xAxis * (p.width / 2)
+                    let hy = p.yAxis * (p.height / 2)
+                    let c00 = p.center - hx - hy, c10 = p.center + hx - hy
+                    let c11 = p.center + hx + hy, c01 = p.center - hx + hy
+                    edges.append(contentsOf: [(c00, c10), (c10, c11), (c11, c01), (c01, c00)])
+                }
+                outlineDescriptors = MeshParser.buildCrossWireframeDescriptors(
+                    edges: edges, thickness: Self.ghostProxyOutlineThickness)
+            }
 
             DispatchQueue.main.async {
                 let ghostColorStr = UserDefaults.standard.string(forKey: AppConstants.Key.ghostMeshColor) ?? AppConstants.ghostMeshColor
                 let color = ghostColorStr.toSIMD4Color
                 // Fully opaque UnlitMaterial — the only stable material in ARView
                 let material = UnlitMaterial(rgb: color)
+                // Outline: same hue, strongly lightened — reads as the same ghost's frame while
+                // separating architecture from content, and can't collide with the live-scan
+                // color whatever the user picked for either.
+                let outlineColor = simd_mix(color, SIMD4<Float>(1, 1, 1, color.w),
+                                            SIMD4<Float>(repeating: 0.55))
+                let outlineMaterial = UnlitMaterial(rgb: outlineColor)
 
                 let containerEntity = Entity()
 
@@ -555,6 +648,12 @@ struct ARCoverageView: UIViewRepresentable {
                 for desc in descriptors {
                     if let resource = try? MeshResource.generate(from: [desc]) {
                         let chunkModel = ModelEntity(mesh: resource, materials: [material])
+                        containerEntity.addChild(chunkModel)
+                    }
+                }
+                for desc in outlineDescriptors {
+                    if let resource = try? MeshResource.generate(from: [desc]) {
+                        let chunkModel = ModelEntity(mesh: resource, materials: [outlineMaterial])
                         containerEntity.addChild(chunkModel)
                     }
                 }
@@ -745,19 +844,20 @@ struct ARCoverageView: UIViewRepresentable {
         /// Final CapturedRoom snapshot captured at recording stop (for export).
         var finalCapturedRoom: CapturedRoom?
 
-        /// [DEFERRED-ROOMPLAN] build box for the current recording's RoomPlan capture. Created fresh in
-        /// startRoomPlanSession, fed the CapturedRoomData at didEndWith, and drained by the save
-        /// pipeline (which triggers RoomBuilder off-main, AFTER pose-sensitive capture). Guarded by a
-        /// lock because it's written on main (start/analysis) and read on the RoomPlan + save queues.
+        /// [DEFERRED-ROOMPLAN] build box for the current recording's RoomPlan capture. Created
+        /// fresh in startRoomPlanSession, fed the CapturedRoomData at didEndWith, and armed with
+        /// the saved scan's directory AFTER saveScan. DECISION 3 (revised): the box runs
+        /// RoomBuilder as a fire-and-forget post-save continuation and writes roomplan.json/_raw
+        /// itself (CapturedRoomData can't be persisted for a later build). Guarded by a lock
+        /// because it's written on main (start/analysis) and read on the RoomPlan + save queues.
         private let deferredRoomLock = NSLock()
         private var deferredRoomBuild: DeferredRoomBuild?
         /// The current recording box (nil for analysis-mode / RoomPlan-off). Thread-safe.
         func currentDeferredRoomBox() -> DeferredRoomBuild? { deferredRoomLock.withLock { deferredRoomBuild } }
-        /// Called by the save pipeline on a background queue: waits for capture, runs RoomBuilder,
-        /// returns the reconstructed room (or nil). Never touches main; never overlaps pose capture.
-        func awaitAndBuildDeferredRoom(timeout: TimeInterval) -> CapturedRoom? {
-            currentDeferredRoomBox()?.buildRoom(timeout: timeout)
-        }
+        /// Strong hold on a just-stopped RoomCaptureSession until its async didEndWith delivers the
+        /// CapturedRoomData (see stopRoomPlanSession — dropping the last reference at stop() lost
+        /// the callback on long scans). Released at didEndWith or when a new session starts.
+        var stoppingRoomCaptureSession: RoomCaptureSession?
         /// Throttle: last time RoomPlan semantic metadata was extracted (see extractRoomMetadata).
         private var lastRoomPlanOutlineTime: Date = .distantPast
         /// Accumulated set of detected semantic classes (published to ScanStats for HUD).
@@ -777,6 +877,142 @@ struct ARCoverageView: UIViewRepresentable {
         let hasWorldMap = Atomic<Bool>(false)
         let hasSeenRelocalizing = Atomic<Bool>(false)
         var lastGhostMeshDataCount: Int? // Track changes to ghost mesh data
+
+        // Ghost auto-align (plane-based live nudge — user-confidence: the ghost visually seats on
+        // reality instead of floating at the relocalization ε for the whole session). Ownership:
+        // `ghostReferencePlanes` is written on main at ghost (re)load — before plane anchors
+        // accumulate — and read on the delegate queue; `livePlaneAnchors` + the throttle/applied
+        // state are delegate-queue-owned; `ghostAutoAlign` is main-owned (applied to the entity and
+        // read by updateUIView). Manual-slider state crosses main→delegate, so it's atomic.
+        var ghostReferencePlanes: [PlaneRegistration.Plane] = []
+        var ghostIsProxy = false // mirrors the view flag; read at ghost build (main)
+        var livePlaneAnchors: [UUID: ARPlaneAnchor] = [:]
+        var ghostAutoAlign: simd_float4x4 = matrix_identity_float4x4
+        private var ghostAutoAlignApplied = matrix_identity_float4x4
+        private var lastGhostAutoAlignAt: TimeInterval = 0
+        // Convergence stop: after this many consecutive trusted fits land within the re-seat
+        // hysteresis, the seat is stable — stop fitting for the rest of the session (the
+        // relocalization ε is stationary once settled; a handful of seats total is the contract).
+        private var ghostAutoAlignStableCount = 0
+        private var ghostAutoAlignConverged = false
+        let manualNudgeActive = Atomic<Bool>(false)
+
+        /// Ghost (re)load reset — main thread; the session was just re-run with
+        /// `.removeExistingAnchors`, so stale plane anchors are gone (didRemove also clears late ones).
+        func resetGhostAutoAlign(referencePlanes: [PlaneRegistration.Plane]) {
+            ghostAutoAlign = matrix_identity_float4x4
+            ghostReferencePlanes = referencePlanes
+            scanStore?.icpAlignReady = nil // stale chip from a prior ghost/alignment
+            sessionDelegateQueue.async { [weak self] in
+                self?.livePlaneAnchors.removeAll()
+                self?.ghostAutoAlignApplied = matrix_identity_float4x4
+                self?.lastGhostAutoAlignAt = 0
+                self?.ghostAutoAlignStableCount = 0
+                self?.ghostAutoAlignConverged = false
+            }
+        }
+
+        /// Register the ghost's raw-frame room planes onto the live classified ARPlaneAnchors and
+        /// seat the ghost ENTITY on the result. Visual only — the world origin / recording frame
+        /// are never touched (save-time registration remains the authority), which is exactly why
+        /// this may re-run continuously as the fit improves, unlike a `setWorldOrigin` bake.
+        /// Delegate-queue; throttled to 2 s with a 1.5 cm / 0.25° re-seat hysteresis.
+        func maybeRunGhostAutoAlign() {
+            guard !ghostAutoAlignConverged,
+                  !isRecording.load(ordering: .relaxed),
+                  !manualNudgeActive.load(ordering: .relaxed),
+                  hasWorldMap.load(ordering: .relaxed),
+                  hasAddedGhostMesh.load(ordering: .relaxed),
+                  !ghostReferencePlanes.isEmpty else { return }
+            let now = Date().timeIntervalSinceReferenceDate
+            guard now - lastGhostAutoAlignAt >= 2.0 else { return }
+            lastGhostAutoAlignAt = now
+
+            let anchors = Array(livePlaneAnchors.values)
+            let live = PlaneRegistration.planes(fromPlaneAnchors: anchors)
+            let liveWalls = live.filter { $0.category == .wall }.count
+
+            // Caveat monitor (perfDiag): one line per attempt on the NON-seated outcomes, so a
+            // rescan where the ghost won't seat says WHY — starved for classified walls, no
+            // correspondence, or a gate refusal (with the failing stat). Distinguishes ARKit not
+            // surfacing/classifying enough walls (→ prescan RoomPlan-continuous fallback) from a
+            // genuine fit problem (→ tune the gate). Success already logs below.
+            func diag(_ outcome: String) {
+                guard PerfDiag.enabled else { return }
+                // ARPlaneAnchor.classification: the status lives on the `.none` case's associated
+                // value (.undetermined = still deciding; .notAvailable/.unknown = won't classify).
+                var wall = 0, floor = 0, otherClass = 0, undet = 0, unavail = 0
+                for a in anchors {
+                    switch a.classification {
+                    case .wall: wall += 1
+                    case .floor: floor += 1
+                    case let .none(status): status == .undetermined ? (undet += 1) : (unavail += 1)
+                    default: otherClass += 1 // ceiling/table/seat/window/door — classified, non-scaffold
+                    }
+                }
+                PerfDiag.log(String(format: "[PlaneReg diag] planeAnchors=%d class(wall=%d floor=%d other=%d | undet=%d n/a=%d) usable=%d liveWalls=%d ghostRef=%d → %@",
+                                    anchors.count, wall, floor, otherClass, undet, unavail,
+                                    live.count, liveWalls, ghostReferencePlanes.count, outcome))
+            }
+
+            guard liveWalls >= 2 else {
+                diag("starved: <2 classified walls (ARKit hasn't surfaced/classified enough)")
+                return
+            }
+            guard let report = PlaneRegistration.register(source: ghostReferencePlanes, target: live) else {
+                diag("no correspondence (ghost planes ↔ live planes didn't match)")
+                return
+            }
+            guard let fit = PlaneRegistration.exportTransform(from: report) else {
+                diag(String(format: "gate refused: RMS=%.1fmm walls=%d weakFrac=%.2f trans=%.1fcm yaw=%.2f° conv=%@",
+                            report.finalRMS * 1000, report.matchedWalls, report.weakAxisFrac,
+                            report.transM * 100, report.yawDeg, report.converged ? "y" : "n"))
+                return
+            }
+
+            let d = fit * ghostAutoAlignApplied.inverse
+            let dTrans = simd_length(SIMD3<Float>(d.columns.3.x, d.columns.3.y, d.columns.3.z))
+            let dYawDeg = abs(atan2(d.columns.2.x, d.columns.2.z)) * 180 / .pi
+            guard dTrans > 0.015 || dYawDeg > 0.25 else {
+                // Trusted fit, same seat: count toward convergence — 3 in a row (~6 s stable,
+                // planes no longer changing the answer) ends fitting for this session.
+                ghostAutoAlignStableCount += 1
+                if ghostAutoAlignStableCount >= 3 {
+                    ghostAutoAlignConverged = true
+                    print("[PlaneReg] ghost auto-align settled — no further fits this session")
+                    // The seat is final — stop paying for ARKit's plane detection too. Mutate the
+                    // LIVE config (the save path's proven pattern: preserves initialWorldMap + the
+                    // relocalized frame, no reset). ARKit drops the plane anchors; didRemove clears.
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, !self.isRecording.load(ordering: .relaxed),
+                              let session = self.arView?.session,
+                              let liveConfig = session.configuration as? ARWorldTrackingConfiguration,
+                              !liveConfig.planeDetection.isEmpty else { return }
+                        liveConfig.planeDetection = []
+                        session.run(liveConfig)
+                        print("[PlaneReg] plane detection off (auto-align settled)")
+                    }
+                }
+                return
+            }
+            ghostAutoAlignStableCount = 0
+            ghostAutoAlignApplied = fit
+
+            print(String(format: "[PlaneReg] ghost auto-align: trans=%.1fcm yaw=%.2f° (RMS=%.1fmm walls=%d weakFrac=%.2f livePlanes=%d)",
+                         report.transM * 100, report.yawDeg, report.finalRMS * 1000,
+                         report.matchedWalls, report.weakAxisFrac, live.count))
+            let transCm = report.transM * 100
+            let yawDeg = report.yawDeg
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isRecording.load(ordering: .relaxed),
+                      !self.manualNudgeActive.load(ordering: .relaxed) else { return }
+                self.ghostAutoAlign = fit
+                self.ghostAnchorEntity?.transform = Transform(matrix: fit)
+                // A trusted plane fit IS the alignment-ready signal — drive the green chip from it
+                // (successor to the mesh-ICP refine's chip; that path is quiet for proxy ghosts).
+                self.scanStore?.icpAlignReady = ScanStore.ICPAlignReady(transCm: transCm, yawDeg: yawDeg)
+            }
+        }
 
         // Boundary Anchor tracking
         weak var scanStore: ScanStore?
@@ -1295,8 +1531,12 @@ struct ARCoverageView: UIViewRepresentable {
                 roomCaptureSession?.stop(pauseARSession: false)
                 roomCaptureSession = nil
             }
-            // [DEFERRED-ROOMPLAN] Fresh build box for this recording; didEndWith feeds it, save drains it.
+            // [DEFERRED-ROOMPLAN] Fresh build box for this recording; didEndWith feeds it, the
+            // persisted sidecar carries it to ScanPostprocessor.
             deferredRoomLock.withLock { deferredRoomBuild = DeferredRoomBuild() }
+            // A new session supersedes any still-finalizing stopped one — release the hold (its
+            // late didEndWith would hit a fresh box anyway; the old recording's chance has passed).
+            stoppingRoomCaptureSession = nil
             roomCaptureSession = RoomCaptureSession(arSession: arSession)
             roomCaptureSession?.delegate = self
             let config = RoomCaptureSession.Configuration()
@@ -1345,6 +1585,14 @@ struct ARCoverageView: UIViewRepresentable {
             // Push through binding so CaptureView.finishStopRecording can access it for export
             finalCapturedRoomBinding?.wrappedValue = finalCapturedRoom
             session.stop(pauseARSession: false) // keep ARKit alive
+            // KEEP THE STOPPING SESSION ALIVE until didEndWith delivers the CapturedRoomData.
+            // didEndWith fires ASYNCHRONOUSLY after stop() — RoomPlan finalizes the captured data
+            // first, which on a long/heavy scan takes seconds. `roomCaptureSession = nil` here was
+            // the LAST strong reference: the session deallocated mid-finalize and the callback
+            // (and the room data with it) was silently lost — quick scans won the race, big scans
+            // (2026-07-13; the 2026-07-16 497k-face scan) lost their room. Released at didEndWith
+            // / next session start.
+            stoppingRoomCaptureSession = session
             roomCaptureSession = nil
             needsSemanticReassert.store(false, ordering: .relaxed) // cancel any pending deferred re-assert
             PerfDiag.log("RoomPlan session stopped (ARSession preserved)")
@@ -1375,6 +1623,7 @@ struct ARCoverageView: UIViewRepresentable {
             // [DEFERRED-ROOMPLAN] Analysis mode has no deferred build — clear any recording box so an
             // analysis-session didEndWith can't feed a stale box (analysis consumes the room live).
             deferredRoomLock.withLock { deferredRoomBuild = nil }
+            stoppingRoomCaptureSession = nil // supersedes any still-finalizing stopped session
 
             // Ensure person segmentation is available for analysis even when Privacy Filter is OFF
             if !privacyFilter,
@@ -1988,6 +2237,11 @@ struct ARCoverageView: UIViewRepresentable {
                 for case let mesh as ARMeshAnchor in anchors { locDiagSampleAnchorForICP(mesh) }
             }
 
+            // Ghost auto-align: collect classified plane anchors (alignment phase — planeDetection
+            // is only on pre-record) and opportunistically re-fit the ghost seat.
+            for case let plane as ARPlaneAnchor in anchors { livePlaneAnchors[plane.identifier] = plane }
+            maybeRunGhostAutoAlign()
+
             guard isRecording.load(ordering: .relaxed) else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
@@ -2024,6 +2278,10 @@ struct ARCoverageView: UIViewRepresentable {
                 for case let mesh as ARMeshAnchor in anchors { locDiagSampleAnchorForICP(mesh) }
             }
 
+            // Ghost auto-align: ARKit refines plane anchors continuously — refresh + re-fit (see didAdd).
+            for case let plane as ARPlaneAnchor in anchors { livePlaneAnchors[plane.identifier] = plane }
+            maybeRunGhostAutoAlign()
+
             guard isRecording.load(ordering: .relaxed) else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
@@ -2038,6 +2296,9 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+            // Ghost auto-align: drop removed planes (ARKit merges planes; also .removeExistingAnchors).
+            for case let plane as ARPlaneAnchor in anchors { livePlaneAnchors.removeValue(forKey: plane.identifier) }
+
             guard isRecording.load(ordering: .relaxed) else { return }
             for anchor in anchors {
                 if let mesh = anchor as? ARMeshAnchor {
@@ -2400,6 +2661,19 @@ struct ARCoverageView: UIViewRepresentable {
         let data: Data
         let vertexCount: Int
         let faceCount: Int
+        /// DECISION 3: per-face ARMeshClassification labels, ONE BYTE PER EMITTED FACE in mesh.obj
+        /// face order (privacy-skipped and invalid faces are skipped here too, so the mapping can't
+        /// desync). nil when no anchor carried classification (classifier off/unsupported) — the
+        /// postprocess proxy build then has nothing to subtract with and is skipped. Persisted as
+        /// `face_classes.bin` beside the mesh.
+        let faceClasses: Data?
+
+        init(data: Data, vertexCount: Int, faceCount: Int, faceClasses: Data? = nil) {
+            self.data = data
+            self.vertexCount = vertexCount
+            self.faceCount = faceCount
+            self.faceClasses = faceClasses
+        }
     }
 
     /// Raw, co-framed buffer snapshot taken on the main/AR thread the instant recording stops.
@@ -2420,6 +2694,11 @@ struct ARCoverageView: UIViewRepresentable {
             let faceCount: Int
             let faceBytesPerPrimitive: Int  // bytesPerIndex * indexCountPerPrimitive
             let faceFormatValid: Bool       // bytesPerIndex == 4 && indexCountPerPrimitive == 3
+            // Per-face ARMeshClassification bytes (faceCount * classificationStride, one uchar per
+            // face at each stride step). nil when `.meshWithClassification` wasn't active — the
+            // ghost-proxy build then bails and the rescan overlay falls back to the full mesh.
+            let classificationData: Data?
+            let classificationStride: Int
         }
         struct Segmentation: Sendable {
             let pixels: Data
@@ -2483,6 +2762,16 @@ struct ARCoverageView: UIViewRepresentable {
             let vertexData = Data(bytes: vertices.buffer.contents(), count: vertices.count * vertices.stride)
             let faceData = Data(bytes: faces.buffer.contents(), count: faces.count * faceBytesPerPrimitive)
 
+            // Per-face classification (present iff .meshWithClassification) — one more memcpy,
+            // consumed by the ghost-proxy build (wall/floor/ceiling subtraction) at save.
+            var classificationData: Data?
+            var classificationStride = 0
+            if let cls = geometry.classification, cls.count == faces.count {
+                classificationData = Data(bytes: cls.buffer.contents().advanced(by: cls.offset),
+                                          count: cls.count * cls.stride)
+                classificationStride = cls.stride
+            }
+
             anchors.append(RawMeshSnapshot.Anchor(
                 transform: meshAnchor.transform,
                 vertexData: vertexData,
@@ -2491,7 +2780,9 @@ struct ARCoverageView: UIViewRepresentable {
                 faceData: faceData,
                 faceCount: faces.count,
                 faceBytesPerPrimitive: faceBytesPerPrimitive,
-                faceFormatValid: faces.bytesPerIndex == 4 && faces.indexCountPerPrimitive == 3
+                faceFormatValid: faces.bytesPerIndex == 4 && faces.indexCountPerPrimitive == 3,
+                classificationData: classificationData,
+                classificationStride: classificationStride
             ))
             totalVertices += vertices.count
         }
@@ -2521,6 +2812,12 @@ struct ARCoverageView: UIViewRepresentable {
         var vertexOffset = 1
         var totalVertices = 0
         var totalFaces = 0
+        // DECISION 3: face-aligned classification sidecar — one label byte appended per face WRITTEN
+        // to the OBJ (same skip logic), so index i in this buffer is face i in mesh.obj forever.
+        // Emitted iff any anchor carries classification; anchors without it contribute 0 (= none).
+        let anyClassification = snapshot.anchors.contains { $0.classificationData != nil }
+        var faceClasses = Data()
+        if anyClassification { faceClasses.reserveCapacity(256 * 1024) }
 
         for anchor in snapshot.anchors {
             let transform = anchor.transform
@@ -2563,6 +2860,9 @@ struct ARCoverageView: UIViewRepresentable {
             }
 
             let faceBytes = anchor.faceBytesPerPrimitive
+            // Anchor-local classification view (nil-safe): label for face i, or 0 (= none).
+            let clsData = anchor.classificationData
+            let clsStride = anchor.classificationStride
             anchor.faceData.withUnsafeBytes { (fBuf: UnsafeRawBufferPointer) in
                 for faceIdx in 0..<anchor.faceCount {
                     let base = faceIdx * faceBytes
@@ -2583,6 +2883,14 @@ struct ARCoverageView: UIViewRepresentable {
                     let v2 = Int(i1) + vertexOffset
                     let v3 = Int(i2) + vertexOffset
                     objData.append(contentsOf: "f \(v1) \(v2) \(v3)\n".utf8)
+                    if anyClassification {
+                        // Same skip path as the `f` line above — the sidecar stays face-aligned.
+                        if let clsData, clsStride > 0, faceIdx * clsStride < clsData.count {
+                            faceClasses.append(clsData[clsData.startIndex + faceIdx * clsStride])
+                        } else {
+                            faceClasses.append(0)
+                        }
+                    }
                     totalFaces += 1
                 }
             }
@@ -2592,7 +2900,230 @@ struct ARCoverageView: UIViewRepresentable {
 
         guard !objData.isEmpty else { return nil }
 
+        return MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces,
+                                faceClasses: anyClassification ? faceClasses : nil)
+    }
+
+    /// DECISION 2 / DECISION 3 — build the rescan ghost's light proxy mesh from the PERSISTED save
+    /// artifacts (mesh.obj + the face-aligned face_classes.bin sidecar), so it can run at
+    /// POST-PROCESS, chained on the RoomBuilder room (mesh.obj itself stays the untouched
+    /// save/export artifact):
+    /// - **floor/ceiling faces dropped unconditionally** (RoomPlan's floor quad stands in; ceilings
+    ///   have no quad and dropping them un-lids the overlay — a readability win, not a gap);
+    /// - **wall/door/window faces dropped iff a RoomPlan wall covers them** — the reconciliation
+    ///   rule: classifier-wall ≠ RoomPlan-wall (RoomPlan drops partial/low-texture walls), so a
+    ///   wall face with no covering quad is KEPT in the lumpy proxy rather than leaving a hole;
+    /// - **content faces (none/table/seat) kept** — they're the honest coverage/change signal.
+    /// Vertices are compacted (only referenced ones emitted, indices remapped) so the size win is
+    /// real. The RoomPlan wall/floor QUADS are baked INTO the artifact (4 corners + 2 triangles
+    /// each, appended last): one coherent, coordinate-locked OBJ — quads and mesh remainder ride
+    /// the registration and the ghost de-registration together, so they can never drift apart
+    /// across sessions, and the renderer needs no dynamic assembly.
+    ///
+    /// The privacy person-filter needs no re-application here: mesh.obj was already emitted with
+    /// person faces skipped, and face_classes.bin is aligned to the EMITTED face order (both come
+    /// from the same buildMeshOBJ loop). Inputs must be frame-consistent: pass the RAW mesh with
+    /// RAW-frame planes (the caller then applies the canonical transform to the result), or the
+    /// canonical mesh with canonical planes.
+    ///
+    /// Returns nil on face-count/sidecar mismatch (misaligned inputs — refuse rather than
+    /// mis-subtract) or when no RoomPlan walls exist to stand in — callers then skip the artifact
+    /// and the rescan ghost falls back to the full mesh.
+    static func buildGhostProxyOBJ(objData meshOBJ: Data, faceClasses: Data,
+                                   roomPlanPlanes: [PlaneRegistration.Plane]) -> MeshExportResult? {
+        let roomPlanWalls = roomPlanPlanes.filter { $0.category == .wall }
+        guard !roomPlanWalls.isEmpty else { return nil }
+
+        // Parse the OBJ's v/f lines (buildMeshOBJ emits only those; transformOBJ may add comment
+        // lines — skipped). Faces are 1-based vertex indices.
+        var verts: [SIMD3<Float>] = []
+        var faces: [(Int, Int, Int)] = []
+        let nl = UInt8(ascii: "\n")
+        meshOBJ.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            var i = 0
+            let count = raw.count
+            while i < count {
+                var j = i
+                while j < count && base[j] != nl { j += 1 }
+                if j > i + 2, base[i + 1] == UInt8(ascii: " ") {
+                    let kind = base[i]
+                    if kind == UInt8(ascii: "v") || kind == UInt8(ascii: "f") {
+                        // Parse three whitespace-separated numbers after the tag.
+                        var vals: [Double] = []
+                        var k = i + 2
+                        while k < j && vals.count < 3 {
+                            while k < j && base[k] == UInt8(ascii: " ") { k += 1 }
+                            var m = k
+                            while m < j && base[m] != UInt8(ascii: " ") { m += 1 }
+                            if m > k, let s = String(bytes: raw[k..<m], encoding: .utf8), let d = Double(s) {
+                                vals.append(d)
+                            }
+                            k = m
+                        }
+                        if vals.count == 3 {
+                            if kind == UInt8(ascii: "v") {
+                                verts.append(SIMD3(Float(vals[0]), Float(vals[1]), Float(vals[2])))
+                            } else {
+                                faces.append((Int(vals[0]) - 1, Int(vals[1]) - 1, Int(vals[2]) - 1))
+                            }
+                        }
+                    }
+                }
+                i = j + 1
+            }
+        }
+        // Alignment contract: one class byte per emitted face. A mismatch means the inputs are
+        // from different builds — refuse rather than subtract the wrong faces.
+        guard faces.count == faceClasses.count, !verts.isEmpty else {
+            print("[GhostProxy] face/class count mismatch (faces=\(faces.count) classes=\(faceClasses.count)) — skipping proxy")
+            return nil
+        }
+
+        // Wall coverage test: within 15 cm of the wall plane and inside its rectangle (+20 cm
+        // margin for RoomPlan seating/extent error).
+        func coveredByRoomPlanWall(_ p: SIMD3<Float>) -> Bool {
+            for w in roomPlanWalls {
+                let d = p - w.center
+                guard abs(simd_dot(d, w.normal)) <= 0.15,
+                      abs(simd_dot(d, w.xAxis)) <= w.width / 2 + 0.2,
+                      abs(simd_dot(d, w.yAxis)) <= w.height / 2 + 0.2 else { continue }
+                return true
+            }
+            return false
+        }
+
+        var objData = Data()
+        objData.reserveCapacity(256 * 1024)
+        // Version header (every consumer skips comment lines; transformOBJ passes them verbatim).
+        // ScanPostprocessor checks the version so proxies from older builders rebuild on the next
+        // Process; `quadFaces` tells the ghost renderer how many TRAILING faces are the RoomPlan
+        // lattice (they get thick wireframe lines — sparse 1 m grid lines at the default 1 mm
+        // thickness are sub-pixel beyond ~1.5 m and visually vanish; 2026-07-16 device finding).
+        let quadFaceCount = roomPlanPlanes.reduce(0) { acc, p in
+            let cols = max(1, Int((p.width / ghostProxyQuadCellMeters).rounded(.up)))
+            let rows = max(1, Int((p.height / ghostProxyQuadCellMeters).rounded(.up)))
+            return acc + cols * rows * 2
+        }
+        objData.append(contentsOf: "\(ghostProxyVersionHeader) quadFaces=\(quadFaceCount)\n".utf8)
+        var vertexOffset = 1
+        var totalVertices = 0
+        var totalFaces = 0
+
+        // Pass 1: faces surviving the class filter; mark referenced vertices.
+        var keptFaces: [(Int, Int, Int)] = []
+        keptFaces.reserveCapacity(faces.count / 2)
+        var used = [Bool](repeating: false, count: verts.count)
+        var droppedFloorCeil = 0
+        var droppedCoveredWall = 0
+        for (faceIdx, f) in faces.enumerated() {
+            guard f.0 >= 0, f.1 >= 0, f.2 >= 0, f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
+            // ARMeshClassification raw: 0 none, 1 wall, 2 floor, 3 ceiling, 4 table,
+            // 5 seat, 6 window, 7 door.
+            switch faceClasses[faceClasses.startIndex + faceIdx] {
+            case 2, 3:
+                droppedFloorCeil += 1
+                continue // floor/ceiling — quad stands in / deliberately open
+            case 1, 6, 7:
+                // wall-plane family — subtract only where a RoomPlan quad replaces it
+                if coveredByRoomPlanWall((verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
+                    droppedCoveredWall += 1
+                    continue
+                }
+            default:
+                break    // content — keep
+            }
+            keptFaces.append(f)
+            used[f.0] = true; used[f.1] = true; used[f.2] = true
+        }
+
+        // Pass 2: compact vertices + remap face indices.
+        var remap = [Int](repeating: 0, count: verts.count)
+        for idx in 0..<verts.count where used[idx] {
+            remap[idx] = vertexOffset
+            vertexOffset += 1
+            totalVertices += 1
+            let p = verts[idx]
+            objData.append(contentsOf: "v \(p.x) \(p.y) \(p.z)\n".utf8)
+        }
+        for f in keptFaces {
+            objData.append(contentsOf: "f \(remap[f.0]) \(remap[f.1]) \(remap[f.2])\n".utf8)
+            totalFaces += 1
+        }
+
+        // Bake the RoomPlan wall + floor quads into the same OBJ (the clean stand-ins for the
+        // subtracted architectural faces). Tessellated into ~1 m grid cells rather than one big
+        // 2-triangle quad: the ghost renders as WIREFRAME, and a bare quad is just its outline +
+        // one diagonal — it reads as emptiness, not a wall (2026-07-16 device feedback: "I can't
+        // visually tell what the walls are"). A 1 m grid draws as a visible lattice — reads as a
+        // solid face — while still being massive decimation (a 5×3 m wall = 30 tris vs. the
+        // thousands of mesh faces it replaced).
+        for p in roomPlanPlanes {
+            let cols = max(1, Int((p.width / ghostProxyQuadCellMeters).rounded(.up)))
+            let rows = max(1, Int((p.height / ghostProxyQuadCellMeters).rounded(.up)))
+            let origin = p.center - p.xAxis * (p.width / 2) - p.yAxis * (p.height / 2)
+            let dx = p.xAxis * (p.width / Float(cols))
+            let dy = p.yAxis * (p.height / Float(rows))
+            // Grid vertices, row-major: (cols+1) × (rows+1).
+            for r in 0...rows {
+                for c in 0...cols {
+                    let v = origin + dx * Float(c) + dy * Float(r)
+                    objData.append(contentsOf: "v \(v.x) \(v.y) \(v.z)\n".utf8)
+                }
+            }
+            func vid(_ c: Int, _ r: Int) -> Int { vertexOffset + r * (cols + 1) + c }
+            for r in 0..<rows {
+                for c in 0..<cols {
+                    objData.append(contentsOf: "f \(vid(c, r)) \(vid(c + 1, r)) \(vid(c + 1, r + 1))\n".utf8)
+                    objData.append(contentsOf: "f \(vid(c, r)) \(vid(c + 1, r + 1)) \(vid(c, r + 1))\n".utf8)
+                    totalFaces += 2
+                }
+            }
+            vertexOffset += (cols + 1) * (rows + 1)
+            totalVertices += (cols + 1) * (rows + 1)
+        }
+
+        guard totalFaces > 0 else { return nil }
+        // Diagnostic: the baked quad dimensions, verbatim from the roomplan surfaces. A wall whose
+        // lattice looks "short" on device either really is short here (RoomPlan partial-wall
+        // extent — the classifier-wall mesh above it is kept, no hole) or its upper mesh faces
+        // were dropped by class (see the drop tally) — this line separates the two from console.
+        let quadDesc = roomPlanPlanes
+            .map { String(format: "%@ %.1f×%.1fm", $0.category == .wall ? "wall" : "floor", $0.width, $0.height) }
+            .joined(separator: ", ")
+        print("[GhostProxy] quads baked: \(quadDesc) | mesh faces kept=\(keptFaces.count) dropped: floorCeil=\(droppedFloorCeil) coveredWall=\(droppedCoveredWall)")
         return MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces)
+    }
+
+    /// Ghost-proxy artifact version header (start of mesh_proxy.obj line 1; the full line carries
+    /// ` quadFaces=N` after it). Bump when the builder's output changes materially —
+    /// ScanPostprocessor treats a proxy without the CURRENT version as not-yet-built, so older
+    /// artifacts regenerate on the next Post-process. v2: RoomPlan quads tessellated to a ~1 m
+    /// wireframe grid (v1 quads were invisible as wireframe). v3: quad-dims diagnostic. v4:
+    /// header carries the trailing lattice face count so the renderer can draw the sparse lattice
+    /// with THICK lines (1 mm lines are sub-pixel beyond ~1.5 m — the "wall lattice only reaches
+    /// 1 m up" illusion was thickness falloff, not geometry).
+    static let ghostProxyVersionHeader = "# ghostproxy v4"
+    /// Target grid cell size for the tessellated RoomPlan quads.
+    static let ghostProxyQuadCellMeters: Float = 1.0
+    /// Wireframe line thickness for the proxy's RoomPlan lattice (the mesh remainder keeps the
+    /// default 1 mm). Sparse 1 m grid lines need real thickness to survive viewing distance:
+    /// 8 mm ≈ 6 px at 3 m — reads as architecture, not noise.
+    static let ghostProxyQuadLineThickness: Float = 0.008
+    /// Thickness for the synthesized room OUTLINE (plane-rect borders: wall-wall corners,
+    /// wall-floor seams, ceiling line) — bolder than the interior lattice so the structural box
+    /// reads at a glance.
+    static let ghostProxyOutlineThickness: Float = 0.02
+
+    /// Parse the `quadFaces=N` count from a proxy OBJ's version header (nil for legacy/full-mesh
+    /// ghosts or older proxy versions). Reads only the first line.
+    static func ghostProxyQuadFaceCount(from data: Data) -> Int? {
+        let head = data.prefix(64)
+        guard let line = String(data: head, encoding: .utf8)?
+            .split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first,
+              line.hasPrefix(ghostProxyVersionHeader),
+              let range = line.range(of: "quadFaces=") else { return nil }
+        return Int(line[range.upperBound...].prefix(while: { $0.isNumber }))
     }
 
     /// A tiny single-triangle snapshot used only in developer/mock modes (e.g. Simulator) where no
@@ -2608,7 +3139,8 @@ struct ARCoverageView: UIViewRepresentable {
         let anchor = RawMeshSnapshot.Anchor(
             transform: matrix_identity_float4x4,
             vertexData: vertexData, vertexCount: 3, vertexStride: 12,
-            faceData: faceData, faceCount: 1, faceBytesPerPrimitive: 12, faceFormatValid: true
+            faceData: faceData, faceCount: 1, faceBytesPerPrimitive: 12, faceFormatValid: true,
+            classificationData: nil, classificationStride: 0
         )
         return RawMeshSnapshot(
             anchors: [anchor], viewMatrix: matrix_identity_float4x4,
@@ -2656,7 +3188,8 @@ struct ARCoverageView: UIViewRepresentable {
     static func makeConfiguration(
         enableMeshReconstruction: Bool = false,
         worldMapURL: URL? = nil,
-        enableFrameSemantics: Bool = false
+        enableFrameSemantics: Bool = false,
+        enablePlaneDetection: Bool = false
     ) -> ARWorldTrackingConfiguration {
         let config = ARWorldTrackingConfiguration()
         if supportsLiDAR {
@@ -2666,6 +3199,12 @@ struct ARCoverageView: UIViewRepresentable {
             } else {
                 config.sceneReconstruction = []
             }
+        }
+        if enablePlaneDetection {
+            // Ghost auto-align (alignment phase only): classified wall/floor ARPlaneAnchors are the
+            // LIVE side of the plane fit that visually seats the ghost. Far cheaper than mesh
+            // reconstruction; not enabled for recording (RoomPlan reconfigures the session there).
+            config.planeDetection = [.horizontal, .vertical]
         }
         config.environmentTexturing = .automatic
         if let mapURL = worldMapURL,
@@ -2690,106 +3229,96 @@ struct ARCoverageView: UIViewRepresentable {
 // MARK: - Deferred RoomPlan Build  [DEFERRED-ROOMPLAN]
 
 /// [DEFERRED-ROOMPLAN] grep this token for every site of the deferred-build feature: this box, the
-/// coordinator storage + currentDeferredRoomBox/awaitAndBuildDeferredRoom, startRoomPlanSession
-/// (create), startAnalysisRoomPlanSession (clear), didUpdate (recording metadata consume), didEndWith (provide),
-/// makeUIView (wire awaitDeferredRoomPlan), ScanStore.awaitDeferredRoomPlan, and the save-block build
-/// trigger in CaptureView+Recording. Only the trigger is location-bound (must run after world-map
-/// export); everything else is plumbing that stays put if the stage moves.
+/// coordinator storage + currentDeferredRoomBox, startRoomPlanSession (create),
+/// startAnalysisRoomPlanSession (clear), didUpdate (recording metadata consume), didEndWith
+/// (provide + stopping-session release), makeUIView (wire setRoomDataPersistDir),
+/// ScanStore.setRoomDataPersistDir, the post-save hand-off in CaptureView+Recording, and
+/// ScanPostprocessor (registration/proxy consume the roomplan this box writes).
 ///
-/// One-shot coordination box for the deferred RoomPlan reconstruction. Separates the cheap capture
-/// (stash `CapturedRoomData` at `didEndWith`) from the expensive reconstruction (`RoomBuilder`), so
-/// the build can be triggered by the save pipeline AFTER every pose-sensitive step (mesh snapshot +
-/// world-map export) is finished — RoomBuilder never competes with pose capture for CPU.
+/// DECISION 3, revised 2026-07-16: this box runs RoomBuilder as a FIRE-AND-FORGET POST-SAVE
+/// continuation. The original DECISION-3 cut persisted the raw `CapturedRoomData` for a
+/// postprocess-time build — but `CapturedRoomData` is Codable in signature only: BOTH
+/// PropertyListEncoder and JSONEncoder throw at runtime ("isn't in the correct format"), so
+/// persistence is impossible and the room MUST be built in the capture app-session. The
+/// constraints that killed the old save-time build still hold, so:
+/// - `provide` (didEndWith, RoomPlan delegate queue) delivers the data; `setPersistDirectory`
+///   (called ONLY after saveScan completes) delivers the scan directory. Whichever arrives second
+///   starts the build — so RoomBuilder can never overlap the pose-sensitive world-map export or
+///   block the save (it isn't on the save path at all; the save never waits).
+/// - On success it writes `roomplan.json` + `roomplan_raw.json` (scan dir + raw_data copy) —
+///   exactly what ScanPostprocessor's registration/proxy steps consume from disk.
+/// - One-shot, no retry loops (the 2026-07-16 OOM was a retry loop around the un-encodable
+///   sidecar). Terminal failure leaves the scan roomless → the bad-scan recheck surfaces it.
+/// - `buildsInFlight` (static, locked) lets the bad-scan grace check distinguish "build still
+///   running" (re-check later) from "room is never coming" (warn redo).
 ///
-/// A fresh box is created per recording (in `startRoomPlanSession`). `provide` is called once on the
-/// RoomPlan delegate queue; `buildRoom` is called once on the save's BACKGROUND queue and blocks only
-/// that queue (never main) while it waits for the data and runs the offline reconstruction.
+/// If the app dies between save and build completion the room is lost (unavoidable without
+/// persistence) — the scan then reads BAD at next launch and the redo warning applies.
 final class DeferredRoomBuild: @unchecked Sendable {
     private let lock = NSLock()
     private var data: CapturedRoomData?
-    private let dataReady = DispatchSemaphore(value: 0)
-    private var signaled = false
-    private var abandoned = false
+    private var persistDir: URL?
+    private var started = false
 
-    /// Stash the captured data (RoomPlan delegate queue). Cheap — no reconstruction.
+    /// Scan directories with a RoomBuilder run currently in flight (paths, standardized).
+    private static let inFlightLock = NSLock()
+    private static var inFlight: Set<String> = []
+    static func isBuildInFlight(scanDirectory: URL) -> Bool {
+        inFlightLock.withLock { inFlight.contains(scanDirectory.standardizedFileURL.path) }
+    }
+
+    /// Stash the captured data (RoomPlan delegate queue). Cheap — no reconstruction, no wait.
     func provide(_ data: CapturedRoomData) {
         lock.lock()
-        // If buildRoom already gave up (data-wait timeout), a late didEndWith would otherwise leave a
-        // potentially large CapturedRoomData buffer lingering in the box until the next recording. Drop it.
-        if abandoned { lock.unlock(); return }
         self.data = data
-        let first = !signaled
-        signaled = true
         lock.unlock()
-        if first { dataReady.signal() }
+        buildIfReady()
     }
 
-    /// Wait (bounded) for the captured data, then run `RoomBuilder` (offline reconstruction) and
-    /// return the room. Call from a background queue AFTER pose-sensitive capture; blocks that queue
-    /// only. Returns nil on timeout or reconstruction failure (→ scan saves without a room, no hang).
-    func buildRoom(timeout: TimeInterval) -> CapturedRoom? {
-        // TWO separate waits. The CapturedRoomData is provided at didEndWith (fires at Stop, well before
-        // the save reaches here), so wait only briefly for it: if RoomPlan produced nothing this scan
-        // (cold/failed session, didEndWith never fired) bail FAST instead of blocking the save queue for
-        // the whole reconstruction timeout. The reconstruction itself then gets the full `timeout`.
-        let dataWait = AppConstants.roomPlanDataWaitSeconds
-        guard dataReady.wait(timeout: .now() + dataWait) == .success else {
-            // Abandon the box so a late provide() (didEndWith firing after we gave up) discards its buffer
-            // instead of stranding it in memory; drop anything a race already stashed.
-            lock.withLock { abandoned = true; data = nil }
-            Self.log.warning("Deferred RoomPlan: no CapturedRoomData within \(Int(dataWait))s — RoomPlan produced nothing this scan; saving without a room")
-            return nil
-        }
-        // Take the data AND release the box's reference: RoomBuilder holds `captured` for the build, so
-        // once we hand it off the (potentially large) CapturedRoomData buffer frees when this returns
-        // instead of lingering in the box until the next recording.
-        guard let captured = lock.withLock({ defer { data = nil }; return data }) else { return nil }
-
-        // [MemDiag] Bracket RoomBuilder to quantify the deferred build's save-time overhead — the cost
-        // run 3 (skip-consume + drop) never paid. wall = latency added to the save; cpu-seconds ÷ wall
-        // = average cores busy; footprintΔ = its transient working set. Runs after OBJ/colorize, so the
-        // app's CPU in this window is dominated by RoomBuilder (a fair attribution). The CPU/footprint
-        // reads walk the thread list / hit task_info, so gate them behind PerfDiag so the production save
-        // path stays syscall-free.
-        let diag = PerfDiag.enabled
-        let wall0 = Date()
-        let cpu0 = diag ? ScanStats.currentCPUTimeSeconds() : 0
-        let foot0 = diag ? ScanStats.currentFootprintMB() : 0
-        if diag { PerfDiag.log(String(format: "[MemDiag] EVENT RP-BUILD-START footprint=%.0fMB", foot0)) }
-
-        let done = DispatchSemaphore(value: 0)
-        let result = ResultBox()
-        let task = Task.detached {
-            defer { done.signal() }
-            result.value = try? await RoomBuilder(options: [.beautifyObjects]).capturedRoom(from: captured)
-        }
-        let timedOut = done.wait(timeout: .now() + timeout) == .timedOut
-        // Read result.value ONLY when done was signaled (!timedOut). On timeout the detached Task may
-        // STILL be writing result.value (cooperative cancel doesn't guarantee it stopped), so touching
-        // it here would be a data race — treat a timeout as no-room without reading the box.
-        let builtRoom = timedOut ? nil : result.value
-        if timedOut {
-            // Cancel so a runaway RoomBuilder can't keep burning CPU/memory after the save moved on.
-            task.cancel()
-            Self.log.warning("Deferred RoomBuilder exceeded \(Int(timeout))s — cancelled; saving without a room")
-        }
-
-        if diag {
-            let wall = Date().timeIntervalSince(wall0)
-            let cpuSecs = ScanStats.currentCPUTimeSeconds() - cpu0
-            let foot1 = ScanStats.currentFootprintMB()
-            PerfDiag.log(String(format: "[MemDiag] EVENT RP-BUILD-END wall=%.1fs cpu=%.1fs (%.0f%% of 1 core)"
-                                + " footprint=%.0fMB (Δ%+.0f) built=%@%@",
-                                wall, cpuSecs, wall > 0.01 ? cpuSecs / wall * 100 : 0, foot1, foot1 - foot0,
-                                builtRoom == nil ? "NO" : "yes", timedOut ? " (TIMEOUT→cancelled)" : ""))
-        }
-        return builtRoom
+    /// Tell the box where the saved scan lives (its scanDirectory). Call AFTER saveScan — this is
+    /// what keeps RoomBuilder off the pose-sensitive save path.
+    func setPersistDirectory(_ dir: URL) {
+        lock.lock()
+        persistDir = dir
+        lock.unlock()
+        buildIfReady()
     }
 
-    /// Always-on (NOT perfDiag-gated) logger for the two failure paths above, so a real RoomPlan
-    /// stall/no-data is diagnosable in the field without Developer Mode.
+    /// Run RoomBuilder once both the data and the destination are known — call order is arbitrary
+    /// (a throttled device can deliver didEndWith many seconds after the save finished). One-shot.
+    private func buildIfReady() {
+        lock.lock()
+        guard !started, let captured = data, let dir = persistDir else { lock.unlock(); return }
+        started = true
+        data = nil   // the build holds the only reference; the box won't strand the buffer
+        lock.unlock()
+
+        let key = dir.standardizedFileURL.path
+        Self.inFlightLock.withLock { _ = Self.inFlight.insert(key) }
+        Self.log.info("Deferred RoomBuilder starting (post-save) → \(dir.lastPathComponent, privacy: .public)")
+
+        DispatchQueue.global(qos: .utility).async {
+            defer { Self.inFlightLock.withLock { _ = Self.inFlight.remove(key) } }
+            guard let room = ScanPostprocessor.buildRoom(from: captured,
+                                                         timeout: AppConstants.roomBuilderTimeoutSeconds) else {
+                Self.log.warning("Deferred RoomBuilder produced no room — scan stays roomless (bad-scan check will surface it)")
+                return
+            }
+            // Write to the scan dir top level (viewer / gates / registration target lookups) and
+            // mirror into raw_data (export staging parity). saveScan's promotion already ran, so
+            // this writes both itself.
+            RoomPlanExporter.writeRoomPlan(room, to: dir)
+            let rawDir = dir.appendingPathComponent("raw_data")
+            if FileManager.default.fileExists(atPath: rawDir.path) {
+                RoomPlanExporter.writeRoomPlan(room, to: rawDir)
+            }
+            Self.log.info("Deferred RoomBuilder finished — roomplan.json written")
+        }
+    }
+
+    /// Always-on (NOT perfDiag-gated) logger, so a real RoomPlan no-data/failed-build case is
+    /// diagnosable in the field without Developer Mode.
     private static let log = Logger(subsystem: PerfDiag.subsystem, category: "roomplan")
-    private final class ResultBox: @unchecked Sendable { var value: CapturedRoom? }
 }
 
 // MARK: - RoomCaptureSessionDelegate
@@ -2838,14 +3367,24 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
         }
         PerfDiag.log("[MemDiag] EVENT RP-DIDEND \(memMarker())")
 
-        // [DEFERRED-ROOMPLAN] step 1 — STASH ONLY (no reconstruction here). RoomBuilder is deliberately
-        // NOT run at didEndWith: the world-map export (getCurrentWorldMap, the pose-sensitive save
-        // step) runs slightly LATER than this callback, so building here would peg CPU during that
-        // capture and risk a drifted/degraded world map. Instead we just hand the raw CapturedRoomData
-        // to the box; the save pipeline triggers the actual build AFTER all pose-sensitive capture is
-        // done (see CaptureView+Recording). `provide` is a no-op if no recording box exists
+        // [DEFERRED-ROOMPLAN] DECISION 3 — STASH ONLY (no reconstruction here). Hand the raw
+        // CapturedRoomData to the box; it runs RoomBuilder once the post-save hand-off also
+        // delivers the scan directory (so the build can't overlap the world-map export) and
+        // writes roomplan.json/_raw itself. `provide` is a no-op if no recording box exists
         // (analysis-mode / RoomPlan-off), so those ends are ignored.
+        //
+        // Identity guard: only accept data from the LIVE session or the one we just stopped (held
+        // in stoppingRoomCaptureSession until this callback). A didEndWith so late that a NEW
+        // recording already superseded it must not feed the new recording's box with the old
+        // scan's room. (Both refs are written on main; a racy read here only widens/narrows a
+        // guard whose miss window is a many-seconds-late callback — acceptable.)
+        guard session === roomCaptureSession || session === stoppingRoomCaptureSession else {
+            PerfDiag.log("RoomPlan didEndWith from a superseded session — dropped")
+            return
+        }
         currentDeferredRoomBox()?.provide(data)
+        // The data is delivered — release the stopping-session hold (see stopRoomPlanSession).
+        DispatchQueue.main.async { [weak self] in self?.stoppingRoomCaptureSession = nil }
     }
 
     func captureSession(_ session: RoomCaptureSession, didStartWith configuration: RoomCaptureSession.Configuration) {

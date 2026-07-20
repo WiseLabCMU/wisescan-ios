@@ -297,8 +297,11 @@ struct ScanExportManager {
                     }
                 }
 
-                // Include roomplan.json + roomplan_raw.json if RoomPlan data was captured
-                for rpFile in ["roomplan.json", "roomplan_raw.json"] {
+                // Include roomplan.json + roomplan_raw.json if RoomPlan data was captured, and the
+                // registration.json sidecar (save-time canonical registration: the raw→canonical
+                // transform + fit stats a downstream consumer needs to relate mesh/roomplan — which
+                // are canonical-frame — to the world map, which stays in the raw capture frame)
+                for rpFile in ["roomplan.json", "roomplan_raw.json", "registration.json"] {
                     let rpURL = scanDir.appendingPathComponent(rpFile)
                     if fm.fileExists(atPath: rpURL.path) {
                         do {

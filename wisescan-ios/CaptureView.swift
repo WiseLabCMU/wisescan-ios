@@ -60,6 +60,17 @@ struct CaptureView: View {
     @State var isWaitingToSave = false
     @State var isStabilizingBeforeSave = false // hold-steady settle window before the save pose is captured
     @State var cachedGhostMeshData: Data?
+    /// True once loadGhostMeshData() has run for this appearance — gates handing the world map to
+    /// ARCoverageView (see the body comment) so the session's first start is ghost-complete, while
+    /// still allowing ghost-less relocalization when no ghost mesh could be loaded. Reset in
+    /// onDisappear.
+    @State var ghostLoadAttempted = false
+    /// Ghost auto-align reference planes (ghost room, RAW capture frame) — loaded alongside the
+    /// ghost mesh, fed to ARCoverageView's live plane fit. Empty when not rescanning.
+    @State var ghostReferencePlanes: [PlaneRegistration.Plane] = []
+    /// True when `cachedGhostMeshData` holds the wall-subtracted proxy (DECISION 2) — the renderer
+    /// then draws the RoomPlan wall/floor quads in the same wireframe style to complete the ghost.
+    @State var ghostIsProxy = false
     /// Track C — connectors shared by the active location's scans with other maps, in the active
     /// scans' world frame. Computed here (CaptureView owns the ModelContext) and passed to
     /// ARCoverageView, which renders one labeled marker per connector when rescanning an existing
@@ -129,15 +140,20 @@ struct CaptureView: View {
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State.
     private func loadGhostMeshData() {
+        // Whatever the outcome, the attempt happened — releases the world-map gate in body (the
+        // no-ghost paths below then run ghost-less relocalization instead of holding forever).
+        defer { ghostLoadAttempted = true }
         guard let locId = scanStore.activeLocationForScan,
               let scanId = scanStore.activeScanToExtend else {
             cachedGhostMeshData = nil
+            ghostReferencePlanes = []
             return
         }
         let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
         guard let location = try? modelContext.fetch(descriptor).first,
               let targetScan = location.scans.first(where: { $0.id == scanId }) else {
             cachedGhostMeshData = nil
+            ghostReferencePlanes = []
             return
         }
         // [MemDiag] Ghost mesh = the ICP-source mesh, held resident ALONGSIDE the live scan mesh
@@ -145,7 +161,30 @@ struct CaptureView: View {
         // exact bytes read in (the parse into a displayed RealityKit entity is a separate, later cost);
         // footprintΔ is the Data buffer. Baseline read only when diagnostics are on → free otherwise.
         let foot0 = PerfDiag.enabled ? ScanStats.currentFootprintMB() : 0
-        cachedGhostMeshData = try? Data(contentsOf: targetScan.meshFileURL)
+        // DECISION 2: rescans load the light proxy (walls/floor/ceiling subtracted, RoomPlan quads
+        // baked in) instead of the full 10⁵–10⁶-face mesh — killing the 2× mesh-coexistence memory
+        // and most of the ghost render/parse cost. A proxy ghost also retires the mesh-ICP path
+        // for the session (plane auto-align drives the green chip; save-time registration is the
+        // correction authority) and drops the perfDiag alignment-phase mesh reconstruction — the
+        // dense-ICP machinery only engages for legacy scans with no proxy artifact.
+        ghostIsProxy = false
+        if scanStore.activeScanCase == .rescanSpace {
+            let proxyCandidates = [
+                targetScan.scanDirectory.appendingPathComponent("mesh_proxy.obj"),
+                targetScan.rawDataPath.appendingPathComponent("mesh_proxy.obj")
+            ]
+            for url in proxyCandidates {
+                if let data = try? Data(contentsOf: url) {
+                    cachedGhostMeshData = data
+                    ghostIsProxy = true
+                    print("[GhostProxy] rescan ghost using proxy (\(data.count / 1024)KB)")
+                    break
+                }
+            }
+        }
+        if !ghostIsProxy {
+            cachedGhostMeshData = try? Data(contentsOf: targetScan.meshFileURL)
+        }
         // DECISION 1 co-framing: if this scan's mesh was registered into the canonical frame at
         // ITS save, undo that here — the live session relocalizes into the scan's RAW capture
         // frame (the world map can't be re-based), and the ghost must share it (visual overlay,
@@ -155,6 +194,19 @@ struct CaptureView: View {
            let undo = SaveRegistration.inverseForGhost(scanDirectory: targetScan.scanDirectory) {
             cachedGhostMeshData = SaveRegistration.transformOBJ(data, by: undo)
             print("[PlaneReg] ghost mesh de-registered back to its raw capture frame for relocalization overlay")
+        }
+        // Ghost auto-align reference: the ghost room's planes in the SAME raw frame as the
+        // (de-registered) mesh + world map. Rescan only — a link-adjacent capture is a different
+        // physical room, and auto-fitting its walls to the ghost's would be a false lock.
+        ghostReferencePlanes = scanStore.activeScanCase == .rescanSpace
+            ? SaveRegistration.rawFramePlanes(scanDirectory: targetScan.scanDirectory)
+            : []
+        if !ghostReferencePlanes.isEmpty {
+            print("[PlaneReg] ghost auto-align reference loaded: \(ghostReferencePlanes.count) planes")
+        } else if scanStore.activeScanCase == .rescanSpace {
+            // Loud, not silent: without reference planes there is NO auto-align, NO plane
+            // detection, and no [PlaneReg] output at all — this line is the only breadcrumb.
+            print("[PlaneReg] auto-align DISABLED: no reference planes — roomplan.json missing/undecodable for scan \(targetScan.id) (was a room built at its save?)")
         }
         if PerfDiag.enabled {
             let blobMB = Double(cachedGhostMeshData?.count ?? 0) / (1024.0 * 1024.0)
@@ -282,8 +334,20 @@ struct CaptureView: View {
                 privacyFilter: isPrivacyFilterOn,
                 activeMeshColor: activeMeshColor,
                 captureMode: AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar,
-                initialWorldMapURL: scanStore.activeRelocalizationMap,
+                // Withhold the world map until the ghost cache is loaded: makeUIView runs on the
+                // FIRST body render, but loadGhostMeshData() runs in onAppear (after it) — handing
+                // the map over immediately made makeUIView start relocalizing ghost-less, then the
+                // ghost's arrival re-ran the whole map load + resetTracking (a second
+                // `[LocDiag ε] map load` + a restarted relocalization every rescan). Gating the URL
+                // on the ghost means the one-and-only session start happens with both together.
+                // A relocalization flow with no loadable ghost (mesh missing) degrades to
+                // ghost-less relocalization once loadGhostMeshData has run (ghostLoadAttempted).
+                initialWorldMapURL: (scanStore.activeScanToExtend != nil
+                                     && cachedGhostMeshData == nil
+                                     && !ghostLoadAttempted) ? nil : scanStore.activeRelocalizationMap,
                 initialGhostMeshData: cachedGhostMeshData,
+                ghostReferencePlanes: ghostReferencePlanes,
+                ghostIsProxy: ghostIsProxy,
                 scanStore: scanStore,
                 connectorAnchors: connectorAnchors,
                 finalCapturedRoom: $finalCapturedRoom,
@@ -1090,6 +1154,9 @@ struct CaptureView: View {
         .onDisappear {
             mainThreadWatchdog.stop()
             memoryPressureMonitor.stop()
+            // Next appearance must re-load the ghost before the world map is handed over (the
+            // makeUIView-vs-onAppear race gate in body).
+            ghostLoadAttempted = false
 
             // Battery: left the capture tab — after an idle period, pause the AR session (camera +
             // sensors off). Guarded at fire time so we never pause mid-recording or during post-scan
