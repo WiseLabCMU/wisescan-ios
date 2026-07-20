@@ -1292,19 +1292,9 @@ struct ARCoverageView: UIViewRepresentable {
             for position in worldPositions {
                 occupiedVoxels.insert(PhotoCoverageGrid.key(for: position))
             }
-            var vertexNormals = [SIMD3<Float>](repeating: .zero, count: worldPositions.count)
-            for base in stride(from: 0, to: flatIndices.count, by: 3) {
-                let idxA = Int(flatIndices[base])
-                let idxB = Int(flatIndices[base + 1])
-                let idxC = Int(flatIndices[base + 2])
-                let faceNormal = simd_cross(
-                    worldPositions[idxB] - worldPositions[idxA],
-                    worldPositions[idxC] - worldPositions[idxA]
-                ) // area-weighted
-                vertexNormals[idxA] += faceNormal
-                vertexNormals[idxB] += faceNormal
-                vertexNormals[idxC] += faceNormal
-            }
+            let vertexNormals = MeshParser.accumulateVertexNormals(
+                vertices: worldPositions, flatIndices: flatIndices
+            )
             var tintDescriptor = MeshDescriptor(name: "photo_tint")
             tintDescriptor.positions = MeshBuffers.Positions(
                 worldPositions.enumerated().map { index, position in

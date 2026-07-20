@@ -12,6 +12,46 @@ enum MeshParser {
         let faces: [(UInt32, UInt32, UInt32)]
     }
 
+    /// Accumulates area-weighted per-vertex normals: each face's edge cross product is
+    /// summed into its three vertices. Deliberately NOT normalized — callers normalize
+    /// per their own needs (normal-map color remap, sign-agnostic view weighting, or
+    /// inflation direction). Out-of-range indices are skipped.
+    static func accumulateVertexNormals(
+        vertices: [SIMD3<Float>], faces: [(UInt32, UInt32, UInt32)]
+    ) -> [SIMD3<Float>] {
+        var normals = [SIMD3<Float>](repeating: .zero, count: vertices.count)
+        for face in faces {
+            accumulateFaceNormal(Int(face.0), Int(face.1), Int(face.2), vertices: vertices, into: &normals)
+        }
+        return normals
+    }
+
+    /// Flat-triangle-index variant of `accumulateVertexNormals` (indices in groups of 3,
+    /// as used by RealityKit mesh descriptors).
+    static func accumulateVertexNormals(
+        vertices: [SIMD3<Float>], flatIndices: [UInt32]
+    ) -> [SIMD3<Float>] {
+        var normals = [SIMD3<Float>](repeating: .zero, count: vertices.count)
+        for base in stride(from: 0, to: flatIndices.count - 2, by: 3) {
+            accumulateFaceNormal(
+                Int(flatIndices[base]), Int(flatIndices[base + 1]), Int(flatIndices[base + 2]),
+                vertices: vertices, into: &normals
+            )
+        }
+        return normals
+    }
+
+    private static func accumulateFaceNormal(
+        _ indexA: Int, _ indexB: Int, _ indexC: Int,
+        vertices: [SIMD3<Float>], into normals: inout [SIMD3<Float>]
+    ) {
+        guard indexA < vertices.count, indexB < vertices.count, indexC < vertices.count else { return }
+        let faceNormal = simd_cross(vertices[indexB] - vertices[indexA], vertices[indexC] - vertices[indexA])
+        normals[indexA] += faceNormal
+        normals[indexB] += faceNormal
+        normals[indexC] += faceNormal
+    }
+
     /// Parses an OBJ file from raw data into vertices and triangle faces.
     /// Face indices are converted from 1-based to 0-based.
     ///
