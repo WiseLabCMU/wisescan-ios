@@ -331,6 +331,21 @@ class PointCloudManager {
             let source = context.sourceColorTexture
             let dest = context.targetColorTexture
 
+            // Developer A/B: render VR without bloom (Settings → Developer → VR Bloom Effect).
+            // The post-process contract requires filling the target, so pass the frame through
+            // with a blit and drop the half-res intermediate (~4MB) while disabled. Read per
+            // frame like pauseVRCompute above, so the toggle applies live. Unset key = enabled.
+            let bloomOn = (UserDefaults.standard.object(forKey: AppConstants.Key.vrBloomEnabled) as? Bool)
+                ?? AppConstants.vrBloomEnabled
+            if !bloomOn {
+                intermediateTexture = nil
+                if let blit = context.commandBuffer.makeBlitCommandEncoder() {
+                    blit.copy(from: source, to: dest)
+                    blit.endEncoding()
+                }
+                return
+            }
+
             // Check if RealityKit provided a texture we can actually write to with a compute shader
             guard dest.usage.contains(.shaderWrite) else {
                 return
@@ -859,6 +874,21 @@ class PointCloudManager {
             }
         }
         cmdBuf.commit()
+    }
+
+    // MARK: - Photo Coverage
+
+    /// Pushes the photo-coverage cell set (PhotoCoverageGrid.packedKey format) to the voxel
+    /// grid: covered voxels stop being amber-tinted at the next pack (~0.5s). Main-callable;
+    /// hops to the voxel serial queue that owns the grid. Called after each keyframe stamp
+    /// and after a tracking-loss voxel wipe (so re-accumulated voxels re-inherit coverage).
+    func applyPhotoCoverage(coveredCells: Set<Int64>) {
+        guard let grid = voxelGrid else { return }
+        voxelQueue.async {
+            PerfDiag.timed("voxel_photo_coverage", warnOverMs: 30) {
+                grid.applyPhotoCoverage(coveredCells: coveredCells)
+            }
+        }
     }
 
     // MARK: - Voxel Reset

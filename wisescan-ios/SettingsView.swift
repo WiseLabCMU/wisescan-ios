@@ -19,6 +19,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.hideLivePoints) private var hideLivePoints: Bool = AppConstants.hideLivePoints
     @AppStorage(AppConstants.Key.perfDiagnostics) private var perfDiagnostics: Bool = AppConstants.perfDiagnostics
     @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
+    @AppStorage(AppConstants.Key.vrBloomEnabled) private var vrBloomEnabled: Bool = AppConstants.vrBloomEnabled
     @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     // 0 = Auto (no override); N = force format index N-1 of supportedVideoFormats.
@@ -402,6 +403,18 @@ struct SettingsView: View {
                                     Text("Pause VR Compute")
                                         .foregroundColor(.white)
                                     Text("Skips the entire VR GPU pipeline (point-cloud projection, voxel integration, extraction, and bloom) — not just hides it. Isolation test: if the freeze disappears with this on, the GPU pipeline is implicated. Applied per frame in VR capture.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $vrBloomEnabled) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("VR Bloom Effect")
+                                        .foregroundColor(.white)
+                                    Text("Glow post-process on the VR point cloud (two GPU passes + a half-res texture per frame). Turn OFF to A/B the raw voxel rendering and reclaim that memory. Applied live, per frame, VR mode only.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

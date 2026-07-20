@@ -391,9 +391,10 @@ struct ARCoverageView: UIViewRepresentable {
                     context.coordinator.addCoverageGreenQuad(to: uiView)
                 }
                 // Photo coverage: each sharp keyframe stamps the coverage grid from its
-                // depth map and flips any anchor that crossed the coverage threshold from
-                // amber ("depth only") to clear ("photo-grade"). Wired here so the callback
-                // lives exactly as long as the recording.
+                // depth map, then flips AR anchors that crossed the coverage threshold from
+                // amber ("depth only") to clear ("photo-grade") — or, in VR mode, clears the
+                // amber tint on covered voxels. Wired here so the callback lives exactly as
+                // long as the recording.
                 let coordinator = context.coordinator
                 frameCaptureSession?.onKeyframeCaptured = { [weak coordinator] keyframe in
                     coordinator?.markPhotoCoverage(keyframe)
@@ -1341,7 +1342,7 @@ struct ARCoverageView: UIViewRepresentable {
         /// stamped, so geometry behind a wall is never marked covered through the wall (the
         /// failure mode of the earlier frustum/AABB test this replaces).
         func markPhotoCoverage(_ keyframe: FrameCaptureSession.KeyframeStill) {
-            guard captureMode == .ar, let depthMap = keyframe.depthMap else { return }
+            guard let depthMap = keyframe.depthMap else { return }
 
             let stamp = photoCoverageGrid.stamp(
                 depthMap: depthMap,
@@ -1359,13 +1360,19 @@ struct ARCoverageView: UIViewRepresentable {
                 print("[Coverage] Still overlap: \(Int(stamp.overlap * 100))% (\(stamp.newlyCovered) new of \(stamp.stamped) voxels, mean \(Int(photoCoverageGrid.meanStillOverlap * 100))%, multi-standpoint \(Int(standpointDiversity * 100))%)")
             }
             publishCoverageStats(standpointDiversity: standpointDiversity)
-            guard stamp.newlyCovered > 0 else { return } // no grid change → no anchor can flip
+            guard stamp.newlyCovered > 0 else { return } // no grid change → nothing can flip
 
-            for (anchorId, voxels) in anchorVoxels where !photoCoveredAnchors.contains(anchorId) {
-                guard isAnchorPhotoCovered(voxels) else { continue }
-                photoCoveredAnchors.insert(anchorId)
-                // Disable the amber tint — this anchor is now photo-grade (clean camera feed).
-                activeMeshEntities[anchorId]?.model.findEntity(named: "photoTint")?.isEnabled = false
+            if captureMode == .ar {
+                for (anchorId, voxels) in anchorVoxels where !photoCoveredAnchors.contains(anchorId) {
+                    guard isAnchorPhotoCovered(voxels) else { continue }
+                    photoCoveredAnchors.insert(anchorId)
+                    // Disable the amber tint — this anchor is now photo-grade (clean camera feed).
+                    activeMeshEntities[anchorId]?.model.findEntity(named: "photoTint")?.isEnabled = false
+                }
+            } else {
+                // VR: push the enlarged covered-cell set to the voxel grid — covered voxels
+                // drop their amber tint at the next pack (~0.5s).
+                pointCloudManager?.applyPhotoCoverage(coveredCells: photoCoverageGrid.coveredPackedKeys())
             }
         }
 
@@ -1698,10 +1705,13 @@ struct ARCoverageView: UIViewRepresentable {
                 }
                 if frameMayShift {
                     DispatchQueue.main.async { [weak self] in
-                        if let pcm = self?.pointCloudManager {
-                            pcm.resetVoxels()
-                            print("[VR] Tracking degraded (frame may shift) — cleared accumulated voxels")
-                        }
+                        guard let self = self, let pcm = self.pointCloudManager else { return }
+                        pcm.resetVoxels()
+                        // The wipe also cleared the grid's covered-cell set — re-push it so
+                        // voxels re-accumulated over already-photographed surfaces don't
+                        // demand redundant stills. (photoCoverageGrid is main-owned.)
+                        pcm.applyPhotoCoverage(coveredCells: self.photoCoverageGrid.coveredPackedKeys())
+                        print("[VR] Tracking degraded (frame may shift) — cleared accumulated voxels")
                     }
                 }
                 return

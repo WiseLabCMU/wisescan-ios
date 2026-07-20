@@ -85,6 +85,21 @@ final class PhotoCoverageGrid {
         covered[key] != nil
     }
 
+    /// Packs a coverage-cell key into an Int64 for cross-grid set membership (21 bits per
+    /// axis — unambiguous within ±1M cells, i.e. ±260km at 25cm cells). VoxelGrid uses this
+    /// to test its fine voxels against the covered set without touching this main-owned grid.
+    static func packedKey(_ key: SIMD3<Int32>) -> Int64 {
+        (Int64(key.x) & 0x1F_FFFF) | ((Int64(key.y) & 0x1F_FFFF) << 21) | ((Int64(key.z) & 0x1F_FFFF) << 42)
+    }
+
+    /// Snapshot of all covered cells as packed keys — safe to hand to another queue
+    /// (the VR voxel queue) since it shares no storage with this grid.
+    func coveredPackedKeys() -> Set<Int64> {
+        var keys = Set<Int64>(minimumCapacity: covered.count)
+        for key in covered.keys { keys.insert(Self.packedKey(key)) }
+        return keys
+    }
+
     /// Number of distinct view octants this voxel has been photographed from (0 if uncovered).
     func viewDiversity(_ key: SIMD3<Int32>) -> Int {
         covered[key].map { $0.viewOctants.nonzeroBitCount } ?? 0

@@ -49,6 +49,10 @@ class VoxelGrid {
         var count: UInt16 = 0      // Number of observations (for first-sample init)
         var confidence: Float = 1.0  // [0..1], maps to alpha. 0 = prune candidate
         var lastSeenFrame: UInt32 = 0  // Frame counter when last observed
+        /// Lies inside a photo-covered coverage cell (see applyPhotoCoverage). Uncovered
+        /// voxels are amber-tinted at pack time — the VR analog of the AR amber overlay.
+        /// Fits the struct's existing padding: no memory growth.
+        var photoCovered: Bool = false
 
         /// Current color as UInt8 RGB
         var averageColor: (r: UInt8, g: UInt8, b: UInt8) {
@@ -111,6 +115,11 @@ class VoxelGrid {
     /// Sparse hash map: packed grid coords → accumulated color.
     /// Key = Int64 packed from (x, y, z) Int16 values.
     private(set) var voxels: [Int64: VoxelData] = [:]
+
+    /// Photo-covered coverage cells (PhotoCoverageGrid.packedKey format), replaced by
+    /// applyPhotoCoverage after each keyframe stamp. Voxels created later inherit coverage
+    /// from this set (mergeAppendBuffer). Voxel-queue owned, like `voxels`.
+    private var photoCoveredCells = Set<Int64>()
 
     /// GPU append buffer — the integrateVoxels kernel writes VoxelEntry structs here.
     let appendBuffer: MTLBuffer
@@ -184,7 +193,15 @@ class VoxelGrid {
             }
 
             let key = Self.packKey(x: entry.gridX, y: entry.gridY, z: entry.gridZ)
+            let countBefore = voxels.count
             voxels[key, default: VoxelData()].addObservation(r: entry.r, g: entry.g, b: entry.b, frame: frameCounter)
+            // Newly created voxel (count grew): inherit photo coverage if its coverage cell
+            // was already photographed — e.g. densification of an already-shot wall must not
+            // re-amber it. O(1) set test, and only for genuinely new voxels.
+            if voxels.count != countBefore, !photoCoveredCells.isEmpty,
+               photoCoveredCells.contains(Self.packedCoverageKey(gridX: entry.gridX, gridY: entry.gridY, gridZ: entry.gridZ)) {
+                voxels[key]?.photoCovered = true
+            }
             observedKeysThisFrame.insert(key)
         }
     }
@@ -192,6 +209,35 @@ class VoxelGrid {
     /// Set of voxel keys that received observations in the most recent merge.
     /// Used by decayContradictedVoxels to skip freshly-confirmed voxels.
     private var observedKeysThisFrame = Set<Int64>()
+
+    // MARK: - Photo Coverage
+
+    /// Applies the latest photo-coverage cell set from a keyframe stamp: flags every voxel
+    /// lying in a covered 25cm cell so packForExtraction stops amber-tinting it, and retains
+    /// the set so voxels created later inherit coverage at merge time. Runs once per accepted
+    /// keyframe (rare) on the voxel serial queue, which owns `voxels`.
+    func applyPhotoCoverage(coveredCells: Set<Int64>) {
+        photoCoveredCells = coveredCells
+        guard !coveredCells.isEmpty else { return }
+        // Iterate without mutating (safe), then flip — newly covered flips are a small set
+        // (~150 fine voxels per newly covered coarse cell).
+        var toFlip: [Int64] = []
+        for (key, data) in voxels where !data.photoCovered {
+            let (gridX, gridY, gridZ) = Self.unpackKey(key)
+            if coveredCells.contains(Self.packedCoverageKey(gridX: gridX, gridY: gridY, gridZ: gridZ)) {
+                toFlip.append(key)
+            }
+        }
+        for key in toFlip { voxels[key]?.photoCovered = true }
+    }
+
+    /// The PhotoCoverageGrid packed cell key containing a fine voxel — the shared coordinate
+    /// bridge between this 2cm grid and the 25cm coverage grid (identical floor quantization).
+    static func packedCoverageKey(gridX: Int16, gridY: Int16, gridZ: Int16) -> Int64 {
+        PhotoCoverageGrid.packedKey(
+            PhotoCoverageGrid.key(for: worldPosition(gridX: gridX, gridY: gridY, gridZ: gridZ))
+        )
+    }
 
     // MARK: - Confidence Decay
 
@@ -293,44 +339,12 @@ class VoxelGrid {
         }
     }
 
-    // MARK: - Mesh Extraction
-
-    /// Pack the occupied voxels into a flat buffer for the `extractVoxelQuads` GPU kernel.
-    ///
-    /// This replaces the former CPU `extractMesh`, which built every billboard quad and
-    /// color texel on the main thread (~33ms for 350K voxels). All of that geometry math
-    /// now runs on the GPU; the CPU only does this lightweight pass — unpack each key and
-    /// copy color/confidence — so the main thread is no longer blocked per extraction.
-    ///
-    /// - Parameters:
-    ///   - buffer: Destination for `ExtractVoxel` records (must hold at least `maxVoxels`).
-    ///   - maxVoxels: Capacity of the destination buffer (the kernel's vertex-buffer cap).
-    /// - Returns: Number of voxels written (capped at `maxVoxels`).
-    func packForExtraction(into buffer: UnsafeMutableRawPointer, maxVoxels: Int) -> Int {
-        let out = buffer.bindMemory(to: ExtractVoxel.self, capacity: maxVoxels)
-        var voxelIndex = 0
-
-        for (key, data) in voxels {
-            if voxelIndex >= maxVoxels { break }
-
-            let (gx, gy, gz) = Self.unpackKey(key)
-            let avg = data.averageColor
-
-            out[voxelIndex] = ExtractVoxel(
-                gridX: gx, gridY: gy, gridZ: gz,
-                r: avg.r, g: avg.g, b: avg.b,
-                a: UInt8(min(max(data.confidence * 255.0, 0), 255))
-            )
-
-            voxelIndex += 1
-        }
-
-        return voxelIndex
-    }
+    // (packForExtraction lives in VoxelGrid+Extraction.swift.)
 
     /// Clear all accumulated voxels (e.g., when starting a new recording)
     func reset() {
         voxels.removeAll(keepingCapacity: true)
+        photoCoveredCells.removeAll(keepingCapacity: true)
     }
 
     // MARK: - Helpers
