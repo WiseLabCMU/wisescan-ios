@@ -104,11 +104,22 @@ enum ScanPostprocessor {
         let fm = FileManager.default
         let roomDone = artifactURL("roomplan.json", in: scan) != nil
 
+        // Registration is pending when never attempted, or when a REFUSED attempt predates the
+        // current solver (`SaveRegistration.sidecarVersion` bump ⇒ refused scans retry with the
+        // upgraded solver — e.g. v2's trim rescue). APPLIED sidecars are final regardless of
+        // version: their mesh is already transformed, and re-fitting would need an un-apply first.
         if wantsRegistration(scan), roomDone,
-           artifactURL("registration.json", in: scan) == nil,
            let orig = original(of: scan),
            artifactURL("roomplan.json", in: orig) != nil {
-            steps.append(.registration)
+            if artifactURL("registration.json", in: scan) == nil {
+                steps.append(.registration)
+            } else if let sidecar = SaveRegistration.loadSidecar(scanDirectory: scan.scanDirectory) {
+                if !sidecar.applied, sidecar.version < SaveRegistration.sidecarVersion {
+                    steps.append(.registration)
+                }
+            } else {
+                steps.append(.registration)   // sidecar file present but unreadable → retry
+            }
         }
 
         // Proxy is "done" only at the CURRENT builder version — an artifact from an older builder
@@ -230,8 +241,9 @@ enum ScanPostprocessor {
         // ── 1. REGISTRATION ──
         // The room is already on disk (written by the deferred post-save RoomBuilder, or by the
         // legacy save-time pipeline). Source planes come from the persisted roomplan in this
-        // scan's RAW capture frame — rawFramePlanes undoes any applied registration (none here:
-        // registration.json absent is what put us in this step).
+        // scan's RAW capture frame — rawFramePlanes undoes an APPLIED registration; here the
+        // sidecar is absent or an unapplied refusal (applied ones never re-enter this step), so
+        // the planes are already raw.
         var appliedT: simd_float4x4?
         if steps.contains(.registration),
            let orig = original(of: scan),
@@ -262,8 +274,9 @@ enum ScanPostprocessor {
         // ── 2. PROXY ──
         // Frame-consistent by construction: current mesh.obj + planes from the current clean
         // roomplan.json (both canonical if registration applied above / already applied at save;
-        // both raw otherwise).
-        if steps.contains(.proxy) {
+        // both raw otherwise). A late-applied registration (version-gated retry) moves mesh.obj
+        // out from under a version-current proxy — rebuild it even though its header says current.
+        if steps.contains(.proxy) || appliedT != nil {
             report("Building proxy…")
             if let classesURL = artifactURL("face_classes.bin", in: scan),
                let classes = try? Data(contentsOf: classesURL),

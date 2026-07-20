@@ -170,10 +170,27 @@ enum PlaneRegistration {
         let horizEigMax: Float    //   over matched walls (units: m² of wall area), RAW weights
         let iterations: Int
         let converged: Bool
+        /// Per-correspondence post-fit detail — the refusal diagnostic (one bistable wall shows a
+        /// large signed offset while the rest sit at noise). Indices are into the caller's ORIGINAL
+        /// source/target arrays (stable under `excludingSource`), so trim logging stays coherent.
+        let pairs: [PairStat]
         /// λ_min/λ_max ∈ [0,1] — the observability conditioning. Square room → ~1; bare corridor
         /// (parallel walls only) → ~0. THE gate quantity (a wall count misfires; this can't).
         var weakAxisFrac: Float { horizEigMax > 1e-6 ? horizEigMin / horizEigMax : 0 }
         var floorMatched: Bool { matchedFloors > 0 }
+    }
+
+    /// One matched plane pair, measured at the final transform.
+    struct PairStat {
+        let sourceIndex: Int
+        let targetIndex: Int
+        let category: Category
+        /// Signed perpendicular offset of the transformed source center to the target plane (m) —
+        /// the per-wall disagreement a rigid fit couldn't absorb.
+        let centerOffsetM: Float
+        /// Point-to-plane RMS over the pair's 5 samples (m) — adds corner/yaw misfit the center
+        /// offset alone can't see.
+        let rmsM: Float
     }
 
     // MARK: - Trust gate
@@ -235,9 +252,14 @@ enum PlaneRegistration {
     /// (it lengthens walls / closes spaces) is benign here: the extension is coplanar, so an
     /// overhanging corner still has ~0 residual against the matched plane; and a *fabricated*
     /// wall with no live counterpart simply fails to match and falls out of the fit.
+    ///
+    /// `excludingSource`: source indices withheld from matching (the trim rescue's leave-one-out).
+    /// Report indices stay in the ORIGINAL source array's space.
     static func register(source: [Plane], target: [Plane],
-                         initial: simd_float4x4 = matrix_identity_float4x4) -> Report? {
-        let sourceWalls = source.filter { $0.category == .wall }.count
+                         initial: simd_float4x4 = matrix_identity_float4x4,
+                         excludingSource: Set<Int> = []) -> Report? {
+        let sourceWalls = source.enumerated()
+            .filter { !excludingSource.contains($0.offset) && $0.element.category == .wall }.count
         let targetWalls = target.filter { $0.category == .wall }.count
         guard sourceWalls >= 2, targetWalls >= 2 else { return nil }
 
@@ -249,7 +271,8 @@ enum PlaneRegistration {
         var lastMatches: [MatchPair] = []
 
         for it in 1...maxIterations {
-            let matches = match(source: source, target: target, transform: transform)
+            let matches = match(source: source, target: target, transform: transform,
+                                excluding: excludingSource)
             let wallMatches = matches.filter { source[$0.s].category == .wall }.count
             guard wallMatches >= 2 else {
                 // Never matched → abort; degraded mid-refit → keep the last good state.
@@ -307,17 +330,25 @@ enum PlaneRegistration {
         guard !lastMatches.isEmpty else { return nil }
 
         // Final residual + observability at the converged transform (honest post-step numbers).
-        let matches = match(source: source, target: target, transform: transform)
+        let matches = match(source: source, target: target, transform: transform,
+                            excluding: excludingSource)
         let finalSet = matches.filter { source[$0.s].category == .wall }.count >= 2 ? matches : lastMatches
         var sumWSq = 0.0, sumW = 0.0
+        var pairs: [PairStat] = []
         for m in finalSet {
             let sp = source[m.s], tp = target[m.t]
             let wRaw = Double(sp.area) / 5.0
+            var pairSq: Float = 0
             for pt in samples(of: sp) {
                 let r = Double(simd_dot(apply(transform, pt) - tp.center, tp.normal))
                 sumWSq += wRaw * r * r
                 sumW += wRaw
+                pairSq += Float(r * r)
             }
+            pairs.append(PairStat(
+                sourceIndex: m.s, targetIndex: m.t, category: sp.category,
+                centerOffsetM: simd_dot(apply(transform, sp.center) - tp.center, tp.normal),
+                rmsM: sqrt(pairSq / 5)))
         }
         finalRMS = Float((sumWSq / max(sumW, 1e-12)).squareRoot())
         let block = horizontalBlock(source: source, target: target,
@@ -332,7 +363,49 @@ enum PlaneRegistration {
                       matchedFloors: finalSet.filter { source[$0.s].category == .floor }.count,
                       sourceWalls: sourceWalls, targetWalls: targetWalls,
                       horizEigMin: eigMin, horizEigMax: eigMax,
-                      iterations: iterations, converged: converged)
+                      iterations: iterations, converged: converged, pairs: pairs)
+    }
+
+    // MARK: - Trim rescue
+
+    /// The ONE-BISTABLE-SURFACE recovery (save/postprocess path only — live auto-align keeps the
+    /// plain fit, since trimming a half-grown live plane set could rescue the wrong hypothesis).
+    ///
+    /// Failure signature it repairs: converged + observable + small trans/yaw, but RMS over gate —
+    /// a room whose walls agree EXCEPT one that RoomPlan seats differently between sessions.
+    /// Field case (2026-07-20): a floor-to-ceiling window wall, seated at the glass line one
+    /// session and at the concrete wall beyond it the next → the room reads ~20 cm longer, and a
+    /// rigid fit smears the conflict across all walls (RMS 69 mm, trans dragged to 14 cm).
+    ///
+    /// Leave-one-out over the matched wall pairs. Both sides of a bistable conflict can produce a
+    /// self-consistent trimmed fit (drop the liar OR drop its honest opposite — either refits
+    /// tight), so gate-passing alone can't pick a side: choose the SMALLEST-TRANSLATION candidate.
+    /// Physics: per-visit seating ε is cm-scale (5.6–7.3 cm measured live) while surface
+    /// bistability is dm-scale, so the small-trans hypothesis is the wall consensus compatible
+    /// with a plausible seat — whichever wall actually lied. Near-ties (≤1 mm) break on RMS.
+    static func trimRescue(source: [Plane], target: [Plane],
+                           full: Report) -> (report: Report, droppedSource: Int)? {
+        guard full.converged,
+              full.matchedWalls > Gate.minMatchedWalls,   // a drop must leave ≥2 matched walls
+              full.weakAxisFrac >= Gate.minWeakAxisFrac,
+              full.finalRMS > Gate.maxFinalRMS,           // the one failure trimming explains…
+              full.transM <= Gate.maxTransM,              // …and none of the ones it doesn't
+              full.yawDeg <= Gate.maxYawDeg else { return nil }
+        var best: (report: Report, droppedSource: Int)?
+        for pair in full.pairs where pair.category == .wall {
+            guard let r = register(source: source, target: target,
+                                   excludingSource: [pair.sourceIndex]),
+                  exportTransform(from: r) != nil else { continue }
+            if let b = best {
+                if r.transM < b.report.transM - 0.001
+                    || (abs(r.transM - b.report.transM) <= 0.001 && r.finalRMS < b.report.finalRMS) {
+                    best = (r, pair.sourceIndex)
+                }
+            } else {
+                best = (r, pair.sourceIndex)
+            }
+        }
+        return best
     }
 
     // MARK: - Correspondence
@@ -345,11 +418,12 @@ enum PlaneRegistration {
     /// collinear segment across the room). Many-to-one is allowed — two source segments of one
     /// physical wall legitimately share a target.
     private static func match(source: [Plane], target: [Plane],
-                              transform: simd_float4x4) -> [MatchPair] {
+                              transform: simd_float4x4,
+                              excluding: Set<Int> = []) -> [MatchPair] {
         let cosGate = cos(matchAngleDeg * .pi / 180)
         var out: [MatchPair] = []
         let rot = rotation(transform)
-        for (si, sp) in source.enumerated() {
+        for (si, sp) in source.enumerated() where !excluding.contains(si) {
             let c = apply(transform, sp.center)
             let n = rot * sp.normal
             let sReach = 0.5 * sqrt(sp.width * sp.width + sp.height * sp.height)

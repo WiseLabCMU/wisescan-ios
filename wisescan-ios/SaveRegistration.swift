@@ -33,12 +33,19 @@ enum SaveRegistration {
 
     // MARK: - Sidecar
 
+    /// Bump when the solver/gating changes in a way that should RETRY previously-REFUSED scans:
+    /// ScanPostprocessor re-queues `applied == false` sidecars whose version is older than this.
+    /// APPLIED sidecars are final regardless of version — their mesh is already transformed, and
+    /// re-fitting would need an un-apply pipeline first.
+    /// v2 (2026-07-20): trim rescue + per-pair diagnostics (the window-wall bistability session).
+    static let sidecarVersion = 2
+
     /// `registration.json` — written for every rescan save that had a registration target,
     /// applied or not (the not-applied record is the diagnostic for gate tuning).
     struct Sidecar: Codable {
         let version: Int
         let applied: Bool
-        let reason: String        // "applied" | "already aligned …" | "gate refused …" | "no correspondence"
+        let reason: String        // "applied" | "applied (trim-rescued)" | "already aligned …" | "gate refused" | "no correspondence"
         let transform: [Float]?   // column-major raw→canonical; present iff applied
         let transM: Float
         let yawDeg: Float
@@ -48,6 +55,9 @@ enum SaveRegistration {
         let matchedFloors: Int
         let weakAxisFrac: Float
         let converged: Bool
+        /// Source wall index excluded by the trim rescue, nil when the full fit stood. Optional
+        /// so v1 sidecars (no key) still decode.
+        let trimmedSourceWall: Int?
         let targetScanId: String  // the location's original scan (canonical frame owner)
         let note: String
 
@@ -95,19 +105,39 @@ enum SaveRegistration {
         }
         let target = PlaneRegistration.planes(fromExportSurfaces: decoded.surfaces)
 
-        guard let report = PlaneRegistration.register(source: source, target: target) else {
+        guard let full = PlaneRegistration.register(source: source, target: target) else {
             print("[PlaneReg] REFUSED: no wall correspondence formed (src walls=\(source.filter { $0.category == .wall }.count) tgt walls=\(target.filter { $0.category == .wall }.count)) — saving raw")
             return Outcome(sidecar: Sidecar(
-                version: 1, applied: false, reason: "no correspondence", transform: nil,
+                version: sidecarVersion, applied: false, reason: "no correspondence", transform: nil,
                 transM: 0, yawDeg: 0, initialRMSmm: 0, finalRMSmm: 0,
                 matchedWalls: 0, matchedFloors: 0, weakAxisFrac: 0, converged: false,
+                trimmedSourceWall: nil,
                 targetScanId: targetScanId.uuidString, note: artifactNote), appliedTransform: nil)
         }
 
-        let stats = String(format: "trans=%.1fcm (yaw=%.2f°) finalRMS=%.1fmm walls=%d floors=%d weakFrac=%.3f converged=%@",
+        // Per-pair table on every attempt (a handful of lines, save path only) — the diagnostic
+        // that turns an aggregate-RMS refusal into "which wall disagrees, by how much".
+        logPairs("fit", full, source: source, target: target)
+
+        var report = full
+        var trimmedWall: Int?
+        if PlaneRegistration.exportTransform(from: full) == nil,
+           let rescue = PlaneRegistration.trimRescue(source: source, target: target, full: full) {
+            let victim = full.pairs.first { $0.sourceIndex == rescue.droppedSource }
+            let dims = source[rescue.droppedSource]
+            print(String(format: "[PlaneReg] TRIM RESCUE — dropped wall[%d] (%.1f×%.1fm, centerOff=%+.1fcm in the full fit); smallest-translation passing refit wins",
+                         rescue.droppedSource, dims.width, dims.height,
+                         (victim?.centerOffsetM ?? 0) * 100))
+            report = rescue.report
+            trimmedWall = rescue.droppedSource
+            logPairs("trim", report, source: source, target: target)
+        }
+
+        var stats = String(format: "trans=%.1fcm (yaw=%.2f°) finalRMS=%.1fmm walls=%d floors=%d weakFrac=%.3f converged=%@",
                            report.transM * 100, report.yawDeg, report.finalRMS * 1000,
                            report.matchedWalls, report.matchedFloors, report.weakAxisFrac,
                            report.converged ? "yes" : "NO")
+        if let w = trimmedWall { stats += " trimmed=wall[\(w)]" }
 
         let applied: Bool
         let reason: String
@@ -121,13 +151,13 @@ enum SaveRegistration {
             print("[PlaneReg] already aligned — no correction needed. \(stats)")
         } else {
             applied = true
-            reason = "applied"
+            reason = trimmedWall == nil ? "applied" : "applied (trim-rescued)"
             print("[PlaneReg] APPLIED canonical correction. \(stats)")
         }
 
         let m = report.transform
         return Outcome(sidecar: Sidecar(
-            version: 1, applied: applied, reason: reason,
+            version: sidecarVersion, applied: applied, reason: reason,
             transform: applied ? [m.columns.0.x, m.columns.0.y, m.columns.0.z, m.columns.0.w,
                                   m.columns.1.x, m.columns.1.y, m.columns.1.z, m.columns.1.w,
                                   m.columns.2.x, m.columns.2.y, m.columns.2.z, m.columns.2.w,
@@ -136,8 +166,34 @@ enum SaveRegistration {
             initialRMSmm: report.initialRMS * 1000, finalRMSmm: report.finalRMS * 1000,
             matchedWalls: report.matchedWalls, matchedFloors: report.matchedFloors,
             weakAxisFrac: report.weakAxisFrac, converged: report.converged,
+            trimmedSourceWall: trimmedWall,
             targetScanId: targetScanId.uuidString, note: artifactNote),
             appliedTransform: applied ? report.transform : nil)
+    }
+
+    /// One line per matched pair (+ the unmatched leftovers on both sides — a fabricated or
+    /// bistable-phantom wall shows up here). `label` distinguishes the full fit from the trimmed
+    /// refit in the log.
+    private static func logPairs(_ label: String, _ report: PlaneRegistration.Report,
+                                 source: [PlaneRegistration.Plane],
+                                 target: [PlaneRegistration.Plane]) {
+        func name(_ c: PlaneRegistration.Category) -> String { c == .wall ? "wall" : "floor" }
+        for p in report.pairs {
+            let sp = source[p.sourceIndex]
+            print(String(format: "[PlaneReg]   %@ %@[%d] %.1f×%.1fm → tgt[%d]: centerOff=%+.1fcm rms=%.1fmm",
+                         label, name(p.category), p.sourceIndex, sp.width, sp.height,
+                         p.targetIndex, p.centerOffsetM * 100, p.rmsM * 1000))
+        }
+        let matchedS = Set(report.pairs.map(\.sourceIndex))
+        for (i, sp) in source.enumerated() where !matchedS.contains(i) {
+            print(String(format: "[PlaneReg]   %@ unmatched src %@[%d] %.1f×%.1fm",
+                         label, name(sp.category), i, sp.width, sp.height))
+        }
+        let matchedT = Set(report.pairs.map(\.targetIndex))
+        for (i, tp) in target.enumerated() where !matchedT.contains(i) {
+            print(String(format: "[PlaneReg]   %@ unmatched tgt %@[%d] %.1f×%.1fm",
+                         label, name(tp.category), i, tp.width, tp.height))
+        }
     }
 
     /// DECISION 3 — legacy retroactive registration: premultiply an EXISTING clean roomplan.json's
