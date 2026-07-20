@@ -855,6 +855,8 @@ struct ARCoverageView: UIViewRepresentable {
             photoCoverageGrid.reset()
             scanStats?.photoCoverageCovered = 0
             scanStats?.photoCoverageOccupied = 0
+            scanStats?.meanStillOverlap = 0
+            scanStats?.standpointDiversity = 0
         }
 
         /// Recolors all existing active mesh wireframe entities with the current activeMeshColor.
@@ -1335,14 +1337,18 @@ struct ARCoverageView: UIViewRepresentable {
         func markPhotoCoverage(_ keyframe: FrameCaptureSession.KeyframeStill) {
             guard captureMode == .ar, let depthMap = keyframe.depthMap else { return }
 
-            let newlyCovered = photoCoverageGrid.stamp(
+            let stamp = photoCoverageGrid.stamp(
                 depthMap: depthMap,
                 cameraTransform: keyframe.transform,
                 intrinsics: keyframe.intrinsics,
                 imageWidth: keyframe.width,
                 imageHeight: keyframe.height
             )
-            guard newlyCovered > 0 else { return } // no grid change → no anchor can flip
+            // Per-still overlap with prior stills — the field-tuning signal for the
+            // multi-view coaching thresholds (photogrammetry target ≈ 0.6).
+            print("[Coverage] Still overlap: \(Int(stamp.overlap * 100))% (\(stamp.newlyCovered) new of \(stamp.stamped) voxels, mean \(Int(photoCoverageGrid.meanStillOverlap * 100))%, multi-standpoint \(Int(photoCoverageGrid.multiStandpointFraction * 100))%)")
+            publishCoverageStats()
+            guard stamp.newlyCovered > 0 else { return } // no grid change → no anchor can flip
 
             for (anchorId, voxels) in anchorVoxels where !photoCoveredAnchors.contains(anchorId) {
                 guard isAnchorPhotoCovered(voxels) else { continue }
@@ -1350,12 +1356,11 @@ struct ARCoverageView: UIViewRepresentable {
                 // Disable the amber tint — this anchor is now photo-grade (clean camera feed).
                 activeMeshEntities[anchorId]?.model.findEntity(named: "photoTint")?.isEnabled = false
             }
-
-            publishCoverageStats()
         }
 
         /// Publishes photo-coverage progress (covered vs occupied voxels across all anchors)
-        /// to ScanStats for the coverage-debt coach tip and the final scan metadata.
+        /// plus the multi-view stats (mean still overlap, standpoint diversity) to ScanStats
+        /// for the coach tips and the final scan metadata.
         /// Called on the main thread (keyframe-capture path), where ScanStats is written.
         private func publishCoverageStats() {
             var occupied = Set<SIMD3<Int32>>()
@@ -1363,6 +1368,8 @@ struct ARCoverageView: UIViewRepresentable {
             let coveredCount = occupied.reduce(0) { $0 + (photoCoverageGrid.isCovered($1) ? 1 : 0) }
             scanStats?.photoCoverageCovered = coveredCount
             scanStats?.photoCoverageOccupied = occupied.count
+            scanStats?.meanStillOverlap = photoCoverageGrid.meanStillOverlap
+            scanStats?.standpointDiversity = photoCoverageGrid.multiStandpointFraction
         }
 
         // Watch for relocalization success and track drift

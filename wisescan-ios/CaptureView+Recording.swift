@@ -214,8 +214,12 @@ extension CaptureView {
         capSession.semanticClassesDetected = scanStats.detectedClasses
         // Snapshot final photo-coverage stats for metadata (populated by the coverage grid)
         if scanStats.photoCoverageOccupied > 0 {
-            capSession.photoCoverageStats = (covered: scanStats.photoCoverageCovered,
-                                             occupied: scanStats.photoCoverageOccupied)
+            capSession.photoCoverageStats = FrameCaptureSession.PhotoCoverageSummary(
+                covered: scanStats.photoCoverageCovered,
+                occupied: scanStats.photoCoverageOccupied,
+                meanStillOverlap: scanStats.meanStillOverlap,
+                standpointDiversity: scanStats.standpointDiversity
+            )
         }
         DispatchQueue.global(qos: .utility).async {
             let rawDataPath = capSession.stop()

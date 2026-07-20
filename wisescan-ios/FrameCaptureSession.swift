@@ -126,9 +126,18 @@ class FrameCaptureSession {
     var semanticClassesDetected: Set<String> = []
 
     /// Final photo-coverage voxel stats (covered = voxels stamped by keyframe depth,
-    /// occupied = voxels containing mesh). Set by the AR coordinator before stop() so
-    /// metadata records how much of the scanned geometry got photo-grade coverage.
-    var photoCoverageStats: (covered: Int, occupied: Int)?
+    /// occupied = voxels containing mesh, plus the multi-view aggregates: mean
+    /// still-to-still overlap and the fraction of covered voxels seen from ≥2
+    /// standpoints). Set from ScanStats before stop() so metadata records how much of
+    /// the scanned geometry got photo-grade coverage — and how well the stills overlap,
+    /// the offline hook for correlating capture properties with splat quality.
+    struct PhotoCoverageSummary {
+        let covered: Int
+        let occupied: Int
+        let meanStillOverlap: Double
+        let standpointDiversity: Double
+    }
+    var photoCoverageStats: PhotoCoverageSummary?
 
     /// Drop low-confidence anchors (seen in too few frames → likely transient segmentation noise)
     /// then coalesce any survivors still within the merge radius, so the saved `face_anchors` are
@@ -1197,7 +1206,9 @@ class FrameCaptureSession {
                 "covered_voxels": stats.covered,
                 "occupied_voxels": stats.occupied,
                 "fraction": Double(stats.covered) / Double(stats.occupied),
-                "voxel_size_m": Double(AppConstants.photoCoverageVoxelSize)
+                "voxel_size_m": Double(AppConstants.photoCoverageVoxelSize),
+                "mean_still_overlap": stats.meanStillOverlap,
+                "standpoint_diversity": stats.standpointDiversity
             ]
         }
 

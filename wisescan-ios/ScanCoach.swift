@@ -163,6 +163,8 @@ class ScanCoach {
         let isCurrentlyStill = frameCaptureSession.isCurrentlyStill
         let photoCoverageFraction = scanStats.photoCoverageFraction
         let photoCoverageOccupied = scanStats.photoCoverageOccupied
+        let meanStillOverlap = scanStats.meanStillOverlap
+        let standpointDiversity = scanStats.standpointDiversity
 
         // Capture RoomPlan data for semantic tips
         let hasWalls = capturedRoom?.walls.isEmpty == false
@@ -196,6 +198,8 @@ class ScanCoach {
                 isCurrentlyStill: isCurrentlyStill,
                 photoCoverageFraction: photoCoverageFraction,
                 photoCoverageOccupied: photoCoverageOccupied,
+                meanStillOverlap: meanStillOverlap,
+                standpointDiversity: standpointDiversity,
                 now: now,
                 coachingEnabled: coachingEnabled
             )
@@ -260,6 +264,8 @@ class ScanCoach {
         isCurrentlyStill: Bool,
         photoCoverageFraction: Double,
         photoCoverageOccupied: Int,
+        meanStillOverlap: Double,
+        standpointDiversity: Double,
         now: Date,
         coachingEnabled: Bool
     ) -> CoachTip? {
@@ -420,6 +426,26 @@ class ScanCoach {
                            "📸 Pause on the amber areas for sharp photos",
                            icon: "camera.fill",
                            priority: .guidance, now: now) { return t }
+        }
+
+        // Multi-view stills coaching — both need a few stills of signal first.
+        if !isEarlyScan && sharpFrameCount >= AppConstants.stillOverlapMinStills {
+            // Stills barely overlap each other: splat/photogrammetry texture wants
+            // ~60% shared content between neighboring photos, not isolated islands.
+            if meanStillOverlap < AppConstants.stillOverlapFloor {
+                if let overlapTip = tip("guidance.stillOverlap",
+                                        "📸 Overlap your photos — shoot the next one closer to the last",
+                                        icon: "square.on.square",
+                                        priority: .guidance, now: now) { return overlapTip }
+            }
+            // Photo coverage is all single-standpoint: parallax (a sidestep between
+            // photos) matters more than re-aiming from the same spot.
+            if standpointDiversity < AppConstants.stillParallaxDiversityFloor {
+                if let parallaxTip = tip("guidance.stillParallax",
+                                         "↔️ Step sideways and photograph covered areas again",
+                                         icon: "figure.walk",
+                                         priority: .guidance, now: now) { return parallaxTip }
+            }
         }
 
         // Great coverage — consider finishing

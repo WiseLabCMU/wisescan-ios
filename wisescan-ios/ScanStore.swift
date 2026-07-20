@@ -438,6 +438,10 @@ class ScanStats {
     // been covered by hi-res stills. Drives the coverage-debt coach tip and scan metadata.
     var photoCoverageCovered: Int = 0  // covered voxels
     var photoCoverageOccupied: Int = 0 // mesh-occupied voxels (denominator)
+    /// Mean still-to-still overlap across the session's stills (0..1; photogrammetry target ~0.6).
+    var meanStillOverlap: Double = 0
+    /// Fraction of photo-covered voxels photographed from ≥2 distinct standpoints (parallax diversity).
+    var standpointDiversity: Double = 0
     /// Fraction of mesh voxels covered by sharp keyframes (0 when no geometry yet).
     var photoCoverageFraction: Double {
         photoCoverageOccupied > 0 ? Double(photoCoverageCovered) / Double(photoCoverageOccupied) : 0

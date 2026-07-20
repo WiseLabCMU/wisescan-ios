@@ -103,6 +103,14 @@
         "voxel_size_m": {
           "type": "number",
           "description": "Edge length in meters of a coverage voxel cell."
+        },
+        "mean_still_overlap": {
+          "type": "number",
+          "description": "Mean still-to-still voxel overlap across the session's keyframes (0..1, first still excluded). Photogrammetry rule of thumb targets ~0.6; low values mean the stills form isolated islands with texture seams between them."
+        },
+        "standpoint_diversity": {
+          "type": "number",
+          "description": "Fraction of photo-covered voxels photographed from >= 2 distinct camera standpoints (~0.5m position cells). Parallax/baseline diversity — the primary multi-view quality signal; rotation-in-place does not increase it. Intended for offline correlation of capture properties against splat quality."
         }
       }
     }
