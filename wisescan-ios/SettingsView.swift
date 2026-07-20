@@ -414,7 +414,7 @@ struct SettingsView: View {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("VR Bloom Effect")
                                         .foregroundColor(.white)
-                                    Text("Glow post-process on the VR point cloud (two GPU passes + a half-res texture per frame). Turn OFF to A/B the raw voxel rendering and reclaim that memory. Applied live, per frame, VR mode only.")
+                                    Text("Glow post-process on the VR point cloud (two GPU passes + a half-res texture per frame). Off by default; most useful with Hide Live Points on, where the glow softens the raw accumulated voxels. Applied live, per frame, VR mode only.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

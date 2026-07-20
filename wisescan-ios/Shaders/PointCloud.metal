@@ -317,14 +317,22 @@ void extractVoxelQuads(uint id [[thread_position_in_grid]],
         voxelOrigin.z + (float(vx.gridZ) + halfDim + 0.5) * voxelCellSize
     );
 
-    // Push the quad slightly away from the camera so live points always render in front.
+    // Push the quad away from the camera so live points always render in front.
+    // Live points sit at measured depth; the voxel center is quantized to the cell,
+    // so it can be up to half the cell diagonal (~0.87 * cellSize) NEARER the camera
+    // than the surface the live point measured. Pushing by a full cell guarantees the
+    // accumulated quad loses the depth test whenever both sample the same surface
+    // (the postPass sort group already breaks exact ties in the live cloud's favor).
+    // Recomputed per extraction (~2Hz) on the GPU — zero per-frame CPU.
     float3 delta = uniforms.camPos - center;
     float dist = length(delta);
     float3 pushDir = dist > 0.001 ? delta / dist : float3(0.0);
-    float3 biasedCenter = center - pushDir * 0.002;
+    float3 biasedCenter = center - pushDir * voxelCellSize;
 
-    // Distance-based size so quads stay gap-free (cellSize near, larger far).
-    float halfSize = clamp(dist * 0.008, 0.01, 0.02);
+    // Distance-based size so quads stay gap-free: never below half a cell (2cm quad =
+    // one cell, the gap-free floor), growing toward the live-point scale (0.004/m)
+    // rather than double it — accumulated voxels read closer to the live cloud's grain.
+    float halfSize = clamp(dist * 0.005, 0.01, 0.015);
     float3 rightVec = uniforms.right * halfSize;
     float3 upVec = uniforms.up * halfSize;
 

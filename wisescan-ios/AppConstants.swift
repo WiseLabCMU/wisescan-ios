@@ -75,7 +75,7 @@ enum AppConstants {
     static let hideLivePoints: Bool = false
     static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
-    static let vrBloomEnabled: Bool = true      // Developer Mode: VR point-cloud bloom post-process (A/B: off drops 2 GPU passes + the half-res texture)
+    static let vrBloomEnabled: Bool = false     // Developer Mode: VR point-cloud bloom post-process (off by default — device A/B found it unmissed with live points visible; helps most when Hide Live Points is on)
     static let semanticLabeling: Bool = true    // Developer Mode: disable entire RoomPlan pipeline to reduce memory
     /// Developer Mode, OFF by default even in dev. When on, [MemDiag] teardown brackets call
     /// `malloc_zone_pressure_relief` before measuring footprint, forcing the allocator to return
