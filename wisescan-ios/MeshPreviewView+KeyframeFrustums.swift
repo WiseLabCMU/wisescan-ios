@@ -7,6 +7,17 @@ import simd
 // motion (sweep) frames are built as two separate node groups so the three-tier
 // KeyframeMarkerMode can show neither / stills / stills+motion. Extracted from MeshPreviewView
 // to keep that file under the length limit.
+
+/// The shared wire/fill/apex geometry set for one marker shape — reused across every wedge
+/// with the same FOV and tier (see the cache in `buildKeyframeMarkerNodes`). Explicitly
+/// nonisolated (the module defaults to MainActor): it is built and read on the background
+/// preview-load queue.
+private nonisolated struct FrustumGeometry {
+    let wire: SCNGeometry
+    let fill: SCNGeometry
+    let apex: SCNBox
+}
+
 extension MeshPreviewView {
 
     /// The two capture-pose marker groups, each a container node ready to attach (nil if empty).
@@ -16,17 +27,23 @@ extension MeshPreviewView {
         var hasAny: Bool { stills != nil || motion != nil }
     }
 
-    /// Attaches the marker groups to the mesh container, sets initial visibility from the current
-    /// mode, publishes `hasKeyframeMarkers`, and stores the container refs on the coordinator for
-    /// later toggling. Main-thread (preview load).
-    func attachKeyframeMarkers(_ nodes: KeyframeMarkerNodes, to container: SCNNode, coordinator: Coordinator) {
+    /// Attaches the marker groups to the mesh container, applies the mesh-centering offset
+    /// (known only once the mesh node exists), sets initial visibility from the current mode,
+    /// publishes `hasKeyframeMarkers`, and stores the container refs on the coordinator for
+    /// later toggling. Main-thread (preview load); the groups themselves are built off-main.
+    func attachKeyframeMarkers(
+        _ nodes: KeyframeMarkerNodes, to container: SCNNode, coordinator: Coordinator, center: SCNVector3
+    ) {
         hasKeyframeMarkers = nodes.hasAny
+        let offset = SCNVector3(-center.x, -center.y, -center.z)
         if let stills = nodes.stills {
+            stills.position = offset
             stills.isHidden = !keyframeMarkerMode.showStills
             container.addChildNode(stills)
             coordinator.keyframeStillsNode = stills
         }
         if let motion = nodes.motion {
+            motion.position = offset
             motion.isHidden = !keyframeMarkerMode.showMotion
             container.addChildNode(motion)
             coordinator.keyframeMotionNode = motion
@@ -35,12 +52,12 @@ extension MeshPreviewView {
 
     /// Builds the still + motion frustum marker groups from the saved `transforms.json` poses.
     /// Stills are `is_keyframe` frames (cyan, full size); motion frames are the rest (amber,
-    /// smaller). Each wedge carries its capture pose in `simdTransform`; the returned container
-    /// nodes carry the shared mesh-centering offset so they align with the centered mesh.
-    /// No capture-time cost — read from raw data already on disk, in the mesh's world frame.
-    nonisolated static func buildKeyframeMarkerNodes(
-        scanDirectoryURL: URL?, center: SCNVector3
-    ) -> KeyframeMarkerNodes {
+    /// smaller). Each wedge carries its capture pose; the mesh-centering offset is applied at
+    /// attach time. No capture-time cost — read from raw data already on disk, in the mesh's
+    /// world frame. Runs OFF-main on the preview-load queue (detached SCNNode trees are legal
+    /// to build on any thread): a long scan parses a multi-MB transforms.json and assembles
+    /// hundreds of wedge nodes, which would be a visible hitch stacked onto the main-thread attach.
+    nonisolated static func buildKeyframeMarkerNodes(scanDirectoryURL: URL?) -> KeyframeMarkerNodes {
         guard let scanDir = scanDirectoryURL else { return KeyframeMarkerNodes(stills: nil, motion: nil) }
         let candidates = [
             scanDir.appendingPathComponent("raw_data").appendingPathComponent("transforms.json"),
@@ -64,6 +81,10 @@ extension MeshPreviewView {
 
         var stillNodes: [SCNNode] = []
         var motionNodes: [SCNNode] = []
+        // Frames overwhelmingly share intrinsics (per-session video format; stills one hi-res
+        // format), so hundreds of wedges reuse 1-2 geometry sets instead of allocating three
+        // SCNGeometries each.
+        var geometryCache: [Int32: FrustumGeometry] = [:]
         for frame in frames {
             guard let cols = frame["transform_matrix"] as? [[NSNumber]], cols.count == 4 else { continue }
             let pose = simd_float4x4(
@@ -75,25 +96,38 @@ extension MeshPreviewView {
             let focal = (frame["fl_x"] as? NSNumber)?.floatValue ?? globalFL
             let width = (frame["w"] as? NSNumber)?.floatValue ?? globalW
             let tanHalf = (focal > 0 && width > 0) ? (width * 0.5) / focal : 0.45
-            let color = isStill ? AppConstants.keyframeStillColor : AppConstants.keyframeMotionColor
-            let scale: Float = isStill ? 1.0 : AppConstants.keyframeMotionScale
-            let node = makeFrustumNode(tanHalfAngle: tanHalf, color: color, scale: scale)
+            let cacheKey = (Int32(tanHalf * 1000) << 1) | (isStill ? 1 : 0)
+            let geometry: FrustumGeometry
+            if let cached = geometryCache[cacheKey] {
+                geometry = cached
+            } else {
+                geometry = makeFrustumGeometry(
+                    tanHalfAngle: tanHalf,
+                    color: isStill ? AppConstants.keyframeStillColor : AppConstants.keyframeMotionColor,
+                    scale: isStill ? 1.0 : AppConstants.keyframeMotionScale
+                )
+                geometryCache[cacheKey] = geometry
+            }
+            let node = makeFrustumNode(geometry: geometry)
             node.simdTransform = pose
             if isStill { stillNodes.append(node) } else { motionNodes.append(node) }
         }
 
         return KeyframeMarkerNodes(
-            stills: container(named: "keyframeStills", nodes: stillNodes, center: center),
-            motion: container(named: "keyframeMotion", nodes: motionNodes, center: center)
+            stills: container(named: "keyframeStills", nodes: stillNodes),
+            motion: container(named: "keyframeMotion", nodes: motionNodes)
         )
     }
 
-    /// Wraps marker nodes in a named container carrying the mesh-centering offset (nil if empty).
-    private nonisolated static func container(named name: String, nodes: [SCNNode], center: SCNVector3) -> SCNNode? {
+    /// Wraps marker nodes in a named container (nil if empty; positioned at attach time).
+    /// Do NOT flattenedClone() the group: SceneKit merges by geometry object, and the wedges
+    /// share cached geometry instances — flattening collapsed every wedge onto one transform
+    /// (device-observed: exactly one still + one motion marker rendered per scan). Plain nodes
+    /// sharing a geometry render correctly at each node's own transform.
+    private nonisolated static func container(named name: String, nodes: [SCNNode]) -> SCNNode? {
         guard !nodes.isEmpty else { return nil }
         let node = SCNNode()
         node.name = name
-        node.position = SCNVector3(-center.x, -center.y, -center.z)
         for child in nodes { node.addChildNode(child) }
         return node
     }
@@ -104,16 +138,14 @@ extension MeshPreviewView {
         return SIMD4<Float>(arr[0].floatValue, arr[1].floatValue, arr[2].floatValue, arr[3].floatValue)
     }
 
-    /// Builds a single frustum marker in local space: apex at the origin opening along -Z
-    /// (camera forward) to a rectangle at `keyframeFrustumDepth × scale`, plus a solid apex cube.
-    /// The base is `~4:3` using the horizontal half-angle tangent; `faceRotation` (identity for a
-    /// pinhole still) orients the wedge for the future 360° cube-face case.
-    private nonisolated static func makeFrustumNode(
+    /// Builds the geometry set for a frustum marker in local space: apex at the origin opening
+    /// along -Z (camera forward) to a rectangle at `keyframeFrustumDepth × scale`, plus a solid
+    /// apex cube. The base is `~4:3` using the horizontal half-angle tangent.
+    private nonisolated static func makeFrustumGeometry(
         tanHalfAngle: Float,
         color: SIMD4<Float>,
-        scale: Float,
-        faceRotation: simd_quatf = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
-    ) -> SCNNode {
+        scale: Float
+    ) -> FrustumGeometry {
         let depth = AppConstants.keyframeFrustumDepth * scale
         let halfW = depth * tanHalfAngle
         let halfH = halfW * 0.75 // ~4:3 aspect
@@ -162,13 +194,22 @@ extension MeshPreviewView {
         apexMat.diffuse.contents = uiColor
         apexBox.materials = [apexMat]
 
-        // Geometry lives on an inner node carrying the face rotation, so the caller can set the
-        // outer node's simdTransform = capture pose without clobbering the rotation. World placement
-        // is then pose × faceRotation × geometry (identity faceRotation for a pinhole still).
+        return FrustumGeometry(wire: wireGeo, fill: fillGeo, apex: apexBox)
+    }
+
+    /// Assembles one marker node around a (shared) geometry set. Geometry lives on an inner node
+    /// carrying the face rotation, so the caller can set the outer node's simdTransform = capture
+    /// pose without clobbering the rotation. World placement is then pose × faceRotation ×
+    /// geometry (identity faceRotation for a pinhole still; the future 360° cube-face case
+    /// passes one rotation per face).
+    private nonisolated static func makeFrustumNode(
+        geometry: FrustumGeometry,
+        faceRotation: simd_quatf = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+    ) -> SCNNode {
         let inner = SCNNode()
-        inner.addChildNode(SCNNode(geometry: wireGeo))
-        inner.addChildNode(SCNNode(geometry: fillGeo))
-        inner.addChildNode(SCNNode(geometry: apexBox))
+        inner.addChildNode(SCNNode(geometry: geometry.wire))
+        inner.addChildNode(SCNNode(geometry: geometry.fill))
+        inner.addChildNode(SCNNode(geometry: geometry.apex))
         inner.simdOrientation = faceRotation
         let node = SCNNode()
         node.addChildNode(inner)

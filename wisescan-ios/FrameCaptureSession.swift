@@ -184,6 +184,10 @@ class FrameCaptureSession {
     /// starve ARKit's frame pool. Only one hi-res request is in flight at a time, so serial.
     private let keyframeEncodeQueue = DispatchQueue(label: "com.scan4d.capture.keyframe", qos: .utility)
     private let ciContext = CIContext()  // Reuse across frames to avoid GPU pipeline re-init
+    // Separate context for ~12MP keyframe encodes: sharing `ciContext` would serialize the
+    // 0.5-1s hi-res render against concurrent stream encodes on ioQueue, and priorityRequestLow
+    // keeps its GPU work from contending with the live AR render.
+    private let hiResCIContext = CIContext(options: [.priorityRequestLow: true])
     /// Reusable 16-bit depth conversion buffer (depth resolution is fixed per session).
     /// Only touched inside depthMapToPNG16 on ioQueue, so no synchronization needed.
     private var depthScratch: [UInt16] = []
@@ -657,9 +661,13 @@ class FrameCaptureSession {
             let transform = frame.camera.transform
             let intrinsics = frame.camera.intrinsics
             let exposureDuration = frame.camera.exposureDuration
-            let depthMap = frame.sceneDepth?.depthMap
-            let confidenceMap = frame.sceneDepth?.confidenceMap
-            let segBuffer = self.privacyFilter ? frame.segmentationBuffer : nil
+            // Unlike the 12MP still (allocated per-capture, not pooled), depth/confidence/seg
+            // come from the live LiDAR/segmentation pipeline — detach copies (~250KB total)
+            // so the pooled originals release with the ARFrame here rather than riding the
+            // ~1s encode+save pipeline.
+            let depthMap = Self.detachedCopy(frame.sceneDepth?.depthMap)
+            let confidenceMap = Self.detachedCopy(frame.sceneDepth?.confidenceMap)
+            let segBuffer = self.privacyFilter ? Self.detachedCopy(frame.segmentationBuffer) : nil
 
             // Measure + encode on a DEDICATED background queue — off both the main thread
             // AND the shared ioQueue. A native-resolution encode can exceed a second; running
@@ -700,7 +708,7 @@ class FrameCaptureSession {
                     // Accepted (sharp enough, or retry budget exhausted — keep the best we
                     // got, with its measured quality recorded for downstream weighting).
                     self.keyframeEncodeQueue.async {
-                        guard let keyframeJPEG = PerfDiag.timed("jpeg_encode_hires", warnOverMs: 250, { self.pixelBufferToJPEG(pixelBuffer) }) else {
+                        guard let keyframeJPEG = PerfDiag.timed("jpeg_encode_hires", warnOverMs: 250, { self.hiResKeyframeJPEG(from: pixelBuffer) }) else {
                             print("[FrameCapture] Hi-res keyframe JPEG encode failed — dropping")
                             DispatchQueue.main.async {
                                 self.hiResCaptureInFlight = false
@@ -822,12 +830,15 @@ class FrameCaptureSession {
         // loss is corrupt. Capture is movement-gated, so the next motion re-triggers a save.
         // Admit-and-increment atomically; the ioQueue closure decrements in its defer.
         //
-        // Keyframes are EXEMPT from the cap: they arrive pre-encoded (the expensive ~12MP JPEG
-        // encode already ran off-queue in the hi-res completion), carry no live-pool pixel buffer
-        // into the ioQueue closure, and are rare + high-value — so they can't contribute to pool
-        // starvation and must not be dropped by transient stream backlog.
+        // PRE-ENCODED keyframes are EXEMPT from the cap: the expensive ~12MP JPEG encode already
+        // ran off-queue in the hi-res completion, they carry no live-pool pixel buffer into the
+        // ioQueue closure, and they are rare + high-value — so they can't contribute to pool
+        // starvation and must not be dropped by transient stream backlog. Stream-fallback
+        // keyframes (hiResUnavailable latched) DO carry the live-pool buffer, so they queue
+        // like any stream frame.
+        let exemptKeyframe = isKeyframe && preEncodedJPEG != nil
         let admittedDepth: Int? = inFlightSaves.withLock { count -> Int? in
-            guard isKeyframe || count < AppConstants.maxFramesInFlight else { return nil }
+            guard exemptKeyframe || count < AppConstants.maxFramesInFlight else { return nil }
             count += 1
             return count
         }
@@ -1237,6 +1248,72 @@ class FrameCaptureSession {
         guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return nil }
         let uiImage = UIImage(cgImage: cgImage)
         return uiImage.jpegData(compressionQuality: AppConstants.jpegCompressionQuality)
+    }
+
+    /// JPEG-encodes a hi-res keyframe still directly from the CIImage, skipping the
+    /// CGImage/UIImage hop of `pixelBufferToJPEG` — that intermediate is a ~47MB BGRA
+    /// bitmap at 12MP, a needless memory spike on 4GB devices.
+    private func hiResKeyframeJPEG(from pixelBuffer: CVPixelBuffer) -> Data? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let colorSpace = ciImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let quality = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
+        return hiResCIContext.jpegRepresentation(
+            of: ciImage,
+            colorSpace: colorSpace,
+            options: [quality: AppConstants.jpegCompressionQuality]
+        )
+    }
+
+    /// Copies a small CVPixelBuffer (depth/confidence/segmentation) into freshly allocated
+    /// memory so the original — which may belong to ARKit's live capture pool — can be
+    /// released immediately instead of riding the ~1s keyframe encode+save pipeline.
+    /// Returns the original on allocation failure (behavior degrades to the old retention).
+    private static func detachedCopy(_ source: CVPixelBuffer?) -> CVPixelBuffer? {
+        guard let source = source else { return nil }
+        var copyOut: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            CVPixelBufferGetWidth(source),
+            CVPixelBufferGetHeight(source),
+            CVPixelBufferGetPixelFormatType(source),
+            nil,
+            &copyOut
+        )
+        guard status == kCVReturnSuccess, let copy = copyOut else { return source }
+
+        CVPixelBufferLockBaseAddress(source, .readOnly)
+        CVPixelBufferLockBaseAddress(copy, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(copy, [])
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+        }
+
+        let planes = max(CVPixelBufferGetPlaneCount(source), 1)
+        for plane in 0..<planes {
+            let planar = CVPixelBufferIsPlanar(source)
+            guard let src = planar
+                    ? CVPixelBufferGetBaseAddressOfPlane(source, plane)
+                    : CVPixelBufferGetBaseAddress(source),
+                  let dst = planar
+                    ? CVPixelBufferGetBaseAddressOfPlane(copy, plane)
+                    : CVPixelBufferGetBaseAddress(copy) else { return source }
+            let srcRowBytes = planar
+                ? CVPixelBufferGetBytesPerRowOfPlane(source, plane)
+                : CVPixelBufferGetBytesPerRow(source)
+            let dstRowBytes = planar
+                ? CVPixelBufferGetBytesPerRowOfPlane(copy, plane)
+                : CVPixelBufferGetBytesPerRow(copy)
+            let rows = planar ? CVPixelBufferGetHeightOfPlane(source, plane) : CVPixelBufferGetHeight(source)
+            if srcRowBytes == dstRowBytes {
+                memcpy(dst, src, rows * srcRowBytes)
+            } else {
+                let rowBytes = min(srcRowBytes, dstRowBytes)
+                for row in 0..<rows {
+                    memcpy(dst + row * dstRowBytes, src + row * srcRowBytes, rowBytes)
+                }
+            }
+        }
+        return copy
     }
 
     private func confidenceMapToPNG(_ confidenceBuffer: CVPixelBuffer) -> Data? {

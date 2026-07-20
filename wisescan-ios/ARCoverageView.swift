@@ -618,6 +618,9 @@ struct ARCoverageView: UIViewRepresentable {
         /// Coverage-grid voxels occupied by each anchor's mesh (the denominator of the
         /// anchor's photo-covered fraction). Rebuilt whenever the anchor's mesh rebuilds.
         private var anchorVoxels: [UUID: Set<SIMD3<Int32>>] = [:]
+        /// Last time each anchor's amber tint MeshResource was regenerated — rebuilds
+        /// inside `photoTintRebuildInterval` reuse the previous tint entity instead.
+        private var lastTintBuildTime: [UUID: Date] = [:]
         /// Anchors whose photo-covered voxel fraction crossed the threshold. Their amber
         /// "depth only" tint is disabled, leaving clean camera passthrough (photo-grade).
         private var photoCoveredAnchors: Set<UUID> = []
@@ -852,6 +855,7 @@ struct ARCoverageView: UIViewRepresentable {
             activeMeshEntities.removeAll()
             anchorVoxels.removeAll()
             photoCoveredAnchors.removeAll()
+            lastTintBuildTime.removeAll()
             photoCoverageGrid.reset()
             scanStats?.photoCoverageCovered = 0
             scanStats?.photoCoverageOccupied = 0
@@ -1000,13 +1004,25 @@ struct ARCoverageView: UIViewRepresentable {
                         // Amber "depth only" tint over the camera feed — skipped entirely
                         // when the anchor is already photo-covered: generating a disabled
                         // tint mesh on the main thread would be pure wasted capture-time work.
-                        if !covered,
-                           let tintRes = try? MeshResource.generate(from: [coverageData.tintDescriptor]) {
-                            var tintMaterial = UnlitMaterial(rgb: AppConstants.photoTintColor, alpha: AppConstants.photoTintAlpha)
-                            tintMaterial.blending = .transparent(opacity: 1.0)
-                            let tintEntity = ModelEntity(mesh: tintRes, materials: [tintMaterial])
-                            tintEntity.name = "photoTint"
-                            containerEntity.addChild(tintEntity)
+                        if !covered {
+                            // The tint's MeshResource.generate is the costliest main-thread
+                            // part of the rebuild hop, and the hint tolerates brief staleness —
+                            // so within the throttle window, carry the previous tint entity
+                            // over instead of regenerating a third full mesh copy.
+                            if let previousTint = self.activeMeshEntities[anchorId]?.model.findEntity(named: "photoTint"),
+                               let builtAt = self.lastTintBuildTime[anchorId],
+                               Date().timeIntervalSince(builtAt) < AppConstants.photoTintRebuildInterval {
+                                previousTint.removeFromParent()
+                                previousTint.isEnabled = true
+                                containerEntity.addChild(previousTint)
+                            } else if let tintRes = try? MeshResource.generate(from: [coverageData.tintDescriptor]) {
+                                var tintMaterial = UnlitMaterial(rgb: AppConstants.photoTintColor, alpha: AppConstants.photoTintAlpha)
+                                tintMaterial.blending = .transparent(opacity: 1.0)
+                                let tintEntity = ModelEntity(mesh: tintRes, materials: [tintMaterial])
+                                tintEntity.name = "photoTint"
+                                containerEntity.addChild(tintEntity)
+                                self.lastTintBuildTime[anchorId] = Date()
+                            }
                         }
                     }
 
@@ -1334,10 +1350,15 @@ struct ARCoverageView: UIViewRepresentable {
                 imageWidth: keyframe.width,
                 imageHeight: keyframe.height
             )
-            // Per-still overlap with prior stills — the field-tuning signal for the
-            // multi-view coaching thresholds (photogrammetry target ≈ 0.6).
-            print("[Coverage] Still overlap: \(Int(stamp.overlap * 100))% (\(stamp.newlyCovered) new of \(stamp.stamped) voxels, mean \(Int(photoCoverageGrid.meanStillOverlap * 100))%, multi-standpoint \(Int(photoCoverageGrid.multiStandpointFraction * 100))%)")
-            publishCoverageStats()
+            // Multi-standpoint fraction walks the whole grid — compute once per keyframe
+            // and share it between the log line and the published stats.
+            let standpointDiversity = photoCoverageGrid.multiStandpointFraction
+            if PerfDiag.enabled {
+                // Per-still overlap with prior stills — the field-tuning signal for the
+                // multi-view coaching thresholds (photogrammetry target ≈ 0.6).
+                print("[Coverage] Still overlap: \(Int(stamp.overlap * 100))% (\(stamp.newlyCovered) new of \(stamp.stamped) voxels, mean \(Int(photoCoverageGrid.meanStillOverlap * 100))%, multi-standpoint \(Int(standpointDiversity * 100))%)")
+            }
+            publishCoverageStats(standpointDiversity: standpointDiversity)
             guard stamp.newlyCovered > 0 else { return } // no grid change → no anchor can flip
 
             for (anchorId, voxels) in anchorVoxels where !photoCoveredAnchors.contains(anchorId) {
@@ -1352,14 +1373,16 @@ struct ARCoverageView: UIViewRepresentable {
         /// plus the multi-view stats (mean still overlap, standpoint diversity) to ScanStats
         /// for the coach tips and the final scan metadata.
         /// Called on the main thread (keyframe-capture path), where ScanStats is written.
-        private func publishCoverageStats() {
+        /// Pass `standpointDiversity` when the caller already computed it (it walks the
+        /// whole coverage grid).
+        private func publishCoverageStats(standpointDiversity: Double? = nil) {
             var occupied = Set<SIMD3<Int32>>()
             for voxels in anchorVoxels.values { occupied.formUnion(voxels) }
             let coveredCount = occupied.reduce(0) { $0 + (photoCoverageGrid.isCovered($1) ? 1 : 0) }
             scanStats?.photoCoverageCovered = coveredCount
             scanStats?.photoCoverageOccupied = occupied.count
             scanStats?.meanStillOverlap = photoCoverageGrid.meanStillOverlap
-            scanStats?.standpointDiversity = photoCoverageGrid.multiStandpointFraction
+            scanStats?.standpointDiversity = standpointDiversity ?? photoCoverageGrid.multiStandpointFraction
         }
 
         // Watch for relocalization success and track drift
@@ -1813,6 +1836,7 @@ struct ARCoverageView: UIViewRepresentable {
                         }
                         self?.anchorVoxels.removeValue(forKey: id)
                         self?.photoCoveredAnchors.remove(id)
+                        self?.lastTintBuildTime.removeValue(forKey: id)
                     }
                 }
             }
@@ -1825,6 +1849,7 @@ struct ARCoverageView: UIViewRepresentable {
                 entry.anchor.removeFromParent()
             }
             activeMeshEntities.removeAll()
+            lastTintBuildTime.removeAll()
             // Delegate-owned dicts → clear on the delegate queue (the ARSession callbacks mutate
             // them; concurrent mutation from main would crash). Clear ALL per-anchor dicts together,
             // including the vertex/face counts — otherwise updateStats keeps summing stale geometry

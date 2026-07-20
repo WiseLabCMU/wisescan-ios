@@ -371,7 +371,9 @@ struct MeshPreviewView: UIViewRepresentable {
 
                 // Build still + motion capture-pose frustum markers from the saved poses
                 // (transforms.json). Derived entirely from existing raw data — no capture-time
-                // cost. Both groups are built once; the three-tier mode toggles their visibility.
+                // cost, and built here off-main (JSON parse + node flattening) so the one-time
+                // preview attach on main stays cheap. The three-tier mode toggles visibility.
+                let markerNodes = Self.buildKeyframeMarkerNodes(scanDirectoryURL: self.scanDirectoryURL)
 
                 DispatchQueue.main.async {
                     let node = SCNNode(geometry: geometry)
@@ -419,14 +421,11 @@ struct MeshPreviewView: UIViewRepresentable {
                         self.detectedClasses = outlines.detectedClasses
                     }
 
-                    // Add still + motion capture-pose markers (built from raw_data/transforms.json,
-                    // same world frame + center offset as the mesh). Both groups are added; the
-                    // three-tier mode toggles their visibility. Built here on the (one-time) preview
-                    // load rather than during capture.
-                    let markerNodes = Self.buildKeyframeMarkerNodes(
-                        scanDirectoryURL: self.scanDirectoryURL, center: center
+                    // Attach the pre-built still + motion capture-pose markers (same world
+                    // frame as the mesh; the centering offset is applied here).
+                    self.attachKeyframeMarkers(
+                        markerNodes, to: containerNode, coordinator: context.coordinator, center: center
                     )
-                    self.attachKeyframeMarkers(markerNodes, to: containerNode, coordinator: context.coordinator)
 
                     scene.rootNode.addChildNode(containerNode)
                     context.coordinator.meshNode = node

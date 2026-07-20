@@ -134,14 +134,15 @@ enum VertexColorAccumulator {
     /// for stills. A pure sweep with no keyframes falls back to plain even-stride, and
     /// when keyframes alone exceed the budget they're even-strided among themselves.
     /// `cameraFiles` must be sorted chronologically; the returned subset preserves that order.
-    static func selectColorizationFrames(from cameraFiles: [URL], max maxFrames: Int) -> [URL] {
+    /// `keyframeStems` are the flagged frames from `keyframeStems(rawDir:)` — resolved from
+    /// transforms.json in one read rather than opening every per-frame camera JSON here.
+    static func selectColorizationFrames(
+        from cameraFiles: [URL], max maxFrames: Int, keyframeStems: Set<String>
+    ) -> [URL] {
         guard cameraFiles.count > maxFrames, maxFrames > 0 else { return cameraFiles }
 
-        // `is_keyframe` is only written to the JSON when true, so its presence is the flag.
-        let isKeyframe: [Bool] = cameraFiles.map { url in
-            guard let data = try? Data(contentsOf: url),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
-            return (json["is_keyframe"] as? Bool) == true
+        let isKeyframe: [Bool] = cameraFiles.map {
+            keyframeStems.contains($0.deletingPathExtension().lastPathComponent)
         }
         let keyframeIdx = cameraFiles.indices.filter { isKeyframe[$0] }
 
@@ -167,8 +168,27 @@ enum VertexColorAccumulator {
         return selected.map { cameraFiles[$0] }
     }
 
+    /// Frame stems (e.g. "frame_00042") flagged `is_keyframe` in the scan's transforms.json.
+    /// One file read replaces opening every camera JSON — `is_keyframe` is recorded per frame
+    /// there by the capture writers. Missing/old transforms.json degrades to an empty set
+    /// (pure even-stride selection, the pre-keyframe behavior).
+    static func keyframeStems(rawDir: URL) -> Set<String> {
+        let url = rawDir.appendingPathComponent("transforms.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let frames = json["frames"] as? [[String: Any]] else { return [] }
+        var stems = Set<String>()
+        for frame in frames where (frame["is_keyframe"] as? Bool) == true {
+            if let path = frame["file_path"] as? String {
+                stems.insert(URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent)
+            }
+        }
+        return stems
+    }
+
     static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?, progress: ((Double) -> Void)? = nil) -> Data? {
         guard let rawDir = rawDataDir else { return nil }
+        let startTime = CACurrentMediaTime()
         let fm = FileManager.default
 
         // Parse OBJ vertices using shared parser
@@ -198,7 +218,8 @@ enum VertexColorAccumulator {
 
         // Sample up to maxColorizationFrames, preferring sharp keyframes (see helper).
         let sampledFiles = Self.selectColorizationFrames(
-            from: cameraFiles, max: AppConstants.maxColorizationFrames
+            from: cameraFiles, max: AppConstants.maxColorizationFrames,
+            keyframeStems: Self.keyframeStems(rawDir: rawDir)
         )
 
         // Per-vertex top-N observation buffers (flat, row = K entries per vertex).
@@ -431,7 +452,8 @@ enum VertexColorAccumulator {
                 coloredCount += 1
             }
         }
-        print("[VertexColor] Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (weighted median, K=\(K))")
+        let elapsed = CACurrentMediaTime() - startTime
+        print("[VertexColor] Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (weighted median, K=\(K)) in \(String(format: "%.1f", elapsed))s")
         return data
     }
 
