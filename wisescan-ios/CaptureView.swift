@@ -82,6 +82,8 @@ struct CaptureView: View {
     @State var saveNavigationTask: Task<Void, Never>? // Delayed post-save tab switch; cancelled if the view leaves first
     @State var isConfirmingAlignment = false // Re-entry guard for confirmAlignment double-tap
     @State var showStopMenu = false
+    @State var showDiscardConfirm = false // destructive Discard from the stop menu → confirm first
+    @State var showPendingDiscardConfirm = false // destructive Discard from the naming dialog → confirm first
     @State var showExtendErrorAlert = false
 
     @State private var showSettings = false
@@ -866,19 +868,37 @@ struct CaptureView: View {
                                 .cornerRadius(14)
                         })
 
+                        // Offered for new scans and extend legs (chaining rooms). Hidden for a
+                        // rescan of an existing space (activeScanToExtend set): its purpose is
+                        // refreshing that space's map, not growing the link graph from it.
+                        if !(scanStore.activeScanCase == .rescanSpace && scanStore.activeScanToExtend != nil) {
+                            Button(action: {
+                                showStopMenu = false
+                                if scanStats.hasEnoughFeaturesForRelocalization {
+                                    pinAndExtend()
+                                } else {
+                                    showExtendErrorAlert = true
+                                }
+                            }, label: {
+                                Text("Save & Scan Adjacent")
+                                    .font(.body.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 14)
+                                    .background(Color.indigo.opacity(0.85))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(14)
+                            })
+                        }
+
                         Button(action: {
                             showStopMenu = false
-                            if scanStats.hasEnoughFeaturesForRelocalization {
-                                pinAndExtend()
-                            } else {
-                                showExtendErrorAlert = true
-                            }
+                            showDiscardConfirm = true
                         }, label: {
-                            Text("Save & Scan Adjacent")
+                            Text("Discard Scan")
                                 .font(.body.bold())
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 14)
-                                .background(Color.indigo.opacity(0.85))
+                                .background(Color.red.opacity(0.8))
                                 .foregroundColor(.white)
                                 .cornerRadius(14)
                         })
@@ -1242,26 +1262,24 @@ struct CaptureView: View {
                 }
             })
             .disabled(newLocationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            Button("Cancel", role: .cancel) {
-                // Nothing consumes the pending scan after cancel, so remove its temp artifacts —
-                // both live in FileManager.temporaryDirectory and saveScan would normally move them.
-                // Dropping pendingScan alone would leak the (potentially large) raw-frames dir.
-                if let pending = pendingScan {
-                    if let rawDir = pending.rawDataPath {
-                        try? FileManager.default.removeItem(at: rawDir)
-                    }
-                    if let mapURL = pending.worldMapURL {
-                        try? FileManager.default.removeItem(at: mapURL)
-                    }
-                }
-                pendingScan = nil
-                saveMessage = nil
-                isProcessingMesh = false
-                isWaitingToSave = false
+            // Labeled as the discard it is (was "Cancel"): recording has already ended and
+            // the only alternatives are save-with-name or delete. Routes through the
+            // destructive-warning confirmation — every Discard Scan does.
+            Button("Discard Scan", role: .destructive) {
+                showPendingDiscardConfirm = true
             }
         } message: {
             Text("Enter a unique name for this space so you can add scans later.")
         }
+        // Both destructive-discard confirmations live in a ViewModifier — inlining two more
+        // .alert blocks here pushed SwiftUI's type-checker over its time budget.
+        .modifier(DiscardConfirmAlerts(
+            showDiscardConfirm: $showDiscardConfirm,
+            showPendingDiscardConfirm: $showPendingDiscardConfirm,
+            onKeepPending: { showNamePrompt = true },
+            onDiscardLive: { discardInProgressScan(isExtendFlow: false, completion: nil) },
+            onDiscardPending: { discardPendingScan() }
+        ))
         .alert("Insufficient Tracking", isPresented: $showInsufficientTrackingAlert) {
             // A scan without a usable world map can't be relocalized or extended, so we don't offer
             // "Save Anyway". Recording is still live here (stopRecording returned early without
@@ -1273,7 +1291,7 @@ struct CaptureView: View {
         } message: {
             Text("This scan's mapping status is '\(scanStats.mappingStatus)'. Relocalizing or extending it "
                 + "later requires a 'mapped' world map. Keep scanning the area to improve it, or discard "
-                + "and start over.")
+                + "and start over. Discarding deletes this recording's frames and photos and cannot be undone.")
         }
         .alert("Not Enough Features", isPresented: $showExtendErrorAlert) {
             Button("OK", role: .cancel) { }
@@ -1530,5 +1548,43 @@ struct OctahedronIcon: View {
         }
         .stroke(color, lineWidth: 1.5)
         .frame(width: 16, height: 16)
+    }
+}
+
+/// The two destructive-discard confirmation alerts (stop menu + naming dialog), sharing
+/// one warning message so every "Discard Scan" carries the same destructive notice.
+/// Extracted from CaptureView.body — inlining them pushed SwiftUI's type-checker over
+/// its time budget ("unable to type-check this expression in reasonable time").
+private struct DiscardConfirmAlerts: ViewModifier {
+    @Binding var showDiscardConfirm: Bool
+    @Binding var showPendingDiscardConfirm: Bool
+    /// Reopens the naming prompt — a pending scan must never be stranded with no UI
+    /// to save or discard it.
+    let onKeepPending: () -> Void
+    let onDiscardLive: () -> Void
+    let onDiscardPending: () -> Void
+
+    static let warningText = "All frames and photos captured in this recording will be deleted. "
+        + "This cannot be undone."
+
+    func body(content: Content) -> some View {
+        content
+            // Stop-menu discard: recording is still live (the menu only dismissed) —
+            // Keep Scanning resumes untouched; Discard tears down the capture session
+            // and deletes the raw capture directory.
+            .alert("Discard this scan?", isPresented: $showDiscardConfirm) {
+                Button("Keep Scanning", role: .cancel) { }
+                Button("Discard Scan", role: .destructive) { onDiscardLive() }
+            } message: {
+                Text(Self.warningText)
+            }
+            // Naming-dialog discard: recording already ended and the mesh is baked;
+            // Back returns to the naming prompt, Discard deletes the pending artifacts.
+            .alert("Discard this scan?", isPresented: $showPendingDiscardConfirm) {
+                Button("Back", role: .cancel) { onKeepPending() }
+                Button("Discard Scan", role: .destructive) { onDiscardPending() }
+            } message: {
+                Text(Self.warningText)
+            }
     }
 }

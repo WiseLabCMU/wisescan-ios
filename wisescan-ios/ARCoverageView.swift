@@ -212,13 +212,13 @@ struct ARCoverageView: UIViewRepresentable {
             uiView.scene.addAnchor(vrAnchor)
             context.coordinator.vrAnchorEntity = vrAnchor
 
-            // Re-configure session for sceneDepth if needed
-            if let config = uiView.session.configuration as? ARWorldTrackingConfiguration {
-                if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-                    config.frameSemantics.insert(.sceneDepth)
-                }
-                uiView.session.run(config)
-            }
+            // NO session.run here. shouldShowVR requires isRecording, so the record-start
+            // branch below ALWAYS runs the full reconstruction config (which inserts
+            // .sceneDepth) within this same updateUIView pass. An extra re-run of the
+            // stale nominal config here made record-start a back-to-back double
+            // reconfiguration — exactly the churn that wedges Recon3D's SLAM on some
+            // devices (see makeConfiguration note re: M2 iPad Pro), device-observed as
+            // "everything runs but no mesh integrates" on VR restarts.
             context.coordinator.removeAllMeshEntities()
             PerfDiag.log("[MemDiag] EVENT VR-READY \(context.coordinator.memMarker())")
         } else if !shouldShowVR && wasShowingVR {

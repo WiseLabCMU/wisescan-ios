@@ -569,7 +569,8 @@ extension CaptureView {
                     title: "World Map Not Captured",
                     message: "Not enough features were tracked to build a world map, so this scan can't be "
                         + "relocalized or extended later. Move to a more detailed area and try again, or "
-                        + "discard this scan.",
+                        + "discard this scan. Discarding deletes this recording's frames and photos "
+                        + "and cannot be undone.",
                     preferredStyle: .alert
                 )
                 alert.addAction(UIAlertAction(title: "Try Again", style: .default) { _ in
@@ -626,6 +627,26 @@ extension CaptureView {
             scanStore.resetCaptureState()
             clearMessage()
         }
+    }
+
+    /// Deletes a stopped-and-baked pending scan that was never saved (naming-dialog discard,
+    /// after its destructive confirmation): removes the temp artifacts — raw frames dir and
+    /// world map, which both live in FileManager.temporaryDirectory and saveScan would
+    /// normally move — and clears the save-flow state. Dropping pendingScan alone would
+    /// leak the (potentially large) raw-frames dir.
+    func discardPendingScan() {
+        if let pending = pendingScan {
+            if let rawDir = pending.rawDataPath {
+                try? FileManager.default.removeItem(at: rawDir)
+            }
+            if let mapURL = pending.worldMapURL {
+                try? FileManager.default.removeItem(at: mapURL)
+            }
+        }
+        pendingScan = nil
+        saveMessage = nil
+        isProcessingMesh = false
+        isWaitingToSave = false
     }
 
     /// Consumes a pending stitch link and persists it as a `StitchLink` SwiftData row now that the
