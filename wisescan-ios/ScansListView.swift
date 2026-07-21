@@ -1007,8 +1007,10 @@ struct ScanCard: View {
         }
         .fullScreenCover(isPresented: $showMeshPreview) {
             NavigationView {
-                MeshPreviewContainer(location: scan.location, meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory)
-                    .ignoresSafeArea()
+                // No .ignoresSafeArea() here — the container bleeds its 3D view/markers under
+                // the safe area internally, while keeping the title/legend inside it (so the
+                // title sits below the nav bar, not under the Dynamic Island).
+                MeshPreviewContainer(location: scan.location, meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory, scanName: scan.name, isColored: scan.isColored)
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .navigationBarLeading) {

@@ -10,6 +10,11 @@ struct MeshPreviewContainer: View {
     var meshFileURL: URL?
     var colorsFileURL: URL?
     var scanDirectoryURL: URL?
+    /// Scan name for the preview title (nil hides the title row).
+    var scanName: String?
+    /// Whether the high-quality photo colorize has run. Drives the color-state note:
+    /// false = fast normals-shaded placeholder (colors not final).
+    var isColored: Bool = false
 
     @StateObject private var markerState = MarkerProjectionState()
     @State private var isUpdating = false
@@ -27,32 +32,39 @@ struct MeshPreviewContainer: View {
     var body: some View {
         ZStack {
             if isViewerReady {
-                MeshPreviewView(
-                    meshFileURL: meshFileURL,
-                    colorsFileURL: colorsFileURL,
-                    scanDirectoryURL: scanDirectoryURL,
-                    markerState: markerState,
-                    isMeshLoaded: $isMeshLoaded,
-                    semanticViewMode: $semanticViewMode,
-                    detectedClasses: $detectedClasses,
-                    hasPrivacyMarkers: $hasPrivacyMarkers,
-                    keyframeMarkerMode: $keyframeMarkerMode,
-                    hasKeyframeMarkers: $hasKeyframeMarkers
-                )
+                // The SceneKit view and the projected privacy markers share ONE coordinate
+                // space and both bleed under the safe area, so the markers stay aligned with
+                // SceneKit's projectPoint output. The title/legend live outside this and
+                // respect the safe area (see below).
+                ZStack {
+                    MeshPreviewView(
+                        meshFileURL: meshFileURL,
+                        colorsFileURL: colorsFileURL,
+                        scanDirectoryURL: scanDirectoryURL,
+                        markerState: markerState,
+                        isMeshLoaded: $isMeshLoaded,
+                        semanticViewMode: $semanticViewMode,
+                        detectedClasses: $detectedClasses,
+                        hasPrivacyMarkers: $hasPrivacyMarkers,
+                        keyframeMarkerMode: $keyframeMarkerMode,
+                        hasKeyframeMarkers: $hasKeyframeMarkers
+                    )
 
-                // 2D overlay icons projected from 3D face anchor positions
-                if showPrivacyMarkers {
-                    ForEach(markerState.screenPositions.indices, id: \.self) { i in
-                        let pos = markerState.screenPositions[i]
-                        if pos.isVisible {
-                            Image(systemName: "eye.slash.fill")
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundColor(.red)
-                                .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
-                                .position(x: pos.point.x, y: pos.point.y)
+                    // 2D overlay icons projected from 3D face anchor positions
+                    if showPrivacyMarkers {
+                        ForEach(markerState.screenPositions.indices, id: \.self) { i in
+                            let pos = markerState.screenPositions[i]
+                            if pos.isVisible {
+                                Image(systemName: "eye.slash.fill")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundColor(.red)
+                                    .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
+                                    .position(x: pos.point.x, y: pos.point.y)
+                            }
                         }
                     }
                 }
+                .ignoresSafeArea()
 
                 // Bottom-left legend (semantic classes + privacy + capture markers)
                 let showSemanticLegend = semanticViewMode.showOutlines && !detectedClasses.isEmpty
@@ -98,7 +110,9 @@ struct MeshPreviewContainer: View {
                 }
             }
 
-            // Show loading indicator until mesh is fully parsed and rendered
+            // Show loading indicator until mesh is fully parsed and rendered.
+            // Full-bleed opaque cover (ignores the safe area) so no default background
+            // shows through at the screen edges during load.
             if !isMeshLoaded {
                 VStack(spacing: 16) {
                     ProgressView()
@@ -110,6 +124,7 @@ struct MeshPreviewContainer: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(white: 0.15))
+                .ignoresSafeArea()
                 .transition(.opacity)
             }
 
@@ -124,6 +139,18 @@ struct MeshPreviewContainer: View {
                 .padding()
                 .background(Color.black.opacity(0.8))
                 .cornerRadius(12)
+            }
+
+            // Title + preview-state note — small, centered. This layer respects the safe
+            // area, and inside a NavigationView the top safe-area inset already includes the
+            // nav bar, so top-alignment sits just BELOW the toolbar buttons and clear of the
+            // Dynamic Island / camera array. Last in the ZStack so it stays legible over both
+            // the mesh and the loading screen.
+            if let scanName = scanName {
+                previewTitle(scanName: scanName)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 8)
+                    .allowsHitTesting(false)
             }
         }
         .toolbar {
@@ -183,6 +210,34 @@ struct MeshPreviewContainer: View {
                 isViewerReady = true
             }
         }
+    }
+
+    /// Centered preview title: "Location · Scan" plus a preview-state note. The note flags
+    /// that this is the on-device mesh preview, not the final render, and whether its colors
+    /// are the fast normals-shaded placeholder (amber) or the photo colorize (green).
+    private func previewTitle(scanName: String) -> some View {
+        let heading = [location?.name, scanName]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+        return VStack(spacing: 2) {
+            if !heading.isEmpty {
+                Text(heading)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Text(isColored ? "Preview · colored mesh" : "Preview · shading only, colors not final")
+                .font(.caption2)
+                .foregroundColor(isColored ? .green : .orange)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial)
+        .cornerRadius(10)
+        .shadow(color: .black.opacity(0.3), radius: 2)
+        .padding(.horizontal, 60) // keep clear of leading/trailing toolbar buttons
     }
 
     /// One legend row for a capture-marker group (colored square + label).
@@ -927,6 +982,5 @@ struct MeshPreviewView: UIViewRepresentable {
 #Preview {
     NavigationView {
         MeshPreviewContainer()
-            .ignoresSafeArea()
     }
 }
