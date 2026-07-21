@@ -388,20 +388,15 @@ struct ARCoverageView: UIViewRepresentable {
         if recordingChanged {
             context.coordinator.isRecording.store(isRecording, ordering: .relaxed)
             if isRecording {
-                // Upgrade to full scene reconstruction — preserve world map for coordinate continuity
-                let config = ARWorldTrackingConfiguration()
-                if Self.supportsLiDAR {
-                    // Plain `.mesh` in production; `.meshWithClassification` when the bench toggle is on
-                    // (A/B its per-face classify cost — see meshReconstructionMode).
-                    config.sceneReconstruction = Self.meshReconstructionMode()
-                }
-                config.environmentTexturing = .automatic
-                // Preserve the relocalized coordinate system by keeping the world map
-                if let mapURL = initialWorldMapURL,
-                   let data = try? Data(contentsOf: mapURL),
-                   let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
-                    config.initialWorldMap = worldMap
-                }
+                // Upgrade to full scene reconstruction via makeConfiguration — ensures a
+                // consistent video format (avoiding a 30fps→60fps switch that confuses
+                // Recon3D's internal SLAM on some devices, e.g. M2 iPad Pro). makeConfiguration
+                // preserves the relocalized frame by loading initialWorldMapURL and honours our
+                // meshClassifier bench toggle internally (meshReconstructionMode).
+                let config = Self.makeConfiguration(
+                    enableMeshReconstruction: true,
+                    worldMapURL: initialWorldMapURL
+                )
                 if privacyFilter, ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
                     config.frameSemantics.insert(.personSegmentationWithDepth)
                 }
@@ -3207,6 +3202,47 @@ struct ARCoverageView: UIViewRepresentable {
             config.planeDetection = [.horizontal, .vertical]
         }
         config.environmentTexturing = .automatic
+
+        // ── Video format selection ──
+        // Default to the highest available resolution at 30fps for best downstream
+        // splat quality without overwhelming the capture pipeline. 60fps doubles
+        // frame delivery rate but doesn't improve mesh reconstruction or VIO — it
+        // only increases backpressure on the ioQueue (privacy blur, JPEG encode,
+        // depth PNG), which starves ARKit's frame pool on older devices (A12Z).
+        // Dev settings can override via videoFormatIndex.
+        let formats = ARWorldTrackingConfiguration.supportedVideoFormats
+        let preferredIndex = UserDefaults.standard.integer(forKey: AppConstants.Key.videoFormatIndex)
+        if preferredIndex > 0, preferredIndex < formats.count {
+            // Dev override: user selected a specific format in settings
+            config.videoFormat = formats[preferredIndex]
+        } else {
+            // Pick highest resolution standard (non-hiRes) format at 30fps.
+            // hiRes formats use 16:9 on iPads (3840×2160) which breaks Recon3D
+            // mesh integration (vio_initialized never clears → zero mesh).
+            let best30 = formats
+                .filter { $0.framesPerSecond == 30 && !$0.isRecommendedForHighResolutionFrameCapturing }
+                .max(by: { $0.imageResolution.width * $0.imageResolution.height
+                         < $1.imageResolution.width * $1.imageResolution.height })
+            if let best = best30 {
+                config.videoFormat = best
+            } else if let fourK = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
+                config.videoFormat = fourK
+            }
+            // else: keep ARKit default
+        }
+
+        let fmt = config.videoFormat
+        print("[ARConfig] Selected video format: \(Int(fmt.imageResolution.width))×\(Int(fmt.imageResolution.height)) @ \(fmt.framesPerSecond)fps")
+
+        // Log all available formats once for device compatibility diagnostics
+        if PerfDiag.enabled {
+            for (i, f) in formats.enumerated() {
+                let tag = f == config.videoFormat ? " ◀ SELECTED" : ""
+                let hiRes = f.isRecommendedForHighResolutionFrameCapturing ? " [hiRes]" : ""
+                print("[ARConfig]   [\(i)] \(Int(f.imageResolution.width))×\(Int(f.imageResolution.height)) @ \(f.framesPerSecond)fps\(hiRes)\(tag)")
+            }
+        }
+
         if let mapURL = worldMapURL,
            let data = try? Data(contentsOf: mapURL),
            let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {

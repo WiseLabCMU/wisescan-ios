@@ -372,6 +372,7 @@ struct SettingsView: View {
                             .tint(.orange)
                             .padding(.vertical, 4)
 
+                            #if canImport(MWDATMockDevice)
                             Toggle(isOn: $mockWearable) {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("Simulate Meta Wearable")
@@ -383,6 +384,7 @@ struct SettingsView: View {
                             }
                             .tint(.orange)
                             .padding(.vertical, 4)
+                            #endif
 
                             Toggle(isOn: $hideLivePoints) {
                                 VStack(alignment: .leading, spacing: 4) {

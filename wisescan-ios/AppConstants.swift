@@ -49,6 +49,7 @@ enum AppConstants {
         static let scanCoachingEnabled = "scanCoachingEnabled"
         static let colorizeOnPostprocess = "colorizeOnPostprocess"
         static let registerLegacyScans = "registerLegacyScans"
+        static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
     }
 
     // MARK: - Default Values

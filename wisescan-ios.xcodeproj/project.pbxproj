@@ -9,7 +9,7 @@
 /* Begin PBXBuildFile section */
 		C901CDB92F74E87700C5F941 /* MWDATCamera in Frameworks */ = {isa = PBXBuildFile; productRef = C901CDB82F74E87700C5F941 /* MWDATCamera */; };
 		C901CDBB2F74E87700C5F941 /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = C901CDBA2F74E87700C5F941 /* MWDATCore */; };
-		C901CDBD2F74E87700C5F941 /* MWDATMockDevice in Frameworks */ = {isa = PBXBuildFile; productRef = C901CDBC2F74E87700C5F941 /* MWDATMockDevice */; };
+
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -59,7 +59,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C901CDB92F74E87700C5F941 /* MWDATCamera in Frameworks */,
-				C901CDBD2F74E87700C5F941 /* MWDATMockDevice in Frameworks */,
+
 				C901CDBB2F74E87700C5F941 /* MWDATCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -124,7 +124,7 @@
 			packageProductDependencies = (
 				C901CDB82F74E87700C5F941 /* MWDATCamera */,
 				C901CDBA2F74E87700C5F941 /* MWDATCore */,
-				C901CDBC2F74E87700C5F941 /* MWDATMockDevice */,
+
 			);
 			productName = "wisescan-ios";
 			productReference = C93B8BCE2F568A6F00785D6B /* wisescan-ios.app */;
@@ -657,11 +657,7 @@
 			package = C901CDB72F74E87700C5F941 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
 			productName = MWDATCore;
 		};
-		C901CDBC2F74E87700C5F941 /* MWDATMockDevice */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = C901CDB72F74E87700C5F941 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
-			productName = MWDATMockDevice;
-		};
+
 /* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = C93B8BC62F568A6F00785D6B /* Project object */;

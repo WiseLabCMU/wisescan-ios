@@ -121,6 +121,8 @@ class MetaWearableManager {
     private var isMockWearableEnabled = false
     private var mockTimer: Timer?
     private var mockFrameIndex = 0
+    #else
+    private let isMockWearableEnabled = false
     #endif
 
     private var deviceObservationTask: Task<Void, Never>?
