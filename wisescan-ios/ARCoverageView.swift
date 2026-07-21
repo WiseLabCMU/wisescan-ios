@@ -1236,9 +1236,6 @@ struct ARCoverageView: UIViewRepresentable {
             guard Date().timeIntervalSince(lastRoomPlanOutlineTime) >= AppConstants.semanticThrottleInterval else { return }
             lastRoomPlanOutlineTime = Date()
 
-            // All detected classes are tracked in detectedSemanticClasses (so roomplan.json export +
-            // the saved metadata carry full data); only the user-enabled ones publish to the HUD.
-            let enabledClasses = SemanticClassPreference.load()
             var classes = Set<String>()
             for surface in room.walls + room.floors + room.doors + room.windows + room.openings {
                 let semantic = SemanticClass.from(surface.category)
@@ -1252,9 +1249,9 @@ struct ARCoverageView: UIViewRepresentable {
             }
 
             detectedSemanticClasses.formUnion(classes)
-            let enabledForHUD = detectedSemanticClasses.filter { enabledClasses.contains($0) }
+            let detectedForHUD = detectedSemanticClasses
             DispatchQueue.main.async { [weak self] in
-                self?.scanStats?.detectedClasses = enabledForHUD
+                self?.scanStats?.detectedClasses = detectedForHUD
             }
         }
 

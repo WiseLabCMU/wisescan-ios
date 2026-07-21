@@ -217,66 +217,6 @@ struct SettingsView: View {
                     }
                     .listRowBackground(Color.white.opacity(0.05))
 
-                    // MARK: - Semantic Classes
-                    // NOTE: post deferred-build migration these no longer gate LIVE outlines (we don't
-                    // render them during capture) — the selection now controls semantic-class visibility
-                    // in the saved-map / mesh-preview viewer. Kept for that reason.
-                    Section {
-                        ForEach(SemanticClass.allCases.filter { $0 != .none }, id: \.rawValue) { cls in
-                            if cls.isConfigurable {
-                                Toggle(isOn: Binding(
-                                    get: { SemanticClassPreference.load().contains(cls.rawValue) },
-                                    set: { enabled in
-                                        var current = SemanticClassPreference.load()
-                                        if enabled { current.insert(cls.rawValue) } else { current.remove(cls.rawValue) }
-                                        SemanticClassPreference.save(current)
-                                    }
-                                )) {
-                                    HStack(spacing: 8) {
-                                        Circle()
-                                            .fill(cls.swiftUIDisplayColor)
-                                            .frame(width: 12, height: 12)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(cls.rawValue.capitalized)
-                                                .foregroundColor(.white)
-                                            Text(cls.classDescription)
-                                                .font(.caption2)
-                                                .foregroundColor(.gray)
-                                        }
-                                    }
-                                }
-                                .tint(.cyan)
-                                .padding(.vertical, 2)
-                            } else {
-                                // Ceiling: non-configurable, shown as disabled
-                                HStack(spacing: 8) {
-                                    Circle()
-                                        .fill(cls.swiftUIDisplayColor.opacity(0.3))
-                                        .frame(width: 12, height: 12)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(cls.rawValue.capitalized)
-                                            .foregroundColor(.gray)
-                                        Text(cls.classDescription)
-                                            .font(.caption2)
-                                            .foregroundColor(.gray.opacity(0.7))
-                                    }
-                                    Spacer()
-                                    Toggle("", isOn: .constant(false))
-                                        .labelsHidden()
-                                        .disabled(true)
-                                }
-                                .padding(.vertical, 2)
-                            }
-                        }
-                    } header: {
-                        Text("SEMANTIC CLASS VISIBILITY")
-                    } footer: {
-                        Text("Choose which semantic classes are shown in saved-map and mesh previews. All classes are always collected for export.")
-                            .font(.caption2)
-                            .foregroundColor(.gray)
-                    }
-                    .listRowBackground(Color.white.opacity(0.05))
-
                     // MARK: - Data Management
                     Section {
                         Button(role: .destructive) {

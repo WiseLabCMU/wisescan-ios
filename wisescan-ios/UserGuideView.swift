@@ -113,6 +113,27 @@ struct UserGuideView: View {
                 }
                 .listRowBackground(Color.white.opacity(0.05))
 
+                // MARK: - Semantic Colors
+                Section {
+                    ForEach(SemanticClass.allCases.filter { $0 != .none }, id: \.rawValue) { cls in
+                        legendRow(
+                            color: cls.swiftUIDisplayColor,
+                            name: cls.rawValue.capitalized,
+                            desc: cls.classDescription,
+                            dimmed: cls == .ceiling
+                        )
+                    }
+                } header: {
+                    Text("SEMANTIC COLORS")
+                } footer: {
+                    Text("Room-structure classes detected while scanning (with Semantic Labeling on), " +
+                         "shown in these colors in the mesh preview's semantics view and listed on the " +
+                         "scan HUD. All detected classes are always included in exports.")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                }
+                .listRowBackground(Color.white.opacity(0.05))
+
                 // MARK: - Export Formats
                 Section {
                     formatRow(
@@ -225,6 +246,25 @@ private extension UserGuideView {
             }
         }
         .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    func legendRow(color: Color, name: String, desc: String, dimmed: Bool = false) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Circle()
+                .fill(dimmed ? color.opacity(0.3) : color)
+                .frame(width: 12, height: 12)
+                .frame(width: 28) // align with guideRow icons
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .foregroundColor(dimmed ? .gray : .white)
+                    .font(.subheadline)
+                Text(desc)
+                    .font(.caption)
+                    .foregroundColor(dimmed ? .gray.opacity(0.7) : .gray)
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     @ViewBuilder

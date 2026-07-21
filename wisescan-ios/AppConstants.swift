@@ -45,7 +45,6 @@ enum AppConstants {
         static let vrBloomEnabled = "vrBloomEnabled"
         static let semanticLabeling = "semanticLabeling"
         static let memDiagForceReclaim = "memDiagForceReclaim"
-        static let enabledSemanticClasses = "enabledSemanticClasses"
         static let scanCoachingEnabled = "scanCoachingEnabled"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
@@ -95,14 +94,6 @@ enum AppConstants {
     /// a cold/failed RoomPlan session (didEndWith never fires) bails fast instead of blocking the save
     /// queue for the full reconstruction timeout.
     static let roomPlanDataWaitSeconds: TimeInterval = 3
-
-    /// Default enabled semantic classes (JSON-encoded Set<String>).
-    /// Walls and doors are on by default; all others off. Ceiling is not yet
-    /// supported by RoomPlan and is marked non-configurable.
-    static let enabledSemanticClassesDefault: String = {
-        let defaults: Set<String> = ["wall", "door"]
-        return (try? JSONEncoder().encode(defaults)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
-    }()
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
@@ -265,16 +256,7 @@ enum KeyframeMarkerMode: String, CaseIterable {
 enum SemanticClass: String, CaseIterable, Codable {
     case none, wall, floor, ceiling, table, seat, door, window, fixture
 
-    /// Whether the user can toggle this class on/off in Settings.
-    /// Ceiling is future-proofed but not yet detected by RoomPlan.
-    var isConfigurable: Bool {
-        switch self {
-        case .none, .ceiling: return false
-        default: return true
-        }
-    }
-
-    /// Brief description of what this class covers (for Settings UI).
+    /// Brief description of what this class covers (for the user-guide color legend).
     var classDescription: String {
         switch self {
         case .none:    return ""
@@ -380,30 +362,3 @@ extension String {
     }
 }
 
-// MARK: - Semantic Class Preference Helper
-
-/// Reads/writes the user's enabled semantic class set from UserDefaults.
-/// Used by the AR/VR capture overlay to filter which classes render in real time.
-/// Mesh previews always show all classes regardless of this preference.
-enum SemanticClassPreference {
-    static func load() -> Set<String> {
-        guard let json = UserDefaults.standard.string(forKey: AppConstants.Key.enabledSemanticClasses),
-              let data = json.data(using: .utf8),
-              let set = try? JSONDecoder().decode(Set<String>.self, from: data) else {
-            // First launch or corrupt: return the compiled-in default set
-            if let data = AppConstants.enabledSemanticClassesDefault.data(using: .utf8),
-               let set = try? JSONDecoder().decode(Set<String>.self, from: data) {
-                return set
-            }
-            return ["wall", "door"]
-        }
-        return set
-    }
-
-    static func save(_ set: Set<String>) {
-        if let data = try? JSONEncoder().encode(set),
-           let json = String(data: data, encoding: .utf8) {
-            UserDefaults.standard.set(json, forKey: AppConstants.Key.enabledSemanticClasses)
-        }
-    }
-}
