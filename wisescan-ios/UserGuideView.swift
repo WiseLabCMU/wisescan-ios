@@ -79,12 +79,13 @@ struct UserGuideView: View {
                     )
                     guideRow(
                         icon: "camera.fill",
-                        title: "Pause for Sharp Photos",
-                        text: "Hold still to capture a high-resolution photo: the center ring fills as " +
-                              "you settle, then a shutter click and flash confirm the shot, and the amber " +
-                              "overlay clears where the photo landed. Pause on every amber area — these " +
-                              "crisp stills drive the final texture quality. In the mesh preview, the " +
-                              "camera toggle shows where each still (and motion frame) was captured."
+                        title: "Hold Still, Tap for Photos",
+                        text: "To capture a high-resolution photo, hold still until the center ring " +
+                              "locks green, then tap the screen: a shutter click and flash confirm the " +
+                              "shot, and the amber overlay clears where the photo landed. Tap on every " +
+                              "amber area — these crisp stills drive the final texture quality. In the " +
+                              "mesh preview, the camera toggle shows where each still (and motion frame) " +
+                              "was captured."
                     )
                     guideRow(
                         icon: "arrow.left.and.right",

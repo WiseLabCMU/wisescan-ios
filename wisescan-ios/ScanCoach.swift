@@ -423,7 +423,7 @@ class ScanCoach {
            photoCoverageOccupied >= AppConstants.photoCoverageDebtMinVoxels &&
            photoCoverageFraction < AppConstants.photoCoverageDebtFraction {
             if let t = tip("guidance.pauseForPhoto",
-                           "📸 Pause on the amber areas for sharp photos",
+                           "📸 Hold still on amber areas, then tap for a photo",
                            icon: "camera.fill",
                            priority: .guidance, now: now) { return t }
         }

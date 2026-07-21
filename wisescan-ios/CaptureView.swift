@@ -218,6 +218,19 @@ struct CaptureView: View {
                 isAnalyzing: $isAnalyzing
             )
                 .ignoresSafeArea()
+                // Shutter tap — the deterministic still trigger, gated on stillness.
+                // Attached to the AR view (behind the HUD) so buttons keep their own
+                // taps; fires nothing unless recording. A warning haptic answers taps
+                // while moving ("hold still first"); capture feedback (shutter click +
+                // flash) comes from the accepted save itself.
+                .onTapGesture {
+                    guard isRecording else { return }
+                    if frameCaptureSession.requestStillCapture() {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    } else {
+                        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                    }
+                }
                 // Fix phase race: set .loadingWorldMap before the AR session starts
                 // loading the world map. onAppear fires AFTER the first render, so
                 // the AR view could detect a boundary anchor before the phase is set.
@@ -262,11 +275,11 @@ struct CaptureView: View {
             PermissionsOverlay(locationManager: locationManager)
                 .ignoresSafeArea()
 
-            // Stillness reticle — the pause-shoot-move affordance. The ring fills as the
-            // device settles and locks green while confirmed still (when the hi-res
-            // keyframe is captured). Shown in both AR and VR modes: keyframes are
-            // captured in both. Wrapped in a host view so the 10Hz progress updates
-            // re-evaluate only the reticle's body, not this entire view.
+            // Stillness reticle — the hold-still-then-tap affordance. The ring fills as
+            // the device settles, locks green when a shutter tap will capture, and shows
+            // "Capturing…" while a tapped still is in flight. Shown in both AR and VR
+            // modes: keyframes are captured in both. Wrapped in a host view so the 10Hz
+            // progress updates re-evaluate only the reticle's body, not this entire view.
             if isRecording && isARSessionReady {
                 StillnessReticleHost(session: frameCaptureSession)
                     .allowsHitTesting(false)

@@ -57,10 +57,16 @@ class FrameCaptureSession {
     /// Ring-fill progress for the stillness reticle: 0 while moving, climbing to 1 over the
     /// confirmation window once the device settles, held at 1 while confirmed still.
     private(set) var stillnessProgress: Double = 0
-    /// Whether a keyframe has already been saved for the current stillness period.
-    /// Prevents hundreds of near-identical frames from piling up when the camera is
-    /// stationary (sensor jitter crosses the tiny overlap threshold at 30fps).
+    /// Whether the current armed request has already fired its keyframe. Prevents a
+    /// single tap from firing twice while its hi-res completion is outstanding.
     private var hasStillnessKeyframe: Bool = false
+    /// Armed by the shutter tap (`requestStillCapture`) — stills NEVER fire
+    /// automatically. The armed request fires on the next capture tick while
+    /// stillness holds, auto-retries blurred results, and cancels when stillness
+    /// breaks before it fires. Main-thread only (tap + capture timer are both main).
+    private var stillCaptureRequested: Bool = false
+    /// UI state: a tapped request is armed or in flight (reticle shows "Capturing…").
+    private(set) var isStillCapturePending: Bool = false
     /// Number of frames captured while device was confirmed still (high confidence sharp).
     private(set) var sharpFrameCount: Int = 0
     /// Total frames captured this session (sharp + sweep).
@@ -70,10 +76,11 @@ class FrameCaptureSession {
 
     // ── High-resolution keyframe capture ──
     // While the AR video stream runs a standard mesh-friendly format (1920×1440),
-    // confirmed stillness triggers ARSession.captureHighResolutionFrame — a single
-    // still at the camera's native photo resolution (up to ~12MP) with its own pose
-    // and intrinsics. This sidesteps the hiRes-video-format-breaks-mesh problem:
-    // sweep frames feed depth/mesh, hi-res stills feed splat texture detail.
+    // a shutter tap during confirmed stillness triggers
+    // ARSession.captureHighResolutionFrame — a single still at the camera's native
+    // photo resolution (up to ~12MP) with its own pose and intrinsics. This sidesteps
+    // the hiRes-video-format-breaks-mesh problem: sweep frames feed depth/mesh,
+    // hi-res stills feed splat texture detail.
     /// A hi-res capture request is pending; ARKit rejects overlapping requests.
     private var hiResCaptureInFlight = false
     /// AR-session timestamp of the pending hi-res request, for the watchdog that
@@ -109,6 +116,27 @@ class FrameCaptureSession {
     /// overlay stamps the photo-coverage voxel grid from the keyframe's depth map and
     /// updates mesh anchors' photo-covered state (amber → clear).
     @ObservationIgnored var onKeyframeCaptured: ((KeyframeStill) -> Void)?
+
+    /// Arms a still capture from the shutter tap — the deterministic trigger (stills
+    /// never fire on their own). Returns false when the device isn't confirmed still,
+    /// so the UI can nudge "hold still". Main thread.
+    @discardableResult
+    func requestStillCapture() -> Bool {
+        guard !captureEnded, isCurrentlyStill else { return false }
+        stillCaptureRequested = true
+        isStillCapturePending = true
+        // Fresh budgets: an explicit tap may intentionally repeat a spot (duplicate
+        // suppression is for jitter, not intent), and gets its own blur-retry allowance.
+        hasStillnessKeyframe = false
+        keyframeRetryCount = 0
+        return true
+    }
+
+    /// Clears a tap-armed request (stillness broke, save landed, or capture reset).
+    private func clearStillCaptureRequest() {
+        stillCaptureRequested = false
+        if isStillCapturePending { isStillCapturePending = false }
+    }
 
     // Privacy logic
     /// Accumulating person anchor with an observation count, which acts as a confidence weight:
@@ -289,6 +317,8 @@ class FrameCaptureSession {
         self.isCurrentlyStill = false
         self.stillnessProgress = 0
         self.hasStillnessKeyframe = false
+        self.stillCaptureRequested = false
+        self.isStillCapturePending = false
         self.sharpFrameCount = 0
         self.totalCapturedFrameCount = 0
         self.lastSharpFrameTime = nil
@@ -473,33 +503,22 @@ class FrameCaptureSession {
             }
         }
 
-        // Skip frame if camera hasn't moved enough (based on overlap setting)
-        if let lastTransform = lastCaptureTransform {
-            let movement = cameraMovement(from: lastTransform, to: transform)
-            // Higher overlap = smaller movement threshold = more frames
-            // overlapMax 100% → threshold ~0.01m (capture almost everything)
-            // overlapMax 10%  → threshold ~0.15m (only distinct views)
-            let threshold = Float(Double(AppConstants.overlapBaseThreshold) * (1.0 - overlapMax / 100.0)) + AppConstants.overlapMinThreshold
-            if !isMockingIMU && movement < threshold {
-                return // skip — too much overlap with previous frame
-            }
-        }
-
-        // ── Stillness keyframe ──
-        // When the device is confirmed still, capture exactly one keyframe at the
-        // start of the stillness period, then suppress further saves until the camera
-        // moves again. Without this gate, sensor noise jitter crosses the tiny overlap
-        // threshold (0.01-0.04m) at 30fps, producing hundreds of near-identical frames
-        // of the same spot.
+        // ── Stillness keyframe (tap-armed) ──
+        // Stills fire ONLY from the shutter tap (`requestStillCapture`), gated on
+        // confirmed stillness — a deterministic trigger. This block runs BEFORE the
+        // overlap gate below on purpose: the old auto-trigger sat behind it, so whether
+        // a pause produced a still depended on where the last stream save happened to
+        // land relative to the settle pose (device-observed as "sometimes a nudge
+        // fires it, sometimes not").
         //
         // The keyframe itself is a native-resolution still (captureHighResolutionFrame)
         // when the device supports it, so the sharp pause-shot carries far more texture
         // detail than the video stream. After repeated hi-res failures, keyframes fall
         // back to saving the stream frame (pre-hi-res behavior).
         var isStillnessKeyframe = false
-        if confirmedStill && !isMockingIMU {
+        if confirmedStill && stillCaptureRequested && !isMockingIMU {
             if hasStillnessKeyframe {
-                return // already captured a keyframe for this stillness period
+                return // this tap's request already fired; suppress jitter saves meanwhile
             }
             // Mock-image capture stays on the stream path — a real hi-res photo would be
             // inconsistent with the synthetic frame sequence.
@@ -529,6 +548,19 @@ class FrameCaptureSession {
             // Hi-res unavailable — fall through and save the stream frame as the keyframe.
             hasStillnessKeyframe = true
             isStillnessKeyframe = true
+        }
+
+        // Skip frame if camera hasn't moved enough (based on overlap setting).
+        // Never skips a tap-requested keyframe — the tap is explicit intent.
+        if !isStillnessKeyframe, let lastTransform = lastCaptureTransform {
+            let movement = cameraMovement(from: lastTransform, to: transform)
+            // Higher overlap = smaller movement threshold = more frames
+            // overlapMax 100% → threshold ~0.01m (capture almost everything)
+            // overlapMax 10%  → threshold ~0.15m (only distinct views)
+            let threshold = Float(Double(AppConstants.overlapBaseThreshold) * (1.0 - overlapMax / 100.0)) + AppConstants.overlapMinThreshold
+            if !isMockingIMU && movement < threshold {
+                return // skip — too much overlap with previous frame
+            }
         }
 
         lastCaptureTransform = transform
@@ -575,8 +607,11 @@ class FrameCaptureSession {
             stillnessStartTime = frameTimestamp
         } else if !isStill {
             stillnessStartTime = nil
-            hasStillnessKeyframe = false // reset so next stillness period gets a fresh keyframe
-            keyframeRetryCount = 0       // fresh blurred-still retry budget for the next period
+            hasStillnessKeyframe = false // reset so the next tap gets a fresh keyframe
+            keyframeRetryCount = 0       // fresh blurred-still retry budget for the next tap
+            // Stillness broke before an armed tap fired — cancel it (the user moved
+            // away; capturing at the new pose would not be what they framed).
+            clearStillCaptureRequest()
         }
         let wasStill = isCurrentlyStill
         let confirmedStill = isStill && (frameTimestamp - (stillnessStartTime ?? frameTimestamp)) >= AppConstants.stillnessDurationRequired
@@ -615,6 +650,7 @@ class FrameCaptureSession {
         sharpFrameCount += 1
         totalCapturedFrameCount += 1
         lastSharpFrameTime = Date()
+        clearStillCaptureRequest() // the tapped request delivered its still
         playShutterClick()
         onKeyframeCaptured?(KeyframeStill(
             transform: transform, intrinsics: intrinsics,
