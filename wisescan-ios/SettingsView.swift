@@ -26,6 +26,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
     @AppStorage(AppConstants.Key.scanCoachingEnabled) private var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
     @AppStorage(AppConstants.Key.colorizeOnPostprocess) private var colorizeOnPostprocess: Bool = AppConstants.colorizeOnPostprocess
+    @AppStorage(AppConstants.Key.registerLegacyScans) private var registerLegacyScans: Bool = AppConstants.registerLegacyScans
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -319,6 +320,7 @@ struct SettingsView: View {
                                     self.mockDepthMaps = AppConstants.mockDepthMaps
                                     self.mockWearable = AppConstants.mockWearable
                                     self.semanticLabeling = AppConstants.semanticLabeling
+                                    self.registerLegacyScans = AppConstants.registerLegacyScans
                                 }
                             }
                         )) {
@@ -435,6 +437,18 @@ struct SettingsView: View {
                                     Text("Mesh Classifier")
                                         .foregroundColor(.white)
                                     Text("Per-face ARKit mesh classification (.meshWithClassification). ON by default — benched at no measurable CPU delta, ~70–100 MB memory — and provides the wall/non-wall labels used for plane registration and the rescan reference mesh. Turn OFF only to re-run the A/B bench (each run stamps meshClassifier=on/off at RECORD-START).")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $registerLegacyScans) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Register Legacy Scans")
+                                        .foregroundColor(.white)
+                                    Text("Lets pre-postprocess-era scans (no saved scan case) enter retroactive registration: old locations will show \"needs postprocess\" and Process may move their meshes into the canonical frame. OFF in production — a legacy adjacent-link is indistinguishable from a rescan and a similar room could false-lock. Scans of link-adjacent locations stay excluded either way.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

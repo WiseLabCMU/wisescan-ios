@@ -72,11 +72,28 @@ enum ScanPostprocessor {
 
     /// Whether this scan should register into its location's canonical frame. Rescans yes; the
     /// original itself no (it IS the frame); link-adjacent never (different physical room —
-    /// force-matching walls there is a false-lock risk). Legacy scans (empty scanCaseRaw) fall
-    /// back to "non-oldest ⇒ rescan" — the registration gates protect against a false match.
+    /// force-matching walls there is a false-lock risk).
+    ///
+    /// Legacy scans (empty scanCaseRaw — saved before the case was persisted) are SKIPPED by
+    /// default, for the merge-to-main blast radius: on an existing install every non-oldest
+    /// legacy scan would otherwise light up "needs postprocess" (hard-gating every old location
+    /// the moment the app updates), and a legacy adjacent-link is indistinguishable from a
+    /// legacy rescan — a *similar* adjacent room could false-positive the fit gates and be
+    /// collapsed onto the original. The dev-gated "Register Legacy Scans" toggle re-enables
+    /// them (the validation path for retroactive registration); even then, scans of
+    /// link-adjacent-typed LOCATIONS stay excluded via the location-level scanCase, which
+    /// predates the per-scan field.
     static func wantsRegistration(_ scan: CapturedScan) -> Bool {
         guard let orig = original(of: scan), orig.id != scan.id else { return false }
-        return scan.scanCaseRaw != ScanCase.linkAdjacent.rawValue
+        switch scan.scanCaseRaw {
+        case ScanCase.rescanSpace.rawValue:
+            return true
+        case "":
+            return UserDefaults.standard.bool(forKey: AppConstants.Key.registerLegacyScans)
+                && scan.location?.scanCase != .linkAdjacent
+        default:
+            return false
+        }
     }
 
     /// ROOM PENDING: no roomplan on disk yet, but the deferred post-save RoomBuilder is still
@@ -89,7 +106,14 @@ enum ScanPostprocessor {
     /// BAD (terminal state): no room on disk and no build in flight to ever produce one. A scan
     /// younger than the post-save grace window is never bad — didEndWith + the deferred build may
     /// simply not have finished yet.
+    ///
+    /// Legacy scans (empty scanCaseRaw) are never BAD: their roomlessness is history (the
+    /// RoomCaptureSession retain-bug era), not a failed deferred build, and flagging them would
+    /// hard-block Rescan/Connect on old locations the moment an existing install updates — with
+    /// no in-app redo short of deleting the scan. They behave exactly as they did pre-merge:
+    /// rescans on top of them work raw-only (no registration target, no auto-align reference).
     static func isBad(_ scan: CapturedScan) -> Bool {
+        guard !scan.scanCaseRaw.isEmpty else { return false }
         guard Date().timeIntervalSince(scan.capturedAt) > AppConstants.roomDataBadScanGraceSeconds else {
             return false
         }

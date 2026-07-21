@@ -48,6 +48,7 @@ enum AppConstants {
         static let enabledSemanticClasses = "enabledSemanticClasses"
         static let scanCoachingEnabled = "scanCoachingEnabled"
         static let colorizeOnPostprocess = "colorizeOnPostprocess"
+        static let registerLegacyScans = "registerLegacyScans"
     }
 
     // MARK: - Default Values
@@ -105,6 +106,11 @@ enum AppConstants {
     /// postprocess (room/registration/proxy — fast); coloring can still be run later (re-running
     /// Post-process picks up whatever is pending).
     static let colorizeOnPostprocess: Bool = true
+    /// Dev-gated: let legacy scans (saved before scanCaseRaw was persisted) enter retroactive
+    /// registration at postprocess. OFF by default — on an existing install every non-oldest
+    /// legacy scan would light up "needs postprocess" (gating every old location at update),
+    /// and a legacy adjacent-link is indistinguishable from a legacy rescan (false-lock risk).
+    static let registerLegacyScans: Bool = false
 
     /// Default enabled semantic classes (JSON-encoded Set<String>).
     /// Walls and doors are on by default; all others off. Ceiling is not yet
