@@ -143,6 +143,10 @@ struct CaptureView: View {
         // Whatever the outcome, the attempt happened — releases the world-map gate in body (the
         // no-ghost paths below then run ghost-less relocalization instead of holding forever).
         defer { ghostLoadAttempted = true }
+        // Reset the proxy flag up front so an early-return guard below can't leave a stale
+        // ghostIsProxy=true from a prior appearance (it is @State and survives across appearances);
+        // the rescan-proxy block re-sets it when a proxy actually loads.
+        ghostIsProxy = false
         guard let locId = scanStore.activeLocationForScan,
               let scanId = scanStore.activeScanToExtend else {
             cachedGhostMeshData = nil
@@ -167,7 +171,6 @@ struct CaptureView: View {
         // for the session (plane auto-align drives the green chip; save-time registration is the
         // correction authority) and drops the perfDiag alignment-phase mesh reconstruction — the
         // dense-ICP machinery only engages for legacy scans with no proxy artifact.
-        ghostIsProxy = false
         if scanStore.activeScanCase == .rescanSpace {
             let proxyCandidates = [
                 targetScan.scanDirectory.appendingPathComponent("mesh_proxy.obj"),

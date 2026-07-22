@@ -756,9 +756,11 @@ struct ARCoverageView: UIViewRepresentable {
         private var locDiagRanICP = false
         /// 0.3: detects the frame-correction "snap" that baked world:.zero overlays don't follow.
         private var locDiagSnap = LocalizationDiag.SnapTracker()
-        /// Phase 2.1 item 2 (production signal, NOT perfDiag-gated): detects a genuine mid-scan frame
-        /// discontinuity (loop-closure / relocalization snap under continuous `.normal` tracking) that
-        /// splits the saved mesh. Delegate-queue state; reset at record-start, fires the ScanStore flag.
+        /// Phase 2.1 item 2 (production signal, NOT perfDiag-gated): detects a snap STORM — a cluster of
+        /// non-physical frame discontinuities (loop-closure / relocalization jumps) under continuous
+        /// `.normal` tracking, the session collapse the VIO guard misses. A SINGLE snap is benign (the
+        /// saved mesh re-pins from live anchor transforms at export), so only the storm fires the flag.
+        /// Delegate-queue state; reset at record-start, fires the ScanStore flag.
         private var trackingStability = TrackingStabilityMonitor()
         /// Per-run consolidated summary. **Main-thread only** — delegate/ICP-queue probes hop to
         /// main to populate it (see LocalizationDiag.Summary). Emitted at stop-recording.

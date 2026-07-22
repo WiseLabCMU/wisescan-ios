@@ -356,12 +356,16 @@ class ScanStore {
 
     // MARK: Tracking Stability (Phase 2.1 build order item 2)
 
-    /// Set when `TrackingStabilityMonitor` confirms a genuine mid-scan frame discontinuity (a
-    /// loop-closure / relocalization snap during continuous `.normal` tracking, distinct from the
-    /// degraded-tracking loss the VIO guard handles). A snap splits the saved mesh across two world
-    /// frames, so the captured geometry may be misaligned regardless of the ICP bake. Surfaced as a
-    /// warning during recording; cleared at record-start and on capture reset. Carries the worst snap
-    /// seen so the message can quantify it.
+    /// Set when `TrackingStabilityMonitor` detects a mid-scan snap *storm* — a cluster of non-physical
+    /// frame discontinuities (loop-closure / relocalization jumps) during continuous `.normal` tracking,
+    /// distinct from the degraded-tracking loss the VIO guard handles. A *single* snap is benign and does
+    /// NOT set this flag: `exportMeshOBJ` rebuilds the OBJ from each anchor's re-pinned transform at save
+    /// time, and ARKit re-pins all anchors consistently on a correction, so a lone snap leaves the saved
+    /// mesh clean (see [[saved-mesh-repins-immune-to-snaps]]). What this flag means is a *storm*
+    /// (≥`stormThreshold` jumps within `stormWindow`) — the relocalizer oscillating between self-similar
+    /// locations while tracking still reports `.normal`, i.e. a session that has collapsed but the VIO
+    /// guard misses. Surfaced as a warning during recording; cleared at record-start and on capture reset.
+    /// Carries the worst snap seen so the message can quantify it.
     var trackingUnreliable: TrackingUnreliable?
 
     struct TrackingUnreliable: Equatable {
