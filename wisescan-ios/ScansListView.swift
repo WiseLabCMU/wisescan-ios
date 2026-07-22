@@ -717,10 +717,10 @@ struct ScansListView: View {
         guard !scans.isEmpty else { return }
         isBulkColoring = true
 
-        let totalScans = scans.count
         // Capture all needed properties on main before dispatching (SwiftData models aren't
         // thread-safe). Each tuple carries the values needed for the background colorize loop.
         struct ScanColorizeInfo {
+            let id: UUID
             let meshURL: URL
             let rawDataDir: URL
             let colorsURL: URL
@@ -728,8 +728,13 @@ struct ScansListView: View {
             let pose: [Float]?
             let frameCenter: SIMD3<Float>?
         }
-        let infos: [(scan: CapturedScan, info: ScanColorizeInfo)] = scans.map { scan in
-            (scan, ScanColorizeInfo(
+        // Claim each scan against the postprocess in-flight set — a Process batch may be baking a
+        // registration into this scan's mesh.obj right now, and colorizing mid-bake would
+        // misproject every frame. Already-claimed scans are skipped this pass.
+        let infos: [(scan: CapturedScan, info: ScanColorizeInfo)] = scans.compactMap { scan in
+            guard ScanPostprocessor.claimInFlight(scan.id) else { return nil }
+            return (scan, ScanColorizeInfo(
+                id: scan.id,
                 meshURL: scan.meshFileURL,
                 rawDataDir: scan.rawDataPath,
                 colorsURL: scan.colorsFileURL,
@@ -738,6 +743,7 @@ struct ScansListView: View {
                 frameCenter: MeshPreviewView.canonicalFrameCenter(for: scan.location)
             ))
         }
+        let totalScans = infos.count
 
         DispatchQueue.global(qos: .utility).async {
             for (idx, entry) in infos.enumerated() {
@@ -746,7 +752,10 @@ struct ScansListView: View {
                     self.bulkProgressMessage = "Coloring \(idx + 1)/\(totalScans) — \(scanName)"
                 }
 
-                guard let meshData = try? Data(contentsOf: entry.info.meshURL) else { continue }
+                guard let meshData = try? Data(contentsOf: entry.info.meshURL) else {
+                    ScanPostprocessor.releaseInFlight(entry.info.id)
+                    continue
+                }
 
                 var lastPct = -1
                 let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
@@ -778,6 +787,7 @@ struct ScansListView: View {
                     entry.scan.isColored = true
                     entry.scan.location?.updatedAt = Date()
                     try? self.modelContext.save()
+                    ScanPostprocessor.releaseInFlight(entry.info.id)   // after the writeback, on main
                 }
             }
 
@@ -1558,8 +1568,12 @@ struct ScanCard: View {
     }
 
     private func colorizeScan() {
+        // Claim against the postprocess in-flight set — colorizing while a Process batch bakes a
+        // registration into this mesh.obj would misproject every frame. Claimed scans no-op.
+        guard ScanPostprocessor.claimInFlight(scan.id) else { return }
         coloringMessage = "Coloring…"
 
+        let scanId = scan.id
         let meshURL = scan.meshFileURL
         let rawDataDir = scan.rawDataPath
         let colorsURL = scan.colorsFileURL
@@ -1571,6 +1585,7 @@ struct ScanCard: View {
             guard let meshData = try? Data(contentsOf: meshURL) else {
                 DispatchQueue.main.async {
                     self.coloringMessage = nil
+                    ScanPostprocessor.releaseInFlight(scanId)
                 }
                 return
             }
@@ -1608,6 +1623,7 @@ struct ScanCard: View {
                 self.scan.location?.updatedAt = Date() // Trigger preview image reload
                 try? self.modelContext.save()
                 self.coloringMessage = nil
+                ScanPostprocessor.releaseInFlight(scanId)   // after the writeback, on main
             }
         }
     }

@@ -210,18 +210,21 @@ enum ScanPostprocessor {
         let frameCenter: SIMD3<Float>?
     }
 
-    /// Guards two Process/Color batches from processing the SAME scan concurrently. Registration
-    /// bakes the raw→canonical transform INTO mesh.obj in place, so an interleaved second pass could
-    /// double-bake or tear the file. Claimed on main when a batch is armed; released as each scan's
-    /// background work completes.
+    /// Guards two Process/Color passes from touching the SAME scan concurrently. Registration
+    /// bakes the raw→canonical transform INTO mesh.obj in place, so an interleaved second pass
+    /// could double-bake or tear the file — and a colorize that reads a fresh sidecar against a
+    /// pre-bake mesh would misproject every frame by the applied transform. Claimed on main when
+    /// a batch/colorize is armed; released on main after that scan's model writeback (so a
+    /// subsequent arm can't snapshot stale model state). The colorize entry points
+    /// (bulkColorize / single-card Color) claim through the same set — internal, not private.
     nonisolated private static let inFlightLock = NSLock()
     nonisolated(unsafe) private static var inFlight: Set<UUID> = []
 
-    private nonisolated static func claimInFlight(_ id: UUID) -> Bool {
+    nonisolated static func claimInFlight(_ id: UUID) -> Bool {
         inFlightLock.lock(); defer { inFlightLock.unlock() }
         return inFlight.insert(id).inserted
     }
-    private nonisolated static func releaseInFlight(_ id: UUID) {
+    nonisolated static func releaseInFlight(_ id: UUID) {
         inFlightLock.lock(); defer { inFlightLock.unlock() }
         inFlight.remove(id)
     }
@@ -254,12 +257,22 @@ enum ScanPostprocessor {
         // their faulted relationships aren't thread-safe off the main actor); the background pass
         // reads only the snapshot + the filesystem. A scan already claimed by another in-flight
         // batch is skipped — still reported done so callers' progress counters stay in sync.
+        // Steps are FROZEN here: a roomplan landing mid-batch (deferred RoomBuilder) is picked up
+        // by the NEXT Process tap, not this one — determinism over mid-batch opportunism.
+        var frameCenters: [UUID: SIMD3<Float>?] = [:]   // per-location memo — canonicalFrameCenter decodes the original's roomplan JSON
         let work: [ScanWork] = ordered.compactMap { scan in
             guard claimInFlight(scan.id) else {
                 progress?(scan, nil)
                 return nil
             }
             let orig = original(of: scan)
+            let frameCenter: SIMD3<Float>?
+            if let locId = scan.location?.id, let memo = frameCenters[locId] {
+                frameCenter = memo
+            } else {
+                frameCenter = MeshPreviewView.canonicalFrameCenter(for: scan.location)
+                if let locId = scan.location?.id { frameCenters[locId] = frameCenter }
+            }
             return ScanWork(
                 scan: scan,
                 id: scan.id,
@@ -271,7 +284,7 @@ enum ScanPostprocessor {
                 origRoomPlanURL: orig.flatMap { artifactURL("roomplan.json", in: $0) },
                 origId: orig?.id,
                 pose: scan.location?.imagingPoseMatrix,
-                frameCenter: MeshPreviewView.canonicalFrameCenter(for: scan.location)
+                frameCenter: frameCenter
             )
         }
 
@@ -289,8 +302,10 @@ enum ScanPostprocessor {
                         try? modelContext.save()
                     }
                     progress?(w.scan, nil)
+                    // Release on MAIN, strictly after the model writeback — a subsequent arm
+                    // (also main) can then never claim this scan and snapshot a stale isColored.
+                    releaseInFlight(w.id)
                 }
-                releaseInFlight(w.id)   // file critical section (processOne) is done
             }
             DispatchQueue.main.async { completion?() }
         }

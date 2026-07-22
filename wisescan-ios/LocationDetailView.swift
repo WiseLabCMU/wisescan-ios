@@ -667,7 +667,9 @@ struct LocationDetailView: View {
     /// are the bad-checked prerequisites; the pending check covers the whole location so one
     /// post-process pass clears it (oldest-first — registration needs the canonical room first).
     private func postprocessGateAllows() -> Bool {
-        let ordered = location.scans.sorted { $0.capturedAt < $1.capturedAt }
+        // Same deterministic comparator as ScanPostprocessor.original(of:) — on a capturedAt tie
+        // the gate must bad-check the SAME scan registration will target.
+        let ordered = location.scans.sorted { ($0.capturedAt, $0.id.uuidString) < ($1.capturedAt, $1.id.uuidString) }
         let prerequisites = [ordered.first, ordered.last].compactMap { $0 }
         if prerequisites.contains(where: { ScanPostprocessor.isBad($0) }) {
             showBadScanGate = true
@@ -739,6 +741,7 @@ struct LocationDetailView: View {
         // ScanColorizeInfo). The background loop below reads only the snapshot + the filesystem.
         struct ColorizeInfo {
             let scan: CapturedScan   // touched only on main (progress key + writeback)
+            let id: UUID
             let meshURL: URL
             let rawDataDir: URL
             let colorsURL: URL
@@ -746,9 +749,14 @@ struct LocationDetailView: View {
             let pose: [Float]?
             let frameCenter: SIMD3<Float>?
         }
-        let infos: [ColorizeInfo] = scans.map { scan in
-            ColorizeInfo(
+        // Claim each scan against the postprocess in-flight set — a Process batch may be baking a
+        // registration into this scan's mesh.obj right now, and colorizing mid-bake would
+        // misproject every frame. Already-claimed scans are skipped this pass.
+        let infos: [ColorizeInfo] = scans.compactMap { scan in
+            guard ScanPostprocessor.claimInFlight(scan.id) else { return nil }
+            return ColorizeInfo(
                 scan: scan,
+                id: scan.id,
                 meshURL: scan.meshFileURL,
                 rawDataDir: scan.rawDataPath,
                 colorsURL: scan.colorsFileURL,
@@ -765,7 +773,10 @@ struct LocationDetailView: View {
                 // Color button uses, so only one card animates at a time as the loop advances.
                 DispatchQueue.main.async { self.bulkColoringMessages[info.scan.id] = "Coloring…" }
                 guard let meshData = try? Data(contentsOf: info.meshURL) else {
-                    DispatchQueue.main.async { self.bulkColoringMessages[info.scan.id] = nil }
+                    DispatchQueue.main.async {
+                        self.bulkColoringMessages[info.scan.id] = nil
+                        ScanPostprocessor.releaseInFlight(info.id)
+                    }
                     continue
                 }
 
@@ -798,6 +809,7 @@ struct LocationDetailView: View {
                     info.scan.location?.updatedAt = Date()
                     self.bulkColoringMessages[info.scan.id] = nil
                     try? self.modelContext.save()
+                    ScanPostprocessor.releaseInFlight(info.id)   // after the writeback, on main
                 }
             }
 
