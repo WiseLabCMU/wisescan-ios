@@ -5,6 +5,7 @@ struct DashboardView: View {
     @State private var showSettings = false
     @State private var serverStatus: ServerStatus = .unknown
     @State private var wearableManager = MetaWearableManager.shared
+    @State private var thetaManager = ThetaCameraManager.shared
 
     enum ServerStatus {
         case unknown, checking, available, unavailable
@@ -199,6 +200,16 @@ struct DashboardView: View {
                             .foregroundColor(.white)
                         }
                         .padding(.horizontal)
+
+                        // MARK: - 360° Still Source (Theta OSC spike)
+                        Text("360° CAMERA (STILL SOURCE)")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                            .padding(.horizontal)
+                            .padding(.top, 16)
+
+                        ThetaCameraCard(manager: thetaManager)
+                            .padding(.horizontal)
                     }
                     .padding(.vertical)
                 }
@@ -416,6 +427,155 @@ struct WearableCard: View {
     }
 }
 
+/// Dashboard card for the 360° still-source spike: shows Theta connection state and a
+/// "Test Shutter" trigger. Wi‑Fi is joined manually (iOS Settings) for now, so connecting
+/// is an explicit "Check Connection" tap rather than automatic on appear (keeps the iOS
+/// Local Network permission prompt tied to a deliberate action). See ThetaCameraManager.
+struct ThetaCameraCard: View {
+    @Bindable var manager: ThetaCameraManager
+
+    private var statusColor: Color {
+        switch manager.state {
+        case .connected: return .green
+        case .connecting: return .cyan
+        case .failed: return .red
+        case .disconnected: return .gray
+        }
+    }
+
+    private var statusLabel: String {
+        switch manager.state {
+        case .disconnected: return "Not connected"
+        case .connecting: return "Checking…"
+        case .connected(let model, let firmware): return "\(model) · \(firmware)"
+        case .failed: return "Connection failed"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: "camera.aperture")
+                    .font(.title2)
+                    .foregroundColor(manager.isConnected ? .green : .gray)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Ricoh Theta")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                    HStack(spacing: 6) {
+                        Circle().fill(statusColor).frame(width: 8, height: 8)
+                        Text(statusLabel)
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                            .lineLimit(1)
+                        if let battery = manager.batteryLevel {
+                            Text("· 🔋 \(Int(battery * 100))%")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                    }
+                }
+                Spacer()
+            }
+
+            if case .failed(let message) = manager.state {
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
+
+            HStack(spacing: 12) {
+                Button(action: { manager.refreshConnection() }, label: {
+                    HStack {
+                        if manager.state == .connecting {
+                            ProgressView().tint(.white).padding(.trailing, 2)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        Text("Check Connection")
+                            .font(.subheadline)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(10)
+                    .foregroundColor(.white)
+                })
+                .disabled(manager.state == .connecting)
+
+                Button(action: { manager.takePicture() }, label: {
+                    HStack {
+                        if manager.isCapturing {
+                            ProgressView().tint(.black).padding(.trailing, 2)
+                        } else {
+                            Image(systemName: "camera.fill")
+                        }
+                        Text("Test Shutter")
+                            .font(.subheadline).bold()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(manager.isConnected ? Color.cyan.opacity(0.85) : Color.gray.opacity(0.3))
+                    .cornerRadius(10)
+                    .foregroundColor(manager.isConnected ? .black : .gray)
+                })
+                .disabled(!manager.isConnected || manager.isCapturing)
+            }
+
+            // Last trigger result — the P2 spike's headline number (round-trip latency).
+            if let capture = manager.lastCapture {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                    Text("Captured in \(capture.roundTripMs) ms")
+                        .font(.caption).foregroundColor(.white)
+                }
+                // The camera returns an absolute http URL to the JPEG; while the phone is on
+                // the camera's Wi‑Fi, tapping opens it in Safari to view/save the shot.
+                if let url = URL(string: capture.fileURL) {
+                    Link(destination: url) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "photo")
+                            Text(capture.fileURL)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .font(.caption2)
+                        .foregroundColor(.cyan)
+                    }
+                } else {
+                    Text(capture.fileURL)
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            } else if let error = manager.lastError {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
+                    Text(error)
+                        .font(.caption).foregroundColor(.orange)
+                }
+            }
+
+            Text("Join the camera's Wi‑Fi in Settings, then Check Connection.")
+                .font(.caption2)
+                .foregroundColor(.gray.opacity(0.7))
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))
+        .cornerRadius(16)
+    }
+}
+
 #Preview {
     DashboardView()
+}
+
+#Preview("ThetaCameraCard") {
+    ZStack {
+        Color.black
+        ThetaCameraCard(manager: ThetaCameraManager.shared)
+            .padding()
+    }
 }

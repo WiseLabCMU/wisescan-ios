@@ -155,6 +155,25 @@ struct UserGuideView: View {
                 }
                 .listRowBackground(Color.white.opacity(0.05))
 
+                // MARK: - Device Connection Guides
+                Section {
+                    NavigationLink(destination: MetaConnectionGuideView()) {
+                        guideRow(icon: "eyeglasses", title: "Connect Meta Ray-Ban",
+                                 text: "Pair in Meta AI, grant camera access, and stream proxy frames during a scan.")
+                    }
+                    NavigationLink(destination: ThetaConnectionGuideView()) {
+                        guideRow(icon: "camera.aperture", title: "Connect Ricoh Theta",
+                                 text: "Join the 360° camera's Wi‑Fi and trigger stills from the Dashboard.")
+                    }
+                } header: {
+                    Text("DEVICE CONNECTION")
+                } footer: {
+                    Text("Step-by-step setup and troubleshooting for each supported capture device.")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                }
+                .listRowBackground(Color.white.opacity(0.05))
+
                 // MARK: - Recommended Viewers
                 Section {
                     appRow(name: "Files", icon: "folder.fill", color: .blue,
@@ -191,11 +210,14 @@ struct UserGuideView: View {
         .navigationTitle("User Guide")
         .navigationBarTitleDisplayMode(.inline)
     }
+}
 
-    // MARK: - Helper Views
+// MARK: - Helper Views
+// In a private extension so the main struct body stays under the type_body_length limit.
 
+private extension UserGuideView {
     @ViewBuilder
-    private func guideRow(icon: String, title: String, text: String) -> some View {
+    func guideRow(icon: String, title: String, text: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: icon)
                 .foregroundColor(.cyan)
@@ -214,7 +236,7 @@ struct UserGuideView: View {
     }
 
     @ViewBuilder
-    private func formatRow(format: String, desc: String) -> some View {
+    func formatRow(format: String, desc: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Text(format)
                 .font(.caption).bold()
@@ -230,8 +252,8 @@ struct UserGuideView: View {
     }
 
     @ViewBuilder
-    private func appRow(name: String, icon: String, color: Color, desc: String,
-                        appStore: String? = nil, website: String? = nil) -> some View {
+    func appRow(name: String, icon: String, color: Color, desc: String,
+                appStore: String? = nil, website: String? = nil) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: icon)
                 .foregroundColor(color)

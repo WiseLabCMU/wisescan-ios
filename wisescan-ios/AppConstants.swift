@@ -147,6 +147,10 @@ enum AppConstants {
     static let analysisAmbientLightWarnThreshold: CGFloat = 500   // lux below which lighting is "Dim" (warning tier — reduced quality)
     static let analysisTimeoutSeconds: TimeInterval = 30          // fallback timeout if 360° not reached
     static let analysisYawCompletionDeg: Float = 330              // yaw coverage (degrees) to count as "360°" (allow slight gap)
+
+    // MARK: - 360° Still Source (Theta OSC spike — feat/still-source-360)
+    static let thetaCaptureTimeout: TimeInterval = 20            // max wait for a takePicture command to reach "done"
+    static let thetaStatusPollInterval: TimeInterval = 0.4       // /osc/commands/status poll cadence while a capture is inProgress
 }
 
 // MARK: - Semantic View Mode
