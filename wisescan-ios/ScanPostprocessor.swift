@@ -363,7 +363,9 @@ enum ScanPostprocessor {
         let url = scanDirectory.appendingPathComponent("roomplan.json")
         guard let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) else { return nil }
-        return PlaneRegistration.planes(fromExportSurfaces: decoded.surfaces)
+        // minArea: 0 — the proxy visualizes every decoded plane (the sliver guard is a fit concern,
+        // not a rendering one; keeping slivers here avoids gaps in the ghost).
+        return PlaneRegistration.planes(fromExportSurfaces: decoded.surfaces, minArea: 0)
     }
 
     /// Offline RoomBuilder run with a (generous) backstop timeout — called by DeferredRoomBuild's

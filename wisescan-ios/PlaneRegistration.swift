@@ -81,12 +81,13 @@ enum PlaneRegistration {
 
     #if canImport(RoomPlan)
     /// Planes straight from a `CapturedRoom` (the save-time source side: this rescan's final
-    /// RoomBuilder output). Surface local frame: rectangle in XY, normal along Z.
-    static func planes(from room: CapturedRoom) -> [Plane] {
+    /// RoomBuilder output). Surface local frame: rectangle in XY, normal along Z. `minArea` mirrors
+    /// the live-anchor guard — see `planes(fromExportSurfaces:)`.
+    static func planes(from room: CapturedRoom, minArea: Float = 1.0) -> [Plane] {
         var out: [Plane] = []
         for s in room.walls { out.append(plane(from: s, category: .wall)) }
         for s in room.floors { out.append(plane(from: s, category: .floor)) }
-        return out
+        return out.filter { $0.area >= minArea }
     }
 
     private static func plane(from s: CapturedRoom.Surface, category: Category) -> Plane {
@@ -99,11 +100,16 @@ enum PlaneRegistration {
     }
 
     /// Planes from the ghost's persisted clean schema (the target side: decoded `roomplan.json`).
-    static func planes(fromExportSurfaces surfaces: [RoomPlanExportData.ExportSurface]) -> [Plane] {
+    /// `minArea` mirrors the live-anchor guard (`planes(fromPlaneAnchors:)`): sub-1 m² surfaces are
+    /// RoomPlan slivers/fragments (e.g. the 0.2 m window-wall sliver that biased the trimmed fit
+    /// ~1 cm) — muted by area weight anyway, but dropping them keeps correspondence matching clean.
+    /// Pass `minArea: 0` for visualization callers (the proxy) that want every decoded plane.
+    static func planes(fromExportSurfaces surfaces: [RoomPlanExportData.ExportSurface],
+                       minArea: Float = 1.0) -> [Plane] {
         surfaces.compactMap {
             plane(category: $0.category, width: $0.dimensions.width,
                   height: $0.dimensions.height, transform: $0.transform)
-        }
+        }.filter { $0.area >= minArea }
     }
     #endif
 
