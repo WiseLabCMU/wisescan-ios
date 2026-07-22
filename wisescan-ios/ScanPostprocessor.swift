@@ -271,7 +271,10 @@ enum ScanPostprocessor {
                 frameCenter = memo
             } else {
                 frameCenter = MeshPreviewView.canonicalFrameCenter(for: scan.location)
-                if let locId = scan.location?.id { frameCenters[locId] = frameCenter }
+                // updateValue, not subscript-assign: the value type is optional, so `dict[k] = nil`
+                // would DROP the key — a nil-frame location would then re-decode the roomplan for
+                // every scan instead of memoizing the nil.
+                if let locId = scan.location?.id { frameCenters.updateValue(frameCenter, forKey: locId) }
             }
             return ScanWork(
                 scan: scan,
