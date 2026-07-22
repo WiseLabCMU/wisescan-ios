@@ -425,3 +425,15 @@ private struct CompactLocationTile: View {
         }
     }
 }
+
+#Preview {
+    // Empty-state / compile smoke check: a populated graph needs SwiftData-backed
+    // locations with stitch links. Renders the no-links placeholder.
+    StitchGraphView(
+        locations: [],
+        renderRequest: .constant(nil),
+        isEditing: .constant(false),
+        selectedLocations: .constant([]),
+        visibleLocationIds: .constant([])
+    )
+}

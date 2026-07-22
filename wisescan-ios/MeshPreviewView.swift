@@ -980,7 +980,9 @@ struct MeshPreviewView: UIViewRepresentable {
 }
 
 #Preview {
+    // scanName/isColored exercise the title caption over the loading screen (a real
+    // mesh file would be needed to render actual geometry).
     NavigationView {
-        MeshPreviewContainer()
+        MeshPreviewContainer(scanName: "Sample Scan", isColored: false)
     }
 }
