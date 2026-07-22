@@ -325,6 +325,12 @@ struct SettingsView: View {
                                     // production, where it would silently drop per-face classification
                                     // (the wall/non-wall labels plane registration depends on).
                                     self.meshClassifier = AppConstants.meshClassifier
+                                    // Diagnostics toggles gate on their own keys (not developerMode),
+                                    // so a bench-ON value would keep costing after dev-mode exit.
+                                    self.hideLivePoints = AppConstants.hideLivePoints
+                                    self.perfDiagnostics = AppConstants.perfDiagnostics
+                                    self.pauseVRCompute = AppConstants.pauseVRCompute
+                                    self.memDiagForceReclaim = AppConstants.memDiagForceReclaim
                                 }
                             }
                         )) {
