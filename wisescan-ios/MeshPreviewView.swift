@@ -717,9 +717,12 @@ struct MeshPreviewView: UIViewRepresentable {
     /// nil when no roomplan.json exists (pre-RoomPlan scans) → caller falls back to bbox centering.
     nonisolated static func canonicalRoomFrame(scanDirectoryURL: URL?) -> (center: SIMD3<Float>, span: Float)? {
         guard let scanDir = scanDirectoryURL else { return nil }
+        // Prefer the scan-root copy (matches artifactURL / registration / export); the raw_data/
+        // mirror is only a fallback — it can momentarily lag the top-level copy while registration
+        // rewrites the frame at postprocess, so reading it first risks canonical-mesh/raw-outline.
         let candidates = [
-            scanDir.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json"),
-            scanDir.appendingPathComponent("roomplan.json")
+            scanDir.appendingPathComponent("roomplan.json"),
+            scanDir.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json")
         ]
         var exportData: RoomPlanExportData?
         for url in candidates {
@@ -778,10 +781,12 @@ struct MeshPreviewView: UIViewRepresentable {
     ) -> SemanticOutlineResult? {
         guard let scanDir = scanDirectoryURL else { return nil }
 
-        // Find roomplan.json (check raw_data/ subdirectory first, then scan root)
+        // Find roomplan.json — prefer the scan-root copy (matches artifactURL / registration /
+        // export); the raw_data/ mirror is only a fallback (it can lag the top-level copy during a
+        // registration frame-rewrite at postprocess).
         let candidates = [
-            scanDir.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json"),
-            scanDir.appendingPathComponent("roomplan.json")
+            scanDir.appendingPathComponent("roomplan.json"),
+            scanDir.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json")
         ]
         var exportData: RoomPlanExportData?
         for url in candidates {
