@@ -192,6 +192,40 @@ enum ScanPostprocessor {
 
     // MARK: - The engine
 
+    /// Everything the background pass needs, snapshotted on the MAIN actor before dispatch —
+    /// SwiftData `@Model` objects and their faulted relationships are NOT thread-safe off the main
+    /// actor. `scan` is a bare reference kept only for the main-thread progress callback + model
+    /// writeback in `run()`; the background pass reads exclusively the snapshot + the filesystem.
+    private struct ScanWork {
+        let scan: CapturedScan
+        let id: UUID
+        let dir: URL
+        let raw: URL
+        let name: String
+        let previewURL: URL
+        let steps: [Step]
+        let origRoomPlanURL: URL?
+        let origId: UUID?
+        let pose: [Float]?
+        let frameCenter: SIMD3<Float>?
+    }
+
+    /// Guards two Process/Color batches from processing the SAME scan concurrently. Registration
+    /// bakes the raw→canonical transform INTO mesh.obj in place, so an interleaved second pass could
+    /// double-bake or tear the file. Claimed on main when a batch is armed; released as each scan's
+    /// background work completes.
+    nonisolated private static let inFlightLock = NSLock()
+    nonisolated(unsafe) private static var inFlight: Set<UUID> = []
+
+    private nonisolated static func claimInFlight(_ id: UUID) -> Bool {
+        inFlightLock.lock(); defer { inFlightLock.unlock() }
+        return inFlight.insert(id).inserted
+    }
+    private nonisolated static func releaseInFlight(_ id: UUID) {
+        inFlightLock.lock(); defer { inFlightLock.unlock() }
+        inFlight.remove(id)
+    }
+
     /// Run every achievable pending step for `scans`. Call from MAIN; the work runs on a utility
     /// queue and hops back to main for model mutations + callbacks. `scans` is re-sorted
     /// oldest-first per location internally (registration depends on the original's room existing
@@ -215,21 +249,48 @@ enum ScanPostprocessor {
             }
         }
         let ordered = batch.sorted { $0.capturedAt < $1.capturedAt }
+
+        // Snapshot every @Model-derived value on MAIN before dispatching (SwiftData objects and
+        // their faulted relationships aren't thread-safe off the main actor); the background pass
+        // reads only the snapshot + the filesystem. A scan already claimed by another in-flight
+        // batch is skipped — still reported done so callers' progress counters stay in sync.
+        let work: [ScanWork] = ordered.compactMap { scan in
+            guard claimInFlight(scan.id) else {
+                progress?(scan, nil)
+                return nil
+            }
+            let orig = original(of: scan)
+            return ScanWork(
+                scan: scan,
+                id: scan.id,
+                dir: scan.scanDirectory,
+                raw: scan.rawDataPath,
+                name: scan.name,
+                previewURL: scan.modelPreviewURL,
+                steps: pendingSteps(for: scan, includeColorize: colorize),
+                origRoomPlanURL: orig.flatMap { artifactURL("roomplan.json", in: $0) },
+                origId: orig?.id,
+                pose: scan.location?.imagingPoseMatrix,
+                frameCenter: MeshPreviewView.canonicalFrameCenter(for: scan.location)
+            )
+        }
+
         DispatchQueue.global(qos: .utility).async {
-            for scan in ordered {
+            for w in work {
                 let report: (String?) -> Void = { msg in
-                    DispatchQueue.main.async { progress?(scan, msg) }
+                    DispatchQueue.main.async { progress?(w.scan, msg) }
                 }
-                let outcome = processOne(scan, colorize: colorize, report: report)
+                let outcome = processOne(w, report: report)
                 DispatchQueue.main.async {
                     if outcome.didStructural || outcome.didColorize {
-                        scan.postprocessedAt = Date()
-                        if outcome.didColorize { scan.isColored = true }
-                        scan.location?.updatedAt = Date()
+                        w.scan.postprocessedAt = Date()
+                        if outcome.didColorize { w.scan.isColored = true }
+                        w.scan.location?.updatedAt = Date()
                         try? modelContext.save()
                     }
-                    progress?(scan, nil)
+                    progress?(w.scan, nil)
                 }
+                releaseInFlight(w.id)   // file critical section (processOne) is done
             }
             DispatchQueue.main.async { completion?() }
         }
@@ -241,15 +302,15 @@ enum ScanPostprocessor {
     }
 
     // swiftlint:disable:next function_body_length cyclomatic_complexity
-    private static func processOne(_ scan: CapturedScan, colorize: Bool,
+    private static func processOne(_ w: ScanWork,
                                    report: @escaping (String?) -> Void) -> Outcome {
         var outcome = Outcome()
         let fm = FileManager.default
-        let dir = scan.scanDirectory
-        let raw = scan.rawDataPath
-        let steps = pendingSteps(for: scan, includeColorize: colorize)
+        let dir = w.dir
+        let raw = w.raw
+        let steps = w.steps   // computed on main (SwiftData reads) before dispatch
         guard !steps.isEmpty else { return outcome }
-        log.info("postprocess \(scan.name, privacy: .public): steps=\(steps.map(\.rawValue).joined(separator: "+"), privacy: .public)")
+        log.info("postprocess \(w.name, privacy: .public): steps=\(steps.map(\.rawValue).joined(separator: "+"), privacy: .public)")
 
         // Writes derived artifacts to BOTH the scan dir top level (viewer / ghost loader / gates)
         // and raw_data/ (export staging parity with the old save-time pipeline).
@@ -264,6 +325,12 @@ enum ScanPostprocessor {
             try? fm.removeItem(at: dst)
             try? fm.copyItem(at: src, to: dst)
         }
+        // Off-main-safe artifact lookup (scan-dir top level then raw_data/), resolving against the
+        // snapshotted dirs — the @Model-based artifactURL(_:in:) would fault the scan off-main.
+        func artifact(_ name: String) -> URL? {
+            [dir.appendingPathComponent(name), raw.appendingPathComponent(name)]
+                .first { fm.fileExists(atPath: $0.path) }
+        }
 
         // ── 1. REGISTRATION ──
         // The room is already on disk (written by the deferred post-save RoomBuilder, or by the
@@ -273,13 +340,13 @@ enum ScanPostprocessor {
         // the planes are already raw.
         var appliedT: simd_float4x4?
         if steps.contains(.registration),
-           let orig = original(of: scan),
-           let targetURL = artifactURL("roomplan.json", in: orig) {
+           let targetURL = w.origRoomPlanURL,
+           let origId = w.origId {
             report("Registering…")
             let sourcePlanes = SaveRegistration.rawFramePlanes(scanDirectory: dir)
             if let regOutcome = SaveRegistration.run(sourcePlanes: sourcePlanes,
                                                      canonicalRoomPlanURL: targetURL,
-                                                     targetScanId: orig.id) {
+                                                     targetScanId: origId) {
                 SaveRegistration.writeSidecar(regOutcome.sidecar, to: dir)
                 mirrorToRaw("registration.json")
                 appliedT = regOutcome.appliedTransform
@@ -305,7 +372,7 @@ enum ScanPostprocessor {
         // out from under a version-current proxy — rebuild it even though its header says current.
         if steps.contains(.proxy) || appliedT != nil {
             report("Building proxy…")
-            if let classesURL = artifactURL("face_classes.bin", in: scan),
+            if let classesURL = artifact("face_classes.bin"),
                let classes = try? Data(contentsOf: classesURL),
                let mesh = try? Data(contentsOf: dir.appendingPathComponent("mesh.obj")),
                let planes = currentFramePlanes(scanDirectory: dir), !planes.isEmpty {
@@ -335,14 +402,12 @@ enum ScanPostprocessor {
         // ── Preview regen (mesh moved and/or got colors) ──
         if outcome.didStructural || outcome.didColorize {
             report("Rendering preview…")
-            let pose = scan.location?.imagingPoseMatrix
-            let frameCenter = MeshPreviewView.canonicalFrameCenter(for: scan.location)
             if let img = MeshPreviewView.generateSnapshot(
                 meshURL: dir.appendingPathComponent("mesh.obj"),
                 colorsURL: dir.appendingPathComponent("colors.bin"),
-                poseMatrix: pose, frameCenter: frameCenter),
+                poseMatrix: w.pose, frameCenter: w.frameCenter),
                let data = img.jpegData(compressionQuality: 0.8) {
-                try? data.write(to: scan.modelPreviewURL)
+                try? data.write(to: w.previewURL)
             }
         }
         return outcome

@@ -734,47 +734,69 @@ struct LocationDetailView: View {
         guard !scans.isEmpty else { return }
         isBulkColoring = true
 
+        // Snapshot every @Model-derived value on main before dispatching — SwiftData models and
+        // their faulted relationships aren't thread-safe off the main actor (mirrors ScansListView's
+        // ScanColorizeInfo). The background loop below reads only the snapshot + the filesystem.
+        struct ColorizeInfo {
+            let scan: CapturedScan   // touched only on main (progress key + writeback)
+            let meshURL: URL
+            let rawDataDir: URL
+            let colorsURL: URL
+            let previewURL: URL
+            let pose: [Float]?
+            let frameCenter: SIMD3<Float>?
+        }
+        let infos: [ColorizeInfo] = scans.map { scan in
+            ColorizeInfo(
+                scan: scan,
+                meshURL: scan.meshFileURL,
+                rawDataDir: scan.rawDataPath,
+                colorsURL: scan.colorsFileURL,
+                previewURL: scan.modelPreviewURL,
+                pose: scan.location?.imagingPoseMatrix,
+                frameCenter: MeshPreviewView.canonicalFrameCenter(for: scan.location)
+            )
+        }
+
         DispatchQueue.global(qos: .utility).async {
-            for scan in scans {
+            for info in infos {
                 // Per-card progress: each card shows its own "Coloring NN%" as the batch reaches it
                 // (mirrors how per-card upload status is shown). Same model property the single-card
                 // Color button uses, so only one card animates at a time as the loop advances.
-                DispatchQueue.main.async { self.bulkColoringMessages[scan.id] = "Coloring…" }
-                guard let meshData = try? Data(contentsOf: scan.meshFileURL) else {
-                    DispatchQueue.main.async { self.bulkColoringMessages[scan.id] = nil }
+                DispatchQueue.main.async { self.bulkColoringMessages[info.scan.id] = "Coloring…" }
+                guard let meshData = try? Data(contentsOf: info.meshURL) else {
+                    DispatchQueue.main.async { self.bulkColoringMessages[info.scan.id] = nil }
                     continue
                 }
 
                 var lastPct = -1
                 let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
                     objData: meshData,
-                    rawDataDir: scan.rawDataPath,
+                    rawDataDir: info.rawDataDir,
                     progress: { p in
                         let pct = Int(p * 100)
                         guard pct != lastPct else { return } // throttle to whole-percent changes
                         lastPct = pct
-                        DispatchQueue.main.async { self.bulkColoringMessages[scan.id] = "Coloring \(pct)%" }
+                        DispatchQueue.main.async { self.bulkColoringMessages[info.scan.id] = "Coloring \(pct)%" }
                     }
                 )
 
                 if let colors = vertexColors {
-                    try? colors.write(to: scan.colorsFileURL)
+                    try? colors.write(to: info.colorsURL)
                 }
 
-                let pose = scan.location?.imagingPoseMatrix
-                let frameCenter = MeshPreviewView.canonicalFrameCenter(for: scan.location)
                 if let img = MeshPreviewView.generateSnapshot(
-                    meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL,
-                    poseMatrix: pose, frameCenter: frameCenter
+                    meshURL: info.meshURL, colorsURL: info.colorsURL,
+                    poseMatrix: info.pose, frameCenter: info.frameCenter
                 ),
                    let data = img.jpegData(compressionQuality: 0.8) {
-                    try? data.write(to: scan.modelPreviewURL)
+                    try? data.write(to: info.previewURL)
                 }
 
                 DispatchQueue.main.async {
-                    scan.isColored = true
-                    scan.location?.updatedAt = Date()
-                    self.bulkColoringMessages[scan.id] = nil
+                    info.scan.isColored = true
+                    info.scan.location?.updatedAt = Date()
+                    self.bulkColoringMessages[info.scan.id] = nil
                     try? self.modelContext.save()
                 }
             }
