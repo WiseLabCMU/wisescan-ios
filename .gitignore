@@ -132,3 +132,10 @@ Network Trash Folder
 Temporary Items
 .apdisk
 .derivedData/
+
+# Raw capture artifacts — contain UNBLURRED imagery of people (no export blur for
+# 360° yet). Never commit. Enforced by the privacy guard in scripts/pre-commit.
+# See CONTRIBUTING.md -> Privacy Filtering Patterns.
+**/raw_data/
+**/theta_stills/
+*.xcappdata

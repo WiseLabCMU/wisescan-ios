@@ -1,15 +1,16 @@
 #!/bin/bash
-# pre-commit hook: verify release-please version markers in project.pbxproj
-#
-# Xcode's project serializer strips non-standard inline comments when it
-# resaves the file. This hook catches the stripped markers before they're
-# committed. Install via: ./scripts/install-hooks.sh
-#
+# pre-commit hook. Install via: ./scripts/install-hooks.sh
 # See CONTRIBUTING.md for details.
+#
+# Two guards:
+#   1. release-please version markers in project.pbxproj (Xcode strips them).
+#   2. Privacy: block debug-only file-sharing plist keys and raw capture artifacts.
 
+HOOK_DIR="$(dirname "$0")"
+FAIL=0
+
+# ---- 1. release-please version markers -------------------------------------
 PBXPROJ="wisescan-ios.xcodeproj/project.pbxproj"
-
-# Only check if project.pbxproj is staged
 if git diff --cached --name-only | grep -q "$PBXPROJ"; then
     EXPECTED=2
     FOUND=$(git show :"$PBXPROJ" | grep -c "x-release-please-version" || true)
@@ -24,6 +25,43 @@ if git diff --cached --name-only | grep -q "$PBXPROJ"; then
         echo ""
         echo "   See CONTRIBUTING.md for details."
         echo ""
-        exit 1
+        FAIL=1
     fi
+fi
+
+# ---- 2. Privacy guard ------------------------------------------------------
+. "$HOOK_DIR/privacy-guard.sh"
+
+while IFS= read -r -d '' f; do
+    # 2a. Debug-only keys in any staged .plist. Checks the STAGED blob, so a
+    #     `git add -p` that leaves the debug hunk unstaged passes cleanly.
+    case "$f" in
+    *.plist)
+        hits=$(pg_plist_violations "$(git show ":$f" 2>/dev/null)")
+        if [ -n "$hits" ]; then
+            echo ""
+            echo "❌ ERROR: debug-only key(s) staged in $f:$hits"
+            echo "   These expose the app's Documents (raw, unblurred 360° stills) via Files/Finder."
+            echo "   Keep them as a LOCAL edit for debugging — do not commit them."
+            echo "   Unstage:  git restore --staged \"$f\"   (or stage other hunks with: git add -p)"
+            FAIL=1
+        fi
+        ;;
+    esac
+
+    # 2b. Raw capture artifacts must never be committed.
+    if pg_is_forbidden_path "$f"; then
+        echo ""
+        echo "❌ ERROR: raw capture artifact staged: $f"
+        echo "   Raw scans / 360° stills contain unblurred imagery of people (export blur not implemented)."
+        echo "   Remove from the commit:  git rm --cached \"$f\"   (and add it to .gitignore)"
+        FAIL=1
+    fi
+done < <(git diff --cached --name-only -z --diff-filter=ACMR)
+
+if [ "$FAIL" -ne 0 ]; then
+    echo ""
+    echo "   See CONTRIBUTING.md -> Privacy Filtering Patterns."
+    echo ""
+    exit 1
 fi
