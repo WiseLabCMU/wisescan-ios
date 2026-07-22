@@ -4,6 +4,7 @@ import UIKit
 import ImageIO
 import Network
 import os
+import simd
 
 /// Connection + shutter-trigger + still-download manager for a Ricoh Theta 360° camera,
 /// driving the **still-source spike** on `feat/still-source-360`
@@ -78,6 +79,8 @@ final class ThetaCameraManager {
     private(set) var currentStillFormat: StillFormat?
     /// Rolling spike event log, newest first (capped).
     private(set) var events: [ThetaEvent] = []
+    /// Count of 360° stills captured into the current scan (reset at record start).
+    private(set) var scanStillCount = 0
     private(set) var lastError: String?
 
     /// Theta **direct (AP) mode** default host. Client/LAN mode uses a different address;
@@ -263,6 +266,54 @@ final class ThetaCameraManager {
             } catch {
                 log(.config, "Set resolution failed: \(Self.describe(error))")
             }
+        }
+    }
+
+    // MARK: - Live-scan capture
+
+    /// Resets the per-scan still counter. Call at record start.
+    func beginScanStillSession() { scanStillCount = 0 }
+
+    /// Triggers a 360° still during a live scan, tags it with the **phone's** ARKit world
+    /// pose + timestamp (captured by the caller at tap time), downloads the equirect, and
+    /// writes it — JPEG + metadata sidecar — into the scan's raw-data dir under
+    /// `theta_stills/`. Storing the phone pose (not the camera pose) is deliberate: it
+    /// captures the phone-pose ↔ equirect pairs the deferred rig-extrinsic calibration (P3)
+    /// needs. No-op unless connected and no capture is already in flight.
+    func captureStillForScan(phoneTransform: simd_float4x4, timestamp: TimeInterval, into rawDataDir: URL) {
+        guard isConnected, !isCapturing else { return }
+        isCapturing = true
+        lastError = nil
+        lastDownload = nil
+        previewImage = nil
+        Task {
+            let start = Date()
+            do {
+                let fileURL = try await triggerStill()
+                let triggerMs = Int(Date().timeIntervalSince(start) * 1000)
+                guard let url = URL(string: fileURL) else { throw URLError(.badURL) }
+                let dlStart = Date()
+                let data = try await downloadData(from: url)
+                let transferMs = Int(Date().timeIntervalSince(dlStart) * 1000)
+                let seq = scanStillCount + 1
+                let input = ScanStillInput(
+                    sequence: seq, phoneTransform: phoneTransform, timestamp: timestamp,
+                    sourceURL: fileURL, format: currentStillFormat,
+                    triggerMs: triggerMs, transferMs: transferMs)
+                try await Self.writeScanStill(data: data, input: input, into: rawDataDir)
+                scanStillCount = seq
+                lastCapture = CaptureOutcome(fileURL: fileURL, roundTripMs: triggerMs)
+                lastDownload = DownloadOutcome(bytes: data.count, elapsedMs: transferMs)
+                previewImage = Self.downsampledImage(from: data, maxPixel: 1200)
+                log(.capture, String(format: "Scan still #%d — trigger %d ms, %.1f MB in %d ms",
+                                     seq, triggerMs, Double(data.count) / 1_000_000, transferMs))
+            } catch {
+                let message = Self.describe(error)
+                lastError = message
+                log(.capture, "Scan still failed: \(message)")
+                if Self.isConnectivityError(error) { state = .failed(message) }
+            }
+            isCapturing = false
         }
     }
 }

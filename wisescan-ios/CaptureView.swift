@@ -22,6 +22,7 @@ struct CaptureView: View {
     // NOTE: capture/recording state is `internal` (not private) because the recording, alignment,
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession?
+    @State private var thetaManager = ThetaCameraManager.shared
     @State var saveMessage: String?
     /// Mesh vertex count captured at record-start. The "move to start the live mesh" cue is shown
     /// until enough NEW vertices appear; a baseline makes it fire in relocalized ghost/stitch flows
@@ -119,6 +120,23 @@ struct CaptureView: View {
     }
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State.
+    /// Screen-tap handler: capture a 360° Theta still into the active scan, tagged with the
+    /// phone's ARKit world pose + timestamp at tap time. Inert unless recording with a Theta
+    /// connected and a raw-data dir open. The pose is snapshotted here (synchronously) before
+    /// the ~seconds-long trigger/download, so it reflects the moment the user tapped.
+    private func captureThetaStill() {
+        guard isRecording, thetaManager.isConnected,
+              let frame = currentARSession?.currentFrame,
+              let rawDataDir = frameCaptureSession.captureDir else { return }
+        hapticGenerator.impactOccurred()
+        thetaManager.captureStillForScan(
+            phoneTransform: frame.camera.transform,
+            timestamp: frame.timestamp,
+            into: rawDataDir
+        )
+        showTransientMessage("📸 360° still #\(thetaManager.scanStillCount + 1)…", duration: 2)
+    }
+
     private func loadGhostMeshData() {
         guard let locId = scanStore.activeLocationForScan,
               let scanId = scanStore.activeScanToExtend else {
@@ -215,6 +233,14 @@ struct CaptureView: View {
                 isAnalyzing: $isAnalyzing
             )
                 .ignoresSafeArea()
+                // 360° still trigger: while recording with a Theta connected, a screen tap
+                // captures a 360° still tagged with the phone's ARKit pose at tap time (the
+                // minimal capture path for early rig-calibration testing). Buttons sit above
+                // this in the ZStack and handle their own taps, so this only fires on the
+                // open AR area. Gated so it's inert when no camera is connected.
+                .onTapGesture {
+                    captureThetaStill()
+                }
                 // Fix phase race: set .loadingWorldMap before the AR session starts
                 // loading the world map. onAppear fires AFTER the first render, so
                 // the AR view could detect a boundary anchor before the phase is set.
