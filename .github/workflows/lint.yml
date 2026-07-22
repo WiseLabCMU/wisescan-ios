@@ -22,3 +22,14 @@ jobs:
             exit 1
           fi
           echo "✅ Found $FOUND x-release-please-version markers (expected $EXPECTED)"
+
+  check-privacy:
+    name: Verify no committed privacy leaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same patterns as the local git hooks (scripts/privacy-guard.sh), so a
+      # missed hook install or a `--no-verify` commit can't leak into main.
+      - name: Scan the committed tree for debug keys and raw stills
+        run: ./scripts/check-privacy.sh

@@ -107,6 +107,24 @@ If `getCurrentWorldMap` fails (insufficient features / serialize error / timeout
 
 ## Build & Test
 
+### First-time setup — install the git hooks
+
+Git does **not** install hooks on clone. After cloning (and again whenever the hooks in `scripts/` change), install them once:
+
+```bash
+./scripts/install-hooks.sh
+```
+
+This installs a `pre-commit` hook (release-please marker check + privacy guard) and a `pre-push` backstop. The privacy guard blocks committing debug-only file-sharing keys and raw capture artifacts — see [Privacy Filtering Patterns](#2-privacy-filtering-patterns).
+
+Prefer not to re-install when the hooks change? Point git at the tracked hooks directly instead (one-time, always current):
+
+```bash
+git config core.hooksPath scripts
+```
+
+Either way, the local hooks are convenience: **CI enforces the same checks on every PR** via `scripts/check-privacy.sh` (see [.github/workflows/lint.yml](.github/workflows/lint.yml)), so a missed install or a `--no-verify` commit can't leak into `main`. Run that check yourself any time with `./scripts/check-privacy.sh`.
+
 To build the project locally, open `wisescan-ios.xcodeproj` with Xcode.
 
 The `wisescan-ios` repository uses [Release Please](https://github.com/googleapis/release-please) to automate CHANGELOG generation and semantic versioning. Your PR titles *must* follow Conventional Commit standards (e.g., `feat:`, `fix:`, `chore:`). Keep commit subjects to ~50 chars. Fastlane is used to automate TestFlight deployments via `fastlane testflight`.
