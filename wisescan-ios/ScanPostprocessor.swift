@@ -66,8 +66,11 @@ enum ScanPostprocessor {
     }
 
     /// The location's original scan — the canonical-frame owner (gen 0, authoritative forever).
+    /// Tie-break on id so two scans sharing a capturedAt can't flip the canonical owner between
+    /// launches (the SwiftData relationship array is unordered); MeshPreviewView.canonicalFrameCenter
+    /// uses the identical comparator so the two never disagree.
     static func original(of scan: CapturedScan) -> CapturedScan? {
-        scan.location?.scans.min(by: { $0.capturedAt < $1.capturedAt })
+        scan.location?.scans.min(by: { ($0.capturedAt, $0.id.uuidString) < ($1.capturedAt, $1.id.uuidString) })
     }
 
     /// Whether this scan should register into its location's canonical frame. Rescans yes; the
@@ -372,7 +375,9 @@ enum ScanPostprocessor {
     /// post-save continuation (blocking a utility queue only; nothing user-facing waits on it).
     /// A wedged RoomBuilder must not hang that queue forever, hence the timeout. On timeout the
     /// result box is NOT read (the task may still be writing it — data race) and the task is
-    /// cancelled so a runaway build can't keep burning CPU.
+    /// cancelled — best-effort only: RoomBuilder.capturedRoom is a single async call that does not
+    /// check Task.isCancelled, so a genuinely wedged build keeps running (and holding memory) until
+    /// the OS-level work completes; cancellation just stops us from waiting on / reading it.
     static func buildRoom(from captured: CapturedRoomData, timeout: TimeInterval) -> CapturedRoom? {
         let done = DispatchSemaphore(value: 0)
         let result = RoomResultBox()

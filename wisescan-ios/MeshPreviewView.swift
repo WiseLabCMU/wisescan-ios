@@ -156,7 +156,7 @@ struct MeshPreviewContainer: View {
                 // Resolve the location's canonical frame from its ORIGINAL (earliest) scan before
                 // mounting the viewer — every generation then renders at the same offset/zoom and
                 // cross-scan misalignment reads true. Tiny JSON decode; fine on main.
-                if let original = location?.scans.min(by: { $0.capturedAt < $1.capturedAt }) {
+                if let original = location?.scans.min(by: { ($0.capturedAt, $0.id.uuidString) < ($1.capturedAt, $1.id.uuidString) }) {
                     canonicalFrame = MeshPreviewView.canonicalRoomFrame(scanDirectoryURL: original.scanDirectory)
                 }
                 isViewerReady = true
@@ -757,7 +757,7 @@ struct MeshPreviewView: UIViewRepresentable {
     /// a different view per scan. Call where the SwiftData model is safe to touch (alongside
     /// reading `imagingPoseMatrix`) and pass the value into background snapshot work.
     static func canonicalFrameCenter(for location: ScanLocation?) -> SIMD3<Float>? {
-        guard let original = location?.scans.min(by: { $0.capturedAt < $1.capturedAt }) else { return nil }
+        guard let original = location?.scans.min(by: { ($0.capturedAt, $0.id.uuidString) < ($1.capturedAt, $1.id.uuidString) }) else { return nil }
         return canonicalRoomFrame(scanDirectoryURL: original.scanDirectory)?.center
     }
 

@@ -196,11 +196,13 @@ enum SaveRegistration {
         }
     }
 
-    /// DECISION 3 — legacy retroactive registration: premultiply an EXISTING clean roomplan.json's
+    /// DECISION 3 — retroactive registration: premultiply an EXISTING clean roomplan.json's
     /// surface/object transforms by the applied raw→canonical correction, so the viewer's semantic
-    /// outlines stay glued to the just-transformed mesh. (Fresh rooms take the transform at write
-    /// time via `RoomPlanExporter.writeRoomPlan(_:to:applying:)`; this path is for scans whose
-    /// roomplan was written before their registration ran.)
+    /// outlines stay glued to the just-transformed mesh. Under DECISION 3 ALL rooms take this path:
+    /// the deferred RoomBuilder writes roomplan.json RAW at save time (registration doesn't exist
+    /// yet), and every scan — fresh or legacy — is registered here at postprocess. (The
+    /// `applying:` parameter on `RoomPlanExporter.writeRoomPlan` is a write-time correction hook
+    /// that is currently unused, since registration always post-dates the room write.)
     static func retransformRoomPlanJSON(at url: URL, by t: simd_float4x4) {
         guard let data = try? Data(contentsOf: url),
               var decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) else { return }
