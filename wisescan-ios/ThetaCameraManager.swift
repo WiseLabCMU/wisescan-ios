@@ -1,5 +1,7 @@
 import Foundation
 import Observation
+import UIKit
+import ImageIO
 
 /// Connection + shutter-trigger manager for a Ricoh Theta 360° camera, driving the
 /// **still-source spike** on `feat/still-source-360` (see docs/design/still-source-360.md).
@@ -10,9 +12,13 @@ import Observation
 ///   round-trip latency) with **no external dependencies**.
 /// - The user joins the camera's Wi‑Fi AP **manually** (iOS Settings). We confirm the
 ///   link by probing the fixed OSC endpoint.
+/// - Adds an **explicit on-device download** of the triggered still (P2's "transfer
+///   time" viability number) — kept a separate action from the trigger so the two
+///   latencies are measured independently. Full JPEG is fetched to time the transfer;
+///   only a downsampled preview is retained (the 60MP bitmap is never held decoded).
 /// - No BLE trigger, no `NEHotspotConfiguration` auto-join, no `theta-client` SDK, no
-///   image download / rig calibration / cube-map export. Those are the design doc's
-///   P3/P4 work and are intentionally out of scope here.
+///   rig calibration / cube-map export. Those are the design doc's P3/P4 work and are
+///   intentionally out of scope here.
 ///
 /// Theta X speaks OSC API level 2.1, so still capture needs **no explicit session**
 /// (`camera.startSession` was an API-2.0 requirement) — `camera.takePicture` is issued
@@ -36,11 +42,24 @@ final class ThetaCameraManager {
         let roundTripMs: Int
     }
 
+    /// Result of downloading the triggered still — bytes and transfer wall-clock (P2's
+    /// "transfer time" viability number).
+    struct DownloadOutcome: Equatable {
+        let bytes: Int
+        let elapsedMs: Int
+        var megabytes: Double { Double(bytes) / 1_000_000 }
+        var megabytesPerSecond: Double { elapsedMs > 0 ? megabytes / (Double(elapsedMs) / 1000) : 0 }
+    }
+
     private(set) var state: ConnectionState = .disconnected
     /// Battery charge 0…1 from `/osc/state`, when known.
     private(set) var batteryLevel: Double?
     private(set) var isCapturing = false
     private(set) var lastCapture: CaptureOutcome?
+    private(set) var isDownloading = false
+    private(set) var lastDownload: DownloadOutcome?
+    /// Downsampled preview of the most recent download (the full-res image is not retained).
+    private(set) var previewImage: UIImage?
     private(set) var lastError: String?
 
     /// Theta **direct (AP) mode** default host. Client/LAN mode uses a different address;
@@ -53,7 +72,7 @@ final class ThetaCameraManager {
     private let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 8
-        cfg.timeoutIntervalForResource = 20
+        cfg.timeoutIntervalForResource = 60   // a full-res 360° JPEG is tens of MB over the camera AP
         cfg.waitsForConnectivity = false
         cfg.allowsCellularAccess = false
         return URLSession(configuration: cfg)
@@ -97,6 +116,9 @@ final class ThetaCameraManager {
         guard isConnected, !isCapturing else { return }
         isCapturing = true
         lastError = nil
+        // Drop any prior download so the card never shows a stale preview against a new shot.
+        lastDownload = nil
+        previewImage = nil
         Task {
             let start = Date()
             do {
@@ -115,6 +137,49 @@ final class ThetaCameraManager {
             }
             isCapturing = false
         }
+    }
+
+    // MARK: - Download
+
+    /// Downloads the most-recent capture's JPEG to time the transfer (P2 viability), then
+    /// keeps only a downsampled preview. Explicit action — not auto-run after the trigger —
+    /// so the transfer cost stays visible and separate from trigger latency.
+    func downloadLastCapture() {
+        guard let capture = lastCapture, let url = URL(string: capture.fileURL),
+              !isDownloading else { return }
+        isDownloading = true
+        lastError = nil
+        previewImage = nil
+        Task {
+            let start = Date()
+            do {
+                let (data, response) = try await session.data(from: url)
+                guard let http = response as? HTTPURLResponse else { throw ThetaError.badResponse(-1) }
+                guard (200...299).contains(http.statusCode) else { throw ThetaError.badResponse(http.statusCode) }
+                let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
+                lastDownload = DownloadOutcome(bytes: data.count, elapsedMs: elapsedMs)
+                // Downsample off the full JPEG so we never hold the ~60MP bitmap decoded.
+                previewImage = Self.downsampledImage(from: data, maxPixel: 1200)
+            } catch {
+                lastError = Self.describe(error)
+            }
+            isDownloading = false
+        }
+    }
+
+    /// ImageIO thumbnail decode — bounds peak memory to the preview size regardless of the
+    /// source resolution (a full-res equirect decode would be hundreds of MB).
+    private static func downsampledImage(from data: Data, maxPixel: CGFloat) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage)
     }
 
     // MARK: - OSC Web API (v2.1)

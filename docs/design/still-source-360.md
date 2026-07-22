@@ -68,6 +68,20 @@ Assessment criteria for each (fill in during the viability spike):
 4. **Metadata quality** — per-still gyro/level (zenith) data, timestamps, exposure info.
 5. **Cost, weight, battery life** on a handheld rig.
 
+### Measured on device (spike — Theta X, `feat/still-source-360`)
+
+First Wi‑Fi-OSC numbers from the Dashboard card ("Test Shutter" + "Download & Preview"):
+
+- **Trigger** (`camera.takePicture` round trip to `done`, over OSC HTTP): confirmed working.
+- **Transfer**: ~4.5 MB JPEG downloaded in ~1100 ms ≈ **~4.1 MB/s** over the camera AP.
+
+Read: at ~4 MB/s a full-resolution 60MP still (~15–20 MB) would take **~4–5 s** to
+transfer — consistent with the "2–6 s per still" estimate above, which points to
+**post-process mode as the default** and makes in-situ transfer viable only for smaller /
+lower-res captures. Caveat: a 4.5 MB file implies the camera was **not** at max still
+resolution — confirm the resolution setting before treating transfer time as final
+(max-quality stills transfer roughly 4× longer).
+
 ## Architecture: `StillSource` abstraction
 
 Introduce a protocol seam where `FrameCaptureSession` currently calls

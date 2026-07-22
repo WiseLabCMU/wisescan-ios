@@ -549,6 +549,40 @@ struct ThetaCameraCard: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+
+                // Download the still on-device (measures P2 transfer time) + preview it.
+                Button(action: { manager.downloadLastCapture() }, label: {
+                    HStack {
+                        if manager.isDownloading {
+                            ProgressView().tint(.white).padding(.trailing, 2)
+                        } else {
+                            Image(systemName: "arrow.down.circle")
+                        }
+                        Text(manager.isDownloading ? "Downloading…" : "Download & Preview")
+                            .font(.subheadline)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(10)
+                    .foregroundColor(.white)
+                })
+                .disabled(manager.isDownloading)
+
+                if let download = manager.lastDownload {
+                    Text(String(format: "Downloaded %.1f MB in %d ms (%.1f MB/s)",
+                                download.megabytes, download.elapsedMs, download.megabytesPerSecond))
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                }
+                if let preview = manager.previewImage {
+                    Image(uiImage: preview)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: .infinity)
+                        .frame(maxHeight: 160)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
             } else if let error = manager.lastError {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
