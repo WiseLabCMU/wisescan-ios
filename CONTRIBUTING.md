@@ -21,6 +21,30 @@ Privacy has two distinct paths — **do not conflate them**:
 - **Saved data (deferred blur):** during capture, raw (unblurred) frames are saved alongside ARKit's person segmentation masks (`masks/` directory, ~5-15KB grayscale PNGs at 256×192). Privacy blur is applied at **export time** in `ScanExportManager.applyPrivacyBlurAtExport()` — pixelating person regions in images and zeroing them in depth maps using the saved masks. This deferred approach eliminates 50-200ms/frame of privacy encode from the capture ioQueue, preventing ARFrame retention backpressure and VIO tracking loss. Raw images exist only in the app's sandboxed container; **no unblurred image or unmasked depth ever leaves the device**.
 - **Mesh exports:** person geometry is excluded from the exported mesh/point cloud.
 - **3D anchors:** re-source `face_anchors` from the **stencil**, not a second Vision pass — one confidence-weighted, observation-gated body-center centroid **per person** (not per grid cell, or they fragment across the body). Accumulated at capture time via `PrivacyBlurUtil.personCentroids(in:)` (cheap — just a few depth reads per centroid).
+- **360° stills are NOT blurred yet:** the Theta/equirect still source ([docs/design/still-source-360.md](docs/design/still-source-360.md)) writes raw equirectangular JPEGs to `raw_data/theta_stills/`. A 360° frame sees the whole room — including people behind the operator that the phone's forward-facing stencil never captured — and **per-face equirect blur is a deferred P3 invariant that is not yet implemented**. Until it lands, a scan exported with 360° stills contains unblurred imagery of bystanders. Treat these as device-only: do not export, share, or commit them.
+
+#### Debug-only file sharing (never commit)
+
+To inspect saved scans (`Documents/Scans/…/raw_data/`) on-device via the **Files app** or **Finder** during development, you can add these keys to `Custom-Info.plist` **locally**:
+
+```xml
+<key>UIFileSharingEnabled</key>
+<true/>
+<key>LSSupportsOpeningDocumentsInPlace</key>
+<true/>
+```
+
+They expose the app's entire Documents folder — including the raw, unblurred 360° stills above — so they are **debug-only and must never be committed or shipped in a production build**. Keep them as a local working-tree edit; when you need to commit *other* `Custom-Info.plist` changes, stage them selectively with `git add -p` so the debug keys stay out.
+
+**Enforcement (install once after cloning):**
+
+```bash
+./scripts/install-hooks.sh
+```
+
+- `scripts/pre-commit` blocks committing those keys (checked against the *staged* plist blob, so a `git add -p` that omits the debug hunk passes) and blocks staging raw capture artifacts (`raw_data/`, `theta_stills/`, `R#######.JPG`, `*.xcappdata`).
+- `scripts/pre-push` re-checks the pushed branch tip as a backstop against `git commit --no-verify`.
+- The same paths are also `.gitignore`d as defense-in-depth.
 
 ### 3. Code Style & Architecture
 

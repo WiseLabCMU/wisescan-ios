@@ -1,0 +1,47 @@
+#!/bin/bash
+# pre-push hook: privacy backstop. Blocks pushing a branch whose tip tree contains
+# debug-only file-sharing plist keys or raw capture artifacts — catching commits
+# made with `git commit --no-verify` (which skips pre-commit).
+#
+# Install via: ./scripts/install-hooks.sh    See CONTRIBUTING.md for details.
+
+HOOK_DIR="$(dirname "$0")"
+. "$HOOK_DIR/privacy-guard.sh"
+
+ZERO="0000000000000000000000000000000000000000"
+FAIL=0
+
+# stdin lines: <local ref> <local oid> <remote ref> <remote oid>
+while read -r local_ref local_oid remote_ref remote_oid; do
+    [ "$local_oid" = "$ZERO" ] && continue   # branch deletion — nothing to inspect
+
+    # Inspect the pushed tip tree: what the remote branch would contain.
+    while IFS= read -r -d '' f; do
+        case "$f" in
+        *.plist)
+            hits=$(pg_plist_violations "$(git show "$local_oid:$f" 2>/dev/null)")
+            if [ -n "$hits" ]; then
+                echo ""
+                echo "❌ PUSH BLOCKED: debug-only key(s) in $f:$hits  ($local_ref)"
+                echo "   Remove them and amend/rebase before pushing."
+                FAIL=1
+            fi
+            ;;
+        esac
+        if pg_is_forbidden_path "$f"; then
+            echo ""
+            echo "❌ PUSH BLOCKED: raw capture artifact in tree: $f  ($local_ref)"
+            echo "   Raw 360° stills are unblurred — purge from history before pushing."
+            FAIL=1
+        fi
+    done < <(git ls-tree -r --name-only -z "$local_oid")
+done
+
+if [ "$FAIL" -ne 0 ]; then
+    echo ""
+    echo "   See CONTRIBUTING.md -> Privacy Filtering Patterns."
+    echo ""
+    exit 1
+fi
+
+exit 0
