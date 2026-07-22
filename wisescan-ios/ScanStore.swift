@@ -132,6 +132,15 @@ class CapturedScan {
     @Transient var roomPlanFileURL: URL { scanDirectory.appendingPathComponent("roomplan.json") }
     @Transient var roomPlanRawFileURL: URL { scanDirectory.appendingPathComponent("roomplan_raw.json") }
 
+    /// Deterministic canonical ordering: oldest first, `id` as tie-break so scans sharing a
+    /// `capturedAt` can't flip the canonical-owner (gen-0) or batch/gate order between launches
+    /// (the SwiftData relationship array is unordered). Single source of truth — used by
+    /// `ScanPostprocessor.original`/`run`/`scansNeedingPostprocess`, the `MeshPreviewView`
+    /// canonical-frame lookup, and the DECISION-3 gate.
+    static func canonicalOrder(_ a: CapturedScan, _ b: CapturedScan) -> Bool {
+        (a.capturedAt, a.id.uuidString) < (b.capturedAt, b.id.uuidString)
+    }
+
     // DECISION 3 (postprocess) artifacts. face_classes is a RAW input persisted at save; the
     // other two are DERIVED outputs written by ScanPostprocessor (or, for legacy scans, by the
     // old save-time pipeline). The room itself (roomplan.json/_raw above) is written by the

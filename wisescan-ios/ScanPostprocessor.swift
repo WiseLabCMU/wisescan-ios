@@ -70,7 +70,7 @@ enum ScanPostprocessor {
     /// launches (the SwiftData relationship array is unordered); MeshPreviewView.canonicalFrameCenter
     /// uses the identical comparator so the two never disagree.
     static func original(of scan: CapturedScan) -> CapturedScan? {
-        scan.location?.scans.min(by: { ($0.capturedAt, $0.id.uuidString) < ($1.capturedAt, $1.id.uuidString) })
+        scan.location?.scans.min(by: CapturedScan.canonicalOrder)
     }
 
     /// Whether this scan should register into its location's canonical frame. Rescans yes; the
@@ -179,7 +179,7 @@ enum ScanPostprocessor {
     /// Returns the scans with pending structural work, oldest-first (the required run order).
     static func scansNeedingPostprocess(in location: ScanLocation) -> [CapturedScan] {
         location.scans
-            .sorted { $0.capturedAt < $1.capturedAt }
+            .sorted(by: CapturedScan.canonicalOrder)
             .filter { needsPostprocess($0) }
     }
 
@@ -251,7 +251,7 @@ enum ScanPostprocessor {
                 seen.insert(orig.id)
             }
         }
-        let ordered = batch.sorted { $0.capturedAt < $1.capturedAt }
+        let ordered = batch.sorted(by: CapturedScan.canonicalOrder)
 
         // Snapshot every @Model-derived value on MAIN before dispatching (SwiftData objects and
         // their faulted relationships aren't thread-safe off the main actor); the background pass

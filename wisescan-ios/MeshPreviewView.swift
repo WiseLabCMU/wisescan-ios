@@ -156,7 +156,7 @@ struct MeshPreviewContainer: View {
                 // Resolve the location's canonical frame from its ORIGINAL (earliest) scan before
                 // mounting the viewer — every generation then renders at the same offset/zoom and
                 // cross-scan misalignment reads true. Tiny JSON decode; fine on main.
-                if let original = location?.scans.min(by: { ($0.capturedAt, $0.id.uuidString) < ($1.capturedAt, $1.id.uuidString) }) {
+                if let original = location?.scans.min(by: CapturedScan.canonicalOrder) {
                     canonicalFrame = MeshPreviewView.canonicalRoomFrame(scanDirectoryURL: original.scanDirectory)
                 }
                 isViewerReady = true
@@ -736,7 +736,12 @@ struct MeshPreviewView: UIViewRepresentable {
 
         var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
-        for surface in roomData.surfaces {
+        // Only the STABLE architecture (walls + floor) frames the canonical view, per the rationale
+        // above — doors/windows/openings can be intermittently detected between builds and would
+        // shift the AABB; furniture objects aren't in `surfaces`. Fall back to all surfaces for a
+        // degenerate wall-less room so it still yields the same frame it did before.
+        let framing = roomData.surfaces.filter { $0.category == "wall" || $0.category == "floor" }
+        for surface in (framing.isEmpty ? roomData.surfaces : framing) {
             let dims = SIMD3<Float>(surface.dimensions.width, surface.dimensions.height, surface.dimensions.depth)
             let transform = reconstructMatrix(from: surface.transform)
             for c in orientedBoxCorners(dimensions: dims, transform: transform) {
@@ -757,7 +762,7 @@ struct MeshPreviewView: UIViewRepresentable {
     /// a different view per scan. Call where the SwiftData model is safe to touch (alongside
     /// reading `imagingPoseMatrix`) and pass the value into background snapshot work.
     static func canonicalFrameCenter(for location: ScanLocation?) -> SIMD3<Float>? {
-        guard let original = location?.scans.min(by: { ($0.capturedAt, $0.id.uuidString) < ($1.capturedAt, $1.id.uuidString) }) else { return nil }
+        guard let original = location?.scans.min(by: CapturedScan.canonicalOrder) else { return nil }
         return canonicalRoomFrame(scanDirectoryURL: original.scanDirectory)?.center
     }
 

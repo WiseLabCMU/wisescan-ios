@@ -669,7 +669,7 @@ struct LocationDetailView: View {
     private func postprocessGateAllows() -> Bool {
         // Same deterministic comparator as ScanPostprocessor.original(of:) — on a capturedAt tie
         // the gate must bad-check the SAME scan registration will target.
-        let ordered = location.scans.sorted { ($0.capturedAt, $0.id.uuidString) < ($1.capturedAt, $1.id.uuidString) }
+        let ordered = location.scans.sorted(by: CapturedScan.canonicalOrder)
         let prerequisites = [ordered.first, ordered.last].compactMap { $0 }
         if prerequisites.contains(where: { ScanPostprocessor.isBad($0) }) {
             showBadScanGate = true
