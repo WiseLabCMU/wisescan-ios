@@ -784,7 +784,7 @@ struct ScansListView: View {
                 }
 
                 DispatchQueue.main.async {
-                    entry.scan.isColored = true
+                    if vertexColors != nil { entry.scan.isColored = true }   // only when colors were produced (matches processOne)
                     entry.scan.location?.updatedAt = Date()
                     try? self.modelContext.save()
                     ScanPostprocessor.releaseInFlight(entry.info.id)   // after the writeback, on main
@@ -1619,7 +1619,7 @@ struct ScanCard: View {
             }
 
             DispatchQueue.main.async {
-                self.scan.isColored = true
+                if vertexColors != nil { self.scan.isColored = true }   // only when colors were produced (matches processOne)
                 self.scan.location?.updatedAt = Date() // Trigger preview image reload
                 try? self.modelContext.save()
                 self.coloringMessage = nil

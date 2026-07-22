@@ -805,7 +805,11 @@ struct LocationDetailView: View {
                 }
 
                 DispatchQueue.main.async {
-                    info.scan.isColored = true
+                    // Only mark colored when colors were actually produced — matches processOne's
+                    // didColorize gate. An unconditional flag would leave a scan claiming colors it
+                    // has no colors.bin for, and the auto-Process path (gated on !isColored) would
+                    // then skip it forever.
+                    if vertexColors != nil { info.scan.isColored = true }
                     info.scan.location?.updatedAt = Date()
                     self.bulkColoringMessages[info.scan.id] = nil
                     try? self.modelContext.save()
