@@ -224,10 +224,13 @@ enum VertexColorAccumulator {
             let maskCount = ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
                 .filter { $0.pathExtension == "png" }.count
             privacyWasOn = maskCount > 0
-            if !privacyWasOn,   // privacy on but stencil never warmed all capture → honor the metadata flag
-               let metaData = try? Data(contentsOf: rawDir.appendingPathComponent("scan4d_metadata.json")),
-               let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] {
-                privacyWasOn = meta["privacy_filter"] as? Bool ?? false
+            if !privacyWasOn {   // no surviving masks — resolve from metadata, failing CLOSED
+                if let metaData = try? Data(contentsOf: rawDir.appendingPathComponent("scan4d_metadata.json")),
+                   let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] {
+                    privacyWasOn = meta["privacy_filter"] as? Bool ?? true   // unknown flag → assume privacy was on
+                } else {
+                    privacyWasOn = true   // metadata missing/corrupt → assume privacy was on (never bake a person)
+                }
             }
         }
         let maskMode = deferredBlurEra && privacyWasOn   // sample per-frame masks + skip unmasked frames
@@ -365,7 +368,8 @@ enum VertexColorAccumulator {
                 let maskURL = masksDir.appendingPathComponent(((frameName as NSString).deletingPathExtension) + ".png")
                 guard let mData = try? Data(contentsOf: maskURL),
                       let mImg = UIImage(data: mData)?.cgImage,
-                      let mProvider = mImg.dataProvider?.data else { return }   // missing/unreadable mask → skip frame
+                      mImg.bitsPerPixel == 8,   // fail closed: only the known 8bpp-gray layout is safe to index 1 byte/pixel
+                      let mProvider = mImg.dataProvider?.data else { return }   // missing/unreadable/unexpected mask → skip frame
                 maskDataBuffer = mProvider
                 maskPtr = CFDataGetBytePtr(mProvider)
                 maskWidth = mImg.width

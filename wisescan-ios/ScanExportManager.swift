@@ -184,10 +184,13 @@ struct ScanExportManager {
             .reduce(into: Set()) { $0.insert($1.deletingPathExtension().lastPathComponent) }
 
         var privacyWasOn = !maskedFrames.isEmpty
-        if !privacyWasOn,
-           let metaData = try? Data(contentsOf: rawDataDir.appendingPathComponent("scan4d_metadata.json")),
-           let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] {
-            privacyWasOn = meta["privacy_filter"] as? Bool ?? false
+        if !privacyWasOn {   // no masks staged — resolve from metadata, failing CLOSED so an unreadable flag never disables the blur
+            if let metaData = try? Data(contentsOf: rawDataDir.appendingPathComponent("scan4d_metadata.json")),
+               let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] {
+                privacyWasOn = meta["privacy_filter"] as? Bool ?? true
+            } else {
+                privacyWasOn = true   // metadata missing/corrupt → assume privacy was on (Vision blur is a no-op on people-free frames)
+            }
         }
         guard privacyWasOn else { return }
 
