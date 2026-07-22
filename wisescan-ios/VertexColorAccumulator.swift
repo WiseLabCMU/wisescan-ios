@@ -172,6 +172,8 @@ enum VertexColorAccumulator {
                 let p = inv * SIMD4<Float>(vertices[i], 1)
                 vertices[i] = SIMD3(p.x, p.y, p.z)
             }
+            let trans = simd_length(SIMD3(t.columns.3.x, t.columns.3.y, t.columns.3.z))
+            print(String(format: "[VertexColor] un-applied registration (trans=%.1fcm) → projecting canonical mesh through raw cameras", trans * 100))
         }
 
         // Per-vertex surface normals (area-weighted face normals) drive the
