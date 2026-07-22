@@ -478,10 +478,42 @@ struct ThetaCameraCard: View {
                 Spacer()
             }
 
+            // Device id (serial) — shown once connected.
+            if let serial = manager.serialNumber {
+                Text("Device ID: \(serial)")
+                    .font(.caption2)
+                    .foregroundColor(.gray)
+                    .textSelection(.enabled)
+            }
+
             if case .failed(let message) = manager.state {
                 Text(message)
                     .font(.caption)
                     .foregroundColor(.orange)
+            }
+
+            // Still resolution — read from the camera, changeable via a preset menu.
+            if manager.isConnected {
+                HStack {
+                    Text("Still resolution")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                    Spacer()
+                    Menu {
+                        ForEach(ThetaCameraManager.stillFormatPresets, id: \.label) { format in
+                            Button("\(format.label) · \(format.megapixels) MP") {
+                                manager.setStillFormat(format)
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(manager.currentStillFormat.map { "\($0.label) · \($0.megapixels) MP" } ?? "Set…")
+                            Image(systemName: "chevron.up.chevron.down")
+                        }
+                        .font(.caption)
+                        .foregroundColor(.cyan)
+                    }
+                }
             }
 
             HStack(spacing: 12) {
@@ -588,6 +620,26 @@ struct ThetaCameraCard: View {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange)
                     Text(error)
                         .font(.caption).foregroundColor(.orange)
+                }
+            }
+
+            // Recent spike events (connect/disconnect, captures, transfer metrics).
+            if !manager.events.isEmpty {
+                Divider().background(Color.white.opacity(0.1))
+                Text("RECENT EVENTS")
+                    .font(.caption2).bold()
+                    .foregroundColor(.gray)
+                ForEach(Array(manager.events.prefix(6))) { event in
+                    HStack(alignment: .top, spacing: 6) {
+                        Text(event.date, format: .dateTime.hour().minute().second())
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundColor(.gray.opacity(0.6))
+                        Text(event.message)
+                            .font(.caption2)
+                            .foregroundColor(.gray)
+                            .lineLimit(2)
+                        Spacer(minLength: 0)
+                    }
                 }
             }
 

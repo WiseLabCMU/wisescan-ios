@@ -68,19 +68,25 @@ Assessment criteria for each (fill in during the viability spike):
 4. **Metadata quality** — per-still gyro/level (zenith) data, timestamps, exposure info.
 5. **Cost, weight, battery life** on a handheld rig.
 
-### Measured on device (spike — Theta X, `feat/still-source-360`)
+### Measured on device (spike — Theta X, firmware 2.92.0)
 
-First Wi‑Fi-OSC numbers from the Dashboard card ("Test Shutter" + "Download & Preview"):
+Wi‑Fi-OSC numbers from the Dashboard card, at both still resolutions:
 
-- **Trigger** (`camera.takePicture` round trip to `done`, over OSC HTTP): confirmed working.
-- **Transfer**: ~4.5 MB JPEG downloaded in ~1100 ms ≈ **~4.1 MB/s** over the camera AP.
+| Still resolution | Trigger (`takePicture`→`done`) | JPEG size | Transfer | Rate |
+| :--- | :--- | :--- | :--- | :--- |
+| 5504×2752 (~15 MP) | ~1.9 s | ~4.3 MB | ~1.1 s | ~3.9 MB/s |
+| 11008×5504 (~61 MP) | ~3.3 s | ~10.5–11.5 MB | ~2.2–2.6 s | ~4.5 MB/s |
 
-Read: at ~4 MB/s a full-resolution 60MP still (~15–20 MB) would take **~4–5 s** to
-transfer — consistent with the "2–6 s per still" estimate above, which points to
-**post-process mode as the default** and makes in-situ transfer viable only for smaller /
-lower-res captures. Caveat: a 4.5 MB file implies the camera was **not** at max still
-resolution — confirm the resolution setting before treating transfer time as final
-(max-quality stills transfer roughly 4× longer).
+Reads:
+
+- The AP link is the transfer bottleneck at a steady **~4.5 MB/s** regardless of size.
+- At **max 61 MP the per-still cost is ~3.3 s trigger + ~2.5 s transfer ≈ ~6 s** done
+  in-situ sequentially — the top of the "2–6 s" estimate. So **post-process mode is the
+  default for 61 MP**; in-situ live transfer is only comfortable at the lower resolution.
+- Important for the rig: the **~3.3 s is the camera's capture + in-camera-stitch time**,
+  not transfer — BLE-trigger + deferred download can't hide it. The rod must be held
+  steady for ~3.3 s per 61 MP shot, which the stillness / sway-settle gate must
+  accommodate (see "Rod stillness metric").
 
 ## Architecture: `StillSource` abstraction
 

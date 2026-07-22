@@ -2,27 +2,25 @@ import Foundation
 import Observation
 import UIKit
 import ImageIO
+import Network
+import os
 
-/// Connection + shutter-trigger manager for a Ricoh Theta 360° camera, driving the
-/// **still-source spike** on `feat/still-source-360` (see docs/design/still-source-360.md).
+/// Connection + shutter-trigger + still-download manager for a Ricoh Theta 360° camera,
+/// driving the **still-source spike** on `feat/still-source-360`
+/// (see docs/design/still-source-360.md).
 ///
 /// SPIKE SCOPE — deliberately minimal:
-/// - Transport is **Wi‑Fi + raw OSC HTTP** (the Open Spherical Camera Web API v2.1, a
-///   published spec). This validates the P2 viability questions (connection + trigger
-///   round-trip latency) with **no external dependencies**.
-/// - The user joins the camera's Wi‑Fi AP **manually** (iOS Settings). We confirm the
-///   link by probing the fixed OSC endpoint.
-/// - Adds an **explicit on-device download** of the triggered still (P2's "transfer
-///   time" viability number) — kept a separate action from the trigger so the two
-///   latencies are measured independently. Full JPEG is fetched to time the transfer;
-///   only a downsampled preview is retained (the 60MP bitmap is never held decoded).
-/// - No BLE trigger, no `NEHotspotConfiguration` auto-join, no `theta-client` SDK, no
-///   rig calibration / cube-map export. Those are the design doc's P3/P4 work and are
-///   intentionally out of scope here.
+/// - Transport is **Wi‑Fi + raw OSC HTTP** (OSC Web API v2.1), no external dependencies.
+///   The OSC/HTTP layer lives in `ThetaCameraManager+OSC.swift`; this file owns published
+///   state, user actions, the event log, and Wi‑Fi reachability monitoring.
+/// - The user joins the camera's Wi‑Fi AP **manually** (iOS Settings); connecting is an
+///   explicit tap, so the Local Network prompt is tied to a deliberate action.
+/// - Still resolution is read/set via OSC options; each capture and transfer is timed
+///   (the P2 viability numbers) and appended to the event log.
+/// - No BLE trigger, no `NEHotspotConfiguration` auto-join, no `theta-client` SDK, no rig
+///   calibration / cube-map export — the design doc's P3/P4 work, out of scope here.
 ///
-/// Theta X speaks OSC API level 2.1, so still capture needs **no explicit session**
-/// (`camera.startSession` was an API-2.0 requirement) — `camera.takePicture` is issued
-/// directly, then polled to completion.
+/// Theta X speaks OSC API level 2.1, so still capture needs no explicit `camera.startSession`.
 @Observable
 @MainActor
 final class ThetaCameraManager {
@@ -36,14 +34,13 @@ final class ThetaCameraManager {
     }
 
     /// Result of one successful shutter trigger — the file URL the camera assigned and the
-    /// wall-clock round trip (trigger → "done"), the number the P2 spike is measuring.
+    /// wall-clock round trip (trigger → "done").
     struct CaptureOutcome: Equatable {
         let fileURL: String
         let roundTripMs: Int
     }
 
-    /// Result of downloading the triggered still — bytes and transfer wall-clock (P2's
-    /// "transfer time" viability number).
+    /// Result of downloading the triggered still — bytes and transfer wall-clock.
     struct DownloadOutcome: Equatable {
         let bytes: Int
         let elapsedMs: Int
@@ -51,45 +48,95 @@ final class ThetaCameraManager {
         var megabytesPerSecond: Double { elapsedMs > 0 ? megabytes / (Double(elapsedMs) / 1000) : 0 }
     }
 
+    /// A still (JPEG) resolution, from the OSC `fileFormat` option.
+    struct StillFormat: Equatable {
+        let width: Int
+        let height: Int
+        var label: String { "\(width) × \(height)" }
+        var megapixels: Int { Int((Double(width * height) / 1_000_000).rounded()) }
+    }
+
+    /// Known Theta X JPEG still sizes (model-specific presets for the spike; unsupported
+    /// values are rejected by `camera.setOptions` and surfaced as a config event).
+    static let stillFormatPresets: [StillFormat] = [
+        StillFormat(width: 11008, height: 5504),   // ~60 MP
+        StillFormat(width: 5504, height: 2752)     // ~15 MP
+    ]
+
     private(set) var state: ConnectionState = .disconnected
     /// Battery charge 0…1 from `/osc/state`, when known.
     private(set) var batteryLevel: Double?
+    /// Camera serial number from `/osc/info` (the device id shown on the card).
+    private(set) var serialNumber: String?
     private(set) var isCapturing = false
     private(set) var lastCapture: CaptureOutcome?
     private(set) var isDownloading = false
     private(set) var lastDownload: DownloadOutcome?
     /// Downsampled preview of the most recent download (the full-res image is not retained).
     private(set) var previewImage: UIImage?
+    /// Current still resolution read from the camera's `fileFormat` option.
+    private(set) var currentStillFormat: StillFormat?
+    /// Rolling spike event log, newest first (capped).
+    private(set) var events: [ThetaEvent] = []
     private(set) var lastError: String?
 
     /// Theta **direct (AP) mode** default host. Client/LAN mode uses a different address;
     /// left mutable so the spike can point at either without a rebuild.
     var host = "192.168.1.1"
-    private var baseURL: URL { URL(string: "http://\(host)")! }
+    var baseURL: URL { URL(string: "http://\(host)")! }
 
-    /// Ephemeral, Wi‑Fi-only session: the camera is a local AP with no internet, so we
-    /// forbid cellular (and keep no cookie/cache state between spike runs).
-    private let session: URLSession = {
+    /// Ephemeral, Wi‑Fi-only session (used by the OSC extension too). Cellular is forbidden
+    /// since the camera AP has no internet; resource timeout accommodates tens-of-MB stills.
+    let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 8
-        cfg.timeoutIntervalForResource = 60   // a full-res 360° JPEG is tens of MB over the camera AP
+        cfg.timeoutIntervalForResource = 60
         cfg.waitsForConnectivity = false
         cfg.allowsCellularAccess = false
         return URLSession(configuration: cfg)
     }()
 
-    private init() {}
+    private let logger = Logger(subsystem: "org.arenaxr.scan4d", category: "theta")
+    private let pathMonitor = NWPathMonitor()
+    private var lastPathSatisfied: Bool?
+
+    private init() {
+        startPathMonitoring()
+    }
 
     var isConnected: Bool {
         if case .connected = state { return true }
         return false
     }
 
+    // MARK: - Event log
+
+    /// Appends an event (newest first, capped) and mirrors it to the unified log.
+    func log(_ kind: ThetaEvent.Kind, _ message: String) {
+        events.insert(ThetaEvent(date: Date(), kind: kind, message: message), at: 0)
+        if events.count > 100 { events.removeLast(events.count - 100) }
+        logger.info("[\(kind.rawValue, privacy: .public)] \(message, privacy: .public)")
+    }
+
+    /// Logs Wi‑Fi/network reachability transitions — the literal "Wi‑Fi connect/disconnect"
+    /// events (joining/leaving the camera AP flips this). No SSID (that needs location
+    /// permission); interface type is enough for the spike.
+    private func startPathMonitoring() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let satisfied = path.status == .satisfied
+            let usesWiFi = path.usesInterfaceType(.wifi)
+            Task { @MainActor in
+                guard let self, self.lastPathSatisfied != satisfied else { return }
+                self.lastPathSatisfied = satisfied
+                self.log(.network, satisfied ? "Network up\(usesWiFi ? " (Wi‑Fi)" : "")" : "Network down")
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "com.scan4d.theta.path", qos: .utility))
+    }
+
     // MARK: - Connection
 
-    /// Probes `/osc/info` (and `/osc/state`) to confirm the phone is on the camera's
-    /// network. Triggered by an explicit Dashboard tap — NOT on appear — so iOS's
-    /// Local Network permission prompt only surfaces on a deliberate user action.
+    /// Probes the camera (explicit Dashboard tap) to confirm the phone is on its network.
     func refreshConnection() {
         guard state != .connecting else { return }
         state = .connecting
@@ -99,19 +146,26 @@ final class ThetaCameraManager {
 
     private func probe() async {
         do {
-            let info = try await getInfo()
-            state = .connected(model: info.model, firmware: info.firmwareVersion)
-            batteryLevel = try? await getBatteryLevel()
+            let info = try await fetchInfo()
+            state = .connected(model: info.model, firmware: info.firmware)
+            serialNumber = info.serial
+            batteryLevel = try? await fetchBatteryLevel()
+            log(.connection, "Connected: \(info.model) \(info.firmware)"
+                + (info.serial.map { " · \($0)" } ?? ""))
+            currentStillFormat = try? await fetchStillResolution()
         } catch {
             batteryLevel = nil
-            state = .failed(Self.describe(error))
+            serialNumber = nil
+            let message = Self.describe(error)
+            state = .failed(message)
+            log(.connection, "Connection failed: \(message)")
         }
     }
 
     // MARK: - Trigger
 
-    /// Fires the shutter and polls to completion, recording the file URL + round-trip time.
-    /// No-op unless connected and no capture is already in flight.
+    /// Fires the shutter and records the file URL + round-trip time. No-op unless connected
+    /// and no capture is already in flight.
     func takePicture() {
         guard isConnected, !isCapturing else { return }
         isCapturing = true
@@ -122,18 +176,17 @@ final class ThetaCameraManager {
         Task {
             let start = Date()
             do {
-                let fileURL: String
-                switch try await execute(name: "camera.takePicture") {
-                case .done(let url): fileURL = url                       // completed synchronously
-                case .inProgress(let id): fileURL = try await pollUntilDone(commandID: id)
-                }
+                let fileURL = try await triggerStill()
                 let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
                 lastCapture = CaptureOutcome(fileURL: fileURL, roundTripMs: elapsedMs)
-                batteryLevel = try? await getBatteryLevel()
+                log(.capture, "Shutter fired — \(elapsedMs) ms")
+                batteryLevel = try? await fetchBatteryLevel()
             } catch {
-                lastError = Self.describe(error)
+                let message = Self.describe(error)
+                lastError = message
+                log(.capture, "Capture failed: \(message)")
                 // A capture failure often means the AP dropped — reflect that in the badge.
-                if case .urlError = Self.classify(error) { state = .failed(Self.describe(error)) }
+                if Self.isConnectivityError(error) { state = .failed(message) }
             }
             isCapturing = false
         }
@@ -153,15 +206,18 @@ final class ThetaCameraManager {
         Task {
             let start = Date()
             do {
-                let (data, response) = try await session.data(from: url)
-                guard let http = response as? HTTPURLResponse else { throw ThetaError.badResponse(-1) }
-                guard (200...299).contains(http.statusCode) else { throw ThetaError.badResponse(http.statusCode) }
+                let data = try await downloadData(from: url)
                 let elapsedMs = Int(Date().timeIntervalSince(start) * 1000)
-                lastDownload = DownloadOutcome(bytes: data.count, elapsedMs: elapsedMs)
+                let outcome = DownloadOutcome(bytes: data.count, elapsedMs: elapsedMs)
+                lastDownload = outcome
+                log(.transfer, String(format: "Downloaded %.1f MB in %d ms (%.1f MB/s)",
+                                      outcome.megabytes, outcome.elapsedMs, outcome.megabytesPerSecond))
                 // Downsample off the full JPEG so we never hold the ~60MP bitmap decoded.
                 previewImage = Self.downsampledImage(from: data, maxPixel: 1200)
             } catch {
-                lastError = Self.describe(error)
+                let message = Self.describe(error)
+                lastError = message
+                log(.transfer, "Download failed: \(message)")
             }
             isDownloading = false
         }
@@ -182,141 +238,41 @@ final class ThetaCameraManager {
         return UIImage(cgImage: cgImage)
     }
 
-    // MARK: - OSC Web API (v2.1)
+    // MARK: - Still resolution
 
-    private func getInfo() async throws -> OSCInfo {
-        try await getJSON("/osc/info", as: OSCInfo.self)
-    }
-
-    private func getBatteryLevel() async throws -> Double? {
-        // /osc/state is a POST with an empty body per the OSC spec.
-        try await postJSON("/osc/state", body: [:], as: OSCStateResponse.self).state.batteryLevel
-    }
-
-    private enum ExecuteResult {
-        case inProgress(String)   // command id to poll via /osc/commands/status
-        case done(String)         // fileUrl returned synchronously
-    }
-
-    /// POST `/osc/commands/execute`.
-    private func execute(name: String, parameters: [String: Any] = [:]) async throws -> ExecuteResult {
-        var body: [String: Any] = ["name": name]
-        if !parameters.isEmpty { body["parameters"] = parameters }
-        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCCommandResponse.self)
-        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "unknown") }
-        // Some commands return done immediately with a fileUrl and no id.
-        if response.state == "done", let fileURL = response.results?.fileUrl { return .done(fileURL) }
-        guard let id = response.id else { throw ThetaError.osc("no command id returned") }
-        return .inProgress(id)
-    }
-
-    /// Polls `/osc/commands/status` until the command finishes; returns its file URL.
-    private func pollUntilDone(commandID: String) async throws -> String {
-        let deadline = Date().addingTimeInterval(AppConstants.thetaCaptureTimeout)
-        while Date() < deadline {
-            let response = try await postJSON(
-                "/osc/commands/status", body: ["id": commandID], as: OSCCommandResponse.self
-            )
-            switch response.state {
-            case "done":
-                guard let fileURL = response.results?.fileUrl else { throw ThetaError.noFileURL }
-                return fileURL
-            case "error":
-                throw ThetaError.osc(response.error?.message ?? "camera reported an error")
-            default:
-                try await Task.sleep(nanoseconds: UInt64(AppConstants.thetaStatusPollInterval * 1_000_000_000))
+    /// Re-reads the current still resolution (e.g. after connecting). Fire-and-forget.
+    func fetchStillFormat() {
+        guard isConnected else { return }
+        Task {
+            do {
+                currentStillFormat = try await fetchStillResolution()
+            } catch {
+                log(.config, "Couldn't read resolution: \(Self.describe(error))")
             }
         }
-        throw ThetaError.timeout
     }
 
-    // MARK: - HTTP helpers
-
-    private func getJSON<T: Decodable>(_ path: String, as type: T.Type) async throws -> T {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
-        request.httpMethod = "GET"
-        return try await send(request, as: type)
-    }
-
-    private func postJSON<T: Decodable>(_ path: String, body: [String: Any], as type: T.Type) async throws -> T {
-        var request = URLRequest(url: baseURL.appendingPathComponent(path))
-        request.httpMethod = "POST"
-        request.setValue("application/json;charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        return try await send(request, as: type)
-    }
-
-    private func send<T: Decodable>(_ request: URLRequest, as type: T.Type) async throws -> T {
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw ThetaError.badResponse(-1) }
-        guard (200...299).contains(http.statusCode) else {
-            // OSC errors arrive as JSON even on non-2xx; surface the message when present.
-            if let osc = try? JSONDecoder().decode(OSCCommandResponse.self, from: data), let error = osc.error {
-                throw ThetaError.osc(error.message ?? error.code ?? "HTTP \(http.statusCode)")
+    /// Applies a still resolution, then re-reads to confirm.
+    func setStillFormat(_ format: StillFormat) {
+        guard isConnected else { return }
+        Task {
+            do {
+                try await applyStillResolution(format)
+                currentStillFormat = try await fetchStillResolution()
+                log(.config, "Resolution set to \(format.label) (\(format.megapixels) MP)")
+            } catch {
+                log(.config, "Set resolution failed: \(Self.describe(error))")
             }
-            throw ThetaError.badResponse(http.statusCode)
-        }
-        do {
-            return try JSONDecoder().decode(T.self, from: data)
-        } catch {
-            throw ThetaError.decode
-        }
-    }
-
-    // MARK: - Errors
-
-    enum ThetaError: Error {
-        case badResponse(Int)
-        case osc(String)
-        case noFileURL
-        case timeout
-        case decode
-    }
-
-    private enum ErrorClass { case urlError, other }
-    private static func classify(_ error: Error) -> ErrorClass {
-        error is URLError ? .urlError : .other
-    }
-
-    /// User-facing one-liners; the Wi‑Fi hint is the common first-run failure.
-    private static func describe(_ error: Error) -> String {
-        if let urlError = error as? URLError {
-            switch urlError.code {
-            case .cannotConnectToHost, .cannotFindHost, .timedOut, .networkConnectionLost, .notConnectedToInternet:
-                return "Can't reach the camera — join its Wi‑Fi in Settings, then retry."
-            default:
-                return "Network error: \(urlError.localizedDescription)"
-            }
-        }
-        switch error {
-        case ThetaError.badResponse(let code): return "Camera returned HTTP \(code)."
-        case ThetaError.osc(let message): return "Camera error: \(message)."
-        case ThetaError.noFileURL: return "Capture finished but no file URL was returned."
-        case ThetaError.timeout: return "Capture timed out."
-        case ThetaError.decode: return "Unexpected response from the camera."
-        default: return error.localizedDescription
         }
     }
 }
 
-// MARK: - OSC response models
-
-private struct OSCInfo: Decodable {
-    let model: String
-    let firmwareVersion: String
-    let serialNumber: String?
-}
-
-private struct OSCStateResponse: Decodable {
-    struct State: Decodable { let batteryLevel: Double? }
-    let state: State
-}
-
-private struct OSCCommandResponse: Decodable {
-    struct Results: Decodable { let fileUrl: String? }
-    struct OSCErrorBody: Decodable { let code: String?; let message: String? }
-    let id: String?
-    let state: String
-    let results: Results?
-    let error: OSCErrorBody?
+/// A timestamped spike event, shown in the card's recent-events list and mirrored to the
+/// unified log (Console category `theta`). File-scope to keep type nesting shallow.
+struct ThetaEvent: Identifiable {
+    enum Kind: String { case connection, capture, transfer, config, network }
+    let id = UUID()
+    let date: Date
+    let kind: Kind
+    let message: String
 }
