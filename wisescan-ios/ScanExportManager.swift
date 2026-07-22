@@ -173,9 +173,11 @@ struct ScanExportManager {
     ///    covers, so every proxy frame needs the Vision path.
     ///
     /// Gate: privacy filter was enabled during capture, signalled by saved masks or by the
-    /// `privacy_filter` flag in scan4d_metadata.json (older scans predate the flag; scans from
-    /// before the deferred-blur pipeline have no masks/ dir and were already blurred at
-    /// capture, so they correctly skip all passes).
+    /// `privacy_filter` flag in scan4d_metadata.json. Legacy scans (readable metadata that
+    /// PREDATES the flag) skip all passes — they were already blurred at capture, or privacy
+    /// was off by choice. Only genuinely indeterminate scans (metadata missing/corrupt, or a
+    /// present-but-garbage flag) fail CLOSED into the Vision pass, which re-encodes frames
+    /// visually unchanged when no person is detected.
     private static func applyExportPrivacyPasses(rawDataDir: URL, stagedDir: URL) {
         let fm = FileManager.default
         let masksDir = rawDataDir.appendingPathComponent("masks")
@@ -184,12 +186,19 @@ struct ScanExportManager {
             .reduce(into: Set()) { $0.insert($1.deletingPathExtension().lastPathComponent) }
 
         var privacyWasOn = !maskedFrames.isEmpty
-        if !privacyWasOn {   // no masks staged — resolve from metadata, failing CLOSED so an unreadable flag never disables the blur
+        if !privacyWasOn {   // no masks staged — resolve from metadata
             if let metaData = try? Data(contentsOf: rawDataDir.appendingPathComponent("scan4d_metadata.json")),
                let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] {
-                privacyWasOn = meta["privacy_filter"] as? Bool ?? true
+                if let flag = meta["privacy_filter"] {
+                    privacyWasOn = (flag as? Bool) ?? true   // deferred-era: honor the flag; a garbage value fails CLOSED
+                } else {
+                    // Key absent from readable metadata ⇒ legacy-era scan (predates the flag):
+                    // already blurred at capture or privacy off by choice — skip the passes
+                    // rather than paying a per-frame Vision pass on every legacy export.
+                    privacyWasOn = false
+                }
             } else {
-                privacyWasOn = true   // metadata missing/corrupt → assume privacy was on (Vision blur is a no-op on people-free frames)
+                privacyWasOn = true   // metadata missing/corrupt → fail CLOSED (Vision blur is a no-op on people-free frames)
             }
         }
         guard privacyWasOn else { return }

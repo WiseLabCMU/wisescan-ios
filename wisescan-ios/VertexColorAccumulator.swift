@@ -218,19 +218,29 @@ enum VertexColorAccumulator {
         // pixel is ever baked. Legacy captures have no masks/ dir → this stays dormant and the
         // depth==0 skip keeps protecting them; privacy-off captures have an empty masks/ → no-op.
         let masksDir = rawDir.appendingPathComponent("masks")
-        let deferredBlurEra = fm.fileExists(atPath: masksDir.path)   // dir created only by the deferred-blur capture session
+        // The deferred-blur era is normally marked by masks/ (created unconditionally at session
+        // start). If the dir was lost (partial restore / manual cleanup), the metadata
+        // `privacy_filter` key still identifies the era — every deferred-era capture stamps it,
+        // legacy metadata predates it — so a privacy-ON scan can't silently fall back to the
+        // legacy path, whose depth==0 skip no longer protects (deferred depth is stored raw).
+        let metaPrivacyFlag: Bool? = {
+            guard let metaData = try? Data(contentsOf: rawDir.appendingPathComponent("scan4d_metadata.json")),
+                  let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] else { return nil }
+            return meta["privacy_filter"] as? Bool
+        }()
+        let masksDirExists = fm.fileExists(atPath: masksDir.path)
+        let deferredBlurEra = masksDirExists || metaPrivacyFlag != nil
         var privacyWasOn = false
         if deferredBlurEra {
-            let maskCount = ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
-                .filter { $0.pathExtension == "png" }.count
+            let maskCount = !masksDirExists ? 0
+                : ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
+                    .filter { $0.pathExtension == "png" }.count
             privacyWasOn = maskCount > 0
-            if !privacyWasOn {   // no surviving masks — resolve from metadata, failing CLOSED
-                if let metaData = try? Data(contentsOf: rawDir.appendingPathComponent("scan4d_metadata.json")),
-                   let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] {
-                    privacyWasOn = meta["privacy_filter"] as? Bool ?? true   // unknown flag → assume privacy was on
-                } else {
-                    privacyWasOn = true   // metadata missing/corrupt → assume privacy was on (never bake a person)
-                }
+            if !privacyWasOn {
+                // No surviving masks — resolve from the metadata flag, failing CLOSED: a
+                // deferred-era scan whose metadata is unreadable assumes privacy was on rather
+                // than ever baking a person pixel.
+                privacyWasOn = metaPrivacyFlag ?? true
             }
         }
         let maskMode = deferredBlurEra && privacyWasOn   // sample per-frame masks + skip unmasked frames
