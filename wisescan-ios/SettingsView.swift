@@ -321,6 +321,10 @@ struct SettingsView: View {
                                     self.mockWearable = AppConstants.mockWearable
                                     self.semanticLabeling = AppConstants.semanticLabeling
                                     self.registerLegacyScans = AppConstants.registerLegacyScans
+                                    // Default-TRUE dev toggle: a bench-OFF value must not leak into
+                                    // production, where it would silently drop per-face classification
+                                    // (the wall/non-wall labels plane registration depends on).
+                                    self.meshClassifier = AppConstants.meshClassifier
                                 }
                             }
                         )) {
