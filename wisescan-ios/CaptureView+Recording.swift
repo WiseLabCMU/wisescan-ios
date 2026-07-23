@@ -11,11 +11,12 @@ extension CaptureView {
 
     func toggleRecording() {
         if isRecording {
-            if scanStore.activeScanCase == .rescanSpace && scanStore.activeLocationForScan != nil {
-                stopRecording()
-            } else {
-                showStopMenu = true
-            }
+            // Every user-initiated stop confirms via the menu — the old rescan bypass saved
+            // immediately on an accidental tap with no way to cancel/discard (2026-07-22 field
+            // report). Rescans simply see fewer options (the menu hides Save & Scan Adjacent
+            // itself). Programmatic stops (extend flow, VIO-compromised halt) call
+            // stopRecording()/performStopRecording directly and are unaffected.
+            showStopMenu = true
         } else {
             // Link-adjacent recording ALWAYS starts programmatically after the user aligns to the
             // previous scan: confirmAlignment / pinAndExtend capture Pin A, reset into the new map,
