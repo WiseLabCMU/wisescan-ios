@@ -37,6 +37,11 @@ struct ScansListView: View {
     /// Shown when a bulk-upload selection mixes already-uploaded and un-uploaded scans.
     @State private var showBulkUploadMixedPrompt = false
     @State private var bulkProgressMessage: String?
+    /// Per-location status during a bulk Post-process, keyed by location id — drives the small
+    /// progress overlay on the grid/graph tiles so a long batch shows WHICH map it's working on
+    /// (the banner alone is ambiguous when scans share names). Mirrors LocationDetailView's
+    /// per-card `bulkColoringMessages` pattern at location granularity.
+    @State private var bulkProcessingByLocation: [UUID: String] = [:]
     @State private var isBulkExporting = false
     @State private var exportItems: [ZipExportItem] = []
     @State private var showExportSheet = false
@@ -77,14 +82,15 @@ struct ScansListView: View {
                         .padding(.vertical, 60)
                     }
                 } else if viewMode == .graph {
-                    StitchGraphView(locations: locations, renderRequest: $renderRequest, isEditing: $isEditing, selectedLocations: $selectedLocations, visibleLocationIds: $graphVisibleLocationIds)
+                    StitchGraphView(locations: locations, renderRequest: $renderRequest, isEditing: $isEditing, selectedLocations: $selectedLocations, visibleLocationIds: $graphVisibleLocationIds, processingByLocation: bulkProcessingByLocation)
                 } else {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 16) {
                             ForEach(locations) { location in
                                 ZStack(alignment: .topTrailing) {
                                     NavigationLink(value: location) {
-                                        LocationGridTile(location: location)
+                                        LocationGridTile(location: location,
+                                                         processingMessage: bulkProcessingByLocation[location.id])
                                     }
                                     .buttonStyle(.plain)
                                     .disabled(isEditing)
@@ -249,8 +255,9 @@ struct ScansListView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("You haven't post-processed these scans — do it now. Uploading needs the " +
-                     "processed room data (room model, registration, and rescan reference).")
+                Text("You haven't post-processed these scans — do it now. Uploading and " +
+                     "exporting need the processed room data (room model, registration, and " +
+                     "rescan reference).")
             }
             .preferredColorScheme(.dark)
             .overlay {
@@ -500,8 +507,15 @@ struct ScansListView: View {
     /// Export selected scans to the share sheet. Runs export packaging on a background queue.
     /// Progress banner shows per-scan preparation status.
     private func bulkSaveToFiles() {
+        guard !isBulkExporting else { return }   // re-entrancy: double-tap = concurrent exports (OOM class)
         let scans = resolveTargetScans()
         guard !scans.isEmpty else { return }
+        // DECISION 3 hard gate: never export a scan with pending structural post-process work
+        // (mirrors requestBulkUpload — the export zip is the same bundle upload sends).
+        if scans.contains(where: { ScanPostprocessor.needsPostprocess($0) }) {
+            showPostprocessGate = true
+            return
+        }
         isBulkExporting = true
         selectedLocations.removeAll()
         let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
@@ -546,6 +560,7 @@ struct ScansListView: View {
     /// Upload selected scans to the configured server. Each scan is exported and uploaded
     /// independently on a background queue. Banner tracks per-scan completion and upload progress.
     private func bulkUpload(scans: [CapturedScan]) {
+        guard !isBulkUploading else { return }   // re-entrancy: double-tap = concurrent export+upload batches
         guard !scans.isEmpty, !uploadURL.isEmpty else { return }
         let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
@@ -675,6 +690,7 @@ struct ScansListView: View {
     /// Run the postprocessor over `scans` (oldest-first internally; prerequisite originals are
     /// pulled in automatically for registration). Reuses the bulk banner + coloring flag.
     private func bulkPostprocess(scans: [CapturedScan]) {
+        guard !isBulkColoring else { return }    // re-entrancy: the engine's claims make a 2nd batch a no-op, but don't churn the UI
         guard !scans.isEmpty else { return }
         isBulkColoring = true
         let total = scans.count
@@ -683,6 +699,16 @@ struct ScansListView: View {
             scans: scans,
             modelContext: modelContext,
             progress: { scan, msg in
+                // Tile overlay: show the step on the scan's location while it works; clear when
+                // that scan finishes (a same-location prerequisite original re-claims it on its
+                // own next progress tick).
+                if let locId = scan.location?.id {
+                    if let msg {
+                        bulkProcessingByLocation[locId] = msg
+                    } else {
+                        bulkProcessingByLocation.removeValue(forKey: locId)
+                    }
+                }
                 if let msg {
                     bulkProgressMessage = "\(scan.name): \(msg)"
                 } else {
@@ -692,6 +718,7 @@ struct ScansListView: View {
             },
             completion: {
                 isBulkColoring = false
+                bulkProcessingByLocation.removeAll()
                 exitEditModeWithBanner("✓ Processed \(total) scan\(total == 1 ? "" : "s")")
             }
         )
@@ -714,6 +741,7 @@ struct ScansListView: View {
     /// Serial colorize of the given scans on a utility queue.
     /// Progress is throttled to whole-percent updates to avoid flooding the main thread.
     private func bulkColorize(scans: [CapturedScan]) {
+        guard !isBulkColoring else { return }    // re-entrancy (see bulkPostprocess)
         guard !scans.isEmpty else { return }
         isBulkColoring = true
 
@@ -839,6 +867,8 @@ enum CaptureIntegrity {
 
 struct LocationGridTile: View {
     let location: ScanLocation
+    /// Non-nil while a bulk Post-process is working this location — shows the step overlay.
+    var processingMessage: String?
     @State private var thumbnailImage: UIImage?
     // Resolved off the main thread in `.task` so the body performs no FileManager I/O.
     @State private var hasMissingWorldMap = false
@@ -915,7 +945,9 @@ struct LocationGridTile: View {
             .padding(8)
         }
         .overlay(alignment: .topTrailing) {
-            if !location.scans.isEmpty && location.scans.allSatisfy({ $0.isUploaded }) {
+            // Latest-scan upload state, matching bulk upload's "Latest" scope (see the graph
+            // tile's identical badge in StitchGraphView for the full rationale).
+            if latestScan?.isUploaded == true {
                 Image(systemName: "checkmark.icloud.fill")
                     .font(.caption)
                     .foregroundColor(.green)
@@ -923,6 +955,25 @@ struct LocationGridTile: View {
                     .background(Color.black.opacity(0.5))
                     .clipShape(Circle())
                     .padding(8)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            // Bulk Post-process: which step is running on THIS map (long batch, look-alike tiles).
+            if let processingMessage {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        .scaleEffect(0.6)
+                    Text(processingMessage)
+                        .font(.caption2)
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.ultraThinMaterial)
+                .clipShape(Capsule())
+                .padding(.bottom, 8)
             }
         }
         .task(id: location.updatedAt) {
@@ -1086,8 +1137,10 @@ struct ScanCard: View {
         }
         .fullScreenCover(isPresented: $showMeshPreview) {
             NavigationView {
-                MeshPreviewContainer(location: scan.location, meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory)
-                    .ignoresSafeArea()
+                // No .ignoresSafeArea() here — the container bleeds its 3D view/markers under
+                // the safe area internally, while keeping the title/legend inside it (so the
+                // title sits below the nav bar, not under the Dynamic Island).
+                MeshPreviewContainer(location: scan.location, meshFileURL: scan.meshFileURL, colorsFileURL: scan.colorsFileURL, scanDirectoryURL: scan.scanDirectory, scanName: scan.name, isColored: scan.isColored)
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .navigationBarLeading) {
@@ -1382,8 +1435,8 @@ struct ScanCard: View {
             Button("Post-process Now") { postprocessScan() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("You haven't post-processed this scan — do it now. Uploading needs the " +
-                 "processed room data (room model, registration, and rescan reference).")
+            Text("You haven't post-processed this scan — do it now. Uploading and exporting " +
+                 "need the processed room data (room model, registration, and rescan reference).")
         }
     }
 
@@ -1448,6 +1501,9 @@ struct ScanCard: View {
 
     private func uploadScan() {
         guard !uploadURL.isEmpty else { return }
+        // Re-entrancy: an export/upload for this scan is already running — a second concurrent
+        // prepareExport doubles the privacy-blur working set (OOM on phones; see UploadStatus.isInFlight).
+        guard !scan.uploadStatus.isInFlight else { return }
         // DECISION 3 hard gate: never upload a scan with pending structural post-process work
         // (its roomplan/registration/proxy artifacts would be missing from the export).
         guard !ScanPostprocessor.needsPostprocess(scan) else {
@@ -1532,6 +1588,17 @@ struct ScanCard: View {
     }
 
     private func saveToFiles() {
+        // Re-entrancy: the zip build is long and silent — a second tap here started a second
+        // CONCURRENT prepareExport whose doubled privacy-blur working set OOM-killed the app
+        // (2026-07-23 iPhone 17 Pro field report; see UploadStatus.isInFlight).
+        guard !scan.uploadStatus.isInFlight else { return }
+        // DECISION 3 hard gate: never export a scan with pending structural post-process work —
+        // the zip would ship without its roomplan/registration/proxy artifacts (export is the
+        // offline copy of the exact bundle upload sends; same gate, same rationale).
+        guard !ScanPostprocessor.needsPostprocess(scan) else {
+            showPostprocessAlert = true
+            return
+        }
         scan.uploadStatus = .zipping
         onUpdate(scan)
 

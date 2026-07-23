@@ -116,6 +116,9 @@ enum ScanPostprocessor {
     /// no in-app redo short of deleting the scan. They behave exactly as they did pre-merge:
     /// rescans on top of them work raw-only (no registration target, no auto-align reference).
     static func isBad(_ scan: CapturedScan) -> Bool {
+        // Lite devices (no LiDAR) can never run RoomPlan: roomless is the NORM there, not a
+        // failure — flagging it would false-warn every Lite scan and block Lite rescans.
+        guard RoomCaptureSession.isSupported else { return false }
         guard !scan.scanCaseRaw.isEmpty else { return false }
         guard Date().timeIntervalSince(scan.capturedAt) > AppConstants.roomDataBadScanGraceSeconds else {
             return false
@@ -141,7 +144,12 @@ enum ScanPostprocessor {
             if artifactURL("registration.json", in: scan) == nil {
                 steps.append(.registration)
             } else if let sidecar = SaveRegistration.loadSidecar(scanDirectory: scan.scanDirectory) {
-                if !sidecar.applied, sidecar.version < SaveRegistration.sidecarVersion {
+                // Retry an unapplied sidecar when a newer solver might now pass it, or when the
+                // refusal was an artifact-write failure ("bake failed …") rather than a fit
+                // verdict — the artifacts stayed raw, so the identical fit just re-applies.
+                if !sidecar.applied,
+                   sidecar.version < SaveRegistration.sidecarVersion
+                    || sidecar.reason.hasPrefix("bake failed") {
                     steps.append(.registration)
                 }
             } else {
@@ -365,21 +373,52 @@ enum ScanPostprocessor {
             if let regOutcome = SaveRegistration.run(sourcePlanes: sourcePlanes,
                                                      canonicalRoomPlanURL: targetURL,
                                                      targetScanId: origId) {
-                SaveRegistration.writeSidecar(regOutcome.sidecar, to: dir)
-                mirrorToRaw("registration.json")
+                // TRANSACTIONAL ORDER: bake the artifacts FIRST, write the sidecar LAST — the
+                // sidecar is the commit record every consumer trusts (ghost de-registration,
+                // colorize un-apply, retry gating). The old order wrote `applied: true` before
+                // the mesh bake; a failed/interrupted write then left a raw mesh under an
+                // "applied" sidecar — silent, permanent misalignment (applied sidecars never
+                // retry). Now any bake failure downgrades the sidecar to an unapplied refusal,
+                // which the version-gated retry can re-attempt, and a partial roomplan failure
+                // rolls the mesh back so the scan stays consistently RAW.
+                var sidecar = regOutcome.sidecar
                 appliedT = regOutcome.appliedTransform
                 if let t = appliedT {
-                    // Bake raw→canonical into the mesh (both copies; colors.bin is per-vertex
-                    // ordered and unaffected) and premultiply the clean roomplan so the viewer's
-                    // outlines stay glued to the transformed mesh.
-                    if let mesh = try? Data(contentsOf: dir.appendingPathComponent("mesh.obj")) {
-                        writeBoth(SaveRegistration.transformOBJ(mesh, by: t), "mesh.obj")
+                    let meshURL = dir.appendingPathComponent("mesh.obj")
+                    var baked = false
+                    if let mesh = try? Data(contentsOf: meshURL) {
+                        let transformed = SaveRegistration.transformOBJ(mesh, by: t)
+                        if (try? transformed.write(to: meshURL, options: .atomic)) != nil {
+                            // Mesh is canonical; the clean roomplan must follow or roll back.
+                            if SaveRegistration.retransformRoomPlanJSON(
+                                at: dir.appendingPathComponent("roomplan.json"), by: t) {
+                                baked = true
+                                // Export-staging mirrors are best-effort copies of the now-
+                                // consistent top-level artifacts (top level is authoritative).
+                                try? transformed.write(to: raw.appendingPathComponent("mesh.obj"),
+                                                       options: .atomic)
+                                mirrorToRaw("roomplan.json")
+                            } else if (try? mesh.write(to: meshURL, options: .atomic)) == nil {
+                                // Roomplan failed AND the mesh rollback failed: mesh is canonical,
+                                // roomplan raw. Keep applied=true (matches the mesh — the ghost/
+                                // colorize contract) and log loudly; only the outlines are stale.
+                                log.error("registration bake: roomplan retransform failed and mesh rollback failed for \(w.name, privacy: .public) — mesh canonical, roomplan RAW (outlines stale)")
+                                baked = true
+                            }
+                        }
                     }
-                    SaveRegistration.retransformRoomPlanJSON(
-                        at: dir.appendingPathComponent("roomplan.json"), by: t)
-                    mirrorToRaw("roomplan.json")
+                    if !baked {
+                        log.warning("registration bake failed (io) for \(w.name, privacy: .public) — reverting to unapplied so the next Process retries")
+                        appliedT = nil
+                        sidecar = SaveRegistration.unappliedCopy(of: sidecar, reason: "bake failed (io)")
+                    }
                 }
-                outcome.didStructural = true
+                if SaveRegistration.writeSidecar(sidecar, to: dir) {
+                    mirrorToRaw("registration.json")
+                    outcome.didStructural = true
+                } else {
+                    log.error("registration sidecar write failed for \(w.name, privacy: .public) — artifacts \(appliedT != nil ? "CANONICAL without a commit record (next Process will re-fit ≈identity and record it)" : "raw; will retry")")
+                }
             }
         }
 
@@ -493,18 +532,27 @@ enum ScanPostprocessor {
     /// room, never be a registration target, never render a proxy ghost: warn NOW, while the user
     /// is still standing in the room, rather than at the next rescan's gate. Call on MAIN after a
     /// successful save.
-    static func scheduleBadScanCheck(scan: CapturedScan, scanStore: ScanStore) {
+    ///
+    /// Captures the scan's UUID, NOT the `@Model` object: the timer chain can span minutes
+    /// (grace window × re-schedules while a 120 s RoomBuilder runs), and touching a SwiftData
+    /// model deleted in the meantime is undefined (has crashed on faulted relationships on some
+    /// OS versions). The scan is re-fetched on main at fire time; fetch-miss = deleted = done.
+    static func scheduleBadScanCheck(scanId: UUID, modelContext: ModelContext, scanStore: ScanStore) {
+        // No RoomPlan on this device (Lite/no-LiDAR) → no room is ever coming; warning the
+        // user to "redo" the scan would be wrong on every save.
+        guard RoomCaptureSession.isSupported else { return }
         guard UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling) else { return }
         let grace = AppConstants.roomDataBadScanGraceSeconds
         DispatchQueue.main.asyncAfter(deadline: .now() + grace) { [weak scanStore] in
             guard let scanStore else { return }
-            // The scan may have been deleted in the meantime; artifact checks are file-based and
-            // safe either way (a deleted scan's dir just reads as missing → skip via location nil).
-            guard scan.location != nil else { return }
+            let descriptor = FetchDescriptor<CapturedScan>(predicate: #Predicate { $0.id == scanId })
+            guard let scan = try? modelContext.fetch(descriptor).first, scan.location != nil else {
+                return   // deleted (or orphaned) in the meantime — nothing to warn about
+            }
             if artifactURL("roomplan.json", in: scan) != nil { return }   // room landed — done
             if roomPending(scan) {
                 // Deferred RoomBuilder still running — check again after another grace period.
-                scheduleBadScanCheck(scan: scan, scanStore: scanStore)
+                scheduleBadScanCheck(scanId: scanId, modelContext: modelContext, scanStore: scanStore)
                 return
             }
             guard isBad(scan) else { return }

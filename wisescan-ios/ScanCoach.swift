@@ -159,6 +159,12 @@ class ScanCoach {
         let detectedClasses = scanStats.detectedClasses
         let recentTransforms = frameCaptureSession.recentTransforms(count: 30)
         let roomPlanInstruction = scanStats.roomPlanInstruction
+        let sharpFrameCount = frameCaptureSession.sharpFrameCount
+        let isCurrentlyStill = frameCaptureSession.isCurrentlyStill
+        let photoCoverageFraction = scanStats.photoCoverageFraction
+        let photoCoverageOccupied = scanStats.photoCoverageOccupied
+        let meanStillOverlap = scanStats.meanStillOverlap
+        let standpointDiversity = scanStats.standpointDiversity
 
         // Capture RoomPlan data for semantic tips
         let hasWalls = capturedRoom?.walls.isEmpty == false
@@ -188,6 +194,12 @@ class ScanCoach {
                 hasFloors: hasFloors,
                 objectCount: objectCount,
                 surfaceCount: surfaceCount,
+                sharpFrameCount: sharpFrameCount,
+                isCurrentlyStill: isCurrentlyStill,
+                photoCoverageFraction: photoCoverageFraction,
+                photoCoverageOccupied: photoCoverageOccupied,
+                meanStillOverlap: meanStillOverlap,
+                standpointDiversity: standpointDiversity,
                 now: now,
                 coachingEnabled: coachingEnabled
             )
@@ -248,6 +260,12 @@ class ScanCoach {
         hasFloors: Bool,
         objectCount: Int,
         surfaceCount: Int,
+        sharpFrameCount: Int,
+        isCurrentlyStill: Bool,
+        photoCoverageFraction: Double,
+        photoCoverageOccupied: Int,
+        meanStillOverlap: Double,
+        standpointDiversity: Double,
         now: Date,
         coachingEnabled: Bool
     ) -> CoachTip? {
@@ -278,10 +296,11 @@ class ScanCoach {
 
         // ── WARNING ──
 
-        // Motion blur (fast motion)
+        // Motion blur (fast motion) — reframed as informational in the two-purpose capture
+        // paradigm: movement builds depth coverage (good!), but no sharp photos are captured.
         if isBlurActive, blurReason == .fastMotion {
             return tip("warning.fastMotion",
-                       "⚠️ Slow down — moving too fast",
+                       "⚡ Moving fast — depth only (pause for photos)",
                        icon: "hare.fill",
                        priority: .warning, now: now)
         }
@@ -322,7 +341,7 @@ class ScanCoach {
             let pattern = cameraMovementPattern(recentTransforms)
             if pattern < 0.3 { // Erratic movement (low directional progress ratio)
                 if let t = tip("guidance.systematicSweep",
-                               "↔️ Start from one wall, sweep to the opposite",
+                               "↔️ Walk the room for depth, pause at each area for photos",
                                icon: "arrow.left.and.right",
                                priority: .guidance, now: now) { return t }
             }
@@ -380,11 +399,53 @@ class ScanCoach {
 
         // ── INFO ──
 
+        // Sharp photo captured — positive reinforcement when the user pauses and captures
+        if isCurrentlyStill && sharpFrameCount > 0 && sharpFrameCount % 5 == 0 {
+            if let t = tip("info.sharpCapture",
+                           "📸 Sharp photo captured!",
+                           icon: "camera.fill",
+                           priority: .info, now: now) { return t }
+        }
+
         // Good coverage encouragement
         if !isEarlyScan && anchorCount >= 15 && capacityScore < 0.5 {
             if let t = tip("info.goodCoverage",
                            "⭐ Coverage looking good!",
                            priority: .info, now: now) { return t }
+        }
+
+        // Encourage pausing for photos, driven by actual photo-coverage debt: depth mesh
+        // is outrunning sharp-keyframe coverage. This replaces the old fixed 30s-since-last-
+        // sharp-frame timer with a signal that reflects where coverage is actually lacking
+        // (the amber regions of the overlay). Requires enough mesh to be meaningful, and the
+        // user to be moving (a pause is already producing a keyframe).
+        if !isEarlyScan && !isCurrentlyStill &&
+           photoCoverageOccupied >= AppConstants.photoCoverageDebtMinVoxels &&
+           photoCoverageFraction < AppConstants.photoCoverageDebtFraction {
+            if let t = tip("guidance.pauseForPhoto",
+                           "📸 Hold still on amber areas, then tap for a photo",
+                           icon: "camera.fill",
+                           priority: .guidance, now: now) { return t }
+        }
+
+        // Multi-view stills coaching — both need a few stills of signal first.
+        if !isEarlyScan && sharpFrameCount >= AppConstants.stillOverlapMinStills {
+            // Stills barely overlap each other: splat/photogrammetry texture wants
+            // ~60% shared content between neighboring photos, not isolated islands.
+            if meanStillOverlap < AppConstants.stillOverlapFloor {
+                if let overlapTip = tip("guidance.stillOverlap",
+                                        "📸 Overlap your photos — shoot the next one closer to the last",
+                                        icon: "square.on.square",
+                                        priority: .guidance, now: now) { return overlapTip }
+            }
+            // Photo coverage is all single-standpoint: parallax (a sidestep between
+            // photos) matters more than re-aiming from the same spot.
+            if standpointDiversity < AppConstants.stillParallaxDiversityFloor {
+                if let parallaxTip = tip("guidance.stillParallax",
+                                         "↔️ Step sideways and photograph covered areas again",
+                                         icon: "figure.walk",
+                                         priority: .guidance, now: now) { return parallaxTip }
+            }
         }
 
         // Great coverage — consider finishing

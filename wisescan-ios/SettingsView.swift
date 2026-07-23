@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import ARKit
 
 struct SettingsView: View {
     var scrollToDevMode: Bool = false
@@ -18,9 +19,12 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.hideLivePoints) private var hideLivePoints: Bool = AppConstants.hideLivePoints
     @AppStorage(AppConstants.Key.perfDiagnostics) private var perfDiagnostics: Bool = AppConstants.perfDiagnostics
     @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
+    @AppStorage(AppConstants.Key.vrBloomEnabled) private var vrBloomEnabled: Bool = AppConstants.vrBloomEnabled
     @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
     @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
+    // 0 = Auto (no override); N = force format index N-1 of supportedVideoFormats.
+    @AppStorage(AppConstants.Key.videoFormatIndex) private var videoFormatIndex: Int = 0
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
@@ -228,66 +232,6 @@ struct SettingsView: View {
                     }
                     .listRowBackground(Color.white.opacity(0.05))
 
-                    // MARK: - Semantic Classes
-                    // NOTE: post deferred-build migration these no longer gate LIVE outlines (we don't
-                    // render them during capture) — the selection now controls semantic-class visibility
-                    // in the saved-map / mesh-preview viewer. Kept for that reason.
-                    Section {
-                        ForEach(SemanticClass.allCases.filter { $0 != .none }, id: \.rawValue) { cls in
-                            if cls.isConfigurable {
-                                Toggle(isOn: Binding(
-                                    get: { SemanticClassPreference.load().contains(cls.rawValue) },
-                                    set: { enabled in
-                                        var current = SemanticClassPreference.load()
-                                        if enabled { current.insert(cls.rawValue) } else { current.remove(cls.rawValue) }
-                                        SemanticClassPreference.save(current)
-                                    }
-                                )) {
-                                    HStack(spacing: 8) {
-                                        Circle()
-                                            .fill(cls.swiftUIDisplayColor)
-                                            .frame(width: 12, height: 12)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(cls.rawValue.capitalized)
-                                                .foregroundColor(.white)
-                                            Text(cls.classDescription)
-                                                .font(.caption2)
-                                                .foregroundColor(.gray)
-                                        }
-                                    }
-                                }
-                                .tint(.cyan)
-                                .padding(.vertical, 2)
-                            } else {
-                                // Ceiling: non-configurable, shown as disabled
-                                HStack(spacing: 8) {
-                                    Circle()
-                                        .fill(cls.swiftUIDisplayColor.opacity(0.3))
-                                        .frame(width: 12, height: 12)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(cls.rawValue.capitalized)
-                                            .foregroundColor(.gray)
-                                        Text(cls.classDescription)
-                                            .font(.caption2)
-                                            .foregroundColor(.gray.opacity(0.7))
-                                    }
-                                    Spacer()
-                                    Toggle("", isOn: .constant(false))
-                                        .labelsHidden()
-                                        .disabled(true)
-                                }
-                                .padding(.vertical, 2)
-                            }
-                        }
-                    } header: {
-                        Text("SEMANTIC CLASS VISIBILITY")
-                    } footer: {
-                        Text("Choose which semantic classes are shown in saved-map and mesh previews. All classes are always collected for export.")
-                            .font(.caption2)
-                            .foregroundColor(.gray)
-                    }
-                    .listRowBackground(Color.white.opacity(0.05))
-
                     // MARK: - Data Management
                     Section {
                         Button(role: .destructive) {
@@ -432,11 +376,65 @@ struct SettingsView: View {
                             .tint(.orange)
                             .padding(.vertical, 4)
 
+                            Toggle(isOn: $vrBloomEnabled) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("VR Bloom Effect")
+                                        .foregroundColor(.white)
+                                    Text("Glow post-process on the VR point cloud (two GPU passes + a half-res texture per frame). Off by default; most useful with Hide Live Points on, where the glow softens the raw accumulated voxels. Applied live, per frame, VR mode only.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
                             Toggle(isOn: $memDiagForceReclaim) {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("MemDiag Force Reclaim")
                                         .foregroundColor(.white)
                                     Text("Memory attribution only. Forces freed pages back to the OS before [MemDiag] teardown snapshots so free-deltas reflect real reclaim, not cached pages. Expensive — leave OFF except when profiling. Needs Perf Diagnostics on.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            // ── Capture Quality ──
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Video Format")
+                                    .foregroundColor(.white)
+                                Text("ARKit video stream resolution. Higher = better splat quality but more storage. Requires session restart.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                                // @AppStorage (not a raw UserDefaults Binding) so the menu
+                                // label refreshes when the selection changes. Tag N maps to
+                                // format index N-1; 0 is the Auto sentinel.
+                                Picker("Video Format", selection: $videoFormatIndex) {
+                                    Text("Auto (Best Available)").tag(0)
+                                    ForEach(Array(ARCoverageView.availableVideoFormats.enumerated()), id: \.offset) { index, label in
+                                        Text("[\(index)] \(label)").tag(index + 1)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .tint(.orange)
+                            }
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: Binding(
+                                get: {
+                                    // Default to true when key hasn't been set yet
+                                    UserDefaults.standard.object(forKey: AppConstants.Key.captureAudioEnabled) == nil
+                                        ? AppConstants.captureAudioEnabled
+                                        : UserDefaults.standard.bool(forKey: AppConstants.Key.captureAudioEnabled)
+                                },
+                                set: { UserDefaults.standard.set($0, forKey: AppConstants.Key.captureAudioEnabled) }
+                            )) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Capture Audio")
+                                        .foregroundColor(.white)
+                                    Text("Play shutter click when a sharp frame is captured at a stillness point, and a chime when entering stillness.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

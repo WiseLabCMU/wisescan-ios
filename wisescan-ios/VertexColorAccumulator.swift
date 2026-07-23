@@ -89,26 +89,7 @@ enum VertexColorAccumulator {
         guard !vertices.isEmpty else { return nil }
 
         // Accumulate face normals per vertex
-        var normals = [SIMD3<Float>](repeating: .zero, count: vertices.count)
-
-        for face in parsed.faces {
-            let i0 = Int(face.0)
-            let i1 = Int(face.1)
-            let i2 = Int(face.2)
-            guard i0 < vertices.count, i1 < vertices.count, i2 < vertices.count else { continue }
-
-            let v0 = vertices[i0]
-            let v1 = vertices[i1]
-            let v2 = vertices[i2]
-
-            let edge1 = v1 - v0
-            let edge2 = v2 - v0
-            let normal = simd_cross(edge1, edge2)
-
-            normals[i0] += normal
-            normals[i1] += normal
-            normals[i2] += normal
-        }
+        let normals = MeshParser.accumulateVertexNormals(vertices: vertices, faces: parsed.faces)
 
         // Normalize and remap to [0,1] using standard normal map convention: (n + 1) / 2.
         // Fill the output Data in place to avoid an intermediate [SIMD4<Float>] allocation.
@@ -150,8 +131,69 @@ enum VertexColorAccumulator {
     /// parses vertices from `objData`, and projects each vertex into camera frames.
     /// `progress` (0...1) is called after each sampled frame on the calling
     /// (background) thread — callers hop to main to update UI.
+    /// Selects up to `max` camera-JSON files to sample for vertex coloring, **always
+    /// including every sharp keyframe** and filling the remainder with evenly-spaced
+    /// sweep frames. Keyframes carry the least motion blur and best registration, so
+    /// guaranteeing their inclusion (rather than only weighting them if they happen to
+    /// land on an even-stride sample) sharpens the colored preview on scans that paused
+    /// for stills. A pure sweep with no keyframes falls back to plain even-stride, and
+    /// when keyframes alone exceed the budget they're even-strided among themselves.
+    /// `cameraFiles` must be sorted chronologically; the returned subset preserves that order.
+    /// `keyframeStems` are the flagged frames from `keyframeStems(rawDir:)` — resolved from
+    /// transforms.json in one read rather than opening every per-frame camera JSON here.
+    static func selectColorizationFrames(
+        from cameraFiles: [URL], max maxFrames: Int, keyframeStems: Set<String>
+    ) -> [URL] {
+        guard cameraFiles.count > maxFrames, maxFrames > 0 else { return cameraFiles }
+
+        let isKeyframe: [Bool] = cameraFiles.map {
+            keyframeStems.contains($0.deletingPathExtension().lastPathComponent)
+        }
+        let keyframeIdx = cameraFiles.indices.filter { isKeyframe[$0] }
+
+        func evenStride(_ indices: [Int], count: Int) -> [Int] {
+            guard indices.count > count else { return indices }
+            let step = Swift.max(1, indices.count / count)
+            return Swift.stride(from: 0, to: indices.count, by: step).prefix(count).map { indices[$0] }
+        }
+
+        let selected: [Int]
+        if keyframeIdx.isEmpty {
+            // No stills — even-stride across all frames (original behavior).
+            selected = evenStride(Array(cameraFiles.indices), count: maxFrames)
+        } else if keyframeIdx.count >= maxFrames {
+            // More keyframes than the budget — even-stride among the keyframes.
+            selected = evenStride(keyframeIdx, count: maxFrames)
+        } else {
+            // All keyframes, then even-stride fill from the sweep frames.
+            let nonKeyframeIdx = cameraFiles.indices.filter { !isKeyframe[$0] }
+            let fill = evenStride(nonKeyframeIdx, count: maxFrames - keyframeIdx.count)
+            selected = (keyframeIdx + fill).sorted()
+        }
+        return selected.map { cameraFiles[$0] }
+    }
+
+    /// Frame stems (e.g. "frame_00042") flagged `is_keyframe` in the scan's transforms.json.
+    /// One file read replaces opening every camera JSON — `is_keyframe` is recorded per frame
+    /// there by the capture writers. Missing/old transforms.json degrades to an empty set
+    /// (pure even-stride selection, the pre-keyframe behavior).
+    static func keyframeStems(rawDir: URL) -> Set<String> {
+        let url = rawDir.appendingPathComponent("transforms.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let frames = json["frames"] as? [[String: Any]] else { return [] }
+        var stems = Set<String>()
+        for frame in frames where (frame["is_keyframe"] as? Bool) == true {
+            if let path = frame["file_path"] as? String {
+                stems.insert(URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent)
+            }
+        }
+        return stems
+    }
+
     static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?, progress: ((Double) -> Void)? = nil) -> Data? {
         guard let rawDir = rawDataDir else { return nil }
+        let startTime = CACurrentMediaTime()
         let fm = FileManager.default
 
         // Parse OBJ vertices using shared parser
@@ -179,13 +221,7 @@ enum VertexColorAccumulator {
         // Per-vertex surface normals (area-weighted face normals) drive the
         // view-angle weight. Sign/winding may be inconsistent across the mesh,
         // so the weight uses |normal · viewDir| and is sign-agnostic.
-        var normals = [SIMD3<Float>](repeating: .zero, count: vertices.count)
-        for face in parsed.faces {
-            let i0 = Int(face.0), i1 = Int(face.1), i2 = Int(face.2)
-            guard i0 < vertices.count, i1 < vertices.count, i2 < vertices.count else { continue }
-            let n = simd_cross(vertices[i1] - vertices[i0], vertices[i2] - vertices[i0])
-            normals[i0] += n; normals[i1] += n; normals[i2] += n
-        }
+        var normals = MeshParser.accumulateVertexNormals(vertices: vertices, faces: parsed.faces)
         for i in normals.indices {
             normals[i] = simd_length(normals[i]) > 0 ? simd_normalize(normals[i]) : SIMD3<Float>(0, 0, 1)
         }
@@ -202,10 +238,11 @@ enum VertexColorAccumulator {
 
         guard !cameraFiles.isEmpty else { return nil }
 
-        // Sample up to maxColorizationFrames evenly-spaced frames for high coverage
-        let maxFrames = min(cameraFiles.count, AppConstants.maxColorizationFrames)
-        let stride = max(1, cameraFiles.count / maxFrames)
-        let sampledFiles = Swift.stride(from: 0, to: cameraFiles.count, by: stride).prefix(maxFrames).map { cameraFiles[$0] }
+        // Sample up to maxColorizationFrames, preferring sharp keyframes (see helper).
+        let sampledFiles = Self.selectColorizationFrames(
+            from: cameraFiles, max: AppConstants.maxColorizationFrames,
+            keyframeStems: Self.keyframeStems(rawDir: rawDir)
+        )
 
         // ── Privacy: keep person pixels out of colors.bin ──
         // Colorize bakes sampled pixels into colors.bin, which exports as PLY vertex colors — a
@@ -305,6 +342,13 @@ enum VertexColorAccumulator {
             // Camera position in world space (translation column of cam2World) —
             // used for the per-observation view-angle and distance weights.
             let camWorld = SIMD3<Float>(t03, t13, t23)
+
+            // Sharp stillness keyframes (hi-res stills captured while the device was
+            // stationary) carry far less motion blur than sweep frames, so their color
+            // observations get a weight bonus — where a keyframe saw a surface, its
+            // crisp samples dominate the weighted median over blur-prone sweep samples.
+            let frameWeight: Float = (json["is_keyframe"] as? Bool) == true
+                ? AppConstants.colorizationKeyframeWeight : 1.0
 
             // Load corresponding image
             guard let imagePath = json["image_path"] as? String else { return }
@@ -453,7 +497,7 @@ enum VertexColorAccumulator {
                 let angleWeight = abs(simd_dot(normals[i], viewDir))   // 1 = head-on, 0 = grazing
                 let clampedDist = max(dist, distFloor)
                 let distWeight = 1.0 / (clampedDist * clampedDist)     // inverse-square, floored
-                let weight = angleWeight * distWeight
+                let weight = angleWeight * distWeight * frameWeight    // keyframes get a sharpness bonus
                 guard weight > 1e-6 else { continue }
 
                 let offset = py * bytesPerRow + px * bytesPerPixel
@@ -511,7 +555,8 @@ enum VertexColorAccumulator {
                 coloredCount += 1
             }
         }
-        print("[VertexColor] Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (weighted median, K=\(K))")
+        let elapsed = CACurrentMediaTime() - startTime
+        print("[VertexColor] Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (weighted median, K=\(K)) in \(String(format: "%.1f", elapsed))s")
         return data
     }
 

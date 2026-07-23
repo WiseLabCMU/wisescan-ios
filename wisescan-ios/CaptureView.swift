@@ -38,6 +38,8 @@ struct CaptureView: View {
     @State var recordingSeconds = 0
     @State var recordingTimer: Timer?
     @State var frameCaptureSession = FrameCaptureSession()
+    /// Opacity of the white shutter-flash overlay shown when a sharp keyframe is captured.
+    @State private var captureFlashOpacity: Double = 0
     // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
     @State private var mainThreadWatchdog = MainThreadWatchdog()
     /// [MemDiag] logs a MEM-PRESSURE marker (footprint + headroom) when the OS flags the app near its
@@ -91,6 +93,8 @@ struct CaptureView: View {
     @State var saveNavigationTask: Task<Void, Never>? // Delayed post-save tab switch; cancelled if the view leaves first
     @State var isConfirmingAlignment = false // Re-entry guard for confirmAlignment double-tap
     @State var showStopMenu = false
+    @State var showDiscardConfirm = false // destructive Discard from the stop menu → confirm first
+    @State var showPendingDiscardConfirm = false // destructive Discard from the naming dialog → confirm first
     @State var showExtendErrorAlert = false
     @State var isAwaitingAlignment = false // Phase 2.1 (perfDiag): briefly holding record for the auto-align correction
 
@@ -138,19 +142,25 @@ struct CaptureView: View {
         let scanCase: ScanCase
     }
 
-    /// Loads ghost mesh data from the scan to extend, caching it in @State.
+    /// Loads ghost mesh data from the scan to extend, caching it in @State. SwiftData reads stay
+    /// on MAIN; the heavy tail — reading a multi-MB OBJ plus the O(n) de-registration text
+    /// rewrite — runs on a background queue (deferred PR #28 review item: it ran on main during
+    /// capture bring-up, the most contended window; a legacy full-mesh ghost with an applied
+    /// registration could stall main for seconds). The completion sets ALL ghost state together
+    /// on main — including `ghostLoadAttempted` — so the body's world-map gate still hands
+    /// map + ghost to the session in a single start, exactly as the synchronous version did
+    /// (cached data always arrived after makeUIView anyway; updateUIView's nil→data reload with
+    /// the map is the designed bring-up path in both timings).
     private func loadGhostMeshData() {
-        // Whatever the outcome, the attempt happened — releases the world-map gate in body (the
-        // no-ghost paths below then run ghost-less relocalization instead of holding forever).
-        defer { ghostLoadAttempted = true }
         // Reset the proxy flag up front so an early-return guard below can't leave a stale
         // ghostIsProxy=true from a prior appearance (it is @State and survives across appearances);
-        // the rescan-proxy block re-sets it when a proxy actually loads.
+        // the async completion re-sets it when a proxy actually loads.
         ghostIsProxy = false
         guard let locId = scanStore.activeLocationForScan,
               let scanId = scanStore.activeScanToExtend else {
             cachedGhostMeshData = nil
             ghostReferencePlanes = []
+            ghostLoadAttempted = true   // nothing to load — release the world-map gate now
             return
         }
         let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
@@ -158,65 +168,96 @@ struct CaptureView: View {
               let targetScan = location.scans.first(where: { $0.id == scanId }) else {
             cachedGhostMeshData = nil
             ghostReferencePlanes = []
+            ghostLoadAttempted = true
             return
         }
+        // Snapshot everything the background pass needs on MAIN — SwiftData models and their
+        // relationships are not thread-safe off the main actor.
+        let isRescan = scanStore.activeScanCase == .rescanSpace
+        let scanDirectory = targetScan.scanDirectory
+        let proxyCandidates = [
+            targetScan.scanDirectory.appendingPathComponent("mesh_proxy.obj"),
+            targetScan.rawDataPath.appendingPathComponent("mesh_proxy.obj")
+        ]
+        let meshFileURL = targetScan.meshFileURL
         // [MemDiag] Ghost mesh = the ICP-source mesh, held resident ALONGSIDE the live scan mesh
         // through a rescan — the genuine 2× mesh coexistence, and it happens during scan time. blob =
         // exact bytes read in (the parse into a displayed RealityKit entity is a separate, later cost);
         // footprintΔ is the Data buffer. Baseline read only when diagnostics are on → free otherwise.
         let foot0 = PerfDiag.enabled ? ScanStats.currentFootprintMB() : 0
-        // DECISION 2: rescans load the light proxy (walls/floor/ceiling subtracted, RoomPlan quads
-        // baked in) instead of the full 10⁵–10⁶-face mesh — killing the 2× mesh-coexistence memory
-        // and most of the ghost render/parse cost. A proxy ghost also retires the mesh-ICP path
-        // for the session (plane auto-align drives the green chip; save-time registration is the
-        // correction authority) and drops the perfDiag alignment-phase mesh reconstruction — the
-        // dense-ICP machinery only engages for legacy scans with no proxy artifact.
-        if scanStore.activeScanCase == .rescanSpace {
-            let proxyCandidates = [
-                targetScan.scanDirectory.appendingPathComponent("mesh_proxy.obj"),
-                targetScan.rawDataPath.appendingPathComponent("mesh_proxy.obj")
-            ]
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let (ghostData, isProxy, planes) = Self.readGhostArtifacts(
+                isRescan: isRescan, scanDirectory: scanDirectory,
+                proxyCandidates: proxyCandidates, meshFileURL: meshFileURL, scanId: scanId)
+
+            DispatchQueue.main.async {
+                // Staleness guard: the user may have left the capture tab or retargeted while the
+                // file was read — applying a stale ghost would hand the WRONG mesh/planes to the
+                // next session start. (A repeat load of the SAME target is idempotent.)
+                guard scanStore.activeScanToExtend == scanId else { return }
+                cachedGhostMeshData = ghostData
+                ghostIsProxy = isProxy
+                ghostReferencePlanes = planes
+                ghostLoadAttempted = true   // ghost + map now hand over together (body's gate)
+                if PerfDiag.enabled {
+                    let blobMB = Double(ghostData?.count ?? 0) / (1024.0 * 1024.0)
+                    let foot1 = ScanStats.currentFootprintMB()
+                    PerfDiag.log(String(format: "[MemDiag] EVENT GHOST-LOAD blob=%.1fMB footprint=%.0fMB (Δ%+.0f)",
+                                        blobMB, foot1, foot1 - foot0))
+                }
+            }
+        }
+    }
+
+    /// Background half of `loadGhostMeshData` — file reads + de-registration + plane decode
+    /// (no SwiftData, no @State; everything arrives as plain values snapshotted on main).
+    private static func readGhostArtifacts(isRescan: Bool, scanDirectory: URL,
+                                           proxyCandidates: [URL], meshFileURL: URL, scanId: UUID)
+        -> (data: Data?, isProxy: Bool, planes: [PlaneRegistration.Plane]) {
+        // DECISION 2: rescans load the light proxy (walls/floor/ceiling subtracted, RoomPlan
+        // quads baked in) instead of the full 10⁵–10⁶-face mesh — killing the 2× mesh-
+        // coexistence memory and most of the ghost render/parse cost. A proxy ghost also
+        // retires the mesh-ICP path for the session (plane auto-align drives the green chip;
+        // save-time registration is the correction authority) — the dense-ICP machinery only
+        // engages for legacy scans with no proxy artifact.
+        var ghostData: Data?
+        var isProxy = false
+        if isRescan {
             for url in proxyCandidates {
                 if let data = try? Data(contentsOf: url) {
-                    cachedGhostMeshData = data
-                    ghostIsProxy = true
+                    ghostData = data
+                    isProxy = true
                     print("[GhostProxy] rescan ghost using proxy (\(data.count / 1024)KB)")
                     break
                 }
             }
         }
-        if !ghostIsProxy {
-            cachedGhostMeshData = try? Data(contentsOf: targetScan.meshFileURL)
+        if !isProxy {
+            ghostData = try? Data(contentsOf: meshFileURL)
         }
-        // DECISION 1 co-framing: if this scan's mesh was registered into the canonical frame at
-        // ITS save, undo that here — the live session relocalizes into the scan's RAW capture
-        // frame (the world map can't be re-based), and the ghost must share it (visual overlay,
-        // manual nudge, and the ICP probe all assume ghost ≡ live frame). One O(n) text pass,
-        // only for scans that actually carry an applied registration.
-        if let data = cachedGhostMeshData,
-           let undo = SaveRegistration.inverseForGhost(scanDirectory: targetScan.scanDirectory) {
-            cachedGhostMeshData = SaveRegistration.transformOBJ(data, by: undo)
+        // DECISION 1 co-framing: if this scan's mesh was registered into the canonical frame
+        // at ITS save, undo that here — the live session relocalizes into the scan's RAW
+        // capture frame (the world map can't be re-based), and the ghost must share it
+        // (visual overlay, manual nudge, and the ICP probe all assume ghost ≡ live frame).
+        // One O(n) text pass, only for scans that actually carry an applied registration.
+        if let data = ghostData,
+           let undo = SaveRegistration.inverseForGhost(scanDirectory: scanDirectory) {
+            ghostData = SaveRegistration.transformOBJ(data, by: undo)
             print("[PlaneReg] ghost mesh de-registered back to its raw capture frame for relocalization overlay")
         }
         // Ghost auto-align reference: the ghost room's planes in the SAME raw frame as the
-        // (de-registered) mesh + world map. Rescan only — a link-adjacent capture is a different
-        // physical room, and auto-fitting its walls to the ghost's would be a false lock.
-        ghostReferencePlanes = scanStore.activeScanCase == .rescanSpace
-            ? SaveRegistration.rawFramePlanes(scanDirectory: targetScan.scanDirectory)
-            : []
-        if !ghostReferencePlanes.isEmpty {
-            print("[PlaneReg] ghost auto-align reference loaded: \(ghostReferencePlanes.count) planes")
-        } else if scanStore.activeScanCase == .rescanSpace {
+        // (de-registered) mesh + world map. Rescan only — a link-adjacent capture is a
+        // different physical room; auto-fitting its walls to the ghost's would be a false lock.
+        let planes = isRescan ? SaveRegistration.rawFramePlanes(scanDirectory: scanDirectory) : []
+        if !planes.isEmpty {
+            print("[PlaneReg] ghost auto-align reference loaded: \(planes.count) planes")
+        } else if isRescan {
             // Loud, not silent: without reference planes there is NO auto-align, NO plane
             // detection, and no [PlaneReg] output at all — this line is the only breadcrumb.
-            print("[PlaneReg] auto-align DISABLED: no reference planes — roomplan.json missing/undecodable for scan \(targetScan.id) (was a room built at its save?)")
+            print("[PlaneReg] auto-align DISABLED: no reference planes — roomplan.json missing/undecodable for scan \(scanId) (was a room built at its save?)")
         }
-        if PerfDiag.enabled {
-            let blobMB = Double(cachedGhostMeshData?.count ?? 0) / (1024.0 * 1024.0)
-            let foot1 = ScanStats.currentFootprintMB()
-            PerfDiag.log(String(format: "[MemDiag] EVENT GHOST-LOAD blob=%.1fMB footprint=%.0fMB (Δ%+.0f)",
-                                blobMB, foot1, foot1 - foot0))
-        }
+        return (ghostData, isProxy, planes)
     }
 
     /// Computes the connector anchors for the active location (Track C). Only populated when
@@ -354,6 +395,7 @@ struct CaptureView: View {
                 scanStore: scanStore,
                 connectorAnchors: connectorAnchors,
                 finalCapturedRoom: $finalCapturedRoom,
+                frameCaptureSession: frameCaptureSession,
                 ghostYRotation: ghostYRotation,
                 ghostXOffset: ghostXOffset,
                 ghostZOffset: ghostZOffset,
@@ -363,6 +405,19 @@ struct CaptureView: View {
                 isAnalyzing: $isAnalyzing
             )
                 .ignoresSafeArea()
+                // Shutter tap — the deterministic still trigger, gated on stillness.
+                // Attached to the AR view (behind the HUD) so buttons keep their own
+                // taps; fires nothing unless recording. A warning haptic answers taps
+                // while moving ("hold still first"); capture feedback (shutter click +
+                // flash) comes from the accepted save itself.
+                .onTapGesture {
+                    guard isRecording else { return }
+                    if frameCaptureSession.requestStillCapture() {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    } else {
+                        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                    }
+                }
                 // Fix phase race: set .loadingWorldMap before the AR session starts
                 // loading the world map. onAppear fires AFTER the first render, so
                 // the AR view could detect a boundary anchor before the phase is set.
@@ -407,10 +462,22 @@ struct CaptureView: View {
             PermissionsOverlay(locationManager: locationManager)
                 .ignoresSafeArea()
 
+            // Stillness reticle — the hold-still-then-tap affordance. The ring fills as
+            // the device settles, locks green when a shutter tap will capture, and shows
+            // "Capturing…" while a tapped still is in flight. Shown in both AR and VR
+            // modes: keyframes are captured in both. Wrapped in a host view so the 10Hz
+            // progress updates re-evaluate only the reticle's body, not this entire view.
+            if isRecording && isARSessionReady {
+                StillnessReticleHost(session: frameCaptureSession)
+                    .allowsHitTesting(false)
+            }
+
             // Centered startup/tracking pills (kept separate from ScanCoach)
             centeredTrackingPills
 
-            // Lite mode banner for non-LiDAR devices
+            // Lite mode banner for non-LiDAR devices. Top-aligned: unanchored it sat at the
+            // ZStack's vertical center — directly over the stillness reticle (2026-07-22 field
+            // report from the iPhone Lite pass).
             if !ARCoverageView.supportsLiDAR {
                 HStack(spacing: 6) {
                     Image(systemName: "info.circle.fill")
@@ -422,7 +489,8 @@ struct CaptureView: View {
                 .padding(.vertical, 8)
                 .background(Color.blue.opacity(0.75))
                 .cornerRadius(16)
-                .padding(.top, 50)
+                .padding(.top, 60)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
 
             VStack {
@@ -490,6 +558,20 @@ struct CaptureView: View {
                             Text("REC \(formattedTime)")
                                 .font(.caption).bold()
                                 .foregroundColor(.white)
+
+                            // Sharp frame counter — shows frames captured while device was still
+                            if frameCaptureSession.sharpFrameCount > 0 {
+                                Divider()
+                                    .frame(height: 12)
+                                    .background(Color.white.opacity(0.5))
+                                HStack(spacing: 3) {
+                                    Image(systemName: "camera.fill")
+                                        .font(.caption2)
+                                    Text("\(frameCaptureSession.sharpFrameCount)")
+                                        .font(.caption).bold()
+                                }
+                                .foregroundColor(.green)
+                            }
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
@@ -681,6 +763,45 @@ struct CaptureView: View {
                                     }
                                 }
                                 */
+
+                                // Row 1.5b: Capture quality (sharp vs total frames)
+                                if frameCaptureSession.totalCapturedFrameCount > 0 {
+                                    HStack(spacing: 16) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "camera.fill")
+                                                .font(.caption2)
+                                                .foregroundColor(.green)
+                                            Text("\(frameCaptureSession.sharpFrameCount)")
+                                                .font(.caption2).bold()
+                                                .foregroundColor(.green)
+                                            Text("sharp")
+                                                .font(.caption2)
+                                                .foregroundColor(.gray)
+                                        }
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "photo.on.rectangle")
+                                                .font(.caption2)
+                                                .foregroundColor(.white.opacity(0.6))
+                                            Text("\(frameCaptureSession.totalCapturedFrameCount)")
+                                                .font(.caption2)
+                                                .foregroundColor(.white.opacity(0.6))
+                                            Text("total")
+                                                .font(.caption2)
+                                                .foregroundColor(.gray)
+                                        }
+                                        Spacer()
+                                        // Stillness indicator
+                                        if frameCaptureSession.isCurrentlyStill {
+                                            HStack(spacing: 3) {
+                                                Image(systemName: "hand.raised.fill")
+                                                    .font(.caption2)
+                                                Text("Still")
+                                                    .font(.caption2).bold()
+                                            }
+                                            .foregroundColor(.green)
+                                        }
+                                    }
+                                }
 
                                 // Row 2: Capacity bar
                                 VStack(spacing: 4) {
@@ -911,19 +1032,37 @@ struct CaptureView: View {
                                 .cornerRadius(14)
                         })
 
+                        // Offered for new scans and extend legs (chaining rooms). Hidden for a
+                        // rescan of an existing space (activeScanToExtend set): its purpose is
+                        // refreshing that space's map, not growing the link graph from it.
+                        if !(scanStore.activeScanCase == .rescanSpace && scanStore.activeScanToExtend != nil) {
+                            Button(action: {
+                                showStopMenu = false
+                                if scanStats.hasEnoughFeaturesForRelocalization {
+                                    pinAndExtend()
+                                } else {
+                                    showExtendErrorAlert = true
+                                }
+                            }, label: {
+                                Text("Save & Scan Adjacent")
+                                    .font(.body.bold())
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 14)
+                                    .background(Color.indigo.opacity(0.85))
+                                    .foregroundColor(.white)
+                                    .cornerRadius(14)
+                            })
+                        }
+
                         Button(action: {
                             showStopMenu = false
-                            if scanStats.hasEnoughFeaturesForRelocalization {
-                                pinAndExtend()
-                            } else {
-                                showExtendErrorAlert = true
-                            }
+                            showDiscardConfirm = true
                         }, label: {
-                            Text("Save & Scan Adjacent")
+                            Text("Discard Scan")
                                 .font(.body.bold())
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 14)
-                                .background(Color.indigo.opacity(0.85))
+                                .background(Color.red.opacity(0.8))
                                 .foregroundColor(.white)
                                 .cornerRadius(14)
                         })
@@ -1042,6 +1181,25 @@ struct CaptureView: View {
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .animation(.spring(), value: showManualAdjust)
+            }
+
+            // Keyframe capture flash — a brief white blink (camera-app shutter language)
+            // each time a sharp keyframe is saved. Drawn last so it covers the full view.
+            Color.white
+                .opacity(captureFlashOpacity)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+        }
+        .onChange(of: frameCaptureSession.sharpFrameCount) { oldCount, newCount in
+            guard newCount > oldCount else { return } // ignore session-start reset to 0
+            // Two-phase so the peak actually renders: commit the peak opacity this
+            // update, then animate down on the next runloop turn — writing both in one
+            // transaction can coalesce to 0→0 and skip the flash entirely.
+            captureFlashOpacity = AppConstants.captureFlashOpacity
+            DispatchQueue.main.async {
+                withAnimation(.easeOut(duration: AppConstants.captureFlashDuration)) {
+                    captureFlashOpacity = 0
+                }
             }
         }
         .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
@@ -1252,26 +1410,24 @@ struct CaptureView: View {
                 }
             })
             .disabled(newLocationName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            Button("Cancel", role: .cancel) {
-                // Nothing consumes the pending scan after cancel, so remove its temp artifacts —
-                // both live in FileManager.temporaryDirectory and saveScan would normally move them.
-                // Dropping pendingScan alone would leak the (potentially large) raw-frames dir.
-                if let pending = pendingScan {
-                    if let rawDir = pending.rawDataPath {
-                        try? FileManager.default.removeItem(at: rawDir)
-                    }
-                    if let mapURL = pending.worldMapURL {
-                        try? FileManager.default.removeItem(at: mapURL)
-                    }
-                }
-                pendingScan = nil
-                saveMessage = nil
-                isProcessingMesh = false
-                isWaitingToSave = false
+            // Labeled as the discard it is (was "Cancel"): recording has already ended and
+            // the only alternatives are save-with-name or delete. Routes through the
+            // destructive-warning confirmation — every Discard Scan does.
+            Button("Discard Scan", role: .destructive) {
+                showPendingDiscardConfirm = true
             }
         } message: {
             Text("Enter a unique name for this space so you can add scans later.")
         }
+        // Both destructive-discard confirmations live in a ViewModifier — inlining two more
+        // .alert blocks here pushed SwiftUI's type-checker over its time budget.
+        .modifier(DiscardConfirmAlerts(
+            showDiscardConfirm: $showDiscardConfirm,
+            showPendingDiscardConfirm: $showPendingDiscardConfirm,
+            onKeepPending: { showNamePrompt = true },
+            onDiscardLive: { discardInProgressScan(isExtendFlow: false, completion: nil) },
+            onDiscardPending: { discardPendingScan() }
+        ))
         .alert("Insufficient Tracking", isPresented: $showInsufficientTrackingAlert) {
             // A scan without a usable world map can't be relocalized or extended, so we don't offer
             // "Save Anyway". Recording is still live here (stopRecording returned early without
@@ -1283,7 +1439,7 @@ struct CaptureView: View {
         } message: {
             Text("This scan's mapping status is '\(scanStats.mappingStatus)'. Relocalizing or extending it "
                 + "later requires a 'mapped' world map. Keep scanning the area to improve it, or discard "
-                + "and start over.")
+                + "and start over. Discarding deletes this recording's frames and photos and cannot be undone.")
         }
         .alert("Not Enough Features", isPresented: $showExtendErrorAlert) {
             Button("OK", role: .cancel) { }
@@ -1355,7 +1511,9 @@ struct CaptureView: View {
 
             let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
             let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
-            if isRecording && needsLiveMeshCue &&
+            // LiDAR-gated: Lite devices never produce mesh vertices, so this cue would show
+            // (and never clear) for a mesh that cannot exist (2026-07-22 Lite field report).
+            if isRecording && ARCoverageView.supportsLiDAR && needsLiveMeshCue &&
                scanStats.trackingStatus != .limited(reason: .relocalizing) &&
                !frameCaptureSession.isBlurWarningActive {
                 Text("📷 Move the camera to start the live mesh")
@@ -1762,5 +1920,43 @@ struct OctahedronIcon: View {
         }
         .stroke(color, lineWidth: 1.5)
         .frame(width: 16, height: 16)
+    }
+}
+
+/// The two destructive-discard confirmation alerts (stop menu + naming dialog), sharing
+/// one warning message so every "Discard Scan" carries the same destructive notice.
+/// Extracted from CaptureView.body — inlining them pushed SwiftUI's type-checker over
+/// its time budget ("unable to type-check this expression in reasonable time").
+private struct DiscardConfirmAlerts: ViewModifier {
+    @Binding var showDiscardConfirm: Bool
+    @Binding var showPendingDiscardConfirm: Bool
+    /// Reopens the naming prompt — a pending scan must never be stranded with no UI
+    /// to save or discard it.
+    let onKeepPending: () -> Void
+    let onDiscardLive: () -> Void
+    let onDiscardPending: () -> Void
+
+    static let warningText = "All frames and photos captured in this recording will be deleted. "
+        + "This cannot be undone."
+
+    func body(content: Content) -> some View {
+        content
+            // Stop-menu discard: recording is still live (the menu only dismissed) —
+            // Keep Scanning resumes untouched; Discard tears down the capture session
+            // and deletes the raw capture directory.
+            .alert("Discard this scan?", isPresented: $showDiscardConfirm) {
+                Button("Keep Scanning", role: .cancel) { }
+                Button("Discard Scan", role: .destructive) { onDiscardLive() }
+            } message: {
+                Text(Self.warningText)
+            }
+            // Naming-dialog discard: recording already ended and the mesh is baked;
+            // Back returns to the naming prompt, Discard deletes the pending artifacts.
+            .alert("Discard this scan?", isPresented: $showPendingDiscardConfirm) {
+                Button("Back", role: .cancel) { onKeepPending() }
+                Button("Discard Scan", role: .destructive) { onDiscardPending() }
+            } message: {
+                Text(Self.warningText)
+            }
     }
 }

@@ -23,7 +23,9 @@ struct UserGuideView: View {
                         text: "Point your device at a scene. The Privacy Filter (on by default) masks " +
                               "people out of the captured data. Tap the capture button to start recording — " +
                               "the mesh overlay shows scanning progress in real-time, and coaching tips " +
-                              "appear when the scan needs attention (moving too fast, session near capacity)."
+                              "appear when the scan needs attention (moving too fast, session near capacity). " +
+                              "The overlay color tells you what each area still needs: green = not yet " +
+                              "scanned, amber = depth captured but no photo yet, clear = photo-grade."
                     )
                     guideRow(
                         icon: "3.circle.fill",
@@ -76,6 +78,16 @@ struct UserGuideView: View {
                               "follow the on-screen tip if the app asks you to slow down or hold steady."
                     )
                     guideRow(
+                        icon: "camera.fill",
+                        title: "Hold Still, Tap for Photos",
+                        text: "To capture a high-resolution photo, hold still until the center ring " +
+                              "locks green, then tap the screen: a shutter click and flash confirm the " +
+                              "shot, and the amber overlay clears where the photo landed. Tap on every " +
+                              "amber area — these crisp stills drive the final texture quality. In the " +
+                              "mesh preview, the camera toggle shows where each still (and motion frame) " +
+                              "was captured."
+                    )
+                    guideRow(
                         icon: "arrow.left.and.right",
                         title: "Layout First, Details Second",
                         text: "Quickly cover all four walls for layout context, sweeping systematically " +
@@ -98,6 +110,27 @@ struct UserGuideView: View {
                     )
                 } header: {
                     Text("SCAN TIPS")
+                }
+                .listRowBackground(Color.white.opacity(0.05))
+
+                // MARK: - Semantic Colors
+                Section {
+                    ForEach(SemanticClass.allCases.filter { $0 != .none }, id: \.rawValue) { cls in
+                        legendRow(
+                            color: cls.swiftUIDisplayColor,
+                            name: cls.rawValue.capitalized,
+                            desc: cls.classDescription,
+                            dimmed: cls == .ceiling
+                        )
+                    }
+                } header: {
+                    Text("SEMANTIC COLORS")
+                } footer: {
+                    Text("Room-structure classes detected while scanning (with Semantic Labeling on), " +
+                         "shown in these colors in the mesh preview's semantics view and listed on the " +
+                         "scan HUD. All detected classes are always included in exports.")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
                 }
                 .listRowBackground(Color.white.opacity(0.05))
 
@@ -191,11 +224,13 @@ struct UserGuideView: View {
         .navigationTitle("User Guide")
         .navigationBarTitleDisplayMode(.inline)
     }
+}
 
-    // MARK: - Helper Views
+// MARK: - Helper Views
 
+private extension UserGuideView {
     @ViewBuilder
-    private func guideRow(icon: String, title: String, text: String) -> some View {
+    func guideRow(icon: String, title: String, text: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: icon)
                 .foregroundColor(.cyan)
@@ -214,7 +249,26 @@ struct UserGuideView: View {
     }
 
     @ViewBuilder
-    private func formatRow(format: String, desc: String) -> some View {
+    func legendRow(color: Color, name: String, desc: String, dimmed: Bool = false) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Circle()
+                .fill(dimmed ? color.opacity(0.3) : color)
+                .frame(width: 12, height: 12)
+                .frame(width: 28) // align with guideRow icons
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .foregroundColor(dimmed ? .gray : .white)
+                    .font(.subheadline)
+                Text(desc)
+                    .font(.caption)
+                    .foregroundColor(dimmed ? .gray.opacity(0.7) : .gray)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    func formatRow(format: String, desc: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Text(format)
                 .font(.caption).bold()
@@ -230,8 +284,8 @@ struct UserGuideView: View {
     }
 
     @ViewBuilder
-    private func appRow(name: String, icon: String, color: Color, desc: String,
-                        appStore: String? = nil, website: String? = nil) -> some View {
+    func appRow(name: String, icon: String, color: Color, desc: String,
+                appStore: String? = nil, website: String? = nil) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: icon)
                 .foregroundColor(color)

@@ -21,6 +21,9 @@ struct StitchGraphView: View {
     /// Set of PersistentIdentifiers for locations visible as graph nodes. Updated when the graph
     /// is rebuilt, so the parent can scope "Select All" to only the visible locations.
     @Binding var visibleLocationIds: Set<PersistentIdentifier>
+    /// Per-location status while a bulk Post-process runs (locationId → step message), from
+    /// ScansListView. Non-empty entries put a progress capsule on that location's tile.
+    var processingByLocation: [UUID: String] = [:]
 
     @State private var graph: StitchGraph?
 
@@ -43,6 +46,7 @@ struct StitchGraphView: View {
                                     graph: graph,
                                     isEditing: isEditing,
                                     selectedLocations: $selectedLocations,
+                                    processingByLocation: processingByLocation,
                                     onRender: { presentRender(for: component) }
                                 )
                             }
@@ -125,6 +129,7 @@ private struct ClusterView: View {
     let graph: StitchGraph
     let isEditing: Bool
     @Binding var selectedLocations: Set<PersistentIdentifier>
+    var processingByLocation: [UUID: String] = [:]
     let onRender: () -> Void
 
     // Layout metrics
@@ -244,7 +249,8 @@ private struct ClusterView: View {
 
                     if isEditing {
                         // In edit mode: tap toggles selection instead of navigating
-                        CompactLocationTile(location: node.location, isEditing: true, isSelected: isSelected)
+                        CompactLocationTile(location: node.location, isEditing: true, isSelected: isSelected,
+                                            processingMessage: processingByLocation[node.location.id])
                             .frame(width: nodeWidth, height: nodeHeight)
                             .contentShape(Rectangle())
                             .onTapGesture {
@@ -258,7 +264,8 @@ private struct ClusterView: View {
                             .position(center(of: node))
                     } else {
                         NavigationLink(value: node.location) {
-                            CompactLocationTile(location: node.location, isEditing: false, isSelected: false)
+                            CompactLocationTile(location: node.location, isEditing: false, isSelected: false,
+                                                processingMessage: processingByLocation[node.location.id])
                                 .frame(width: nodeWidth, height: nodeHeight)
                         }
                         .buttonStyle(.plain)
@@ -322,6 +329,8 @@ private struct CompactLocationTile: View {
     let location: ScanLocation
     var isEditing: Bool = false
     var isSelected: Bool = false
+    /// Non-nil while a bulk Post-process is working this location — shows the step overlay.
+    var processingMessage: String?
     @State private var thumbnail: UIImage?
     @State private var hasMissingWorldMap = false
 
@@ -378,7 +387,11 @@ private struct CompactLocationTile: View {
                 }
             }
             .overlay(alignment: .topTrailing) {
-                if !isEditing && !location.scans.isEmpty && location.scans.allSatisfy({ $0.isUploaded }) {
+                // Keyed to the LATEST scan, not an all-scans rollup: bulk upload's default
+                // "Latest" scope uploads only the newest scan per location, so allSatisfy read
+                // "never uploaded" forever on any multi-scan location. The latest generation is
+                // the operative artifact; per-scan upload state lives in LocationDetailView.
+                if !isEditing, latestScan?.isUploaded == true {
                     Image(systemName: "checkmark.icloud.fill")
                         .font(.system(size: 10))
                         .foregroundColor(.green)
@@ -386,6 +399,25 @@ private struct CompactLocationTile: View {
                         .background(Color.black.opacity(0.5))
                         .clipShape(Circle())
                         .padding(4)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                // Bulk Post-process: which step is running on THIS map (long batch, look-alike tiles).
+                if let processingMessage {
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            .scaleEffect(0.5)
+                        Text(processingMessage)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.ultraThinMaterial)
+                    .clipShape(Capsule())
+                    .padding(.bottom, 4)
                 }
             }
             .opacity(isEditing ? 0.85 : 1.0)
@@ -424,4 +456,16 @@ private struct CompactLocationTile: View {
             hasMissingWorldMap = resolved.1
         }
     }
+}
+
+#Preview {
+    // Empty-state / compile smoke check: a populated graph needs SwiftData-backed
+    // locations with stitch links. Renders the no-links placeholder.
+    StitchGraphView(
+        locations: [],
+        renderRequest: .constant(nil),
+        isEditing: .constant(false),
+        selectedLocations: .constant([]),
+        visibleLocationIds: .constant([])
+    )
 }

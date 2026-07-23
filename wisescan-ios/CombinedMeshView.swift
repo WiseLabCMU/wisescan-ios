@@ -375,3 +375,9 @@ extension CombinedMeshItem {
         UIColor(red: 0.70, green: 0.60, blue: 1.00, alpha: 1.0) // violet
     ]
 }
+
+#Preview {
+    // Empty state: no on-disk meshes, so the screen shows its "nothing to combine"
+    // path. A populated preview would need real mesh files on disk.
+    CombinedMeshScreen(title: "Living Room + Kitchen", items: [])
+}

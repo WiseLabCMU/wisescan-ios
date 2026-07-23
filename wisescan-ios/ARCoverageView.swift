@@ -45,6 +45,9 @@ struct ARCoverageView: UIViewRepresentable {
     /// RoomPlan: binding to receive the final CapturedRoom when recording stops.
     /// Written by the Coordinator in stopRoomPlanSession(); consumed by finishStopRecording for export.
     @Binding var finalCapturedRoom: CapturedRoom?
+    /// Frame capture session, wired at record-start so sharp keyframe captures can mark
+    /// mesh anchors as photo-covered in the coverage overlay (amber → clear).
+    var frameCaptureSession: FrameCaptureSession?
 
     /// Well-known name for boundary anchors so they can be identified across sessions.
     static let boundaryAnchorName = "Scan4D_Boundary_Anchor"
@@ -68,6 +71,17 @@ struct ARCoverageView: UIViewRepresentable {
 
     /// Whether this device has LiDAR for scene reconstruction and depth capture.
     static let supportsLiDAR = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
+
+    /// Human-readable labels for each supported video format, for the dev settings picker.
+    static var availableVideoFormats: [String] {
+        ARWorldTrackingConfiguration.supportedVideoFormats.map { f in
+            let w = Int(f.imageResolution.width)
+            let h = Int(f.imageResolution.height)
+            let fps = f.framesPerSecond
+            let hiRes = f.isRecommendedForHighResolutionFrameCapturing ? " [hiRes]" : ""
+            return "\(w)×\(h) @ \(fps)fps\(hiRes)"
+        }
+    }
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
@@ -235,13 +249,13 @@ struct ARCoverageView: UIViewRepresentable {
             uiView.scene.addAnchor(vrAnchor)
             context.coordinator.vrAnchorEntity = vrAnchor
 
-            // Re-configure session for sceneDepth if needed
-            if let config = uiView.session.configuration as? ARWorldTrackingConfiguration {
-                if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-                    config.frameSemantics.insert(.sceneDepth)
-                }
-                uiView.session.run(config)
-            }
+            // NO session.run here. shouldShowVR requires isRecording, so the record-start
+            // branch below ALWAYS runs the full reconstruction config (which inserts
+            // .sceneDepth) within this same updateUIView pass. An extra re-run of the
+            // stale nominal config here made record-start a back-to-back double
+            // reconfiguration — exactly the churn that wedges Recon3D's SLAM on some
+            // devices (see makeConfiguration note re: M2 iPad Pro), device-observed as
+            // "everything runs but no mesh integrates" on VR restarts.
             context.coordinator.removeAllMeshEntities()
             PerfDiag.log("[MemDiag] EVENT VR-READY \(context.coordinator.memMarker())")
         } else if !shouldShowVR && wasShowingVR {
@@ -471,6 +485,15 @@ struct ARCoverageView: UIViewRepresentable {
                 if captureMode == .ar {
                     context.coordinator.addCoverageGreenQuad(to: uiView)
                 }
+                // Photo coverage: each sharp keyframe stamps the coverage grid from its
+                // depth map, then flips AR anchors that crossed the coverage threshold from
+                // amber ("depth only") to clear ("photo-grade") — or, in VR mode, clears the
+                // amber tint on covered voxels. Wired here so the callback lives exactly as
+                // long as the recording.
+                let coordinator = context.coordinator
+                frameCaptureSession?.onKeyframeCaptured = { [weak coordinator] keyframe in
+                    coordinator?.markPhotoCoverage(keyframe)
+                }
 
                 // Background parse the ghost mesh if we didn't already load it in nominal mode
                 if let ghostData = initialGhostMeshData, context.coordinator.ghostAnchorEntity == nil {
@@ -511,6 +534,7 @@ struct ARCoverageView: UIViewRepresentable {
                 context.coordinator.stopRoomPlanSession()
                 context.coordinator.resetForNominal()
                 context.coordinator.removeCoverageGreenQuad()
+                frameCaptureSession?.onKeyframeCaptured = nil
 
                 // Remove ghost mesh from scene (will be re-added on next recording if needed)
                 if let ghostAnchor = context.coordinator.ghostAnchorEntity {
@@ -819,6 +843,22 @@ struct ARCoverageView: UIViewRepresentable {
         private var lastAnchorWireframeTime: [UUID: Date] = [:]
         /// Minimum interval between wireframe rebuilds for the same anchor (seconds).
         private let wireframeThrottleInterval: TimeInterval = 0.5
+
+        // Photo coverage (three-state overlay: green = unscanned, amber = depth only,
+        // clear = photo-grade). Main-thread-owned — written when mesh entities are
+        // (re)built and when a sharp keyframe stamps the coverage grid.
+        /// Coverage-grid voxels occupied by each anchor's mesh (the denominator of the
+        /// anchor's photo-covered fraction). Rebuilt whenever the anchor's mesh rebuilds.
+        private var anchorVoxels: [UUID: Set<SIMD3<Int32>>] = [:]
+        /// Last time each anchor's amber tint MeshResource was regenerated — rebuilds
+        /// inside `photoTintRebuildInterval` reuse the previous tint entity instead.
+        private var lastTintBuildTime: [UUID: Date] = [:]
+        /// Anchors whose photo-covered voxel fraction crossed the threshold. Their amber
+        /// "depth only" tint is disabled, leaving clean camera passthrough (photo-grade).
+        private var photoCoveredAnchors: Set<UUID> = []
+        /// World-space voxel grid of surfaces covered by sharp keyframe photos, stamped
+        /// from each keyframe's depth map (occlusion-correct — no through-wall marking).
+        let photoCoverageGrid = PhotoCoverageGrid()
 
         // RoomPlan: structured room detection alongside ARKit mesh
         /// Active RoomPlan session sharing our ARSession. Provides oriented surfaces/objects.
@@ -1193,6 +1233,14 @@ struct ARCoverageView: UIViewRepresentable {
                 entry.anchor.removeFromParent()
             }
             activeMeshEntities.removeAll()
+            anchorVoxels.removeAll()
+            photoCoveredAnchors.removeAll()
+            lastTintBuildTime.removeAll()
+            photoCoverageGrid.reset()
+            scanStats?.photoCoverageCovered = 0
+            scanStats?.photoCoverageOccupied = 0
+            scanStats?.meanStillOverlap = 0
+            scanStats?.standpointDiversity = 0
         }
 
         /// Recolors all existing active mesh wireframe entities with the current activeMeshColor.
@@ -1205,6 +1253,10 @@ struct ARCoverageView: UIViewRepresentable {
                 let children = entry.model.children.map { $0 }
                 for child in children {
                     guard let modelEntity = child as? ModelEntity, let mesh = modelEntity.model?.mesh else { continue }
+                    // Skip the coverage-overlay fills — the occlusion punch and the amber
+                    // photo tint keep their own materials (recoloring them to the wireframe
+                    // color would break the green-quad hole punch).
+                    guard modelEntity.name != "occlusionFill" && modelEntity.name != "photoTint" else { continue }
                     modelEntity.removeFromParent()
                     let newModel = ModelEntity(mesh: mesh, materials: [material])
                     entry.model.addChild(newModel)
@@ -1241,21 +1293,35 @@ struct ARCoverageView: UIViewRepresentable {
 
             guard faces.bytesPerIndex == 4, faces.indexCountPerPrimitive == 3 else { return }
 
-            // Transform vertices to world space (same math as exportMeshOBJ)
+            // Transform vertices to world space (same math as exportMeshOBJ).
+            //
+            // BOUNDED READS (2026-07-23 M2 crash — EXC_BAD_ACCESS at a page-aligned address in
+            // this loop): a SIMD3<Float> pointee loads 16 bytes against ARKit's packed 12-byte
+            // vertex stride, over-reading the FINAL vertex by 4 bytes — harmless while Metal
+            // pads the allocation, fatal when the buffer ends exactly on a page boundary. Read
+            // x/y/z as three 4-byte floats instead (the same fix buildMeshOBJ's parse already
+            // carries), honor the source's byte offset, and clamp the declared counts to what
+            // the mapped buffer can actually hold (ARKit can recycle/resize the underlying
+            // MTLBuffer while a queued didUpdate drains — truncated geometry renders one
+            // throttle-cycle stale; a fault kills the scan).
+            let vStride = max(vertices.stride, MemoryLayout<Float>.size * 3)
+            let vBase = vertices.buffer.contents().advanced(by: vertices.offset)
+            let vAvail = max(0, vertices.buffer.length - vertices.offset)
+            let safeVertexCount = min(vertices.count, vAvail / vStride)
             var worldPositions = [SIMD3<Float>]()
-            worldPositions.reserveCapacity(vertices.count)
-            for i in 0..<vertices.count {
-                let ptr = vertices.buffer.contents().advanced(by: i * vertices.stride)
-                let local = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                let worldPos = anchorTransform * SIMD4<Float>(local.x, local.y, local.z, 1.0)
+            worldPositions.reserveCapacity(safeVertexCount)
+            for i in 0..<safeVertexCount {
+                let xyz = vBase.advanced(by: i * vertices.stride).assumingMemoryBound(to: Float.self)
+                let worldPos = anchorTransform * SIMD4<Float>(xyz[0], xyz[1], xyz[2], 1.0)
                 worldPositions.append(SIMD3<Float>(worldPos.x, worldPos.y, worldPos.z))
             }
 
             let faceStride = faces.bytesPerIndex * faces.indexCountPerPrimitive
+            let safeFaceCount = min(faces.count, faces.buffer.length / max(faceStride, 1))
             var faceIndices = [(UInt32, UInt32, UInt32)]()
-            faceIndices.reserveCapacity(faces.count)
+            faceIndices.reserveCapacity(safeFaceCount)
             let vertexCount = worldPositions.count
-            for i in 0..<faces.count {
+            for i in 0..<safeFaceCount {
                 let ptr = faces.buffer.contents().advanced(by: i * faceStride)
                 let face = ptr.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
                 // Validate indices are within vertex bounds — corrupted geometry
@@ -1287,6 +1353,13 @@ struct ARCoverageView: UIViewRepresentable {
                 }
                 filledDescriptor.primitives = .triangles(flatIndices)
 
+                // Photo-coverage support: world AABB for keyframe frustum tests, and a
+                // slightly inflated copy of the fill mesh for the amber "depth only" tint.
+                let coverageData = Self.buildPhotoCoverageData(
+                    worldPositions: worldPositions,
+                    flatIndices: flatIndices
+                )
+
                 DispatchQueue.main.async {
                     guard let self = self, let arView = self.arView, self.isRecording.load(ordering: .relaxed) else { return }
 
@@ -1303,14 +1376,50 @@ struct ARCoverageView: UIViewRepresentable {
                         }
                     }
 
-                    // Add filled occlusion mesh (invisible, writes depth to punch holes in green quad)
-                    if self.captureMode == .ar,
-                       let occlusionRes = try? MeshResource.generate(from: [filledDescriptor]) {
-                        let occlusionEntity = ModelEntity(
-                            mesh: occlusionRes,
-                            materials: [OcclusionMaterial()]
-                        )
-                        containerEntity.addChild(occlusionEntity)
+                    if self.captureMode == .ar {
+                        // Add filled occlusion mesh (invisible, writes depth to punch holes in green quad)
+                        if let occlusionRes = try? MeshResource.generate(from: [filledDescriptor]) {
+                            let occlusionEntity = ModelEntity(
+                                mesh: occlusionRes,
+                                materials: [OcclusionMaterial()]
+                            )
+                            occlusionEntity.name = "occlusionFill"
+                            containerEntity.addChild(occlusionEntity)
+                        }
+                        // Record this rebuild's occupied voxels, then re-evaluate coverage:
+                        // an anchor can rebuild larger (new geometry) after it was already
+                        // photo-covered, so recompute against the grid rather than trusting
+                        // the prior flag.
+                        self.anchorVoxels[anchorId] = coverageData.occupiedVoxels
+                        let covered = self.isAnchorPhotoCovered(coverageData.occupiedVoxels)
+                        if covered {
+                            self.photoCoveredAnchors.insert(anchorId)
+                        } else {
+                            self.photoCoveredAnchors.remove(anchorId)
+                        }
+                        // Amber "depth only" tint over the camera feed — skipped entirely
+                        // when the anchor is already photo-covered: generating a disabled
+                        // tint mesh on the main thread would be pure wasted capture-time work.
+                        if !covered {
+                            // The tint's MeshResource.generate is the costliest main-thread
+                            // part of the rebuild hop, and the hint tolerates brief staleness —
+                            // so within the throttle window, carry the previous tint entity
+                            // over instead of regenerating a third full mesh copy.
+                            if let previousTint = self.activeMeshEntities[anchorId]?.model.findEntity(named: "photoTint"),
+                               let builtAt = self.lastTintBuildTime[anchorId],
+                               Date().timeIntervalSince(builtAt) < AppConstants.photoTintRebuildInterval {
+                                previousTint.removeFromParent()
+                                previousTint.isEnabled = true
+                                containerEntity.addChild(previousTint)
+                            } else if let tintRes = try? MeshResource.generate(from: [coverageData.tintDescriptor]) {
+                                var tintMaterial = UnlitMaterial(rgb: AppConstants.photoTintColor, alpha: AppConstants.photoTintAlpha)
+                                tintMaterial.blending = .transparent(opacity: 1.0)
+                                let tintEntity = ModelEntity(mesh: tintRes, materials: [tintMaterial])
+                                tintEntity.name = "photoTint"
+                                containerEntity.addChild(tintEntity)
+                                self.lastTintBuildTime[anchorId] = Date()
+                            }
+                        }
                     }
 
                     if let existing = self.activeMeshEntities[anchorId] {
@@ -1357,15 +1466,22 @@ struct ARCoverageView: UIViewRepresentable {
             let vertices = mesh.geometry.vertices
             guard vertices.count > 0 else { return }
             let anchorTransform = mesh.transform
+            // Bounded reads — same hazard and fix as buildWireframeForAnchor: three-float loads
+            // (a SIMD3 pointee over-reads packed 12-byte strides by 4 bytes), source offset
+            // honored, count clamped to the mapped buffer.
+            let vStride = max(vertices.stride, MemoryLayout<Float>.size * 3)
+            let vBase = vertices.buffer.contents().advanced(by: vertices.offset)
+            let vAvail = max(0, vertices.buffer.length - vertices.offset)
+            let safeCount = min(vertices.count, vAvail / vStride)
+            guard safeCount > 0 else { return }
             let cap = 400
-            let step = max(1, vertices.count / cap)
+            let step = max(1, safeCount / cap)
             var samples = [SIMD3<Float>]()
-            samples.reserveCapacity(min(cap, vertices.count))
+            samples.reserveCapacity(min(cap, safeCount))
             var i = 0
-            while i < vertices.count {
-                let ptr = vertices.buffer.contents().advanced(by: i * vertices.stride)
-                let local = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                let w = anchorTransform * SIMD4<Float>(local.x, local.y, local.z, 1.0)
+            while i < safeCount {
+                let xyz = vBase.advanced(by: i * vertices.stride).assumingMemoryBound(to: Float.self)
+                let w = anchorTransform * SIMD4<Float>(xyz[0], xyz[1], xyz[2], 1.0)
                 samples.append(SIMD3<Float>(w.x, w.y, w.z))
                 i += step
             }
@@ -1717,9 +1833,6 @@ struct ARCoverageView: UIViewRepresentable {
             guard Date().timeIntervalSince(lastRoomPlanOutlineTime) >= AppConstants.semanticThrottleInterval else { return }
             lastRoomPlanOutlineTime = Date()
 
-            // All detected classes are tracked in detectedSemanticClasses (so roomplan.json export +
-            // the saved metadata carry full data); only the user-enabled ones publish to the HUD.
-            let enabledClasses = SemanticClassPreference.load()
             var classes = Set<String>()
             for surface in room.walls + room.floors + room.doors + room.windows + room.openings {
                 let semantic = SemanticClass.from(surface.category)
@@ -1733,9 +1846,9 @@ struct ARCoverageView: UIViewRepresentable {
             }
 
             detectedSemanticClasses.formUnion(classes)
-            let enabledForHUD = detectedSemanticClasses.filter { enabledClasses.contains($0) }
+            let detectedForHUD = detectedSemanticClasses
             DispatchQueue.main.async { [weak self] in
-                self?.scanStats?.detectedClasses = enabledForHUD
+                self?.scanStats?.detectedClasses = detectedForHUD
             }
         }
 
@@ -1765,6 +1878,112 @@ struct ARCoverageView: UIViewRepresentable {
         func removeCoverageGreenQuad() {
             coverageGreenQuadAnchor?.removeFromParent()
             coverageGreenQuadAnchor = nil
+        }
+
+        // MARK: - Photo Coverage (sharp keyframe frustum marking)
+
+        /// Photo-coverage support data for a rebuilt anchor mesh: its world-space AABB (for
+        /// keyframe frustum tests) and the amber tint mesh descriptor.
+        struct PhotoCoverageData {
+            /// Coverage-grid voxels occupied by the anchor's vertices — the denominator
+            /// of the anchor's photo-covered fraction.
+            let occupiedVoxels: Set<SIMD3<Int32>>
+            let tintDescriptor: MeshDescriptor
+        }
+
+        /// Builds the photo-coverage support data for a rebuilt anchor mesh. The tint mesh is
+        /// a copy of the fill mesh inflated along vertex normals so the translucent tint
+        /// doesn't z-fight the coincident occlusion fill (which writes depth).
+        /// Pure function; runs on the background mesh-build queue.
+        private static func buildPhotoCoverageData(
+            worldPositions: [SIMD3<Float>],
+            flatIndices: [UInt32]
+        ) -> PhotoCoverageData {
+            var occupiedVoxels = Set<SIMD3<Int32>>()
+            for position in worldPositions {
+                occupiedVoxels.insert(PhotoCoverageGrid.key(for: position))
+            }
+            let vertexNormals = MeshParser.accumulateVertexNormals(
+                vertices: worldPositions, flatIndices: flatIndices
+            )
+            var tintDescriptor = MeshDescriptor(name: "photo_tint")
+            tintDescriptor.positions = MeshBuffers.Positions(
+                worldPositions.enumerated().map { index, position in
+                    let normal = vertexNormals[index]
+                    let length = simd_length(normal)
+                    return length > 1e-8 ? position + (normal / length) * AppConstants.photoTintInflation : position
+                }
+            )
+            tintDescriptor.primitives = .triangles(flatIndices)
+            return PhotoCoverageData(occupiedVoxels: occupiedVoxels, tintDescriptor: tintDescriptor)
+        }
+
+        /// Whether an anchor's mesh is sufficiently photo-covered to drop its amber tint:
+        /// at least `photoCoverageAnchorFraction` of its occupied voxels appear in the
+        /// coverage grid.
+        private func isAnchorPhotoCovered(_ voxels: Set<SIMD3<Int32>>) -> Bool {
+            guard !voxels.isEmpty else { return false }
+            let hits = voxels.reduce(0) { $0 + (photoCoverageGrid.isCovered($1) ? 1 : 0) }
+            return Double(hits) / Double(voxels.count) >= AppConstants.photoCoverageAnchorFraction
+        }
+
+        /// Stamps the photo-coverage grid from a sharp keyframe's depth map, then flips any
+        /// anchor that crossed the coverage threshold from amber ("depth only") to clean
+        /// camera passthrough ("photo-grade"). Runs on main, only at keyframe-capture events
+        /// (a few times a minute).
+        ///
+        /// Coverage is occlusion-correct: only surfaces the depth map actually measured are
+        /// stamped, so geometry behind a wall is never marked covered through the wall (the
+        /// failure mode of the earlier frustum/AABB test this replaces).
+        func markPhotoCoverage(_ keyframe: FrameCaptureSession.KeyframeStill) {
+            guard let depthMap = keyframe.depthMap else { return }
+
+            let stamp = photoCoverageGrid.stamp(
+                depthMap: depthMap,
+                cameraTransform: keyframe.transform,
+                intrinsics: keyframe.intrinsics,
+                imageWidth: keyframe.width,
+                imageHeight: keyframe.height
+            )
+            // Multi-standpoint fraction walks the whole grid — compute once per keyframe
+            // and share it between the log line and the published stats.
+            let standpointDiversity = photoCoverageGrid.multiStandpointFraction
+            if PerfDiag.enabled {
+                // Per-still overlap with prior stills — the field-tuning signal for the
+                // multi-view coaching thresholds (photogrammetry target ≈ 0.6).
+                print("[Coverage] Still overlap: \(Int(stamp.overlap * 100))% (\(stamp.newlyCovered) new of \(stamp.stamped) voxels, mean \(Int(photoCoverageGrid.meanStillOverlap * 100))%, multi-standpoint \(Int(standpointDiversity * 100))%)")
+            }
+            publishCoverageStats(standpointDiversity: standpointDiversity)
+            guard stamp.newlyCovered > 0 else { return } // no grid change → nothing can flip
+
+            if captureMode == .ar {
+                for (anchorId, voxels) in anchorVoxels where !photoCoveredAnchors.contains(anchorId) {
+                    guard isAnchorPhotoCovered(voxels) else { continue }
+                    photoCoveredAnchors.insert(anchorId)
+                    // Disable the amber tint — this anchor is now photo-grade (clean camera feed).
+                    activeMeshEntities[anchorId]?.model.findEntity(named: "photoTint")?.isEnabled = false
+                }
+            } else {
+                // VR: push the enlarged covered-cell set to the voxel grid — covered voxels
+                // drop their amber tint at the next pack (~0.5s).
+                pointCloudManager?.applyPhotoCoverage(coveredCells: photoCoverageGrid.coveredPackedKeys())
+            }
+        }
+
+        /// Publishes photo-coverage progress (covered vs occupied voxels across all anchors)
+        /// plus the multi-view stats (mean still overlap, standpoint diversity) to ScanStats
+        /// for the coach tips and the final scan metadata.
+        /// Called on the main thread (keyframe-capture path), where ScanStats is written.
+        /// Pass `standpointDiversity` when the caller already computed it (it walks the
+        /// whole coverage grid).
+        private func publishCoverageStats(standpointDiversity: Double? = nil) {
+            var occupied = Set<SIMD3<Int32>>()
+            for voxels in anchorVoxels.values { occupied.formUnion(voxels) }
+            let coveredCount = occupied.reduce(0) { $0 + (photoCoverageGrid.isCovered($1) ? 1 : 0) }
+            scanStats?.photoCoverageCovered = coveredCount
+            scanStats?.photoCoverageOccupied = occupied.count
+            scanStats?.meanStillOverlap = photoCoverageGrid.meanStillOverlap
+            scanStats?.standpointDiversity = standpointDiversity ?? photoCoverageGrid.multiStandpointFraction
         }
 
         // Watch for relocalization success and track drift
@@ -2146,10 +2365,13 @@ struct ARCoverageView: UIViewRepresentable {
                 }
                 if frameMayShift {
                     DispatchQueue.main.async { [weak self] in
-                        if let pcm = self?.pointCloudManager {
-                            pcm.resetVoxels()
-                            print("[VR] Tracking degraded (frame may shift) — cleared accumulated voxels")
-                        }
+                        guard let self = self, let pcm = self.pointCloudManager else { return }
+                        pcm.resetVoxels()
+                        // The wipe also cleared the grid's covered-cell set — re-push it so
+                        // voxels re-accumulated over already-photographed surfaces don't
+                        // demand redundant stills. (photoCoverageGrid is main-owned.)
+                        pcm.applyPhotoCoverage(coveredCells: self.photoCoverageGrid.coveredPackedKeys())
+                        print("[VR] Tracking degraded (frame may shift) — cleared accumulated voxels")
                     }
                 }
                 return
@@ -2306,10 +2528,14 @@ struct ARCoverageView: UIViewRepresentable {
                     lastAnchorWireframeTime.removeValue(forKey: id)
 
                     // Remove the wireframe entity on main — RealityKit is main-only.
+                    // (anchorVoxels/photoCoveredAnchors are main-owned too.)
                     DispatchQueue.main.async { [weak self] in
                         if let entry = self?.activeMeshEntities.removeValue(forKey: id) {
                             entry.anchor.removeFromParent()
                         }
+                        self?.anchorVoxels.removeValue(forKey: id)
+                        self?.photoCoveredAnchors.remove(id)
+                        self?.lastTintBuildTime.removeValue(forKey: id)
                     }
                 }
             }
@@ -2322,6 +2548,7 @@ struct ARCoverageView: UIViewRepresentable {
                 entry.anchor.removeFromParent()
             }
             activeMeshEntities.removeAll()
+            lastTintBuildTime.removeAll()
             // Delegate-owned dicts → clear on the delegate queue (the ARSession callbacks mutate
             // them; concurrent mutation from main would crash). Clear ALL per-anchor dicts together,
             // including the vertex/face counts — otherwise updateStats keeps summing stale geometry
@@ -3206,26 +3433,51 @@ struct ARCoverageView: UIViewRepresentable {
         config.environmentTexturing = .automatic
 
         // ── Video format selection ──
-        // Default to the highest available resolution at 30fps for best downstream
-        // splat quality without overwhelming the capture pipeline. 60fps doubles
-        // frame delivery rate but doesn't improve mesh reconstruction or VIO — it
-        // only increases backpressure on the ioQueue (privacy blur, JPEG encode,
-        // depth PNG), which starves ARKit's frame pool on older devices (A12Z).
-        // Dev settings can override via videoFormatIndex.
+        //
+        // Goal: a 30fps format compatible with continuous AR + LiDAR mesh
+        // reconstruction whose camera configuration delivers the highest-resolution
+        // stills via captureHighResolutionFrame. 60fps doubles frame delivery without
+        // improving mesh/VIO and starves ARKit's frame pool on older devices.
+        //
+        // Device landscape (verified on M-series iPad Pro, 2026):
+        //   • hiRes 16:9 formats (3840×2160) break Recon3D mesh integration:
+        //     vio_initialized never clears, producing zero mesh geometry.
+        //   • hiRes 4:3 formats (1920×1440 [hiRes]) keep mesh integration intact
+        //     AND bind the full photo sensor: captureHighResolutionFrame returns
+        //     4032×3024 stills vs 2016×1512 on the standard format.
+        //   • recommendedVideoFormatFor4KResolution returns hiRes 16:9 on iPads
+        //     (M2/M4), so it cannot be trusted blindly.
+        //
+        // Selection priority:
+        //   1. Highest hiRes 4:3 30fps — mesh-safe, full-sensor stills.
+        //   2. Highest standard (non-hiRes) 30fps — typically 1920×1440 (4:3).
+        //   3. Apple's 4K pick — last resort, better than ARKit default.
+        //   4. ARKit default.
+        //
+        // Dev settings can force any format index via videoFormatIndex override.
+        // The stored value is 1-based (0 = Auto sentinel): value N selects format N-1,
+        // matching the picker tags in SettingsView and the [ARConfig] log numbering.
         let formats = ARWorldTrackingConfiguration.supportedVideoFormats
         let preferredIndex = UserDefaults.standard.integer(forKey: AppConstants.Key.videoFormatIndex)
-        if preferredIndex > 0, preferredIndex < formats.count {
+        if preferredIndex > 0, preferredIndex <= formats.count {
             // Dev override: user selected a specific format in settings
-            config.videoFormat = formats[preferredIndex]
+            config.videoFormat = formats[preferredIndex - 1]
         } else {
-            // Pick highest resolution standard (non-hiRes) format at 30fps.
-            // hiRes formats use 16:9 on iPads (3840×2160) which breaks Recon3D
-            // mesh integration (vio_initialized never clears → zero mesh).
-            let best30 = formats
+            let byPixelCount: (ARConfiguration.VideoFormat, ARConfiguration.VideoFormat) -> Bool = {
+                $0.imageResolution.width * $0.imageResolution.height
+                    < $1.imageResolution.width * $1.imageResolution.height
+            }
+            // 4:3 check with tolerance (imageResolution is exact, but stay robust).
+            let isFourByThree: (ARConfiguration.VideoFormat) -> Bool = {
+                abs(($0.imageResolution.width / $0.imageResolution.height) - 4.0 / 3.0) < 0.01
+            }
+            let bestHiRes43 = formats
+                .filter { $0.framesPerSecond == 30 && $0.isRecommendedForHighResolutionFrameCapturing && isFourByThree($0) }
+                .max(by: byPixelCount)
+            let bestStandard30 = formats
                 .filter { $0.framesPerSecond == 30 && !$0.isRecommendedForHighResolutionFrameCapturing }
-                .max(by: { $0.imageResolution.width * $0.imageResolution.height
-                         < $1.imageResolution.width * $1.imageResolution.height })
-            if let best = best30 {
+                .max(by: byPixelCount)
+            if let best = bestHiRes43 ?? bestStandard30 {
                 config.videoFormat = best
             } else if let fourK = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
                 config.videoFormat = fourK
@@ -3404,6 +3656,36 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
             PerfDiag.log("RoomPlan session ended cleanly")
         }
         PerfDiag.log("[MemDiag] EVENT RP-DIDEND \(memMarker())")
+
+        // Mid-scan RoomPlan failure (e.g. "World tracking failure" from drift under a fast
+        // sweep) surfaces here with a non-nil error while recording is still active — the
+        // intended-Stop path stores isRecording=false BEFORE calling stopRoomPlanSession, so
+        // a clean stop won't enter this branch.
+        //
+        // CRUCIAL: RoomPlan (RSCaptureSession) runs its OWN SLAM that can fail independently
+        // of the main ARKit session. RoomPlan dying does NOT by itself mean the scan is bad —
+        // it just means we lose the structured-room data; the frames/mesh/poses from ARKit are
+        // still good as long as ARKit's tracking is healthy. So only escalate to the
+        // VIO-compromised halt when ARKit's OWN tracking is also degraded at this moment. If
+        // ARKit is normal, log and keep scanning; the ARKit frame-gap/sustained-degradation
+        // guard remains the backstop for genuine ARKit loss. (Checked on main, where arView
+        // and the ARSession are owned.)
+        if error != nil, isRecording.load(ordering: .relaxed) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.isRecording.load(ordering: .relaxed) else { return }
+                let arTrackingNormal: Bool
+                switch self.arView?.session.currentFrame?.camera.trackingState {
+                case .normal: arTrackingNormal = true
+                default: arTrackingNormal = false
+                }
+                if arTrackingNormal {
+                    PerfDiag.log("RoomPlan world-tracking failure mid-scan, but ARKit tracking is normal — continuing (structured-room data lost, scan preserved)")
+                } else {
+                    PerfDiag.log("⛔️ RoomPlan failure + ARKit tracking degraded mid-scan — halting scan")
+                    self.vioCompromisedBinding?.wrappedValue = true
+                }
+            }
+        }
 
         // [DEFERRED-ROOMPLAN] DECISION 3 — STASH ONLY (no reconstruction here). Hand the raw
         // CapturedRoomData to the box; it runs RoomBuilder once the post-save hand-off also

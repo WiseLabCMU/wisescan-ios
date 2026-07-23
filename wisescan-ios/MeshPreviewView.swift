@@ -10,6 +10,11 @@ struct MeshPreviewContainer: View {
     var meshFileURL: URL?
     var colorsFileURL: URL?
     var scanDirectoryURL: URL?
+    /// Scan name for the preview title (nil hides the title row).
+    var scanName: String?
+    /// Whether the high-quality photo colorize has run. Drives the color-state note:
+    /// false = fast normals-shaded placeholder (colors not final).
+    var isColored: Bool = false
 
     @StateObject private var markerState = MarkerProjectionState()
     @State private var isUpdating = false
@@ -19,6 +24,9 @@ struct MeshPreviewContainer: View {
     @State private var detectedClasses: [SemanticClass] = []
     @State private var hasPrivacyMarkers = false
     @State private var isMeshLoaded = false
+    @State private var keyframeMarkerMode: KeyframeMarkerMode = .none
+    @State private var hasKeyframeMarkers = false
+    @State private var showSetPoseConfirm = false
     /// Canonical frame from the location's ORIGINAL scan (see `canonicalRoomFrame`), resolved
     /// before the viewer mounts so all of a location's scans preview through an identical view.
     @State private var canonicalFrame: (center: SIMD3<Float>, span: Float)?
@@ -27,38 +35,50 @@ struct MeshPreviewContainer: View {
     var body: some View {
         ZStack {
             if isViewerReady {
-                MeshPreviewView(
-                    meshFileURL: meshFileURL,
-                    colorsFileURL: colorsFileURL,
-                    scanDirectoryURL: scanDirectoryURL,
-                    frameCenter: canonicalFrame?.center,
-                    frameSpan: canonicalFrame?.span,
-                    initialPoseMatrix: location?.imagingPoseMatrix,
-                    markerState: markerState,
-                    isMeshLoaded: $isMeshLoaded,
-                    semanticViewMode: $semanticViewMode,
-                    detectedClasses: $detectedClasses,
-                    hasPrivacyMarkers: $hasPrivacyMarkers
-                )
+                // The SceneKit view and the projected privacy markers share ONE coordinate
+                // space and both bleed under the safe area, so the markers stay aligned with
+                // SceneKit's projectPoint output. The title/legend live outside this and
+                // respect the safe area (see below).
+                ZStack {
+                    MeshPreviewView(
+                        meshFileURL: meshFileURL,
+                        colorsFileURL: colorsFileURL,
+                        scanDirectoryURL: scanDirectoryURL,
+                        frameCenter: canonicalFrame?.center,
+                        frameSpan: canonicalFrame?.span,
+                        initialPoseMatrix: location?.imagingPoseMatrix,
+                        markerState: markerState,
+                        isMeshLoaded: $isMeshLoaded,
+                        semanticViewMode: $semanticViewMode,
+                        detectedClasses: $detectedClasses,
+                        hasPrivacyMarkers: $hasPrivacyMarkers,
+                        keyframeMarkerMode: $keyframeMarkerMode,
+                        hasKeyframeMarkers: $hasKeyframeMarkers
+                    )
 
-                // 2D overlay icons projected from 3D face anchor positions
-                if showPrivacyMarkers {
-                    ForEach(markerState.screenPositions.indices, id: \.self) { i in
-                        let pos = markerState.screenPositions[i]
-                        if pos.isVisible {
-                            Image(systemName: "eye.slash.fill")
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundColor(.red)
-                                .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
-                                .position(x: pos.point.x, y: pos.point.y)
+                    // 2D overlay icons projected from 3D face anchor positions
+                    if showPrivacyMarkers {
+                        ForEach(markerState.screenPositions.indices, id: \.self) { i in
+                            let pos = markerState.screenPositions[i]
+                            if pos.isVisible {
+                                Image(systemName: "eye.slash.fill")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundColor(.red)
+                                    .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
+                                    .position(x: pos.point.x, y: pos.point.y)
+                            }
                         }
                     }
                 }
+                .ignoresSafeArea()
 
-                // Bottom-left legend (semantic classes + privacy markers)
-                if (semanticViewMode.showOutlines && !detectedClasses.isEmpty) || (showPrivacyMarkers && hasPrivacyMarkers) {
+                // Bottom-left legend (semantic classes + privacy + capture markers)
+                let showSemanticLegend = semanticViewMode.showOutlines && !detectedClasses.isEmpty
+                let showPrivacyLegend = showPrivacyMarkers && hasPrivacyMarkers
+                let showStillsLegend = keyframeMarkerMode.showStills && hasKeyframeMarkers
+                if showSemanticLegend || showPrivacyLegend || showStillsLegend {
                     VStack(alignment: .leading, spacing: 4) {
-                        if semanticViewMode.showOutlines {
+                        if showSemanticLegend {
                             ForEach(detectedClasses, id: \.rawValue) { cls in
                                 HStack(spacing: 6) {
                                     Circle()
@@ -70,7 +90,7 @@ struct MeshPreviewContainer: View {
                                 }
                             }
                         }
-                        if showPrivacyMarkers && hasPrivacyMarkers {
+                        if showPrivacyLegend {
                             HStack(spacing: 6) {
                                 Image(systemName: "eye.slash.fill")
                                     .font(.system(size: 10))
@@ -78,6 +98,12 @@ struct MeshPreviewContainer: View {
                                 Text("Privacy")
                                     .font(.caption2)
                                     .foregroundColor(.white)
+                            }
+                        }
+                        if showStillsLegend {
+                            captureLegendRow(color: AppConstants.keyframeStillColor, label: "Stills")
+                            if keyframeMarkerMode.showMotion {
+                                captureLegendRow(color: AppConstants.keyframeMotionColor, label: "Motion")
                             }
                         }
                     }
@@ -90,7 +116,9 @@ struct MeshPreviewContainer: View {
                 }
             }
 
-            // Show loading indicator until mesh is fully parsed and rendered
+            // Show loading indicator until mesh is fully parsed and rendered.
+            // Full-bleed opaque cover (ignores the safe area) so no default background
+            // shows through at the screen edges during load.
             if !isMeshLoaded {
                 VStack(spacing: 16) {
                     ProgressView()
@@ -102,6 +130,7 @@ struct MeshPreviewContainer: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(white: 0.15))
+                .ignoresSafeArea()
                 .transition(.opacity)
             }
 
@@ -116,6 +145,18 @@ struct MeshPreviewContainer: View {
                 .padding()
                 .background(Color.black.opacity(0.8))
                 .cornerRadius(12)
+            }
+
+            // Title + preview-state note — small, centered. This layer respects the safe
+            // area, and inside a NavigationView the top safe-area inset already includes the
+            // nav bar, so top-alignment sits just BELOW the toolbar buttons and clear of the
+            // Dynamic Island / camera array. Last in the ZStack so it stays legible over both
+            // the mesh and the loading screen.
+            if let scanName = scanName {
+                previewTitle(scanName: scanName)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 8)
+                    .allowsHitTesting(false)
             }
         }
         .toolbar {
@@ -138,17 +179,36 @@ struct MeshPreviewContainer: View {
                     }
                 }
             }
+            if hasKeyframeMarkers {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        keyframeMarkerMode = keyframeMarkerMode.next
+                    } label: {
+                        Image(systemName: keyframeMarkerMode.iconName)
+                            .foregroundColor(keyframeMarkerMode == .none ? .gray : .cyan)
+                    }
+                }
+            }
             if location != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: savePoseAndUpdate) {
-                        HStack {
-                            Image(systemName: "camera.viewfinder")
-                            Text("Set Default Pose")
-                        }
+                    // Icon-only to keep the trailing bar uncrowded alongside the privacy/
+                    // semantic/keyframe toggles. A confirmation dialog names the action for
+                    // sighted users; the accessibility label names it for VoiceOver.
+                    Button {
+                        showSetPoseConfirm = true
+                    } label: {
+                        Image(systemName: "camera.viewfinder")
                     }
+                    .accessibilityLabel("Set Default Pose")
                     .disabled(isUpdating || !isMeshLoaded)
                 }
             }
+        }
+        .confirmationDialog("Set Default Pose", isPresented: $showSetPoseConfirm, titleVisibility: .visible) {
+            Button("Set Default Pose") { savePoseAndUpdate() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Save the current view angle as this location's default preview pose, then regenerate every scan's thumbnail from this viewpoint.")
         }
         .onAppear {
             // Defer the heavy OBJ parsing to ensure the fullScreenCover animation completes smoothly
@@ -161,6 +221,46 @@ struct MeshPreviewContainer: View {
                 }
                 isViewerReady = true
             }
+        }
+    }
+
+    /// Centered preview title: "Location · Scan" plus a preview-state note. The note flags
+    /// that this is the on-device mesh preview, not the final render, and whether its colors
+    /// are the fast normals-shaded placeholder (amber) or the photo colorize (green).
+    private func previewTitle(scanName: String) -> some View {
+        let heading = [location?.name, scanName]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+        return VStack(spacing: 2) {
+            if !heading.isEmpty {
+                Text(heading)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Text(isColored ? "Preview · colored mesh" : "Preview · shading only, colors not final")
+                .font(.caption2)
+                .foregroundColor(isColored ? .green : .orange)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial)
+        .cornerRadius(10)
+        .shadow(color: .black.opacity(0.3), radius: 2)
+        .padding(.horizontal, 60) // keep clear of leading/trailing toolbar buttons
+    }
+
+    /// One legend row for a capture-marker group (colored square + label).
+    private func captureLegendRow(color: SIMD4<Float>, label: String) -> some View {
+        HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color(red: Double(color.x), green: Double(color.y), blue: Double(color.z)))
+                .frame(width: 10, height: 10)
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(.white)
         }
     }
 
@@ -277,6 +377,8 @@ struct MeshPreviewView: UIViewRepresentable {
     @Binding var semanticViewMode: SemanticViewMode
     @Binding var detectedClasses: [SemanticClass]
     @Binding var hasPrivacyMarkers: Bool
+    @Binding var keyframeMarkerMode: KeyframeMarkerMode
+    @Binding var hasKeyframeMarkers: Bool
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -351,6 +453,12 @@ struct MeshPreviewView: UIViewRepresentable {
                     scanDirectoryURL: self.scanDirectoryURL
                 )
 
+                // Build still + motion capture-pose frustum markers from the saved poses
+                // (transforms.json). Derived entirely from existing raw data — no capture-time
+                // cost, and built here off-main (JSON parse + node flattening) so the one-time
+                // preview attach on main stays cheap. The three-tier mode toggles visibility.
+                let markerNodes = Self.buildKeyframeMarkerNodes(scanDirectoryURL: self.scanDirectoryURL)
+
                 DispatchQueue.main.async {
                     let node = SCNNode(geometry: geometry)
                     node.name = "mesh"
@@ -398,6 +506,12 @@ struct MeshPreviewView: UIViewRepresentable {
                         containerNode.addChildNode(fillsNode)
                         self.detectedClasses = outlines.detectedClasses
                     }
+
+                    // Attach the pre-built still + motion capture-pose markers (same world
+                    // frame as the mesh; the centering offset is applied here).
+                    self.attachKeyframeMarkers(
+                        markerNodes, to: containerNode, coordinator: context.coordinator, center: center
+                    )
 
                     scene.rootNode.addChildNode(containerNode)
                     context.coordinator.meshNode = node
@@ -452,6 +566,8 @@ struct MeshPreviewView: UIViewRepresentable {
         context.coordinator.meshNode?.isHidden = !mode.showMesh
         context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
         context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
+        context.coordinator.keyframeStillsNode?.isHidden = !keyframeMarkerMode.showStills
+        context.coordinator.keyframeMotionNode?.isHidden = !keyframeMarkerMode.showMotion
     }
 
     func makeCoordinator() -> Coordinator {
@@ -466,6 +582,10 @@ struct MeshPreviewView: UIViewRepresentable {
         weak var semanticsNode: SCNNode?
         /// Reference to the semantics fill (translucent faces) node for toggling visibility.
         weak var semanticFillsNode: SCNNode?
+        /// Reference to the still (keyframe) capture-marker container for toggling visibility.
+        weak var keyframeStillsNode: SCNNode?
+        /// Reference to the motion (sweep) capture-marker container for toggling visibility.
+        weak var keyframeMotionNode: SCNNode?
 
         init(markerState: MarkerProjectionState) {
             self.markerState = markerState
@@ -969,8 +1089,9 @@ struct MeshPreviewView: UIViewRepresentable {
 }
 
 #Preview {
+    // scanName/isColored exercise the title caption over the loading screen (a real
+    // mesh file would be needed to render actual geometry).
     NavigationView {
-        MeshPreviewContainer()
-            .ignoresSafeArea()
+        MeshPreviewContainer(scanName: "Sample Scan", isColored: false)
     }
 }

@@ -211,6 +211,17 @@ enum UploadStatus: Equatable {
     case success
     case failed(String)
 
+    /// True while an export/upload pipeline owns this scan (zip build or network send). Entry
+    /// points guard on this so a second tap can't start a CONCURRENT export — two overlapping
+    /// 72-frame privacy-blur passes OOM-killed the app during a Save to Files double-tap
+    /// (2026-07-23 iPhone 17 Pro field report).
+    var isInFlight: Bool {
+        switch self {
+        case .zipping, .uploading: return true
+        default: return false
+        }
+    }
+
     var label: String {
         switch self {
         case .pending: return "Ready"
@@ -512,6 +523,19 @@ class ScanStats {
     var mappingStatus: String = "notAvailable" // ARFrame.WorldMappingStatus for cumulative relocalization quality
     var detectedClasses: Set<String> = [] // Semantic classes detected so far (for HUD display)
     var roomPlanInstruction: RoomCaptureSession.Instruction? // Latest RoomPlan coaching instruction
+
+    // Photo coverage (sharp-keyframe voxel grid): how much of the depth-scanned mesh has
+    // been covered by hi-res stills. Drives the coverage-debt coach tip and scan metadata.
+    var photoCoverageCovered: Int = 0  // covered voxels
+    var photoCoverageOccupied: Int = 0 // mesh-occupied voxels (denominator)
+    /// Mean still-to-still overlap across the session's stills (0..1; photogrammetry target ~0.6).
+    var meanStillOverlap: Double = 0
+    /// Fraction of photo-covered voxels photographed from ≥2 distinct standpoints (parallax diversity).
+    var standpointDiversity: Double = 0
+    /// Fraction of mesh voxels covered by sharp keyframes (0 when no geometry yet).
+    var photoCoverageFraction: Double {
+        photoCoverageOccupied > 0 ? Double(photoCoverageCovered) / Double(photoCoverageOccupied) : 0
+    }
 
     // MARK: - Space Analysis (pre-scan staging check)
     /// Latest ambient intensity from ARFrame.lightEstimate (lumens, ~0–2000). Updated per-frame

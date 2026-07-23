@@ -62,3 +62,30 @@ struct CoachBarView: View {
         return Color(red: c.red, green: c.green, blue: c.blue)
     }
 }
+
+#Preview {
+    ZStack {
+        Color.black.ignoresSafeArea()
+        VStack(spacing: 12) {
+            CoachBarView(
+                tip: CoachTip(id: "guidance.pauseForPhoto",
+                              message: "📸 Hold still on amber areas, then tap for a photo",
+                              icon: "camera.fill", priority: .guidance),
+                onDismiss: {}
+            )
+            CoachBarView(
+                tip: CoachTip(id: "warning.nearCapacity",
+                              message: "Approaching session capacity — save soon",
+                              icon: "exclamationmark.triangle.fill", priority: .warning),
+                onDismiss: {}
+            )
+            CoachBarView(
+                tip: CoachTip(id: "critical.trackingLost",
+                              message: "Tracking lost — hold still to recover",
+                              icon: "exclamationmark.triangle.fill", priority: .critical),
+                onDismiss: {}
+            )
+        }
+        .padding()
+    }
+}
