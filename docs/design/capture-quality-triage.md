@@ -24,11 +24,17 @@ confirmation scan.
 > just at bring-up — at t≈73 s of an AR scan (footprint 1.2 GB, CPU ~300%), a
 > `jpeg_encode_hires 1242ms` (vs 73–90 ms for regular encodes) coincided with a sustained
 > `retaining 11–13 ARFrames` burst → ARKit dropped to `limited(Initializing)`, **VIO
-> reinit #2**, fps 11, ~2 s of skipped mesh integration before self-recovery. The lever below
-> (hold until warm) does not cover the mid-scan case — the encode itself is the load. Mid-scan
-> lever candidates: run `jpeg_encode_hires` at `.utility` on its own serial queue with a
-> single-encode-in-flight cap that DROPS (not queues) keyframes while one is in flight, and/or
-> count the retained hi-res frame against `maxFramesInFlight` so the backlog cap sees it.
+> reinit #2**, fps 11, ~2 s of skipped mesh integration before self-recovery.
+>
+> **Mid-scan lever status (2026-07-23): implemented.** Audit found most of it already in the
+> branch — the hi-res encode runs on its own SERIAL `.utility` queue (`keyframeEncodeQueue`,
+> never the shared ioQueue), the keyframe CIContext is `priorityRequestLow`, depth/confidence/
+> seg detach-copy so pooled buffers release with the ARFrame, and `hiResCaptureInFlight` stays
+> latched through the whole sharpness-gate + encode window. The one real gap: rapid shutter
+> taps each re-armed a fresh keyframe budget and stacked serialized request→encode cycles
+> back-to-back (heard as multiple shutter clicks) — `requestStillCapture` now refuses taps
+> while a still is armed or in flight (warning haptic; reticle shows "Capturing…"). Remaining
+> residue is the BRING-UP interaction below (hold-until-warm lever) — still watch-only.
 
 ### 3. ARFrame-retention burst at bring-up × early keyframe
 At t=0–1 s of a scan there was a burst of `delegate is retaining 11–13 ARFrames` warnings —

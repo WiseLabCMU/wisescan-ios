@@ -123,11 +123,18 @@ class FrameCaptureSession {
     @discardableResult
     func requestStillCapture() -> Bool {
         guard !captureEnded, isCurrentlyStill else { return false }
+        // ONE STILL PER STILLNESS PAUSE: refuse the tap (warning haptic at the call site)
+        // while a request is armed, its hi-res completion/encode is outstanding, OR this
+        // pause has already delivered its keyframe (`hasStillnessKeyframe` latches until
+        // stillness breaks — see updateStillness). The first cut of this gate only blocked
+        // overlap, so continuous tapping still produced one still per ~1.2s pipeline cycle,
+        // each with its own shutter click (2026-07-23 field reports ×2) — and every extra
+        // cycle sustains the hi-res encode load behind the mid-scan starvation class
+        // (triage item 3). To deliberately re-shoot a spot: move slightly and settle again.
+        guard !isStillCapturePending, !hiResCaptureInFlight, !hasStillnessKeyframe else { return false }
         stillCaptureRequested = true
         isStillCapturePending = true
-        // Fresh budgets: an explicit tap may intentionally repeat a spot (duplicate
-        // suppression is for jitter, not intent), and gets its own blur-retry allowance.
-        hasStillnessKeyframe = false
+        // Fresh blur-retry allowance for this tap (failure paths manage their own re-arms).
         keyframeRetryCount = 0
         return true
     }
