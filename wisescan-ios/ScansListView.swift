@@ -255,8 +255,9 @@ struct ScansListView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("You haven't post-processed these scans — do it now. Uploading needs the " +
-                     "processed room data (room model, registration, and rescan reference).")
+                Text("You haven't post-processed these scans — do it now. Uploading and " +
+                     "exporting need the processed room data (room model, registration, and " +
+                     "rescan reference).")
             }
             .preferredColorScheme(.dark)
             .overlay {
@@ -508,6 +509,12 @@ struct ScansListView: View {
     private func bulkSaveToFiles() {
         let scans = resolveTargetScans()
         guard !scans.isEmpty else { return }
+        // DECISION 3 hard gate: never export a scan with pending structural post-process work
+        // (mirrors requestBulkUpload — the export zip is the same bundle upload sends).
+        if scans.contains(where: { ScanPostprocessor.needsPostprocess($0) }) {
+            showPostprocessGate = true
+            return
+        }
         isBulkExporting = true
         selectedLocations.removeAll()
         let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
@@ -1424,8 +1431,8 @@ struct ScanCard: View {
             Button("Post-process Now") { postprocessScan() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("You haven't post-processed this scan — do it now. Uploading needs the " +
-                 "processed room data (room model, registration, and rescan reference).")
+            Text("You haven't post-processed this scan — do it now. Uploading and exporting " +
+                 "need the processed room data (room model, registration, and rescan reference).")
         }
     }
 
@@ -1574,6 +1581,13 @@ struct ScanCard: View {
     }
 
     private func saveToFiles() {
+        // DECISION 3 hard gate: never export a scan with pending structural post-process work —
+        // the zip would ship without its roomplan/registration/proxy artifacts (export is the
+        // offline copy of the exact bundle upload sends; same gate, same rationale).
+        guard !ScanPostprocessor.needsPostprocess(scan) else {
+            showPostprocessAlert = true
+            return
+        }
         scan.uploadStatus = .zipping
         onUpdate(scan)
 

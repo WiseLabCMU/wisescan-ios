@@ -475,6 +475,12 @@ struct LocationDetailView: View {
 
     private func bulkSaveToFiles(scans: [CapturedScan]) {
         guard !scans.isEmpty else { return }
+        // DECISION 3 hard gate: never export a scan with pending structural post-process work
+        // (mirrors requestBulkUpload — the export zip is the same bundle upload sends).
+        if scans.contains(where: { ScanPostprocessor.needsPostprocess($0) }) {
+            showPostprocessGate = true
+            return
+        }
         isBulkExporting = true
         let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
         let locationIds = Set(scans.compactMap { $0.location?.id })
@@ -847,8 +853,8 @@ private struct PostprocessGateAlerts: ViewModifier {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("You haven't post-processed this map — do it now. Rescanning, connecting, " +
-                     "and uploading need the processed room data (alignment reference and " +
-                     "registration).")
+                     "uploading, and exporting need the processed room data (alignment reference " +
+                     "and registration).")
             }
             .alert("Scan Needs to Be Redone", isPresented: $showBadScanGate) {
                 Button("OK", role: .cancel) {}
