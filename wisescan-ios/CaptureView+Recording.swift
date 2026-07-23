@@ -545,7 +545,9 @@ extension CaptureView {
                         // with the scan's final directory + schedule the bad-scan grace check
                         // (see savePendingScan for the full rationale).
                         self.scanStore.setRoomDataPersistDir?(savedScan.scanDirectory)
-                        ScanPostprocessor.scheduleBadScanCheck(scan: savedScan, scanStore: self.scanStore)
+                        ScanPostprocessor.scheduleBadScanCheck(scanId: savedScan.id,
+                                                               modelContext: self.modelContext,
+                                                               scanStore: self.scanStore)
 
                         completion?(savedScan)
                     } else {
@@ -792,7 +794,8 @@ extension CaptureView {
         // Schedule the DECISION-3 bad-scan check: if no room materializes (and no build is in
         // flight) within the grace window, warn the user to redo the scan while they're still
         // standing in the room.
-        ScanPostprocessor.scheduleBadScanCheck(scan: savedScan, scanStore: scanStore)
+        ScanPostprocessor.scheduleBadScanCheck(scanId: savedScan.id, modelContext: modelContext,
+                                               scanStore: scanStore)
 
         saveMessage = "Scan Saved!"
         pendingScan = nil

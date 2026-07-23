@@ -529,18 +529,24 @@ enum ScanPostprocessor {
     /// room, never be a registration target, never render a proxy ghost: warn NOW, while the user
     /// is still standing in the room, rather than at the next rescan's gate. Call on MAIN after a
     /// successful save.
-    static func scheduleBadScanCheck(scan: CapturedScan, scanStore: ScanStore) {
+    ///
+    /// Captures the scan's UUID, NOT the `@Model` object: the timer chain can span minutes
+    /// (grace window × re-schedules while a 120 s RoomBuilder runs), and touching a SwiftData
+    /// model deleted in the meantime is undefined (has crashed on faulted relationships on some
+    /// OS versions). The scan is re-fetched on main at fire time; fetch-miss = deleted = done.
+    static func scheduleBadScanCheck(scanId: UUID, modelContext: ModelContext, scanStore: ScanStore) {
         guard UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling) else { return }
         let grace = AppConstants.roomDataBadScanGraceSeconds
         DispatchQueue.main.asyncAfter(deadline: .now() + grace) { [weak scanStore] in
             guard let scanStore else { return }
-            // The scan may have been deleted in the meantime; artifact checks are file-based and
-            // safe either way (a deleted scan's dir just reads as missing → skip via location nil).
-            guard scan.location != nil else { return }
+            let descriptor = FetchDescriptor<CapturedScan>(predicate: #Predicate { $0.id == scanId })
+            guard let scan = try? modelContext.fetch(descriptor).first, scan.location != nil else {
+                return   // deleted (or orphaned) in the meantime — nothing to warn about
+            }
             if artifactURL("roomplan.json", in: scan) != nil { return }   // room landed — done
             if roomPending(scan) {
                 // Deferred RoomBuilder still running — check again after another grace period.
-                scheduleBadScanCheck(scan: scan, scanStore: scanStore)
+                scheduleBadScanCheck(scanId: scanId, modelContext: modelContext, scanStore: scanStore)
                 return
             }
             guard isBad(scan) else { return }
