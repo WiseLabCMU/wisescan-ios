@@ -507,6 +507,7 @@ struct ScansListView: View {
     /// Export selected scans to the share sheet. Runs export packaging on a background queue.
     /// Progress banner shows per-scan preparation status.
     private func bulkSaveToFiles() {
+        guard !isBulkExporting else { return }   // re-entrancy: double-tap = concurrent exports (OOM class)
         let scans = resolveTargetScans()
         guard !scans.isEmpty else { return }
         // DECISION 3 hard gate: never export a scan with pending structural post-process work
@@ -559,6 +560,7 @@ struct ScansListView: View {
     /// Upload selected scans to the configured server. Each scan is exported and uploaded
     /// independently on a background queue. Banner tracks per-scan completion and upload progress.
     private func bulkUpload(scans: [CapturedScan]) {
+        guard !isBulkUploading else { return }   // re-entrancy: double-tap = concurrent export+upload batches
         guard !scans.isEmpty, !uploadURL.isEmpty else { return }
         let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
@@ -688,6 +690,7 @@ struct ScansListView: View {
     /// Run the postprocessor over `scans` (oldest-first internally; prerequisite originals are
     /// pulled in automatically for registration). Reuses the bulk banner + coloring flag.
     private func bulkPostprocess(scans: [CapturedScan]) {
+        guard !isBulkColoring else { return }    // re-entrancy: the engine's claims make a 2nd batch a no-op, but don't churn the UI
         guard !scans.isEmpty else { return }
         isBulkColoring = true
         let total = scans.count
@@ -738,6 +741,7 @@ struct ScansListView: View {
     /// Serial colorize of the given scans on a utility queue.
     /// Progress is throttled to whole-percent updates to avoid flooding the main thread.
     private func bulkColorize(scans: [CapturedScan]) {
+        guard !isBulkColoring else { return }    // re-entrancy (see bulkPostprocess)
         guard !scans.isEmpty else { return }
         isBulkColoring = true
 
@@ -1497,6 +1501,9 @@ struct ScanCard: View {
 
     private func uploadScan() {
         guard !uploadURL.isEmpty else { return }
+        // Re-entrancy: an export/upload for this scan is already running — a second concurrent
+        // prepareExport doubles the privacy-blur working set (OOM on phones; see UploadStatus.isInFlight).
+        guard !scan.uploadStatus.isInFlight else { return }
         // DECISION 3 hard gate: never upload a scan with pending structural post-process work
         // (its roomplan/registration/proxy artifacts would be missing from the export).
         guard !ScanPostprocessor.needsPostprocess(scan) else {
@@ -1581,6 +1588,10 @@ struct ScanCard: View {
     }
 
     private func saveToFiles() {
+        // Re-entrancy: the zip build is long and silent — a second tap here started a second
+        // CONCURRENT prepareExport whose doubled privacy-blur working set OOM-killed the app
+        // (2026-07-23 iPhone 17 Pro field report; see UploadStatus.isInFlight).
+        guard !scan.uploadStatus.isInFlight else { return }
         // DECISION 3 hard gate: never export a scan with pending structural post-process work —
         // the zip would ship without its roomplan/registration/proxy artifacts (export is the
         // offline copy of the exact bundle upload sends; same gate, same rationale).

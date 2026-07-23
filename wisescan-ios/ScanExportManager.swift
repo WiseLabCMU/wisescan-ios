@@ -233,11 +233,15 @@ struct ScanExportManager {
         print("[prepareExport] Vision privacy blur on \(files.count) unmasked images in \(imagesDir.lastPathComponent)/...")
         var written = 0
         for url in files {
-            guard let data = try? Data(contentsOf: url) else { continue }
-            let (blurred, _) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: data)
-            if let blurred {
-                try? blurred.write(to: url, options: .atomic)
-                written += 1
+            // Per-frame pool for the same reason as applyPrivacyBlurAtExport: each Vision pass
+            // decodes + re-renders a full-resolution frame through autoreleased CF transients.
+            autoreleasepool {
+                guard let data = try? Data(contentsOf: url) else { return }
+                let (blurred, _) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(in: data)
+                if let blurred {
+                    try? blurred.write(to: url, options: .atomic)
+                    written += 1
+                }
             }
         }
         print("[prepareExport] ✓ vision-blurred \(written)/\(files.count) images in \(imagesDir.lastPathComponent)/")
@@ -268,135 +272,163 @@ struct ScanExportManager {
         var maskedDepthCount = 0
 
         for maskURL in maskFiles {
-            let frameName = maskURL.deletingPathExtension().lastPathComponent // e.g. "frame_00042"
+            // Per-frame autoreleasepool: each iteration decodes a 4032×3024 JPEG plus a 16-bit
+            // depth PNG through UIImage/CoreImage/ImageIO, whose CF transients are autoreleased —
+            // without draining per frame they accumulate across the whole 70+ frame pass
+            // (hundreds of MB peak; two concurrent passes OOM-killed the app — 2026-07-23
+            // iPhone 17 Pro field report).
+            autoreleasepool {
+                let frameName = maskURL.deletingPathExtension().lastPathComponent // e.g. "frame_00042"
 
-            // Load the mask as a CIImage for blur blending
-            guard let maskData = try? Data(contentsOf: maskURL),
-                  let maskUIImage = UIImage(data: maskData),
-                  let maskCGImage = maskUIImage.cgImage else { continue }
-            let maskCI = CIImage(cgImage: maskCGImage)
+                // Load the mask once; it drives both the image blur and the depth zeroing.
+                guard let maskData = try? Data(contentsOf: maskURL),
+                      let maskUIImage = UIImage(data: maskData),
+                      let maskCGImage = maskUIImage.cgImage else { return }
 
-            // ── Blur the corresponding image ──
-            let imageURL = imagesDir.appendingPathComponent("\(frameName).jpg")
-            if fm.fileExists(atPath: imageURL.path),
-               let imageData = try? Data(contentsOf: imageURL),
-               let imageUIImage = UIImage(data: imageData),
-               let imageCGImage = imageUIImage.cgImage {
-                let imageCI = CIImage(cgImage: imageCGImage)
-                let imageSize = imageCI.extent
-
-                // Scale mask up to image resolution
-                let scaleX = imageSize.width / maskCI.extent.width
-                let scaleY = imageSize.height / maskCI.extent.height
-                var scaledMask = maskCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
-
-                // Dilate slightly to ensure full coverage (same as the old capture-time blur)
-                let dilate = CIFilter.morphologyMaximum()
-                dilate.inputImage = scaledMask
-                dilate.radius = 12
-                if let dilated = dilate.outputImage {
-                    scaledMask = dilated.cropped(to: imageSize)
+                if blurStagedImage(named: frameName, maskCGImage: maskCGImage,
+                                   imagesDir: imagesDir, ciContext: ciContext) {
+                    blurredCount += 1
                 }
-
-                // Pixelate person regions
-                let pixelate = CIFilter.pixellate()
-                pixelate.inputImage = imageCI
-                pixelate.scale = 40.0
-
-                if let pixelatedCI = pixelate.outputImage {
-                    let blend = CIFilter.blendWithMask()
-                    blend.inputImage = pixelatedCI
-                    blend.backgroundImage = imageCI
-                    blend.maskImage = scaledMask
-
-                    if let outputCI = blend.outputImage,
-                       let outputCG = ciContext.createCGImage(outputCI, from: imageSize) {
-                        let blurredJPEG = UIImage(cgImage: outputCG).jpegData(compressionQuality: AppConstants.jpegCompressionQuality)
-                        if let jpegData = blurredJPEG {
-                            try? jpegData.write(to: imageURL, options: .atomic)
-                            blurredCount += 1
-                        }
-                    }
+                if maskStagedDepth(named: frameName, maskCGImage: maskCGImage, depthDir: depthDir) {
+                    maskedDepthCount += 1
                 }
-            }
-
-            // ── Zero person regions in the corresponding depth map ──
-            let depthURL = depthDir.appendingPathComponent("\(frameName).png")
-            if fm.fileExists(atPath: depthURL.path),
-               let depthData = try? Data(contentsOf: depthURL),
-               let depthUIImage = UIImage(data: depthData),
-               let depthCGImage = depthUIImage.cgImage {
-
-                let depthWidth = depthCGImage.width
-                let depthHeight = depthCGImage.height
-                let maskWidth = maskCGImage.width
-                let maskHeight = maskCGImage.height
-
-                // Read the 16-bit depth data. Anything but 16-bit single-channel means the
-                // decode didn't round-trip the capture format — skip rather than corrupt.
-                guard depthCGImage.bitsPerComponent == 16, depthCGImage.bitsPerPixel == 16,
-                      let depthProvider = depthCGImage.dataProvider,
-                      let depthCFData = depthProvider.data else { continue }
-                let depthLength = CFDataGetLength(depthCFData)
-                let expectedLength = depthWidth * depthHeight * 2
-                guard depthLength >= expectedLength else { continue }
-
-                // Read the mask data
-                guard let maskProvider = maskCGImage.dataProvider,
-                      let maskCFData = maskProvider.data else { continue }
-                let maskPtr = CFDataGetBytePtr(maskCFData)!
-                let maskBytesPerRow = maskCGImage.bytesPerRow
-
-                // Copy depth to mutable buffer and zero person regions
-                var depthBytes = [UInt8](repeating: 0, count: expectedLength)
-                CFDataGetBytes(depthCFData, CFRangeMake(0, expectedLength), &depthBytes)
-
-                depthBytes.withUnsafeMutableBytes { rawBuf in
-                    let uint16Buf = rawBuf.bindMemory(to: UInt16.self)
-                    for y in 0..<depthHeight {
-                        for x in 0..<depthWidth {
-                            let mx = x * maskWidth / max(depthWidth, 1)
-                            let my = y * maskHeight / max(depthHeight, 1)
-                            if mx < maskWidth, my < maskHeight {
-                                let pixel = maskPtr[my * maskBytesPerRow + mx]
-                                if pixel > 128 {
-                                    uint16Buf[y * depthWidth + x] = 0
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Re-encode as 16-bit grayscale PNG. The bitmapInfo must carry the DECODED
-                // image's byte order (ImageIO returns little-endian): zeroed pixels are
-                // endian-neutral, so labeling the untouched bytes with their true order makes
-                // the rewrite value-preserving. Labeling them big-endian (rawValue: 0) instead
-                // byte-swaps every surviving pixel — which un-did the swap depthMapToPNG16 has
-                // always baked into these files and turned exported depth near-black.
-                let byteOrder = depthCGImage.bitmapInfo.intersection(.byteOrderMask)
-                let data = Data(depthBytes)
-                guard let provider = CGDataProvider(data: data as CFData),
-                      let newCGImage = CGImage(
-                          width: depthWidth,
-                          height: depthHeight,
-                          bitsPerComponent: 16,
-                          bitsPerPixel: 16,
-                          bytesPerRow: depthWidth * 2,
-                          space: CGColorSpaceCreateDeviceGray(),
-                          bitmapInfo: byteOrder,
-                          provider: provider,
-                          decode: nil,
-                          shouldInterpolate: false,
-                          intent: .defaultIntent
-                      ),
-                      let maskedPNG = UIImage(cgImage: newCGImage).pngData() else { continue }
-
-                try? maskedPNG.write(to: depthURL, options: .atomic)
-                maskedDepthCount += 1
             }
         }
 
         print("[prepareExport] ✓ privacy-blurred \(blurredCount) images + \(maskedDepthCount) depth maps")
+    }
+
+    /// Pixelates person regions of one staged image in place. Returns true when a blurred
+    /// JPEG was written. (Split from the per-frame loop so each frame's decode/render lives
+    /// inside its own autoreleasepool — see applyPrivacyBlurAtExport.)
+    private static func blurStagedImage(named frameName: String, maskCGImage: CGImage,
+                                        imagesDir: URL, ciContext: CIContext) -> Bool {
+        let fm = FileManager.default
+        let maskCI = CIImage(cgImage: maskCGImage)
+
+        // ── Blur the corresponding image ──
+        let imageURL = imagesDir.appendingPathComponent("\(frameName).jpg")
+        guard fm.fileExists(atPath: imageURL.path),
+              let imageData = try? Data(contentsOf: imageURL),
+              let imageUIImage = UIImage(data: imageData),
+              let imageCGImage = imageUIImage.cgImage else { return false }
+        let imageCI = CIImage(cgImage: imageCGImage)
+        let imageSize = imageCI.extent
+
+        // Scale mask up to image resolution
+        let scaleX = imageSize.width / maskCI.extent.width
+        let scaleY = imageSize.height / maskCI.extent.height
+        var scaledMask = maskCI.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+
+        // Dilate slightly to ensure full coverage (same as the old capture-time blur)
+        let dilate = CIFilter.morphologyMaximum()
+        dilate.inputImage = scaledMask
+        dilate.radius = 12
+        if let dilated = dilate.outputImage {
+            scaledMask = dilated.cropped(to: imageSize)
+        }
+
+        // Pixelate person regions
+        let pixelate = CIFilter.pixellate()
+        pixelate.inputImage = imageCI
+        pixelate.scale = 40.0
+
+        guard let pixelatedCI = pixelate.outputImage else { return false }
+        let blend = CIFilter.blendWithMask()
+        blend.inputImage = pixelatedCI
+        blend.backgroundImage = imageCI
+        blend.maskImage = scaledMask
+
+        guard let outputCI = blend.outputImage,
+              let outputCG = ciContext.createCGImage(outputCI, from: imageSize),
+              let jpegData = UIImage(cgImage: outputCG)
+                  .jpegData(compressionQuality: AppConstants.jpegCompressionQuality) else { return false }
+        try? jpegData.write(to: imageURL, options: .atomic)
+        return true
+    }
+
+    /// Zeros person regions of one staged 16-bit depth map in place. Returns true when the
+    /// masked PNG was written. (Split from the per-frame loop for the same autoreleasepool
+    /// reason as `blurStagedImage`.)
+    private static func maskStagedDepth(named frameName: String, maskCGImage: CGImage,
+                                        depthDir: URL) -> Bool {
+        let fm = FileManager.default
+        let depthURL = depthDir.appendingPathComponent("\(frameName).png")
+        guard fm.fileExists(atPath: depthURL.path),
+              let depthData = try? Data(contentsOf: depthURL),
+              let depthUIImage = UIImage(data: depthData),
+              let depthCGImage = depthUIImage.cgImage else { return false }
+
+        let depthWidth = depthCGImage.width
+        let depthHeight = depthCGImage.height
+        let maskWidth = maskCGImage.width
+        let maskHeight = maskCGImage.height
+
+        // Read the 16-bit depth data. Anything but 16-bit single-channel means the
+        // decode didn't round-trip the capture format — skip rather than corrupt.
+        guard depthCGImage.bitsPerComponent == 16, depthCGImage.bitsPerPixel == 16,
+              let depthProvider = depthCGImage.dataProvider,
+              let depthCFData = depthProvider.data else { return false }
+        let depthLength = CFDataGetLength(depthCFData)
+        let expectedLength = depthWidth * depthHeight * 2
+        guard depthLength >= expectedLength else { return false }
+
+        // Read the mask data
+        guard let maskProvider = maskCGImage.dataProvider,
+              let maskCFData = maskProvider.data else { return false }
+        let maskPtr = CFDataGetBytePtr(maskCFData)!
+        let maskBytesPerRow = maskCGImage.bytesPerRow
+
+        // Copy depth to mutable buffer and zero person regions
+        var depthBytes = [UInt8](repeating: 0, count: expectedLength)
+        CFDataGetBytes(depthCFData, CFRangeMake(0, expectedLength), &depthBytes)
+
+        depthBytes.withUnsafeMutableBytes { rawBuf in
+            let uint16Buf = rawBuf.bindMemory(to: UInt16.self)
+            for y in 0..<depthHeight {
+                for x in 0..<depthWidth {
+                    let mx = x * maskWidth / max(depthWidth, 1)
+                    let my = y * maskHeight / max(depthHeight, 1)
+                    if mx < maskWidth, my < maskHeight {
+                        let pixel = maskPtr[my * maskBytesPerRow + mx]
+                        if pixel > 128 {
+                            uint16Buf[y * depthWidth + x] = 0
+                        }
+                    }
+                }
+            }
+        }
+
+        let byteOrder = depthCGImage.bitmapInfo.intersection(.byteOrderMask)
+        guard let maskedPNG = encodeDepthPNG16(bytes: depthBytes, width: depthWidth,
+                                               height: depthHeight, byteOrder: byteOrder) else { return false }
+        try? maskedPNG.write(to: depthURL, options: .atomic)
+        return true
+    }
+
+    /// Re-encode zeroed 16-bit depth bytes as a grayscale PNG. The bitmapInfo must carry the
+    /// DECODED image's byte order (ImageIO returns little-endian): zeroed pixels are
+    /// endian-neutral, so labeling the untouched bytes with their true order makes the rewrite
+    /// value-preserving. Labeling them big-endian (rawValue: 0) instead byte-swaps every
+    /// surviving pixel — which un-did the swap depthMapToPNG16 has always baked into these
+    /// files and turned exported depth near-black.
+    private static func encodeDepthPNG16(bytes: [UInt8], width: Int, height: Int,
+                                         byteOrder: CGBitmapInfo) -> Data? {
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+              let cgImage = CGImage(
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 16,
+                  bitsPerPixel: 16,
+                  bytesPerRow: width * 2,
+                  space: CGColorSpaceCreateDeviceGray(),
+                  bitmapInfo: byteOrder,
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: false,
+                  intent: .defaultIntent
+              ) else { return nil }
+        return UIImage(cgImage: cgImage).pngData()
     }
 
     /// `bulkStitch`, when supplied, is a pre-built snapshot of every location's stitch artifacts

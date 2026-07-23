@@ -474,6 +474,7 @@ struct LocationDetailView: View {
     }
 
     private func bulkSaveToFiles(scans: [CapturedScan]) {
+        guard !isBulkExporting else { return }   // re-entrancy: double-tap = concurrent exports (OOM class)
         guard !scans.isEmpty else { return }
         // DECISION 3 hard gate: never export a scan with pending structural post-process work
         // (mirrors requestBulkUpload — the export zip is the same bundle upload sends).
@@ -513,6 +514,9 @@ struct LocationDetailView: View {
     }
 
     private func bulkUpload(scans: [CapturedScan]) {
+        // Re-entrancy: this view tracks per-scan status (no bulk flag) — refuse while any
+        // selected scan's export/upload is already in flight.
+        guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
         guard !scans.isEmpty, !uploadURL.isEmpty else { return }
         let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
@@ -710,6 +714,7 @@ struct LocationDetailView: View {
     /// coloring UI plumbing: per-card progress via `bulkColoringMessages`, `isBulkColoring` as the
     /// in-flight flag.
     private func bulkPostprocess(scans: [CapturedScan]) {
+        guard !isBulkColoring else { return }    // re-entrancy: the engine's claims make a 2nd batch a no-op, but don't churn the UI
         guard !scans.isEmpty else { return }
         isBulkColoring = true
         ScanPostprocessor.run(
@@ -739,6 +744,7 @@ struct LocationDetailView: View {
     }
 
     private func bulkColorize(scans: [CapturedScan]) {
+        guard !isBulkColoring else { return }    // re-entrancy (see bulkPostprocess)
         guard !scans.isEmpty else { return }
         isBulkColoring = true
 

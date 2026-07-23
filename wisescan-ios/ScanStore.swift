@@ -211,6 +211,17 @@ enum UploadStatus: Equatable {
     case success
     case failed(String)
 
+    /// True while an export/upload pipeline owns this scan (zip build or network send). Entry
+    /// points guard on this so a second tap can't start a CONCURRENT export — two overlapping
+    /// 72-frame privacy-blur passes OOM-killed the app during a Save to Files double-tap
+    /// (2026-07-23 iPhone 17 Pro field report).
+    var isInFlight: Bool {
+        switch self {
+        case .zipping, .uploading: return true
+        default: return false
+        }
+    }
+
     var label: String {
         switch self {
         case .pending: return "Ready"
