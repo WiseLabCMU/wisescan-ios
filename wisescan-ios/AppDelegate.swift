@@ -33,7 +33,10 @@ struct Scan4DApp: App {
         // @AppStorage provides its own default, but direct UserDefaults reads need registration.
         UserDefaults.standard.register(defaults: [
             AppConstants.Key.semanticLabeling: AppConstants.semanticLabeling,
-            AppConstants.Key.enabledSemanticClasses: AppConstants.enabledSemanticClassesDefault
+            AppConstants.Key.enabledSemanticClasses: AppConstants.enabledSemanticClassesDefault,
+            AppConstants.Key.meshClassifier: AppConstants.meshClassifier,
+            AppConstants.Key.colorizeOnPostprocess: AppConstants.colorizeOnPostprocess,
+            AppConstants.Key.registerLegacyScans: AppConstants.registerLegacyScans
         ])
         print("Application directory: \(NSHomeDirectory())")
         do {

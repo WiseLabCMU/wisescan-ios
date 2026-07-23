@@ -60,6 +60,17 @@ struct CaptureView: View {
     @State var isWaitingToSave = false
     @State var isStabilizingBeforeSave = false // hold-steady settle window before the save pose is captured
     @State var cachedGhostMeshData: Data?
+    /// True once loadGhostMeshData() has run for this appearance — gates handing the world map to
+    /// ARCoverageView (see the body comment) so the session's first start is ghost-complete, while
+    /// still allowing ghost-less relocalization when no ghost mesh could be loaded. Reset in
+    /// onDisappear.
+    @State var ghostLoadAttempted = false
+    /// Ghost auto-align reference planes (ghost room, RAW capture frame) — loaded alongside the
+    /// ghost mesh, fed to ARCoverageView's live plane fit. Empty when not rescanning.
+    @State var ghostReferencePlanes: [PlaneRegistration.Plane] = []
+    /// True when `cachedGhostMeshData` holds the wall-subtracted proxy (DECISION 2) — the renderer
+    /// then draws the RoomPlan wall/floor quads in the same wireframe style to complete the ghost.
+    @State var ghostIsProxy = false
     /// Track C — connectors shared by the active location's scans with other maps, in the active
     /// scans' world frame. Computed here (CaptureView owns the ModelContext) and passed to
     /// ARCoverageView, which renders one labeled marker per connector when rescanning an existing
@@ -81,6 +92,7 @@ struct CaptureView: View {
     @State var isConfirmingAlignment = false // Re-entry guard for confirmAlignment double-tap
     @State var showStopMenu = false
     @State var showExtendErrorAlert = false
+    @State var isAwaitingAlignment = false // Phase 2.1 (perfDiag): briefly holding record for the auto-align correction
 
     @State private var showSettings = false
     @State private var activeLocationName: String?
@@ -105,6 +117,14 @@ struct CaptureView: View {
     @State var spaceAnalyzer = SpaceAnalyzer()
     @State private var analysisResult: SpaceAnalysisResult?
     @State private var showAnalysisReport = false
+    // Relocalization-timeout watchdog (item 3): a rescan can hang forever on "move camera to
+    // relocalize" when the space is feature-poor / self-similar (ARKit never reaches `.normal` —
+    // false loop-closure, a fundamental limit). If we're still `.relocalizing` after
+    // AppConstants.relocalizationTimeoutSeconds, `relocTimedOut` flips and the prompt becomes a
+    // guidance panel with escape routes (Try Again / Go Back). Non-blocking: clears itself if
+    // relocalization then succeeds.
+    @State private var relocTimeoutTimer: Timer?
+    @State private var relocTimedOut = false
 
     struct PendingScanData {
         let locationId: UUID?
@@ -120,15 +140,24 @@ struct CaptureView: View {
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State.
     private func loadGhostMeshData() {
+        // Whatever the outcome, the attempt happened — releases the world-map gate in body (the
+        // no-ghost paths below then run ghost-less relocalization instead of holding forever).
+        defer { ghostLoadAttempted = true }
+        // Reset the proxy flag up front so an early-return guard below can't leave a stale
+        // ghostIsProxy=true from a prior appearance (it is @State and survives across appearances);
+        // the rescan-proxy block re-sets it when a proxy actually loads.
+        ghostIsProxy = false
         guard let locId = scanStore.activeLocationForScan,
               let scanId = scanStore.activeScanToExtend else {
             cachedGhostMeshData = nil
+            ghostReferencePlanes = []
             return
         }
         let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
         guard let location = try? modelContext.fetch(descriptor).first,
               let targetScan = location.scans.first(where: { $0.id == scanId }) else {
             cachedGhostMeshData = nil
+            ghostReferencePlanes = []
             return
         }
         // [MemDiag] Ghost mesh = the ICP-source mesh, held resident ALONGSIDE the live scan mesh
@@ -136,7 +165,52 @@ struct CaptureView: View {
         // exact bytes read in (the parse into a displayed RealityKit entity is a separate, later cost);
         // footprintΔ is the Data buffer. Baseline read only when diagnostics are on → free otherwise.
         let foot0 = PerfDiag.enabled ? ScanStats.currentFootprintMB() : 0
-        cachedGhostMeshData = try? Data(contentsOf: targetScan.meshFileURL)
+        // DECISION 2: rescans load the light proxy (walls/floor/ceiling subtracted, RoomPlan quads
+        // baked in) instead of the full 10⁵–10⁶-face mesh — killing the 2× mesh-coexistence memory
+        // and most of the ghost render/parse cost. A proxy ghost also retires the mesh-ICP path
+        // for the session (plane auto-align drives the green chip; save-time registration is the
+        // correction authority) and drops the perfDiag alignment-phase mesh reconstruction — the
+        // dense-ICP machinery only engages for legacy scans with no proxy artifact.
+        if scanStore.activeScanCase == .rescanSpace {
+            let proxyCandidates = [
+                targetScan.scanDirectory.appendingPathComponent("mesh_proxy.obj"),
+                targetScan.rawDataPath.appendingPathComponent("mesh_proxy.obj")
+            ]
+            for url in proxyCandidates {
+                if let data = try? Data(contentsOf: url) {
+                    cachedGhostMeshData = data
+                    ghostIsProxy = true
+                    print("[GhostProxy] rescan ghost using proxy (\(data.count / 1024)KB)")
+                    break
+                }
+            }
+        }
+        if !ghostIsProxy {
+            cachedGhostMeshData = try? Data(contentsOf: targetScan.meshFileURL)
+        }
+        // DECISION 1 co-framing: if this scan's mesh was registered into the canonical frame at
+        // ITS save, undo that here — the live session relocalizes into the scan's RAW capture
+        // frame (the world map can't be re-based), and the ghost must share it (visual overlay,
+        // manual nudge, and the ICP probe all assume ghost ≡ live frame). One O(n) text pass,
+        // only for scans that actually carry an applied registration.
+        if let data = cachedGhostMeshData,
+           let undo = SaveRegistration.inverseForGhost(scanDirectory: targetScan.scanDirectory) {
+            cachedGhostMeshData = SaveRegistration.transformOBJ(data, by: undo)
+            print("[PlaneReg] ghost mesh de-registered back to its raw capture frame for relocalization overlay")
+        }
+        // Ghost auto-align reference: the ghost room's planes in the SAME raw frame as the
+        // (de-registered) mesh + world map. Rescan only — a link-adjacent capture is a different
+        // physical room, and auto-fitting its walls to the ghost's would be a false lock.
+        ghostReferencePlanes = scanStore.activeScanCase == .rescanSpace
+            ? SaveRegistration.rawFramePlanes(scanDirectory: targetScan.scanDirectory)
+            : []
+        if !ghostReferencePlanes.isEmpty {
+            print("[PlaneReg] ghost auto-align reference loaded: \(ghostReferencePlanes.count) planes")
+        } else if scanStore.activeScanCase == .rescanSpace {
+            // Loud, not silent: without reference planes there is NO auto-align, NO plane
+            // detection, and no [PlaneReg] output at all — this line is the only breadcrumb.
+            print("[PlaneReg] auto-align DISABLED: no reference planes — roomplan.json missing/undecodable for scan \(targetScan.id) (was a room built at its save?)")
+        }
         if PerfDiag.enabled {
             let blobMB = Double(cachedGhostMeshData?.count ?? 0) / (1024.0 * 1024.0)
             let foot1 = ScanStats.currentFootprintMB()
@@ -189,6 +263,68 @@ struct CaptureView: View {
             .filter { seenConnectors.insert($0.id).inserted }
     }
 
+    // MARK: - Relocalization timeout (item 3)
+
+    /// Arms/cancels the relocalization watchdog from the relevant state changes. Called from the
+    /// `.onChange` handlers below. The timer fires once (no auto-restart on intermediate tracking-state
+    /// flips); it stands down — and clears any timed-out flag — the moment relocalization succeeds
+    /// (`.normal`), recording starts, or the ghost is cleared.
+    private func evaluateRelocalizationTimeout() {
+        let relocalizing = cachedGhostMeshData != nil
+            && !isRecording
+            && scanStats.trackingStatus == .limited(reason: .relocalizing)
+        if relocalizing {
+            // Arm once. Don't restart if already running or already timed out.
+            guard relocTimeoutTimer == nil && !relocTimedOut else { return }
+            relocTimeoutTimer = Timer.scheduledTimer(
+                withTimeInterval: AppConstants.relocalizationTimeoutSeconds,
+                repeats: false
+            ) { _ in
+                // Fires on the main run loop. Re-check we're still stuck (a success/back-out would
+                // have cancelled us via onChange, but guard against the race).
+                if cachedGhostMeshData != nil && !isRecording
+                    && scanStats.trackingStatus == .limited(reason: .relocalizing) {
+                    relocTimedOut = true
+                }
+                relocTimeoutTimer = nil
+            }
+        } else {
+            relocTimeoutTimer?.invalidate()
+            relocTimeoutTimer = nil
+            // Only drop the timed-out banner when we genuinely left the relocalizing-with-ghost
+            // state (relocalized, or ghost gone) — not on a transient flip while still recording.
+            if scanStats.trackingStatus.isNormal || cachedGhostMeshData == nil {
+                relocTimedOut = false
+            }
+        }
+    }
+
+    /// "Try Again" — restart relocalization from scratch by reloading the world map (toggling the
+    /// ghost data, the proven `showRelocDialog` Re-relocalize path). Re-arms the watchdog.
+    private func retryRelocalization() {
+        relocTimeoutTimer?.invalidate()
+        relocTimeoutTimer = nil
+        relocTimedOut = false
+        ghostYRotation = 0
+        ghostXOffset = 0
+        ghostZOffset = 0
+        let savedData = cachedGhostMeshData
+        cachedGhostMeshData = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            cachedGhostMeshData = savedData
+        }
+    }
+
+    /// "Go Back" — bail out of a relocalization that won't lock. Returns to the Scans tab (where the
+    /// rescan was launched from); onDisappear handles the capture teardown (resetCaptureState, ghost
+    /// clear, session). Matches the post-save navigation (selectedTab = 2).
+    private func exitCaptureFromRelocTimeout() {
+        relocTimeoutTimer?.invalidate()
+        relocTimeoutTimer = nil
+        relocTimedOut = false
+        selectedTab = 2
+    }
+
     var body: some View {
         ZStack {
             // Live ARKit Scene Reconstruction View
@@ -201,8 +337,20 @@ struct CaptureView: View {
                 privacyFilter: isPrivacyFilterOn,
                 activeMeshColor: activeMeshColor,
                 captureMode: AppConstants.CaptureMode(rawValue: captureModeStr) ?? .ar,
-                initialWorldMapURL: scanStore.activeRelocalizationMap,
+                // Withhold the world map until the ghost cache is loaded: makeUIView runs on the
+                // FIRST body render, but loadGhostMeshData() runs in onAppear (after it) — handing
+                // the map over immediately made makeUIView start relocalizing ghost-less, then the
+                // ghost's arrival re-ran the whole map load + resetTracking (a second
+                // `[LocDiag ε] map load` + a restarted relocalization every rescan). Gating the URL
+                // on the ghost means the one-and-only session start happens with both together.
+                // A relocalization flow with no loadable ghost (mesh missing) degrades to
+                // ghost-less relocalization once loadGhostMeshData has run (ghostLoadAttempted).
+                initialWorldMapURL: (scanStore.activeScanToExtend != nil
+                                     && cachedGhostMeshData == nil
+                                     && !ghostLoadAttempted) ? nil : scanStore.activeRelocalizationMap,
                 initialGhostMeshData: cachedGhostMeshData,
+                ghostReferencePlanes: ghostReferencePlanes,
+                ghostIsProxy: ghostIsProxy,
                 scanStore: scanStore,
                 connectorAnchors: connectorAnchors,
                 finalCapturedRoom: $finalCapturedRoom,
@@ -260,40 +408,7 @@ struct CaptureView: View {
                 .ignoresSafeArea()
 
             // Centered startup/tracking pills (kept separate from ScanCoach)
-            VStack(spacing: 12) {
-                if cachedGhostMeshData != nil && scanStats.trackingStatus == .limited(reason: .relocalizing) {
-                    HStack(spacing: 8) {
-                        Text("🔄 Move camera to relocalize with previous scan")
-                        OctahedronIcon(color: ghostMeshColor.swiftUIColor)
-                    }
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                        .background(Color.blue.opacity(0.85))
-                        .cornerRadius(20)
-                        .shadow(radius: 5)
-                        .transition(.scale.combined(with: .opacity))
-                        .animation(.easeInOut(duration: 0.2), value: scanStats.trackingStatus)
-                }
-
-                let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
-                let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
-                if isRecording && needsLiveMeshCue &&
-                   scanStats.trackingStatus != .limited(reason: .relocalizing) &&
-                   !frameCaptureSession.isBlurWarningActive {
-                    Text("📷 Move the camera to start the live mesh")
-                        .font(.headline)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                        .background(Color.indigo.opacity(0.85))
-                        .cornerRadius(20)
-                        .shadow(radius: 5)
-                        .transition(.scale.combined(with: .opacity))
-                        .animation(.easeInOut(duration: 0.2), value: needsLiveMeshCue)
-                }
-            }
+            centeredTrackingPills
 
             // Lite mode banner for non-LiDAR devices
             if !ARCoverageView.supportsLiDAR {
@@ -647,6 +762,12 @@ struct CaptureView: View {
                                         RoundedRectangle(cornerRadius: 4)
                                             .fill(Color.red)
                                             .frame(width: 28, height: 28)
+                                    } else if isProcessingMesh || isWaitingToSave {
+                                        // Previous scan's export/coloring still running — recording is
+                                        // blocked until it finishes. Show a spinner so the disabled button
+                                        // isn't a silent dead tap (a spinner that never clears = a stuck
+                                        // isProcessingMesh/isWaitingToSave reset, a separate bug).
+                                        ProgressView().tint(.white)
                                     } else {
                                         Circle()
                                             .fill(Color.white)
@@ -659,7 +780,7 @@ struct CaptureView: View {
                                             .foregroundColor(.white)
                                             .offset(y: 50)
                                     } else {
-                                        Text(isRecording ? "Tap to stop" : "Tap to scan")
+                                        Text(recordButtonCaption)
                                             .font(.caption2)
                                             .foregroundColor(.white.opacity(0.7))
                                             .offset(y: 50)
@@ -749,6 +870,9 @@ struct CaptureView: View {
                 .animation(.easeInOut(duration: 0.3), value: showExtendOverlay)
             }
 
+            // Phase 2.1 (perfDiag): briefly holding record while the auto-align correction lands.
+            awaitingAlignmentOverlay
+
             // Alignment overlay for cross-session resume (Flow B)
             if scanStore.capturePhase == .loadingWorldMap
                 || scanStore.capturePhase == .aligning
@@ -830,30 +954,7 @@ struct CaptureView: View {
             // relocalization is imperfect. Complements the anchor-based AlignmentOverlayView above;
             // startRecording bakes any offset into the world origin so mesh + world map stay co-framed.
             if cachedGhostMeshData != nil && !dismissGhostMesh {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Button(action: { showRelocDialog = true }, label: {
-                            HStack(spacing: 6) {
-                                OctahedronIcon(color: ghostMeshColor.swiftUIColor)
-                                Text("Ghost Mesh")
-                                    .font(.caption2.bold())
-                            }
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(.ultraThinMaterial)
-                            .cornerRadius(20)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 20)
-                                    .stroke(Color.white.opacity(0.3), lineWidth: 1)
-                            )
-                        })
-                        Spacer()
-                    }
-                    .padding(.leading, 16)
-                    .padding(.bottom, 100)
-                }
+                ghostMeshChipStack
             }
 
             // Manual alignment slider overlay
@@ -1056,6 +1157,9 @@ struct CaptureView: View {
         .onDisappear {
             mainThreadWatchdog.stop()
             memoryPressureMonitor.stop()
+            // Next appearance must re-load the ghost before the world map is handed over (the
+            // makeUIView-vs-onAppear race gate in body).
+            ghostLoadAttempted = false
 
             // Battery: left the capture tab — after an idle period, pause the AR session (camera +
             // sensors off). Guarded at fire time so we never pause mid-recording or during post-scan
@@ -1121,6 +1225,10 @@ struct CaptureView: View {
                 saveNavigationTask?.cancel()
                 saveNavigationTask = nil
                 activeLocationName = nil
+                // Relocalization watchdog (item 3): cancel + reset so it can't fire after we leave.
+                relocTimeoutTimer?.invalidate()
+                relocTimeoutTimer = nil
+                relocTimedOut = false
             }
         }
         .onChange(of: scanStore.activeLocationForScan) { _, newLocId in
@@ -1229,6 +1337,228 @@ struct CaptureView: View {
                 ScanAnalysisReportView(result: result)
             }
         }
+    }
+
+    /// Centered startup/tracking pills (kept separate from ScanCoach). Extracted from `body` to
+    /// keep its expression type-checkable (the body ZStack is at the compiler's budget).
+    private var centeredTrackingPills: some View {
+        VStack(spacing: 12) {
+            if cachedGhostMeshData != nil && scanStats.trackingStatus == .limited(reason: .relocalizing) {
+                if relocTimedOut {
+                    relocTimeoutPanel
+                } else {
+                    relocalizingPrompt
+                }
+            }
+
+            stormWarningBanner
+
+            let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
+            let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
+            if isRecording && needsLiveMeshCue &&
+               scanStats.trackingStatus != .limited(reason: .relocalizing) &&
+               !frameCaptureSession.isBlurWarningActive {
+                Text("📷 Move the camera to start the live mesh")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(Color.indigo.opacity(0.85))
+                    .cornerRadius(20)
+                    .shadow(radius: 5)
+                    .transition(.scale.combined(with: .opacity))
+                    .animation(.easeInOut(duration: 0.2), value: needsLiveMeshCue)
+            }
+        }
+        // Relocalization-timeout watchdog (item 3): arm/cancel whenever the inputs to the
+        // relocalizing-with-ghost state change. Attached here (an always-present subtree) rather
+        // than to the body chain, which is at the type-checker's expression budget.
+        .onChange(of: scanStats.trackingStatus) { _, _ in evaluateRelocalizationTimeout() }
+        // Key on `.count` (Int?), not the multi-MB `Data` — a value compare of the whole mesh on
+        // every frequent stats-driven update cycle would be needlessly expensive; the count captures
+        // the meaningful transitions (loaded / cleared / reloaded).
+        .onChange(of: cachedGhostMeshData?.count) { _, _ in evaluateRelocalizationTimeout() }
+        .onChange(of: isRecording) { _, _ in evaluateRelocalizationTimeout() }
+    }
+
+    // Item 2 (perfDiag-gated during dev validation; reframed 2026-06-25 to a STORM signal):
+    // a burst of non-physical mid-scan jumps means relocalization is oscillating / the session
+    // has destabilized (a self-similar space ARKit can't lock onto) — distinct from a single
+    // benign snap (the mesh re-pins). The flag is only set on a storm, and latches for the scan.
+    @ViewBuilder private var stormWarningBanner: some View {
+        if isRecording, PerfDiag.enabled, let unreliable = scanStore.trackingUnreliable {
+            Text(String(format: "⚠️ Tracking unstable — %d sudden jumps mid-scan; relocalization may be failing", unreliable.snapCount))
+                .font(.headline)
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(Color.red.opacity(0.85))
+                .cornerRadius(20)
+                .shadow(radius: 5)
+                .transition(.scale.combined(with: .opacity))
+                .animation(.easeInOut(duration: 0.2), value: unreliable)
+        }
+    }
+
+    /// Phase 2.1 (perfDiag): full-screen hold shown while toggleRecording briefly waits for the
+    /// auto-align correction to land before starting the recording.
+    @ViewBuilder private var awaitingAlignmentOverlay: some View {
+        if isAwaitingAlignment {
+            ZStack {
+                Color.black.opacity(0.5).ignoresSafeArea()
+                VStack(spacing: 16) {
+                    ProgressView().scaleEffect(1.5).tint(.green)
+                    Text("📐 Finalizing alignment…")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                    Text("Holding for the auto-align correction")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.7))
+                }
+            }
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.2), value: isAwaitingAlignment)
+        }
+    }
+
+    /// Bottom-left ghost-mesh chip column: the Phase-2.1 align-status chips (green "correction
+    /// locked" / orange "still computing", perfDiag-gated) above the Ghost Mesh dialog chip.
+    private var ghostMeshChipStack: some View {
+        VStack {
+            Spacer()
+            // Phase 2.1 (perfDiagnostics-only): "alignment sweep done — correction locked"
+            // cue. icpAlignReady is set only when a trusted ICP refine has converged during
+            // the pre-record phase; its appearance tells the user it's safe to record (the
+            // gravity-locked correction will bake into the world origin at record-start).
+            if !isRecording, let align = scanStore.icpAlignReady {
+                HStack {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                        Text(String(format: "Auto-aligned · %.1f cm / %.1f° — ready to record", align.transCm, align.yawDeg))
+                            .font(.caption2.bold())
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.green.opacity(0.85))
+                    .cornerRadius(20)
+                    Spacer()
+                }
+                .padding(.leading, 16)
+                .padding(.bottom, 8)
+            } else if !isRecording, PerfDiag.enabled, scanStats.trackingStatus.isNormal {
+                // Not-yet-ready cue: relocalized, correction still computing. The ABSENCE of the
+                // green chip is otherwise ambiguous ("nothing to do" vs "still working") — this
+                // tells the user to wait for green before recording (the ghost mesh appearing is
+                // NOT the same as the correction being locked).
+                HStack {
+                    HStack(spacing: 6) {
+                        ProgressView().scaleEffect(0.7).tint(.white)
+                        Text("📐 Aligning — wait for green before recording")
+                            .font(.caption2.bold())
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.orange.opacity(0.85))
+                    .cornerRadius(20)
+                    Spacer()
+                }
+                .padding(.leading, 16)
+                .padding(.bottom, 8)
+            }
+            HStack {
+                Button(action: { showRelocDialog = true }, label: {
+                    HStack(spacing: 6) {
+                        OctahedronIcon(color: ghostMeshColor.swiftUIColor)
+                        Text("Ghost Mesh")
+                            .font(.caption2.bold())
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(20)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20)
+                            .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                    )
+                })
+                Spacer()
+            }
+            .padding(.leading, 16)
+            .padding(.bottom, 100)
+        }
+    }
+
+    /// The indefinite "move camera" pill shown while ARKit relocalizes against the loaded map.
+    /// Extracted from `body` (with `relocTimeoutPanel`) to keep the body expression type-checkable.
+    private var relocalizingPrompt: some View {
+        HStack(spacing: 8) {
+            Text("🔄 Move camera to relocalize with previous scan")
+            OctahedronIcon(color: ghostMeshColor.swiftUIColor)
+        }
+        .font(.headline)
+        .foregroundColor(.white)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(Color.blue.opacity(0.85))
+        .cornerRadius(20)
+        .shadow(radius: 5)
+        .transition(.scale.combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.2), value: scanStats.trackingStatus)
+    }
+
+    /// Watchdog fired — relocalization is taking unusually long / may never lock (feature-poor or
+    /// self-similar space). Replaces the indefinite "move camera" prompt with actionable guidance +
+    /// escape routes so the user is never stuck.
+    private var relocTimeoutPanel: some View {
+        VStack(spacing: 12) {
+            Text("🔄 Having trouble recognizing this spot")
+                .font(.headline)
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+            Text("This area may look too similar to other places or lack distinct features. Move to a more recognizable spot — aim at corners, furniture, or textured surfaces — and make sure it's well lit.")
+                .font(.subheadline)
+                .foregroundColor(.white.opacity(0.9))
+                .multilineTextAlignment(.center)
+            HStack(spacing: 12) {
+                Button(action: { retryRelocalization() }, label: {
+                    Label("Try Again", systemImage: "arrow.clockwise")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.blue.opacity(0.9))
+                        .cornerRadius(12)
+                })
+                Button(action: { exitCaptureFromRelocTimeout() }, label: {
+                    Label("Go Back", systemImage: "chevron.left")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(12)
+                })
+            }
+        }
+        .padding(20)
+        .background(Color.orange.opacity(0.9))
+        .cornerRadius(20)
+        .shadow(radius: 5)
+        .padding(.horizontal, 16)
+        .transition(.scale.combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.2), value: relocTimedOut)
+    }
+
+    /// Caption under the record button. A computed String (not a chained ternary in `body`) so the
+    /// body expression stays type-checkable.
+    private var recordButtonCaption: String {
+        if isRecording { return "Tap to stop" }
+        if isProcessingMesh || isWaitingToSave { return "Processing previous scan…" }
+        return "Tap to scan"
     }
 
     private var qualityColor: Color {

@@ -19,6 +19,9 @@ struct MeshPreviewContainer: View {
     @State private var detectedClasses: [SemanticClass] = []
     @State private var hasPrivacyMarkers = false
     @State private var isMeshLoaded = false
+    /// Canonical frame from the location's ORIGINAL scan (see `canonicalRoomFrame`), resolved
+    /// before the viewer mounts so all of a location's scans preview through an identical view.
+    @State private var canonicalFrame: (center: SIMD3<Float>, span: Float)?
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
@@ -28,6 +31,9 @@ struct MeshPreviewContainer: View {
                     meshFileURL: meshFileURL,
                     colorsFileURL: colorsFileURL,
                     scanDirectoryURL: scanDirectoryURL,
+                    frameCenter: canonicalFrame?.center,
+                    frameSpan: canonicalFrame?.span,
+                    initialPoseMatrix: location?.imagingPoseMatrix,
                     markerState: markerState,
                     isMeshLoaded: $isMeshLoaded,
                     semanticViewMode: $semanticViewMode,
@@ -147,6 +153,12 @@ struct MeshPreviewContainer: View {
         .onAppear {
             // Defer the heavy OBJ parsing to ensure the fullScreenCover animation completes smoothly
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                // Resolve the location's canonical frame from its ORIGINAL (earliest) scan before
+                // mounting the viewer — every generation then renders at the same offset/zoom and
+                // cross-scan misalignment reads true. Tiny JSON decode; fine on main.
+                if let original = location?.scans.min(by: CapturedScan.canonicalOrder) {
+                    canonicalFrame = MeshPreviewView.canonicalRoomFrame(scanDirectoryURL: original.scanDirectory)
+                }
                 isViewerReady = true
             }
         }
@@ -160,11 +172,15 @@ struct MeshPreviewContainer: View {
 
         Task {
             let scans = location.scans
+            // Same canonical frame the interactive viewer centered with when the pose was saved —
+            // every scan's thumbnail then shows the identical view (nil → legacy bbox centering).
+            let frameCenter = canonicalFrame?.center
             for scan in scans {
                 // Ensure mesh exists
                 guard FileManager.default.fileExists(atPath: scan.meshFileURL.path) else { continue }
                 if let img = await Task.detached(priority: .userInitiated, operation: {
-                    MeshPreviewView.generateSnapshot(meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL, poseMatrix: pose)
+                    MeshPreviewView.generateSnapshot(meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL,
+                                                     poseMatrix: pose, frameCenter: frameCenter)
                 }).value, let data = img.jpegData(compressionQuality: 0.8) {
                     try? data.write(to: scan.modelPreviewURL)
                 }
@@ -243,6 +259,19 @@ struct MeshPreviewView: UIViewRepresentable {
     var meshFileURL: URL?
     var colorsFileURL: URL?
     var scanDirectoryURL: URL?
+    /// Canonical preview frame (center + span) shared by every scan of a location — derived from
+    /// the ORIGINAL scan's RoomPlan room, not this mesh's own bounding box. With it, all of a
+    /// location's scans render at the same offset/rotation/zoom, so flipping between previews
+    /// shows TRUE residual misalignment (the 4D shared-coordinate-space contract). nil falls back
+    /// to per-mesh bbox centering (scans with no location / pre-RoomPlan scans).
+    var frameCenter: SIMD3<Float>?
+    var frameSpan: Float?
+    /// The location's user-set default pose ("Set Default Pose" → `location.imagingPoseMatrix`),
+    /// in scene coordinates (world − frameCenter). When set, it overrides the stock camera as the
+    /// initial view. Per-LOCATION, and the canonical frame makes scene coords identical across a
+    /// location's scans — so rescans still line up under a user-specified default, same as the
+    /// stock one. (User can still orbit freely; this is only the starting view.)
+    var initialPoseMatrix: [Float]?
     var markerState: MarkerProjectionState
     @Binding var isMeshLoaded: Bool
     @Binding var semanticViewMode: SemanticViewMode
@@ -326,9 +355,11 @@ struct MeshPreviewView: UIViewRepresentable {
                     let node = SCNNode(geometry: geometry)
                     node.name = "mesh"
 
-                    // Center the model
+                    // Center the model: on the location's canonical frame when provided (every
+                    // scan of the location gets the SAME shift, so cross-scan offset is honest),
+                    // else on this mesh's own bbox (legacy single-scan behaviour).
                     let (minBound, maxBound) = node.boundingBox
-                    let center = SCNVector3(
+                    let center = frameCenter.map { SCNVector3($0.x, $0.y, $0.z) } ?? SCNVector3(
                         (minBound.x + maxBound.x) / 2,
                         (minBound.y + maxBound.y) / 2,
                         (minBound.z + maxBound.z) / 2
@@ -381,19 +412,30 @@ struct MeshPreviewView: UIViewRepresentable {
                     context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
                     context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
 
-                    // Position camera based on model size
+                    // Position camera from the canonical span when provided (fixed zoom across
+                    // a location's scans; the angle below is already fixed), else this model's size.
                     let size = SCNVector3(
                         maxBound.x - minBound.x,
                         maxBound.y - minBound.y,
                         maxBound.z - minBound.z
                     )
-                    let maxDimension = max(size.x, max(size.y, size.z))
+                    let maxDimension = frameSpan ?? max(size.x, max(size.y, size.z))
 
                     let cameraNode = SCNNode()
                     cameraNode.camera = SCNCamera()
                     cameraNode.camera?.automaticallyAdjustsZRange = true
-                    cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 0.4)
-                    cameraNode.look(at: SCNVector3Zero)
+                    if let matrix = initialPoseMatrix, matrix.count == 16 {
+                        // User-set default pose (same matrix the thumbnails render with).
+                        cameraNode.transform = SCNMatrix4(
+                            m11: matrix[0], m12: matrix[1], m13: matrix[2], m14: matrix[3],
+                            m21: matrix[4], m22: matrix[5], m23: matrix[6], m24: matrix[7],
+                            m31: matrix[8], m32: matrix[9], m33: matrix[10], m34: matrix[11],
+                            m41: matrix[12], m42: matrix[13], m43: matrix[14], m44: matrix[15]
+                        )
+                    } else {
+                        cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 0.4)
+                        cameraNode.look(at: SCNVector3Zero)
+                    }
                     scene.rootNode.addChildNode(cameraNode)
 
                     // Signal that mesh is ready
@@ -587,15 +629,20 @@ struct MeshPreviewView: UIViewRepresentable {
         }
     }
 
-    /// Generates a 2D snapshot of the mesh using an offscreen renderer.
-    nonisolated static func generateSnapshot(meshURL: URL, colorsURL: URL?, poseMatrix: [Float]? = nil) -> UIImage? {
+    /// Generates a 2D snapshot of the mesh using an offscreen renderer. Pass the location's
+    /// canonical `frameCenter` alongside a saved `poseMatrix` — the pose is expressed in scene
+    /// coords (world − frameCenter), so all of a location's thumbnails must center identically
+    /// for one pose to mean the same view across rescans.
+    nonisolated static func generateSnapshot(meshURL: URL, colorsURL: URL?, poseMatrix: [Float]? = nil,
+                                             frameCenter: SIMD3<Float>? = nil) -> UIImage? {
         guard let meshData = try? Data(contentsOf: meshURL) else { return nil }
         let colorsData = colorsURL.flatMap { try? Data(contentsOf: $0) }
         guard let (geometry, _) = buildGeometry(from: meshData, vertexColors: colorsData) else { return nil }
 
         let node = SCNNode(geometry: geometry)
         let (minBound, maxBound) = node.boundingBox
-        let center = SCNVector3((minBound.x + maxBound.x) / 2, (minBound.y + maxBound.y) / 2, (minBound.z + maxBound.z) / 2)
+        let center = frameCenter.map { SCNVector3($0.x, $0.y, $0.z) }
+            ?? SCNVector3((minBound.x + maxBound.x) / 2, (minBound.y + maxBound.y) / 2, (minBound.z + maxBound.z) / 2)
         node.position = SCNVector3(-center.x, -center.y, -center.z)
 
         let containerNode = SCNNode()
@@ -659,6 +706,66 @@ struct MeshPreviewView: UIViewRepresentable {
 
     // MARK: - Semantic Outline Result
 
+    // MARK: - Canonical preview frame
+
+    /// The canonical preview frame for a location: AABB center + max dimension of the given
+    /// scan's RoomPlan SURFACES (walls/floor — the stable structure; objects move between
+    /// generations and would wobble the frame). Callers pass the location's ORIGINAL scan's
+    /// directory so every generation previews through the identical view. Anchoring on the
+    /// original ROOM's center (a fixed landmark of the canonical frame) rather than raw world
+    /// (0,0,0) keeps the room framed on-screen — world origin is wherever the session started.
+    /// nil when no roomplan.json exists (pre-RoomPlan scans) → caller falls back to bbox centering.
+    nonisolated static func canonicalRoomFrame(scanDirectoryURL: URL?) -> (center: SIMD3<Float>, span: Float)? {
+        guard let scanDir = scanDirectoryURL else { return nil }
+        // Prefer the scan-root copy (matches artifactURL / registration / export); the raw_data/
+        // mirror is only a fallback — it can momentarily lag the top-level copy while registration
+        // rewrites the frame at postprocess, so reading it first risks canonical-mesh/raw-outline.
+        let candidates = [
+            scanDir.appendingPathComponent("roomplan.json"),
+            scanDir.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json")
+        ]
+        var exportData: RoomPlanExportData?
+        for url in candidates {
+            if let data = try? Data(contentsOf: url),
+               let decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) {
+                exportData = decoded
+                break
+            }
+        }
+        guard let roomData = exportData, !roomData.surfaces.isEmpty else { return nil }
+
+        var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        // Only the STABLE architecture (walls + floor) frames the canonical view, per the rationale
+        // above — doors/windows/openings can be intermittently detected between builds and would
+        // shift the AABB; furniture objects aren't in `surfaces`. Fall back to all surfaces for a
+        // degenerate wall-less room so it still yields the same frame it did before.
+        let framing = roomData.surfaces.filter { $0.category == "wall" || $0.category == "floor" }
+        for surface in (framing.isEmpty ? roomData.surfaces : framing) {
+            let dims = SIMD3<Float>(surface.dimensions.width, surface.dimensions.height, surface.dimensions.depth)
+            let transform = reconstructMatrix(from: surface.transform)
+            for c in orientedBoxCorners(dimensions: dims, transform: transform) {
+                let p = SIMD3<Float>(c.x, c.y, c.z)
+                lo = simd_min(lo, p)
+                hi = simd_max(hi, p)
+            }
+        }
+        let size = hi - lo
+        let span = max(size.x, max(size.y, size.z))
+        guard span > 0.5 else { return nil } // degenerate room → not a usable frame
+        return ((lo + hi) / 2, span)
+    }
+
+    /// Canonical frame center for a location — from its ORIGINAL (earliest) scan's RoomPlan room
+    /// (see `canonicalRoomFrame`). Every snapshot rendered with the location's `imagingPoseMatrix`
+    /// must center on this (the pose is expressed in world − center coords) or the same pose shows
+    /// a different view per scan. Call where the SwiftData model is safe to touch (alongside
+    /// reading `imagingPoseMatrix`) and pass the value into background snapshot work.
+    static func canonicalFrameCenter(for location: ScanLocation?) -> SIMD3<Float>? {
+        guard let original = location?.scans.min(by: CapturedScan.canonicalOrder) else { return nil }
+        return canonicalRoomFrame(scanDirectoryURL: original.scanDirectory)?.center
+    }
+
     /// Result from building semantic outlines: SceneKit geometry nodes + detected class list.
     struct SemanticOutlineResult {
         struct OutlineNode {
@@ -679,10 +786,12 @@ struct MeshPreviewView: UIViewRepresentable {
     ) -> SemanticOutlineResult? {
         guard let scanDir = scanDirectoryURL else { return nil }
 
-        // Find roomplan.json (check raw_data/ subdirectory first, then scan root)
+        // Find roomplan.json — prefer the scan-root copy (matches artifactURL / registration /
+        // export); the raw_data/ mirror is only a fallback (it can lag the top-level copy during a
+        // registration frame-rewrite at postprocess).
         let candidates = [
-            scanDir.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json"),
-            scanDir.appendingPathComponent("roomplan.json")
+            scanDir.appendingPathComponent("roomplan.json"),
+            scanDir.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json")
         ]
         var exportData: RoomPlanExportData?
         for url in candidates {

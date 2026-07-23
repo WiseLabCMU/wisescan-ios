@@ -33,6 +33,11 @@ enum VertexColorAccumulator {
                 return
             }
 
+            // Feature count of the map we're about to persist. A relocalized generation
+            // should save *more* features than it loaded (inherited + newly observed); a
+            // sudden collapse here is the inherited map being dropped before export.
+            LocalizationDiag.logMapStats(map, context: "save (about to persist)")
+
             do {
                 let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
                 let filename = "worldmap_\(UUID().uuidString.prefix(8)).worldmap"
@@ -151,8 +156,25 @@ enum VertexColorAccumulator {
 
         // Parse OBJ vertices using shared parser
         guard let parsed = MeshParser.parseOBJ(from: objData) else { return nil }
-        let vertices = parsed.vertices
+        var vertices = parsed.vertices
         guard !vertices.isEmpty else { return nil }
+
+        // Registered scans: mesh.obj is in the location's CANONICAL frame, but the saved camera
+        // poses/depth are in this scan's RAW capture frame — projecting canonical vertices through
+        // raw cameras would misproject by the applied registration transform (decimeters). Undo it
+        // here for the projection only; the emitted colors are per-vertex-ordered, so they attach
+        // to the canonical mesh unchanged. (Normals are derived from these remapped vertices below,
+        // keeping the view-angle weights frame-consistent.)
+        if let sidecar = SaveRegistration.loadSidecar(scanDirectory: rawDir.deletingLastPathComponent()),
+           sidecar.applied, let t = sidecar.transformMatrix {
+            let inv = t.inverse
+            for i in vertices.indices {
+                let p = inv * SIMD4<Float>(vertices[i], 1)
+                vertices[i] = SIMD3(p.x, p.y, p.z)
+            }
+            let trans = simd_length(SIMD3(t.columns.3.x, t.columns.3.y, t.columns.3.z))
+            print(String(format: "[VertexColor] un-applied registration (trans=%.1fcm) → projecting canonical mesh through raw cameras", trans * 100))
+        }
 
         // Per-vertex surface normals (area-weighted face normals) drive the
         // view-angle weight. Sign/winding may be inconsistent across the mesh,
@@ -184,6 +206,48 @@ enum VertexColorAccumulator {
         let maxFrames = min(cameraFiles.count, AppConstants.maxColorizationFrames)
         let stride = max(1, cameraFiles.count / maxFrames)
         let sampledFiles = Swift.stride(from: 0, to: cameraFiles.count, by: stride).prefix(maxFrames).map { cameraFiles[$0] }
+
+        // ── Privacy: keep person pixels out of colors.bin ──
+        // Colorize bakes sampled pixels into colors.bin, which exports as PLY vertex colors — a
+        // path the export-time privacy blur never revisits. The old capture pipeline zeroed person
+        // regions in the depth PNG at capture, so the depth==0 skip in the projection loop already
+        // excluded people for free. The deferred-blur pipeline instead writes RAW depth + per-frame
+        // person masks under masks/ and defers blur to export — silently removing that free
+        // protection. Restore the invariant here: in the deferred-blur era, skip masked pixels and
+        // (per 2026-07-21 decision) skip whole frames whose stencil hadn't warmed up, so no person
+        // pixel is ever baked. Legacy captures have no masks/ dir → this stays dormant and the
+        // depth==0 skip keeps protecting them; privacy-off captures have an empty masks/ → no-op.
+        let masksDir = rawDir.appendingPathComponent("masks")
+        // Deferred-blur era (RAW depth, needs per-frame masks) vs legacy (depth already person-zeroed
+        // at capture, so the depth==0 skip protects). masks/ (created unconditionally at session
+        // start) is the primary signal. If it was lost (partial restore / manual cleanup), the
+        // metadata `privacy_filter` KEY marks the era — every deferred capture stamps it
+        // (FrameCaptureSession), legacy metadata predates it. UNREADABLE metadata (missing/corrupt —
+        // abnormal, since it's written for every scan) fails CLOSED into the deferred era so a
+        // lost-masks deferred scan can't silently colorize raw depth. Only READABLE metadata WITHOUT
+        // the key is genuine legacy. Mirrors ScanExportManager's gate.
+        let meta: [String: Any]? = {
+            guard let metaData = try? Data(contentsOf: rawDir.appendingPathComponent("scan4d_metadata.json")),
+                  let obj = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] else { return nil }
+            return obj
+        }()
+        let masksDirExists = fm.fileExists(atPath: masksDir.path)
+        let hasPrivacyKey = meta?.keys.contains("privacy_filter") ?? false
+        let deferredBlurEra = masksDirExists || hasPrivacyKey || meta == nil
+        var privacyWasOn = false
+        if deferredBlurEra {
+            let maskCount = !masksDirExists ? 0
+                : ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
+                    .filter { $0.pathExtension == "png" }.count
+            privacyWasOn = maskCount > 0
+            if !privacyWasOn {
+                // No surviving masks: honor an explicit Bool; a present-but-garbage flag or
+                // unreadable metadata fails CLOSED (assume privacy was on — never bake a person).
+                privacyWasOn = (meta?["privacy_filter"] as? Bool) ?? true
+            }
+        }
+        let maskMode = deferredBlurEra && privacyWasOn   // sample per-frame masks + skip unmasked frames
+        if maskMode { print("[VertexColor] privacy mask mode ON (deferred-blur capture) — masking person regions") }
 
         // Per-vertex top-N observation buffers (flat, row = K entries per vertex).
         // Colors are kept as 8-bit (the source precision) to bound memory.
@@ -306,6 +370,26 @@ enum VertexColorAccumulator {
                 }
             }
 
+            // Load this frame's person mask (deferred-blur era only). No mask ⇒ the stencil hadn't
+            // warmed up on this frame → skip the whole frame rather than risk baking an unmasked
+            // person (the top-K redundancy across other frames absorbs the coverage loss).
+            var maskPtr: UnsafePointer<UInt8>?
+            var maskWidth = 0, maskHeight = 0, maskBytesPerRow = 0
+            var maskDataBuffer: CFData?
+            if maskMode {
+                let frameName = (imagePath as NSString).lastPathComponent
+                let maskURL = masksDir.appendingPathComponent(((frameName as NSString).deletingPathExtension) + ".png")
+                guard let mData = try? Data(contentsOf: maskURL),
+                      let mImg = UIImage(data: mData)?.cgImage,
+                      mImg.bitsPerPixel == 8,   // fail closed: only the known 8bpp-gray layout is safe to index 1 byte/pixel
+                      let mProvider = mImg.dataProvider?.data else { return }   // missing/unreadable/unexpected mask → skip frame
+                maskDataBuffer = mProvider
+                maskPtr = CFDataGetBytePtr(mProvider)
+                maskWidth = mImg.width
+                maskHeight = mImg.height
+                maskBytesPerRow = mImg.bytesPerRow
+            }
+
             // Project each vertex into this camera frame
             for (i, vertex) in vertices.enumerated() {
                 let worldPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
@@ -341,6 +425,24 @@ enum VertexColorAccumulator {
                         // If expected distance is > tolerance farther than what the depth sensor saw, we are occluded
                         if expectedMM > depthMM + AppConstants.colorizationOcclusionToleranceMM { continue }
                     }
+                }
+
+                // Person-mask exclusion (deferred-blur era): skip any vertex projecting into a
+                // person region so its pixels never bake into colors.bin. A ±1 mask-pixel
+                // neighborhood approximates export's 12 px silhouette dilation (the mask is ~⅛
+                // image resolution) — conservative on privacy, negligible coverage cost.
+                if let mPtr = maskPtr {
+                    let mpx = px * downscaleFactor * maskWidth / max(imgW, 1)
+                    let mpy = py * downscaleFactor * maskHeight / max(imgH, 1)
+                    var person = false
+                    for ddy in -1...1 where !person {
+                        for ddx in -1...1 {
+                            let sx = mpx + ddx, sy = mpy + ddy
+                            if sx >= 0, sx < maskWidth, sy >= 0, sy < maskHeight,
+                               mPtr[sy * maskBytesPerRow + sx] > 0 { person = true; break }
+                        }
+                    }
+                    if person { continue }
                 }
 
                 // Quality weight: head-on views and closer frames win.
@@ -380,6 +482,7 @@ enum VertexColorAccumulator {
                 }
             }
             _ = depthPixelDataBuffer // Silence compiler warning while ensuring CFData buffer outlives the pointer
+            _ = maskDataBuffer       // ditto — keep the mask CFData alive for the vertex loop
           } // autoreleasepool (per frame)
             progress?(Double(frameIdx + 1) / Double(sampledFiles.count))
         }

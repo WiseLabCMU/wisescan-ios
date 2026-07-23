@@ -51,8 +51,10 @@ enum PerfDiag {
             signposter.endInterval(label, state)
             let ms = (CACurrentMediaTime() - start) * 1000.0
             if warnOverMs == 0 || ms > warnOverMs {
+                // [PerfTimer] prefix so every timed-block duration line greps/filters as one
+                // family (like [MemDiag]/[LocDiag]), e.g. `[PerfTimer] voxel_decay 163ms`.
                 let name = "\(label)"
-                logger.info("\(name, privacy: .public) \(Int(ms))ms")
+                logger.info("[PerfTimer] \(name, privacy: .public) \(Int(ms))ms")
             }
         }
         return try body()
@@ -105,7 +107,7 @@ final class MainThreadWatchdog: NSObject, @unchecked Sendable {
         t.resume()
         monitor = t
 
-        PerfDiag.log("MainThreadWatchdog started (threshold \(Int(stallThreshold * 1000))ms)")
+        PerfDiag.log("[PerfDiag] MainThreadWatchdog started (threshold \(Int(stallThreshold * 1000))ms)")
     }
 
     @objc private func tick(_ link: CADisplayLink) {
@@ -120,13 +122,13 @@ final class MainThreadWatchdog: NSObject, @unchecked Sendable {
             if !stallActive {
                 stallActive = true
                 stallMaxGap = gap
-                PerfDiag.log("⚠️ main-thread stall BEGIN (no frame for \(Int(gap * 1000))ms)")
+                PerfDiag.log("[PerfDiag] ⚠️ main-thread stall BEGIN (no frame for \(Int(gap * 1000))ms)")
             } else {
                 stallMaxGap = max(stallMaxGap, gap)
             }
         } else if stallActive {
             stallActive = false
-            PerfDiag.log("✓ main-thread stall END (max no-frame gap \(Int(stallMaxGap * 1000))ms)")
+            PerfDiag.log("[PerfDiag] ✓ main-thread stall END (max no-frame gap \(Int(stallMaxGap * 1000))ms)")
         }
     }
 
@@ -165,7 +167,7 @@ final class MemoryPressureMonitor: @unchecked Sendable {
         }
         src.resume()
         source = src
-        PerfDiag.log("MemoryPressureMonitor started")
+        PerfDiag.log("[PerfDiag] MemoryPressureMonitor started")
     }
 
     func stop() {
