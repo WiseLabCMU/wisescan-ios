@@ -519,13 +519,18 @@ class ScanStats {
     var footprintMB: Double = 0
     var availableMB: Double = 0
     /// Smoothed ARKit frame rate (~1s EMA), published from updateStats. The direct, device-adaptive
-    /// compute-headroom signal — drives `fpsPressure`. Defaults to 60 so the bar reads healthy before
-    /// the first sample lands.
+    /// compute-headroom signal — drives `fpsPressure`. Defaults to 60 (≥ any target) so the bar reads
+    /// healthy before the first sample lands.
     var smoothedFPS: Double = 60
+    /// The session's CONFIGURED capture frame rate (`ARConfiguration.VideoFormat.framesPerSecond`),
+    /// published from updateStats. `fpsPressure` is measured RELATIVE to this — a scan running 30/30 on a
+    /// 30fps format is healthy, not "half speed". Defaults to 60 so pre-sample math matches the old fixed
+    /// ceiling; overwritten with the real target on the first stats publish.
+    var targetFPS: Double = 60
     /// Smoothed total CPU usage across all cores as a percentage (100 = one core fully busy), published
     /// from updateStats. Divided by this device's core budget it becomes `cpuPressure` — the LEADING
     /// compute signal: it ramps as reconstruction scales, well before `fpsPressure` (which stays pinned
-    /// at 60 fps until the device finally can't keep up). Defaults to 0 (healthy) pre-first-sample.
+    /// at the target rate until the device finally can't keep up). Defaults to 0 (healthy) pre-first-sample.
     var cpuPercent: Double = 0
     var driftEstimate: Double = 0 // 0.0 to 1.0
     var mappingStatus: String = "notAvailable" // ARFrame.WorldMappingStatus for cumulative relocalization quality
@@ -567,10 +572,11 @@ class ScanStats {
     private let maxAnchors: Double = 500
     /// Bar is full when footprint reaches this fraction of the jetsam ceiling (margin before the kill).
     private let memoryWarnFraction: Double = 0.80
-    /// FPS at/below which `fpsPressure` = 1.0. Set to 20 (not 30) to keep resolution INSIDE the danger
-    /// zone: at 30 the bar saturates across sustained-mid-20s-fps scans and can't tell "rough" (~28,
-    /// ~0.8) from "broken" (single digits, 1.0). Roughening is still ~0.67 by 40 fps.
-    private let fpsFloor: Double = 20.0
+    /// Fraction of the CONFIGURED frame rate at/below which `fpsPressure` = 1.0. 1/3 keeps resolution
+    /// INSIDE the danger zone: a fixed floor at half-target would saturate across sustained scans and
+    /// couldn't tell "rough" from "broken". At the legacy 60fps ceiling this floor is 20 (matching the
+    /// old hand-tuned value, roughening ~0.67 by 40); at a 30fps ceiling it scales to 10.
+    private let fpsFloorFraction: Double = 1.0 / 3.0
     /// This device's total logical-core budget (×100 = the CPU% at full all-core saturation). Normalizing
     /// CPU% by THIS turns an absolute number that means nothing across chips into a device-relative
     /// saturation FRACTION: a faster or older device simply saturates at a different workload and the
@@ -625,17 +631,21 @@ class ScanStats {
     }
     var anchorPressure: Double { min(Double(anchorCount) / maxAnchors, 1.0) }
 
-    /// Compute-headroom pressure from the smoothed frame rate. FPS is the direct, DEVICE-ADAPTIVE
-    /// signal for "the device can't turn more geometry into frames" — the wall a fixed polygon budget
-    /// can't see (FPS collapsed here at ~32% of maxPolygons). 0 above 60 fps; ~0.67 by 40 (roughening),
-    /// ramps to full by `fpsFloor` (20). Leads `driftEstimate` (VIO actually breaking).
+    /// Compute-headroom pressure from the smoothed frame rate, measured RELATIVE to the session's
+    /// configured `targetFPS` (30 or 60 depending on the selected video format). FPS is the direct,
+    /// DEVICE-ADAPTIVE signal for "the device can't turn more geometry into frames" — the wall a fixed
+    /// polygon budget can't see (FPS collapsed at ~32% of maxPolygons). 0 at/above target; ramps to full
+    /// by `fpsFloorFraction` of target (e.g. 20 for a 60fps ceiling, 10 for 30fps). A scan holding
+    /// target/target is healthy. Leads `driftEstimate` (VIO actually breaking).
     var fpsPressure: Double {
-        min(max(0, (60.0 - smoothedFPS) / (60.0 - fpsFloor)), 1.0)
+        guard targetFPS > 0 else { return 0 }
+        let floor = targetFPS * fpsFloorFraction
+        return min(max(0, (targetFPS - smoothedFPS) / (targetFPS - floor)), 1.0)
     }
 
     /// Compute-saturation pressure: fraction of THIS device's cores in use, scaled so the bar is full at
     /// `cpuWarnFraction` of all-core saturation. The LEADING compute axis — it ramps with reconstruction
-    /// load while `fpsPressure` is still 0 (fps holds 60 until the cliff, giving no runway). Portable by
+    /// load while `fpsPressure` is still 0 (fps holds at target until the cliff, giving no runway). Portable by
     /// construction: the denominator is the device's own core count, so the same fraction means the same
     /// relative load on any chip. `fpsPressure` stays the device-INdependent backstop if this axis's
     /// calibration is off for a given device — the two cover each other (see the M1 iPad profiling run,
