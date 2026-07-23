@@ -60,3 +60,16 @@ a follow-up; not on the branch.
 that run were **VR-ENTER (469 ms — bloom/pipeline setup)** and **VR-EXIT + save (828 ms)**,
 both sub-second transition costs on the marginal iPad, not the thermal cliff. Watch both;
 the ENTER stall's lever is lazy bloom setup (it runs even though bloom defaults OFF).
+
+### 5. Stop/save teardown main-thread stall — ESCALATING on VR
+Observed across runs on the marginal iPad: **2469 ms** (AR stop, first post-merge run) →
+**7056 ms** (VR stop, P1-fixes validation run). The window spans the worldmap archive
+(`map load (save (about to persist))`) → VR-EXIT → session teardown, with the **naming
+alert presenting over the still-rendering ARView** (the exact CONTRIBUTING anti-pattern —
+"leave the capture screen first, then prompt"), `Reporter disconnected` spam, `cpu=0%`
+MemDiag samples, and 1.4–1.8 s ARKit frame gaps. Post-stop so no capture data is at risk,
+but 7 s of frozen UI reads as a hang. Cosmetic co-symptom: `[VR] Tracking degraded —
+cleared accumulated voxels` fires during the teardown degradation, wiping the on-screen
+cloud early. **Lever:** move the name prompt off the capture screen (navigate to Scans tab
+first, prompt there — CONTRIBUTING's own recommendation), and profile what holds main
+during the VR teardown window (bloom callback removal? RealityKit scene teardown?).
