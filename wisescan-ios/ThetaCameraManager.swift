@@ -50,19 +50,12 @@ final class ThetaCameraManager {
     }
 
     /// A still (JPEG) resolution, from the OSC `fileFormat` option.
-    struct StillFormat: Equatable {
+    struct StillFormat: Hashable {
         let width: Int
         let height: Int
         var label: String { "\(width) × \(height)" }
         var megapixels: Int { Int((Double(width * height) / 1_000_000).rounded()) }
     }
-
-    /// Known Theta X JPEG still sizes (model-specific presets for the spike; unsupported
-    /// values are rejected by `camera.setOptions` and surfaced as a config event).
-    static let stillFormatPresets: [StillFormat] = [
-        StillFormat(width: 11008, height: 5504),   // ~60 MP
-        StillFormat(width: 5504, height: 2752)     // ~15 MP
-    ]
 
     private(set) var state: ConnectionState = .disconnected
     /// Battery charge 0…1 from `/osc/state`, when known.
@@ -77,6 +70,9 @@ final class ThetaCameraManager {
     private(set) var previewImage: UIImage?
     /// Current still resolution read from the camera's `fileFormat` option.
     private(set) var currentStillFormat: StillFormat?
+    /// JPEG resolutions the camera reports as supported (via `fileFormatSupport`); empty
+    /// until a successful connect, or if the camera/firmware doesn't report them.
+    private(set) var supportedStillFormats: [StillFormat] = []
     /// Rolling spike event log, newest first (capped).
     private(set) var events: [ThetaEvent] = []
     /// Count of 360° stills captured into the current scan (reset at record start).
@@ -156,6 +152,7 @@ final class ThetaCameraManager {
             log(.connection, "Connected: \(info.model) \(info.firmware)"
                 + (info.serial.map { " · \($0)" } ?? ""))
             currentStillFormat = try? await fetchStillResolution()
+            await refreshSupportedStillFormats()
         } catch {
             batteryLevel = nil
             serialNumber = nil
@@ -243,7 +240,7 @@ final class ThetaCameraManager {
 
     // MARK: - Still resolution
 
-    /// Re-reads the current still resolution (e.g. after connecting). Fire-and-forget.
+    /// Re-reads the current resolution and the supported list (e.g. after connecting).
     func fetchStillFormat() {
         guard isConnected else { return }
         Task {
@@ -252,6 +249,22 @@ final class ThetaCameraManager {
             } catch {
                 log(.config, "Couldn't read resolution: \(Self.describe(error))")
             }
+            await refreshSupportedStillFormats()
+        }
+    }
+
+    /// Refreshes `supportedStillFormats` from the camera; logs whether the camera
+    /// reported a list (dynamic) or we'll fall back to the model presets.
+    private func refreshSupportedStillFormats() async {
+        do {
+            let formats = try await fetchSupportedStillFormats()
+            supportedStillFormats = formats
+            log(.config, formats.isEmpty
+                ? "No format list from camera; using model presets"
+                : "\(formats.count) still format(s) reported by camera")
+        } catch {
+            supportedStillFormats = []
+            log(.config, "Couldn't read format list: \(Self.describe(error))")
         }
     }
 

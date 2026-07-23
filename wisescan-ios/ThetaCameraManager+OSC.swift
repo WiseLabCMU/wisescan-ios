@@ -40,6 +40,22 @@ extension ThetaCameraManager {
         if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setOptions failed") }
     }
 
+    /// Reads the JPEG still resolutions the camera reports as supported via the
+    /// `fileFormatSupport` option (a RICOH extension). Empty when the camera/firmware
+    /// doesn't report it — callers fall back to a model table. Non-JPEG entries
+    /// (e.g. RAW) are ignored.
+    func fetchSupportedStillFormats() async throws -> [StillFormat] {
+        let body: [String: Any] = ["name": "camera.getOptions",
+                                   "parameters": ["optionNames": ["fileFormatSupport"]]]
+        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCOptionsResponse.self)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "getOptions failed") }
+        guard let list = response.results?.options.fileFormatSupport else { return [] }
+        return list.compactMap { format in
+            guard format.type == "jpeg", let width = format.width, let height = format.height else { return nil }
+            return StillFormat(width: width, height: height)
+        }
+    }
+
     /// Fires `camera.takePicture` and resolves to the saved file URL (polls if async).
     func triggerStill() async throws -> String {
         switch try await execute(name: "camera.takePicture") {
@@ -198,7 +214,10 @@ private struct OSCCommandResponse: Decodable {
 
 private struct OSCOptionsResponse: Decodable {
     struct Results: Decodable { let options: Options }
-    struct Options: Decodable { let fileFormat: FileFormat? }
+    struct Options: Decodable {
+        let fileFormat: FileFormat?
+        let fileFormatSupport: [FileFormat]?
+    }
     struct FileFormat: Decodable { let type: String?; let width: Int?; let height: Int? }
     let results: Results?
     let error: OSCErrorBody?

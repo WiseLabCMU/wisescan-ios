@@ -500,7 +500,7 @@ struct ThetaCameraCard: View {
                         .foregroundColor(.gray)
                     Spacer()
                     Menu {
-                        ForEach(ThetaCameraManager.stillFormatPresets, id: \.label) { format in
+                        ForEach(manager.stillFormatMenu, id: \.label) { format in
                             Button("\(format.label) · \(format.megapixels) MP") {
                                 manager.setStillFormat(format)
                             }
