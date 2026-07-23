@@ -370,4 +370,33 @@ enum StitchLinkStore {
             stitchLog.error("migration save FAILED; will retry next launch: \(error.localizedDescription, privacy: .public)")
         }
     }
+
+    // MARK: Orphan cleanup
+
+    /// Sweep orphaned adjacent-space locations. The mid-session (`pinAndExtend`) and cross-session
+    /// (`confirmAlignment`) extend flows create the "Adjacent to …" `ScanLocation` and persist it
+    /// BEFORE the new scan records (recording resolves `activeLocationForScan`, so the location must
+    /// already exist). Their abort `defer`s only cover the stabilization task; a freeze or crash
+    /// during the subsequent record→save leaves the location behind with **zero scans** — and it has
+    /// no UI affordance to delete. A `.linkAdjacent` location with no scans can never become useful
+    /// (0 scans ⇒ no incident links either, since links reference scans), so delete it.
+    ///
+    /// Runs once at launch, after migration — no capture is in flight then, so `scans.isEmpty` can't
+    /// be a legitimate mid-recording transient. Scoped to `.linkAdjacent` so a user-created normal
+    /// location that's simply not scanned yet is never touched.
+    static func reconcileOrphanedAdjacentLocations(context: ModelContext) {
+        guard let locations = try? context.fetch(FetchDescriptor<ScanLocation>()) else { return }
+        let orphans = locations.filter { $0.scanCase == .linkAdjacent && $0.scans.isEmpty }
+        guard !orphans.isEmpty else { return }
+        for loc in orphans {
+            stitchLog.info("reconcile: deleting orphaned adjacent location '\(loc.name, privacy: .public)' (0 scans)")
+            context.delete(loc)
+        }
+        do {
+            try context.save()
+            stitchLog.info("reconcile: swept \(orphans.count) orphaned adjacent location(s)")
+        } catch {
+            stitchLog.error("reconcile: save failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
 }
