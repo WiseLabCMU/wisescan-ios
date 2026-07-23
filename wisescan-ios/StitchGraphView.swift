@@ -378,7 +378,11 @@ private struct CompactLocationTile: View {
                 }
             }
             .overlay(alignment: .topTrailing) {
-                if !isEditing && !location.scans.isEmpty && location.scans.allSatisfy({ $0.isUploaded }) {
+                // Keyed to the LATEST scan, not an all-scans rollup: bulk upload's default
+                // "Latest" scope uploads only the newest scan per location, so allSatisfy read
+                // "never uploaded" forever on any multi-scan location. The latest generation is
+                // the operative artifact; per-scan upload state lives in LocationDetailView.
+                if !isEditing, latestScan?.isUploaded == true {
                     Image(systemName: "checkmark.icloud.fill")
                         .font(.system(size: 10))
                         .foregroundColor(.green)

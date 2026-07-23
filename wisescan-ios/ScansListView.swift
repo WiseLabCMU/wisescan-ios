@@ -915,7 +915,9 @@ struct LocationGridTile: View {
             .padding(8)
         }
         .overlay(alignment: .topTrailing) {
-            if !location.scans.isEmpty && location.scans.allSatisfy({ $0.isUploaded }) {
+            // Latest-scan upload state, matching bulk upload's "Latest" scope (see the graph
+            // tile's identical badge in StitchGraphView for the full rationale).
+            if latestScan?.isUploaded == true {
                 Image(systemName: "checkmark.icloud.fill")
                     .font(.caption)
                     .foregroundColor(.green)
