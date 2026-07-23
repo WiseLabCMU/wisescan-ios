@@ -293,8 +293,12 @@ final class ThetaCameraManager {
     /// `theta_stills/`. Storing the phone pose (not the camera pose) is deliberate: it
     /// captures the phone-pose ↔ equirect pairs the deferred rig-extrinsic calibration (P3)
     /// needs. No-op unless connected and no capture is already in flight.
-    func captureStillForScan(phoneTransform: simd_float4x4, timestamp: TimeInterval, into rawDataDir: URL) {
-        guard isConnected, !isCapturing else { return }
+    /// Returns false when the capture was NOT started (camera disconnected, or the previous
+    /// still's ~7s trigger+download pipeline is still in flight) — the caller's toast must
+    /// only show for captures that actually began, or fast taps display phantom stills.
+    @discardableResult
+    func captureStillForScan(phoneTransform: simd_float4x4, timestamp: TimeInterval, into rawDataDir: URL) -> Bool {
+        guard isConnected, !isCapturing else { return false }
         isCapturing = true
         lastError = nil
         lastDownload = nil
@@ -309,6 +313,16 @@ final class ThetaCameraManager {
                 let data = try await downloadData(from: url)
                 let transferMs = Int(Date().timeIntervalSince(dlStart) * 1000)
                 let seq = scanStillCount + 1
+                // STOP-RACE GUARD: the ~7s trigger+download pipeline can cross the scan's Stop —
+                // saveScan then MOVES the capture dir, and writing to the stale path creates an
+                // orphaned theta_stills/ the saved bundle never sees (observed on device: still
+                // #3 landed after TEARDOWN). Writing into the moved bundle post-metadata is not
+                // safe either, so the honest outcome is a loud drop.
+                guard FileManager.default.fileExists(atPath: rawDataDir.path) else {
+                    log(.capture, "Scan still #\(seq) discarded — scan ended before the 360° download finished")
+                    isCapturing = false
+                    return
+                }
                 let input = ScanStillInput(
                     sequence: seq, phoneTransform: phoneTransform, timestamp: timestamp,
                     sourceURL: fileURL, format: currentStillFormat,
@@ -328,6 +342,7 @@ final class ThetaCameraManager {
             }
             isCapturing = false
         }
+        return true
     }
 }
 

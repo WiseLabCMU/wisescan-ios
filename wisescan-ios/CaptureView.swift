@@ -154,12 +154,17 @@ struct CaptureView: View {
         guard isRecording, thetaManager.isConnected,
               let frame = currentARSession?.currentFrame,
               let rawDataDir = frameCaptureSession.captureDir else { return }
-        thetaManager.captureStillForScan(
+        // Toast only when the capture actually started — the manager refuses while the
+        // previous still's ~7s pipeline is in flight, and a phantom "still #N…" for a
+        // refused capture would overcount (the phone keyframe of this pause still fires;
+        // that pair is simply phone-only).
+        if thetaManager.captureStillForScan(
             phoneTransform: frame.camera.transform,
             timestamp: frame.timestamp,
             into: rawDataDir
-        )
-        showTransientMessage("📸 360° still #\(thetaManager.scanStillCount + 1)…", duration: 2)
+        ) {
+            showTransientMessage("📸 360° still #\(thetaManager.scanStillCount + 1)…", duration: 2)
+        }
     }
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State. SwiftData reads stay
