@@ -361,6 +361,14 @@ class ScanStore {
     ///   artifact): a trusted correction queued to bake into the world origin at record-start.
     var icpAlignReady: ICPAlignReady?
 
+    /// Set by the VIO-compromised halt (`handleVIOCompromised`): tracking collapsed hard enough
+    /// to kill the scan (snap storm / RoomPlan DriftDetection), so ARKit's internal map is
+    /// corrupt. The next session configuration must include `.resetTracking` to re-bootstrap
+    /// VIO — without it the warm session relocalizes against the dead map FOREVER (observed on
+    /// device: endless `limited(Relocalizing)` after a halt; no new scan could start). Consumed
+    /// (cleared) by ARCoverageView at the next config run.
+    var needsTrackingReset = false
+
     struct ICPAlignReady: Equatable {
         let transCm: Float
         let yawDeg: Float
