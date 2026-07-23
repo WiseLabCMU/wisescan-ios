@@ -1293,21 +1293,35 @@ struct ARCoverageView: UIViewRepresentable {
 
             guard faces.bytesPerIndex == 4, faces.indexCountPerPrimitive == 3 else { return }
 
-            // Transform vertices to world space (same math as exportMeshOBJ)
+            // Transform vertices to world space (same math as exportMeshOBJ).
+            //
+            // BOUNDED READS (2026-07-23 M2 crash — EXC_BAD_ACCESS at a page-aligned address in
+            // this loop): a SIMD3<Float> pointee loads 16 bytes against ARKit's packed 12-byte
+            // vertex stride, over-reading the FINAL vertex by 4 bytes — harmless while Metal
+            // pads the allocation, fatal when the buffer ends exactly on a page boundary. Read
+            // x/y/z as three 4-byte floats instead (the same fix buildMeshOBJ's parse already
+            // carries), honor the source's byte offset, and clamp the declared counts to what
+            // the mapped buffer can actually hold (ARKit can recycle/resize the underlying
+            // MTLBuffer while a queued didUpdate drains — truncated geometry renders one
+            // throttle-cycle stale; a fault kills the scan).
+            let vStride = max(vertices.stride, MemoryLayout<Float>.size * 3)
+            let vBase = vertices.buffer.contents().advanced(by: vertices.offset)
+            let vAvail = max(0, vertices.buffer.length - vertices.offset)
+            let safeVertexCount = min(vertices.count, vAvail / vStride)
             var worldPositions = [SIMD3<Float>]()
-            worldPositions.reserveCapacity(vertices.count)
-            for i in 0..<vertices.count {
-                let ptr = vertices.buffer.contents().advanced(by: i * vertices.stride)
-                let local = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                let worldPos = anchorTransform * SIMD4<Float>(local.x, local.y, local.z, 1.0)
+            worldPositions.reserveCapacity(safeVertexCount)
+            for i in 0..<safeVertexCount {
+                let xyz = vBase.advanced(by: i * vertices.stride).assumingMemoryBound(to: Float.self)
+                let worldPos = anchorTransform * SIMD4<Float>(xyz[0], xyz[1], xyz[2], 1.0)
                 worldPositions.append(SIMD3<Float>(worldPos.x, worldPos.y, worldPos.z))
             }
 
             let faceStride = faces.bytesPerIndex * faces.indexCountPerPrimitive
+            let safeFaceCount = min(faces.count, faces.buffer.length / max(faceStride, 1))
             var faceIndices = [(UInt32, UInt32, UInt32)]()
-            faceIndices.reserveCapacity(faces.count)
+            faceIndices.reserveCapacity(safeFaceCount)
             let vertexCount = worldPositions.count
-            for i in 0..<faces.count {
+            for i in 0..<safeFaceCount {
                 let ptr = faces.buffer.contents().advanced(by: i * faceStride)
                 let face = ptr.assumingMemoryBound(to: (UInt32, UInt32, UInt32).self).pointee
                 // Validate indices are within vertex bounds — corrupted geometry
@@ -1452,15 +1466,22 @@ struct ARCoverageView: UIViewRepresentable {
             let vertices = mesh.geometry.vertices
             guard vertices.count > 0 else { return }
             let anchorTransform = mesh.transform
+            // Bounded reads — same hazard and fix as buildWireframeForAnchor: three-float loads
+            // (a SIMD3 pointee over-reads packed 12-byte strides by 4 bytes), source offset
+            // honored, count clamped to the mapped buffer.
+            let vStride = max(vertices.stride, MemoryLayout<Float>.size * 3)
+            let vBase = vertices.buffer.contents().advanced(by: vertices.offset)
+            let vAvail = max(0, vertices.buffer.length - vertices.offset)
+            let safeCount = min(vertices.count, vAvail / vStride)
+            guard safeCount > 0 else { return }
             let cap = 400
-            let step = max(1, vertices.count / cap)
+            let step = max(1, safeCount / cap)
             var samples = [SIMD3<Float>]()
-            samples.reserveCapacity(min(cap, vertices.count))
+            samples.reserveCapacity(min(cap, safeCount))
             var i = 0
-            while i < vertices.count {
-                let ptr = vertices.buffer.contents().advanced(by: i * vertices.stride)
-                let local = ptr.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                let w = anchorTransform * SIMD4<Float>(local.x, local.y, local.z, 1.0)
+            while i < safeCount {
+                let xyz = vBase.advanced(by: i * vertices.stride).assumingMemoryBound(to: Float.self)
+                let w = anchorTransform * SIMD4<Float>(xyz[0], xyz[1], xyz[2], 1.0)
                 samples.append(SIMD3<Float>(w.x, w.y, w.z))
                 i += step
             }
