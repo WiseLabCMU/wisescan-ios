@@ -320,20 +320,54 @@ extension CaptureView {
         }
 
         guard let snapshot = finalSnapshot else {
-            // No live mesh to snapshot. This is the NORM when tracking is relocalizing at Stop:
-            // ARKit drops its mesh anchors during relocalization, so currentFrame carries no
-            // geometry — which is exactly the VIO-loss "Save Anyway" case. The raw frames
-            // (images + depth + camera poses) captured BEFORE the loss are still on disk and are
-            // the primary splat/photogrammetry payload, so preserve them as a mesh-less scan
-            // rather than discarding everything. (Backend reconstructs geometry from raw frames;
-            // the on-device OBJ is only a preview.) Only for the normal flow — a stitch/extend
-            // link needs a co-framed mesh + world map, so those still discard.
-            isRecording = false
-            isProcessingMesh = false  // release the re-entrancy claim from performStopRecording
-
+            // No live mesh to snapshot. Two distinct cases land here:
+            //
+            // LITE MODE (no LiDAR): a meshless snapshot is the NORM — this device never has
+            // ARMeshAnchors — not a tracking loss. Feature-based world maps still work without
+            // LiDAR (older Lite builds saved them and their rescans relocalize from them), so
+            // export the map and route through the normal pendingScan flow: a new space still
+            // gets its name prompt, and the scan saves with an empty mesh (the backend
+            // reconstructs geometry from the raw frames). Regression fixed 2026-07-22: this
+            // guard's recovery path silently saved every Lite scan as an unnamed
+            // "Recovered Scan" with no world map.
+            //
+            // VIO LOSS (LiDAR device, tracking relocalizing at Stop): ARKit dropped its mesh
+            // anchors, and a relocalizing session's map is unreliable — preserve the raw
+            // frames as a mesh-less, map-less scan below rather than discarding everything.
+            // Extend flows need a co-framed mesh + world map either way, so those discard.
             let rawFrameCount: Int = rawDataPath.map {
                 (try? FileManager.default.contentsOfDirectory(atPath: $0.appendingPathComponent("images").path).count) ?? 0
             } ?? 0
+
+            if completion == nil, !ARCoverageView.supportsLiDAR, rawFrameCount > 0 {
+                isRecording = false
+                saveMessage = "Saving World Map..."
+                VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL in
+                    DispatchQueue.main.async {
+                        // A nil mapURL degrades to a mapless (non-relocalizable) scan rather
+                        // than a Retry/Discard alert — the raw frames are the payload on this
+                        // device class, and the name prompt below must still happen.
+                        self.pendingScan = PendingScanData(
+                            locationId: locationId, meshData: Data(), vertexCount: 0, faceCount: 0,
+                            rawDataPath: rawDataPath, vertexColors: nil, worldMapURL: mapURL,
+                            thumbnailData: thumbnailData, scanCase: scanCase)
+                        self.frameCaptureSession = FrameCaptureSession()
+                        MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
+                        self.isProcessingMesh = false
+                        if locationId != nil {
+                            self.savePendingScan()
+                        } else {
+                            self.saveMessage = nil
+                            self.newLocationName = ""
+                            self.showNamePrompt = true
+                        }
+                    }
+                }
+                return
+            }
+
+            isRecording = false
+            isProcessingMesh = false  // release the re-entrancy claim from performStopRecording
 
             if completion == nil, rawFrameCount > 0 {
                 // Recover the raw capture: empty mesh (geometry comes from the frames downstream),

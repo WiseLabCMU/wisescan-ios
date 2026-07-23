@@ -116,6 +116,9 @@ enum ScanPostprocessor {
     /// no in-app redo short of deleting the scan. They behave exactly as they did pre-merge:
     /// rescans on top of them work raw-only (no registration target, no auto-align reference).
     static func isBad(_ scan: CapturedScan) -> Bool {
+        // Lite devices (no LiDAR) can never run RoomPlan: roomless is the NORM there, not a
+        // failure — flagging it would false-warn every Lite scan and block Lite rescans.
+        guard RoomCaptureSession.isSupported else { return false }
         guard !scan.scanCaseRaw.isEmpty else { return false }
         guard Date().timeIntervalSince(scan.capturedAt) > AppConstants.roomDataBadScanGraceSeconds else {
             return false
@@ -535,6 +538,9 @@ enum ScanPostprocessor {
     /// model deleted in the meantime is undefined (has crashed on faulted relationships on some
     /// OS versions). The scan is re-fetched on main at fire time; fetch-miss = deleted = done.
     static func scheduleBadScanCheck(scanId: UUID, modelContext: ModelContext, scanStore: ScanStore) {
+        // No RoomPlan on this device (Lite/no-LiDAR) → no room is ever coming; warning the
+        // user to "redo" the scan would be wrong on every save.
+        guard RoomCaptureSession.isSupported else { return }
         guard UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling) else { return }
         let grace = AppConstants.roomDataBadScanGraceSeconds
         DispatchQueue.main.asyncAfter(deadline: .now() + grace) { [weak scanStore] in
