@@ -142,19 +142,25 @@ struct CaptureView: View {
         let scanCase: ScanCase
     }
 
-    /// Loads ghost mesh data from the scan to extend, caching it in @State.
+    /// Loads ghost mesh data from the scan to extend, caching it in @State. SwiftData reads stay
+    /// on MAIN; the heavy tail — reading a multi-MB OBJ plus the O(n) de-registration text
+    /// rewrite — runs on a background queue (deferred PR #28 review item: it ran on main during
+    /// capture bring-up, the most contended window; a legacy full-mesh ghost with an applied
+    /// registration could stall main for seconds). The completion sets ALL ghost state together
+    /// on main — including `ghostLoadAttempted` — so the body's world-map gate still hands
+    /// map + ghost to the session in a single start, exactly as the synchronous version did
+    /// (cached data always arrived after makeUIView anyway; updateUIView's nil→data reload with
+    /// the map is the designed bring-up path in both timings).
     private func loadGhostMeshData() {
-        // Whatever the outcome, the attempt happened — releases the world-map gate in body (the
-        // no-ghost paths below then run ghost-less relocalization instead of holding forever).
-        defer { ghostLoadAttempted = true }
         // Reset the proxy flag up front so an early-return guard below can't leave a stale
         // ghostIsProxy=true from a prior appearance (it is @State and survives across appearances);
-        // the rescan-proxy block re-sets it when a proxy actually loads.
+        // the async completion re-sets it when a proxy actually loads.
         ghostIsProxy = false
         guard let locId = scanStore.activeLocationForScan,
               let scanId = scanStore.activeScanToExtend else {
             cachedGhostMeshData = nil
             ghostReferencePlanes = []
+            ghostLoadAttempted = true   // nothing to load — release the world-map gate now
             return
         }
         let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
@@ -162,65 +168,96 @@ struct CaptureView: View {
               let targetScan = location.scans.first(where: { $0.id == scanId }) else {
             cachedGhostMeshData = nil
             ghostReferencePlanes = []
+            ghostLoadAttempted = true
             return
         }
+        // Snapshot everything the background pass needs on MAIN — SwiftData models and their
+        // relationships are not thread-safe off the main actor.
+        let isRescan = scanStore.activeScanCase == .rescanSpace
+        let scanDirectory = targetScan.scanDirectory
+        let proxyCandidates = [
+            targetScan.scanDirectory.appendingPathComponent("mesh_proxy.obj"),
+            targetScan.rawDataPath.appendingPathComponent("mesh_proxy.obj")
+        ]
+        let meshFileURL = targetScan.meshFileURL
         // [MemDiag] Ghost mesh = the ICP-source mesh, held resident ALONGSIDE the live scan mesh
         // through a rescan — the genuine 2× mesh coexistence, and it happens during scan time. blob =
         // exact bytes read in (the parse into a displayed RealityKit entity is a separate, later cost);
         // footprintΔ is the Data buffer. Baseline read only when diagnostics are on → free otherwise.
         let foot0 = PerfDiag.enabled ? ScanStats.currentFootprintMB() : 0
-        // DECISION 2: rescans load the light proxy (walls/floor/ceiling subtracted, RoomPlan quads
-        // baked in) instead of the full 10⁵–10⁶-face mesh — killing the 2× mesh-coexistence memory
-        // and most of the ghost render/parse cost. A proxy ghost also retires the mesh-ICP path
-        // for the session (plane auto-align drives the green chip; save-time registration is the
-        // correction authority) and drops the perfDiag alignment-phase mesh reconstruction — the
-        // dense-ICP machinery only engages for legacy scans with no proxy artifact.
-        if scanStore.activeScanCase == .rescanSpace {
-            let proxyCandidates = [
-                targetScan.scanDirectory.appendingPathComponent("mesh_proxy.obj"),
-                targetScan.rawDataPath.appendingPathComponent("mesh_proxy.obj")
-            ]
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let (ghostData, isProxy, planes) = Self.readGhostArtifacts(
+                isRescan: isRescan, scanDirectory: scanDirectory,
+                proxyCandidates: proxyCandidates, meshFileURL: meshFileURL, scanId: scanId)
+
+            DispatchQueue.main.async {
+                // Staleness guard: the user may have left the capture tab or retargeted while the
+                // file was read — applying a stale ghost would hand the WRONG mesh/planes to the
+                // next session start. (A repeat load of the SAME target is idempotent.)
+                guard scanStore.activeScanToExtend == scanId else { return }
+                cachedGhostMeshData = ghostData
+                ghostIsProxy = isProxy
+                ghostReferencePlanes = planes
+                ghostLoadAttempted = true   // ghost + map now hand over together (body's gate)
+                if PerfDiag.enabled {
+                    let blobMB = Double(ghostData?.count ?? 0) / (1024.0 * 1024.0)
+                    let foot1 = ScanStats.currentFootprintMB()
+                    PerfDiag.log(String(format: "[MemDiag] EVENT GHOST-LOAD blob=%.1fMB footprint=%.0fMB (Δ%+.0f)",
+                                        blobMB, foot1, foot1 - foot0))
+                }
+            }
+        }
+    }
+
+    /// Background half of `loadGhostMeshData` — file reads + de-registration + plane decode
+    /// (no SwiftData, no @State; everything arrives as plain values snapshotted on main).
+    private static func readGhostArtifacts(isRescan: Bool, scanDirectory: URL,
+                                           proxyCandidates: [URL], meshFileURL: URL, scanId: UUID)
+        -> (data: Data?, isProxy: Bool, planes: [PlaneRegistration.Plane]) {
+        // DECISION 2: rescans load the light proxy (walls/floor/ceiling subtracted, RoomPlan
+        // quads baked in) instead of the full 10⁵–10⁶-face mesh — killing the 2× mesh-
+        // coexistence memory and most of the ghost render/parse cost. A proxy ghost also
+        // retires the mesh-ICP path for the session (plane auto-align drives the green chip;
+        // save-time registration is the correction authority) — the dense-ICP machinery only
+        // engages for legacy scans with no proxy artifact.
+        var ghostData: Data?
+        var isProxy = false
+        if isRescan {
             for url in proxyCandidates {
                 if let data = try? Data(contentsOf: url) {
-                    cachedGhostMeshData = data
-                    ghostIsProxy = true
+                    ghostData = data
+                    isProxy = true
                     print("[GhostProxy] rescan ghost using proxy (\(data.count / 1024)KB)")
                     break
                 }
             }
         }
-        if !ghostIsProxy {
-            cachedGhostMeshData = try? Data(contentsOf: targetScan.meshFileURL)
+        if !isProxy {
+            ghostData = try? Data(contentsOf: meshFileURL)
         }
-        // DECISION 1 co-framing: if this scan's mesh was registered into the canonical frame at
-        // ITS save, undo that here — the live session relocalizes into the scan's RAW capture
-        // frame (the world map can't be re-based), and the ghost must share it (visual overlay,
-        // manual nudge, and the ICP probe all assume ghost ≡ live frame). One O(n) text pass,
-        // only for scans that actually carry an applied registration.
-        if let data = cachedGhostMeshData,
-           let undo = SaveRegistration.inverseForGhost(scanDirectory: targetScan.scanDirectory) {
-            cachedGhostMeshData = SaveRegistration.transformOBJ(data, by: undo)
+        // DECISION 1 co-framing: if this scan's mesh was registered into the canonical frame
+        // at ITS save, undo that here — the live session relocalizes into the scan's RAW
+        // capture frame (the world map can't be re-based), and the ghost must share it
+        // (visual overlay, manual nudge, and the ICP probe all assume ghost ≡ live frame).
+        // One O(n) text pass, only for scans that actually carry an applied registration.
+        if let data = ghostData,
+           let undo = SaveRegistration.inverseForGhost(scanDirectory: scanDirectory) {
+            ghostData = SaveRegistration.transformOBJ(data, by: undo)
             print("[PlaneReg] ghost mesh de-registered back to its raw capture frame for relocalization overlay")
         }
         // Ghost auto-align reference: the ghost room's planes in the SAME raw frame as the
-        // (de-registered) mesh + world map. Rescan only — a link-adjacent capture is a different
-        // physical room, and auto-fitting its walls to the ghost's would be a false lock.
-        ghostReferencePlanes = scanStore.activeScanCase == .rescanSpace
-            ? SaveRegistration.rawFramePlanes(scanDirectory: targetScan.scanDirectory)
-            : []
-        if !ghostReferencePlanes.isEmpty {
-            print("[PlaneReg] ghost auto-align reference loaded: \(ghostReferencePlanes.count) planes")
-        } else if scanStore.activeScanCase == .rescanSpace {
+        // (de-registered) mesh + world map. Rescan only — a link-adjacent capture is a
+        // different physical room; auto-fitting its walls to the ghost's would be a false lock.
+        let planes = isRescan ? SaveRegistration.rawFramePlanes(scanDirectory: scanDirectory) : []
+        if !planes.isEmpty {
+            print("[PlaneReg] ghost auto-align reference loaded: \(planes.count) planes")
+        } else if isRescan {
             // Loud, not silent: without reference planes there is NO auto-align, NO plane
             // detection, and no [PlaneReg] output at all — this line is the only breadcrumb.
-            print("[PlaneReg] auto-align DISABLED: no reference planes — roomplan.json missing/undecodable for scan \(targetScan.id) (was a room built at its save?)")
+            print("[PlaneReg] auto-align DISABLED: no reference planes — roomplan.json missing/undecodable for scan \(scanId) (was a room built at its save?)")
         }
-        if PerfDiag.enabled {
-            let blobMB = Double(cachedGhostMeshData?.count ?? 0) / (1024.0 * 1024.0)
-            let foot1 = ScanStats.currentFootprintMB()
-            PerfDiag.log(String(format: "[MemDiag] EVENT GHOST-LOAD blob=%.1fMB footprint=%.0fMB (Δ%+.0f)",
-                                blobMB, foot1, foot1 - foot0))
-        }
+        return (ghostData, isProxy, planes)
     }
 
     /// Computes the connector anchors for the active location (Track C). Only populated when
