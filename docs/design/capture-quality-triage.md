@@ -20,6 +20,16 @@ confirmation scan.
 
 ## Watch items (lever defined, not implemented)
 
+> **⬆ ESCALATED (2026-07-22 post-merge long run, `capqual1.log`):** recurred **mid-scan**, not
+> just at bring-up — at t≈73 s of an AR scan (footprint 1.2 GB, CPU ~300%), a
+> `jpeg_encode_hires 1242ms` (vs 73–90 ms for regular encodes) coincided with a sustained
+> `retaining 11–13 ARFrames` burst → ARKit dropped to `limited(Initializing)`, **VIO
+> reinit #2**, fps 11, ~2 s of skipped mesh integration before self-recovery. The lever below
+> (hold until warm) does not cover the mid-scan case — the encode itself is the load. Mid-scan
+> lever candidates: run `jpeg_encode_hires` at `.utility` on its own serial queue with a
+> single-encode-in-flight cap that DROPS (not queues) keyframes while one is in flight, and/or
+> count the retained hi-res frame against `maxFramesInFlight` so the backlog cap sees it.
+
 ### 3. ARFrame-retention burst at bring-up × early keyframe
 At t=0–1 s of a scan there was a burst of `delegate is retaining 11–13 ARFrames` warnings —
 the classic pool-starvation precursor this repo fights. Cause: everything piled up at once
@@ -44,3 +54,9 @@ decay/pack timings quadrupled under throttle**.
 **Lever if long VR scans matter:** throttle the voxel pipeline cadence when
 `ProcessInfo.thermalState >= .serious` (fewer decay/extract passes, same data). Parked as
 a follow-up; not on the branch.
+
+**2026-07-22 post-merge run note:** the long run (6 scans incl. one long VR scan) stayed
+`thermal=nominal` throughout — voxel timings stayed 17–28 ms. The VR-mode watchdog stalls
+that run were **VR-ENTER (469 ms — bloom/pipeline setup)** and **VR-EXIT + save (828 ms)**,
+both sub-second transition costs on the marginal iPad, not the thermal cliff. Watch both;
+the ENTER stall's lever is lazy bloom setup (it runs even though bloom defaults OFF).
