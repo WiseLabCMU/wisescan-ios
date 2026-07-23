@@ -424,7 +424,15 @@ struct ARCoverageView: UIViewRepresentable {
                 // live currentFrame.anchors). An extend preserves its anchors: the world-map load
                 // path (makeUIView / ghost-mesh-data) already cleared stale ones with
                 // .removeExistingAnchors, and we want to keep re-meshing in the relocalized frame.
-                let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [] : .removeExistingAnchors
+                var runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [] : .removeExistingAnchors
+                if scanStore?.needsTrackingReset == true, config.initialWorldMap == nil {
+                    // Belt to the nominal-downgrade reset: if a VIO-compromised halt's flag is
+                    // somehow still pending at the next NEW-scan record-start, re-bootstrap here
+                    // (never for an extend — resetTracking would discard the loaded map's frame).
+                    scanStore?.needsTrackingReset = false
+                    runOptions.insert(.resetTracking)
+                    PerfDiag.log("record-start: pending post-halt .resetTracking applied")
+                }
                 PerfDiag.log(config.initialWorldMap != nil
                     ? "record-start: extend → preserving anchors + world map"
                     : "record-start: new scan → .removeExistingAnchors (clear prior scan's mesh)")
@@ -542,7 +550,18 @@ struct ARCoverageView: UIViewRepresentable {
                 }
 
                 let config = Self.makeConfiguration()
-                uiView.session.run(config)
+                if scanStore?.needsTrackingReset == true {
+                    // VIO-compromised halt: re-bootstrap tracking with the nominal downgrade —
+                    // the collapsed session otherwise stays relocalizing against its corrupt
+                    // internal map indefinitely and the next scan can never establish tracking.
+                    // resetTracking here is a ~1-2s VIO re-init on the live camera, NOT the
+                    // 13s cold start (the session itself stays warm).
+                    scanStore?.needsTrackingReset = false
+                    PerfDiag.log("post-halt nominal downgrade → .resetTracking (re-bootstrap after VIO collapse)")
+                    uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+                } else {
+                    uiView.session.run(config)
+                }
                 // Clear ALL debug options for pure passthrough (or VR background)
                 uiView.debugOptions = []
                 // [MemDiag] post-teardown floor: RoomPlan stopped + mesh config dropped. Deferred one

@@ -1786,6 +1786,11 @@ struct CaptureView: View {
     func handleVIOCompromised() {
         vioCompromised = false // reset the latch so a later scan can trip the guard again
         guard isRecording else { return }
+        // The session's internal map is corrupt (this halt only fires on hard collapse —
+        // snap storm / RoomPlan DriftDetection). Schedule a full .resetTracking for the next
+        // config run (the post-stop nominal downgrade), or the warm session relocalizes
+        // against the dead map forever and no new scan can start (2026-07-23 field report).
+        scanStore.needsTrackingReset = true
 
         recordingTimer?.invalidate()
         recordingTimer = nil
