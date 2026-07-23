@@ -2587,6 +2587,9 @@ struct ARCoverageView: UIViewRepresentable {
                 smoothedFPSValue = smoothedFPSValue <= 0 ? instantFPS : smoothedFPSValue * 0.8 + instantFPS * 0.2
             }
             let smoothedFPS = smoothedFPSValue
+            // Configured capture rate — fpsPressure is measured RELATIVE to this (30/30 is healthy, not
+            // "half speed"). Read off the live session so a format switch is reflected without plumbing.
+            let targetFPS = Double(session.configuration?.videoFormat.framesPerSecond ?? 60)
 
             // ── Extract worldMappingStatus in a tight scope ──
             // Only read the enum value; do NOT iterate frame.anchors or access
@@ -2677,6 +2680,7 @@ struct ARCoverageView: UIViewRepresentable {
                 scanStats.footprintMB = footprintMB      // capacity bar: avail-based memoryPressure
                 scanStats.availableMB = availableMB
                 scanStats.smoothedFPS = smoothedFPS      // capacity bar: fpsPressure
+                scanStats.targetFPS = targetFPS          // capacity bar: fpsPressure ceiling (relative)
                 scanStats.cpuPercent = smoothedCPU       // capacity bar: cpuPressure (leading compute axis)
                 scanStats.driftEstimate = drift
                 scanStats.mappingStatus = statusStr
