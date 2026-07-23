@@ -45,7 +45,10 @@ enum AppConstants {
         static let vrBloomEnabled = "vrBloomEnabled"
         static let semanticLabeling = "semanticLabeling"
         static let memDiagForceReclaim = "memDiagForceReclaim"
+        static let meshClassifier = "meshClassifier"
         static let scanCoachingEnabled = "scanCoachingEnabled"
+        static let colorizeOnPostprocess = "colorizeOnPostprocess"
+        static let registerLegacyScans = "registerLegacyScans"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
     }
@@ -83,17 +86,34 @@ enum AppConstants {
     /// an attribution session, never leave it on. Doesn't reclaim Metal/GPU buffers (those free on
     /// RealityKit's schedule), so the delta is a floor on what a subsystem releases.
     static let memDiagForceReclaim: Bool = false
-    /// Deferred RoomPlan build: max time the save pipeline waits (off-main) for RoomBuilder to
-    /// reconstruct the room from CapturedRoomData before writing roomplan.json. RoomBuilder is kicked
-    /// off at RoomPlan's didEndWith (post-stop) and runs concurrently with the multi-second OBJ build,
-    /// so this rarely elapses; it's a backstop so a RoomBuilder stall can't hang the save.
-    static let roomBuilderTimeoutSeconds: TimeInterval = 20
-    /// Deferred RoomPlan build: max time to wait for the CapturedRoomData itself (separate from the
-    /// reconstruction timeout above). The data is provided at RoomPlan's didEndWith, which fires at
-    /// Stop — long before the save reaches the build — so it's normally already present. Kept short so
-    /// a cold/failed RoomPlan session (didEndWith never fires) bails fast instead of blocking the save
-    /// queue for the full reconstruction timeout.
-    static let roomPlanDataWaitSeconds: TimeInterval = 3
+    /// Use `.meshWithClassification` scene reconstruction instead of plain `.mesh`. Default ON:
+    /// benched 2026-07 (same room, on vs off, AR and VR modes) at no measurable CPU delta and
+    /// ~70–100 MB memory — affordable, and the per-face labels are what lets us split wall vs
+    /// non-wall geometry (plane registration ghost, decimated rescan reference). The toggle remains
+    /// in Developer Mode so the A/B stays re-runnable; each run stamps meshClassifier=on/off at
+    /// RECORD-START. Varies ONLY the ARKit classifier — RoomPlan (semanticLabeling) is independent.
+    static let meshClassifier: Bool = true
+    /// DECISION 3: RoomBuilder no longer runs at save (the 2026-07-13 large hot scan starved its
+    /// 3 s data-wait and the scan saved with no room/proxy/registration). It runs at POST-PROCESS
+    /// from the persisted CapturedRoomData sidecar, on a cool device. This is the postprocess-time
+    /// backstop only — generous, since nothing user-blocking waits on it (a wedged RoomBuilder
+    /// shouldn't hang the postprocess queue forever).
+    static let roomBuilderTimeoutSeconds: TimeInterval = 120
+    /// Grace period after a save completes before declaring a scan "bad" (no room data): RoomPlan's
+    /// didEndWith normally delivers CapturedRoomData within a second of Stop, but on a thermally
+    /// throttled device it can land many seconds late — the sidecar is written whenever it arrives,
+    /// so the bad-scan check just needs to wait out the realistic tail before warning the user to
+    /// redo the scan (while they're still standing in the room).
+    static let roomDataBadScanGraceSeconds: TimeInterval = 30
+    /// Colorize as part of Post-process (production setting, default ON). Off = structural-only
+    /// postprocess (room/registration/proxy — fast); coloring can still be run later (re-running
+    /// Post-process picks up whatever is pending).
+    static let colorizeOnPostprocess: Bool = true
+    /// Dev-gated: let legacy scans (saved before scanCaseRaw was persisted) enter retroactive
+    /// registration at postprocess. OFF by default — on an existing install every non-oldest
+    /// legacy scan would light up "needs postprocess" (gating every old location at update),
+    /// and a legacy adjacent-link is indistinguishable from a legacy rescan (false-lock risk).
+    static let registerLegacyScans: Bool = false
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
@@ -104,6 +124,7 @@ enum AppConstants {
     static let voxelDecayInterval: TimeInterval = 0.5        // VR: min seconds between 350K-voxel confidence-decay passes; throttled off every-integration so the voxelQueue can't back up (drove multi-second stalls)
     static let arIdleTeardownSeconds: TimeInterval = 60      // battery: seconds on a non-capture tab before pausing the AR session (camera/sensors off); resumed on return. Long enough that rapid successive scans stay warm.
     static let liveMeshCueVertexThreshold: Int = 500        // "move the camera to start the live mesh" cue shows until this many NEW vertices are captured since recording began (baseline-relative so it also fires in relocalized ghost/stitch flows where the mesh count starts high)
+    static let relocalizationTimeoutSeconds: TimeInterval = 30 // rescan relocalization watchdog: if tracking is still `.relocalizing` (never reaches `.normal`) this long after the prompt appears, surface the "having trouble" guidance + escape UX. Generous: clean rooms settle in 3-9 s but rough/feature-poor rooms legitimately take up to ~43 s, and the panel is non-blocking (auto-dismisses if relocalization then succeeds), so it rescues the forever-hang (self-similar/feature-poor spaces, false loop-closure) without cutting off a slow-but-working settle.
     static let overlapBaseThreshold: Float = 0.15            // movement threshold base for frame capture
     static let overlapMinThreshold: Float = 0.01             // minimum movement threshold
     static let maxColorizationFrames: Int = 150              // max sampled frames for vertex coloring

@@ -49,13 +49,21 @@ enum RoomPlanExporter {
     /// - Parameters:
     ///   - room: The final CapturedRoom from RoomPlan.
     ///   - directory: Destination directory (scan directory or export staging).
-    static func writeRoomPlan(_ room: CapturedRoom, to directory: URL) {
-        writeCleanJSON(room, to: directory)
+    ///   - transform: Optional save-time registration correction (raw→canonical, DECISION 1).
+    ///     Premultiplied into every surface/object transform of the CLEAN json only — the mesh
+    ///     gets the same correction, so the two stay co-framed. `roomplan_raw.json` remains in
+    ///     the raw capture frame (Apple's opaque Codable, kept byte-faithful for round-tripping;
+    ///     the relationship is recorded in the scan's registration.json sidecar).
+    static func writeRoomPlan(_ room: CapturedRoom, to directory: URL,
+                              applying transform: simd_float4x4? = nil) {
+        writeCleanJSON(room, to: directory, applying: transform)
         writeRawJSON(room, to: directory)
     }
 
     /// Writes the clean, human-readable `roomplan.json`.
-    private static func writeCleanJSON(_ room: CapturedRoom, to directory: URL) {
+    private static func writeCleanJSON(_ room: CapturedRoom, to directory: URL,
+                                       applying transform: simd_float4x4?) {
+        let reg = transform ?? matrix_identity_float4x4
         let allSurfaces = room.walls + room.floors + room.doors + room.windows + room.openings
         let exportSurfaces = allSurfaces.map { surface -> RoomPlanExportData.ExportSurface in
             RoomPlanExportData.ExportSurface(
@@ -66,7 +74,7 @@ enum RoomPlanExporter {
                     height: surface.dimensions.y,
                     depth: surface.dimensions.z
                 ),
-                transform: flattenMatrix(surface.transform),
+                transform: flattenMatrix(reg * surface.transform),
                 confidence: confidenceString(for: surface.confidence)
             )
         }
@@ -80,7 +88,7 @@ enum RoomPlanExporter {
                     height: object.dimensions.y,
                     depth: object.dimensions.z
                 ),
-                transform: flattenMatrix(object.transform),
+                transform: flattenMatrix(reg * object.transform),
                 confidence: confidenceString(for: object.confidence)
             )
         }

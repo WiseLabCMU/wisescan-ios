@@ -882,7 +882,7 @@ class FrameCaptureSession {
             if PerfDiag.enabled { PerfDiag.log("capture frame DROPPED — backlog at cap (\(AppConstants.maxFramesInFlight))") }
             return false
         }
-        if PerfDiag.enabled && depth > 1 { PerfDiag.log("capture I/O backlog: \(depth) frames in flight") }
+        if PerfDiag.enabled && depth > 1 { PerfDiag.log("[PerfDiag] capture I/O backlog: \(depth) frames in flight") }
         ioQueue.async { [weak self] in
             defer { self?.inFlightSaves.withLock { $0 -= 1 } }
             guard let self = self, let imagesDir = self.imagesDir else { return }

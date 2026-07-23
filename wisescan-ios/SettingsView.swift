@@ -21,6 +21,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
     @AppStorage(AppConstants.Key.vrBloomEnabled) private var vrBloomEnabled: Bool = AppConstants.vrBloomEnabled
     @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
+    @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     // 0 = Auto (no override); N = force format index N-1 of supportedVideoFormats.
     @AppStorage(AppConstants.Key.videoFormatIndex) private var videoFormatIndex: Int = 0
@@ -28,6 +29,8 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
     @AppStorage(AppConstants.Key.scanCoachingEnabled) private var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
+    @AppStorage(AppConstants.Key.colorizeOnPostprocess) private var colorizeOnPostprocess: Bool = AppConstants.colorizeOnPostprocess
+    @AppStorage(AppConstants.Key.registerLegacyScans) private var registerLegacyScans: Bool = AppConstants.registerLegacyScans
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -212,6 +215,18 @@ struct SettingsView: View {
                         .tint(.cyan)
                         .padding(.vertical, 4)
 
+                        Toggle(isOn: $colorizeOnPostprocess) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Colorize During Post-process")
+                                    .foregroundColor(.white)
+                                Text("Include photo-based mesh coloring when post-processing a scan. Off = structural processing only (room model, alignment, rescan reference) — faster; you can color later by re-running Process.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                        .tint(.cyan)
+                        .padding(.vertical, 4)
+
                     } header: {
                         Text("SCAN CAPTURE")
                     }
@@ -249,6 +264,17 @@ struct SettingsView: View {
                                     self.mockDepthMaps = AppConstants.mockDepthMaps
                                     self.mockWearable = AppConstants.mockWearable
                                     self.semanticLabeling = AppConstants.semanticLabeling
+                                    self.registerLegacyScans = AppConstants.registerLegacyScans
+                                    // Default-TRUE dev toggle: a bench-OFF value must not leak into
+                                    // production, where it would silently drop per-face classification
+                                    // (the wall/non-wall labels plane registration depends on).
+                                    self.meshClassifier = AppConstants.meshClassifier
+                                    // Diagnostics toggles gate on their own keys (not developerMode),
+                                    // so a bench-ON value would keep costing after dev-mode exit.
+                                    self.hideLivePoints = AppConstants.hideLivePoints
+                                    self.perfDiagnostics = AppConstants.perfDiagnostics
+                                    self.pauseVRCompute = AppConstants.pauseVRCompute
+                                    self.memDiagForceReclaim = AppConstants.memDiagForceReclaim
                                 }
                             }
                         )) {
@@ -409,6 +435,30 @@ struct SettingsView: View {
                                     Text("Capture Audio")
                                         .foregroundColor(.white)
                                     Text("Play shutter click when a sharp frame is captured at a stillness point, and a chime when entering stillness.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $meshClassifier) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Mesh Classifier")
+                                        .foregroundColor(.white)
+                                    Text("Per-face ARKit mesh classification (.meshWithClassification). ON by default — benched at no measurable CPU delta, ~70–100 MB memory — and provides the wall/non-wall labels used for plane registration and the rescan reference mesh. Turn OFF only to re-run the A/B bench (each run stamps meshClassifier=on/off at RECORD-START).")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $registerLegacyScans) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Register Legacy Scans")
+                                        .foregroundColor(.white)
+                                    Text("Lets pre-postprocess-era scans (no saved scan case) enter retroactive registration: old locations will show \"needs postprocess\" and Process may move their meshes into the canonical frame. OFF in production — a legacy adjacent-link is indistinguishable from a rescan and a similar room could false-lock. Scans of link-adjacent locations stay excluded either way.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

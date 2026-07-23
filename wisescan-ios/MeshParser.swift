@@ -258,6 +258,119 @@ enum MeshParser {
         return descriptors
     }
 
+    /// Cross-section wireframe for SPARSE architectural lines (the ghost proxy's RoomPlan
+    /// lattice): each unique edge gets TWO perpendicular ribbons (a "+" cross-section), each
+    /// emitted with BOTH windings (double-sided). The single-flat-ribbon builder above is
+    /// invisible edge-on and backface-culled from one whole side — statistically irrelevant for
+    /// dense mesh wireframes (a million randomly-oriented edges average out), but systematically
+    /// fatal for axis-aligned grid lines: horizontal lines ride a horizontal ribbon (edge-on near
+    /// eye height, culled from one side), and vertical lines hit the degenerate-cross fallback
+    /// whose fixed world plane is edge-on for walls of particular orientations — the 2026-07-20
+    /// "lattice clips on SOME walls" device finding. Cost: 8 tris/edge vs 2 — fine for the ~10²
+    /// lattice edges, wrong tool for the 10⁵-edge mesh remainder.
+    static func buildCrossWireframeDescriptors(vertices: [SIMD3<Float>],
+                                               faces: [(UInt32, UInt32, UInt32)],
+                                               thickness: Float) -> [MeshDescriptor] {
+        struct Edge: Hashable {
+            let a: UInt32, b: UInt32
+            init(_ v0: UInt32, _ v1: UInt32) {
+                a = min(v0, v1)
+                b = max(v0, v1)
+            }
+        }
+        var uniqueEdges = Set<Edge>()
+        for (i0, i1, i2) in faces {
+            uniqueEdges.insert(Edge(i0, i1))
+            uniqueEdges.insert(Edge(i1, i2))
+            uniqueEdges.insert(Edge(i2, i0))
+        }
+
+        let halfT = thickness * 0.5
+        var positions = [SIMD3<Float>]()
+        positions.reserveCapacity(uniqueEdges.count * 8)
+        var indices = [UInt32]()
+        indices.reserveCapacity(uniqueEdges.count * 24)
+        var idx: UInt32 = 0
+        var descriptors = [MeshDescriptor]()
+        // 8 verts/edge → chunk well under the 16-bit vertex limit (mirrors the flat builder).
+        let maxEdgesPerChunk = 8000
+
+        func flushChunk() {
+            guard !positions.isEmpty else { return }
+            var desc = MeshDescriptor(name: "CrossWireframeChunk_\(descriptors.count)")
+            desc.positions = MeshBuffer(positions)
+            desc.primitives = .triangles(indices)
+            descriptors.append(desc)
+            positions.removeAll(keepingCapacity: true)
+            indices.removeAll(keepingCapacity: true)
+            idx = 0
+        }
+
+        var edgesInChunk = 0
+        for edge in uniqueEdges {
+            guard Int(edge.a) < vertices.count && Int(edge.b) < vertices.count else { continue }
+            let p0 = vertices[Int(edge.a)]
+            let p1 = vertices[Int(edge.b)]
+            appendCrossEdge(p0, p1, halfT: halfT, positions: &positions, indices: &indices, idx: &idx)
+            edgesInChunk += 1
+            if edgesInChunk >= maxEdgesPerChunk {
+                flushChunk()
+                edgesInChunk = 0
+            }
+        }
+        flushChunk()
+        return descriptors
+    }
+
+    /// Cross-section wireframe from EXPLICIT edge pairs — same double-sided "+" geometry as the
+    /// faces variant above. Used for synthesized architectural outlines (the ghost proxy's room
+    /// perimeter: wall-wall corners, wall-floor seams) where the edges come from plane rectangles
+    /// rather than mesh triangles.
+    static func buildCrossWireframeDescriptors(edges: [(SIMD3<Float>, SIMD3<Float>)],
+                                               thickness: Float) -> [MeshDescriptor] {
+        guard !edges.isEmpty else { return [] }
+        let halfT = thickness * 0.5
+        var positions = [SIMD3<Float>]()
+        positions.reserveCapacity(edges.count * 8)
+        var indices = [UInt32]()
+        indices.reserveCapacity(edges.count * 24)
+        var idx: UInt32 = 0
+        for (p0, p1) in edges {
+            appendCrossEdge(p0, p1, halfT: halfT, positions: &positions, indices: &indices, idx: &idx)
+        }
+        guard !positions.isEmpty else { return [] }
+        var desc = MeshDescriptor(name: "CrossOutline")
+        desc.positions = MeshBuffer(positions)
+        desc.primitives = .triangles(indices)
+        return [desc]
+    }
+
+    /// Emit one edge as two perpendicular ribbons, each wound both ways (the shared "+" cross-
+    /// section primitive of the two builders above).
+    private static func appendCrossEdge(_ p0: SIMD3<Float>, _ p1: SIMD3<Float>, halfT: Float,
+                                        positions: inout [SIMD3<Float>], indices: inout [UInt32],
+                                        idx: inout UInt32) {
+        let dir = p1 - p0
+        let len = simd_length(dir)
+        guard len > 1e-8 else { return }
+        let d = dir / len
+
+        var perp1 = simd_cross(d, SIMD3<Float>(0, 1, 0))
+        if simd_length(perp1) < 1e-6 {
+            perp1 = simd_cross(d, SIMD3<Float>(1, 0, 0))
+        }
+        perp1 = simd_normalize(perp1) * halfT
+        let perp2 = simd_normalize(simd_cross(d, perp1)) * halfT
+
+        for perp in [perp1, perp2] {
+            positions.append(contentsOf: [p0 - perp, p0 + perp, p1 + perp, p1 - perp])
+            // Both windings — visible from either side regardless of material culling.
+            indices.append(contentsOf: [idx, idx + 1, idx + 2, idx, idx + 2, idx + 3,
+                                        idx + 2, idx + 1, idx, idx + 3, idx + 2, idx])
+            idx += 4
+        }
+    }
+
     /// Builds wireframe geometry descriptors from explicit edge pairs (start, end positions).
     /// Used for bounding box outlines where edges are known (not derived from triangles).
     static func buildWireframeDescriptors(
