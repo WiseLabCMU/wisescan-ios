@@ -475,7 +475,9 @@ struct CaptureView: View {
             // Centered startup/tracking pills (kept separate from ScanCoach)
             centeredTrackingPills
 
-            // Lite mode banner for non-LiDAR devices
+            // Lite mode banner for non-LiDAR devices. Top-aligned: unanchored it sat at the
+            // ZStack's vertical center — directly over the stillness reticle (2026-07-22 field
+            // report from the iPhone Lite pass).
             if !ARCoverageView.supportsLiDAR {
                 HStack(spacing: 6) {
                     Image(systemName: "info.circle.fill")
@@ -487,7 +489,8 @@ struct CaptureView: View {
                 .padding(.vertical, 8)
                 .background(Color.blue.opacity(0.75))
                 .cornerRadius(16)
-                .padding(.top, 50)
+                .padding(.top, 60)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
 
             VStack {
@@ -1508,7 +1511,9 @@ struct CaptureView: View {
 
             let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
             let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
-            if isRecording && needsLiveMeshCue &&
+            // LiDAR-gated: Lite devices never produce mesh vertices, so this cue would show
+            // (and never clear) for a mesh that cannot exist (2026-07-22 Lite field report).
+            if isRecording && ARCoverageView.supportsLiDAR && needsLiveMeshCue &&
                scanStats.trackingStatus != .limited(reason: .relocalizing) &&
                !frameCaptureSession.isBlurWarningActive {
                 Text("📷 Move the camera to start the live mesh")
