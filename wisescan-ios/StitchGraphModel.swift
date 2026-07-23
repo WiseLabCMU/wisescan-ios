@@ -216,15 +216,35 @@ enum StitchGraphBuilder {
     /// Computes, for one connected component, a placement transform per location that maps
     /// each scan's world-frame vertices into a single shared frame (the root's frame).
     ///
-    /// For a link, a point in the **target** scan's frame maps into the **source** frame by
-    /// `R = sourceAnchorTransform · inverse(targetAnchorTransform)` (the anchors are the same
-    /// physical pin). A spanning-tree BFS propagates transforms from the root outward.
+    /// For a link, a point in the **target** scan's *canonical* frame maps into the **source**
+    /// scan's *canonical* frame by `R = (T_src·srcAnchor) · inverse(T_tgt·tgtAnchor)` — the anchors
+    /// are the same physical pin, and each endpoint's raw→canonical registration `T` (identity when
+    /// the scan saved raw / isn't processed) lifts its raw-frame anchor into the frame its baked
+    /// `mesh.obj` now lives in (PR #28 moved geometry to the canonical frame but left anchor poses
+    /// raw). Without the `T` composition the combined render seams by ~`T` (11–27 cm) on any stitch
+    /// touching a registered or legacy scan. A spanning-tree BFS propagates transforms from the root
+    /// outward; the root's identity thus *defines* the shared frame as its own canonical frame.
     @MainActor
     static func placeScans(in component: [UUID], edges componentEdges: [StitchGraphEdge]) -> [PlacedScan] {
         // Pick a deterministic root (smallest UUID) so combined-render placements are
         // stable across runs — component element order comes from non-deterministic
         // Dictionary iteration and must not drive the accumulated transform frame.
         guard let root = component.min(by: { $0.uuidString < $1.uuidString }) else { return [] }
+
+        // Each endpoint's raw→canonical registration (PR #28): anchor poses are stored in the raw
+        // capture frame, but the baked mesh.obj / roomplan the render draws are in the location's
+        // canonical frame. Lift the anchors by `T` so every edge is canonical→canonical; identity
+        // when a scan saved raw or isn't processed (self-heals mixed/legacy state — an unprocessed
+        // endpoint has raw anchor + raw mesh, still consistent). Memoized: a scan can sit on several
+        // incident edges, and this reads the on-disk sidecar.
+        var tCache: [UUID: simd_float4x4] = [:]
+        func appliedT(_ scan: CapturedScan?) -> simd_float4x4 {
+            guard let scan else { return matrix_identity_float4x4 }
+            if let cached = tCache[scan.id] { return cached }
+            let t = SaveRegistration.appliedTransform(scanDirectory: scan.scanDirectory) ?? matrix_identity_float4x4
+            tCache[scan.id] = t
+            return t
+        }
 
         // Undirected adjacency carrying the link and traversal direction.
         var adj: [UUID: [(neighbor: UUID, link: StitchLink, forward: Bool)]] = [:]
@@ -250,9 +270,9 @@ enum StitchGraphBuilder {
             let worldU = world[u] ?? matrix_identity_float4x4
             for step in adj[u] ?? [] where !visited.contains(step.neighbor) {
                 visited.insert(step.neighbor)
-                let mSrc = step.link.sourceAnchorMatrix
-                let mTgt = step.link.targetAnchorMatrix
-                let r = mSrc * simd_inverse(mTgt)   // maps target-frame → source-frame
+                let mSrc = appliedT(step.link.sourceScan) * step.link.sourceAnchorMatrix
+                let mTgt = appliedT(step.link.targetScan) * step.link.targetAnchorMatrix
+                let r = mSrc * simd_inverse(mTgt)   // maps target canonical-frame → source canonical-frame
                 if step.forward {
                     // u is the source, neighbor is the target.
                     world[step.neighbor] = worldU * r

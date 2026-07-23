@@ -295,6 +295,16 @@ enum SaveRegistration {
         return t.inverse
     }
 
+    /// The forward transform baked into this scan's mesh/roomplan — its RAW capture frame → the
+    /// location's canonical (original-scan) frame. The inverse of `inverseForGhost` (both read the
+    /// same sidecar). nil when the scan saved raw (nothing applied), which callers treat as identity.
+    /// Used by the stitch graph to lift raw-frame anchor poses into the canonical frame the baked
+    /// mesh now lives in (see `StitchGraphBuilder.placeScans`).
+    static func appliedTransform(scanDirectory: URL) -> simd_float4x4? {
+        guard let sidecar = loadSidecar(scanDirectory: scanDirectory), sidecar.applied else { return nil }
+        return sidecar.transformMatrix
+    }
+
     #if canImport(RoomPlan)
     /// The ghost scan's room planes in its RAW capture frame — the frame the de-registered ghost
     /// mesh, the world map, and hence the relocalized live session all share. Reference side of
