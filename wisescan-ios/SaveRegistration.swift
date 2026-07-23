@@ -203,9 +203,13 @@ enum SaveRegistration {
     /// yet), and every scan — fresh or legacy — is registered here at postprocess. (The
     /// `applying:` parameter on `RoomPlanExporter.writeRoomPlan` is a write-time correction hook
     /// that is currently unused, since registration always post-dates the room write.)
-    static func retransformRoomPlanJSON(at url: URL, by t: simd_float4x4) {
+    /// Returns false when the roomplan could not be read, decoded, or written — the caller
+    /// (the transactional bake in ScanPostprocessor) rolls the mesh back so the scan's
+    /// artifacts never straddle two frames.
+    @discardableResult
+    static func retransformRoomPlanJSON(at url: URL, by t: simd_float4x4) -> Bool {
         guard let data = try? Data(contentsOf: url),
-              var decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) else { return }
+              var decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) else { return false }
         func premultiply(_ flat: [Float]) -> [Float] {
             guard flat.count == 16 else { return flat }
             let m = simd_float4x4(SIMD4(flat[0], flat[1], flat[2], flat[3]),
@@ -234,19 +238,36 @@ enum SaveRegistration {
             })
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let out = try? encoder.encode(decoded) {
-            try? out.write(to: url, options: .atomic)
-        }
+        guard let out = try? encoder.encode(decoded),
+              (try? out.write(to: url, options: .atomic)) != nil else { return false }
+        return true
     }
 
     // MARK: - Sidecar IO
 
-    static func writeSidecar(_ sidecar: Sidecar, to directory: URL) {
+    /// Returns false when the sidecar could not be encoded/written (the caller logs — the
+    /// sidecar is the bake's commit record, so a silent miss must not look like success).
+    @discardableResult
+    static func writeSidecar(_ sidecar: Sidecar, to directory: URL) -> Bool {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if let data = try? encoder.encode(sidecar) {
-            try? data.write(to: directory.appendingPathComponent(sidecarName), options: .atomic)
-        }
+        guard let data = try? encoder.encode(sidecar),
+              (try? data.write(to: directory.appendingPathComponent(sidecarName), options: .atomic)) != nil
+        else { return false }
+        return true
+    }
+
+    /// A copy of `sidecar` downgraded to an unapplied refusal (transform dropped, reason
+    /// replaced) — written when the artifact bake fails so the scan reads consistently RAW and
+    /// the version-gated retry re-attempts on the next Process.
+    static func unappliedCopy(of sidecar: Sidecar, reason: String) -> Sidecar {
+        Sidecar(version: sidecar.version, applied: false, reason: reason, transform: nil,
+                transM: sidecar.transM, yawDeg: sidecar.yawDeg,
+                initialRMSmm: sidecar.initialRMSmm, finalRMSmm: sidecar.finalRMSmm,
+                matchedWalls: sidecar.matchedWalls, matchedFloors: sidecar.matchedFloors,
+                weakAxisFrac: sidecar.weakAxisFrac, converged: sidecar.converged,
+                trimmedSourceWall: sidecar.trimmedSourceWall,
+                targetScanId: sidecar.targetScanId, note: sidecar.note)
     }
 
     /// Read a scan's registration sidecar (top level first — the save promotes it there — then
