@@ -139,3 +139,12 @@ struct ScanAnalysisReportView: View {
         }
     }
 }
+
+#Preview {
+    var result = SpaceAnalysisResult()
+    result.lighting = .pass("Bright and even across the sweep")
+    result.screens = .warn("2 screens detected — expect reflective artifacts")
+    result.doors = .alert("An open doorway exits the scan volume")
+    result.people = .skipped("Privacy filter was off")
+    return ScanAnalysisReportView(result: result)
+}

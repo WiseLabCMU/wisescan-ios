@@ -10,6 +10,11 @@ struct MeshPreviewContainer: View {
     var meshFileURL: URL?
     var colorsFileURL: URL?
     var scanDirectoryURL: URL?
+    /// Scan name for the preview title (nil hides the title row).
+    var scanName: String?
+    /// Whether the high-quality photo colorize has run. Drives the color-state note:
+    /// false = fast normals-shaded placeholder (colors not final).
+    var isColored: Bool = false
 
     @StateObject private var markerState = MarkerProjectionState()
     @State private var isUpdating = false
@@ -19,40 +24,61 @@ struct MeshPreviewContainer: View {
     @State private var detectedClasses: [SemanticClass] = []
     @State private var hasPrivacyMarkers = false
     @State private var isMeshLoaded = false
+    @State private var keyframeMarkerMode: KeyframeMarkerMode = .none
+    @State private var hasKeyframeMarkers = false
+    @State private var showSetPoseConfirm = false
+    /// Canonical frame from the location's ORIGINAL scan (see `canonicalRoomFrame`), resolved
+    /// before the viewer mounts so all of a location's scans preview through an identical view.
+    @State private var canonicalFrame: (center: SIMD3<Float>, span: Float)?
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
         ZStack {
             if isViewerReady {
-                MeshPreviewView(
-                    meshFileURL: meshFileURL,
-                    colorsFileURL: colorsFileURL,
-                    scanDirectoryURL: scanDirectoryURL,
-                    markerState: markerState,
-                    isMeshLoaded: $isMeshLoaded,
-                    semanticViewMode: $semanticViewMode,
-                    detectedClasses: $detectedClasses,
-                    hasPrivacyMarkers: $hasPrivacyMarkers
-                )
+                // The SceneKit view and the projected privacy markers share ONE coordinate
+                // space and both bleed under the safe area, so the markers stay aligned with
+                // SceneKit's projectPoint output. The title/legend live outside this and
+                // respect the safe area (see below).
+                ZStack {
+                    MeshPreviewView(
+                        meshFileURL: meshFileURL,
+                        colorsFileURL: colorsFileURL,
+                        scanDirectoryURL: scanDirectoryURL,
+                        frameCenter: canonicalFrame?.center,
+                        frameSpan: canonicalFrame?.span,
+                        initialPoseMatrix: location?.imagingPoseMatrix,
+                        markerState: markerState,
+                        isMeshLoaded: $isMeshLoaded,
+                        semanticViewMode: $semanticViewMode,
+                        detectedClasses: $detectedClasses,
+                        hasPrivacyMarkers: $hasPrivacyMarkers,
+                        keyframeMarkerMode: $keyframeMarkerMode,
+                        hasKeyframeMarkers: $hasKeyframeMarkers
+                    )
 
-                // 2D overlay icons projected from 3D face anchor positions
-                if showPrivacyMarkers {
-                    ForEach(markerState.screenPositions.indices, id: \.self) { i in
-                        let pos = markerState.screenPositions[i]
-                        if pos.isVisible {
-                            Image(systemName: "eye.slash.fill")
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundColor(.red)
-                                .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
-                                .position(x: pos.point.x, y: pos.point.y)
+                    // 2D overlay icons projected from 3D face anchor positions
+                    if showPrivacyMarkers {
+                        ForEach(markerState.screenPositions.indices, id: \.self) { i in
+                            let pos = markerState.screenPositions[i]
+                            if pos.isVisible {
+                                Image(systemName: "eye.slash.fill")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundColor(.red)
+                                    .shadow(color: .black.opacity(0.6), radius: 2, x: 0, y: 1)
+                                    .position(x: pos.point.x, y: pos.point.y)
+                            }
                         }
                     }
                 }
+                .ignoresSafeArea()
 
-                // Bottom-left legend (semantic classes + privacy markers)
-                if (semanticViewMode.showOutlines && !detectedClasses.isEmpty) || (showPrivacyMarkers && hasPrivacyMarkers) {
+                // Bottom-left legend (semantic classes + privacy + capture markers)
+                let showSemanticLegend = semanticViewMode.showOutlines && !detectedClasses.isEmpty
+                let showPrivacyLegend = showPrivacyMarkers && hasPrivacyMarkers
+                let showStillsLegend = keyframeMarkerMode.showStills && hasKeyframeMarkers
+                if showSemanticLegend || showPrivacyLegend || showStillsLegend {
                     VStack(alignment: .leading, spacing: 4) {
-                        if semanticViewMode.showOutlines {
+                        if showSemanticLegend {
                             ForEach(detectedClasses, id: \.rawValue) { cls in
                                 HStack(spacing: 6) {
                                     Circle()
@@ -64,7 +90,7 @@ struct MeshPreviewContainer: View {
                                 }
                             }
                         }
-                        if showPrivacyMarkers && hasPrivacyMarkers {
+                        if showPrivacyLegend {
                             HStack(spacing: 6) {
                                 Image(systemName: "eye.slash.fill")
                                     .font(.system(size: 10))
@@ -72,6 +98,12 @@ struct MeshPreviewContainer: View {
                                 Text("Privacy")
                                     .font(.caption2)
                                     .foregroundColor(.white)
+                            }
+                        }
+                        if showStillsLegend {
+                            captureLegendRow(color: AppConstants.keyframeStillColor, label: "Stills")
+                            if keyframeMarkerMode.showMotion {
+                                captureLegendRow(color: AppConstants.keyframeMotionColor, label: "Motion")
                             }
                         }
                     }
@@ -84,7 +116,9 @@ struct MeshPreviewContainer: View {
                 }
             }
 
-            // Show loading indicator until mesh is fully parsed and rendered
+            // Show loading indicator until mesh is fully parsed and rendered.
+            // Full-bleed opaque cover (ignores the safe area) so no default background
+            // shows through at the screen edges during load.
             if !isMeshLoaded {
                 VStack(spacing: 16) {
                     ProgressView()
@@ -96,6 +130,7 @@ struct MeshPreviewContainer: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(white: 0.15))
+                .ignoresSafeArea()
                 .transition(.opacity)
             }
 
@@ -110,6 +145,18 @@ struct MeshPreviewContainer: View {
                 .padding()
                 .background(Color.black.opacity(0.8))
                 .cornerRadius(12)
+            }
+
+            // Title + preview-state note — small, centered. This layer respects the safe
+            // area, and inside a NavigationView the top safe-area inset already includes the
+            // nav bar, so top-alignment sits just BELOW the toolbar buttons and clear of the
+            // Dynamic Island / camera array. Last in the ZStack so it stays legible over both
+            // the mesh and the loading screen.
+            if let scanName = scanName {
+                previewTitle(scanName: scanName)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 8)
+                    .allowsHitTesting(false)
             }
         }
         .toolbar {
@@ -132,23 +179,88 @@ struct MeshPreviewContainer: View {
                     }
                 }
             }
+            if hasKeyframeMarkers {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        keyframeMarkerMode = keyframeMarkerMode.next
+                    } label: {
+                        Image(systemName: keyframeMarkerMode.iconName)
+                            .foregroundColor(keyframeMarkerMode == .none ? .gray : .cyan)
+                    }
+                }
+            }
             if location != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(action: savePoseAndUpdate) {
-                        HStack {
-                            Image(systemName: "camera.viewfinder")
-                            Text("Set Default Pose")
-                        }
+                    // Icon-only to keep the trailing bar uncrowded alongside the privacy/
+                    // semantic/keyframe toggles. A confirmation dialog names the action for
+                    // sighted users; the accessibility label names it for VoiceOver.
+                    Button {
+                        showSetPoseConfirm = true
+                    } label: {
+                        Image(systemName: "camera.viewfinder")
                     }
+                    .accessibilityLabel("Set Default Pose")
                     .disabled(isUpdating || !isMeshLoaded)
                 }
             }
         }
+        .confirmationDialog("Set Default Pose", isPresented: $showSetPoseConfirm, titleVisibility: .visible) {
+            Button("Set Default Pose") { savePoseAndUpdate() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Save the current view angle as this location's default preview pose, then regenerate every scan's thumbnail from this viewpoint.")
+        }
         .onAppear {
             // Defer the heavy OBJ parsing to ensure the fullScreenCover animation completes smoothly
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                // Resolve the location's canonical frame from its ORIGINAL (earliest) scan before
+                // mounting the viewer — every generation then renders at the same offset/zoom and
+                // cross-scan misalignment reads true. Tiny JSON decode; fine on main.
+                if let original = location?.scans.min(by: CapturedScan.canonicalOrder) {
+                    canonicalFrame = MeshPreviewView.canonicalRoomFrame(scanDirectoryURL: original.scanDirectory)
+                }
                 isViewerReady = true
             }
+        }
+    }
+
+    /// Centered preview title: "Location · Scan" plus a preview-state note. The note flags
+    /// that this is the on-device mesh preview, not the final render, and whether its colors
+    /// are the fast normals-shaded placeholder (amber) or the photo colorize (green).
+    private func previewTitle(scanName: String) -> some View {
+        let heading = [location?.name, scanName]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+        return VStack(spacing: 2) {
+            if !heading.isEmpty {
+                Text(heading)
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Text(isColored ? "Preview · colored mesh" : "Preview · shading only, colors not final")
+                .font(.caption2)
+                .foregroundColor(isColored ? .green : .orange)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial)
+        .cornerRadius(10)
+        .shadow(color: .black.opacity(0.3), radius: 2)
+        .padding(.horizontal, 60) // keep clear of leading/trailing toolbar buttons
+    }
+
+    /// One legend row for a capture-marker group (colored square + label).
+    private func captureLegendRow(color: SIMD4<Float>, label: String) -> some View {
+        HStack(spacing: 6) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(Color(red: Double(color.x), green: Double(color.y), blue: Double(color.z)))
+                .frame(width: 10, height: 10)
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(.white)
         }
     }
 
@@ -160,11 +272,15 @@ struct MeshPreviewContainer: View {
 
         Task {
             let scans = location.scans
+            // Same canonical frame the interactive viewer centered with when the pose was saved —
+            // every scan's thumbnail then shows the identical view (nil → legacy bbox centering).
+            let frameCenter = canonicalFrame?.center
             for scan in scans {
                 // Ensure mesh exists
                 guard FileManager.default.fileExists(atPath: scan.meshFileURL.path) else { continue }
                 if let img = await Task.detached(priority: .userInitiated, operation: {
-                    MeshPreviewView.generateSnapshot(meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL, poseMatrix: pose)
+                    MeshPreviewView.generateSnapshot(meshURL: scan.meshFileURL, colorsURL: scan.colorsFileURL,
+                                                     poseMatrix: pose, frameCenter: frameCenter)
                 }).value, let data = img.jpegData(compressionQuality: 0.8) {
                     try? data.write(to: scan.modelPreviewURL)
                 }
@@ -243,11 +359,26 @@ struct MeshPreviewView: UIViewRepresentable {
     var meshFileURL: URL?
     var colorsFileURL: URL?
     var scanDirectoryURL: URL?
+    /// Canonical preview frame (center + span) shared by every scan of a location — derived from
+    /// the ORIGINAL scan's RoomPlan room, not this mesh's own bounding box. With it, all of a
+    /// location's scans render at the same offset/rotation/zoom, so flipping between previews
+    /// shows TRUE residual misalignment (the 4D shared-coordinate-space contract). nil falls back
+    /// to per-mesh bbox centering (scans with no location / pre-RoomPlan scans).
+    var frameCenter: SIMD3<Float>?
+    var frameSpan: Float?
+    /// The location's user-set default pose ("Set Default Pose" → `location.imagingPoseMatrix`),
+    /// in scene coordinates (world − frameCenter). When set, it overrides the stock camera as the
+    /// initial view. Per-LOCATION, and the canonical frame makes scene coords identical across a
+    /// location's scans — so rescans still line up under a user-specified default, same as the
+    /// stock one. (User can still orbit freely; this is only the starting view.)
+    var initialPoseMatrix: [Float]?
     var markerState: MarkerProjectionState
     @Binding var isMeshLoaded: Bool
     @Binding var semanticViewMode: SemanticViewMode
     @Binding var detectedClasses: [SemanticClass]
     @Binding var hasPrivacyMarkers: Bool
+    @Binding var keyframeMarkerMode: KeyframeMarkerMode
+    @Binding var hasKeyframeMarkers: Bool
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -322,13 +453,21 @@ struct MeshPreviewView: UIViewRepresentable {
                     scanDirectoryURL: self.scanDirectoryURL
                 )
 
+                // Build still + motion capture-pose frustum markers from the saved poses
+                // (transforms.json). Derived entirely from existing raw data — no capture-time
+                // cost, and built here off-main (JSON parse + node flattening) so the one-time
+                // preview attach on main stays cheap. The three-tier mode toggles visibility.
+                let markerNodes = Self.buildKeyframeMarkerNodes(scanDirectoryURL: self.scanDirectoryURL)
+
                 DispatchQueue.main.async {
                     let node = SCNNode(geometry: geometry)
                     node.name = "mesh"
 
-                    // Center the model
+                    // Center the model: on the location's canonical frame when provided (every
+                    // scan of the location gets the SAME shift, so cross-scan offset is honest),
+                    // else on this mesh's own bbox (legacy single-scan behaviour).
                     let (minBound, maxBound) = node.boundingBox
-                    let center = SCNVector3(
+                    let center = frameCenter.map { SCNVector3($0.x, $0.y, $0.z) } ?? SCNVector3(
                         (minBound.x + maxBound.x) / 2,
                         (minBound.y + maxBound.y) / 2,
                         (minBound.z + maxBound.z) / 2
@@ -368,6 +507,12 @@ struct MeshPreviewView: UIViewRepresentable {
                         self.detectedClasses = outlines.detectedClasses
                     }
 
+                    // Attach the pre-built still + motion capture-pose markers (same world
+                    // frame as the mesh; the centering offset is applied here).
+                    self.attachKeyframeMarkers(
+                        markerNodes, to: containerNode, coordinator: context.coordinator, center: center
+                    )
+
                     scene.rootNode.addChildNode(containerNode)
                     context.coordinator.meshNode = node
                     context.coordinator.semanticsNode = scene.rootNode
@@ -381,19 +526,30 @@ struct MeshPreviewView: UIViewRepresentable {
                     context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
                     context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
 
-                    // Position camera based on model size
+                    // Position camera from the canonical span when provided (fixed zoom across
+                    // a location's scans; the angle below is already fixed), else this model's size.
                     let size = SCNVector3(
                         maxBound.x - minBound.x,
                         maxBound.y - minBound.y,
                         maxBound.z - minBound.z
                     )
-                    let maxDimension = max(size.x, max(size.y, size.z))
+                    let maxDimension = frameSpan ?? max(size.x, max(size.y, size.z))
 
                     let cameraNode = SCNNode()
                     cameraNode.camera = SCNCamera()
                     cameraNode.camera?.automaticallyAdjustsZRange = true
-                    cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 0.4)
-                    cameraNode.look(at: SCNVector3Zero)
+                    if let matrix = initialPoseMatrix, matrix.count == 16 {
+                        // User-set default pose (same matrix the thumbnails render with).
+                        cameraNode.transform = SCNMatrix4(
+                            m11: matrix[0], m12: matrix[1], m13: matrix[2], m14: matrix[3],
+                            m21: matrix[4], m22: matrix[5], m23: matrix[6], m24: matrix[7],
+                            m31: matrix[8], m32: matrix[9], m33: matrix[10], m34: matrix[11],
+                            m41: matrix[12], m42: matrix[13], m43: matrix[14], m44: matrix[15]
+                        )
+                    } else {
+                        cameraNode.position = SCNVector3(0, maxDimension * 0.3, maxDimension * 0.4)
+                        cameraNode.look(at: SCNVector3Zero)
+                    }
                     scene.rootNode.addChildNode(cameraNode)
 
                     // Signal that mesh is ready
@@ -410,6 +566,8 @@ struct MeshPreviewView: UIViewRepresentable {
         context.coordinator.meshNode?.isHidden = !mode.showMesh
         context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
         context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
+        context.coordinator.keyframeStillsNode?.isHidden = !keyframeMarkerMode.showStills
+        context.coordinator.keyframeMotionNode?.isHidden = !keyframeMarkerMode.showMotion
     }
 
     func makeCoordinator() -> Coordinator {
@@ -424,6 +582,10 @@ struct MeshPreviewView: UIViewRepresentable {
         weak var semanticsNode: SCNNode?
         /// Reference to the semantics fill (translucent faces) node for toggling visibility.
         weak var semanticFillsNode: SCNNode?
+        /// Reference to the still (keyframe) capture-marker container for toggling visibility.
+        weak var keyframeStillsNode: SCNNode?
+        /// Reference to the motion (sweep) capture-marker container for toggling visibility.
+        weak var keyframeMotionNode: SCNNode?
 
         init(markerState: MarkerProjectionState) {
             self.markerState = markerState
@@ -587,15 +749,20 @@ struct MeshPreviewView: UIViewRepresentable {
         }
     }
 
-    /// Generates a 2D snapshot of the mesh using an offscreen renderer.
-    nonisolated static func generateSnapshot(meshURL: URL, colorsURL: URL?, poseMatrix: [Float]? = nil) -> UIImage? {
+    /// Generates a 2D snapshot of the mesh using an offscreen renderer. Pass the location's
+    /// canonical `frameCenter` alongside a saved `poseMatrix` — the pose is expressed in scene
+    /// coords (world − frameCenter), so all of a location's thumbnails must center identically
+    /// for one pose to mean the same view across rescans.
+    nonisolated static func generateSnapshot(meshURL: URL, colorsURL: URL?, poseMatrix: [Float]? = nil,
+                                             frameCenter: SIMD3<Float>? = nil) -> UIImage? {
         guard let meshData = try? Data(contentsOf: meshURL) else { return nil }
         let colorsData = colorsURL.flatMap { try? Data(contentsOf: $0) }
         guard let (geometry, _) = buildGeometry(from: meshData, vertexColors: colorsData) else { return nil }
 
         let node = SCNNode(geometry: geometry)
         let (minBound, maxBound) = node.boundingBox
-        let center = SCNVector3((minBound.x + maxBound.x) / 2, (minBound.y + maxBound.y) / 2, (minBound.z + maxBound.z) / 2)
+        let center = frameCenter.map { SCNVector3($0.x, $0.y, $0.z) }
+            ?? SCNVector3((minBound.x + maxBound.x) / 2, (minBound.y + maxBound.y) / 2, (minBound.z + maxBound.z) / 2)
         node.position = SCNVector3(-center.x, -center.y, -center.z)
 
         let containerNode = SCNNode()
@@ -659,6 +826,66 @@ struct MeshPreviewView: UIViewRepresentable {
 
     // MARK: - Semantic Outline Result
 
+    // MARK: - Canonical preview frame
+
+    /// The canonical preview frame for a location: AABB center + max dimension of the given
+    /// scan's RoomPlan SURFACES (walls/floor — the stable structure; objects move between
+    /// generations and would wobble the frame). Callers pass the location's ORIGINAL scan's
+    /// directory so every generation previews through the identical view. Anchoring on the
+    /// original ROOM's center (a fixed landmark of the canonical frame) rather than raw world
+    /// (0,0,0) keeps the room framed on-screen — world origin is wherever the session started.
+    /// nil when no roomplan.json exists (pre-RoomPlan scans) → caller falls back to bbox centering.
+    nonisolated static func canonicalRoomFrame(scanDirectoryURL: URL?) -> (center: SIMD3<Float>, span: Float)? {
+        guard let scanDir = scanDirectoryURL else { return nil }
+        // Prefer the scan-root copy (matches artifactURL / registration / export); the raw_data/
+        // mirror is only a fallback — it can momentarily lag the top-level copy while registration
+        // rewrites the frame at postprocess, so reading it first risks canonical-mesh/raw-outline.
+        let candidates = [
+            scanDir.appendingPathComponent("roomplan.json"),
+            scanDir.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json")
+        ]
+        var exportData: RoomPlanExportData?
+        for url in candidates {
+            if let data = try? Data(contentsOf: url),
+               let decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) {
+                exportData = decoded
+                break
+            }
+        }
+        guard let roomData = exportData, !roomData.surfaces.isEmpty else { return nil }
+
+        var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        // Only the STABLE architecture (walls + floor) frames the canonical view, per the rationale
+        // above — doors/windows/openings can be intermittently detected between builds and would
+        // shift the AABB; furniture objects aren't in `surfaces`. Fall back to all surfaces for a
+        // degenerate wall-less room so it still yields the same frame it did before.
+        let framing = roomData.surfaces.filter { $0.category == "wall" || $0.category == "floor" }
+        for surface in (framing.isEmpty ? roomData.surfaces : framing) {
+            let dims = SIMD3<Float>(surface.dimensions.width, surface.dimensions.height, surface.dimensions.depth)
+            let transform = reconstructMatrix(from: surface.transform)
+            for c in orientedBoxCorners(dimensions: dims, transform: transform) {
+                let p = SIMD3<Float>(c.x, c.y, c.z)
+                lo = simd_min(lo, p)
+                hi = simd_max(hi, p)
+            }
+        }
+        let size = hi - lo
+        let span = max(size.x, max(size.y, size.z))
+        guard span > 0.5 else { return nil } // degenerate room → not a usable frame
+        return ((lo + hi) / 2, span)
+    }
+
+    /// Canonical frame center for a location — from its ORIGINAL (earliest) scan's RoomPlan room
+    /// (see `canonicalRoomFrame`). Every snapshot rendered with the location's `imagingPoseMatrix`
+    /// must center on this (the pose is expressed in world − center coords) or the same pose shows
+    /// a different view per scan. Call where the SwiftData model is safe to touch (alongside
+    /// reading `imagingPoseMatrix`) and pass the value into background snapshot work.
+    static func canonicalFrameCenter(for location: ScanLocation?) -> SIMD3<Float>? {
+        guard let original = location?.scans.min(by: CapturedScan.canonicalOrder) else { return nil }
+        return canonicalRoomFrame(scanDirectoryURL: original.scanDirectory)?.center
+    }
+
     /// Result from building semantic outlines: SceneKit geometry nodes + detected class list.
     struct SemanticOutlineResult {
         struct OutlineNode {
@@ -679,10 +906,12 @@ struct MeshPreviewView: UIViewRepresentable {
     ) -> SemanticOutlineResult? {
         guard let scanDir = scanDirectoryURL else { return nil }
 
-        // Find roomplan.json (check raw_data/ subdirectory first, then scan root)
+        // Find roomplan.json — prefer the scan-root copy (matches artifactURL / registration /
+        // export); the raw_data/ mirror is only a fallback (it can lag the top-level copy during a
+        // registration frame-rewrite at postprocess).
         let candidates = [
-            scanDir.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json"),
-            scanDir.appendingPathComponent("roomplan.json")
+            scanDir.appendingPathComponent("roomplan.json"),
+            scanDir.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json")
         ]
         var exportData: RoomPlanExportData?
         for url in candidates {
@@ -860,8 +1089,9 @@ struct MeshPreviewView: UIViewRepresentable {
 }
 
 #Preview {
+    // scanName/isColored exercise the title caption over the loading screen (a real
+    // mesh file would be needed to render actual geometry).
     NavigationView {
-        MeshPreviewContainer()
-            .ignoresSafeArea()
+        MeshPreviewContainer(scanName: "Sample Scan", isColored: false)
     }
 }

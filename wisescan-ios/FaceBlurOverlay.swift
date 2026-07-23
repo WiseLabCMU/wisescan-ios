@@ -502,3 +502,13 @@ enum PrivacyBlurUtil {
     }
 
 }
+
+#Preview {
+    // Smoke/compile preview only: privacy markers are driven by a live ARSession's
+    // segmentation, so with no session this renders empty. Kept per the
+    // "preview for every view" convention (see CONTRIBUTING.md).
+    ZStack {
+        Color.black.ignoresSafeArea()
+        PrivacyEyeOverlay(arSession: nil)
+    }
+}

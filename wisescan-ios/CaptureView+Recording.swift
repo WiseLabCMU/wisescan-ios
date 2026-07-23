@@ -11,11 +11,12 @@ extension CaptureView {
 
     func toggleRecording() {
         if isRecording {
-            if scanStore.activeScanCase == .rescanSpace && scanStore.activeLocationForScan != nil {
-                stopRecording()
-            } else {
-                showStopMenu = true
-            }
+            // Every user-initiated stop confirms via the menu — the old rescan bypass saved
+            // immediately on an accidental tap with no way to cancel/discard (2026-07-22 field
+            // report). Rescans simply see fewer options (the menu hides Save & Scan Adjacent
+            // itself). Programmatic stops (extend flow, VIO-compromised halt) call
+            // stopRecording()/performStopRecording directly and are unaffected.
+            showStopMenu = true
         } else {
             // Link-adjacent recording ALWAYS starts programmatically after the user aligns to the
             // previous scan: confirmAlignment / pinAndExtend capture Pin A, reset into the new map,
@@ -46,7 +47,29 @@ extension CaptureView {
                 showTransientMessage("Hold steady — establishing tracking…", duration: 3)
                 return
             }
-            startRecording()
+            // Phase 2.1 (perfDiag): if we're relocalized into a rescan but the auto-align correction
+            // isn't ready yet (the green chip hasn't appeared), briefly hold so it can land and bake —
+            // the ghost mesh being visible is NOT the same as the correction being locked. Times out →
+            // record raw (feature-poor spaces that never produce a trusted correction aren't blocked).
+            // Removes the "recorded a hair before the refine completed → no bake" miss.
+            let shouldAwaitAlignment = PerfDiag.enabled
+                && cachedGhostMeshData != nil
+                && scanStats.trackingStatus.isNormal
+                && scanStore.icpAlignReady == nil
+                && !isAwaitingAlignment
+            guard shouldAwaitAlignment else {
+                startRecording()
+                return
+            }
+            isAwaitingAlignment = true
+            Task { @MainActor in
+                defer { isAwaitingAlignment = false }
+                let deadline = Date().addingTimeInterval(8)
+                while scanStore.icpAlignReady == nil, Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 150_000_000) // 150 ms
+                }
+                startRecording()
+            }
         }
     }
 
@@ -70,6 +93,9 @@ extension CaptureView {
         showManualAdjust = false // dismiss the manual-adjust panel once recording begins
 
         isRecording = true
+        // Item 2: clear any prior scan's tracking-unreliable warning so it doesn't bleed into this run
+        // (the coordinator's TrackingStabilityMonitor accumulators reset in resetForRecording).
+        scanStore.trackingUnreliable = nil
         // Baseline for the "move the camera to start the live mesh" cue. In a relocalized ghost /
         // stitch-boundary flow `totalVertices` already starts high, so the cue is shown until enough
         // NEW vertices appear relative to this baseline (not an absolute count).
@@ -214,6 +240,15 @@ extension CaptureView {
         let scanCase = scanStore.activeScanCase
         // Snapshot detected semantic display classes for metadata (populated by RoomPlan coordinator)
         capSession.semanticClassesDetected = scanStats.detectedClasses
+        // Snapshot final photo-coverage stats for metadata (populated by the coverage grid)
+        if scanStats.photoCoverageOccupied > 0 {
+            capSession.photoCoverageStats = FrameCaptureSession.PhotoCoverageSummary(
+                covered: scanStats.photoCoverageCovered,
+                occupied: scanStats.photoCoverageOccupied,
+                meanStillOverlap: scanStats.meanStillOverlap,
+                standpointDiversity: scanStats.standpointDiversity
+            )
+        }
         DispatchQueue.global(qos: .utility).async {
             let rawDataPath = capSession.stop()
             DispatchQueue.main.async {
@@ -245,12 +280,18 @@ extension CaptureView {
         // the pose-sensitive capture. The old semantic↔mesh ~90° drift race is gone with the live
         // consume: RoomBuilder reconstructs in the world frame the scan was captured in, once, at end.
 
-        // Now that the room is snapshotted (and the mesh frozen above), end the recording-mode RoomPlan
-        // session immediately rather than waiting for updateUIView's nominal-downgrade branch — which the
-        // post-Stop save pipeline stalls for 15–25s, so RoomPlan kept running, re-basing its room and
-        // burning battery long after Stop. Stopping here can't affect the saved data (already
-        // snapshotted) or the mesh export (already done). Idempotent — updateUIView's later
-        // stopRoomPlanSession() guard-returns once roomCaptureSession is nil.
+        // [DEFERRED-ROOMPLAN] DECISION 3 (revised 2026-07-16): the deferred box gets its
+        // destination only AFTER saveScan completes (see savePendingScan / the extend flow) —
+        // that's the trigger gate that keeps the in-process RoomBuilder off the pose-sensitive
+        // save path (world-map export below). didEndWith just stashes the CapturedRoomData in the
+        // box until then; the save never waits on RoomPlan.
+
+        // Now that the mesh is frozen above, end the recording-mode RoomPlan session immediately
+        // rather than waiting for updateUIView's nominal-downgrade branch — which the post-Stop save
+        // pipeline stalls for 15–25s, so RoomPlan kept running, re-basing its room and burning
+        // battery long after Stop. Stopping here can't affect the saved data (already snapshotted)
+        // or the mesh export (already done). Idempotent — updateUIView's later stopRoomPlanSession()
+        // guard-returns once roomCaptureSession is nil.
         scanStore.requestStopRoomPlan?()
 
         // Capture a 2D thumbnail from the current camera frame
@@ -281,9 +322,85 @@ extension CaptureView {
         }
 
         guard let snapshot = finalSnapshot else {
-            // Switch to nominal mode (drops mesh anchors, frees AR memory)
+            // No live mesh to snapshot. Two distinct cases land here:
+            //
+            // LITE MODE (no LiDAR): a meshless snapshot is the NORM — this device never has
+            // ARMeshAnchors — not a tracking loss. Feature-based world maps still work without
+            // LiDAR (older Lite builds saved them and their rescans relocalize from them), so
+            // export the map and route through the normal pendingScan flow: a new space still
+            // gets its name prompt, and the scan saves with an empty mesh (the backend
+            // reconstructs geometry from the raw frames). Regression fixed 2026-07-22: this
+            // guard's recovery path silently saved every Lite scan as an unnamed
+            // "Recovered Scan" with no world map.
+            //
+            // VIO LOSS (LiDAR device, tracking relocalizing at Stop): ARKit dropped its mesh
+            // anchors, and a relocalizing session's map is unreliable — preserve the raw
+            // frames as a mesh-less, map-less scan below rather than discarding everything.
+            // Extend flows need a co-framed mesh + world map either way, so those discard.
+            let rawFrameCount: Int = rawDataPath.map {
+                (try? FileManager.default.contentsOfDirectory(atPath: $0.appendingPathComponent("images").path).count) ?? 0
+            } ?? 0
+
+            if completion == nil, !ARCoverageView.supportsLiDAR, rawFrameCount > 0 {
+                isRecording = false
+                saveMessage = "Saving World Map..."
+                VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL in
+                    DispatchQueue.main.async {
+                        // A nil mapURL degrades to a mapless (non-relocalizable) scan rather
+                        // than a Retry/Discard alert — the raw frames are the payload on this
+                        // device class, and the name prompt below must still happen.
+                        self.pendingScan = PendingScanData(
+                            locationId: locationId, meshData: Data(), vertexCount: 0, faceCount: 0,
+                            rawDataPath: rawDataPath, vertexColors: nil, worldMapURL: mapURL,
+                            thumbnailData: thumbnailData, scanCase: scanCase)
+                        self.frameCaptureSession = FrameCaptureSession()
+                        MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
+                        self.isProcessingMesh = false
+                        if locationId != nil {
+                            self.savePendingScan()
+                        } else {
+                            self.saveMessage = nil
+                            self.newLocationName = ""
+                            self.showNamePrompt = true
+                        }
+                    }
+                }
+                return
+            }
+
             isRecording = false
             isProcessingMesh = false  // release the re-entrancy claim from performStopRecording
+
+            if completion == nil, rawFrameCount > 0 {
+                // Recover the raw capture: empty mesh (geometry comes from the frames downstream),
+                // no world map (a relocalizing session's map is unreliable / not extendable).
+                let recoveredName = newLocationName.isEmpty ? "Recovered Scan" : newLocationName
+                let savedScan = ScanFileManager.shared.saveScan(
+                    context: modelContext,
+                    locationId: locationId,
+                    name: recoveredName,
+                    meshData: Data(),
+                    vertexCount: 0,
+                    faceCount: 0,
+                    hardwareDeviceModel: UIDevice.current.name,
+                    rawDataPath: rawDataPath,
+                    vertexColors: nil,
+                    worldMapURL: nil,
+                    thumbnailData: thumbnailData,
+                    scanCase: scanCase
+                )
+                frameCaptureSession = FrameCaptureSession()
+                MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
+                saveMessage = savedScan != nil
+                    ? "Saved \(rawFrameCount) frames (mesh lost to tracking interruption)"
+                    : "Save failed"
+                scanStore.resetCaptureState()
+                clearMessage()
+                completion?(savedScan)
+                return
+            }
+
+            // Nothing usable to preserve (no frames), or a stitch/extend flow — discard.
             saveMessage = "No Mesh Data"
             frameCaptureSession = FrameCaptureSession()
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
@@ -317,8 +434,15 @@ extension CaptureView {
             isWaitingToSave = false
 
             if locationId == nil {
-                newLocationName = ""
-                showNamePrompt = true
+                // Name prompt is DEFERRED to the pipeline's completion (pendingScan stored):
+                // right now the world-map export + mesh/color build are still running on the
+                // live session, and presenting a keyboard/alert over the tearing-down ARView
+                // is the stop-stall anti-pattern (CONTRIBUTING; triage item 5 measured 7s on
+                // the marginal iPad with the alert in the window). Deferring also means the
+                // world-map failure alert (exportWorldMapThenContinue) can never stack under
+                // the naming alert. The save pipeline itself is untouched — only the alert's
+                // timing moves.
+                saveMessage = "Processing scan…"
             } else {
                 isWaitingToSave = true
                 saveMessage = "Coloring mesh..."
@@ -329,6 +453,10 @@ extension CaptureView {
 
         let capturedLocationId = locationId
         let capturedScanCase = scanCase
+
+        // DECISION 3: no save-time registration target — registration (like the RoomBuilder room
+        // and the ghost proxy it depends on) runs at POST-PROCESS (ScanPostprocessor), which
+        // resolves the canonical target itself. The save persists raw artifacts only.
 
         // ── Capture the ARWorldMap co-framed with the OBJ, BEFORE coloring ──
         // mesh.obj was just baked from the live world frame above. The world map
@@ -399,42 +527,29 @@ extension CaptureView {
                     return
                 }
 
-                let vertexColors = VertexColorAccumulator.generateNormalsColors(objData: result.data)
-
-                // ┌── [DEFERRED-ROOMPLAN] BUILD TRIGGER (movable unit) ───────────────────────────────
-                // Run RoomBuilder HERE, off-main, only now: this is past the world-map export
-                // (getCurrentWorldMap ran earlier in exportWorldMapThenContinue) and past the OBJ build
-                // + colorize above, so RoomBuilder's compute overlaps NOTHING pose-sensitive and doesn't
-                // stack onto the save's heaviest passes. Blocks only this background queue (bounded);
-                // nil if RoomPlan was off / failed / timed out → save proceeds without a room rather
-                // than hang. The reconstructed room lands in the temp raw dir BEFORE saveScan moves it,
-                // so roomplan.json stays atomic with the scan.
-                //
-                // TO RELOCATE (separate RoomPlan stage before mesh reconstruction): the build itself is
-                // location-independent — DeferredRoomBuild.buildRoom() self-contains the wait+build, so
-                // moving this stage is just moving this call. THE ONE HARD CONSTRAINT: it must still run
-                // AFTER the world-map export, or RoomBuilder's CPU can perturb the pose-sensitive
-                // capture (the whole reason it was deferred). grep "[DEFERRED-ROOMPLAN]" for all sites.
-                // Keyed on the deferred BOX existing (created at record-start iff RoomPlan was on),
-                // NOT the live semanticLabeling toggle: keying on the toggle would discard a real
-                // capture if the user flipped RoomPlan off mid-scan. awaitDeferredRoomPlan returns nil
-                // fast when no box exists (RoomPlan was off), so this is safe to always call.
-                let builtRoom: CapturedRoom? = self.scanStore.awaitDeferredRoomPlan?(AppConstants.roomBuilderTimeoutSeconds)
-                // └── [DEFERRED-ROOMPLAN] end build trigger ─────────────────────────────────────────
+                // [DEFERRED-ROOMPLAN] DECISION 3: nothing derived is built here anymore. The old
+                // save-time chain — RoomBuilder (waited on RoomPlan with a 3 s data-gate that a
+                // hot device starved, 2026-07-13) → plane registration → ghost proxy — is gone:
+                // the room is built by the deferred POST-SAVE RoomBuilder (DeferredRoomBuild,
+                // armed after saveScan), and registration/proxy/colorize run at Post-process from
+                // the on-disk artifacts. The scan saves RAW-frame with normals colors.
+                let meshData = result.data
+                let vertexColors = VertexColorAccumulator.generateNormalsColors(objData: meshData)
 
                 DispatchQueue.main.async {
                     // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping.
+                    // DECISION 3: raw artifacts only — roomplan.json lands post-save via the
+                    // deferred RoomBuilder; registration.json / mesh_proxy.obj are written by
+                    // ScanPostprocessor later.
                     if let rawDir = rawDataPath {
                         let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
-                        try? result.data.write(to: meshFileURL)
+                        try? meshData.write(to: meshFileURL)
                         let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
                         try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
-                        // Write roomplan.json + roomplan_raw.json from the RoomBuilder reconstruction
-                        // (deferred, built above from CapturedRoomData in the scan's own world frame).
-                        if let room = builtRoom {
-                            RoomPlanExporter.writeRoomPlan(room, to: rawDir)
-                            // Surface the room to the preview / ScanCoach (post-scan, not live).
-                            self.finalCapturedRoom = room
+                        // Face-aligned per-face classification (the proxy build's subtraction
+                        // input). One byte per mesh.obj face; absent when the classifier was off.
+                        if let classes = result.faceClasses {
+                            try? classes.write(to: rawDir.appendingPathComponent("face_classes.bin"))
                         }
                     }
 
@@ -445,7 +560,7 @@ extension CaptureView {
                             context: self.modelContext,
                             locationId: capturedLocationId,
                             name: autoSaveName,
-                            meshData: result.data,
+                            meshData: meshData,
                             vertexCount: result.vertexCount,
                             faceCount: result.faceCount,
                             hardwareDeviceModel: UIDevice.current.name,
@@ -469,12 +584,20 @@ extension CaptureView {
                         // Write deferred stitching.json now that we have the real target scan ID
                         self.writeStitchingLinkIfPending(targetScanId: savedScan.id)
 
+                        // [DEFERRED-ROOMPLAN] Save is complete — arm the deferred RoomBuilder
+                        // with the scan's final directory + schedule the bad-scan grace check
+                        // (see savePendingScan for the full rationale).
+                        self.scanStore.setRoomDataPersistDir?(savedScan.scanDirectory)
+                        ScanPostprocessor.scheduleBadScanCheck(scanId: savedScan.id,
+                                                               modelContext: self.modelContext,
+                                                               scanStore: self.scanStore)
+
                         completion?(savedScan)
                     } else {
                         // Normal flow: store as pending scan
                         self.pendingScan = PendingScanData(
                             locationId: capturedLocationId,
-                            meshData: result.data,
+                            meshData: meshData,
                             vertexCount: result.vertexCount,
                             faceCount: result.faceCount,
                             rawDataPath: rawDataPath,
@@ -494,6 +617,15 @@ extension CaptureView {
                             self.savePendingScan()
                         } else if capturedLocationId != nil {
                             self.savePendingScan()
+                        } else {
+                            // New space: the pipeline is DONE (world map, mesh, colors all
+                            // persisted to the raw dir) and the AR view has downgraded to
+                            // nominal — now ask for the name on a quiet device (deferred from
+                            // finishStopRecording; see the comment there). Keyboard is instant
+                            // and nothing pose-sensitive can be disturbed anymore.
+                            self.saveMessage = nil
+                            self.newLocationName = ""
+                            self.showNamePrompt = true
                         }
                     }
                 }
@@ -520,7 +652,8 @@ extension CaptureView {
                     title: "World Map Not Captured",
                     message: "Not enough features were tracked to build a world map, so this scan can't be "
                         + "relocalized or extended later. Move to a more detailed area and try again, or "
-                        + "discard this scan.",
+                        + "discard this scan. Discarding deletes this recording's frames and photos "
+                        + "and cannot be undone.",
                     preferredStyle: .alert
                 )
                 alert.addAction(UIAlertAction(title: "Try Again", style: .default) { _ in
@@ -577,6 +710,26 @@ extension CaptureView {
             scanStore.resetCaptureState()
             clearMessage()
         }
+    }
+
+    /// Deletes a stopped-and-baked pending scan that was never saved (naming-dialog discard,
+    /// after its destructive confirmation): removes the temp artifacts — raw frames dir and
+    /// world map, which both live in FileManager.temporaryDirectory and saveScan would
+    /// normally move — and clears the save-flow state. Dropping pendingScan alone would
+    /// leak the (potentially large) raw-frames dir.
+    func discardPendingScan() {
+        if let pending = pendingScan {
+            if let rawDir = pending.rawDataPath {
+                try? FileManager.default.removeItem(at: rawDir)
+            }
+            if let mapURL = pending.worldMapURL {
+                try? FileManager.default.removeItem(at: mapURL)
+            }
+        }
+        pendingScan = nil
+        saveMessage = nil
+        isProcessingMesh = false
+        isWaitingToSave = false
     }
 
     /// Consumes a pending stitch link and persists it as a `StitchLink` SwiftData row now that the
@@ -640,7 +793,13 @@ extension CaptureView {
     }
 
     func savePendingScan() {
-        guard let pending = pendingScan else { return }
+        guard let pending = pendingScan else {
+            // Nothing to save — clear any processing/waiting flags so the record button can't stay
+            // disabled ("Processing previous scan…") forever on a stray call.
+            isProcessingMesh = false
+            isWaitingToSave = false
+            return
+        }
 
         let locationId: UUID?
         var finalName = "New Space"
@@ -679,8 +838,23 @@ extension CaptureView {
         // Write deferred stitching.json now that we have the real target scan ID
         writeStitchingLinkIfPending(targetScanId: savedScan.id)
 
+        // [DEFERRED-ROOMPLAN] Save is complete — arm the deferred RoomBuilder with the scan's
+        // final directory. The build starts as soon as didEndWith's CapturedRoomData is also in
+        // hand (usually already is) and writes roomplan.json/_raw when it finishes; it was held
+        // until now so it can't overlap the world-map export.
+        scanStore.setRoomDataPersistDir?(savedScan.scanDirectory)
+        // Schedule the DECISION-3 bad-scan check: if no room materializes (and no build is in
+        // flight) within the grace window, warn the user to redo the scan while they're still
+        // standing in the room.
+        ScanPostprocessor.scheduleBadScanCheck(scanId: savedScan.id, modelContext: modelContext,
+                                               scanStore: scanStore)
+
         saveMessage = "Scan Saved!"
         pendingScan = nil
+        // Release the processing/waiting claim now that the save is done — otherwise isWaitingToSave
+        // (set in finishStopRecording's rescan branch / the name-prompt Save) leaks true and leaves the
+        // record button disabled ("Processing previous scan…") indefinitely on the next scan.
+        isProcessingMesh = false
         isWaitingToSave = false
 
         // Reset the FULL capture state so a scan started before the delayed tab switch below can't

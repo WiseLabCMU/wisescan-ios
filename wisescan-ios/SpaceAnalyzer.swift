@@ -30,8 +30,10 @@ class SpaceAnalyzer {
     var progress: Float = 0
     /// True once the analysis is complete (360° reached or timeout).
     var isComplete: Bool = false
-    /// Human-readable progress label for the overlay.
-    var progressLabel: String = "Pan slowly around the room…"
+    /// Human-readable progress label for the overlay. Sweep-oriented wording: the metric is
+    /// COMPASS COVERAGE (yaw sectors visited toward a full turn), not speed or elapsed time —
+    /// the old "pan slowly…" copy read as if speed were being judged (2026-07-22 field report).
+    var progressLabel: String = "Turn to sweep the camera 360° around the room"
 
     // MARK: - Lighting tier for per-zone tracking
 
@@ -52,6 +54,8 @@ class SpaceAnalyzer {
     private var startTime: Date = .distantPast
     /// Whether the first yaw sample has been received (gate the "waiting for data" state).
     private var hasFirstSample = false
+    /// Previous sample's bucket, for arc-filling between consecutive samples.
+    private var lastBucket: Int?
 
     // MARK: - Lifecycle
 
@@ -62,7 +66,8 @@ class SpaceAnalyzer {
         progress = 0
         isComplete = false
         hasFirstSample = false
-        progressLabel = "Pan slowly around the room…"
+        lastBucket = nil
+        progressLabel = "Turn to sweep the camera 360° around the room"
         startTime = Date()
     }
 
@@ -78,6 +83,14 @@ class SpaceAnalyzer {
         if degrees < 0 { degrees += 360 }
         let bucket = Int(degrees.truncatingRemainder(dividingBy: 360))
         let clampedBucket = max(0, min(359, bucket))
+
+        // Fill the shortest arc from the previous sample: at 30 fps a comfortable ~90°/s pan
+        // lands samples ~3° apart, so marking only the sampled bucket left ~2/3 of each turn
+        // unvisited — "360°" took ~3 physical rotations (2026-07-22 iPhone field report).
+        if let prev = lastBucket, prev != clampedBucket {
+            fillArc(from: prev, to: clampedBucket, lux: currentLux)
+        }
+        lastBucket = clampedBucket
         visitedBuckets.insert(clampedBucket)
 
         // Tag the bucket with its lux tier on first visit
@@ -89,31 +102,58 @@ class SpaceAnalyzer {
         let covered = Float(visitedBuckets.count)
         progress = min(1.0, covered / AppConstants.analysisYawCompletionDeg)
 
-        // Update label
+        // Update label — real swept degrees (1° buckets), so the metric is unmistakable.
+        let sweptDeg = visitedBuckets.count
         if progress < 0.3 {
-            progressLabel = "Keep panning slowly… \(Int(progress * 100))%"
+            progressLabel = "Keep turning — \(sweptDeg)° of 360° swept"
         } else if progress < 0.7 {
-            progressLabel = "Good progress! \(Int(progress * 100))%"
+            progressLabel = "Good sweep — \(sweptDeg)° of 360°"
         } else if progress < 1.0 {
-            progressLabel = "Almost done… \(Int(progress * 100))%"
+            progressLabel = "Almost around — \(sweptDeg)° of 360°"
         }
 
         // Check completion
         if visitedBuckets.count >= Int(AppConstants.analysisYawCompletionDeg) {
-            complete()
+            complete(fullSweep: true)
         }
 
         // Fallback timeout
         if Date().timeIntervalSince(startTime) >= AppConstants.analysisTimeoutSeconds {
-            complete()
+            complete(fullSweep: false)
         }
     }
 
-    private func complete() {
+    /// Credit every 1° bucket on the shortest arc between consecutive yaw samples as swept
+    /// coverage. A single-frame jump beyond the fill cap is a tracking snap, not rotation —
+    /// credit nothing (the next sample restarts the arc from wherever tracking re-seated).
+    private func fillArc(from prev: Int, to bucket: Int, lux: CGFloat) {
+        var delta = bucket - prev
+        if delta > 180 { delta -= 360 }
+        if delta < -180 { delta += 360 }
+        guard delta != 0, abs(delta) <= AppConstants.analysisYawMaxFillDeg else { return }
+        let step = delta > 0 ? 1 : -1
+        var filled = prev
+        while filled != bucket {
+            filled = (filled + step + 360) % 360
+            visitedBuckets.insert(filled)
+            if bucketTiers[filled] == nil {
+                bucketTiers[filled] = Self.luxTier(for: lux)
+            }
+        }
+    }
+
+    private func complete(fullSweep: Bool) {
         guard !isComplete else { return }
         isComplete = true
-        progress = 1.0
-        progressLabel = "Analysis complete!"
+        if fullSweep {
+            progress = 1.0
+            progressLabel = "Sweep complete!"
+        } else {
+            // Timed out short of a full turn: report with what was covered, but do NOT fake a
+            // 100% ring — the analysis judges compass coverage, and pretending a partial sweep
+            // completed is what made it read like a speed/elapsed-time check.
+            progressLabel = "Time's up — analyzed \(visitedBuckets.count)° of the sweep"
+        }
     }
 
     /// Classifies a lux value into a lighting tier using centralized AppConstants thresholds.

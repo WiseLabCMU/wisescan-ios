@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import ARKit
 
 struct SettingsView: View {
     var scrollToDevMode: Bool = false
@@ -18,12 +19,18 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.hideLivePoints) private var hideLivePoints: Bool = AppConstants.hideLivePoints
     @AppStorage(AppConstants.Key.perfDiagnostics) private var perfDiagnostics: Bool = AppConstants.perfDiagnostics
     @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
+    @AppStorage(AppConstants.Key.vrBloomEnabled) private var vrBloomEnabled: Bool = AppConstants.vrBloomEnabled
     @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
+    @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
+    // 0 = Auto (no override); N = force format index N-1 of supportedVideoFormats.
+    @AppStorage(AppConstants.Key.videoFormatIndex) private var videoFormatIndex: Int = 0
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
     @AppStorage(AppConstants.Key.scanCoachingEnabled) private var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
+    @AppStorage(AppConstants.Key.colorizeOnPostprocess) private var colorizeOnPostprocess: Bool = AppConstants.colorizeOnPostprocess
+    @AppStorage(AppConstants.Key.registerLegacyScans) private var registerLegacyScans: Bool = AppConstants.registerLegacyScans
     @Environment(\.dismiss) private var dismiss
 
     @State private var showDeleteConfirmation = false
@@ -208,68 +215,20 @@ struct SettingsView: View {
                         .tint(.cyan)
                         .padding(.vertical, 4)
 
-                    } header: {
-                        Text("SCAN CAPTURE")
-                    }
-                    .listRowBackground(Color.white.opacity(0.05))
-
-                    // MARK: - Semantic Classes
-                    // NOTE: post deferred-build migration these no longer gate LIVE outlines (we don't
-                    // render them during capture) — the selection now controls semantic-class visibility
-                    // in the saved-map / mesh-preview viewer. Kept for that reason.
-                    Section {
-                        ForEach(SemanticClass.allCases.filter { $0 != .none }, id: \.rawValue) { cls in
-                            if cls.isConfigurable {
-                                Toggle(isOn: Binding(
-                                    get: { SemanticClassPreference.load().contains(cls.rawValue) },
-                                    set: { enabled in
-                                        var current = SemanticClassPreference.load()
-                                        if enabled { current.insert(cls.rawValue) } else { current.remove(cls.rawValue) }
-                                        SemanticClassPreference.save(current)
-                                    }
-                                )) {
-                                    HStack(spacing: 8) {
-                                        Circle()
-                                            .fill(cls.swiftUIDisplayColor)
-                                            .frame(width: 12, height: 12)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(cls.rawValue.capitalized)
-                                                .foregroundColor(.white)
-                                            Text(cls.classDescription)
-                                                .font(.caption2)
-                                                .foregroundColor(.gray)
-                                        }
-                                    }
-                                }
-                                .tint(.cyan)
-                                .padding(.vertical, 2)
-                            } else {
-                                // Ceiling: non-configurable, shown as disabled
-                                HStack(spacing: 8) {
-                                    Circle()
-                                        .fill(cls.swiftUIDisplayColor.opacity(0.3))
-                                        .frame(width: 12, height: 12)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(cls.rawValue.capitalized)
-                                            .foregroundColor(.gray)
-                                        Text(cls.classDescription)
-                                            .font(.caption2)
-                                            .foregroundColor(.gray.opacity(0.7))
-                                    }
-                                    Spacer()
-                                    Toggle("", isOn: .constant(false))
-                                        .labelsHidden()
-                                        .disabled(true)
-                                }
-                                .padding(.vertical, 2)
+                        Toggle(isOn: $colorizeOnPostprocess) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Colorize During Post-process")
+                                    .foregroundColor(.white)
+                                Text("Include photo-based mesh coloring when post-processing a scan. Off = structural processing only (room model, alignment, rescan reference) — faster; you can color later by re-running Process.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
                             }
                         }
+                        .tint(.cyan)
+                        .padding(.vertical, 4)
+
                     } header: {
-                        Text("SEMANTIC CLASS VISIBILITY")
-                    } footer: {
-                        Text("Choose which semantic classes are shown in saved-map and mesh previews. All classes are always collected for export.")
-                            .font(.caption2)
-                            .foregroundColor(.gray)
+                        Text("SCAN CAPTURE")
                     }
                     .listRowBackground(Color.white.opacity(0.05))
 
@@ -305,6 +264,17 @@ struct SettingsView: View {
                                     self.mockDepthMaps = AppConstants.mockDepthMaps
                                     self.mockWearable = AppConstants.mockWearable
                                     self.semanticLabeling = AppConstants.semanticLabeling
+                                    self.registerLegacyScans = AppConstants.registerLegacyScans
+                                    // Default-TRUE dev toggle: a bench-OFF value must not leak into
+                                    // production, where it would silently drop per-face classification
+                                    // (the wall/non-wall labels plane registration depends on).
+                                    self.meshClassifier = AppConstants.meshClassifier
+                                    // Diagnostics toggles gate on their own keys (not developerMode),
+                                    // so a bench-ON value would keep costing after dev-mode exit.
+                                    self.hideLivePoints = AppConstants.hideLivePoints
+                                    self.perfDiagnostics = AppConstants.perfDiagnostics
+                                    self.pauseVRCompute = AppConstants.pauseVRCompute
+                                    self.memDiagForceReclaim = AppConstants.memDiagForceReclaim
                                 }
                             }
                         )) {
@@ -406,11 +376,89 @@ struct SettingsView: View {
                             .tint(.orange)
                             .padding(.vertical, 4)
 
+                            Toggle(isOn: $vrBloomEnabled) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("VR Bloom Effect")
+                                        .foregroundColor(.white)
+                                    Text("Glow post-process on the VR point cloud (two GPU passes + a half-res texture per frame). Off by default; most useful with Hide Live Points on, where the glow softens the raw accumulated voxels. Applied live, per frame, VR mode only.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
                             Toggle(isOn: $memDiagForceReclaim) {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("MemDiag Force Reclaim")
                                         .foregroundColor(.white)
                                     Text("Memory attribution only. Forces freed pages back to the OS before [MemDiag] teardown snapshots so free-deltas reflect real reclaim, not cached pages. Expensive — leave OFF except when profiling. Needs Perf Diagnostics on.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            // ── Capture Quality ──
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Video Format")
+                                    .foregroundColor(.white)
+                                Text("ARKit video stream resolution. Higher = better splat quality but more storage. Requires session restart.")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                                // @AppStorage (not a raw UserDefaults Binding) so the menu
+                                // label refreshes when the selection changes. Tag N maps to
+                                // format index N-1; 0 is the Auto sentinel.
+                                Picker("Video Format", selection: $videoFormatIndex) {
+                                    Text("Auto (Best Available)").tag(0)
+                                    ForEach(Array(ARCoverageView.availableVideoFormats.enumerated()), id: \.offset) { index, label in
+                                        Text("[\(index)] \(label)").tag(index + 1)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .tint(.orange)
+                            }
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: Binding(
+                                get: {
+                                    // Default to true when key hasn't been set yet
+                                    UserDefaults.standard.object(forKey: AppConstants.Key.captureAudioEnabled) == nil
+                                        ? AppConstants.captureAudioEnabled
+                                        : UserDefaults.standard.bool(forKey: AppConstants.Key.captureAudioEnabled)
+                                },
+                                set: { UserDefaults.standard.set($0, forKey: AppConstants.Key.captureAudioEnabled) }
+                            )) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Capture Audio")
+                                        .foregroundColor(.white)
+                                    Text("Play shutter click when a sharp frame is captured at a stillness point, and a chime when entering stillness.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $meshClassifier) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Mesh Classifier")
+                                        .foregroundColor(.white)
+                                    Text("Per-face ARKit mesh classification (.meshWithClassification). ON by default — benched at no measurable CPU delta, ~70–100 MB memory — and provides the wall/non-wall labels used for plane registration and the rescan reference mesh. Turn OFF only to re-run the A/B bench (each run stamps meshClassifier=on/off at RECORD-START).")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $registerLegacyScans) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Register Legacy Scans")
+                                        .foregroundColor(.white)
+                                    Text("Lets pre-postprocess-era scans (no saved scan case) enter retroactive registration: old locations will show \"needs postprocess\" and Process may move their meshes into the canonical frame. OFF in production — a legacy adjacent-link is indistinguishable from a rescan and a similar room could false-lock. Scans of link-adjacent locations stay excluded either way.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

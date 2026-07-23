@@ -138,3 +138,17 @@ struct AlignmentOverlayView: View {
         }
     }
 }
+
+#Preview {
+    let store = ScanStore()
+    store.capturePhase = .alignedReady
+    store.distanceToBoundaryAnchor = 0.4
+    let stats = ScanStats()
+    stats.trackingStatus = .normal
+    return ZStack {
+        LinearGradient(colors: [.gray, .black], startPoint: .top, endPoint: .bottom)
+            .ignoresSafeArea()
+        AlignmentOverlayView(scanStats: stats, onConfirm: {}, onCancel: {})
+    }
+    .environment(store)
+}

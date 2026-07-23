@@ -1,6 +1,7 @@
 import Foundation
 import ARKit
 import UIKit
+import AudioToolbox
 import Observation
 import os
 
@@ -47,6 +48,103 @@ class FrameCaptureSession {
     private var blurWarningTimer: Timer?
     private var consecutiveBlurredFrames: Int = 0
 
+    // ── Stillness detection & capture quality ──
+    // Tracks device motion state to identify "sharp" frames (device stationary) vs
+    // "sweep" frames (device in motion). Sharp frames get audio feedback (shutter click)
+    // and are counted separately for the quality bar UI.
+    private var stillnessStartTime: TimeInterval?
+    private(set) var isCurrentlyStill: Bool = false
+    /// Ring-fill progress for the stillness reticle: 0 while moving, climbing to 1 over the
+    /// confirmation window once the device settles, held at 1 while confirmed still.
+    private(set) var stillnessProgress: Double = 0
+    /// Whether the current armed request has already fired its keyframe. Prevents a
+    /// single tap from firing twice while its hi-res completion is outstanding.
+    private var hasStillnessKeyframe: Bool = false
+    /// Armed by the shutter tap (`requestStillCapture`) — stills NEVER fire
+    /// automatically. The armed request fires on the next capture tick while
+    /// stillness holds, auto-retries blurred results, and cancels when stillness
+    /// breaks before it fires. Main-thread only (tap + capture timer are both main).
+    private var stillCaptureRequested: Bool = false
+    /// UI state: a tapped request is armed or in flight (reticle shows "Capturing…").
+    private(set) var isStillCapturePending: Bool = false
+    /// Number of frames captured while device was confirmed still (high confidence sharp).
+    private(set) var sharpFrameCount: Int = 0
+    /// Total frames captured this session (sharp + sweep).
+    private(set) var totalCapturedFrameCount: Int = 0
+    /// Time of last sharp frame capture (for ScanCoach "pause for photo" guidance).
+    private(set) var lastSharpFrameTime: Date?
+
+    // ── High-resolution keyframe capture ──
+    // While the AR video stream runs a standard mesh-friendly format (1920×1440),
+    // a shutter tap during confirmed stillness triggers
+    // ARSession.captureHighResolutionFrame — a single still at the camera's native
+    // photo resolution (up to ~12MP) with its own pose and intrinsics. This sidesteps
+    // the hiRes-video-format-breaks-mesh problem: sweep frames feed depth/mesh,
+    // hi-res stills feed splat texture detail.
+    /// A hi-res capture request is pending; ARKit rejects overlapping requests.
+    private var hiResCaptureInFlight = false
+    /// AR-session timestamp of the pending hi-res request, for the watchdog that
+    /// recovers when a completion is dropped (e.g. by a session interruption).
+    private var hiResRequestTime: TimeInterval?
+    /// Consecutive hi-res failures; transient errors get retried before latching.
+    private var hiResFailureCount = 0
+    /// Hi-res capture failed repeatedly (unsupported format/device) — fall back to
+    /// saving stream frames as stillness keyframes for the rest of the session.
+    private var hiResUnavailable = false
+    /// Set when capture stops (pause/stop/discard); a hi-res completion landing after
+    /// this must not save — the metadata writers have already run.
+    private var captureEnded = false
+    /// Blurred-still retries consumed in the current stillness period. Pose velocity says
+    /// the DEVICE is still, but dim rooms force long exposures where hand tremor still
+    /// blurs the photo — the sharpness gate rejects those and retries (bounded), and after
+    /// the budget we accept the best we got with its measured quality recorded.
+    private var keyframeRetryCount = 0
+    /// A saved sharp keyframe (hi-res still or stream fallback), as delivered to the
+    /// coverage overlay via `onKeyframeCaptured`.
+    struct KeyframeStill {
+        let transform: simd_float4x4
+        let intrinsics: simd_float3x3
+        let width: Int
+        let height: Int
+        /// Scene depth at capture time, when available. Consumers must use it
+        /// synchronously inside the callback and not retain it — it's an ARKit
+        /// pool buffer, and holding it starves the frame pool (VIO loss).
+        let depthMap: CVPixelBuffer?
+    }
+
+    /// Called on the main thread after a sharp keyframe is saved. The AR coverage
+    /// overlay stamps the photo-coverage voxel grid from the keyframe's depth map and
+    /// updates mesh anchors' photo-covered state (amber → clear).
+    @ObservationIgnored var onKeyframeCaptured: ((KeyframeStill) -> Void)?
+
+    /// Arms a still capture from the shutter tap — the deterministic trigger (stills
+    /// never fire on their own). Returns false when the device isn't confirmed still,
+    /// so the UI can nudge "hold still". Main thread.
+    @discardableResult
+    func requestStillCapture() -> Bool {
+        guard !captureEnded, isCurrentlyStill else { return false }
+        // ONE STILL PER STILLNESS PAUSE: refuse the tap (warning haptic at the call site)
+        // while a request is armed, its hi-res completion/encode is outstanding, OR this
+        // pause has already delivered its keyframe (`hasStillnessKeyframe` latches until
+        // stillness breaks — see updateStillness). The first cut of this gate only blocked
+        // overlap, so continuous tapping still produced one still per ~1.2s pipeline cycle,
+        // each with its own shutter click (2026-07-23 field reports ×2) — and every extra
+        // cycle sustains the hi-res encode load behind the mid-scan starvation class
+        // (triage item 3). To deliberately re-shoot a spot: move slightly and settle again.
+        guard !isStillCapturePending, !hiResCaptureInFlight, !hasStillnessKeyframe else { return false }
+        stillCaptureRequested = true
+        isStillCapturePending = true
+        // Fresh blur-retry allowance for this tap (failure paths manage their own re-arms).
+        keyframeRetryCount = 0
+        return true
+    }
+
+    /// Clears a tap-armed request (stillness broke, save landed, or capture reset).
+    private func clearStillCaptureRequest() {
+        stillCaptureRequested = false
+        if isStillCapturePending { isStillCapturePending = false }
+    }
+
     // Privacy logic
     /// Accumulating person anchor with an observation count, which acts as a confidence weight:
     /// a real person merges in across many frames (high weight) while a one-frame segmentation
@@ -61,6 +159,20 @@ class FrameCaptureSession {
     /// Semantic display classes detected during this session (e.g. "wall", "floor", "fixture").
     /// Set by the AR coordinator before stop() so metadata includes the detected classes.
     var semanticClassesDetected: Set<String> = []
+
+    /// Final photo-coverage voxel stats (covered = voxels stamped by keyframe depth,
+    /// occupied = voxels containing mesh, plus the multi-view aggregates: mean
+    /// still-to-still overlap and the fraction of covered voxels seen from ≥2
+    /// standpoints). Set from ScanStats before stop() so metadata records how much of
+    /// the scanned geometry got photo-grade coverage — and how well the stills overlap,
+    /// the offline hook for correlating capture properties with splat quality.
+    struct PhotoCoverageSummary {
+        let covered: Int
+        let occupied: Int
+        let meanStillOverlap: Double
+        let standpointDiversity: Double
+    }
+    var photoCoverageStats: PhotoCoverageSummary?
 
     /// Drop low-confidence anchors (seen in too few frames → likely transient segmentation noise)
     /// then coalesce any survivors still within the merge radius, so the saved `face_anchors` are
@@ -95,8 +207,22 @@ class FrameCaptureSession {
     private var cachedOSName: String = "iOS"
     private var cachedOSVersion: String = "Unknown"
 
+    // Haptic generators are held for the session and re-prepared after each use so the
+    // keyframe feedback lands without Taptic Engine spin-up latency (mirrors the
+    // prepared `hapticGenerator` pattern in CaptureView). Main-thread only.
+    @ObservationIgnored private let shutterHaptic = UIImpactFeedbackGenerator(style: .rigid)
+    @ObservationIgnored private let stillnessHaptic = UIImpactFeedbackGenerator(style: .light)
+
     private let ioQueue = DispatchQueue(label: "com.scan4d.capture.io", qos: .userInitiated)
+    /// Dedicated queue for the expensive ~12MP hi-res keyframe JPEG encode, kept OFF the
+    /// shared ioQueue so a >1s native-res encode can't head-of-line-block stream saves and
+    /// starve ARKit's frame pool. Only one hi-res request is in flight at a time, so serial.
+    private let keyframeEncodeQueue = DispatchQueue(label: "com.scan4d.capture.keyframe", qos: .utility)
     private let ciContext = CIContext()  // Reuse across frames to avoid GPU pipeline re-init
+    // Separate context for ~12MP keyframe encodes: sharing `ciContext` would serialize the
+    // 0.5-1s hi-res render against concurrent stream encodes on ioQueue, and priorityRequestLow
+    // keeps its GPU work from contending with the live AR render.
+    private let hiResCIContext = CIContext(options: [.priorityRequestLow: true])
     /// Reusable 16-bit depth conversion buffer (depth resolution is fixed per session).
     /// Only touched inside depthMapToPNG16 on ioQueue, so no synchronization needed.
     private var depthScratch: [UInt16] = []
@@ -115,6 +241,19 @@ class FrameCaptureSession {
         // RoomPlan owns the session or on non-LiDAR devices).
         let hasDepth: Bool
         let hasConfidence: Bool
+        // Per-frame dimensions and intrinsics: hi-res keyframes are captured at native photo
+        // resolution, so they differ from the video-stream frames. Writers emit per-frame
+        // overrides when these differ from the session-global values.
+        let width: Int
+        let height: Int
+        let intrinsics: CameraIntrinsics
+        /// True for hi-res stills captured at a stillness point (splat-priority frames).
+        let isKeyframe: Bool
+        // Measured keyframe quality (nil for sweep frames): Laplacian-variance sharpness
+        // (higher = sharper) and the camera exposure duration at capture. Persisted so
+        // downstream pipelines can weight stills by actual quality, not just is_keyframe.
+        let sharpness: Float?
+        let exposureDuration: Double?
     }
 
     struct CameraIntrinsics {
@@ -181,6 +320,22 @@ class FrameCaptureSession {
         self.consecutiveBlurredFrames = 0
         self.blurWarningTimer?.invalidate()
         self.blurWarningTimer = nil
+        self.stillnessStartTime = nil
+        self.isCurrentlyStill = false
+        self.stillnessProgress = 0
+        self.hasStillnessKeyframe = false
+        self.stillCaptureRequested = false
+        self.isStillCapturePending = false
+        self.sharpFrameCount = 0
+        self.totalCapturedFrameCount = 0
+        self.lastSharpFrameTime = nil
+        self.hiResCaptureInFlight = false
+        self.hiResRequestTime = nil
+        self.hiResFailureCount = 0
+        self.hiResUnavailable = false
+        self.captureEnded = false
+        self.keyframeRetryCount = 0
+        self.photoCoverageStats = nil
         self.overlapMax = overlapMax
         self.rejectBlur = rejectBlur
         self.privacyFilter = privacyFilter
@@ -198,6 +353,8 @@ class FrameCaptureSession {
             self.cachedDeviceName = UIDevice.current.name
             self.cachedOSName = UIDevice.current.systemName
             self.cachedOSVersion = UIDevice.current.systemVersion
+            self.shutterHaptic.prepare()
+            self.stillnessHaptic.prepare()
         }
 
         self.isMockingIMU = mockIMU
@@ -241,6 +398,7 @@ class FrameCaptureSession {
     func pauseCapture() {
         timer?.invalidate()
         timer = nil
+        captureEnded = true // a late hi-res completion must not save past this point
     }
 
     /// Abandon the in-progress capture without finalizing: stop the timer and delete the capture
@@ -248,6 +406,7 @@ class FrameCaptureSession {
     func discardCapture() {
         timer?.invalidate()
         timer = nil
+        captureEnded = true
         let dir = captureDir
         ioQueue.async {
             if let dir = dir { try? FileManager.default.removeItem(at: dir) }
@@ -291,6 +450,35 @@ class FrameCaptureSession {
             intrinsics = testIntrinsics
         }
 
+        // ── Motion state ──
+        // Pose velocities since the last saved frame. Computed regardless of the
+        // rejectBlur setting: stillness detection drives the keyframe pipeline,
+        // reticle, and coverage overlay — not just blur rejection.
+        // Checks both translational velocity (fast walking) AND rotational velocity
+        // (panning in place) — the rotational check catches the common indoor scanning
+        // pattern where users stand still but rotate quickly.
+        var velocity: Float = 0
+        var angularVelocity: Float = 0
+        var hasMotionBaseline = false
+        if !isMockingIMU, let lastTransform = lastCaptureTransform {
+            let timeDelta = frameTimestamp - lastCaptureTime
+            if timeDelta > 0 {
+                velocity = cameraMovement(from: lastTransform, to: transform) / Float(timeDelta)
+                angularVelocity = extractRotationAngle(from: lastTransform, to: transform) / Float(timeDelta)
+                hasMotionBaseline = true
+            }
+        }
+        let trackingNormal = trackingState == nil || trackingState == .normal
+
+        // ── Stillness detection ──
+        // Still only when we have a motion baseline, tracking is reliable, and both
+        // velocities are under the stillness thresholds. Tracking loss or fast motion
+        // resets the state machine so the reticle never shows a stale locked-green ring.
+        let isStill = hasMotionBaseline && trackingNormal &&
+                      velocity < AppConstants.stillnessTranslationalThreshold &&
+                      angularVelocity < AppConstants.stillnessAngularThreshold
+        let confirmedStill = updateStillness(isStill: isStill, frameTimestamp: frameTimestamp)
+
         // Reject blurred frames based on camera tracking quality
         if rejectBlur && !isMockingIMU {
             var warning: CaptureWarning?
@@ -298,21 +486,12 @@ class FrameCaptureSession {
             // Tracking dropped out of .normal (limited / excessive motion / relocalizing): frames
             // here are unreliable. The fix is to hold steady & let tracking recover — NOT necessarily
             // to slow down — so this is reported as a distinct cause from genuine fast motion.
-            if let state = trackingState, state != .normal {
+            if !trackingNormal {
                 warning = .trackingLost
-            }
-
-            // Otherwise, the camera pose moved too fast since the last capture (motion blur likely).
-            // Heuristic from pose velocity, not a pixel-sharpness measurement.
-            if warning == nil, let lastTransform = lastCaptureTransform {
-                let timeDelta = frameTimestamp - lastCaptureTime
-                if timeDelta > 0 {
-                    let movement = cameraMovement(from: lastTransform, to: transform)
-                    let velocity = movement / Float(timeDelta)
-                    if velocity > AppConstants.motionBlurVelocity {
-                        warning = .fastMotion
-                    }
-                }
+            } else if velocity > AppConstants.motionBlurVelocity ||
+                      angularVelocity > AppConstants.motionBlurAngularVelocity {
+                // The camera pose moved too fast since the last capture (motion blur likely).
+                warning = .fastMotion
             }
 
             if let warning = warning {
@@ -331,8 +510,56 @@ class FrameCaptureSession {
             }
         }
 
-        // Skip frame if camera hasn't moved enough (based on overlap setting)
-        if let lastTransform = lastCaptureTransform {
+        // ── Stillness keyframe (tap-armed) ──
+        // Stills fire ONLY from the shutter tap (`requestStillCapture`), gated on
+        // confirmed stillness — a deterministic trigger. This block runs BEFORE the
+        // overlap gate below on purpose: the old auto-trigger sat behind it, so whether
+        // a pause produced a still depended on where the last stream save happened to
+        // land relative to the settle pose (device-observed as "sometimes a nudge
+        // fires it, sometimes not").
+        //
+        // The keyframe itself is a native-resolution still (captureHighResolutionFrame)
+        // when the device supports it, so the sharp pause-shot carries far more texture
+        // detail than the video stream. After repeated hi-res failures, keyframes fall
+        // back to saving the stream frame (pre-hi-res behavior).
+        var isStillnessKeyframe = false
+        if confirmedStill && stillCaptureRequested && !isMockingIMU {
+            if hasStillnessKeyframe {
+                return // this tap's request already fired; suppress jitter saves meanwhile
+            }
+            // Mock-image capture stays on the stream path — a real hi-res photo would be
+            // inconsistent with the synthetic frame sequence.
+            if !hiResUnavailable && !isMockingImages {
+                // Anchor the overlap gate at this pose so stream saves don't sneak
+                // through on sensor jitter while the hi-res request is in flight.
+                lastCaptureTransform = transform
+                lastCaptureTime = frameTimestamp
+                if !hiResCaptureInFlight {
+                    hasStillnessKeyframe = true
+                    hiResRequestTime = frameTimestamp
+                    requestHighResolutionKeyframe(from: session)
+                } else if let requested = hiResRequestTime,
+                          frameTimestamp - requested > AppConstants.hiResCaptureTimeoutSeconds {
+                    // Watchdog: the completion never arrived (a session interruption can
+                    // drop it). Issue a fresh request; a zombie completion landing later
+                    // costs at most one extra saved frame.
+                    print("[FrameCapture] Hi-res capture timed out after \(Int(AppConstants.hiResCaptureTimeoutSeconds))s — re-requesting")
+                    hasStillnessKeyframe = true
+                    hiResRequestTime = frameTimestamp
+                    requestHighResolutionKeyframe(from: session)
+                }
+                // A previous request still in flight (not timed out): leave the keyframe
+                // budget unconsumed so the next tick retries once the completion lands.
+                return // the hi-res completion saves the keyframe (or re-arms the gate on failure)
+            }
+            // Hi-res unavailable — fall through and save the stream frame as the keyframe.
+            hasStillnessKeyframe = true
+            isStillnessKeyframe = true
+        }
+
+        // Skip frame if camera hasn't moved enough (based on overlap setting).
+        // Never skips a tap-requested keyframe — the tap is explicit intent.
+        if !isStillnessKeyframe, let lastTransform = lastCaptureTransform {
             let movement = cameraMovement(from: lastTransform, to: transform)
             // Higher overlap = smaller movement threshold = more frames
             // overlapMax 100% → threshold ~0.01m (capture almost everything)
@@ -349,7 +576,7 @@ class FrameCaptureSession {
         let currentIndex = self.testSequenceIndex
         self.testSequenceIndex += 1 // Increment sequence index for synthetic progression
 
-        processAndSaveFrame(
+        let admitted = processAndSaveFrame(
             pixelBuffer: pixelBuffer,
             camW: camW,
             camH: camH,
@@ -358,8 +585,216 @@ class FrameCaptureSession {
             depthMap: depthMap,
             confidenceMap: confidenceMap,
             segBuffer: segBuffer,
-            currentIndex: currentIndex
+            currentIndex: currentIndex,
+            isKeyframe: isStillnessKeyframe
         )
+
+        // ── Counters & feedback (post-admission) ──
+        // Bookkeeping only runs for frames that actually entered the save pipeline, so
+        // the UI counts, shutter feedback, and coverage overlay never report a frame the
+        // backlog guard dropped.
+        if admitted {
+            if isStillnessKeyframe {
+                noteKeyframeSaved(transform: transform, intrinsics: intrinsics, width: camW, height: camH, depthMap: depthMap)
+            } else {
+                DispatchQueue.main.async { self.totalCapturedFrameCount += 1 }
+            }
+        } else if isStillnessKeyframe {
+            hasStillnessKeyframe = false // backlog drop — let this stillness period retry
+        }
+    }
+
+    /// Advances the stillness state machine: entry/exit tracking, the confirmed-still
+    /// flag, reticle ring progress, and the entering-stillness chime/haptic.
+    /// Returns whether the device is confirmed still as of this frame (fresher than the
+    /// async-published `isCurrentlyStill`). Runs on the capture timer (main thread).
+    @discardableResult
+    private func updateStillness(isStill: Bool, frameTimestamp: TimeInterval) -> Bool {
+        if isStill && stillnessStartTime == nil {
+            stillnessStartTime = frameTimestamp
+        } else if !isStill {
+            stillnessStartTime = nil
+            hasStillnessKeyframe = false // reset so the next tap gets a fresh keyframe
+            keyframeRetryCount = 0       // fresh blurred-still retry budget for the next tap
+            // Stillness broke before an armed tap fired — cancel it (the user moved
+            // away; capturing at the new pose would not be what they framed).
+            clearStillCaptureRequest()
+        }
+        let wasStill = isCurrentlyStill
+        let confirmedStill = isStill && (frameTimestamp - (stillnessStartTime ?? frameTimestamp)) >= AppConstants.stillnessDurationRequired
+        if confirmedStill != isCurrentlyStill {
+            DispatchQueue.main.async { self.isCurrentlyStill = confirmedStill }
+        }
+        // Publish ring-fill progress for the stillness reticle.
+        let progress: Double
+        if confirmedStill {
+            progress = 1.0
+        } else if isStill, let start = stillnessStartTime {
+            progress = min((frameTimestamp - start) / AppConstants.stillnessDurationRequired, 1.0)
+        } else {
+            progress = 0.0
+        }
+        if progress != stillnessProgress {
+            DispatchQueue.main.async { self.stillnessProgress = progress }
+        }
+        // Play audio + haptic feedback on stillness transitions
+        if confirmedStill && !wasStill {
+            playStillnessChime()
+        }
+        return confirmedStill
+    }
+
+    /// Shared bookkeeping for a saved stillness keyframe (hi-res still or stream
+    /// fallback): counters, coach timestamp, shutter feedback, and the coverage-overlay
+    /// callback. Must be called on the main thread.
+    private func noteKeyframeSaved(
+        transform: simd_float4x4,
+        intrinsics: simd_float3x3,
+        width: Int,
+        height: Int,
+        depthMap: CVPixelBuffer?
+    ) {
+        sharpFrameCount += 1
+        totalCapturedFrameCount += 1
+        lastSharpFrameTime = Date()
+        clearStillCaptureRequest() // the tapped request delivered its still
+        playShutterClick()
+        onKeyframeCaptured?(KeyframeStill(
+            transform: transform, intrinsics: intrinsics,
+            width: width, height: height, depthMap: depthMap
+        ))
+    }
+
+    /// Requests a single still at the camera's native photo resolution and saves it as the
+    /// keyframe for the current stillness period. The AR video stream is unaffected — this
+    /// is how we get 4K+ sharp frames without switching to a hiRes video format (which
+    /// breaks Recon3D mesh integration on iPads).
+    private func requestHighResolutionKeyframe(from session: ARSession) {
+        hiResCaptureInFlight = true
+        session.captureHighResolutionFrame { [weak self] frame, error in
+            guard let self = self else { return }
+
+            guard let frame = frame, error == nil else {
+                DispatchQueue.main.async {
+                    self.hiResCaptureInFlight = false
+                    self.hiResFailureCount += 1
+                    print("[FrameCapture] Hi-res capture failed (\(error?.localizedDescription ?? "nil frame")) — attempt \(self.hiResFailureCount)/\(AppConstants.hiResMaxFailures)")
+                    // Transient failures happen (session interruptions, RoomPlan
+                    // reconfiguration windows) — only latch the stream-frame fallback
+                    // after repeated failures.
+                    if self.hiResFailureCount >= AppConstants.hiResMaxFailures {
+                        self.hiResUnavailable = true
+                        print("[FrameCapture] Hi-res capture disabled for this session — falling back to stream keyframes")
+                    }
+                    // Re-arm the keyframe budget AND drop the overlap anchor: the anchor
+                    // was pinned at the stillness pose, so without this the jitter-gated
+                    // overlap check could starve the retry for the rest of the pause.
+                    self.hasStillnessKeyframe = false
+                    self.lastCaptureTransform = nil
+                }
+                return
+            }
+
+            // Completion arrives on an arbitrary queue. Extract everything needed from the
+            // ARFrame here so the reference releases when this scope exits (same ARFrame
+            // retention discipline as the stream path).
+            let pixelBuffer = frame.capturedImage
+            let camW = CVPixelBufferGetWidth(pixelBuffer)
+            let camH = CVPixelBufferGetHeight(pixelBuffer)
+            let transform = frame.camera.transform
+            let intrinsics = frame.camera.intrinsics
+            let exposureDuration = frame.camera.exposureDuration
+            // Unlike the 12MP still (allocated per-capture, not pooled), depth/confidence/seg
+            // come from the live LiDAR/segmentation pipeline — detach copies (~250KB total)
+            // so the pooled originals release with the ARFrame here rather than riding the
+            // ~1s encode+save pipeline.
+            let depthMap = Self.detachedCopy(frame.sceneDepth?.depthMap)
+            let confidenceMap = Self.detachedCopy(frame.sceneDepth?.confidenceMap)
+            let segBuffer = self.privacyFilter ? Self.detachedCopy(frame.segmentationBuffer) : nil
+
+            // Measure + encode on a DEDICATED background queue — off both the main thread
+            // AND the shared ioQueue. A native-resolution encode can exceed a second; running
+            // it on the ioQueue head-of-line-blocks queued stream saves, pinning their live
+            // ARFrame pool buffers and starving ARKit (observed on device: a 1668ms encode →
+            // 1.5s frame gap → tracking loss → RoomPlan drift). We dispatch explicitly rather
+            // than run on the completion's own queue because ARKit doesn't document which queue
+            // that is (it may be main). The ioQueue closure later then only does the fast
+            // depth-PNG + file writes. The hi-res pixel buffer is not a live-pool ARFrame
+            // buffer, so retaining it across these hops doesn't affect ARKit's pool.
+            keyframeEncodeQueue.async {
+                // ── Sharpness gate ──
+                // Pose velocity confirmed the DEVICE was still, but in dim light the long
+                // exposure can still blur the photo from hand tremor. Measure actual image
+                // sharpness BEFORE the expensive encode; the gate decision runs on main,
+                // which owns the retry budget. Exposure is recorded, not gated: a dim room
+                // makes EVERY still long-exposure, so gating on it would starve keyframes.
+                let sharpness = Self.laplacianSharpness(of: pixelBuffer)
+                let exposureLabel = exposureDuration > 0 ? String(format: "1/%.0fs", 1.0 / exposureDuration) : "n/a"
+                print("[FrameCapture] Hi-res keyframe captured: \(camW)×\(camH) (depth: \(depthMap != nil), sharpness: \(String(format: "%.0f", sharpness)), exposure: \(exposureLabel))")
+
+                DispatchQueue.main.async {
+                    guard !self.captureEnded else {
+                        self.hiResCaptureInFlight = false
+                        return
+                    }
+                    if sharpness < AppConstants.keyframeSharpnessFloor,
+                       self.keyframeRetryCount < AppConstants.keyframeMaxRetries {
+                        // Too blurred — re-arm the stillness period for another attempt
+                        // (bounded). No shutter feedback for a rejected still.
+                        self.keyframeRetryCount += 1
+                        self.hiResCaptureInFlight = false
+                        self.hasStillnessKeyframe = false
+                        print("[FrameCapture] Keyframe below sharpness floor (\(String(format: "%.0f", sharpness)) < \(String(format: "%.0f", AppConstants.keyframeSharpnessFloor))) — retry \(self.keyframeRetryCount)/\(AppConstants.keyframeMaxRetries)")
+                        return
+                    }
+
+                    // Accepted (sharp enough, or retry budget exhausted — keep the best we
+                    // got, with its measured quality recorded for downstream weighting).
+                    self.keyframeEncodeQueue.async {
+                        guard let keyframeJPEG = PerfDiag.timed("jpeg_encode_hires", warnOverMs: 250, { self.hiResKeyframeJPEG(from: pixelBuffer) }) else {
+                            print("[FrameCapture] Hi-res keyframe JPEG encode failed — dropping")
+                            DispatchQueue.main.async {
+                                self.hiResCaptureInFlight = false
+                                self.hasStillnessKeyframe = false // let the stillness period retry
+                            }
+                            return
+                        }
+
+                        DispatchQueue.main.async {
+                            self.hiResCaptureInFlight = false
+                            self.hiResFailureCount = 0
+                            // Recording may have stopped while the encode ran — the metadata
+                            // writers have already run, so a late save would write an orphan
+                            // frame into the exported capture directory.
+                            guard !self.captureEnded else { return }
+                            // pixelBuffer: nil — the JPEG is pre-encoded, so the 12MP buffer isn't
+                            // retained across the ioQueue hop (depth/seg are separate small buffers).
+                            let admitted = self.processAndSaveFrame(
+                                pixelBuffer: nil,
+                                camW: camW,
+                                camH: camH,
+                                transform: transform,
+                                intrinsics: intrinsics,
+                                depthMap: depthMap,
+                                confidenceMap: confidenceMap,
+                                segBuffer: segBuffer,
+                                currentIndex: 0,
+                                isKeyframe: true,
+                                preEncodedJPEG: keyframeJPEG,
+                                keyframeQuality: (sharpness: sharpness, exposureDuration: exposureDuration)
+                            )
+                            // Feedback and coverage marking only for frames that actually entered
+                            // the save pipeline — a backlog drop re-arms the stillness period instead.
+                            if admitted {
+                                self.noteKeyframeSaved(transform: transform, intrinsics: intrinsics, width: camW, height: camH, depthMap: depthMap)
+                            } else {
+                                self.hasStillnessKeyframe = false
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Injects a pixel buffer from a proxy capture device (e.g., Meta Ray-Ban stream).
@@ -414,6 +849,10 @@ class FrameCaptureSession {
         }
     }
 
+    /// Returns whether the frame was admitted to the save pipeline (false = dropped at
+    /// the in-flight backlog cap). Admission does not guarantee the encode/write
+    /// succeeds, but callers use it to keep UI counters honest under backpressure.
+    @discardableResult
     private func processAndSaveFrame(
         pixelBuffer: CVPixelBuffer?,
         camW: Int,
@@ -423,23 +862,34 @@ class FrameCaptureSession {
         depthMap: CVPixelBuffer?,
         confidenceMap: CVPixelBuffer?,
         segBuffer: CVPixelBuffer?,
-        currentIndex: Int
-    ) {
+        currentIndex: Int,
+        isKeyframe: Bool = false,
+        preEncodedJPEG: Data? = nil,
+        keyframeQuality: (sharpness: Float, exposureDuration: Double)? = nil
+    ) -> Bool {
         // Backlog guard: if frame encodes are falling behind, DROP this frame instead of piling
         // up retained CVPixelBuffers. That pile-up is what starves ARKit's frame pool ("retaining
         // N ARFrames") and ultimately stalls/loses VIO tracking — and any data captured after VIO
         // loss is corrupt. Capture is movement-gated, so the next motion re-triggers a save.
         // Admit-and-increment atomically; the ioQueue closure decrements in its defer.
+        //
+        // PRE-ENCODED keyframes are EXEMPT from the cap: the expensive ~12MP JPEG encode already
+        // ran off-queue in the hi-res completion, they carry no live-pool pixel buffer into the
+        // ioQueue closure, and they are rare + high-value — so they can't contribute to pool
+        // starvation and must not be dropped by transient stream backlog. Stream-fallback
+        // keyframes (hiResUnavailable latched) DO carry the live-pool buffer, so they queue
+        // like any stream frame.
+        let exemptKeyframe = isKeyframe && preEncodedJPEG != nil
         let admittedDepth: Int? = inFlightSaves.withLock { count -> Int? in
-            guard count < AppConstants.maxFramesInFlight else { return nil }
+            guard exemptKeyframe || count < AppConstants.maxFramesInFlight else { return nil }
             count += 1
             return count
         }
         guard let depth = admittedDepth else {
             if PerfDiag.enabled { PerfDiag.log("capture frame DROPPED — backlog at cap (\(AppConstants.maxFramesInFlight))") }
-            return
+            return false
         }
-        if PerfDiag.enabled && depth > 1 { PerfDiag.log("capture I/O backlog: \(depth) frames in flight") }
+        if PerfDiag.enabled && depth > 1 { PerfDiag.log("[PerfDiag] capture I/O backlog: \(depth) frames in flight") }
         ioQueue.async { [weak self] in
             defer { self?.inFlightSaves.withLock { $0 -= 1 } }
             guard let self = self, let imagesDir = self.imagesDir else { return }
@@ -466,6 +916,10 @@ class FrameCaptureSession {
             var finalJpegData: Data
             if self.isMockingImages {
                 finalJpegData = TestDataGenerator.generateImage(for: currentIndex, w: camW, h: camH, transform: transform, intrinsics: intrinsics)
+            } else if let preEncodedJPEG = preEncodedJPEG {
+                // Keyframe path: the ~12MP encode already ran off-queue (hi-res completion),
+                // so the ioQueue only does the fast depth-PNG + file writes here.
+                finalJpegData = preEncodedJPEG
             } else {
                 guard let pBuf = pixelBuffer else { return }
                 guard let jpegData = PerfDiag.timed("jpeg_encode", warnOverMs: 50, { self.pixelBufferToJPEG(pBuf) }) else { return }
@@ -576,18 +1030,34 @@ class FrameCaptureSession {
                     wroteConfidence = true
                 }
 
-                if self.globalIntrinsics == nil {
+                let frameIntrinsics = CameraIntrinsics(
+                    fx: intrinsics[0][0],
+                    fy: intrinsics[1][1],
+                    cx: intrinsics[2][0],
+                    cy: intrinsics[2][1]
+                )
+
+                // Session-global intrinsics describe the video stream. Hi-res keyframes have
+                // different dimensions/intrinsics, so never let one seed the globals — writers
+                // emit per-frame overrides for frames that differ from the globals.
+                if self.globalIntrinsics == nil && !isKeyframe {
                     self.imageWidth = camW
                     self.imageHeight = camH
-                    self.globalIntrinsics = CameraIntrinsics(
-                        fx: intrinsics[0][0],
-                        fy: intrinsics[1][1],
-                        cx: intrinsics[2][0],
-                        cy: intrinsics[2][1]
-                    )
+                    self.globalIntrinsics = frameIntrinsics
                 }
 
-                self.frames.append(FrameData(index: index, transform: transform, hasDepth: wroteDepth, hasConfidence: wroteConfidence))
+                self.frames.append(FrameData(
+                    index: index,
+                    transform: transform,
+                    hasDepth: wroteDepth,
+                    hasConfidence: wroteConfidence,
+                    width: camW,
+                    height: camH,
+                    intrinsics: frameIntrinsics,
+                    isKeyframe: isKeyframe,
+                    sharpness: keyframeQuality?.sharpness,
+                    exposureDuration: keyframeQuality?.exposureDuration
+                ))
                 let newlyAddedCount = self.frames.count
 
                 DispatchQueue.main.async {
@@ -597,6 +1067,7 @@ class FrameCaptureSession {
                 try? FileManager.default.removeItem(at: rgbPath)
             }
         }
+        return true
     }
 
     // MARK: - transforms.json
@@ -624,6 +1095,22 @@ class FrameCaptureSession {
             // Reference depth/confidence only when the file was actually written for this frame.
             if frame.hasDepth { entry["depth_file_path"] = "depth/frame_\(paddedIndex).png" }
             if frame.hasConfidence { entry["confidence_file_path"] = "confidence/frame_\(paddedIndex).png" }
+            // Hi-res keyframes differ from the session-global (video stream) resolution:
+            // emit per-frame intrinsics/dimensions, which Nerfstudio reads as overrides.
+            if frame.width != imageWidth || frame.height != imageHeight {
+                entry["fl_x"] = frame.intrinsics.fx
+                entry["fl_y"] = frame.intrinsics.fy
+                entry["cx"] = frame.intrinsics.cx
+                entry["cy"] = frame.intrinsics.cy
+                entry["w"] = frame.width
+                entry["h"] = frame.height
+            }
+            // Mark sharp stillness keyframes so the splat pipeline can weight them higher,
+            // with measured quality when available (sharpness = Laplacian variance of luma,
+            // higher = sharper; exposure in seconds).
+            if frame.isKeyframe { entry["is_keyframe"] = true }
+            if let sharpness = frame.sharpness { entry["sharpness"] = sharpness }
+            if let exposure = frame.exposureDuration { entry["exposure_duration_s"] = exposure }
             frameEntries.append(entry)
         }
 
@@ -647,7 +1134,7 @@ class FrameCaptureSession {
     // MARK: - Polycam Camera JSONs
 
     private func writePolycamCameras(to directory: URL) {
-        guard let intrinsics = globalIntrinsics,
+        guard globalIntrinsics != nil,
               let camerasDir = camerasDir else { return }
 
         for frame in frames {
@@ -655,20 +1142,27 @@ class FrameCaptureSession {
             let paddedIndex = String(format: "%05d", frame.index)
 
             // Polycam uses t_00..t_23 (3×4 flattened, row-major, omitting last row [0,0,0,1])
-            // ARKit transform is column-major, so we transpose
+            // ARKit transform is column-major, so we transpose.
+            // Intrinsics/dimensions are per-frame: hi-res keyframes are captured at native
+            // photo resolution, larger than the video-stream frames.
             var cameraJSON: [String: Any] = [
                 "t_00": mat.columns.0.x, "t_01": mat.columns.1.x, "t_02": mat.columns.2.x, "t_03": mat.columns.3.x,
                 "t_10": mat.columns.0.y, "t_11": mat.columns.1.y, "t_12": mat.columns.2.y, "t_13": mat.columns.3.y,
                 "t_20": mat.columns.0.z, "t_21": mat.columns.1.z, "t_22": mat.columns.2.z, "t_23": mat.columns.3.z,
-                "fx": intrinsics.fx,
-                "fy": intrinsics.fy,
-                "cx": intrinsics.cx,
-                "cy": intrinsics.cy,
-                "width": imageWidth,
-                "height": imageHeight,
+                "fx": frame.intrinsics.fx,
+                "fy": frame.intrinsics.fy,
+                "cx": frame.intrinsics.cx,
+                "cy": frame.intrinsics.cy,
+                "width": frame.width,
+                "height": frame.height,
                 "blur_score": 1.0, // frames passed blur rejection are assumed sharp
                 "image_path": "images/frame_\(paddedIndex).jpg"
             ]
+            if frame.isKeyframe { cameraJSON["is_keyframe"] = true }
+            // Measured keyframe quality (blur_score's semantics are left untouched for
+            // compatibility; these are additive keys).
+            if let sharpness = frame.sharpness { cameraJSON["sharpness"] = sharpness }
+            if let exposure = frame.exposureDuration { cameraJSON["exposure_duration_s"] = exposure }
             // Reference depth/confidence only when the file was actually written for this frame.
             if frame.hasDepth { cameraJSON["depth_path"] = "depth/frame_\(paddedIndex).png" }
             if frame.hasConfidence { cameraJSON["confidence_path"] = "confidence/frame_\(paddedIndex).png" }
@@ -754,6 +1248,24 @@ class FrameCaptureSession {
             metadata["boundary_anchor"] = boundaryDict
         }
 
+        // Sharp stillness keyframes (hi-res stills when supported) — counted from the frames
+        // array (ioQueue-owned) rather than the main-thread UI counter to avoid a data race.
+        metadata["keyframe_count"] = frames.filter { $0.isKeyframe }.count
+
+        // Photo-coverage voxel stats: how much of the depth-scanned geometry was covered
+        // by sharp keyframes. Lets the backend triage datasets (low fraction = splat
+        // texture quality will be sweep-frame limited).
+        if let stats = photoCoverageStats, stats.occupied > 0 {
+            metadata["photo_coverage"] = [
+                "covered_voxels": stats.covered,
+                "occupied_voxels": stats.occupied,
+                "fraction": Double(stats.covered) / Double(stats.occupied),
+                "voxel_size_m": Double(AppConstants.photoCoverageVoxelSize),
+                "mean_still_overlap": stats.meanStillOverlap,
+                "standpoint_diversity": stats.standpointDiversity
+            ]
+        }
+
         // Privacy filter: lets the export pipeline apply its privacy passes even when zero
         // segmentation masks were saved (e.g. the stencil never became available), instead
         // of inferring the setting from the masks/ directory alone.
@@ -781,6 +1293,72 @@ class FrameCaptureSession {
         return uiImage.jpegData(compressionQuality: AppConstants.jpegCompressionQuality)
     }
 
+    /// JPEG-encodes a hi-res keyframe still directly from the CIImage, skipping the
+    /// CGImage/UIImage hop of `pixelBufferToJPEG` — that intermediate is a ~47MB BGRA
+    /// bitmap at 12MP, a needless memory spike on 4GB devices.
+    private func hiResKeyframeJPEG(from pixelBuffer: CVPixelBuffer) -> Data? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let colorSpace = ciImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let quality = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
+        return hiResCIContext.jpegRepresentation(
+            of: ciImage,
+            colorSpace: colorSpace,
+            options: [quality: AppConstants.jpegCompressionQuality]
+        )
+    }
+
+    /// Copies a small CVPixelBuffer (depth/confidence/segmentation) into freshly allocated
+    /// memory so the original — which may belong to ARKit's live capture pool — can be
+    /// released immediately instead of riding the ~1s keyframe encode+save pipeline.
+    /// Returns the original on allocation failure (behavior degrades to the old retention).
+    private static func detachedCopy(_ source: CVPixelBuffer?) -> CVPixelBuffer? {
+        guard let source = source else { return nil }
+        var copyOut: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            CVPixelBufferGetWidth(source),
+            CVPixelBufferGetHeight(source),
+            CVPixelBufferGetPixelFormatType(source),
+            nil,
+            &copyOut
+        )
+        guard status == kCVReturnSuccess, let copy = copyOut else { return source }
+
+        CVPixelBufferLockBaseAddress(source, .readOnly)
+        CVPixelBufferLockBaseAddress(copy, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(copy, [])
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+        }
+
+        let planes = max(CVPixelBufferGetPlaneCount(source), 1)
+        for plane in 0..<planes {
+            let planar = CVPixelBufferIsPlanar(source)
+            guard let src = planar
+                    ? CVPixelBufferGetBaseAddressOfPlane(source, plane)
+                    : CVPixelBufferGetBaseAddress(source),
+                  let dst = planar
+                    ? CVPixelBufferGetBaseAddressOfPlane(copy, plane)
+                    : CVPixelBufferGetBaseAddress(copy) else { return source }
+            let srcRowBytes = planar
+                ? CVPixelBufferGetBytesPerRowOfPlane(source, plane)
+                : CVPixelBufferGetBytesPerRow(source)
+            let dstRowBytes = planar
+                ? CVPixelBufferGetBytesPerRowOfPlane(copy, plane)
+                : CVPixelBufferGetBytesPerRow(copy)
+            let rows = planar ? CVPixelBufferGetHeightOfPlane(source, plane) : CVPixelBufferGetHeight(source)
+            if srcRowBytes == dstRowBytes {
+                memcpy(dst, src, rows * srcRowBytes)
+            } else {
+                let rowBytes = min(srcRowBytes, dstRowBytes)
+                for row in 0..<rows {
+                    memcpy(dst + row * dstRowBytes, src + row * srcRowBytes, rowBytes)
+                }
+            }
+        }
+        return copy
+    }
+
     private func confidenceMapToPNG(_ confidenceBuffer: CVPixelBuffer) -> Data? {
         let ciImage = CIImage(cvPixelBuffer: confidenceBuffer)
         guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return nil }
@@ -796,21 +1374,27 @@ class FrameCaptureSession {
 
         let width = CVPixelBufferGetWidth(depthBuffer)
         let height = CVPixelBufferGetHeight(depthBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthBuffer)
         guard let baseAddress = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
-
-        let floatBuffer = baseAddress.assumingMemoryBound(to: Float32.self)
 
         // Convert float meters to UInt16 millimeters.
         // Reuse a session-scoped buffer to avoid a per-frame allocation. Every pixel is
         // written exactly once below, so stale contents from the previous frame don't leak.
+        // Access rows via bytesPerRow stride — CVPixelBuffer may pad rows beyond width*4.
         let count = width * height
         if depthScratch.count != count {
             depthScratch = [UInt16](repeating: 0, count: count)
         }
+        let floatsPerRow = bytesPerRow / MemoryLayout<Float32>.stride
         depthScratch.withUnsafeMutableBufferPointer { out in
-            for i in 0..<count {
-                let meters = floatBuffer[i]
-                out[i] = meters.isFinite ? UInt16(min(max(meters * 1000.0, 0), 65535)) : 0
+            let floatBuffer = baseAddress.assumingMemoryBound(to: Float32.self)
+            for y in 0..<height {
+                let rowStart = y * floatsPerRow
+                let outStart = y * width
+                for x in 0..<width {
+                    let meters = floatBuffer[rowStart + x]
+                    out[outStart + x] = meters.isFinite ? UInt16(min(max(meters * 1000.0, 0), 65535)) : 0
+                }
             }
         }
 
@@ -915,6 +1499,86 @@ class FrameCaptureSession {
             DispatchQueue.main.async {
                 self?.blurWarningReason = nil
             }
+        }
+    }
+
+    // MARK: - Capture Quality Helpers
+
+    /// Variance of the 3×3 Laplacian over the luma plane — the standard cheap focus/blur
+    /// metric (higher = sharper). Samples every `keyframeSharpnessStride`-th pixel (~760K
+    /// samples on a 12MP still, a few ms on a background queue); each sample's Laplacian
+    /// uses immediate ±1 neighbors so the measure reflects true pixel-level edge energy.
+    /// Returns 0 when the buffer isn't the expected bi-planar YCbCr camera format.
+    private static func laplacianSharpness(of pixelBuffer: CVPixelBuffer) -> Float {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        // Luma is plane 0 of the bi-planar YCbCr formats ARKit delivers.
+        guard CVPixelBufferGetPlaneCount(pixelBuffer) >= 1,
+              let base = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return 0 }
+        let width = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+        let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        guard width > 2, height > 2 else { return 0 }
+        let luma = base.assumingMemoryBound(to: UInt8.self)
+
+        let step = max(1, AppConstants.keyframeSharpnessStride)
+        var sum = 0.0
+        var sumSquares = 0.0
+        var count = 0
+        var row = step
+        while row < height - 1 {
+            let rowStart = row * rowBytes
+            var col = step
+            while col < width - 1 {
+                let center = Int(luma[rowStart + col])
+                let lap = 4 * center
+                    - Int(luma[rowStart + col - 1]) - Int(luma[rowStart + col + 1])
+                    - Int(luma[rowStart - rowBytes + col]) - Int(luma[rowStart + rowBytes + col])
+                sum += Double(lap)
+                sumSquares += Double(lap * lap)
+                count += 1
+                col += step
+            }
+            row += step
+        }
+        guard count > 0 else { return 0 }
+        let mean = sum / Double(count)
+        return Float(sumSquares / Double(count) - mean * mean)
+    }
+
+    /// Compute the total rotation angle (radians) between two 4×4 pose transforms.
+    /// Uses quaternion dot product for a robust, gimbal-lock-free angular delta.
+    private func extractRotationAngle(from a: simd_float4x4, to b: simd_float4x4) -> Float {
+        let qa = simd_quaternion(a)
+        let qb = simd_quaternion(b)
+        let dot = abs(simd_dot(qa, qb))
+        return 2.0 * acos(min(dot, 1.0))
+    }
+
+    /// Whether capture audio (shutter click + chime) is enabled. Defaults to on when unset.
+    private var captureAudioOn: Bool {
+        (UserDefaults.standard.object(forKey: AppConstants.Key.captureAudioEnabled) as? Bool) ?? true
+    }
+
+    /// Shutter click + crisp haptic when a keyframe is captured at a stillness point.
+    /// The haptic always fires (people scan with the ringer off); only audio is gated.
+    private func playShutterClick() {
+        let audioOn = captureAudioOn
+        DispatchQueue.main.async {
+            self.shutterHaptic.impactOccurred()
+            self.shutterHaptic.prepare() // keep the Taptic Engine warm for the next keyframe
+            if audioOn { AudioServicesPlaySystemSound(1108) }
+        }
+    }
+
+    /// Gentle chime + soft haptic when the device enters confirmed stillness.
+    private func playStillnessChime() {
+        let audioOn = captureAudioOn
+        DispatchQueue.main.async {
+            self.stillnessHaptic.impactOccurred(intensity: AppConstants.stillnessHapticIntensity)
+            self.stillnessHaptic.prepare()
+            if audioOn { AudioServicesPlaySystemSound(1057) }
         }
     }
 }

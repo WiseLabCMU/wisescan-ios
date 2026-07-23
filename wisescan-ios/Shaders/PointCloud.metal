@@ -120,9 +120,18 @@ void projectPointCloud(uint2 id [[thread_position_in_grid]],
         return;
     }
 
-    // Confidence filter: 0=Low, 1=Medium, 2=High. Only keep High confidence.
+    // Confidence filter: 0=Low, 1=Medium, 2=High. Keep Medium and High at ALL ranges.
+    // Confidence drops below High near the LiDAR's minimum range (~25cm), on
+    // glossy/dark materials, and — device-observed — GLOBALLY when the sensor duty-
+    // cycles under thermal pressure (thermal=serious late-scan): a High-only filter
+    // (and even a close-range-gated Medium) blanked the whole live cloud for
+    // 0.5-1.5s bursts, leaving only the stale accumulated voxels. Medium everywhere
+    // keeps the live cloud solid through all three cases; the cost is silhouette
+    // "flying pixel" speckle at depth edges, softened by the reduced Medium quad
+    // size below. Visualization only: voxel INTEGRATION (integrateVoxels below)
+    // stays High-only, so accumulated/exported data quality is unchanged.
     uint conf = confidenceTexture.read(id).r;
-    if (conf < 2) {
+    if (conf < 1) {
         colorOutput.write(float4(0, 0, 0, 0), id);
         writeVertex(vertices, baseVertex + 0, zero_pos, zero_uv);
         writeVertex(vertices, baseVertex + 1, zero_pos, zero_uv);
@@ -173,8 +182,13 @@ void projectPointCloud(uint2 id [[thread_position_in_grid]],
     float4 worldSpacePosition = uniforms.cameraTransform * float4(cameraSpacePosition, 1.0);
     float3 center = worldSpacePosition.xyz;
 
-    // Billboard quad: scale size with depth for consistent visual density
+    // Billboard quad: scale size with depth for consistent visual density.
+    // Medium-confidence points (admitted at close range only) render smaller —
+    // any residual noise reads as fine grain instead of full-size shimmer.
     float halfSize = clamp(depth * 0.004, 0.0015, 0.008);
+    if (conf < 2) {
+        halfSize *= 0.7;
+    }
 
     // Camera right and up vectors for screen-facing billboards
     float3 camRight = float3(uniforms.cameraTransform[0][0],
@@ -317,14 +331,22 @@ void extractVoxelQuads(uint id [[thread_position_in_grid]],
         voxelOrigin.z + (float(vx.gridZ) + halfDim + 0.5) * voxelCellSize
     );
 
-    // Push the quad slightly away from the camera so live points always render in front.
+    // Push the quad away from the camera so live points always render in front.
+    // Live points sit at measured depth; the voxel center is quantized to the cell,
+    // so it can be up to half the cell diagonal (~0.87 * cellSize) NEARER the camera
+    // than the surface the live point measured. Pushing by a full cell guarantees the
+    // accumulated quad loses the depth test whenever both sample the same surface
+    // (the postPass sort group already breaks exact ties in the live cloud's favor).
+    // Recomputed per extraction (~2Hz) on the GPU — zero per-frame CPU.
     float3 delta = uniforms.camPos - center;
     float dist = length(delta);
     float3 pushDir = dist > 0.001 ? delta / dist : float3(0.0);
-    float3 biasedCenter = center - pushDir * 0.002;
+    float3 biasedCenter = center - pushDir * voxelCellSize;
 
-    // Distance-based size so quads stay gap-free (cellSize near, larger far).
-    float halfSize = clamp(dist * 0.008, 0.01, 0.02);
+    // Distance-based size so quads stay gap-free: never below half a cell (2cm quad =
+    // one cell, the gap-free floor), growing toward the live-point scale (0.004/m)
+    // rather than double it — accumulated voxels read closer to the live cloud's grain.
+    float halfSize = clamp(dist * 0.005, 0.01, 0.015);
     float3 rightVec = uniforms.right * halfSize;
     float3 upVec = uniforms.up * halfSize;
 

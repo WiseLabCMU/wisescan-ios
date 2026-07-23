@@ -21,6 +21,26 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 | **Mesh Preview** | ✅ Colored 3D model | ❌ | ❌ |
 | **Server Reconstruction** | Full pipeline | Photogrammetry only | Photogrammetry only |
 
+### Hi-Res Still Keyframe Resolution
+
+When the device is held still, the app requests a native-resolution still via `ARSession.captureHighResolutionFrame` (iOS 16+). **The still's resolution is determined by the active video format's camera configuration**, not by the device alone: standard (non-hiRes) video formats deliver a modestly upscaled sensor readout, while formats flagged `isRecommendedForHighResolutionFrameCapturing` bind the full photo sensor. hiRes **16:9** video formats break Recon3D mesh integration on iPads (zero mesh geometry), but the 4:3 hiRes formats (`1920×1440 @ 30fps [hiRes]`) are mesh-safe — **the app defaults to the highest 4:3 hiRes 30fps format**, falling back to the best standard 4:3 format when none exists. The Developer Mode video-format picker can force any format for per-device testing.
+
+| Device class | Standard 4:3 format | 4:3 [hiRes] format (default) |
+| :--- | :--- | :--- |
+| iPad Pro M2/M4 | 2016×1512 (verified on-device) | **4032×3024 — verified on-device, mesh intact** |
+| iPad Pro A12Z (2020) | untested | **4032×3024 — verified on-device (auto-selected), mesh intact**; 16:9 1080p [hiRes] also verified (4224×2376, narrower FOV) |
+| iPhone Pro (13 Pro and later) | untested | 4032×3024 expected (per Apple's ARKit 6 guidance) — untested |
+| Non-Pro / no LiDAR | n/a (Lite Mode — stream frames only) | n/a |
+
+Scope of the 16:9 mesh breakage: the zero-mesh failure has only been reproduced with the
+**3840×2160 hiRes formats on M-series iPads**. On the A12Z iPad (which offers no 4K
+formats), the 16:9 `1920×1080 @ 30fps [hiRes]` format ran with mesh fully intact — so
+the auto-selection's 4:3 preference is a conservative choice, not a hard requirement,
+and mixed-aspect captures are fine downstream because every frame exports per-frame
+intrinsics/resolution.
+
+To check a device: the `[ARConfig]` launch log lists every supported format with its `[hiRes]` flag and the `◀ SELECTED` marker, and each captured keyframe logs `[FrameCapture] Hi-res keyframe captured: W×H`. Please update this table as devices are verified.
+
 ## Features
 
 - **AR + VR Capture Modes:** AR mode uses camera passthrough with live wireframe mesh overlay; VR mode renders a live depth point cloud on a black background using Metal shaders. Toggle between modes in Settings.
@@ -31,6 +51,7 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 - **Scan4D (Rescan & Link Adjacent):** Group scans by Location and set the workflow intent when saving. The two intents capture different dimensions of a space: **Rescan Space** is *temporal* — re-capture the same physical area at a later time so the backend can diff or merge versions; **Link Adjacent Space** is *spatial* — capture a neighboring area and stitch the chunks into one larger model. Both relocalize against the previous scan's `ARWorldMap` and show a configurable ghost-mesh overlay (default: magenta) of that prior capture. Adjacent chunks join at a shared boundary anchor: drop one mid-scan with **Pin & Extend**, or relocalize back to it in a later session through a guided alignment overlay.
 - **Linked-Scan Graph & Combined Mesh:** Each boundary link is recorded in a per-location `stitching.json` manifest (paired anchor transforms + compass headings) and bundled in every Scan4D export. The Scans tab visualizes chained scans as a node graph and can render all linked scans together in one combined-mesh viewer.
 - **Privacy Filtering:** A live red-eye indicator marks detected people on-screen, and person regions are pixelated in exported frames and zeroed out of depth maps. All three are driven by ARKit's person-segmentation stencil (no per-frame Vision pass); one body-center 3D anchor per person is unprojected from depth for red privacy markers on mesh previews.
+- **Capture Quality (Hi-Res Stillness Keyframes):** When the device is held still, the app captures a native-resolution still photo (`ARSession.captureHighResolutionFrame`, up to ~12MP) as a sharp keyframe alongside the video-stream frames — the AR stream stays on a mesh-friendly format. A center reticle fills as the device settles, and a shutter flash/click/haptic confirms each keyframe. In AR mode, the coverage overlay shows three states: green (unscanned), amber (depth captured, no photo), and clear camera feed (photo-grade). Photo coverage is tracked on a world-space voxel grid stamped from each keyframe's depth map (so surfaces behind walls are never falsely marked), and the coach nudges you to pause on the amber areas when photo coverage falls behind the mesh. Keyframes are flagged in exports (`is_keyframe`) and weighted higher during vertex coloring; `scan4d_metadata.json` records a `photo_coverage` fraction so backends can triage datasets.
 - **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
 - **Developer Mode:** Toggleable debugging tools — synthetic IMU/camera/depth injection for Simulator testing and performance diagnostics — with a persistent banner across all views.
 - **Export & Scan Capture Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses governed by motion-blur rejection and overlapping metrics.
@@ -66,6 +87,7 @@ wisescan-ios/
 ├── LocationManager.swift        # GPS/heading updates for scan metadata
 ├── PermissionsOverlay.swift     # Camera/AR permission request UI
 ├── SettingsView.swift           # Upload URL, RAW settings, capture mode, Developer Mode
+├── StillnessReticle.swift       # Capture-quality reticle: ring fills as device settles for a keyframe
 ├── ScanCoach.swift              # Rules engine: 4-tier priority coaching tips (~1Hz evaluation)
 ├── CoachBarView.swift           # Coach bar UI: color-coded tip banner with swipe-to-dismiss
 ├── SpaceAnalyzer.swift          # Pre-scan analysis engine: 360° yaw tracker, report builder

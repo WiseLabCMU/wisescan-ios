@@ -55,6 +55,18 @@
     "confidence_path": {
       "type": "string",
       "description": "Relative path to the associated depth confidence map."
+    },
+    "is_keyframe": {
+      "type": "boolean",
+      "description": "True for sharp stillness keyframes (hi-res stills captured while the device was stationary). These frames may have a higher width/height than the video-stream frames."
+    },
+    "sharpness": {
+      "type": "number",
+      "description": "Measured keyframe sharpness: variance of the 3x3 Laplacian over the luma plane (higher = sharper). Only present on keyframes. Additive key — blur_score's assumed 1.0 semantics are unchanged."
+    },
+    "exposure_duration_s": {
+      "type": "number",
+      "description": "Camera exposure duration in seconds at keyframe capture. Only present on keyframes."
     }
   },
   "required": [

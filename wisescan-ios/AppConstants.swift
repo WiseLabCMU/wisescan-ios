@@ -42,11 +42,15 @@ enum AppConstants {
         static let hideLivePoints = "hideLivePoints"
         static let perfDiagnostics = "perfDiagnostics"
         static let pauseVRCompute = "pauseVRCompute"
+        static let vrBloomEnabled = "vrBloomEnabled"
         static let semanticLabeling = "semanticLabeling"
         static let memDiagForceReclaim = "memDiagForceReclaim"
-        static let enabledSemanticClasses = "enabledSemanticClasses"
+        static let meshClassifier = "meshClassifier"
         static let scanCoachingEnabled = "scanCoachingEnabled"
+        static let colorizeOnPostprocess = "colorizeOnPostprocess"
+        static let registerLegacyScans = "registerLegacyScans"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
+        static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
     }
 
     // MARK: - Default Values
@@ -57,7 +61,7 @@ enum AppConstants {
     static var uploadURL: String {
         isTestFlight ? "https://wiselambda4.lan.cmu.edu/wisescan-uploads/" : ""
     }
-    static let overlapMax: Double = 60.0
+    static let overlapMax: Double = 60.0                           // 60%: fewer redundant motion frames now that sharp stills carry texture detail (photogrammetry overlap rule of thumb)
     static let rejectBlur: Bool = true
     static let developerMode: Bool = false
     static let mockIMU: Bool = false
@@ -73,6 +77,7 @@ enum AppConstants {
     static let hideLivePoints: Bool = false
     static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
+    static let vrBloomEnabled: Bool = false     // Developer Mode: VR point-cloud bloom post-process (off by default — device A/B found it unmissed with live points visible; helps most when Hide Live Points is on)
     static let semanticLabeling: Bool = true    // Developer Mode: disable entire RoomPlan pipeline to reduce memory
     /// Developer Mode, OFF by default even in dev. When on, [MemDiag] teardown brackets call
     /// `malloc_zone_pressure_relief` before measuring footprint, forcing the allocator to return
@@ -81,25 +86,34 @@ enum AppConstants {
     /// an attribution session, never leave it on. Doesn't reclaim Metal/GPU buffers (those free on
     /// RealityKit's schedule), so the delta is a floor on what a subsystem releases.
     static let memDiagForceReclaim: Bool = false
-    /// Deferred RoomPlan build: max time the save pipeline waits (off-main) for RoomBuilder to
-    /// reconstruct the room from CapturedRoomData before writing roomplan.json. RoomBuilder is kicked
-    /// off at RoomPlan's didEndWith (post-stop) and runs concurrently with the multi-second OBJ build,
-    /// so this rarely elapses; it's a backstop so a RoomBuilder stall can't hang the save.
-    static let roomBuilderTimeoutSeconds: TimeInterval = 20
-    /// Deferred RoomPlan build: max time to wait for the CapturedRoomData itself (separate from the
-    /// reconstruction timeout above). The data is provided at RoomPlan's didEndWith, which fires at
-    /// Stop — long before the save reaches the build — so it's normally already present. Kept short so
-    /// a cold/failed RoomPlan session (didEndWith never fires) bails fast instead of blocking the save
-    /// queue for the full reconstruction timeout.
-    static let roomPlanDataWaitSeconds: TimeInterval = 3
-
-    /// Default enabled semantic classes (JSON-encoded Set<String>).
-    /// Walls and doors are on by default; all others off. Ceiling is not yet
-    /// supported by RoomPlan and is marked non-configurable.
-    static let enabledSemanticClassesDefault: String = {
-        let defaults: Set<String> = ["wall", "door"]
-        return (try? JSONEncoder().encode(defaults)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
-    }()
+    /// Use `.meshWithClassification` scene reconstruction instead of plain `.mesh`. Default ON:
+    /// benched 2026-07 (same room, on vs off, AR and VR modes) at no measurable CPU delta and
+    /// ~70–100 MB memory — affordable, and the per-face labels are what lets us split wall vs
+    /// non-wall geometry (plane registration ghost, decimated rescan reference). The toggle remains
+    /// in Developer Mode so the A/B stays re-runnable; each run stamps meshClassifier=on/off at
+    /// RECORD-START. Varies ONLY the ARKit classifier — RoomPlan (semanticLabeling) is independent.
+    static let meshClassifier: Bool = true
+    /// DECISION 3: RoomBuilder no longer runs at save (the 2026-07-13 large hot scan starved its
+    /// 3 s data-wait and the scan saved with no room/proxy/registration). It runs at POST-PROCESS
+    /// from the persisted CapturedRoomData sidecar, on a cool device. This is the postprocess-time
+    /// backstop only — generous, since nothing user-blocking waits on it (a wedged RoomBuilder
+    /// shouldn't hang the postprocess queue forever).
+    static let roomBuilderTimeoutSeconds: TimeInterval = 120
+    /// Grace period after a save completes before declaring a scan "bad" (no room data): RoomPlan's
+    /// didEndWith normally delivers CapturedRoomData within a second of Stop, but on a thermally
+    /// throttled device it can land many seconds late — the sidecar is written whenever it arrives,
+    /// so the bad-scan check just needs to wait out the realistic tail before warning the user to
+    /// redo the scan (while they're still standing in the room).
+    static let roomDataBadScanGraceSeconds: TimeInterval = 30
+    /// Colorize as part of Post-process (production setting, default ON). Off = structural-only
+    /// postprocess (room/registration/proxy — fast); coloring can still be run later (re-running
+    /// Post-process picks up whatever is pending).
+    static let colorizeOnPostprocess: Bool = true
+    /// Dev-gated: let legacy scans (saved before scanCaseRaw was persisted) enter retroactive
+    /// registration at postprocess. OFF by default — on an existing install every non-oldest
+    /// legacy scan would light up "needs postprocess" (gating every old location at update),
+    /// and a legacy adjacent-link is indistinguishable from a legacy rescan (false-lock risk).
+    static let registerLegacyScans: Bool = false
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
@@ -110,6 +124,7 @@ enum AppConstants {
     static let voxelDecayInterval: TimeInterval = 0.5        // VR: min seconds between 350K-voxel confidence-decay passes; throttled off every-integration so the voxelQueue can't back up (drove multi-second stalls)
     static let arIdleTeardownSeconds: TimeInterval = 60      // battery: seconds on a non-capture tab before pausing the AR session (camera/sensors off); resumed on return. Long enough that rapid successive scans stay warm.
     static let liveMeshCueVertexThreshold: Int = 500        // "move the camera to start the live mesh" cue shows until this many NEW vertices are captured since recording began (baseline-relative so it also fires in relocalized ghost/stitch flows where the mesh count starts high)
+    static let relocalizationTimeoutSeconds: TimeInterval = 30 // rescan relocalization watchdog: if tracking is still `.relocalizing` (never reaches `.normal`) this long after the prompt appears, surface the "having trouble" guidance + escape UX. Generous: clean rooms settle in 3-9 s but rough/feature-poor rooms legitimately take up to ~43 s, and the panel is non-blocking (auto-dismisses if relocalization then succeeds), so it rescues the forever-hang (self-similar/feature-poor spaces, false loop-closure) without cutting off a slow-but-working settle.
     static let overlapBaseThreshold: Float = 0.15            // movement threshold base for frame capture
     static let overlapMinThreshold: Float = 0.01             // minimum movement threshold
     static let maxColorizationFrames: Int = 150              // max sampled frames for vertex coloring
@@ -141,12 +156,49 @@ enum AppConstants {
     static let earlyScanThresholdSeconds: TimeInterval = 30.0  // first N seconds considered "early scan" for pattern tips
     static let coachMaxDismissCount: Int = 2                   // after this many manual dismissals, tip won't re-show for the session
     static let scanCoachingEnabled: Bool = true                // default for the scan coaching toggle
+    static let captureAudioEnabled: Bool = true                // default for shutter-click + chime sounds
+
+    // MARK: - Capture Quality Constants
+    static let motionBlurAngularVelocity: Float = 0.5          // rad/s (~30°/s) — rotational velocity above which frames are rejected as blurry
+    static let stillnessTranslationalThreshold: Float = 0.02   // m/s — translational velocity below this = "still"
+    static let stillnessAngularThreshold: Float = 0.1          // rad/s — rotational velocity below this = "still"
+    static let stillnessDurationRequired: TimeInterval = 0.3   // seconds device must be still before counting as "sharp" capture
+    static let hiResCaptureTimeoutSeconds: TimeInterval = 5.0  // watchdog: re-request if a hi-res completion never arrives
+    static let hiResMaxFailures: Int = 3                       // consecutive hi-res failures before latching stream-frame fallback
+    static let keyframeSharpnessFloor: Float = 20.0            // Laplacian variance below this = grossly blurred still → retry (conservative: plain walls still pass on sensor noise)
+    static let keyframeSharpnessStride: Int = 4                // sample every Nth luma pixel when measuring sharpness (~760K samples on a 12MP still)
+    static let keyframeMaxRetries: Int = 2                     // blurred-still retries per stillness period before accepting the best we got
+    static let stillnessHapticIntensity: CGFloat = 0.6         // soft haptic strength on entering confirmed stillness
+    static let captureFlashOpacity: Double = 0.5               // peak opacity of the white shutter flash on keyframe capture
+    static let captureFlashDuration: TimeInterval = 0.35       // fade-out duration of the shutter flash
+    static let photoCoverageMaxDistance: Float = 4.0           // m — max distance a keyframe photo credibly captures texture detail
+    static let photoTintColor = SIMD4<Float>(1.0, 0.72, 0.2, 1.0) // amber overlay marking depth-covered-but-unphotographed mesh
+    static let photoTintAlpha: CGFloat = 0.28                  // opacity of the amber "depth only" tint
+    static let photoTintInflation: Float = 0.004               // m — tint mesh inflation along normals (avoids z-fighting the occlusion fill)
+    static let photoTintRebuildInterval: TimeInterval = 1.0    // s — reuse the previous tint mesh for rebuilds inside this window (main-thread MeshResource.generate is the costliest rebuild step)
+    static let vrPhotoTintBlend: Float = 0.4                   // fraction of photoTintColor blended into VR voxels not yet photo-covered (VR analog of the AR amber tint)
+    static let photoCoverageVoxelSize: Float = 0.25            // m — photo-coverage grid cell size (coarse: coverage tracking, not geometry)
+    static let photoCoverageDepthStride: Int = 2               // sample every Nth depth pixel when stamping coverage (256×192 / 2 ≈ 12K samples)
+    static let photoCoverageAnchorFraction: Double = 0.5       // fraction of an anchor's mesh voxels that must be photo-covered to clear its amber tint
+    static let photoCoverageDebtMinVoxels: Int = 40            // min mesh voxels before the coverage-debt coach tip can fire (too little geometry below this)
+    static let photoCoverageDebtFraction: Double = 0.3         // coach nudges "pause for photos" while photo coverage is below this fraction of mesh
+    static let photoCoverageStandpointCell: Float = 0.5        // m — camera-position quantization for the per-voxel standpoint (parallax) mask
+    static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)
+    static let stillOverlapFloor: Double = 0.4                 // coach nudges "overlap your photos" while mean still-to-still overlap is below this (photogrammetry target ~0.6)
+    static let stillParallaxDiversityFloor: Double = 0.15      // coach nudges "step sideways" while under this fraction of photo-covered voxels has ≥2 standpoints
+    static let keyframeFrustumDepth: Float = 0.25             // m — length of the still-capture frustum wedge in the preview
+    static let keyframeStillColor = SIMD4<Float>(0.2, 0.85, 1.0, 1.0)  // cyan — sharp still (keyframe) capture markers
+    static let keyframeMotionColor = SIMD4<Float>(1.0, 0.6, 0.15, 1.0) // amber — motion (sweep) frame markers
+    static let keyframeApexSize: Float = 0.04                 // m — solid cube marking the exact still-capture position
+    static let keyframeMotionScale: Float = 0.6              // motion-frame wedges drawn smaller than stills (many of them; reduce clutter)
+    static let colorizationKeyframeWeight: Float = 3.0         // vertex-color weight bonus for sharp stillness keyframes vs sweep frames
 
     // MARK: - Space Analysis Constants
     static let analysisAmbientLightAlertThreshold: CGFloat = 250  // lux below which lighting is "Very Low" (alert tier — RGB nearly useless)
     static let analysisAmbientLightWarnThreshold: CGFloat = 500   // lux below which lighting is "Dim" (warning tier — reduced quality)
     static let analysisTimeoutSeconds: TimeInterval = 30          // fallback timeout if 360° not reached
     static let analysisYawCompletionDeg: Float = 330              // yaw coverage (degrees) to count as "360°" (allow slight gap)
+    static let analysisYawMaxFillDeg = 45                         // max per-frame yaw delta credited as swept rotation (beyond = tracking snap, credit nothing)
 
     // MARK: - 360° Still Source (Theta OSC spike — feat/still-source-360)
     static let thetaCaptureTimeout: TimeInterval = 20            // max wait for a takePicture command to reach "done"
@@ -188,6 +240,39 @@ enum SemanticViewMode: String, CaseIterable {
     var showFills: Bool { self == .semanticOnly }
 }
 
+/// Three-tier toggle for still/motion capture-pose frustum markers in the mesh preview.
+/// Mirrors `SemanticViewMode`'s cycle-button pattern; defaults to hidden so the preview
+/// stays clean until the user opts in.
+enum KeyframeMarkerMode: String, CaseIterable {
+    /// No capture markers.
+    case none
+    /// Sharp still (keyframe) capture poses only.
+    case stills
+    /// Still + motion (sweep) frame capture poses.
+    case stillsAndMotion
+
+    /// SF Symbol name for the toolbar button.
+    var iconName: String {
+        switch self {
+        case .none:            return "camera.metering.none"
+        case .stills:          return "camera.metering.partial"
+        case .stillsAndMotion: return "camera.metering.matrix"
+        }
+    }
+
+    /// Advance to the next mode in the cycle.
+    var next: KeyframeMarkerMode {
+        switch self {
+        case .none:            return .stills
+        case .stills:          return .stillsAndMotion
+        case .stillsAndMotion: return .none
+        }
+    }
+
+    var showStills: Bool { self != .none }
+    var showMotion: Bool { self == .stillsAndMotion }
+}
+
 // MARK: - Semantic Classification
 
 /// Semantic display classes for AR/VR overlays, HUD, and preview rendering.
@@ -197,16 +282,7 @@ enum SemanticViewMode: String, CaseIterable {
 enum SemanticClass: String, CaseIterable, Codable {
     case none, wall, floor, ceiling, table, seat, door, window, fixture
 
-    /// Whether the user can toggle this class on/off in Settings.
-    /// Ceiling is future-proofed but not yet detected by RoomPlan.
-    var isConfigurable: Bool {
-        switch self {
-        case .none, .ceiling: return false
-        default: return true
-        }
-    }
-
-    /// Brief description of what this class covers (for Settings UI).
+    /// Brief description of what this class covers (for the user-guide color legend).
     var classDescription: String {
         switch self {
         case .none:    return ""
@@ -312,30 +388,3 @@ extension String {
     }
 }
 
-// MARK: - Semantic Class Preference Helper
-
-/// Reads/writes the user's enabled semantic class set from UserDefaults.
-/// Used by the AR/VR capture overlay to filter which classes render in real time.
-/// Mesh previews always show all classes regardless of this preference.
-enum SemanticClassPreference {
-    static func load() -> Set<String> {
-        guard let json = UserDefaults.standard.string(forKey: AppConstants.Key.enabledSemanticClasses),
-              let data = json.data(using: .utf8),
-              let set = try? JSONDecoder().decode(Set<String>.self, from: data) else {
-            // First launch or corrupt: return the compiled-in default set
-            if let data = AppConstants.enabledSemanticClassesDefault.data(using: .utf8),
-               let set = try? JSONDecoder().decode(Set<String>.self, from: data) {
-                return set
-            }
-            return ["wall", "door"]
-        }
-        return set
-    }
-
-    static func save(_ set: Set<String>) {
-        if let data = try? JSONEncoder().encode(set),
-           let json = String(data: data, encoding: .utf8) {
-            UserDefaults.standard.set(json, forKey: AppConstants.Key.enabledSemanticClasses)
-        }
-    }
-}
