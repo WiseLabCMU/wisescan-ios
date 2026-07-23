@@ -37,6 +37,11 @@ struct ScansListView: View {
     /// Shown when a bulk-upload selection mixes already-uploaded and un-uploaded scans.
     @State private var showBulkUploadMixedPrompt = false
     @State private var bulkProgressMessage: String?
+    /// Per-location status during a bulk Post-process, keyed by location id — drives the small
+    /// progress overlay on the grid/graph tiles so a long batch shows WHICH map it's working on
+    /// (the banner alone is ambiguous when scans share names). Mirrors LocationDetailView's
+    /// per-card `bulkColoringMessages` pattern at location granularity.
+    @State private var bulkProcessingByLocation: [UUID: String] = [:]
     @State private var isBulkExporting = false
     @State private var exportItems: [ZipExportItem] = []
     @State private var showExportSheet = false
@@ -77,14 +82,15 @@ struct ScansListView: View {
                         .padding(.vertical, 60)
                     }
                 } else if viewMode == .graph {
-                    StitchGraphView(locations: locations, renderRequest: $renderRequest, isEditing: $isEditing, selectedLocations: $selectedLocations, visibleLocationIds: $graphVisibleLocationIds)
+                    StitchGraphView(locations: locations, renderRequest: $renderRequest, isEditing: $isEditing, selectedLocations: $selectedLocations, visibleLocationIds: $graphVisibleLocationIds, processingByLocation: bulkProcessingByLocation)
                 } else {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 16) {
                             ForEach(locations) { location in
                                 ZStack(alignment: .topTrailing) {
                                     NavigationLink(value: location) {
-                                        LocationGridTile(location: location)
+                                        LocationGridTile(location: location,
+                                                         processingMessage: bulkProcessingByLocation[location.id])
                                     }
                                     .buttonStyle(.plain)
                                     .disabled(isEditing)
@@ -683,6 +689,16 @@ struct ScansListView: View {
             scans: scans,
             modelContext: modelContext,
             progress: { scan, msg in
+                // Tile overlay: show the step on the scan's location while it works; clear when
+                // that scan finishes (a same-location prerequisite original re-claims it on its
+                // own next progress tick).
+                if let locId = scan.location?.id {
+                    if let msg {
+                        bulkProcessingByLocation[locId] = msg
+                    } else {
+                        bulkProcessingByLocation.removeValue(forKey: locId)
+                    }
+                }
                 if let msg {
                     bulkProgressMessage = "\(scan.name): \(msg)"
                 } else {
@@ -692,6 +708,7 @@ struct ScansListView: View {
             },
             completion: {
                 isBulkColoring = false
+                bulkProcessingByLocation.removeAll()
                 exitEditModeWithBanner("✓ Processed \(total) scan\(total == 1 ? "" : "s")")
             }
         )
@@ -839,6 +856,8 @@ enum CaptureIntegrity {
 
 struct LocationGridTile: View {
     let location: ScanLocation
+    /// Non-nil while a bulk Post-process is working this location — shows the step overlay.
+    var processingMessage: String?
     @State private var thumbnailImage: UIImage?
     // Resolved off the main thread in `.task` so the body performs no FileManager I/O.
     @State private var hasMissingWorldMap = false
@@ -925,6 +944,25 @@ struct LocationGridTile: View {
                     .background(Color.black.opacity(0.5))
                     .clipShape(Circle())
                     .padding(8)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            // Bulk Post-process: which step is running on THIS map (long batch, look-alike tiles).
+            if let processingMessage {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        .scaleEffect(0.6)
+                    Text(processingMessage)
+                        .font(.caption2)
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.ultraThinMaterial)
+                .clipShape(Capsule())
+                .padding(.bottom, 8)
             }
         }
         .task(id: location.updatedAt) {
