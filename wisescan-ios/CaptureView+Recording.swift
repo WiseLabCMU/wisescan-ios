@@ -398,8 +398,15 @@ extension CaptureView {
             isWaitingToSave = false
 
             if locationId == nil {
-                newLocationName = ""
-                showNamePrompt = true
+                // Name prompt is DEFERRED to the pipeline's completion (pendingScan stored):
+                // right now the world-map export + mesh/color build are still running on the
+                // live session, and presenting a keyboard/alert over the tearing-down ARView
+                // is the stop-stall anti-pattern (CONTRIBUTING; triage item 5 measured 7s on
+                // the marginal iPad with the alert in the window). Deferring also means the
+                // world-map failure alert (exportWorldMapThenContinue) can never stack under
+                // the naming alert. The save pipeline itself is untouched — only the alert's
+                // timing moves.
+                saveMessage = "Processing scan…"
             } else {
                 isWaitingToSave = true
                 saveMessage = "Coloring mesh..."
@@ -574,6 +581,15 @@ extension CaptureView {
                             self.savePendingScan()
                         } else if capturedLocationId != nil {
                             self.savePendingScan()
+                        } else {
+                            // New space: the pipeline is DONE (world map, mesh, colors all
+                            // persisted to the raw dir) and the AR view has downgraded to
+                            // nominal — now ask for the name on a quiet device (deferred from
+                            // finishStopRecording; see the comment there). Keyboard is instant
+                            // and nothing pose-sensitive can be disturbed anymore.
+                            self.saveMessage = nil
+                            self.newLocationName = ""
+                            self.showNamePrompt = true
                         }
                     }
                 }
