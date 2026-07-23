@@ -945,12 +945,15 @@ struct LocationGridTile: View {
             .padding(8)
         }
         .overlay(alignment: .topTrailing) {
-            // Latest-scan upload state, matching bulk upload's "Latest" scope (see the graph
-            // tile's identical badge in StitchGraphView for the full rationale).
-            if latestScan?.isUploaded == true {
+            // Three-state upload rollup (see the graph tile's identical badge in
+            // StitchGraphView for the rationale): no icon = nothing uploaded; DIMMED
+            // cloud-check = partial (1+ but not all); solid green = every scan uploaded.
+            let uploadedCount = location.scans.filter(\.isUploaded).count
+            if uploadedCount > 0 {
                 Image(systemName: "checkmark.icloud.fill")
                     .font(.caption)
-                    .foregroundColor(.green)
+                    .foregroundColor(uploadedCount == location.scans.count
+                                     ? .green : .green.opacity(0.4))
                     .padding(6)
                     .background(Color.black.opacity(0.5))
                     .clipShape(Circle())
