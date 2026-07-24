@@ -794,15 +794,19 @@ struct ARCoverageView: UIViewRepresentable {
         /// and every record tap bounced off the "establishing tracking" gate with no way out).
         let lastFrameWallMs = Atomic<Int64>(0)
 
-        // ── LiDAR depth-start watchdog (delegate-queue state) ──
-        // A recording on a LiDAR device that never receives a sceneDepth frame means the capture
-        // graph came up wrong (observed 2026-07-24 after a long idle-resume: camera at 60fps
-        // despite the selected 30fps format, FigCaptureSourceRemote err=-17281 storm, zero mesh
-        // anchors for 36s). One config re-run rebuilds the graph — that's exactly what fixed it
-        // manually (stop/discard → record again).
+        // ── LiDAR mesh-start watchdog (delegate-queue state) ──
+        // A recording on a LiDAR device that never produces an ARMeshAnchor means Recon3D is dead
+        // for this scan — the capture graph came up wrong (2026-07-24 runs: 60fps default-format
+        // fallback + Fig err storm after RoomPlan's internal reconfigure; faces=0 for the whole
+        // scan). Mesh anchors are the product-level signal: they subsume a dead depth stream
+        // (mesh needs depth) AND a dead reconstruction on a live stream. Action is a HALT via the
+        // VIO guard — NOT a live config rebuild: re-running the session under an active RoomPlan
+        // crashed ObjectUnderstanding (EXC_BREAKPOINT in OUSession updateWithKeyframes at save,
+        // run 4). The halt's needsTrackingReset gives the NEXT record-start the full fresh
+        // rebuild, which is the manual fix that always worked.
         private var recordStartTimestamp: TimeInterval = 0
-        private var sawSceneDepthThisRecording = false
-        private var depthWatchdogFired = false
+        private var sawMeshAnchorThisRecording = false
+        private var meshWatchdogFired = false
 
         // ── Phase-0 localization diagnostics (log-only; see docs/fix-localization-plan.md).
         //    All delegate-queue state. ──
@@ -1726,9 +1730,24 @@ struct ARCoverageView: UIViewRepresentable {
                 config.frameSemantics.insert(.sceneDepth)
                 changed = true
             }
+            // RoomPlan's internal session run can also silently reset the video format to ARKit's
+            // default (1920×1440 @ 60fps — format[0]). Observed 2026-07-24 run 4: the 60fps
+            // fallback kept Recon3D from ever initializing (faces=0, fps=60 for the whole scan)
+            // and ObjectUnderstanding asserted at save. Re-force our selection in the SAME run()
+            // as the semantics fix — one restart, at the point already proven safe for post-
+            // RoomPlan reconfiguration. The factory re-runs format selection, so a Developer-Mode
+            // format override is respected, not fought.
+            let preferred = ARCoverageView.makeConfiguration().videoFormat
+            if config.videoFormat.framesPerSecond != preferred.framesPerSecond
+                || config.videoFormat.imageResolution != preferred.imageResolution {
+                config.videoFormat = preferred
+                changed = true
+            }
             guard changed else { return }
             session.run(config, options: []) // no reset → preserve tracking/world map and RoomPlan
-            PerfDiag.log("Re-asserted frame semantics after RoomPlan (sceneDepth + personSegmentation)")
+            PerfDiag.log("Re-asserted frame semantics after RoomPlan (sceneDepth + personSegmentation, "
+                + "\(Int(config.videoFormat.imageResolution.width))×\(Int(config.videoFormat.imageResolution.height)) "
+                + "@ \(config.videoFormat.framesPerSecond)fps)")
         }
 
         /// Record-tap escape from a dead session (main thread): if the session hasn't delivered a
@@ -1751,39 +1770,12 @@ struct ARCoverageView: UIViewRepresentable {
                 + " — re-ran configuration to rebuild the capture graph")
         }
 
-        /// Depth-start watchdog remedy (main thread): the recording config's LiDAR depth stream
-        /// never delivered, so rebuild the capture graph by re-running the session with the
-        /// current config after re-forcing everything observed dropped in the failure — the
-        /// 30fps video format (the broken graph ran 60fps), scene reconstruction, and frame
-        /// semantics. `options: []` preserves tracking, anchors, and any initialWorldMap, so a
-        /// rescan's relocalization is untouched. Skips proxy/Lite-style recordings whose config
-        /// never requested depth in the first place.
-        func rebuildCaptureConfiguration() {
-            guard let session = arView?.session,
-                  let config = session.configuration as? ARWorldTrackingConfiguration else { return }
-            guard config.sceneReconstruction != [] || config.frameSemantics.contains(.sceneDepth) else {
-                PerfDiag.log("[Session] depth watchdog: config never requested depth — skipping rebuild")
-                return
-            }
-            if ARCoverageView.supportsLiDAR {
-                config.sceneReconstruction = ARCoverageView.meshReconstructionMode()
-            }
-            if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-                config.frameSemantics.insert(.sceneDepth)
-            }
-            if (privacyFilter || isAnalysisRoomPlan),
-               ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
-                config.frameSemantics.insert(.personSegmentationWithDepth)
-            }
-            if config.videoFormat.framesPerSecond != 30 {
-                // Re-run the factory's format selection (highest mesh-safe 4:3 hiRes 30fps).
-                config.videoFormat = ARCoverageView.makeConfiguration().videoFormat
-            }
-            session.run(config, options: [])
-            PerfDiag.log("[Session] depth watchdog: re-ran capture configuration "
-                + "(\(Int(config.videoFormat.imageResolution.width))×\(Int(config.videoFormat.imageResolution.height)) "
-                + "@ \(config.videoFormat.framesPerSecond)fps)")
-        }
+        // NOTE: there is deliberately no mid-recording config rebuild. Re-running the session
+        // under an active RoomPlan crashed ObjectUnderstanding (EXC_BREAKPOINT in
+        // OUSession updateWithKeyframes at save, 2026-07-24 run 4) — the mesh-start watchdog
+        // HALTS instead, and the halt's needsTrackingReset rebuilds everything at the next
+        // record-start. Live rebuilds are only safe in nominal mode (reviveSessionIfStalled,
+        // above) where RoomPlan is never running.
 
         /// Stops RoomPlan and stores the final CapturedRoom for export.
         /// Call on main thread before recording cleanup.
@@ -2413,23 +2405,29 @@ struct ARCoverageView: UIViewRepresentable {
                 PerfDiag.log("[PerfDiag] ARKit frame gap \(Int(frameGap * 1000))ms (tracking \(normal ? "normal" : "degraded"))")
             }
 
-            // ── LiDAR depth-start watchdog ──
-            // Cost when healthy: two Bool checks per frame (sceneDepth arrives within ~1s and
-            // latches sawSceneDepthThisRecording). Fires at most once per recording.
+            // ── LiDAR mesh-start watchdog ──
+            // Cost when healthy: one Bool check per frame (the first ARMeshAnchor in didAdd
+            // latches sawMeshAnchorThisRecording within a second or two of any movement).
+            // Fires at most once per recording; the main hop re-verifies that this recording
+            // actually wants mesh (skips proxy-streaming and Lite-style configs).
             if isRecording.load(ordering: .relaxed) {
                 if recordStartTimestamp == 0 {
                     recordStartTimestamp = ts
-                    sawSceneDepthThisRecording = false
-                    depthWatchdogFired = false
+                    sawMeshAnchorThisRecording = false
+                    meshWatchdogFired = false
                 }
-                if !sawSceneDepthThisRecording, frame.sceneDepth != nil || frame.smoothedSceneDepth != nil {
-                    sawSceneDepthThisRecording = true
-                }
-                if !sawSceneDepthThisRecording, !depthWatchdogFired, ARCoverageView.supportsLiDAR,
-                   ts - recordStartTimestamp > AppConstants.depthStartWatchdogSeconds {
-                    depthWatchdogFired = true
-                    PerfDiag.log("⛔️ [Session] No LiDAR depth \(Int(AppConstants.depthStartWatchdogSeconds))s into recording — re-running capture configuration")
-                    DispatchQueue.main.async { [weak self] in self?.rebuildCaptureConfiguration() }
+                if !sawMeshAnchorThisRecording, !meshWatchdogFired, ARCoverageView.supportsLiDAR,
+                   ts - recordStartTimestamp > AppConstants.meshStartWatchdogSeconds {
+                    meshWatchdogFired = true
+                    vioGuardArmed = false // one halt/alert is enough (re-arms on the next .normal frame)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, let session = self.arView?.session,
+                              let cfg = session.configuration as? ARWorldTrackingConfiguration,
+                              cfg.sceneReconstruction != [],
+                              !MetaWearableManager.shared.isStreaming else { return }
+                        PerfDiag.log("⛔️ [Session] No mesh anchor \(Int(AppConstants.meshStartWatchdogSeconds))s into recording — reconstruction is dead, halting scan")
+                        self.vioCompromisedBinding?.wrappedValue = true
+                    }
                 }
             } else {
                 recordStartTimestamp = 0
@@ -2581,6 +2579,10 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Track anchor update counts via delegate + build active mesh wireframe
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+            // Mesh-start watchdog: the first ARMeshAnchor proves Recon3D is alive this recording.
+            if !sawMeshAnchorThisRecording, anchors.contains(where: { $0 is ARMeshAnchor }) {
+                sawMeshAnchorThisRecording = true
+            }
             // Detect boundary anchors from loaded ARWorldMap (visual marker only —
             // phase transitions are driven by tracking state in didUpdate frame).
             for anchor in anchors {
