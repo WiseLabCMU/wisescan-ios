@@ -1070,6 +1070,51 @@ class FrameCaptureSession {
         return true
     }
 
+    // MARK: - NaN-safe JSON writing
+
+    /// JSONSerialization does NOT throw a Swift error for non-finite numbers — it raises an
+    /// ObjC `NSInvalidArgumentException` ("Invalid number value (NaN) in JSON write") that
+    /// `try?` cannot catch, killing the app at save time (2026-07-24 M2 run: a non-finite
+    /// value reached a frame entry during a thermal=serious link-adjacent stop). Replace
+    /// non-finite numbers with 0 and collect their key paths so the true source is
+    /// diagnosable from the log. Bool/Int/String are matched first: they bridge through
+    /// NSNumber too, and must pass through untouched.
+    private static func jsonSanitized(_ value: Any, path: String, invalidPaths: inout [String]) -> Any {
+        switch value {
+        case let dict as [String: Any]:
+            var out = [String: Any](minimumCapacity: dict.count)
+            for (key, val) in dict {
+                out[key] = jsonSanitized(val, path: "\(path).\(key)", invalidPaths: &invalidPaths)
+            }
+            return out
+        case let arr as [Any]:
+            return arr.enumerated().map {
+                jsonSanitized($0.element, path: "\(path)[\($0.offset)]", invalidPaths: &invalidPaths)
+            }
+        case is Bool, is Int, is String:
+            return value
+        case let num as Double where !num.isFinite:
+            invalidPaths.append(path)
+            return 0
+        default:
+            return value
+        }
+    }
+
+    /// Serialize + write a JSON payload after sanitizing non-finite numbers (crash-proof
+    /// replacement for the bare `JSONSerialization.data` + `write` pattern).
+    private static func writeJSON(_ object: Any, to url: URL, label: String) {
+        var bad: [String] = []
+        let safe = jsonSanitized(object, path: label, invalidPaths: &bad)
+        if !bad.isEmpty {
+            print("[FrameCapture] ⚠️ \(label): replaced \(bad.count) non-finite value(s) — "
+                + bad.prefix(6).joined(separator: ", "))
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: safe, options: .prettyPrinted) {
+            try? data.write(to: url)
+        }
+    }
+
     // MARK: - transforms.json
 
     private func writeTransformsJSON(to directory: URL) {
@@ -1126,9 +1171,7 @@ class FrameCaptureSession {
         ]
 
         let jsonPath = directory.appendingPathComponent("transforms.json")
-        if let jsonData = try? JSONSerialization.data(withJSONObject: transforms, options: .prettyPrinted) {
-            try? jsonData.write(to: jsonPath)
-        }
+        Self.writeJSON(transforms, to: jsonPath, label: "transforms.json")
     }
 
     // MARK: - Polycam Camera JSONs
@@ -1168,9 +1211,7 @@ class FrameCaptureSession {
             if frame.hasConfidence { cameraJSON["confidence_path"] = "confidence/frame_\(paddedIndex).png" }
 
             let jsonPath = camerasDir.appendingPathComponent("frame_\(paddedIndex).json")
-            if let jsonData = try? JSONSerialization.data(withJSONObject: cameraJSON, options: .prettyPrinted) {
-                try? jsonData.write(to: jsonPath)
-            }
+            Self.writeJSON(cameraJSON, to: jsonPath, label: "cameras/frame_\(paddedIndex).json")
         }
 
         // Write mesh_info.json with basic metadata
@@ -1181,9 +1222,7 @@ class FrameCaptureSession {
             "coordinate_system": "arkit"
         ]
         let meshInfoPath = directory.appendingPathComponent("mesh_info.json")
-        if let jsonData = try? JSONSerialization.data(withJSONObject: meshInfo, options: .prettyPrinted) {
-            try? jsonData.write(to: meshInfoPath)
-        }
+        Self.writeJSON(meshInfo, to: meshInfoPath, label: "mesh_info.json")
     }
 
     // MARK: - Scan4D Metadata
@@ -1279,9 +1318,7 @@ class FrameCaptureSession {
         }
 
         let jsonPath = directory.appendingPathComponent("scan4d_metadata.json")
-        if let jsonData = try? JSONSerialization.data(withJSONObject: metadata, options: .prettyPrinted) {
-            try? jsonData.write(to: jsonPath)
-        }
+        Self.writeJSON(metadata, to: jsonPath, label: "scan4d_metadata.json")
     }
 
     // MARK: - Image Conversion
