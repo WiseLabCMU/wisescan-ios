@@ -44,6 +44,12 @@ extension CaptureView {
             // programmatic extend/alignment start path (awaitStabilizationAndPlacePinB) bypasses
             // toggleRecording and already waits for .normal, so chained scans are unaffected.
             guard scanStats.trackingStatus.isReadyToStartRecording else {
+                // Self-heal a dead session before bouncing: if no ARFrame has arrived for
+                // several seconds the capture graph is wedged (post-idle Fig err storm,
+                // 2026-07-24 run 3) and "establishing tracking" would bounce forever —
+                // re-running the config rebuilds the graph so the NEXT tap succeeds. No-op
+                // while frames are flowing (normal 1–2 s VIO warm-up).
+                scanStore.reviveARSession?()
                 showTransientMessage("Hold steady — establishing tracking…", duration: 3)
                 return
             }

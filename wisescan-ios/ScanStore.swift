@@ -450,6 +450,10 @@ class ScanStore {
     /// path. The box builds the room and writes roomplan.json/_raw whenever both the didEndWith
     /// data and this destination are in hand. Weakly captures the coordinator.
     @ObservationIgnored var setRoomDataPersistDir: ((URL) -> Void)?
+    /// Re-runs the AR session's configuration if no frames have been delivered for several
+    /// seconds — the record button's escape from a wedged capture graph (set by ARCoverageView;
+    /// called from the record tap's "establishing tracking" bounce).
+    @ObservationIgnored var reviveARSession: (() -> Void)?
 
     // MARK: - State Reset
 

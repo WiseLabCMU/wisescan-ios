@@ -138,6 +138,11 @@ struct ARCoverageView: UIViewRepresentable {
         scanStore?.setRoomDataPersistDir = { [weak coordinator = context.coordinator] dir in
             coordinator?.currentDeferredRoomBox()?.setPersistDirectory(dir)
         }
+        // Record-tap escape hatch: lets CaptureView revive a wedged capture graph (no frames
+        // flowing) when the "establishing tracking" gate keeps bouncing the record button.
+        scanStore?.reviveARSession = { [weak coordinator = context.coordinator] in
+            coordinator?.reviveSessionIfStalled()
+        }
         // Genuine map-load failure on the fresh-view path (requested but archive missing/corrupt) —
         // knowable synchronously here. Mirror of the updateUIView relocalization branch; replaces the
         // racy per-frame inference removed from driveAlignmentPhase (see that comment + git log).
@@ -781,6 +786,23 @@ struct ARCoverageView: UIViewRepresentable {
         /// Perf diagnostics: timestamp of the previous ARFrame, to detect gaps in frame
         /// delivery (the signature of ARKit VIO being starved). Touched only on the delegate queue.
         private var lastFrameTimestamp: TimeInterval = 0
+
+        /// Wall-clock (ms) of the most recent ARFrame delivery, readable from any thread.
+        /// 0 = no frame yet. Drives `reviveSessionIfStalled` — the record button's escape from a
+        /// dead capture graph (2026-07-24 run 3: after a battery-idle resume the Fig capture
+        /// source stayed wedged, no frames ever flowed, tracking sat in .initializing forever,
+        /// and every record tap bounced off the "establishing tracking" gate with no way out).
+        let lastFrameWallMs = Atomic<Int64>(0)
+
+        // ── LiDAR depth-start watchdog (delegate-queue state) ──
+        // A recording on a LiDAR device that never receives a sceneDepth frame means the capture
+        // graph came up wrong (observed 2026-07-24 after a long idle-resume: camera at 60fps
+        // despite the selected 30fps format, FigCaptureSourceRemote err=-17281 storm, zero mesh
+        // anchors for 36s). One config re-run rebuilds the graph — that's exactly what fixed it
+        // manually (stop/discard → record again).
+        private var recordStartTimestamp: TimeInterval = 0
+        private var sawSceneDepthThisRecording = false
+        private var depthWatchdogFired = false
 
         // ── Phase-0 localization diagnostics (log-only; see docs/fix-localization-plan.md).
         //    All delegate-queue state. ──
@@ -1709,6 +1731,60 @@ struct ARCoverageView: UIViewRepresentable {
             PerfDiag.log("Re-asserted frame semantics after RoomPlan (sceneDepth + personSegmentation)")
         }
 
+        /// Record-tap escape from a dead session (main thread): if the session hasn't delivered a
+        /// frame for several seconds, the capture graph is wedged (Fig err=-17281 storm after a
+        /// battery-idle resume — tracking then sits in .initializing forever and the record
+        /// button's "establishing tracking" gate bounces every tap with nothing to heal it).
+        /// Re-running the configuration rebuilds the graph; a no-op if frames are flowing and the
+        /// session is merely still initializing (fresh VIO warms up in ~1–2 s on its own).
+        func reviveSessionIfStalled() {
+            let lastMs = lastFrameWallMs.load(ordering: .relaxed)
+            let stalledSecs = lastMs == 0
+                ? Double.greatestFiniteMagnitude
+                : CFAbsoluteTimeGetCurrent() - Double(lastMs) / 1000
+            guard stalledSecs > 3 else { return }
+            guard let session = arView?.session else { return }
+            let config = session.configuration ?? ARCoverageView.makeConfiguration()
+            session.run(config, options: [])
+            PerfDiag.log("[Session] revive: no ARFrame for "
+                + (lastMs == 0 ? "this session" : "\(Int(stalledSecs))s")
+                + " — re-ran configuration to rebuild the capture graph")
+        }
+
+        /// Depth-start watchdog remedy (main thread): the recording config's LiDAR depth stream
+        /// never delivered, so rebuild the capture graph by re-running the session with the
+        /// current config after re-forcing everything observed dropped in the failure — the
+        /// 30fps video format (the broken graph ran 60fps), scene reconstruction, and frame
+        /// semantics. `options: []` preserves tracking, anchors, and any initialWorldMap, so a
+        /// rescan's relocalization is untouched. Skips proxy/Lite-style recordings whose config
+        /// never requested depth in the first place.
+        func rebuildCaptureConfiguration() {
+            guard let session = arView?.session,
+                  let config = session.configuration as? ARWorldTrackingConfiguration else { return }
+            guard config.sceneReconstruction != [] || config.frameSemantics.contains(.sceneDepth) else {
+                PerfDiag.log("[Session] depth watchdog: config never requested depth — skipping rebuild")
+                return
+            }
+            if ARCoverageView.supportsLiDAR {
+                config.sceneReconstruction = ARCoverageView.meshReconstructionMode()
+            }
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+                config.frameSemantics.insert(.sceneDepth)
+            }
+            if (privacyFilter || isAnalysisRoomPlan),
+               ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
+                config.frameSemantics.insert(.personSegmentationWithDepth)
+            }
+            if config.videoFormat.framesPerSecond != 30 {
+                // Re-run the factory's format selection (highest mesh-safe 4:3 hiRes 30fps).
+                config.videoFormat = ARCoverageView.makeConfiguration().videoFormat
+            }
+            session.run(config, options: [])
+            PerfDiag.log("[Session] depth watchdog: re-ran capture configuration "
+                + "(\(Int(config.videoFormat.imageResolution.width))×\(Int(config.videoFormat.imageResolution.height)) "
+                + "@ \(config.videoFormat.framesPerSecond)fps)")
+        }
+
         /// Stops RoomPlan and stores the final CapturedRoom for export.
         /// Call on main thread before recording cleanup.
         func stopRoomPlanSession() {
@@ -2331,9 +2407,32 @@ struct ARCoverageView: UIViewRepresentable {
             let ts = frame.timestamp
             let frameGap = lastFrameTimestamp > 0 ? ts - lastFrameTimestamp : 0
             lastFrameTimestamp = ts
+            lastFrameWallMs.store(Int64(CFAbsoluteTimeGetCurrent() * 1000), ordering: .relaxed)
             if PerfDiag.enabled, frameGap > 0.1 {
                 let normal = frame.camera.trackingState == .normal
                 PerfDiag.log("[PerfDiag] ARKit frame gap \(Int(frameGap * 1000))ms (tracking \(normal ? "normal" : "degraded"))")
+            }
+
+            // ── LiDAR depth-start watchdog ──
+            // Cost when healthy: two Bool checks per frame (sceneDepth arrives within ~1s and
+            // latches sawSceneDepthThisRecording). Fires at most once per recording.
+            if isRecording.load(ordering: .relaxed) {
+                if recordStartTimestamp == 0 {
+                    recordStartTimestamp = ts
+                    sawSceneDepthThisRecording = false
+                    depthWatchdogFired = false
+                }
+                if !sawSceneDepthThisRecording, frame.sceneDepth != nil || frame.smoothedSceneDepth != nil {
+                    sawSceneDepthThisRecording = true
+                }
+                if !sawSceneDepthThisRecording, !depthWatchdogFired, ARCoverageView.supportsLiDAR,
+                   ts - recordStartTimestamp > AppConstants.depthStartWatchdogSeconds {
+                    depthWatchdogFired = true
+                    PerfDiag.log("⛔️ [Session] No LiDAR depth \(Int(AppConstants.depthStartWatchdogSeconds))s into recording — re-running capture configuration")
+                    DispatchQueue.main.async { [weak self] in self?.rebuildCaptureConfiguration() }
+                }
+            } else {
+                recordStartTimestamp = 0
             }
 
             // ── VIO starvation guard ──
