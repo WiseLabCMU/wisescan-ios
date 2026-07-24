@@ -1310,6 +1310,12 @@ class FrameCaptureSession {
         // of inferring the setting from the masks/ directory alone.
         metadata["privacy_filter"] = privacyFilter
 
+        // Low Power Mode at capture stop: LPM throttling is a suspected trigger for silent
+        // tracking excursions under continuous .normal tracking (2026-07-24 run 11: a 10%
+        // battery event mid-scan preceded a 91.8m outlier cluster with no degradation logged)
+        // — recorded so the correlation is provable from the dataset next time.
+        metadata["low_power_mode"] = ProcessInfo.processInfo.isLowPowerModeEnabled
+
         // Semantic labeling: record whether classification was enabled for this session
         let semanticEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.semanticLabeling)
         metadata["semantic_labeling"] = semanticEnabled
