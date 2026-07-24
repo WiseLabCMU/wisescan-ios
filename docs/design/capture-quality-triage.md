@@ -153,6 +153,16 @@ gap-trip deliberately treats as benign recovery.
   continued ("Saving scan… do not move" held past a minute). The crash cut it short, so
   unclear if it would have completed; watch on the next long chain.
 
+**Run 7 (2026-07-24, M2 hot, idle-tap sequence):**
+- Battery **resume path preempted the wedge** (frames flowing by the record tap), so the
+  revive correctly no-op'd — its positive case stays unexercised (needs the intermittent
+  Fig storm); bounded risk, nominal-only.
+- **Mesh watchdog false positive, fixed**: hot post-idle start took ~4 s of VIO init and the
+  user (primed by "hold steady") stood still — the 10 s budget expired as the first anchors
+  landed → spurious halt + mapless Save Anyway. The budget now starts at the recording's
+  **first `.normal` tracking frame**, so VIO init doesn't count against it; a truly dead
+  reconstruction (run 6: `.normal` in ~2 s, meshless forever) still trips.
+
 **Run 5 (2026-07-24, marginal iPad): all green.** Format re-force logged `@ 30fps` on all
 5 record-starts (AR + VR); interruption trip fired mid-rescan; no meshless scans, no
 watchdog/halt false-trips; suspect detector stayed silent on every clean save; **delete
