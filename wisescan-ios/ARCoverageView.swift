@@ -799,6 +799,10 @@ struct ARCoverageView: UIViewRepresentable {
         /// source stayed wedged, no frames ever flowed, tracking sat in .initializing forever,
         /// and every record tap bounced off the "establishing tracking" gate with no way out).
         let lastFrameWallMs = Atomic<Int64>(0)
+        /// Wall-clock (ms) of the most recent frame whose tracking state the record gate would
+        /// accept (not .initializing/.notAvailable). 0 = never this session. The revive's second
+        /// signal: frames flowing but tracking stuck cold since long ago.
+        let lastTrackingReadyWallMs = Atomic<Int64>(0)
 
         // ── LiDAR mesh-start watchdog (delegate-queue state) ──
         // A recording on a LiDAR device that never produces an ARMeshAnchor means Recon3D is dead
@@ -1766,17 +1770,34 @@ struct ARCoverageView: UIViewRepresentable {
         /// Re-running the configuration rebuilds the graph; a no-op if frames are flowing and the
         /// session is merely still initializing (fresh VIO warms up in ~1–2 s on its own).
         func reviveSessionIfStalled() {
-            let lastMs = lastFrameWallMs.load(ordering: .relaxed)
-            let stalledSecs = lastMs == 0
-                ? Double.greatestFiniteMagnitude
-                : CFAbsoluteTimeGetCurrent() - Double(lastMs) / 1000
-            guard stalledSecs > 3 else { return }
             guard let session = arView?.session else { return }
-            let config = session.configuration ?? ARCoverageView.makeConfiguration()
-            session.run(config, options: [])
-            PerfDiag.log("[Session] revive: no ARFrame for "
-                + (lastMs == 0 ? "this session" : "\(Int(stalledSecs))s")
-                + " — re-ran configuration to rebuild the capture graph")
+            let now = CFAbsoluteTimeGetCurrent()
+            let lastMs = lastFrameWallMs.load(ordering: .relaxed)
+            let stalledSecs = lastMs == 0 ? Double.greatestFiniteMagnitude : now - Double(lastMs) / 1000
+            if stalledSecs > 3 {
+                // Dead graph: no frames at all — rebuild it (same config, no reset).
+                let config = session.configuration ?? ARCoverageView.makeConfiguration()
+                session.run(config, options: [])
+                PerfDiag.log("[Session] revive: no ARFrame for "
+                    + (lastMs == 0 ? "this session" : "\(Int(stalledSecs))s")
+                    + " — re-ran configuration to rebuild the capture graph")
+                return
+            }
+            // Frames flowing but tracking stuck cold: a warm session can sit in .initializing
+            // indefinitely after a save (2026-07-24 run 9 tail — record taps bounced with frames
+            // alive, so the dead-graph branch above never applied). A plain new scan doesn't
+            // need the session's old map, so reset it. Never under a loaded world map — the
+            // rescan/link relocalization owns that state (its timeout UX recovers it), and
+            // .relocalizing counts as record-ready anyway. Requires having BEEN ready once
+            // (lastReadyMs > 0) so a normal cold-start warm-up is never reset mid-init.
+            let lastReadyMs = lastTrackingReadyWallMs.load(ordering: .relaxed)
+            guard lastReadyMs > 0, !hasWorldMap.load(ordering: .relaxed) else { return }
+            let stuckSecs = now - Double(lastReadyMs) / 1000
+            guard stuckSecs > 5 else { return }
+            session.run(ARCoverageView.makeConfiguration(),
+                        options: [.resetTracking, .removeExistingAnchors])
+            PerfDiag.log("[Session] revive: frames flowing but tracking cold for \(Int(stuckSecs))s "
+                + "— reset tracking for a fresh start")
         }
 
         // NOTE: there is deliberately no mid-recording config rebuild. Re-running the session
@@ -2409,6 +2430,12 @@ struct ARCoverageView: UIViewRepresentable {
             let frameGap = lastFrameTimestamp > 0 ? ts - lastFrameTimestamp : 0
             lastFrameTimestamp = ts
             lastFrameWallMs.store(Int64(CFAbsoluteTimeGetCurrent() * 1000), ordering: .relaxed)
+            // Record-tap revive's second signal: when tracking was last in a record-ready state
+            // (everything except the cold .initializing/.notAvailable the record gate blocks).
+            switch frame.camera.trackingState {
+            case .notAvailable, .limited(.initializing): break
+            default: lastTrackingReadyWallMs.store(Int64(CFAbsoluteTimeGetCurrent() * 1000), ordering: .relaxed)
+            }
             if PerfDiag.enabled, frameGap > 0.1 {
                 let normal = frame.camera.trackingState == .normal
                 PerfDiag.log("[PerfDiag] ARKit frame gap \(Int(frameGap * 1000))ms (tracking \(normal ? "normal" : "degraded"))")
