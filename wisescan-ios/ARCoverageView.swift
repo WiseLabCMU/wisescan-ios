@@ -2173,6 +2173,41 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
+        // ── OS interruption guard ──
+        // A system interruption (Control Center, app switch, phone call) stops frame delivery
+        // entirely; on resume ARKit reports .initializing/.relocalizing — the exact states the
+        // gap-based VIO guard treats as "recovering", so it never trips. But if the device MOVED
+        // during the interruption, ARKit fully reinitializes SLAM (map_size→0) and merges
+        // dead-reckoned features into the session map (observed 2026-07-24 M2 interruption test:
+        // a room-sized scan saved a 223m feature cloud, poses written before the gap disagree
+        // with the re-pinned mesh → misplaced vertex colors, offset ghost for the next scan).
+        // ARKit tells us about interruptions directly — treat one mid-recording as a VIO trip:
+        // halt capture and let the user save what was gathered before the gap, or discard.
+        func sessionWasInterrupted(_ session: ARSession) {
+            let recording = isRecording.load(ordering: .relaxed)
+            PerfDiag.log("[Session] OS interruption began (recording=\(recording))")
+            guard recording else { return }
+            // Disarm the gap-based guard: the resume frame after this interruption will carry a
+            // multi-second gap that would hard-trip it a second time — one halt/alert is enough.
+            vioGuardArmed = false
+            DispatchQueue.main.async { [weak self] in
+                self?.vioCompromisedBinding?.wrappedValue = true
+            }
+        }
+
+        func sessionInterruptionEnded(_ session: ARSession) {
+            PerfDiag.log("[Session] OS interruption ended")
+        }
+
+        /// Ask ARKit to relocalize to the session's own map after an interruption instead of
+        /// resetting the world origin. Mid-recording we halt anyway (above), but for the benign
+        /// cases — interruption while idle, during a ghost preview, or before the halt's stop/save
+        /// flow grabs the world map — relocalizing preserves the existing frame (ghost alignment,
+        /// anchor poses) rather than silently re-origining. A relocalization that can't succeed
+        /// isn't a stuck-state risk: the halt path sets `needsTrackingReset`, which the next config
+        /// run consumes as a full `.resetTracking`.
+        func sessionShouldAttemptRelocalization(_ session: ARSession) -> Bool { true }
+
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
             memDiagFrameCount &+= 1 // [MemDiag] frames/sample → measured FPS (the "visible slowdown")
             prodFrameCount &+= 1    // production fps → capacity bar (ungated)
@@ -2339,10 +2374,19 @@ struct ARCoverageView: UIViewRepresentable {
                     default: recovered = false
                     }
                     let stalled = frameGap > AppConstants.vioFrameGapTripSeconds && !recovered
-                    if sustainedDegraded || stalled {
+                    // Belt for OS actions that stall delivery WITHOUT an interruption callback:
+                    // Control Center on iPadOS fired no sessionWasInterrupted on either 2026-07-24
+                    // run, and the 7.9s run-1 gap resumed via benign-looking .initializing (so
+                    // `recovered` above excused it) while SLAM fully reinitialized underneath. A
+                    // gap this large mid-recording means VIO dead-reckoned or reinitialized through
+                    // it no matter how the recovery frame presents — halt unconditionally.
+                    let hardStalled = frameGap > AppConstants.vioHardFrameGapTripSeconds
+                    if sustainedDegraded || stalled || hardStalled {
                         vioGuardArmed = false // fire once per recording
                         vioDegradedSince = 0
-                        let why = stalled ? "frame gap \(Int(frameGap * 1000))ms" : "tracking degraded >\(AppConstants.vioDegradedTripSeconds)s"
+                        let why = hardStalled ? "hard frame gap \(Int(frameGap * 1000))ms"
+                            : stalled ? "frame gap \(Int(frameGap * 1000))ms"
+                            : "tracking degraded >\(AppConstants.vioDegradedTripSeconds)s"
                         PerfDiag.log("⛔️ VIO guard tripped (\(why)) — halting scan")
                         DispatchQueue.main.async { [weak self] in
                             self?.vioCompromisedBinding?.wrappedValue = true
