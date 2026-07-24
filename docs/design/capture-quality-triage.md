@@ -136,7 +136,14 @@ gap-trip deliberately treats as benign recovery.
   run 4's failing scan logged the semantics re-assert firing but the format stayed 60 and
   Recon3D never initialized. `reassertFrameSemantics` now **re-forces the selected video
   format in the same run()** (respects the dev-mode format override), so the state should
-  be prevented, with the halt as backstop. Pending device validation.
+  be prevented, with the halt as backstop.
+
+**Run 5 (2026-07-24, marginal iPad): all green.** Format re-force logged `@ 30fps` on all
+5 record-starts (AR + VR); interruption trip fired mid-rescan; no meshless scans, no
+watchdog/halt false-trips; suspect detector stayed silent on every clean save; **delete
+flagged/interrupted scan → rescan from the clean base validated** (healthy map, no
+warning). Remaining nice-to-have: record-tap revive confirmation on M2 (idle-wedge state
+only ever reproduced there).
 
 **Not implemented (escalate if Save-Anyway scans still mis-color):** per-frame reinit-epoch
 tag in transforms.json so colorize can drop pre-reinit poses.
