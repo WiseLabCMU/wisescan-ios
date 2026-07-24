@@ -153,6 +153,18 @@ gap-trip deliberately treats as benign recovery.
   continued ("Saving scan… do not move" held past a minute). The crash cut it short, so
   unclear if it would have completed; watch on the next long chain.
 
+**Run 11 (2026-07-24, M2, link-adjacent) — startups steady, detector catches a THIRD
+corruption class:**
+- All record-starts clean across the link-adjacent runs (run-10 stale-status fix + run-8
+  resume fix validated again).
+- Last scan (96 frames, longest of the arc) flagged suspect on a **real 91.8 m outlier
+  cluster (p99 4.9 m, 19×)** — with tracking `.normal` throughout, zero snap corrections,
+  zero skipped integration, thermal nominal. A silent excursion in the SnapTracker's
+  documented blind spot (loop-closure under continuous normal tracking) that ONLY the
+  save-time detector can see. A 10% battery dialog appeared mid-scan (ARFrame-retention
+  burst present, consistent with Low Power Mode throttling) — correlation unprovable from
+  console logs, so `low_power_mode` is now recorded in scan4d_metadata at capture stop.
+
 **Run 10 (2026-07-24, M2) — the bounce loop's THIRD face, fixed:**
 - Loop recurred with the session **healthy and un-paused**: the post-save stats reset
   hardcoded `scanStats.trackingStatus = .notAvailable`, and the UI copy only refreshes on
