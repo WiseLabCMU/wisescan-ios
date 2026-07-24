@@ -153,6 +153,18 @@ gap-trip deliberately treats as benign recovery.
   continued ("Saving scan… do not move" held past a minute). The crash cut it short, so
   unclear if it would have completed; watch on the next long chain.
 
+**Run 10 (2026-07-24, M2) — the bounce loop's THIRD face, fixed:**
+- Loop recurred with the session **healthy and un-paused**: the post-save stats reset
+  hardcoded `scanStats.trackingStatus = .notAvailable`, and the UI copy only refreshes on
+  ARKit *transitions* — a teardown that leaves the live session in `.normal` throughout
+  (this run: zero transitions logged post-save) never corrects the lie, so the record gate
+  bounced forever against a healthy session. The revive was RIGHT to stay silent (it checks
+  the real session). The user's Analyse pass escaped it by forcing real transitions.
+- Fix: the stats reset no longer touches `trackingStatus` — the last pushed value stays
+  truthful, and any real tracking restart still updates via its transition. The three loop
+  faces are now: dead graph → revive rebuild; cold-stuck session → revive reset;
+  stale UI copy → removed. Battery-resume fix held again this run (post-resume scan clean).
+
 **Run 9 (2026-07-24, M2):**
 - **Battery-resume fix validated 2/2** — post-idle scans just worked (no wedge, no halt,
   healthy maps).
