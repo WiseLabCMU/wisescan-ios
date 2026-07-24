@@ -3,10 +3,6 @@
 ## [0.5.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.4.0...v0.5.0) (2026-07-24)
 
 
-### ⚠ BREAKING CHANGES
-
-* meta-wearables-dat-ios 0.8.0 renamed MockRaybanMeta to MockGlasses and made Stream lifecycle methods synchronous.
-
 ### Features
 
 * add [MemDiag] load + subsystem brackets ([d97b636](https://github.com/WiseLabCMU/wisescan-ios/commit/d97b63600da6ebb37e2e5b3713d0a07e71800c7a))
@@ -80,7 +76,7 @@
 * make the registration bake transactional (sidecar = commit record) ([87ba880](https://github.com/WiseLabCMU/wisescan-ios/commit/87ba88087615e2b245fc570e8dc1724d5107d420))
 * measure fpsPressure relative to the configured capture rate ([5a44265](https://github.com/WiseLabCMU/wisescan-ios/commit/5a442655ae325ced6671854af7a5f732671fc426))
 * memoize nil canonical frames too (updateValue, not subscript-assign) ([3424b8d](https://github.com/WiseLabCMU/wisescan-ios/commit/3424b8d735aa9bd5296167c9a1e23326f9d8aed0))
-* migrate MetaWearableManager to DAT SDK 0.8.0 API ([6e43155](https://github.com/WiseLabCMU/wisescan-ios/commit/6e4315557a893d90e895ba153231d5693af4a31e))
+* update Meta wearable SDK to 0.8.0 (MockGlasses, synchronous streams) ([6e43155](https://github.com/WiseLabCMU/wisescan-ios/commit/6e4315557a893d90e895ba153231d5693af4a31e))
 * mirror export privacy era-detection in colorize (key presence + fail closed) ([0d6050e](https://github.com/WiseLabCMU/wisescan-ios/commit/0d6050ed0389564752bcbbbd2c727e1ba3a24f86))
 * one deterministic canonical-owner comparator; stabilize the preview frame ([eba5a9d](https://github.com/WiseLabCMU/wisescan-ios/commit/eba5a9d1e9fb07c748a54a1c86303749f021b39f))
 * one still per stillness pause — gate shutter taps ([5beba2a](https://github.com/WiseLabCMU/wisescan-ios/commit/5beba2a5f58aa26b24a2e9d5affa194e82319b89))
