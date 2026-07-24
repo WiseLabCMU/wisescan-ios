@@ -140,6 +140,10 @@ struct CaptureView: View {
         let worldMapURL: URL?
         let thumbnailData: Data?
         let scanCase: ScanCase
+        // Map saved with a wandering outlier cluster in its feature cloud (tracking excursion,
+        // e.g. an OS interruption with motion) — persisted so rescan/link can warn (default lets
+        // the VIO-recovery construction sites, which save no map, omit it).
+        var worldMapSuspect = false
     }
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State. SwiftData reads stay

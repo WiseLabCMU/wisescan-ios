@@ -342,7 +342,7 @@ extension CaptureView {
             if completion == nil, !ARCoverageView.supportsLiDAR, rawFrameCount > 0 {
                 isRecording = false
                 saveMessage = "Saving World Map..."
-                VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL in
+                VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL, mapSuspect in
                     DispatchQueue.main.async {
                         // A nil mapURL degrades to a mapless (non-relocalizable) scan rather
                         // than a Retry/Discard alert — the raw frames are the payload on this
@@ -350,7 +350,8 @@ extension CaptureView {
                         self.pendingScan = PendingScanData(
                             locationId: locationId, meshData: Data(), vertexCount: 0, faceCount: 0,
                             rawDataPath: rawDataPath, vertexColors: nil, worldMapURL: mapURL,
-                            thumbnailData: thumbnailData, scanCase: scanCase)
+                            thumbnailData: thumbnailData, scanCase: scanCase,
+                            worldMapSuspect: mapSuspect)
                         self.frameCaptureSession = FrameCaptureSession()
                         MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
                         self.isProcessingMesh = false
@@ -492,7 +493,7 @@ extension CaptureView {
         // Export the ARWorldMap (co-framed with the OBJ). A scan with no world map can't be
         // relocalized or extended, so on failure exportWorldMapThenContinue offers Retry / Discard —
         // never save-without-map. `proceed` runs on the main thread with a guaranteed-valid mapURL.
-        exportWorldMapThenContinue(isExtendFlow: isExtendFlow, completion: completion) { mapURL in
+        exportWorldMapThenContinue(isExtendFlow: isExtendFlow, completion: completion) { mapURL, mapSuspect in
             // Map captured. Sync the isRecording binding so SwiftUI's updateUIView
             // reflects nominal mode (reconstruction was already disabled above).
             self.isRecording = false
@@ -566,7 +567,8 @@ extension CaptureView {
                             vertexColors: vertexColors,
                             worldMapURL: mapURL,
                             thumbnailData: thumbnailData,
-                            scanCase: capturedScanCase
+                            scanCase: capturedScanCase,
+                            worldMapSuspect: mapSuspect
                         )
                         self.frameCaptureSession = FrameCaptureSession()
                         MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
@@ -602,7 +604,8 @@ extension CaptureView {
                             vertexColors: vertexColors,
                             worldMapURL: mapURL,
                             thumbnailData: thumbnailData,
-                            scanCase: capturedScanCase
+                            scanCase: capturedScanCase,
+                            worldMapSuspect: mapSuspect
                         )
 
                         // Release frame capture session memory
@@ -639,11 +642,11 @@ extension CaptureView {
     /// discard rather than silently persist a mapless scan or hang.
     private func exportWorldMapThenContinue(isExtendFlow: Bool,
                                             completion: ((CapturedScan?) -> Void)?,
-                                            proceed: @escaping (URL) -> Void) {
-        VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL in
+                                            proceed: @escaping (URL, _ mapSuspect: Bool) -> Void) {
+        VertexColorAccumulator.exportWorldMap(from: currentARSession) { mapURL, mapSuspect in
             DispatchQueue.main.async {
                 if let mapURL = mapURL {
-                    proceed(mapURL)
+                    proceed(mapURL, mapSuspect)
                     return
                 }
                 let alert = UIAlertController(
@@ -822,7 +825,8 @@ extension CaptureView {
             vertexColors: pending.vertexColors,
             worldMapURL: pending.worldMapURL,
             thumbnailData: pending.thumbnailData,
-            scanCase: pending.scanCase
+            scanCase: pending.scanCase,
+            worldMapSuspect: pending.worldMapSuspect
         )
 
         guard let savedScan else {

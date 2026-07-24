@@ -18,6 +18,13 @@ struct LocationDetailView: View {
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
     @State private var showNoWorldMapAlert = false
+    // Suspect-map confirm: the latest scan's world map carries a wandering outlier cluster
+    // (tracking excursion baked in — see CapturedScan.worldMapSuspect), so relocalizing a
+    // rescan/link against it risks an offset ghost + offset registration. Warn, don't block:
+    // the map usually still relocalizes, and the Process-time registration can correct a
+    // seated-but-offset rescan. The tapped button's action is stashed here and run on Continue.
+    @State private var showSuspectMapConfirm = false
+    @State private var suspectMapContinueAction: (() -> Void)?
     /// DECISION 3 hard gate: rescan/connect/upload require the location's scans post-processed
     /// (room + registration + proxy to the achievable tier). "You haven't post-processed this
     /// map — do it now."
@@ -118,23 +125,7 @@ struct LocationDetailView: View {
                                 HStack(spacing: 12) {
                                     // Rescan Space button
                                     Button(action: {
-                                        // Rescan relocalizes against the existing world map (ghost
-                                        // overlay + shared frame). Without the file ARCoverageView
-                                        // silently falls back to a mapless session, so guard first.
-                                        guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
-                                            showNoWorldMapAlert = true
-                                            return
-                                        }
-                                        // DECISION 3 hard gate: the rescan consumes the LATEST
-                                        // scan's proxy/roomplan (ghost + auto-align reference) and
-                                        // the ORIGINAL's roomplan (registration target) — all
-                                        // post-process products.
-                                        guard postprocessGateAllows() else { return }
-                                        scanStore.activeLocationForScan = location.id
-                                        scanStore.activeRelocalizationMap = latestScan.worldMapURL
-                                        scanStore.activeScanToExtend = latestScan.id
-                                        scanStore.activeScanCase = .rescanSpace
-                                        selectedTab = 1
+                                        startRescan(latestScan)
                                     }, label: {
                                         HStack {
                                             Image(systemName: "plus.viewfinder")
@@ -146,30 +137,7 @@ struct LocationDetailView: View {
 
                                     // Link Adjacent Space button
                                     Button(action: {
-                                        // Only require a valid world map — no boundary anchor needed.
-                                        // The user relocalizes via the world map and chooses the
-                                        // boundary point by walking there.
-                                        guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
-                                            showNoWorldMapAlert = true
-                                            return
-                                        }
-                                        // DECISION 3 hard gate: connect loads the latest scan's
-                                        // ghost proxy/roomplan too (same alignment machinery).
-                                        guard postprocessGateAllows() else { return }
-                                        scanStore.activeLocationForScan = location.id
-                                        scanStore.activeRelocalizationMap = latestScan.worldMapURL
-                                        scanStore.activeScanToExtend = latestScan.id
-                                        scanStore.activeScanCase = .linkAdjacent
-                                        // Enter the alignment phase synchronously, BEFORE navigating to
-                                        // capture, so the "align with previous scan" overlay is up on
-                                        // first render. Otherwise the phase is only set in
-                                        // ARCoverageView.onAppear (after first render), leaving a window
-                                        // where the record button is live but capturePhase is still
-                                        // .idle — a fast tap then starts an un-aligned scan (ghost ~90°
-                                        // off). CaptureView.onDisappear → resetCaptureState clears this
-                                        // if the user backs out.
-                                        scanStore.capturePhase = .loadingWorldMap
-                                        selectedTab = 1
+                                        startConnectAdjacent(latestScan)
                                     }, label: {
                                         HStack {
                                             Image(systemName: "link.badge.plus")
@@ -379,6 +347,10 @@ struct LocationDetailView: View {
                  "or connected to an adjacent space — both relocalize against the saved world map. " +
                  "Capture a new scan of this space to create one.")
         }
+        .modifier(SuspectMapConfirmAlert(
+            isPresented: $showSuspectMapConfirm,
+            continueAction: $suspectMapContinueAction
+        ))
         .modifier(PostprocessGateAlerts(
             showPostprocessGate: $showPostprocessGate,
             showBadScanGate: $showBadScanGate,
@@ -676,6 +648,89 @@ struct LocationDetailView: View {
     /// rescan consumes the LATEST scan's proxy/roomplan and the ORIGINAL's roomplan, so those two
     /// are the bad-checked prerequisites; the pending check covers the whole location so one
     /// post-process pass clears it (oldest-first — registration needs the canonical room first).
+    /// Confirm dialog for starting a rescan/link against a suspect world map (tracking excursion
+    /// baked into the saved map — see CapturedScan.worldMapSuspect). Extracted as a modifier so the
+    /// main body stays inside the type-checker's expression budget (same pattern as
+    /// PostprocessGateAlerts).
+    private struct SuspectMapConfirmAlert: ViewModifier {
+        @Binding var isPresented: Bool
+        @Binding var continueAction: (() -> Void)?
+
+        func body(content: Content) -> some View {
+            content.alert("Previous Map May Be Unreliable", isPresented: $isPresented) {
+                Button("Continue Anyway") {
+                    continueAction?()
+                    continueAction = nil
+                }
+                Button("Cancel", role: .cancel) { continueAction = nil }
+            } message: {
+                Text("The previous scan's tracking was disrupted while it was recorded (for example " +
+                     "by an interruption), so the ghost overlay and alignment may start offset — and " +
+                     "a rescan that starts from an unreliable map usually inherits the problem. " +
+                     "To clear it, delete the flagged scan so the most recent clean scan becomes " +
+                     "the reference. Processing can still auto-align the result either way.")
+            }
+        }
+    }
+
+    /// Rescan Space: relocalize against the latest scan's world map (ghost overlay + shared
+    /// frame). Without the map file ARCoverageView silently falls back to a mapless session, so
+    /// guard first. DECISION 3 hard gate: the rescan consumes the LATEST scan's proxy/roomplan
+    /// (ghost + auto-align reference) and the ORIGINAL's roomplan (registration target) — all
+    /// post-process products. A suspect map (tracking excursion baked in) warns before proceeding.
+    private func startRescan(_ latestScan: CapturedScan) {
+        guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
+            showNoWorldMapAlert = true
+            return
+        }
+        guard postprocessGateAllows() else { return }
+        let proceed = {
+            scanStore.activeLocationForScan = location.id
+            scanStore.activeRelocalizationMap = latestScan.worldMapURL
+            scanStore.activeScanToExtend = latestScan.id
+            scanStore.activeScanCase = .rescanSpace
+            selectedTab = 1
+        }
+        if latestScan.worldMapSuspect {
+            suspectMapContinueAction = proceed
+            showSuspectMapConfirm = true
+        } else {
+            proceed()
+        }
+    }
+
+    /// Connect Adjacent: only requires a valid world map — no boundary anchor needed (the user
+    /// relocalizes via the map and chooses the boundary point by walking there). DECISION 3 hard
+    /// gate: connect loads the latest scan's ghost proxy/roomplan too (same alignment machinery).
+    /// A suspect map warns before proceeding, same as rescan.
+    private func startConnectAdjacent(_ latestScan: CapturedScan) {
+        guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
+            showNoWorldMapAlert = true
+            return
+        }
+        guard postprocessGateAllows() else { return }
+        let proceed = {
+            scanStore.activeLocationForScan = location.id
+            scanStore.activeRelocalizationMap = latestScan.worldMapURL
+            scanStore.activeScanToExtend = latestScan.id
+            scanStore.activeScanCase = .linkAdjacent
+            // Enter the alignment phase synchronously, BEFORE navigating to capture, so the
+            // "align with previous scan" overlay is up on first render. Otherwise the phase is
+            // only set in ARCoverageView.onAppear (after first render), leaving a window where
+            // the record button is live but capturePhase is still .idle — a fast tap then starts
+            // an un-aligned scan (ghost ~90° off). CaptureView.onDisappear → resetCaptureState
+            // clears this if the user backs out.
+            scanStore.capturePhase = .loadingWorldMap
+            selectedTab = 1
+        }
+        if latestScan.worldMapSuspect {
+            suspectMapContinueAction = proceed
+            showSuspectMapConfirm = true
+        } else {
+            proceed()
+        }
+    }
+
     private func postprocessGateAllows() -> Bool {
         // Same deterministic comparator as ScanPostprocessor.original(of:) — on a capturedAt tie
         // the gate must bad-check the SAME scan registration will target.
