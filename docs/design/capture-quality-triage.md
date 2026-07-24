@@ -97,13 +97,32 @@ trans=37.6 cm rot=30.52° pre-record) — the exact ghost/stitch offset observed
 guard never tripped: resume reports `.initializing`/`.relocalizing`, the states the
 gap-trip deliberately treats as benign recovery.
 
-**Levers implemented (2026-07-24, pending device pass):**
+**Levers implemented (2026-07-24; app-switch trip + suspect flag device-validated runs 2–3):**
 - `sessionWasInterrupted` mid-recording now trips the VIO-halt path (Save Anyway / Discard,
-  `needsTrackingReset` armed) — deterministic, no gap heuristic.
+  `needsTrackingReset` armed) — deterministic, no gap heuristic. ✅ fires on app switch.
+- **Hard-gap belt** (`vioHardFrameGapTripSeconds` 4 s): a delivery gap this large trips the
+  halt regardless of how the recovery frame presents — Control Center on iPadOS fires **no
+  interruption callback at all** (runs 1–3), and run 1's 7.9 s gap resumed via benign-looking
+  `.initializing`.
 - `sessionShouldAttemptRelocalization` → true (resume relocalizes instead of re-origining).
 - Save-time **wandering-cluster check** (`LocalizationDiag.mapSuspect`: max>25 m AND
   max>5×p99) → `CapturedScan.worldMapSuspect` + `worldmap_suspect` in scan4d_metadata;
-  Rescan/Connect warn before relocalizing against a flagged map.
+  Rescan/Connect warn before relocalizing against a flagged map; yellow rollup badge on
+  location/graph tiles + per-scan explainer. ✅ flagged both polluted runs; healthy control
+  maps (max 8–10 m, p99-proportional) passed clean.
+
+**Run 2–3 addenda:**
+- **CC pollutes silently**: run 3 scan 1 went suspect with *no* callback, *no* frame gap,
+  fps steady 30 — the save-time flag is the only reliable net for this class.
+- **Suspicion is heritable**: a rescan seeded from a flagged map re-baked its own outliers
+  (62 cm / 74° mid-recording corrections → its map flagged too). Expected; the dialogs now
+  say to delete flagged scans so the newest clean scan becomes the reference.
+- **Wedged capture graph after idle-resume** (`FigCaptureSourceRemote err=-17281` storm):
+  two symptoms, one remedy (config re-run): (a) recording with dead depth — 60 fps camera
+  despite the selected 30 fps format, zero mesh anchors for 36 s → **depth-start watchdog**
+  (8 s, one-shot rebuild); (b) idle with zero frames flowing — tracking `.initializing`
+  forever, record taps bounced endlessly → **record-tap revive** (re-run config when no
+  ARFrame for >3 s). Both pending device validation.
 
 **Not implemented (escalate if Save-Anyway scans still mis-color):** per-frame reinit-epoch
 tag in transforms.json so colorize can drop pre-reinit poses.
