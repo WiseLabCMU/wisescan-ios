@@ -118,11 +118,25 @@ gap-trip deliberately treats as benign recovery.
   (62 cm / 74° mid-recording corrections → its map flagged too). Expected; the dialogs now
   say to delete flagged scans so the newest clean scan becomes the reference.
 - **Wedged capture graph after idle-resume** (`FigCaptureSourceRemote err=-17281` storm):
-  two symptoms, one remedy (config re-run): (a) recording with dead depth — 60 fps camera
-  despite the selected 30 fps format, zero mesh anchors for 36 s → **depth-start watchdog**
-  (8 s, one-shot rebuild); (b) idle with zero frames flowing — tracking `.initializing`
+  (a) recording with dead reconstruction — 60 fps camera despite the selected 30 fps format,
+  zero mesh anchors all scan; (b) idle with zero frames flowing — tracking `.initializing`
   forever, record taps bounced endlessly → **record-tap revive** (re-run config when no
-  ARFrame for >3 s). Both pending device validation.
+  ARFrame for >3 s; nominal mode only, safe — RoomPlan never runs there).
+
+**Run 4 addenda (2026-07-24 evening):**
+- **Live config rebuild under RoomPlan is a crasher — withdrawn.** The first-cut depth
+  watchdog re-ran the session mid-recording; run 4 ended in `EXC_BREAKPOINT` inside
+  RoomPlan/ObjectUnderstanding (`OUSession updateWithKeyframes`, brk #0x1 on its queue) at
+  save after a meshless 60 fps scan. Replaced with a **mesh-start watchdog** (10 s, signal =
+  first `ARMeshAnchor`, which subsumes dead-depth AND dead-Recon3D) that **halts via the VIO
+  guard** — `needsTrackingReset` then rebuilds everything at the next record-start, the
+  manual fix that always worked. Skips proxy-streaming/Lite configs.
+- **Root cause of the 60 fps fallback found**: RoomPlan's internal reconfigure at
+  `didStartWith` resets the video format to ARKit's default (format[0], 1920×1440@60) —
+  run 4's failing scan logged the semantics re-assert firing but the format stayed 60 and
+  Recon3D never initialized. `reassertFrameSemantics` now **re-forces the selected video
+  format in the same run()** (respects the dev-mode format override), so the state should
+  be prevented, with the halt as backstop. Pending device validation.
 
 **Not implemented (escalate if Save-Anyway scans still mis-color):** per-frame reinit-epoch
 tag in transforms.json so colorize can drop pre-reinit poses.
