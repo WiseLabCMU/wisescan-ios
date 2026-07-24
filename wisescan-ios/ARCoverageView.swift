@@ -1276,7 +1276,14 @@ struct ARCoverageView: UIViewRepresentable {
                 self?.scanStats?.baselineMemoryMB = 0
                 self?.scanStats?.driftEstimate = 0
                 self?.scanStats?.averageQuality = 0
-                self?.scanStats?.trackingStatus = .notAvailable
+                // Do NOT reset trackingStatus here. The UI copy only refreshes on ARKit
+                // TRANSITIONS (cameraDidChangeTrackingState) — when a teardown leaves the live
+                // session in .normal the whole time, a hardcoded .notAvailable is never
+                // corrected, and the record gate bounces "Hold steady…" forever against a
+                // healthy session (2026-07-24 run 10; the revive rightly saw a healthy session
+                // and stayed silent — the staleness was here, not in ARKit). The last pushed
+                // value stays truthful: if the teardown really does restart tracking, the
+                // transition fires and updates it.
                 self?.scanStats?.detectedClasses.removeAll()
             }
         }
