@@ -153,6 +153,19 @@ gap-trip deliberately treats as benign recovery.
   continued ("Saving scan… do not move" held past a minute). The crash cut it short, so
   unclear if it would have completed; watch on the next long chain.
 
+**Run 8 (2026-07-24, M2, timing sweep — WEDGE ROOT-CAUSED & FIXED):**
+- The idle wedge reproduced **deterministically**: every battery-resume recording (×4) went
+  meshless and the tuned mesh-halt caught each one at 10 s post-settle (no false positives
+  this run); every post-halt retry recovered via `.resetTracking`. Frames always flowed, so
+  the revive path never applied.
+- **Root cause was the battery-resume itself**: it re-ran a *bare*
+  `ARWorldTrackingConfiguration()` — ARKit's default 60 fps format, not our selection — with
+  *no reset options*, carrying the Fig-wedged graph into the next recording. Resume now runs
+  the factory config with `[.resetTracking, .removeExistingAnchors]` — identical to the
+  recovery path that worked 100% of the time; nominal mode has nothing to preserve.
+- Expected next-run behavior: post-idle scans just work; the mesh-halt returns to being a
+  rare backstop; the record-tap revive becomes near-unreachable (kept as final belt).
+
 **Run 7 (2026-07-24, M2 hot, idle-tap sequence):**
 - Battery **resume path preempted the wedge** (frames flowing by the record tap), so the
   revive correctly no-op'd — its positive case stays unexercised (needs the intermittent
