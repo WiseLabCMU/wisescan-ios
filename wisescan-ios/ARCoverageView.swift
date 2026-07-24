@@ -805,6 +805,9 @@ struct ARCoverageView: UIViewRepresentable {
         // run 4). The halt's needsTrackingReset gives the NEXT record-start the full fresh
         // rebuild, which is the manual fix that always worked.
         private var recordStartTimestamp: TimeInterval = 0
+        /// First .normal-tracking frame timestamp of this recording (0 until seen) — the mesh
+        /// budget starts here so VIO initialization time doesn't count against it.
+        private var meshWatchdogBaseline: TimeInterval = 0
         private var sawMeshAnchorThisRecording = false
         private var meshWatchdogFired = false
 
@@ -2410,14 +2413,26 @@ struct ARCoverageView: UIViewRepresentable {
             // latches sawMeshAnchorThisRecording within a second or two of any movement).
             // Fires at most once per recording; the main hop re-verifies that this recording
             // actually wants mesh (skips proxy-streaming and Lite-style configs).
+            //
+            // The budget starts at the recording's FIRST .normal tracking frame, not at
+            // record-start: on a hot post-idle start VIO takes ~4s to initialize and the user is
+            // primed by "hold steady" to stay still, so charging init time against the mesh
+            // budget false-halted a recoverable scan at exactly 10s (2026-07-24 run 7 — the
+            // anchors landed as the alert presented). A truly dead reconstruction still trips:
+            // those scans reach .normal within ~2s and then stay meshless forever (run 6).
             if isRecording.load(ordering: .relaxed) {
                 if recordStartTimestamp == 0 {
                     recordStartTimestamp = ts
+                    meshWatchdogBaseline = 0
                     sawMeshAnchorThisRecording = false
                     meshWatchdogFired = false
                 }
+                if meshWatchdogBaseline == 0, frame.camera.trackingState == .normal {
+                    meshWatchdogBaseline = ts
+                }
                 if !sawMeshAnchorThisRecording, !meshWatchdogFired, ARCoverageView.supportsLiDAR,
-                   ts - recordStartTimestamp > AppConstants.meshStartWatchdogSeconds {
+                   meshWatchdogBaseline > 0,
+                   ts - meshWatchdogBaseline > AppConstants.meshStartWatchdogSeconds {
                     meshWatchdogFired = true
                     vioGuardArmed = false // one halt/alert is enough (re-arms on the next .normal frame)
                     DispatchQueue.main.async { [weak self] in
@@ -2425,7 +2440,7 @@ struct ARCoverageView: UIViewRepresentable {
                               let cfg = session.configuration as? ARWorldTrackingConfiguration,
                               cfg.sceneReconstruction != [],
                               !MetaWearableManager.shared.isStreaming else { return }
-                        PerfDiag.log("⛔️ [Session] No mesh anchor \(Int(AppConstants.meshStartWatchdogSeconds))s into recording — reconstruction is dead, halting scan")
+                        PerfDiag.log("⛔️ [Session] No mesh anchor \(Int(AppConstants.meshStartWatchdogSeconds))s after tracking settled — reconstruction is dead, halting scan")
                         self.vioCompromisedBinding?.wrappedValue = true
                     }
                 }
