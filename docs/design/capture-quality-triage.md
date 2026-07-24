@@ -76,6 +76,12 @@ alert presenting over the still-rendering ARView** (the exact CONTRIBUTING anti-
 MemDiag samples, and 1.4–1.8 s ARKit frame gaps. Post-stop so no capture data is at risk,
 but 7 s of frozen UI reads as a hang. Cosmetic co-symptom: `[VR] Tracking degraded —
 cleared accumulated voxels` fires during the teardown degradation, wiping the on-screen
-cloud early. **Lever:** move the name prompt off the capture screen (navigate to Scans tab
-first, prompt there — CONTRIBUTING's own recommendation), and profile what holds main
-during the VR teardown window (bloom callback removal? RealityKit scene teardown?).
+cloud early.
+
+**Lever status (2026-07-23): prompt half DONE** — the name prompt is deferred until the
+save pipeline completes (world map/mesh/colors persisted, AR view downgraded; landed via
+PR #26, M2-validated: the alert now presents after TEARDOWN with an instant keyboard, and
+the world-map failure alert can no longer stack under it). M2 stop stalls measured
+3185/1969 ms post-fix vs 7056 ms. **Remaining half: profile what holds main during the VR
+teardown window itself** (bloom callback removal? RealityKit scene teardown? worldmap
+archive?) — an Instruments session on the marginal iPad.
