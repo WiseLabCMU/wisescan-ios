@@ -153,6 +153,16 @@ gap-trip deliberately treats as benign recovery.
   continued ("Saving scan… do not move" held past a minute). The crash cut it short, so
   unclear if it would have completed; watch on the next long chain.
 
+**Run 9 (2026-07-24, M2):**
+- **Battery-resume fix validated 2/2** — post-idle scans just worked (no wedge, no halt,
+  healthy maps).
+- **Last gap closed**: after the final save the session sat in cold tracking for minutes
+  *with frames flowing* — the record gate bounced and the revive's dead-graph branch
+  correctly didn't apply (run-3 loop, frames-alive variant). The revive now has a second
+  branch: frames flowing + tracking cold >5 s + was-ready-once + **no loaded world map**
+  (never yanks a rescan/link relocalization; cold-start warm-up can't trip it) → re-run
+  factory config with `.resetTracking + .removeExistingAnchors`. Pending device pass.
+
 **Run 8 (2026-07-24, M2, timing sweep — WEDGE ROOT-CAUSED & FIXED):**
 - The idle wedge reproduced **deterministically**: every battery-resume recording (×4) went
   meshless and the tuned mesh-halt caught each one at 10 s post-settle (no false positives
