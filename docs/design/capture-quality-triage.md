@@ -138,6 +138,21 @@ gap-trip deliberately treats as benign recovery.
   format in the same run()** (respects the dev-mode format override), so the state should
   be prevented, with the halt as backstop.
 
+**Run 6 (2026-07-24, M2, link-adjacent chains):**
+- **Mesh-halt backstop validated live**: post-idle wedge recurred *despite* the 30 fps
+  re-assert (graph wedge ≠ format-only) — watchdog halted at 10 s, `needsTrackingReset`
+  armed, next scan clean. Exactly the designed recovery.
+- **NEW CRASH, fixed**: `NSInvalidArgumentException "Invalid number value (NaN) in JSON
+  write"` from `writeTransformsJSON` during a thermal=serious link-adjacent stop —
+  JSONSerialization raises an ObjC exception for non-finite numbers that Swift `try?`
+  cannot catch. All FrameCaptureSession JSON writers now sanitize payloads (non-finite → 0)
+  and **log the offending key paths**, so the next occurrence identifies the true NaN
+  source (pose vs intrinsics vs sharpness/exposure).
+- **Thermal ceiling observation** (items 4/5 territory): the link-adjacent auto-save ran
+  >60 s under thermal=serious / CPU ~300% / ARFrame-retention storm while recording
+  continued ("Saving scan… do not move" held past a minute). The crash cut it short, so
+  unclear if it would have completed; watch on the next long chain.
+
 **Run 5 (2026-07-24, marginal iPad): all green.** Format re-force logged `@ 30fps` on all
 5 record-starts (AR + VR); interruption trip fired mid-rescan; no meshless scans, no
 watchdog/halt false-trips; suspect detector stayed silent on every clean save; **delete
