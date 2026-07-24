@@ -208,9 +208,15 @@ struct ARCoverageView: UIViewRepresentable {
             // config would relocalize to the abandoned map for nothing. If the user wants to extend
             // again they re-tap Extend, which reloads the map + ghost fresh; a brand-new scan's
             // record-start reconfigures and clears anchors. (Supersedes b579197.)
-            let resumeConfig = ARWorldTrackingConfiguration()
-            if Self.supportsLiDAR { resumeConfig.sceneReconstruction = [] }
-            uiView.session.run(resumeConfig)
+            // Full factory config + full reset, not a bare re-run. Two failure modes lived here
+            // (2026-07-24 run-8 timing sweep, M2): (1) the bare ARWorldTrackingConfiguration ran
+            // ARKit's DEFAULT video format (1920×1440@60), not our selected 30fps; (2) resuming a
+            // paused session without reset options left the capture graph wedged (Fig err=-17281
+            // storm) with Recon3D dead on EVERY post-resume recording — while the mesh-halt's
+            // .resetTracking retry recovered 100% of the time. Nominal mode has nothing to
+            // preserve (see above), so resume exactly the way the proven recovery path does.
+            uiView.session.run(ARCoverageView.makeConfiguration(),
+                               options: [.resetTracking, .removeExistingAnchors])
         }
 
         // Live active mesh color update — recolor all existing wireframe entities
