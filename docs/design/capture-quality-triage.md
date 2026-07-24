@@ -7,16 +7,24 @@ the per-feature verification list in [voxel-accumulated-point-cloud.md](voxel-ac
 
 ## Verify on device
 
-### 1. Hi-res keyframe failure-path resilience
+### 1. Hi-res keyframe failure-path resilience — ✅ VERIFIED (2026-07-24, M2 iPad, `interrupt.log`)
 Trigger a session interruption mid-scan (Control Center pull-down, app switch, or a phone
 call) while pausing for keyframes. Expected: `Hi-res capture failed ... attempt N/3`
 **recovers on the next pause** rather than silently degrading to 2016×1512 for the rest of
 the scan; a wedged request should log the **5 s watchdog re-request**.
 
-### 2. Reject-blur OFF confirmation scan
+**Result:** stronger than expected — zero `Hi-res capture failed` lines across repeated
+Control-Center + app-switch interruptions; keyframes kept firing at 4032×3024 (sharpness
+98–464) straight through, watchdog never needed. But the run exposed a different
+interruption problem — see item 6.
+
+### 2. Reject-blur OFF confirmation scan — ✅ VERIFIED (2026-07-24, same run)
 Flip the reject-blur setting off and confirm the reticle, keyframes, and coverage overlay
 all still work. This path was **completely dead before the review fix** — worth one
 confirmation scan.
+
+**Result:** reticle, keyframes, and `[Coverage] Still overlap` logging all ran with
+reject-blur OFF. No dead path.
 
 ## Watch items (lever defined, not implemented)
 
@@ -77,6 +85,28 @@ MemDiag samples, and 1.4–1.8 s ARKit frame gaps. Post-stop so no capture data 
 but 7 s of frozen UI reads as a hang. Cosmetic co-symptom: `[VR] Tracking degraded —
 cleared accumulated voxels` fires during the teardown degradation, wiping the on-screen
 cloud early.
+
+### 6. OS interruption mid-recording silently corrupts the session map (2026-07-24, M2, `interrupt.log`)
+A Control-Center/app-switch interruption **while the user keeps moving** forces a full SLAM
+reinit (`vio_initialized(0) map_size(0)`, 7.9 s frame gap). The re-merge visually "catches
+up" the mesh, but: the saved world map carried a **223 m feature cloud (max dist-from-median
+152.8 m vs p99 7.1 m)** for a ~4×3 m room; scan 1's colorize frames projected from a
+different frame than the re-pinned mesh (colors wildly misplaced); scan 2, relocalized
+against that map, seated **~0.4–0.6 m / 20–30° off** (measured live by `[LocDiag ICP]`:
+trans=37.6 cm rot=30.52° pre-record) — the exact ghost/stitch offset observed. The VIO
+guard never tripped: resume reports `.initializing`/`.relocalizing`, the states the
+gap-trip deliberately treats as benign recovery.
+
+**Levers implemented (2026-07-24, pending device pass):**
+- `sessionWasInterrupted` mid-recording now trips the VIO-halt path (Save Anyway / Discard,
+  `needsTrackingReset` armed) — deterministic, no gap heuristic.
+- `sessionShouldAttemptRelocalization` → true (resume relocalizes instead of re-origining).
+- Save-time **wandering-cluster check** (`LocalizationDiag.mapSuspect`: max>25 m AND
+  max>5×p99) → `CapturedScan.worldMapSuspect` + `worldmap_suspect` in scan4d_metadata;
+  Rescan/Connect warn before relocalizing against a flagged map.
+
+**Not implemented (escalate if Save-Anyway scans still mis-color):** per-frame reinit-epoch
+tag in transforms.json so colorize can drop pre-reinit poses.
 
 **Lever status (2026-07-23): prompt half DONE** — the name prompt is deferred until the
 save pipeline completes (world map/mesh/colors persisted, AR view downgraded; landed via
