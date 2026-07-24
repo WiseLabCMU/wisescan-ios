@@ -1442,7 +1442,9 @@ struct CaptureView: View {
             }
         } message: {
             Text("This scan's mapping status is '\(scanStats.mappingStatus)'. Relocalizing or extending it "
-                + "later requires a 'mapped' world map. Keep scanning the area to improve it, or discard "
+                + "later requires a 'mapped' world map. To finish mapping, aim the camera at detail-rich "
+                + "areas — furniture, shelves, posters, floor texture (blank walls, glass, and screens "
+                + "don't track) — and sweep slowly until tracking improves, then stop again. Or discard "
                 + "and start over. Discarding deletes this recording's frames and photos and cannot be undone.")
         }
         .alert("Not Enough Features", isPresented: $showExtendErrorAlert) {
