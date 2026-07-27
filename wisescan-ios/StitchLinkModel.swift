@@ -61,6 +61,14 @@ final class StitchLink {
     var manualDY: Double = 0
     var manualDZ: Double = 0
 
+    // Per-join opt-in for the Op-2 auto correction. Op-2 no longer auto-applies silently (user,
+    // 2026-07-27): the combined render shows the raw pivot by default, and the user opts in per-join
+    // ("Autocorrect") or in bulk ("Autocorrect all") — the easiest way to see, across scenarios, how
+    // good the solver actually is. `nil` = follow the global `StitchPrefs.alwaysAutocorrect` default;
+    // `true`/`false` = an explicit per-join override that wins over the global. Baked into the
+    // exported edge (with the manual nudge) only when effectively true.
+    var autoCorrectOverride: Bool?
+
     var linkedAt: Date = Date()
     var linkTypeStr: String = StitchingLink.LinkType.midSession.rawValue
 
@@ -142,6 +150,19 @@ struct ManualNudge: Equatable {
     }
 }
 
+// MARK: - Stitch UX preferences
+
+/// App-wide stitch-correction preferences (UserDefaults-backed). `alwaysAutocorrect` is the global
+/// default a link's per-join `autoCorrectOverride` falls back to (nil override ⇒ follow this). The
+/// key is shared with the combined render's `@AppStorage` toggle.
+enum StitchPrefs {
+    static let alwaysAutocorrectKey = "stitchAlwaysAutocorrect"
+    static var alwaysAutocorrect: Bool {
+        get { UserDefaults.standard.bool(forKey: alwaysAutocorrectKey) }
+        set { UserDefaults.standard.set(newValue, forKey: alwaysAutocorrectKey) }
+    }
+}
+
 // MARK: - Provenance-resolved accessors
 
 extension StitchLink {
@@ -166,6 +187,10 @@ extension StitchLink {
     }
     var hasManualCorrection: Bool { !manualNudge.isZero }
 
+    /// Whether Op-2 auto-correction applies to this join: the explicit per-link override if set,
+    /// else the global "always autocorrect" preference.
+    var autoCorrectEffective: Bool { autoCorrectOverride ?? StitchPrefs.alwaysAutocorrect }
+
     /// The endpoint anchor pose expressed in `scan`'s own world frame, plus the *other*
     /// endpoint, for in-scan connector rendering. Returns nil if `scan` is not an endpoint.
     func localAnchor(for scan: CapturedScan) -> (transform: simd_float4x4, otherScan: CapturedScan?)? {
@@ -176,15 +201,22 @@ extension StitchLink {
 
     /// Maps this link back to the on-the-wire `StitchingLink` DTO (export / schema format).
     /// Returns nil if an endpoint scan or its location no longer exists.
+    ///
+    /// The exported SOURCE anchor carries the effective Op-2 + manual correction baked in (see
+    /// `StitchGraphBuilder.bakedSourceAnchor`) so the wire edge reproduces the corrected
+    /// combined-render placement — the correction is authoritative downstream, not render-only. The
+    /// model's stored anchors stay raw/as-measured (non-destructive); only this exported copy moves.
+    @MainActor
     func asDTO() -> StitchingLink? {
         guard let src = sourceScan, let tgt = targetScan,
               let srcLoc = src.location, let tgtLoc = tgt.location else { return nil }
+        let bakedSource = StitchGraphBuilder.bakedSourceAnchor(for: self)
         return StitchingLink(
             id: id,
             sourceLocationId: srcLoc.id,
             sourceScanId: src.id,
             sourceAnchorId: sourceAnchorId,
-            sourceAnchorTransform: CodableMatrix4x4(sourceAnchorMatrix),
+            sourceAnchorTransform: CodableMatrix4x4(bakedSource),
             sourceAnchorCompassHeading: sourceAnchorCompassHeading,
             targetLocationId: tgtLoc.id,
             targetScanId: tgt.id,

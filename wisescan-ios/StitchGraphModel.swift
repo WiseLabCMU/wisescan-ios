@@ -397,6 +397,43 @@ enum StitchGraphBuilder {
         return out
     }
 
+    // MARK: - Export bake (make the correction authoritative, non-destructively)
+
+    /// The effective correction for a link in the SOURCE scan's canonical frame — the auto
+    /// correction (only when `autoCorrectEffective`) with the manual nudge composed on top, matching
+    /// exactly what `placeScans` renders. Identity when nothing applies. Reads disk.
+    @MainActor
+    static func effectiveCorrection(for link: StitchLink) -> simd_float4x4 {
+        let tSrc = (link.sourceScan?.scanDirectory).flatMap { SaveRegistration.appliedTransform(scanDirectory: $0) } ?? matrix_identity_float4x4
+        let mSrc = tSrc * link.sourceAnchorMatrix
+        var autoC = matrix_identity_float4x4
+        #if canImport(RoomPlan)
+        if link.autoCorrectEffective { autoC = stitchCorrection(link: link)?.transform ?? matrix_identity_float4x4 }
+        #endif
+        var cTotal = autoC
+        let nudge = link.manualNudge
+        if !nudge.isZero {
+            let pin = autoC * mSrc.columns.3
+            cTotal = nudge.matrix(pivot: SIMD3<Float>(pin.x, pin.y, pin.z)) * autoC
+        }
+        return cTotal
+    }
+
+    /// The link's SOURCE anchor pose (raw frame, as stored) with the effective correction folded in,
+    /// for EXPORT — so the serialized edge `bakedSource · inverse(target)` reproduces the corrected
+    /// placement the combined render shows. Returns the untouched raw anchor when nothing applies.
+    /// The correction lives in the source scan's CANONICAL frame, so it is conjugated by the source
+    /// registration `T` back into the raw frame the DTO/world-map convention uses: `A' = inv(T)·C·T·A`.
+    /// **Non-destructive** — the model's stored anchor matrices are never mutated; only the exported
+    /// copy carries the correction.
+    @MainActor
+    static func bakedSourceAnchor(for link: StitchLink) -> simd_float4x4 {
+        let cTotal = effectiveCorrection(for: link)
+        guard cTotal != matrix_identity_float4x4 else { return link.sourceAnchorMatrix }
+        let tSrc = (link.sourceScan?.scanDirectory).flatMap { SaveRegistration.appliedTransform(scanDirectory: $0) } ?? matrix_identity_float4x4
+        return simd_inverse(tSrc) * cTotal * tSrc * link.sourceAnchorMatrix
+    }
+
     // MARK: - Transform accumulation (for combined render)
 
     /// Computes, for one connected component, a placement transform per location that maps
@@ -415,11 +452,16 @@ enum StitchGraphBuilder {
     ///     solved here (reads disk). Pass the cache so live manual re-nudges stay in-memory.
     ///   - manualOverrides: in-progress adjuster values by link id; falls back to each link's stored
     ///     `manualNudge`. Composed on top of the auto seat: `r' = manual · C_auto · r`.
+    /// - Parameters:
+    ///   - autoApplied: per-link opt-in for the auto correction (in-flight adjuster state); falls
+    ///     back to each link's `autoCorrectEffective` (its override, else the global pref). Auto no
+    ///     longer applies unless effectively true — the render shows the raw pivot by default.
     @MainActor
     static func placeScans(in component: [UUID],
                            edges componentEdges: [StitchGraphEdge],
                            autoCorrections: [UUID: StitchCorrection]? = nil,
-                           manualOverrides: [UUID: ManualNudge] = [:]) -> ComponentPlacement {
+                           manualOverrides: [UUID: ManualNudge] = [:],
+                           autoApplied: [UUID: Bool] = [:]) -> ComponentPlacement {
         // Pick a deterministic root (smallest UUID) so combined-render placements are
         // stable across runs — component element order comes from non-deterministic
         // Dictionary iteration and must not drive the accumulated transform frame.
@@ -465,7 +507,8 @@ enum StitchGraphBuilder {
             let mSrc = appliedT(link.sourceScan) * link.sourceAnchorMatrix
             let mTgt = appliedT(link.targetScan) * link.targetAnchorMatrix
             var r = mSrc * simd_inverse(mTgt)
-            let autoC = autos[link.id]?.transform ?? matrix_identity_float4x4
+            let useAuto = autoApplied[link.id] ?? link.autoCorrectEffective
+            let autoC = useAuto ? (autos[link.id]?.transform ?? matrix_identity_float4x4) : matrix_identity_float4x4
             r = autoC * r
             let nudge = manualOverrides[link.id] ?? link.manualNudge
             if !nudge.isZero {

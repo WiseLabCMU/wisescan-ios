@@ -111,7 +111,8 @@ struct StitchGraphView: View {
                     if c.appliedYaw { parts.append(String(format: "yaw %+.1f°", c.yawDeg)) }
                     if c.appliedPerp { parts.append(String(format: "translation %.0fcm", c.perpCm)) }
                     let sN = e.link.sourceScan?.location?.name ?? "?", tN = e.link.targetScan?.location?.name ?? "?"
-                    print("[StitchCorrect] \(sN) ↔ \(tN): auto-corrected \(parts.joined(separator: ", ")) (compass \(c.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a")) — manual nudge available if still off")
+                    let applied = e.link.autoCorrectEffective ? "APPLIED" : "available (opt-in)"
+                    print("[StitchCorrect] \(sN) ↔ \(tN): auto-correction \(applied) — \(parts.joined(separator: ", ")) (compass \(c.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a"))")
                 }
             }
         }

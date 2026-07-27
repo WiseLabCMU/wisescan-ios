@@ -35,13 +35,12 @@ private struct StitchRoomRow: Identifiable {
     let name: String
     let tint: Color
     let parentLinkId: UUID?
-    var appliedYaw = false
-    var yawDeg: Float = 0
-    var appliedPerp = false
+    var yawDeg: Float = 0          // magnitude the solver found for this join (shown applied or not)
     var perpCm: Float = 0
+    var autoAvailable = false      // solver found a trusted correction for this join
+    var autoOn = false             // that correction is currently applied (effective)
     var hasManual = false
     var isBase: Bool { parentLinkId == nil }
-    var wasAutoCorrected: Bool { appliedYaw || appliedPerp }
 }
 
 struct CombinedMeshScreen: View {
@@ -57,7 +56,12 @@ struct CombinedMeshScreen: View {
     /// Live adjuster values by link id (seeded from each link's stored nudge on appear). This is the
     /// single source of truth for the view while open; committed back to the links on Save.
     @State private var manualDrafts: [UUID: ManualNudge] = [:]
+    /// Effective auto-correct state per join (render source). Seeded from each link's
+    /// `autoCorrectEffective`; a toggle updates this AND persists the link's override.
+    @State private var autoApplied: [UUID: Bool] = [:]
     @State private var editingLinkId: UUID?
+    /// Global "always autocorrect" default (implicitly all joins, unless a per-join override wins).
+    @AppStorage(StitchPrefs.alwaysAutocorrectKey) private var alwaysAutocorrect = false
 
     private var title: String { request.title }
     private var hasStitches: Bool { !request.edges.isEmpty && !request.component.isEmpty }
@@ -70,7 +74,8 @@ struct CombinedMeshScreen: View {
         }
         return StitchGraphBuilder.placeScans(
             in: request.component, edges: request.edges,
-            autoCorrections: request.autoCorrections, manualOverrides: manualDrafts)
+            autoCorrections: request.autoCorrections, manualOverrides: manualDrafts,
+            autoApplied: autoApplied)
     }
 
     private func displayItems(from placement: ComponentPlacement) -> [CombinedMeshItem] {
@@ -84,12 +89,14 @@ struct CombinedMeshScreen: View {
         return placement.scans.compactMap { p -> StitchRoomRow? in
             guard let item = itemByScan[p.scanId] else { return nil }
             let corr = p.parentLinkId.flatMap { request.autoCorrections[$0] }
+            let available = (corr?.appliedYaw ?? false) || (corr?.appliedPerp ?? false)
             let draft = p.parentLinkId.flatMap { manualDrafts[$0] }
+            let on = p.parentLinkId.flatMap { autoApplied[$0] } ?? false
             return StitchRoomRow(
                 id: p.locationId, name: item.name, tint: Color(uiColor: item.tint),
                 parentLinkId: p.parentLinkId,
-                appliedYaw: corr?.appliedYaw ?? false, yawDeg: corr?.yawDeg ?? 0,
-                appliedPerp: corr?.appliedPerp ?? false, perpCm: corr?.perpCm ?? 0,
+                yawDeg: corr?.yawDeg ?? 0, perpCm: corr?.perpCm ?? 0,
+                autoAvailable: available, autoOn: available && on,
                 hasManual: !(draft ?? .zero).isZero)
         }
     }
@@ -134,9 +141,16 @@ struct CombinedMeshScreen: View {
 
                 // Room legend + per-map correction status (Step 2c). Tap a map to adjust its join.
                 if hasStitches && rooms.count > 1 && showLegend && editingLinkId == nil {
-                    StitchLegendPanel(rooms: rooms) { row in
-                        if let lid = row.parentLinkId { editingLinkId = lid }
-                    }
+                    StitchLegendPanel(
+                        rooms: rooms,
+                        alwaysAutocorrect: $alwaysAutocorrect,
+                        anyAvailableOff: rooms.contains { $0.autoAvailable && !$0.autoOn },
+                        anyAutoOn: rooms.contains { $0.autoOn },
+                        onToggleAuto: { row in if let lid = row.parentLinkId { toggleAuto(lid) } },
+                        onAutocorrectAll: autocorrectAll,
+                        onClearAll: clearAllAuto,
+                        onAdjust: { row in if let lid = row.parentLinkId { editingLinkId = lid } }
+                    )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     .padding(.top, 8)
                     .padding(.trailing, 12)
@@ -161,6 +175,7 @@ struct CombinedMeshScreen: View {
             .toolbar { toolbarContent(present: presentItems) }
             .preferredColorScheme(.dark)
             .onAppear(perform: seedDrafts)
+            .onChange(of: alwaysAutocorrect) { _, newVal in applyAlwaysChange(newVal) }
             .animation(.easeInOut(duration: 0.2), value: showLegend)
             .animation(.easeInOut(duration: 0.2), value: editingLinkId)
         }
@@ -238,7 +253,10 @@ struct CombinedMeshScreen: View {
 
     private func seedDrafts() {
         guard manualDrafts.isEmpty else { return }
-        for e in request.edges { manualDrafts[e.link.id] = e.link.manualNudge }
+        for e in request.edges {
+            manualDrafts[e.link.id] = e.link.manualNudge
+            autoApplied[e.link.id] = e.link.autoCorrectEffective
+        }
     }
 
     private func draftBinding(_ id: UUID) -> Binding<ManualNudge> {
@@ -266,15 +284,64 @@ struct CombinedMeshScreen: View {
         }
         editingLinkId = nil
     }
+
+    // MARK: Auto-correct opt-in (per-join / all / always)
+
+    /// Link ids whose join has a trusted correction the solver could apply.
+    private func availableLinkIds() -> [UUID] {
+        request.edges.compactMap { e in
+            let c = request.autoCorrections[e.link.id]
+            return (c?.appliedYaw == true || c?.appliedPerp == true) ? e.link.id : nil
+        }
+    }
+
+    private func persist() {
+        do { try modelContext.save() }
+        catch { print("[StitchCorrect] auto-correct save failed: \(error.localizedDescription)") }
+    }
+
+    private func toggleAuto(_ id: UUID) {
+        let new = !(autoApplied[id] ?? false)
+        autoApplied[id] = new
+        link(for: id)?.autoCorrectOverride = new     // explicit per-join override (wins over global)
+        persist()
+    }
+
+    private func autocorrectAll() {
+        for id in availableLinkIds() {
+            autoApplied[id] = true
+            link(for: id)?.autoCorrectOverride = true
+        }
+        persist()
+    }
+
+    private func clearAllAuto() {
+        for e in request.edges {
+            autoApplied[e.link.id] = false
+            e.link.autoCorrectOverride = false
+        }
+        persist()
+    }
+
+    /// "Always autocorrect" changed: joins WITHOUT an explicit override follow the new global default.
+    private func applyAlwaysChange(_ newVal: Bool) {
+        for e in request.edges where e.link.autoCorrectOverride == nil {
+            autoApplied[e.link.id] = newVal
+        }
+    }
 }
 
 // MARK: - Legend / status panel
 
 private struct StitchLegendPanel: View {
     let rooms: [StitchRoomRow]
+    @Binding var alwaysAutocorrect: Bool
+    let anyAvailableOff: Bool
+    let anyAutoOn: Bool
+    let onToggleAuto: (StitchRoomRow) -> Void
+    let onAutocorrectAll: () -> Void
+    let onClearAll: () -> Void
     let onAdjust: (StitchRoomRow) -> Void
-
-    private var anyAutoCorrected: Bool { rooms.contains(where: { $0.wasAutoCorrected }) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -291,9 +358,7 @@ private struct StitchLegendPanel: View {
             ScrollView {
                 VStack(spacing: 0) {
                     ForEach(rooms) { room in
-                        Button { onAdjust(room) } label: { row(room) }
-                            .buttonStyle(.plain)
-                            .disabled(room.isBase)
+                        row(room)
                         if room.id != rooms.last?.id {
                             Divider().overlay(Color.white.opacity(0.08))
                         }
@@ -302,15 +367,10 @@ private struct StitchLegendPanel: View {
             }
             .frame(maxHeight: 240)
 
-            if anyAutoCorrected {
-                Divider().overlay(Color.white.opacity(0.15))
-                Text("Orange joins were auto-corrected — tap to fine-tune, or rescan if still off.")
-                    .font(.caption2).foregroundColor(.gray)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-            }
+            Divider().overlay(Color.white.opacity(0.15))
+            footer
         }
-        .frame(width: 246)
+        .frame(width: 260)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.12), lineWidth: 1))
@@ -318,20 +378,35 @@ private struct StitchLegendPanel: View {
     }
 
     private func row(_ room: StitchRoomRow) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Circle().fill(room.tint).frame(width: 12, height: 12)
                 .overlay(Circle().stroke(Color.white.opacity(0.5), lineWidth: 0.5))
             VStack(alignment: .leading, spacing: 2) {
                 Text(room.name).font(.caption.weight(.medium)).foregroundColor(.white).lineLimit(1)
                 statusLine(room)
             }
-            Spacer(minLength: 4)
+            Spacer(minLength: 2)
+            if room.autoAvailable {
+                Button { onToggleAuto(room) } label: {
+                    Text("Auto")
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(room.autoOn ? Color.orange : Color.white.opacity(0.12))
+                        .foregroundColor(room.autoOn ? .black : .white)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
             if !room.isBase {
-                Image(systemName: "slider.horizontal.3").font(.caption2).foregroundColor(.cyan)
+                Button { onAdjust(room) } label: {
+                    Image(systemName: "slider.horizontal.3").font(.caption).foregroundColor(.cyan)
+                        .frame(width: 28, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
-        .contentShape(Rectangle())
     }
 
     @ViewBuilder private func statusLine(_ room: StitchRoomRow) -> some View {
@@ -339,18 +414,53 @@ private struct StitchLegendPanel: View {
             Text("Base map (reference)").font(.caption2).foregroundColor(.gray)
         } else if room.hasManual {
             Text("Manually adjusted").font(.caption2).foregroundColor(.cyan)
-        } else if room.wasAutoCorrected {
-            Text(autoSummary(room)).font(.caption2).foregroundColor(.orange)
+        } else if room.autoOn {
+            Text("Auto-corrected · " + summary(room)).font(.caption2).foregroundColor(.orange).lineLimit(1)
+        } else if room.autoAvailable {
+            Text("Auto-fix available · " + summary(room)).font(.caption2).foregroundColor(.yellow).lineLimit(1)
         } else {
             Text("Aligned").font(.caption2).foregroundColor(.green.opacity(0.85))
         }
     }
 
-    private func autoSummary(_ room: StitchRoomRow) -> String {
+    @ViewBuilder private var footer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $alwaysAutocorrect) {
+                Text("Always autocorrect").font(.caption).foregroundColor(.white)
+            }
+            .toggleStyle(SwitchToggleStyle(tint: .cyan))
+
+            if anyAvailableOff || anyAutoOn {
+                HStack(spacing: 8) {
+                    if anyAvailableOff {
+                        Button(action: onAutocorrectAll) {
+                            Text("Autocorrect all").font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 10).padding(.vertical, 5)
+                                .background(Color.orange).foregroundColor(.black)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if anyAutoOn {
+                        Button(action: onClearAll) {
+                            Text("Clear").font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 10).padding(.vertical, 5)
+                                .background(Color.white.opacity(0.12)).foregroundColor(.white)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+
+    private func summary(_ room: StitchRoomRow) -> String {
         var parts: [String] = []
-        if room.appliedYaw { parts.append(String(format: "yaw %+.1f°", room.yawDeg)) }
-        if room.appliedPerp { parts.append(String(format: "shift %.0f cm", room.perpCm)) }
-        return "Auto-corrected · " + parts.joined(separator: ", ")
+        if abs(room.yawDeg) >= 0.05 { parts.append(String(format: "yaw %+.1f°", room.yawDeg)) }
+        if room.perpCm >= 0.5 { parts.append(String(format: "shift %.0f cm", room.perpCm)) }
+        return parts.isEmpty ? "—" : parts.joined(separator: ", ")
     }
 }
 
@@ -375,7 +485,7 @@ private struct ManualAdjustPanel: View {
                 Button("Reset", action: onReset).font(.subheadline).foregroundColor(.orange)
             }
 
-            slider("rotate.3d", "Rotate", $nudge.yawDeg, -15...15, "%.1f°")
+            slider("rotate.3d", "Rotate", $nudge.yawDeg, -30...30, "%.1f°")
             slider("arrow.left.and.right", "Left / Right", $nudge.dx, -0.5...0.5, "%.2f m")
             slider("arrow.up.and.down", "Fwd / Back", $nudge.dz, -0.5...0.5, "%.2f m")
             slider("arrow.up.arrow.down", "Up / Down", $nudge.dy, -0.3...0.3, "%.2f m")
@@ -476,6 +586,7 @@ struct CombinedMeshView: UIViewRepresentable {
         // reloading meshes. No-ops until the async load has populated the nodes.
         context.coordinator.applyTransforms(from: items)
         context.coordinator.updateStitchPoints(stitchPoints)
+        context.coordinator.updateLabels(from: items)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -487,6 +598,10 @@ struct CombinedMeshView: UIViewRepresentable {
         private var fillWrappers: [UUID: [SCNNode]] = [:]
         // Stitch-pin markers keyed by link id.
         private var stitchMarkers: [UUID: SCNNode] = [:]
+        // Floating name labels keyed by scanId, plus each mesh's local top-center anchor for
+        // repositioning them as pieces move under a live nudge.
+        private var labelNodes: [UUID: SCNNode] = [:]
+        private var labelAnchors: [UUID: SIMD4<Float>] = [:]
         private var semanticsNode: SCNNode?
         private var semanticFillsNode: SCNNode?
         private var allDetectedClasses: [SemanticClass] = []
@@ -538,6 +653,9 @@ struct CombinedMeshView: UIViewRepresentable {
                         self.meshNodes[entry.item.id] = node
                         self.coloredGeometries[entry.item.id] = entry.geometry
                         self.flatGeometries[entry.item.id] = entry.flat
+                        // Local top-center of this mesh — where its floating name label anchors.
+                        let (mn, mx) = node.boundingBox
+                        self.labelAnchors[entry.item.id] = SIMD4<Float>((mn.x + mx.x) / 2, mx.y, (mn.z + mx.z) / 2, 1)
                     }
 
                     // Add semantics wireframes
@@ -582,6 +700,16 @@ struct CombinedMeshView: UIViewRepresentable {
                         self.stitchMarkers[sp.id] = marker
                     }
 
+                    // Floating name labels at each map's centroid-top (billboarded, depth-independent).
+                    for entry in built {
+                        guard let anchor = self.labelAnchors[entry.item.id] else { continue }
+                        let label = Self.makeLabel(entry.item.name)
+                        let p = entry.item.transform * anchor
+                        label.simdPosition = SIMD3<Float>(p.x, p.y, p.z) + SIMD3<Float>(0, 0.3, 0)
+                        contentNode.addChildNode(label)
+                        self.labelNodes[entry.item.id] = label
+                    }
+
                     onLoaded()
                 }
             }
@@ -618,6 +746,60 @@ struct CombinedMeshView: UIViewRepresentable {
         /// Reposition stitch-pin markers as pieces move under a live nudge.
         func updateStitchPoints(_ points: [StitchPoint]) {
             for p in points { stitchMarkers[p.id]?.simdPosition = p.position }
+        }
+
+        /// Reposition floating name labels as pieces move under a live nudge.
+        func updateLabels(from items: [CombinedMeshItem]) {
+            for item in items {
+                guard let anchor = labelAnchors[item.id], let node = labelNodes[item.id] else { continue }
+                let p = item.transform * anchor
+                node.simdPosition = SIMD3<Float>(p.x, p.y, p.z) + SIMD3<Float>(0, 0.3, 0)
+            }
+        }
+
+        /// A floating, camera-facing name label with a dark backing plate for legibility against any
+        /// mesh coloring (colorize / RoomPlan modes are already multi-colored, so tint alone can't
+        /// identify a map). Depth-independent so it isn't hidden behind geometry.
+        private static func makeLabel(_ text: String) -> SCNNode {
+            let scnText = SCNText(string: text, extrusionDepth: 0)
+            scnText.font = UIFont.systemFont(ofSize: 14, weight: .bold)
+            scnText.flatness = 0.2
+            let tm = SCNMaterial()
+            tm.diffuse.contents = UIColor.white
+            tm.lightingModel = .constant
+            tm.isDoubleSided = true
+            tm.readsFromDepthBuffer = false
+            tm.writesToDepthBuffer = false
+            scnText.materials = [tm]
+            let textNode = SCNNode(geometry: scnText)
+            let (tmn, tmx) = textNode.boundingBox
+            textNode.pivot = SCNMatrix4MakeTranslation((tmn.x + tmx.x) / 2, (tmn.y + tmx.y) / 2, (tmn.z + tmx.z) / 2)
+            let scale: Float = 0.01
+            textNode.scale = SCNVector3(scale, scale, scale)
+            textNode.renderingOrder = 21
+
+            let w = CGFloat(tmx.x - tmn.x) * CGFloat(scale) + 0.14
+            let h = CGFloat(tmx.y - tmn.y) * CGFloat(scale) + 0.08
+            let plane = SCNPlane(width: w, height: h)
+            plane.cornerRadius = h * 0.35
+            let pm = SCNMaterial()
+            pm.diffuse.contents = UIColor.black.withAlphaComponent(0.6)
+            pm.lightingModel = .constant
+            pm.isDoubleSided = true
+            pm.readsFromDepthBuffer = false
+            pm.writesToDepthBuffer = false
+            plane.materials = [pm]
+            let plateNode = SCNNode(geometry: plane)
+            plateNode.position = SCNVector3(0, 0, -0.002)
+            plateNode.renderingOrder = 20
+
+            let container = SCNNode()
+            container.addChildNode(plateNode)
+            container.addChildNode(textNode)
+            let bc = SCNBillboardConstraint()
+            bc.freeAxes = .all
+            container.constraints = [bc]
+            return container
         }
 
         /// A small always-on-top emissive marker at a stitch pin, so the join is findable in the
