@@ -106,6 +106,7 @@ enum StitchGraphBuilder {
             nodes[srcLocId]?.scanIds.insert(srcScan.id)
             nodes[tgtLocId]?.scanIds.insert(tgtScan.id)
             edges.append(StitchGraphEdge(from: srcLocId, to: tgtLocId, link: link))
+            if PerfDiag.enabled { logResidual(link: link) }   // Phase-4.2 residual measurement (no mutation)
         }
 
         // Sort node ids/list deterministically — Dictionary iteration order is unstable
@@ -117,6 +118,26 @@ enum StitchGraphBuilder {
         layout(nodes: &nodeList, edges: edges, components: components)
 
         return StitchGraph(nodes: nodeList, edges: edges, components: components)
+    }
+
+    /// PerfDiag per-link log of the Op-2 decision — pure diagnostic, no mutation. Delegates to
+    /// `stitchCorrection` (the same computation `placeScans` applies) and prints, by location name,
+    /// what it decided: the measured yaw / ⊥, whether each was applied or held, the compass reading,
+    /// and the wall / near-∥ counts. So a link that WASN'T corrected says why (untrusted vs. gated).
+    @MainActor
+    static func logResidual(link: StitchLink) {
+        #if canImport(RoomPlan)
+        guard let c = stitchCorrection(link: link) else {
+            print("[StitchResidual] skip — missing scan or canonical roomplan")
+            return
+        }
+        let src = link.sourceScan?.location?.name ?? "?", tgt = link.targetScan?.location?.name ?? "?"
+        let compass = c.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a"
+        let yaw = String(format: "yaw %+.1f°→%@", c.yawDeg, c.appliedYaw ? "applied" : "held")
+        let perp = c.appliedPerp ? String(format: "⊥ %.0fcm→applied", c.perpCm)
+                                 : (c.doorwayPerpCm.map { String(format: "⊥ %.0fcm→held", $0) } ?? "⊥ n/a")
+        print("[StitchResidual] \(src) ↔ \(tgt): \(yaw), \(perp) | compass \(compass) | walls \(c.srcWalls)/\(c.tgtWalls) near-∥ \(c.nearParallel)")
+        #endif
     }
 
     // MARK: Connected components (union-find)
@@ -211,6 +232,137 @@ enum StitchGraphBuilder {
         }
     }
 
+    // MARK: - Op-2: plane-derived edge correction
+
+    /// The Op-2 decision for one link: the edge-correction transform plus the diagnostics behind it
+    /// (so `logResidual` can report it without recomputing). `applied*` false ⇒ that DOF kept the pivot.
+    struct StitchCorrection {
+        var transform = matrix_identity_float4x4   // C: r_corrected = C · (mSrc·inv(mTgt))
+        var yawDeg: Float = 0                       // measured pivot yaw error
+        var appliedYaw = false
+        var perpCm: Float = 0                        // applied through-doorway ⊥ correction magnitude (cm)
+        var appliedPerp = false
+        var compassDeg: Float?                       // |C_A − C_B|
+        var srcWalls = 0
+        var tgtWalls = 0
+        var nearParallel = 0                         // # near-∥ wall pairs
+        var doorwayPerpCm: Float?                    // de-yawed doorway-wall gap before correction (cm)
+    }
+
+    /// Plane-derived correction to the T-composed pivot edge for one link (Op-2). Compose as
+    /// `r_corrected = transform · (mSrc·inv(mTgt))`.
+    /// - **Yaw** is *correspondence-free* — every near-∥ wall pair sees the same pivot yaw error, so
+    ///   the median orientation delta IS the global fix — applied only within the compass window (a
+    ///   plane yaw far from `|C_A−C_B|` is a bad fit / relocalization flip → reject).
+    /// - **Through-doorway ⊥ translation** is the de-yawed **doorway wall**'s residual gap. The doorway
+    ///   wall is the coplanar OPPOSITE-face pair with the **minimum** ⊥ (the genuinely-shared wall,
+    ///   *not* the pin-nearest side wall), gated to a sane, well-separated magnitude. Room B is placed
+    ///   on the side of the wall OPPOSITE the pin (room A) at a nominal thickness — the pin fixes the
+    ///   side, so no reliance on a RoomPlan normal convention.
+    /// `nil` only when a scan / canonical roomplan is missing; otherwise a struct whose `applied*`
+    /// flags say what (if anything) was corrected — never-worse-than-the-pivot.
+    @MainActor
+    static func stitchCorrection(link: StitchLink) -> StitchCorrection? {
+        #if canImport(RoomPlan)
+        guard let src = link.sourceScan, let tgt = link.targetScan else { return nil }
+        let tSrc = SaveRegistration.appliedTransform(scanDirectory: src.scanDirectory) ?? matrix_identity_float4x4
+        let tTgt = SaveRegistration.appliedTransform(scanDirectory: tgt.scanDirectory) ?? matrix_identity_float4x4
+        let mSrc = tSrc * link.sourceAnchorMatrix
+        let r = mSrc * simd_inverse(tTgt * link.targetAnchorMatrix)
+        let anchor = SIMD3<Float>(mSrc.columns.3.x, mSrc.columns.3.y, mSrc.columns.3.z)
+        let sW = SaveRegistration.canonicalFramePlanes(scanDirectory: src.scanDirectory).filter { $0.category == .wall }
+        let tW = SaveRegistration.canonicalFramePlanes(scanDirectory: tgt.scanDirectory)
+            .filter { $0.category == .wall }.map { PlaneRegistration.applying(r, to: $0) }
+        guard !sW.isEmpty, !tW.isEmpty else { return nil }
+
+        var out = StitchCorrection()
+        out.srcWalls = sW.count; out.tgtWalls = tW.count
+        // Compass certificate |C_A − C_B|.
+        if let ca = link.sourceAnchorCompassHeading, let cb = link.targetAnchorCompassHeading {
+            var d = abs(Float(ca) - Float(cb)).truncatingRemainder(dividingBy: 360); if d > 180 { d = 360 - d }
+            out.compassDeg = d
+        }
+
+        // Global yaw = median near-∥ orientation delta (correspondence-free).
+        var yaws: [Float] = []
+        for s in sW { for t in tW {
+            let nDot = simd_dot(s.normal, t.normal)
+            guard acos(min(abs(nDot), 1)) * 180 / Float.pi < PlaneRegistration.matchAngleDeg else { continue }
+            let nt = nDot < 0 ? -t.normal : t.normal
+            yaws.append(atan2(s.normal.x * nt.z - s.normal.z * nt.x, s.normal.x * nt.x + s.normal.z * nt.z) * 180 / Float.pi)
+        }}
+        out.nearParallel = yaws.count
+        guard !yaws.isEmpty else { return out }
+        let yawFix = yaws.sorted()[yaws.count / 2]
+        out.yawDeg = yawFix
+
+        // Compass guardrail — the plane yaw must agree with |C_A−C_B| (≤15°, coarse) or the whole fit
+        // is untrusted (a flip): touch nothing.
+        let trustworthy = out.compassDeg.map { abs(abs(yawFix) - $0) <= 15 } ?? false
+        guard trustworthy else { return out }
+
+        // De-yaw sign is convention-ambiguous → pick the sign that ALIGNS opposite faces. Reused for
+        // both the yaw matrix and the ⊥ measurement.
+        func spinner(_ deg: Float) -> (SIMD3<Float>) -> SIMD3<Float> {
+            let a = deg * Float.pi / 180, cA = cos(a), sA = sin(a)
+            return { v in SIMD3(cA * v.x + sA * v.z, v.y, -sA * v.x + cA * v.z) }
+        }
+        func alignScore(_ deg: Float) -> Int {
+            let sp = spinner(deg); var n = 0
+            for s in sW { for t in tW {
+                let nDot = simd_dot(s.normal, sp(t.normal))
+                if acos(min(abs(nDot), 1)) * 180 / Float.pi < 10, nDot < 0 { n += 1 }
+            }}
+            return n
+        }
+        let signedYaw = alignScore(-yawFix) >= alignScore(yawFix) ? -yawFix : yawFix
+        let spin = spinner(signedYaw)
+
+        // C_yaw about the pin — applied only when the yaw is beyond noise (>1°).
+        var C = matrix_identity_float4x4
+        if abs(yawFix) > 1 {
+            let a = signedYaw * Float.pi / 180, cA = cos(a), sA = sin(a)
+            let R = simd_float4x4(SIMD4<Float>(cA, 0, -sA, 0), SIMD4<Float>(0, 1, 0, 0),
+                                  SIMD4<Float>(sA, 0, cA, 0), SIMD4<Float>(0, 0, 0, 1))
+            var Tp = matrix_identity_float4x4; Tp.columns.3 = SIMD4<Float>(anchor, 1)
+            var Tn = matrix_identity_float4x4; Tn.columns.3 = SIMD4<Float>(-anchor, 1)
+            C = Tp * R * Tn
+            out.appliedYaw = true
+        }
+
+        // ⊥ translation: doorway wall = de-yawed coplanar OPPOSITE pair with the MIN gap (not the
+        // pin-nearest side wall). Gate: sane (<1 m) and clearly separated from the next.
+        var opp: [(perp: Float, sp: Float, n: SIMD3<Float>, sc: SIMD3<Float>)] = []
+        for s in sW { for t in tW {
+            let tn = spin(t.normal); let nDot = simd_dot(s.normal, tn)
+            guard acos(min(abs(nDot), 1)) * 180 / Float.pi < 10, nDot < 0 else { continue }
+            let tc = anchor + spin(t.center - anchor)
+            let signed = simd_dot(s.normal, tc - s.center)
+            opp.append((abs(signed), signed, s.normal, s.center))
+        }}
+        opp.sort { $0.perp < $1.perp }
+        if let d = opp.first { out.doorwayPerpCm = d.perp * 100 }
+        if let d = opp.first, d.perp < 1.0, (opp.count < 2 || d.perp < 0.5 * opp[1].perp) {
+            let thick: Float = 0.10
+            // Room B belongs on the side of the doorway wall OPPOSITE the pin (room A), a nominal
+            // thickness away. The pin fixes the side → convention-independent.
+            let pinSide: Float = simd_dot(d.n, anchor - d.sc) >= 0 ? 1 : -1
+            let delta = (-pinSide * thick) - d.sp        // scalar shift along the wall normal
+            if abs(delta) < 1.0 {                          // sane correction magnitude
+                var Tperp = matrix_identity_float4x4
+                Tperp.columns.3 = SIMD4<Float>(delta * d.n, 1)
+                C = Tperp * C                              // after the yaw (both source-canonical)
+                out.perpCm = abs(delta) * 100
+                out.appliedPerp = true
+            }
+        }
+        out.transform = C
+        return out
+        #else
+        return nil
+        #endif
+    }
+
     // MARK: - Transform accumulation (for combined render)
 
     /// Computes, for one connected component, a placement transform per location that maps
@@ -272,7 +424,18 @@ enum StitchGraphBuilder {
                 visited.insert(step.neighbor)
                 let mSrc = appliedT(step.link.sourceScan) * step.link.sourceAnchorMatrix
                 let mTgt = appliedT(step.link.targetScan) * step.link.targetAnchorMatrix
-                let r = mSrc * simd_inverse(mTgt)   // maps target canonical-frame → source canonical-frame
+                var r = mSrc * simd_inverse(mTgt)   // maps target canonical-frame → source canonical-frame
+                // Op-2: plane-derived yaw refinement, composed in source-canonical (r' = C·r). The
+                // inverse(r) backward branch inherits it automatically. No-op unless confidently
+                // applied within the compass window — never-worse-than-the-pivot.
+                if let corr = stitchCorrection(link: step.link), corr.appliedYaw || corr.appliedPerp {
+                    r = corr.transform * r
+                    let sN = step.link.sourceScan?.location?.name ?? "?", tN = step.link.targetScan?.location?.name ?? "?"
+                    var parts: [String] = []
+                    if corr.appliedYaw { parts.append(String(format: "yaw %+.1f°", corr.yawDeg)) }
+                    if corr.appliedPerp { parts.append(String(format: "translation %.0fcm", corr.perpCm)) }
+                    print("[StitchCorrect] \(sN) ↔ \(tN): auto-corrected \(parts.joined(separator: ", ")) (compass \(corr.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a")) — manual nudge available if still off")
+                }
                 if step.forward {
                     // u is the source, neighbor is the target.
                     world[step.neighbor] = worldU * r

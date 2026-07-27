@@ -332,6 +332,25 @@ enum SaveRegistration {
         }
         return []
     }
+
+    /// The scan's room planes in its CANONICAL frame (the frame `mesh.obj` / `roomplan.json` are
+    /// baked to) — the sibling of `rawFramePlanes` WITHOUT the raw-frame undo. Feeds the stitch
+    /// residual diagnostic (and, ahead, Op-2 cross-room refinement), which plane-fits two canonical
+    /// roomplans against each other. Candidate order gives the transformed (canonical) roomplan for
+    /// registered scans; unregistered scans have no applied `T`, so their roomplan is already
+    /// canonical (== raw). [] when unavailable.
+    static func canonicalFramePlanes(scanDirectory: URL) -> [PlaneRegistration.Plane] {
+        let candidates = [
+            scanDirectory.appendingPathComponent("roomplan.json"),
+            scanDirectory.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json")
+        ]
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url),
+                  let decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) else { continue }
+            return PlaneRegistration.planes(fromExportSurfaces: decoded.surfaces)
+        }
+        return []
+    }
     #endif
 
     // MARK: - OBJ transform
