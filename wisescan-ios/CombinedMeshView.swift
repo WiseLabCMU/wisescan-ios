@@ -603,6 +603,7 @@ struct CombinedMeshView: UIViewRepresentable {
         fill.eulerAngles = SCNVector3(Float.pi / 4, -Float.pi / 3, 0)
         scene.rootNode.addChildNode(fill)
 
+        scnView.delegate = context.coordinator   // per-frame label rescale (constant on-screen size)
         context.coordinator.load(
             into: scnView, items: items, stitchPoints: stitchPoints, colorByMap: colorByMap,
             semanticViewMode: semanticViewMode, detectedClassesBinding: $detectedClasses,
@@ -624,7 +625,7 @@ struct CombinedMeshView: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator {
+    final class Coordinator: NSObject, SCNSceneRendererDelegate {
         private var meshNodes: [UUID: SCNNode] = [:]
         // RoomPlan outline/fill wrappers keyed by scanId so a live nudge moves them with the mesh.
         private var outlineWrappers: [UUID: [SCNNode]] = [:]
@@ -635,6 +636,9 @@ struct CombinedMeshView: UIViewRepresentable {
         // repositioning them as pieces move under a live nudge.
         private var labelNodes: [UUID: SCNNode] = [:]
         private var labelAnchors: [UUID: SIMD4<Float>] = [:]
+        // Camera distance at the default framing; labels scale by (distance / this) each frame so
+        // their on-screen size stays constant regardless of zoom (they're 3D geometry otherwise).
+        private var labelRefDistance: Float = 0
         private var semanticsNode: SCNNode?
         private var semanticFillsNode: SCNNode?
         private var allDetectedClasses: [SemanticClass] = []
@@ -790,6 +794,19 @@ struct CombinedMeshView: UIViewRepresentable {
             }
         }
 
+        /// Per-frame (render thread): hold each name label at a constant ON-SCREEN size by scaling it
+        /// proportionally to its camera distance — labels are 3D geometry, so without this they grow
+        /// when you zoom in and shrink when you zoom out. Only reads camera + label world positions
+        /// and writes label scale; the billboard constraint (orientation) is untouched.
+        func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+            guard labelRefDistance > 0, !labelNodes.isEmpty, let pov = renderer.pointOfView else { return }
+            let cam = pov.simdWorldPosition
+            for (_, label) in labelNodes {
+                let d = simd_distance(cam, label.simdWorldPosition)
+                label.simdScale = SIMD3<Float>(repeating: max(0.15, min(6, d / labelRefDistance)))
+            }
+        }
+
         /// A floating, camera-facing name label with a dark backing plate for legibility against any
         /// mesh coloring (colorize / RoomPlan modes are already multi-colored, so tint alone can't
         /// identify a map). Depth-independent so it isn't hidden behind geometry.
@@ -881,6 +898,9 @@ struct CombinedMeshView: UIViewRepresentable {
             cameraNode.look(at: SCNVector3Zero)
             scene.rootNode.addChildNode(cameraNode)
             scnView.pointOfView = cameraNode
+            // Reference distance for constant-screen-size labels: a label at the default framing
+            // renders at its authored size; zoom in/out just holds that on-screen size.
+            labelRefDistance = simd_length(cameraNode.simdPosition)
         }
 
         /// Union of all child mesh bounding boxes, expressed in `parent`'s coordinate space.
