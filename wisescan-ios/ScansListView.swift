@@ -194,7 +194,7 @@ struct ScansListView: View {
                 }
             }
             .fullScreenCover(item: $renderRequest) { req in
-                CombinedMeshScreen(title: req.title, items: req.items)
+                CombinedMeshScreen(request: req)
             }
             .confirmationDialog(
                 "Delete \(bulkScope == .allScans ? "Locations" : "Scans")",

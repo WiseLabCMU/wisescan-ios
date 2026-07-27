@@ -95,10 +95,30 @@ struct StitchGraphView: View {
         // queued from a just-registered tap) ignore repeat taps so rapid presses on
         // the gesture-driven capsule can't stack/re-trigger presentations.
         guard renderRequest == nil else { return }
-        let placements = StitchGraphBuilder.placeScans(in: component, edges: graph?.edges(in: component) ?? [])
+        let edges = graph?.edges(in: component) ?? []
+        // Solve Op-2 ONCE (the only disk read); the render + live adjuster reuse this cache.
+        let autos = StitchGraphBuilder.computeAutoCorrections(for: edges)
+        let placement = StitchGraphBuilder.placeScans(in: component, edges: edges, autoCorrections: autos)
+
+        // PerfDiag-only: the Op-2 residual + applied-correction logs, fired ONCE here (the full
+        // render) — never on the all-scans graph list. The visual panel is the always-on surface.
+        if PerfDiag.enabled {
+            for e in edges {
+                let corr = autos[e.link.id]
+                StitchGraphBuilder.logResidual(link: e.link, correction: corr)
+                if let c = corr, c.appliedYaw || c.appliedPerp {
+                    var parts: [String] = []
+                    if c.appliedYaw { parts.append(String(format: "yaw %+.1f°", c.yawDeg)) }
+                    if c.appliedPerp { parts.append(String(format: "translation %.0fcm", c.perpCm)) }
+                    let sN = e.link.sourceScan?.location?.name ?? "?", tN = e.link.targetScan?.location?.name ?? "?"
+                    print("[StitchCorrect] \(sN) ↔ \(tN): auto-corrected \(parts.joined(separator: ", ")) (compass \(c.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a")) — manual nudge available if still off")
+                }
+            }
+        }
+
         let nodesById = graph?.nodesById ?? [:]
         var items: [CombinedMeshItem] = []
-        for (idx, placed) in placements.enumerated() {
+        for (idx, placed) in placement.scans.enumerated() {
             guard let scan = scanLookup[placed.scanId] else { continue }
             let name = nodesById[placed.locationId]?.location.name ?? scan.name
             items.append(CombinedMeshItem(
@@ -112,7 +132,12 @@ struct StitchGraphView: View {
             ))
         }
         let title = items.count == 1 ? (items.first?.name ?? "Combined") : "\(items.count) Maps"
-        renderRequest = ComponentRenderRequest(title: title, items: items)
+        renderRequest = ComponentRenderRequest(
+            title: title, items: items,
+            component: component, edges: edges,
+            autoCorrections: autos,
+            placements: placement.scans,
+            stitchPoints: placement.stitchPoints)
     }
 }
 
@@ -120,6 +145,13 @@ struct ComponentRenderRequest: Identifiable {
     let id = UUID()
     let title: String
     let items: [CombinedMeshItem]
+    // Ingredients for the combined render's legend panel, stitch markers, and live manual adjuster.
+    // The adjuster re-runs `placeScans` in-memory using `autoCorrections` (no disk) as the user drags.
+    var component: [UUID] = []
+    var edges: [StitchGraphEdge] = []
+    var autoCorrections: [UUID: StitchGraphBuilder.StitchCorrection] = [:]
+    var placements: [PlacedScan] = []
+    var stitchPoints: [StitchPoint] = []
 }
 
 // MARK: - Cluster (one connected component)

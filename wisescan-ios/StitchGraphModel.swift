@@ -35,6 +35,24 @@ struct PlacedScan {
     let scanId: UUID
     /// Transform mapping this scan's world-frame vertices into the component's shared frame.
     let transform: simd_float4x4
+    /// The spanning-tree edge (link id) that placed this map — i.e. the join the manual adjuster
+    /// edits to move THIS piece. `nil` for the root/base map, which defines the shared frame.
+    let parentLinkId: UUID?
+}
+
+/// A stitch pin (the shared boundary point of one link) expressed in the component's shared frame,
+/// so the combined render can drop a visible marker at each join.
+struct StitchPoint: Identifiable {
+    let id: UUID            // link id
+    let position: SIMD3<Float>
+    let sourceName: String
+    let targetName: String
+}
+
+/// The full result of placing a component: per-map transforms plus the stitch-pin markers.
+struct ComponentPlacement {
+    var scans: [PlacedScan] = []
+    var stitchPoints: [StitchPoint] = []
 }
 
 /// The assembled graph plus connected-component grouping and layout.
@@ -106,7 +124,10 @@ enum StitchGraphBuilder {
             nodes[srcLocId]?.scanIds.insert(srcScan.id)
             nodes[tgtLocId]?.scanIds.insert(tgtScan.id)
             edges.append(StitchGraphEdge(from: srcLocId, to: tgtLocId, link: link))
-            if PerfDiag.enabled { logResidual(link: link) }   // Phase-4.2 residual measurement (no mutation)
+            // NOTE: the Op-2 residual/correction diag is intentionally NOT logged here. This runs on
+            // the all-scans graph list (every rebuild); the diag belongs to the full combined render
+            // only (StitchGraphView.presentRender), where the correction is actually applied and a
+            // user is looking at the result. Kept PerfDiag-gated there.
         }
 
         // Sort node ids/list deterministically — Dictionary iteration order is unstable
@@ -120,18 +141,20 @@ enum StitchGraphBuilder {
         return StitchGraph(nodes: nodeList, edges: edges, components: components)
     }
 
-    /// PerfDiag per-link log of the Op-2 decision — pure diagnostic, no mutation. Delegates to
-    /// `stitchCorrection` (the same computation `placeScans` applies) and prints, by location name,
-    /// what it decided: the measured yaw / ⊥, whether each was applied or held, the compass reading,
-    /// and the wall / near-∥ counts. So a link that WASN'T corrected says why (untrusted vs. gated).
+    /// PerfDiag per-link log of the Op-2 decision — pure diagnostic, no mutation. Takes the
+    /// PRE-COMPUTED correction (from `computeAutoCorrections`, so the render path solves once) and
+    /// prints, by location name, what it decided: the measured yaw / ⊥, whether each was applied or
+    /// held, the compass reading, and the wall / near-∥ counts. So a link that WASN'T corrected says
+    /// why (untrusted vs. gated). Caller gates on `PerfDiag.enabled` and fires only from the full
+    /// combined render (never the all-scans list).
     @MainActor
-    static func logResidual(link: StitchLink) {
+    static func logResidual(link: StitchLink, correction: StitchCorrection?) {
         #if canImport(RoomPlan)
-        guard let c = stitchCorrection(link: link) else {
-            print("[StitchResidual] skip — missing scan or canonical roomplan")
+        let src = link.sourceScan?.location?.name ?? "?", tgt = link.targetScan?.location?.name ?? "?"
+        guard let c = correction else {
+            print("[StitchResidual] \(src) ↔ \(tgt): skip — missing scan or canonical roomplan")
             return
         }
-        let src = link.sourceScan?.location?.name ?? "?", tgt = link.targetScan?.location?.name ?? "?"
         let compass = c.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a"
         let yaw = String(format: "yaw %+.1f°→%@", c.yawDeg, c.appliedYaw ? "applied" : "held")
         let perp = c.appliedPerp ? String(format: "⊥ %.0fcm→applied", c.perpCm)
@@ -363,6 +386,17 @@ enum StitchGraphBuilder {
         #endif
     }
 
+    /// Solve the Op-2 auto correction for every edge in a component ONCE (this is the only part that
+    /// reads canonical roomplans off disk). Pass the result into `placeScans` so live manual re-nudges
+    /// recompose transforms purely in memory. Keyed by link id; a link absent from the map had no
+    /// trusted correction (its edge keeps the raw pivot).
+    @MainActor
+    static func computeAutoCorrections(for edges: [StitchGraphEdge]) -> [UUID: StitchCorrection] {
+        var out: [UUID: StitchCorrection] = [:]
+        for e in edges { if let c = stitchCorrection(link: e.link) { out[e.link.id] = c } }
+        return out
+    }
+
     // MARK: - Transform accumulation (for combined render)
 
     /// Computes, for one connected component, a placement transform per location that maps
@@ -376,12 +410,21 @@ enum StitchGraphBuilder {
     /// raw). Without the `T` composition the combined render seams by ~`T` (11–27 cm) on any stitch
     /// touching a registered or legacy scan. A spanning-tree BFS propagates transforms from the root
     /// outward; the root's identity thus *defines* the shared frame as its own canonical frame.
+    /// - Parameters:
+    ///   - autoCorrections: pre-solved Op-2 corrections (`computeAutoCorrections`). When `nil`,
+    ///     solved here (reads disk). Pass the cache so live manual re-nudges stay in-memory.
+    ///   - manualOverrides: in-progress adjuster values by link id; falls back to each link's stored
+    ///     `manualNudge`. Composed on top of the auto seat: `r' = manual · C_auto · r`.
     @MainActor
-    static func placeScans(in component: [UUID], edges componentEdges: [StitchGraphEdge]) -> [PlacedScan] {
+    static func placeScans(in component: [UUID],
+                           edges componentEdges: [StitchGraphEdge],
+                           autoCorrections: [UUID: StitchCorrection]? = nil,
+                           manualOverrides: [UUID: ManualNudge] = [:]) -> ComponentPlacement {
         // Pick a deterministic root (smallest UUID) so combined-render placements are
         // stable across runs — component element order comes from non-deterministic
         // Dictionary iteration and must not drive the accumulated transform frame.
-        guard let root = component.min(by: { $0.uuidString < $1.uuidString }) else { return [] }
+        guard let root = component.min(by: { $0.uuidString < $1.uuidString }) else { return ComponentPlacement() }
+        let autos = autoCorrections ?? computeAutoCorrections(for: componentEdges)
 
         // Each endpoint's raw→canonical registration (PR #28): anchor poses are stored in the raw
         // capture frame, but the baked mesh.obj / roomplan the render draws are in the location's
@@ -407,11 +450,30 @@ enum StitchGraphBuilder {
 
         var world: [UUID: simd_float4x4] = [root: matrix_identity_float4x4]
         var scanForLocation: [UUID: UUID] = [:]
+        var parentLink: [UUID: UUID] = [:]   // locationId → the edge that placed it (root has none)
 
         // Seed the root's representative scan from any incident edge.
         if let first = adj[root]?.first,
            let seedScanId = (first.forward ? first.link.sourceScan?.id : first.link.targetScan?.id) {
             scanForLocation[root] = seedScanId
+        }
+
+        // The relative edge target-canonical → source-canonical, with the Op-2 auto correction and
+        // then the user's manual nudge composed IN (before the direction branch) so both BFS
+        // directions inherit them and the child's whole subtree rides along. No disk / no prints.
+        func correctedEdge(_ link: StitchLink) -> simd_float4x4 {
+            let mSrc = appliedT(link.sourceScan) * link.sourceAnchorMatrix
+            let mTgt = appliedT(link.targetScan) * link.targetAnchorMatrix
+            var r = mSrc * simd_inverse(mTgt)
+            let autoC = autos[link.id]?.transform ?? matrix_identity_float4x4
+            r = autoC * r
+            let nudge = manualOverrides[link.id] ?? link.manualNudge
+            if !nudge.isZero {
+                // Pivot the manual yaw about the pin AFTER the auto correction (source-canonical).
+                let pin = autoC * mSrc.columns.3
+                r = nudge.matrix(pivot: SIMD3<Float>(pin.x, pin.y, pin.z)) * r
+            }
+            return r
         }
 
         var queue: [UUID] = [root]
@@ -422,20 +484,7 @@ enum StitchGraphBuilder {
             let worldU = world[u] ?? matrix_identity_float4x4
             for step in adj[u] ?? [] where !visited.contains(step.neighbor) {
                 visited.insert(step.neighbor)
-                let mSrc = appliedT(step.link.sourceScan) * step.link.sourceAnchorMatrix
-                let mTgt = appliedT(step.link.targetScan) * step.link.targetAnchorMatrix
-                var r = mSrc * simd_inverse(mTgt)   // maps target canonical-frame → source canonical-frame
-                // Op-2: plane-derived yaw refinement, composed in source-canonical (r' = C·r). The
-                // inverse(r) backward branch inherits it automatically. No-op unless confidently
-                // applied within the compass window — never-worse-than-the-pivot.
-                if let corr = stitchCorrection(link: step.link), corr.appliedYaw || corr.appliedPerp {
-                    r = corr.transform * r
-                    let sN = step.link.sourceScan?.location?.name ?? "?", tN = step.link.targetScan?.location?.name ?? "?"
-                    var parts: [String] = []
-                    if corr.appliedYaw { parts.append(String(format: "yaw %+.1f°", corr.yawDeg)) }
-                    if corr.appliedPerp { parts.append(String(format: "translation %.0fcm", corr.perpCm)) }
-                    print("[StitchCorrect] \(sN) ↔ \(tN): auto-corrected \(parts.joined(separator: ", ")) (compass \(corr.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a")) — manual nudge available if still off")
-                }
+                let r = correctedEdge(step.link)
                 if step.forward {
                     // u is the source, neighbor is the target.
                     world[step.neighbor] = worldU * r
@@ -445,13 +494,30 @@ enum StitchGraphBuilder {
                     world[step.neighbor] = worldU * simd_inverse(r)
                     if let sid = step.link.sourceScan?.id { scanForLocation[step.neighbor] = sid }
                 }
+                parentLink[step.neighbor] = step.link.id
                 queue.append(step.neighbor)
             }
         }
 
-        return component.compactMap { locId in
+        let scans: [PlacedScan] = component.compactMap { locId in
             guard let t = world[locId], let scanId = scanForLocation[locId] else { return nil }
-            return PlacedScan(locationId: locId, scanId: scanId, transform: t)
+            return PlacedScan(locationId: locId, scanId: scanId, transform: t, parentLinkId: parentLink[locId])
         }
+
+        // Stitch-pin markers: every edge's shared pin, taken on the SOURCE side and mapped into the
+        // shared frame. Corrections move the TARGET geometry to meet this point, so the source-side
+        // pin is the stable "join" location to mark.
+        var stitchPoints: [StitchPoint] = []
+        for e in componentEdges {
+            guard let srcLocId = e.link.sourceScan?.location?.id, let wS = world[srcLocId] else { continue }
+            let mSrc = appliedT(e.link.sourceScan) * e.link.sourceAnchorMatrix
+            let p = wS * mSrc.columns.3
+            stitchPoints.append(StitchPoint(
+                id: e.link.id, position: SIMD3<Float>(p.x, p.y, p.z),
+                sourceName: e.link.sourceScan?.location?.name ?? "?",
+                targetName: e.link.targetScan?.location?.name ?? "?"))
+        }
+
+        return ComponentPlacement(scans: scans, stitchPoints: stitchPoints)
     }
 }

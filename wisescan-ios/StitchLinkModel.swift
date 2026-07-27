@@ -48,6 +48,19 @@ final class StitchLink {
     // Creation provenance only (Pin A / pre-existing map = endpoint A when true).
     var sourceIsA: Bool = true
 
+    // Manual fine-tune of THIS join (Step 2c) — the user's remedy in place of "rescan" for a
+    // *placement* error: the residual after Op-2 auto-correct, or a stitch Op-2 gated off. A
+    // gravity-locked yaw about the pin + a 3-axis translation, expressed in the SOURCE scan's
+    // canonical frame (same frame/pivot family as the auto yaw), composed into the stitch edge as
+    // `r' = nudge · C_auto · r` so it rides both BFS traversal directions like the auto correction.
+    // Stored as 4 scalars (not a matrix) so they round-trip to the adjuster's sliders and can't
+    // encode a non-conforming transform. Additive with defaults ⇒ lightweight SwiftData migration
+    // (mirrors the compass-heading adds).
+    var manualYawDeg: Double = 0
+    var manualDX: Double = 0
+    var manualDY: Double = 0
+    var manualDZ: Double = 0
+
     var linkedAt: Date = Date()
     var linkTypeStr: String = StitchingLink.LinkType.midSession.rawValue
 
@@ -100,6 +113,35 @@ extension StitchLink {
     }
 }
 
+// MARK: - Manual nudge (Step 2c adjuster)
+
+/// A user's manual fine-tune of one stitch join: a gravity-locked yaw about the pin + a 3-axis
+/// translation, in the source scan's canonical frame. Backs the adjuster's sliders (the values ARE
+/// the slider positions) and composes into the stitch edge as `r' = matrix · C_auto · r` — the same
+/// frame and pivot family as the Op-2 auto yaw, so a manual tweak layers cleanly on the auto seat.
+struct ManualNudge: Equatable {
+    var yawDeg: Float = 0
+    var dx: Float = 0      // source-canonical X (m)
+    var dy: Float = 0      // vertical (m)
+    var dz: Float = 0      // source-canonical Z (m)
+
+    static let zero = ManualNudge()
+    var isZero: Bool { yawDeg == 0 && dx == 0 && dy == 0 && dz == 0 }
+
+    /// Correction matrix: yaw about `pivot` (world-up Y), then translate. `pivot` is the join's pin
+    /// (in source-canonical, after the auto correction) so a manual rotation spins the piece about
+    /// the doorway rather than about a far origin.
+    func matrix(pivot: SIMD3<Float>) -> simd_float4x4 {
+        let a = yawDeg * Float.pi / 180, c = cos(a), s = sin(a)
+        let R = simd_float4x4(SIMD4<Float>(c, 0, -s, 0), SIMD4<Float>(0, 1, 0, 0),
+                              SIMD4<Float>(s, 0, c, 0), SIMD4<Float>(0, 0, 0, 1))
+        var tp = matrix_identity_float4x4; tp.columns.3 = SIMD4<Float>(pivot, 1)
+        var tn = matrix_identity_float4x4; tn.columns.3 = SIMD4<Float>(-pivot, 1)
+        var tt = matrix_identity_float4x4; tt.columns.3 = SIMD4<Float>(dx, dy, dz, 1)
+        return tt * (tp * R * tn)
+    }
+}
+
 // MARK: - Provenance-resolved accessors
 
 extension StitchLink {
@@ -115,6 +157,14 @@ extension StitchLink {
     var targetAnchorId: UUID { sourceIsA ? anchorBId : anchorAId }
     var sourceAnchorCompassHeading: Double? { sourceIsA ? anchorACompassHeading : anchorBCompassHeading }
     var targetAnchorCompassHeading: Double? { sourceIsA ? anchorBCompassHeading : anchorACompassHeading }
+
+    /// The user's manual fine-tune for this join (Step 2c). Get/set proxies the 4 stored scalars.
+    var manualNudge: ManualNudge {
+        get { ManualNudge(yawDeg: Float(manualYawDeg), dx: Float(manualDX), dy: Float(manualDY), dz: Float(manualDZ)) }
+        set { manualYawDeg = Double(newValue.yawDeg); manualDX = Double(newValue.dx)
+              manualDY = Double(newValue.dy); manualDZ = Double(newValue.dz) }
+    }
+    var hasManualCorrection: Bool { !manualNudge.isZero }
 
     /// The endpoint anchor pose expressed in `scan`'s own world frame, plus the *other*
     /// endpoint, for in-scan connector rendering. Returns nil if `scan` is not an endpoint.
