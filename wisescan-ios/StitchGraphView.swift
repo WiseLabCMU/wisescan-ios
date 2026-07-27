@@ -98,7 +98,7 @@ struct StitchGraphView: View {
         let edges = graph?.edges(in: component) ?? []
         // Solve Op-2 ONCE (the only disk read); the render + live adjuster reuse this cache.
         let autos = StitchGraphBuilder.computeAutoCorrections(for: edges)
-        let placement = StitchGraphBuilder.placeScans(in: component, edges: edges)
+        let placement = StitchGraphBuilder.placeScans(in: component, edges: edges, autoCorrections: autos)
 
         // PerfDiag-only: the Op-2 residual + applied-correction logs, fired ONCE here (the full
         // render) — never on the all-scans graph list. The visual panel is the always-on surface.

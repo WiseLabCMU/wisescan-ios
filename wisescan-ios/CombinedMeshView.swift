@@ -70,7 +70,8 @@ struct CombinedMeshScreen: View {
             return ComponentPlacement(scans: request.placements, stitchPoints: request.stitchPoints)
         }
         return StitchGraphBuilder.placeScans(
-            in: request.component, edges: request.edges, manualOverrides: manualDrafts)
+            in: request.component, edges: request.edges,
+            manualOverrides: manualDrafts, autoCorrections: request.autoCorrections)
     }
 
     private func displayItems(from placement: ComponentPlacement) -> [CombinedMeshItem] {
@@ -732,23 +733,32 @@ struct CombinedMeshView: UIViewRepresentable {
                     self.frameCamera(scene: scene, contentNode: contentNode, scnView: scnView)
 
                     // Stitch-pin markers last, so their tiny spheres don't influence the camera framing.
+                    // Build each dictionary into a local and publish it in ONE assignment: the render
+                    // thread enumerates `labelNodes` in `willRenderScene`, so incrementally inserting
+                    // into the shared dictionary here would race and can crash with "collection was
+                    // mutated while being enumerated". A single assignment lets the render thread see
+                    // either the empty dictionary or the fully-built one.
+                    var markers: [UUID: SCNNode] = [:]
                     for sp in stitchPoints {
                         let marker = Self.makeStitchMarker()
                         marker.simdPosition = sp.position
                         contentNode.addChildNode(marker)
-                        self.stitchMarkers[sp.id] = marker
+                        markers[sp.id] = marker
                     }
+                    self.stitchMarkers = markers
 
                     // Floating name labels at each map's centroid-top (billboarded, depth-independent).
+                    var labels: [UUID: SCNNode] = [:]
                     for entry in built {
                         guard let anchor = self.labelAnchors[entry.item.id] else { continue }
                         let (label, plateHeight) = Self.makeLabel(entry.item.name)
-                        self.labelBaseHeight = plateHeight
+                        self.labelBaseHeight = plateHeight   // scalar, same for every label
                         let p = entry.item.transform * anchor
                         label.simdPosition = SIMD3<Float>(p.x, p.y, p.z) + SIMD3<Float>(0, 0.3, 0)
                         contentNode.addChildNode(label)
-                        self.labelNodes[entry.item.id] = label
+                        labels[entry.item.id] = label
                     }
+                    self.labelNodes = labels   // publish once, after all labels are built
 
                     onLoaded()
                 }

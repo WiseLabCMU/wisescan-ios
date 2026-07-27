@@ -434,11 +434,13 @@ enum StitchGraphBuilder {
     /// auto fix when "always autocorrect" is on and the join is untouched; else none. ("Autocorrect"
     /// / always-seeding in the UI transfers the auto fix INTO the stored nudge — this is the fallback
     /// so an as-yet-unopened render or an export still honors "always".) Reads disk only for the
-    /// fallback (unset nudge + always on).
+    /// fallback (unset nudge + always on) — pass `precomputedAuto` (from `computeAutoCorrections`) to
+    /// reuse an already-solved correction and avoid re-reading the canonical roomplans off disk.
     @MainActor
-    static func effectiveNudge(for link: StitchLink) -> ManualNudge {
+    static func effectiveNudge(for link: StitchLink, precomputedAuto: StitchCorrection? = nil) -> ManualNudge {
         if !link.manualNudge.isZero { return link.manualNudge }
         guard StitchPrefs.alwaysAutocorrect else { return .zero }
+        if let precomputedAuto { return precomputedAuto.asNudge }
         #if canImport(RoomPlan)
         return stitchCorrection(link: link)?.asNudge ?? .zero
         #else
@@ -489,10 +491,14 @@ enum StitchGraphBuilder {
     ///   a join. The solver's "Autocorrect" seeds these values too, so there is NO separate auto
     ///   layer. Falls back to `effectiveNudge(for:)` (the link's stored nudge, or the auto fix when
     ///   "always autocorrect" is on and the join is untouched). Applied about the raw pin: `r' = nudge · r`.
+    /// - Parameter autoCorrections: pre-solved Op-2 corrections by link id (from
+    ///   `computeAutoCorrections`). Passing them keeps the render path's disk read to that single
+    ///   solve — the "always autocorrect" fallback reuses these instead of re-solving off disk.
     @MainActor
     static func placeScans(in component: [UUID],
                            edges componentEdges: [StitchGraphEdge],
-                           manualOverrides: [UUID: ManualNudge] = [:]) -> ComponentPlacement {
+                           manualOverrides: [UUID: ManualNudge] = [:],
+                           autoCorrections: [UUID: StitchCorrection] = [:]) -> ComponentPlacement {
         // Pick a deterministic root (smallest UUID) so combined-render placements are
         // stable across runs — component element order comes from non-deterministic
         // Dictionary iteration and must not drive the accumulated transform frame.
@@ -540,7 +546,7 @@ enum StitchGraphBuilder {
             // ONE correction: the join's nudge (the solver's "Autocorrect" seeds this same value —
             // no separate auto layer), pivoted about the raw pin. In-flight overrides win; otherwise
             // the stored nudge, or the auto fix when "always autocorrect" seeds an untouched join.
-            let nudge = manualOverrides[link.id] ?? effectiveNudge(for: link)
+            let nudge = manualOverrides[link.id] ?? effectiveNudge(for: link, precomputedAuto: autoCorrections[link.id])
             if !nudge.isZero {
                 let pin = mSrc.columns.3
                 r = nudge.matrix(pivot: SIMD3<Float>(pin.x, pin.y, pin.z)) * r
