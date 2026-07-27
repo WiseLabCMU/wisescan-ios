@@ -486,9 +486,9 @@ private struct ManualAdjustPanel: View {
             }
 
             slider("rotate.3d", "Rotate", $nudge.yawDeg, -30...30, "%.1f°")
-            slider("arrow.left.and.right", "Left / Right", $nudge.dx, -0.5...0.5, "%.2f m")
-            slider("arrow.up.and.down", "Fwd / Back", $nudge.dz, -0.5...0.5, "%.2f m")
-            slider("arrow.up.arrow.down", "Up / Down", $nudge.dy, -0.3...0.3, "%.2f m")
+            slider("arrow.left.and.right", "Left / Right", $nudge.dx, -2...2, "%.2f m")
+            slider("arrow.up.and.down", "Fwd / Back", $nudge.dz, -2...2, "%.2f m")
+            slider("arrow.up.arrow.down", "Up / Down", $nudge.dy, -2...2, "%.2f m")
 
             HStack(spacing: 12) {
                 Button(action: onCancel) {
@@ -513,15 +513,28 @@ private struct ManualAdjustPanel: View {
         .padding(.bottom, 12)
     }
 
+    /// A nonlinear (signed-power) slider: the thumb travels a *linear* normalized position `p∈[-1,1]`
+    /// but the bound value is `sign(p)·|p|^curve · max`, so the center of the travel gives fine
+    /// control and the extremes reach the full (now large, ±2 m) range — you fine-tune most of the
+    /// time yet can still dial out a big drift. `curve = 1` would be linear; `2` is a gentle ease.
     @ViewBuilder
     private func slider(_ icon: String, _ label: String, _ value: Binding<Float>,
-                        _ range: ClosedRange<Float>, _ fmt: String) -> some View {
+                        _ range: ClosedRange<Float>, _ fmt: String, curve: Double = 2) -> some View {
+        let maxAbs = Double(max(abs(range.lowerBound), abs(range.upperBound)))
+        let position = Binding<Double>(
+            get: {
+                guard maxAbs > 0 else { return 0 }
+                let n = min(1, max(-1, Double(value.wrappedValue) / maxAbs))
+                return (n < 0 ? -1 : 1) * pow(abs(n), 1 / curve)
+            },
+            set: { p in
+                value.wrappedValue = Float((p < 0 ? -1 : 1) * pow(abs(p), curve) * maxAbs)
+            }
+        )
         HStack {
             Image(systemName: icon).frame(width: 24).foregroundColor(.cyan)
             Text(label).font(.caption).frame(width: 84, alignment: .leading)
-            Slider(value: Binding(get: { Double(value.wrappedValue) },
-                                  set: { value.wrappedValue = Float($0) }),
-                   in: Double(range.lowerBound)...Double(range.upperBound))
+            Slider(value: position, in: -1...1)
             Text(String(format: fmt, value.wrappedValue))
                 .font(.caption.monospacedDigit())
                 .frame(width: 56, alignment: .trailing)
