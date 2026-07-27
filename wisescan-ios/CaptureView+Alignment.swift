@@ -1,6 +1,7 @@
 import SwiftUI
 import ARKit
 import SwiftData
+import simd
 
 // MARK: - Cross-Session Alignment (Flow B)
 
@@ -44,8 +45,18 @@ extension CaptureView {
         // Pin A: camera pose in Map A's coordinate system at this moment.
         // The user is physically at the boundary; the relocalized session
         // expresses this position in Map A's world coordinates.
-        let pinACameraPose = frame.camera.transform
+        //
+        // Compose the plane auto-align fit so pinA lands in the ghost's RAW frame (the canonical
+        // owner's frame that placeScans lifts via T), not the coarse raw relocalization pose. The
+        // fit maps ghost-raw → live; its inverse brings the live camera pose back into ghost-raw.
+        // nil (no trusted fit yet — degraded relocalization / no walls) ⇒ identity ⇒ raw pinA.
+        let alignFit = scanStore.ghostAutoAlignFit ?? matrix_identity_float4x4
+        let pinACameraPose = simd_inverse(alignFit) * frame.camera.transform
         let pinACompassHeading = locationManager.bestHeading
+        // Pin A's heading + fit provenance — the source-side counterpart to BoundaryAnchor's Pin B
+        // heading log, so |C_A − C_B| (the "tablet didn't move" certificate) and whether the fit was
+        // the best-RMS plane seat vs. the raw fallback are both readable from a device log.
+        print("[BoundaryAnchor] Pin A (source, mapA) captured — heading=\(pinACompassHeading), fit=\(scanStore.ghostAutoAlignFit == nil ? "raw (no trusted plane seat)" : "plane-composed (best-RMS seat)")")
         let pinAId = UUID()  // Metadata ID only — no ARAnchor needed for the stitch link
 
         // Create new location for the adjacent space
