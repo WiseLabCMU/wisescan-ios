@@ -137,10 +137,13 @@ struct CombinedMeshScreen: View {
                 if isLoading && !presentItems.isEmpty { loadingOverlay(count: presentItems.count) }
                 if missingCount > 0 { missingBadge(missingCount) }
 
-                // Room legend + per-map correction status (Step 2c). Tap a map to adjust its join.
-                if hasStitches && rooms.count > 1 && showLegend && editingLinkId == nil {
+                // Room legend + per-map correction status (Step 2c). Stays visible while adjusting
+                // (top-right; the adjuster is bottom) — the edited map's row is highlighted, and any
+                // row's adjust button switches the target. Tap a map to adjust its join.
+                if hasStitches && rooms.count > 1 && showLegend {
                     StitchLegendPanel(
                         rooms: rooms,
+                        editingLinkId: editingLinkId,
                         alwaysAutocorrect: $alwaysAutocorrect,
                         anyAutoOfferable: rooms.contains { $0.autoAvailable && !$0.isAuto },
                         anyCorrected: rooms.contains { $0.isCorrected },
@@ -155,14 +158,19 @@ struct CombinedMeshScreen: View {
                     .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
 
-                // Manual rotate/translate adjuster for the selected map's join.
+                // Manual rotate/translate adjuster for the selected map's join. Live-persists (slider
+                // release / Auto / Reset all write through), so switching maps or dismissing is safe.
                 if let lid = editingLinkId {
+                    let editingRow = rooms.first { $0.parentLinkId == lid }
                     ManualAdjustPanel(
-                        title: adjustTitle(forLink: lid, rooms: rooms),
+                        title: editingRow?.name ?? "map",
+                        autoAvailable: editingRow?.autoAvailable ?? false,
+                        isAuto: editingRow?.isAuto ?? false,
                         nudge: draftBinding(lid),
-                        onReset: { manualDrafts[lid] = .zero },
-                        onCancel: { cancelEdit(lid) },
-                        onSave: { commitEdit(lid) }
+                        onToggleAuto: { toggleAuto(lid) },
+                        onReset: { setNudge(lid, .zero); persist() },
+                        onCommit: { persistEdit(lid) },
+                        onDone: { persistEdit(lid); editingLinkId = nil }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .transition(.move(edge: .bottom))
@@ -271,26 +279,15 @@ struct CombinedMeshScreen: View {
         Binding(get: { manualDrafts[id] ?? .zero }, set: { manualDrafts[id] = $0 })
     }
 
-    private func adjustTitle(forLink id: UUID, rooms: [StitchRoomRow]) -> String {
-        rooms.first(where: { $0.parentLinkId == id })?.name ?? "map"
-    }
-
     private func link(for id: UUID) -> StitchLink? {
         request.edges.first(where: { $0.link.id == id })?.link
     }
 
-    private func cancelEdit(_ id: UUID) {
-        if let link = link(for: id) { manualDrafts[id] = link.manualNudge }   // restore stored
-        editingLinkId = nil
-    }
-
-    private func commitEdit(_ id: UUID) {
-        if let link = link(for: id) {
-            link.manualNudge = manualDrafts[id] ?? .zero
-            do { try modelContext.save() }
-            catch { print("[StitchCorrect] manual nudge save failed: \(error.localizedDescription)") }
-        }
-        editingLinkId = nil
+    /// The manual adjuster's live-persist: sync a join's live draft to its link and save (called on
+    /// slider release / Done), so what you see is always what's stored and exported.
+    private func persistEdit(_ id: UUID) {
+        link(for: id)?.manualNudge = manualDrafts[id] ?? .zero
+        persist()
     }
 
     // MARK: Auto-correct = seed the single nudge (per-join / all / always)
@@ -344,6 +341,7 @@ struct CombinedMeshScreen: View {
 
 private struct StitchLegendPanel: View {
     let rooms: [StitchRoomRow]
+    let editingLinkId: UUID?
     @Binding var alwaysAutocorrect: Bool
     let anyAutoOfferable: Bool
     let anyCorrected: Bool
@@ -408,7 +406,9 @@ private struct StitchLegendPanel: View {
             }
             if !room.isBase {
                 Button { onAdjust(room) } label: {
-                    Image(systemName: "slider.horizontal.3").font(.caption).foregroundColor(.cyan)
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.caption)
+                        .foregroundColor(room.parentLinkId == editingLinkId ? .white : .cyan)
                         .frame(width: 28, height: 24)
                         .contentShape(Rectangle())
                 }
@@ -416,6 +416,8 @@ private struct StitchLegendPanel: View {
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(room.parentLinkId != nil && room.parentLinkId == editingLinkId
+                    ? Color.cyan.opacity(0.18) : Color.clear)
     }
 
     @ViewBuilder private func statusLine(_ room: StitchRoomRow) -> some View {
@@ -478,20 +480,36 @@ private struct StitchLegendPanel: View {
 
 private struct ManualAdjustPanel: View {
     let title: String
+    let autoAvailable: Bool
+    let isAuto: Bool
     @Binding var nudge: ManualNudge
+    let onToggleAuto: () -> Void
     let onReset: () -> Void
-    let onCancel: () -> Void
-    let onSave: () -> Void
+    let onCommit: () -> Void      // persist current values (slider release / Done) — live, no Save/Cancel
+    let onDone: () -> Void
 
     var body: some View {
         VStack(spacing: 12) {
-            HStack {
+            HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Adjust \(title)").font(.headline).foregroundColor(.white).lineLimit(1)
                     Text("Rotate & move this map to fine-tune the join")
                         .font(.caption2).foregroundColor(.gray)
                 }
-                Spacer()
+                Spacer(minLength: 4)
+                // Auto lives here too (near Reset) so you can flip the join corrected/raw without
+                // leaving the sliders — it seeds/clears the same values the sliders show.
+                if autoAvailable {
+                    Button(action: onToggleAuto) {
+                        Text("Auto")
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10).padding(.vertical, 5)
+                            .background(isAuto ? Color.orange : Color.white.opacity(0.12))
+                            .foregroundColor(isAuto ? .black : .white)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
                 Button("Reset", action: onReset).font(.subheadline).foregroundColor(.orange)
             }
 
@@ -500,20 +518,12 @@ private struct ManualAdjustPanel: View {
             slider("arrow.up.and.down", "Fwd / Back", $nudge.dz, -2...2, "%.2f m")
             slider("arrow.up.arrow.down", "Up / Down", $nudge.dy, -2...2, "%.2f m")
 
-            HStack(spacing: 12) {
-                Button(action: onCancel) {
-                    Text("Cancel").frame(maxWidth: .infinity).padding(.vertical, 10)
-                        .background(Color.white.opacity(0.12))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-                .foregroundColor(.white)
-                Button(action: onSave) {
-                    Text("Save").frame(maxWidth: .infinity).padding(.vertical, 10)
-                        .background(Color.cyan)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-                .foregroundColor(.black)
+            Button(action: onDone) {
+                Text("Done").frame(maxWidth: .infinity).padding(.vertical, 10)
+                    .background(Color.cyan)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
             }
+            .foregroundColor(.black)
             .font(.subheadline.bold())
         }
         .padding(16)
@@ -544,7 +554,7 @@ private struct ManualAdjustPanel: View {
         HStack {
             Image(systemName: icon).frame(width: 24).foregroundColor(.cyan)
             Text(label).font(.caption).frame(width: 84, alignment: .leading)
-            Slider(value: position, in: -1...1)
+            Slider(value: position, in: -1...1, onEditingChanged: { editing in if !editing { onCommit() } })
             Text(String(format: fmt, value.wrappedValue))
                 .font(.caption.monospacedDigit())
                 .frame(width: 56, alignment: .trailing)
