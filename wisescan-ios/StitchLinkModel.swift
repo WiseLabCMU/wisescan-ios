@@ -344,6 +344,51 @@ enum StitchLinkStore {
         return StitchingManifest(links: dtos)
     }
 
+    // MARK: Generation churn (preserve stitches across a scan deletion)
+
+    /// Before deleting `deleteSet` scans, preserve any stitch whose endpoint scan is going away but
+    /// whose ROOM survives (another generation remains): re-point that endpoint onto a surviving scan
+    /// of the same location — preferring the canonical owner (gen-0) — and re-express the pin.
+    ///
+    /// The pin is a fixed point in the location's canonical frame, so the re-expression is EXACT and
+    /// moves the rendered/exported geometry not at all:
+    ///   `canonicalPin = appliedT(old)·anchor`, `newAnchor = inverse(appliedT(new))·canonicalPin`.
+    /// (`appliedT(new)·newAnchor == canonicalPin`, so `mSrc`/the edge are unchanged.)
+    ///
+    /// A link whose endpoint location is being FULLY deleted has no survivor here, so it is left for
+    /// the cascade to remove — correctly BISECTING the graph (that is a room deletion, per design).
+    /// Must run BEFORE the caller deletes the scans; saves so the re-point beats the delete cascade.
+    static func repointIncidentLinks(beforeDeleting deleteSet: [CapturedScan], in context: ModelContext) {
+        let doomed = Set(deleteSet.map(\.id))
+        var changed = false
+        for scan in deleteSet {
+            guard let location = scan.location,
+                  let target = location.scans.filter({ !doomed.contains($0.id) }).min(by: CapturedScan.canonicalOrder)
+            else { continue }   // no surviving generation in this room → cascade bisects, as intended
+            let tOld = SaveRegistration.appliedTransform(scanDirectory: scan.scanDirectory) ?? matrix_identity_float4x4
+            let tNewInv = simd_inverse(SaveRegistration.appliedTransform(scanDirectory: target.scanDirectory) ?? matrix_identity_float4x4)
+            for link in incidentLinks(for: scan) {
+                if link.endpointAScan?.id == scan.id {
+                    link.anchorAMatrix = StitchLink.flatten(tNewInv * (tOld * StitchLink.unflatten(link.anchorAMatrix)))
+                    link.endpointAScan = target
+                    changed = true
+                }
+                if link.endpointBScan?.id == scan.id {
+                    link.anchorBMatrix = StitchLink.flatten(tNewInv * (tOld * StitchLink.unflatten(link.anchorBMatrix)))
+                    link.endpointBScan = target
+                    changed = true
+                }
+            }
+        }
+        guard changed else { return }
+        do {
+            try context.save()   // persist the re-point BEFORE the caller's delete so the cascade can't take these links
+            stitchLog.info("repoint: preserved stitch link(s) across \(deleteSet.count) scan deletion(s)")
+        } catch {
+            stitchLog.error("repoint save FAILED: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     // MARK: Migration
 
     /// One-time import of legacy per-location `stitching.json` files into SwiftData.

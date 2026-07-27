@@ -462,6 +462,10 @@ struct ScansListView: View {
         case .latest:
             // Delete only the latest scan per location; auto-delete location if empty
             var dirsToRemove: [URL] = []
+            // Preserve stitches for rooms that keep an older generation (re-point off the latest);
+            // a room whose latest IS its only scan has no survivor here → cascade bisects below.
+            let latestScans = selectedLocs.compactMap { $0.scans.max(by: { $0.capturedAt < $1.capturedAt }) }
+            StitchLinkStore.repointIncidentLinks(beforeDeleting: latestScans, in: modelContext)
             for loc in selectedLocs {
                 guard let latest = loc.scans.max(by: { $0.capturedAt < $1.capturedAt }) else { continue }
                 dirsToRemove.append(latest.scanDirectory)

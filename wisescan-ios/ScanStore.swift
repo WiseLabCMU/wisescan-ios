@@ -1068,6 +1068,9 @@ class ScanFileManager {
     }
 
     func deleteScan(_ scan: CapturedScan, context: ModelContext) {
+        // Preserve stitches if this room keeps another generation (re-point off the doomed scan);
+        // if this is the room's last scan, the link cascades away (bisect) as intended.
+        StitchLinkStore.repointIncidentLinks(beforeDeleting: [scan], in: context)
         try? FileManager.default.removeItem(at: scan.scanDirectory)
         context.delete(scan)
         try? context.save()
