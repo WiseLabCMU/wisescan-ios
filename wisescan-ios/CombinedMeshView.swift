@@ -615,6 +615,8 @@ struct CombinedMeshView: UIViewRepresentable {
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         // Re-tint in place when the toggle changes (no reload needed).
+        // Cache the viewport size here (main thread) for the render-thread label sizing.
+        context.coordinator.viewportSize = uiView.bounds.size
         context.coordinator.applyTint(colorByMap: colorByMap)
         context.coordinator.applyViewMode(semanticViewMode)
         // Live manual adjuster: move pieces + stitch markers to the recomputed transforms without
@@ -637,11 +639,16 @@ struct CombinedMeshView: UIViewRepresentable {
         // repositioning them as pieces move under a live nudge.
         private var labelNodes: [UUID: SCNNode] = [:]
         private var labelAnchors: [UUID: SIMD4<Float>] = [:]
-        // World height (at container scale 1) of a label's backing plate. Each frame the label is
-        // rescaled so this plate covers a fixed fraction of the viewport (constant on-screen size).
-        private var labelBaseHeight: Float = 0.24
+        // World height (at container scale 1) of each label's backing plate, keyed by scanId. Plate
+        // height depends on the glyphs in the name (ascenders/descenders), so it is stored PER label;
+        // each frame the label is rescaled so ITS plate covers a fixed fraction of the viewport.
+        private var labelBaseHeights: [UUID: Float] = [:]
         // Target on-screen height of a label plate, as a fraction of the viewport height.
         private let labelScreenFraction: Float = 0.075
+        // Viewport size cached from the MAIN thread (updateUIView sets it). `willRenderScene` runs on
+        // SceneKit's render thread, where touching the UIView's `bounds` would be a UIKit threading
+        // violation — so we read the size from here instead. Internal so updateUIView can set it.
+        var viewportSize: CGSize = .zero
         private var semanticsNode: SCNNode?
         private var semanticFillsNode: SCNNode?
         private var allDetectedClasses: [SemanticClass] = []
@@ -749,16 +756,18 @@ struct CombinedMeshView: UIViewRepresentable {
 
                     // Floating name labels at each map's centroid-top (billboarded, depth-independent).
                     var labels: [UUID: SCNNode] = [:]
+                    var baseHeights: [UUID: Float] = [:]
                     for entry in built {
                         guard let anchor = self.labelAnchors[entry.item.id] else { continue }
                         let (label, plateHeight) = Self.makeLabel(entry.item.name)
-                        self.labelBaseHeight = plateHeight   // scalar, same for every label
+                        baseHeights[entry.item.id] = plateHeight
                         let p = entry.item.transform * anchor
                         label.simdPosition = SIMD3<Float>(p.x, p.y, p.z) + SIMD3<Float>(0, 0.3, 0)
                         contentNode.addChildNode(label)
                         labels[entry.item.id] = label
                     }
-                    self.labelNodes = labels   // publish once, after all labels are built
+                    self.labelBaseHeights = baseHeights   // publish heights before nodes...
+                    self.labelNodes = labels              // ...so the render thread never sees nodes without heights
 
                     onLoaded()
                 }
@@ -817,20 +826,27 @@ struct CombinedMeshView: UIViewRepresentable {
         /// runs on every rendered frame. Only reads camera/projection and writes label scale; the
         /// billboard constraint (orientation) is untouched.
         func renderer(_ renderer: SCNSceneRenderer, willRenderScene scene: SCNScene, atTime time: TimeInterval) {
-            guard !labelNodes.isEmpty, labelBaseHeight > 0,
-                  let pov = renderer.pointOfView, let cam = pov.camera else { return }
-            let vp = (renderer as? SCNView)?.bounds.size ?? CGSize(width: 1, height: 1)
-            guard vp.height > 0 else { return }
+            // Snapshot the shared dictionaries once: they are (re)assigned wholesale on the main thread
+            // as the async load publishes labels, so enumerating a local copy insulates this render
+            // thread from a concurrent reassignment (iterating the live property could crash).
+            let labels = labelNodes
+            let bases = labelBaseHeights
+            guard !labels.isEmpty, let pov = renderer.pointOfView, let cam = pov.camera else { return }
+            // Viewport comes from the main-thread cache (never UIView.bounds off this render thread).
+            // Zero until the first updateUIView after layout — skip sizing until then.
+            let vp = viewportSize
+            guard vp.width > 0, vp.height > 0 else { return }
             // Vertical projection scale fy = cot(fovY/2): an object of world height H at camera
             // distance d covers fraction (fy·H)/(2·d) of the viewport height. Solve for the H that
-            // hits our target fraction, then scale the (labelBaseHeight-tall) plate to match.
+            // hits our target fraction, then scale each label's own plate (its base height) to match.
             let fy = simd_float4x4(cam.projectionTransform(withViewportSize: vp)).columns.1.y
             guard fy != 0 else { return }
             let camPos = pov.simdWorldPosition
-            for (_, label) in labelNodes {
+            for (id, label) in labels {
+                let base = max(0.05, bases[id] ?? 0.24)   // sane floor guards a missing/zero plate height
                 let d = simd_distance(camPos, label.simdWorldPosition)
                 let worldH = 2 * labelScreenFraction * d / fy
-                label.simdScale = SIMD3<Float>(repeating: max(0.001, worldH / labelBaseHeight))
+                label.simdScale = SIMD3<Float>(repeating: max(0.001, worldH / base))
             }
         }
 

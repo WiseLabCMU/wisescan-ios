@@ -108,7 +108,7 @@ struct StitchGraphView: View {
                 StitchGraphBuilder.logResidual(link: e.link, correction: corr)
                 if let c = corr, c.appliedYaw || c.appliedPerp {
                     var parts: [String] = []
-                    if c.appliedYaw { parts.append(String(format: "yaw %+.1f°", c.yawDeg)) }
+                    if c.appliedYaw { parts.append(String(format: "yaw %+.1f°", c.yawSigned)) }
                     if c.appliedPerp { parts.append(String(format: "translation %.0fcm", c.perpCm)) }
                     let sN = e.link.sourceScan?.location?.name ?? "?", tN = e.link.targetScan?.location?.name ?? "?"
                     let state = e.link.hasManualCorrection ? "in nudge" : "available (tap Autocorrect)"

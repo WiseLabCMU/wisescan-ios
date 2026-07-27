@@ -130,6 +130,12 @@ enum StitchGraphBuilder {
             // user is looking at the result. Kept PerfDiag-gated there.
         }
 
+        // Sort edges deterministically: placeScans' spanning-tree BFS walks adjacency in edge order,
+        // so an unstable `edges` order (it follows Dictionary/link discovery order) would make the
+        // combined-render placements — and each map's chosen `parentLinkId` for the adjuster — vary
+        // across runs, especially in cyclic graphs. Key on the stable link id.
+        edges.sort { $0.link.id.uuidString < $1.link.id.uuidString }
+
         // Sort node ids/list deterministically — Dictionary iteration order is unstable
         // across runs, which would otherwise leak into component membership order and
         // the layered layout's `order` assignment.
@@ -156,7 +162,9 @@ enum StitchGraphBuilder {
             return
         }
         let compass = c.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a"
-        let yaw = String(format: "yaw %+.1f°→%@", c.yawDeg, c.appliedYaw ? "applied" : "held")
+        // When applied, report the SIGNED yaw actually baked in (alignScore can flip the sign vs the
+        // measured median); when held, report the measured value so the log says what was considered.
+        let yaw = String(format: "yaw %+.1f°→%@", c.appliedYaw ? c.yawSigned : c.yawDeg, c.appliedYaw ? "applied" : "held")
         let perp = c.appliedPerp ? String(format: "⊥ %.0fcm→applied", c.perpCm)
                                  : (c.doorwayPerpCm.map { String(format: "⊥ %.0fcm→held", $0) } ?? "⊥ n/a")
         print("[StitchResidual] \(src) ↔ \(tgt): \(yaw), \(perp) | compass \(compass) | walls \(c.srcWalls)/\(c.tgtWalls) near-∥ \(c.nearParallel)")
@@ -276,7 +284,9 @@ enum StitchGraphBuilder {
         /// The applied correction expressed as a `ManualNudge` (yaw about the pin + translation), so
         /// "Autocorrect" can transfer the solver's fix INTO the single manual correction rather than
         /// layering a separate transform under it. Reproduces `transform` exactly when the nudge is
-        /// applied about the RAW pin (`mSrc.columns.3`).
+        /// applied about the T-composed CANONICAL pin (`mSrc.columns.3`, i.e. `tSrc·sourceAnchor`) —
+        /// the same pivot placeScans/effectiveCorrection use. (Not the true raw `sourceAnchor` pin;
+        /// all three paths agree only because each pivots about this canonical point.)
         var asNudge: ManualNudge { ManualNudge(yawDeg: yawSigned, dx: transVec.x, dy: transVec.y, dz: transVec.z) }
     }
 
@@ -449,7 +459,8 @@ enum StitchGraphBuilder {
     }
 
     /// The effective correction transform in the SOURCE scan's canonical frame — the single nudge
-    /// applied about the raw pin, matching exactly what `placeScans` renders. Identity when none.
+    /// applied about the T-composed canonical pin (`tSrc·sourceAnchor`), matching exactly what
+    /// `placeScans` renders. Identity when none.
     @MainActor
     static func effectiveCorrection(for link: StitchLink) -> simd_float4x4 {
         let nudge = effectiveNudge(for: link)
@@ -490,7 +501,7 @@ enum StitchGraphBuilder {
     /// - Parameter manualOverrides: in-progress adjuster values by link id — the SINGLE correction on
     ///   a join. The solver's "Autocorrect" seeds these values too, so there is NO separate auto
     ///   layer. Falls back to `effectiveNudge(for:)` (the link's stored nudge, or the auto fix when
-    ///   "always autocorrect" is on and the join is untouched). Applied about the raw pin: `r' = nudge · r`.
+    ///   "always autocorrect" is on and the join is untouched). Applied about the canonical pin: `r' = nudge · r`.
     /// - Parameter autoCorrections: pre-solved Op-2 corrections by link id (from
     ///   `computeAutoCorrections`). Passing them keeps the render path's disk read to that single
     ///   solve — the "always autocorrect" fallback reuses these instead of re-solving off disk.
@@ -544,7 +555,8 @@ enum StitchGraphBuilder {
             let mTgt = appliedT(link.targetScan) * link.targetAnchorMatrix
             var r = mSrc * simd_inverse(mTgt)
             // ONE correction: the join's nudge (the solver's "Autocorrect" seeds this same value —
-            // no separate auto layer), pivoted about the raw pin. In-flight overrides win; otherwise
+            // no separate auto layer), pivoted about the canonical pin `mSrc.columns.3` (= tSrc·anchor,
+            // the SAME pivot bakedSourceAnchor uses). In-flight overrides win; otherwise
             // the stored nudge, or the auto fix when "always autocorrect" seeds an untouched join.
             let nudge = manualOverrides[link.id] ?? effectiveNudge(for: link, precomputedAuto: autoCorrections[link.id])
             if !nudge.isZero {
