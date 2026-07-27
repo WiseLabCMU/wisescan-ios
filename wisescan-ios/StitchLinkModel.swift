@@ -61,14 +61,6 @@ final class StitchLink {
     var manualDY: Double = 0
     var manualDZ: Double = 0
 
-    // Per-join opt-in for the Op-2 auto correction. Op-2 no longer auto-applies silently (user,
-    // 2026-07-27): the combined render shows the raw pivot by default, and the user opts in per-join
-    // ("Autocorrect") or in bulk ("Autocorrect all") — the easiest way to see, across scenarios, how
-    // good the solver actually is. `nil` = follow the global `StitchPrefs.alwaysAutocorrect` default;
-    // `true`/`false` = an explicit per-join override that wins over the global. Baked into the
-    // exported edge (with the manual nudge) only when effectively true.
-    var autoCorrectOverride: Bool?
-
     var linkedAt: Date = Date()
     var linkTypeStr: String = StitchingLink.LinkType.midSession.rawValue
 
@@ -152,9 +144,9 @@ struct ManualNudge: Equatable {
 
 // MARK: - Stitch UX preferences
 
-/// App-wide stitch-correction preferences (UserDefaults-backed). `alwaysAutocorrect` is the global
-/// default a link's per-join `autoCorrectOverride` falls back to (nil override ⇒ follow this). The
-/// key is shared with the combined render's `@AppStorage` toggle.
+/// App-wide stitch-correction preferences (UserDefaults-backed). When `alwaysAutocorrect` is on, an
+/// untouched join's correction is seeded from the solver's auto fix (transferred INTO its single
+/// nudge) at render-open and honored at export. The key is shared with the render's `@AppStorage`.
 enum StitchPrefs {
     static let alwaysAutocorrectKey = "stitchAlwaysAutocorrect"
     static var alwaysAutocorrect: Bool {
@@ -186,10 +178,6 @@ extension StitchLink {
               manualDY = Double(newValue.dy); manualDZ = Double(newValue.dz) }
     }
     var hasManualCorrection: Bool { !manualNudge.isZero }
-
-    /// Whether Op-2 auto-correction applies to this join: the explicit per-link override if set,
-    /// else the global "always autocorrect" preference.
-    var autoCorrectEffective: Bool { autoCorrectOverride ?? StitchPrefs.alwaysAutocorrect }
 
     /// The endpoint anchor pose expressed in `scan`'s own world frame, plus the *other*
     /// endpoint, for in-scan connector rendering. Returns nil if `scan` is not an endpoint.

@@ -98,7 +98,7 @@ struct StitchGraphView: View {
         let edges = graph?.edges(in: component) ?? []
         // Solve Op-2 ONCE (the only disk read); the render + live adjuster reuse this cache.
         let autos = StitchGraphBuilder.computeAutoCorrections(for: edges)
-        let placement = StitchGraphBuilder.placeScans(in: component, edges: edges, autoCorrections: autos)
+        let placement = StitchGraphBuilder.placeScans(in: component, edges: edges)
 
         // PerfDiag-only: the Op-2 residual + applied-correction logs, fired ONCE here (the full
         // render) — never on the all-scans graph list. The visual panel is the always-on surface.
@@ -111,8 +111,8 @@ struct StitchGraphView: View {
                     if c.appliedYaw { parts.append(String(format: "yaw %+.1f°", c.yawDeg)) }
                     if c.appliedPerp { parts.append(String(format: "translation %.0fcm", c.perpCm)) }
                     let sN = e.link.sourceScan?.location?.name ?? "?", tN = e.link.targetScan?.location?.name ?? "?"
-                    let applied = e.link.autoCorrectEffective ? "APPLIED" : "available (opt-in)"
-                    print("[StitchCorrect] \(sN) ↔ \(tN): auto-correction \(applied) — \(parts.joined(separator: ", ")) (compass \(c.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a"))")
+                    let state = e.link.hasManualCorrection ? "in nudge" : "available (tap Autocorrect)"
+                    print("[StitchCorrect] \(sN) ↔ \(tN): auto-fix \(state) — \(parts.joined(separator: ", ")) (compass \(c.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a"))")
                 }
             }
         }

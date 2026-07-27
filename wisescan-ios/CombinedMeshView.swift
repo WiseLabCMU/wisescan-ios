@@ -35,12 +35,12 @@ private struct StitchRoomRow: Identifiable {
     let name: String
     let tint: Color
     let parentLinkId: UUID?
-    var yawDeg: Float = 0          // magnitude the solver found for this join (shown applied or not)
-    var perpCm: Float = 0
-    var autoAvailable = false      // solver found a trusted correction for this join
-    var autoOn = false             // that correction is currently applied (effective)
-    var hasManual = false
+    var nudge = ManualNudge.zero      // the SINGLE correction currently on this join
+    var autoNudge = ManualNudge.zero  // the solver's fix on offer (may or may not be applied)
+    var isAuto = false                // the current nudge matches the auto fix (seeded / in sync)
     var isBase: Bool { parentLinkId == nil }
+    var autoAvailable: Bool { !autoNudge.isZero }
+    var isCorrected: Bool { !nudge.isZero }
 }
 
 struct CombinedMeshScreen: View {
@@ -56,9 +56,6 @@ struct CombinedMeshScreen: View {
     /// Live adjuster values by link id (seeded from each link's stored nudge on appear). This is the
     /// single source of truth for the view while open; committed back to the links on Save.
     @State private var manualDrafts: [UUID: ManualNudge] = [:]
-    /// Effective auto-correct state per join (render source). Seeded from each link's
-    /// `autoCorrectEffective`; a toggle updates this AND persists the link's override.
-    @State private var autoApplied: [UUID: Bool] = [:]
     @State private var editingLinkId: UUID?
     /// Global "always autocorrect" default (implicitly all joins, unless a per-join override wins).
     @AppStorage(StitchPrefs.alwaysAutocorrectKey) private var alwaysAutocorrect = false
@@ -73,9 +70,7 @@ struct CombinedMeshScreen: View {
             return ComponentPlacement(scans: request.placements, stitchPoints: request.stitchPoints)
         }
         return StitchGraphBuilder.placeScans(
-            in: request.component, edges: request.edges,
-            autoCorrections: request.autoCorrections, manualOverrides: manualDrafts,
-            autoApplied: autoApplied)
+            in: request.component, edges: request.edges, manualOverrides: manualDrafts)
     }
 
     private func displayItems(from placement: ComponentPlacement) -> [CombinedMeshItem] {
@@ -88,17 +83,20 @@ struct CombinedMeshScreen: View {
         let itemByScan = Dictionary(items.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return placement.scans.compactMap { p -> StitchRoomRow? in
             guard let item = itemByScan[p.scanId] else { return nil }
-            let corr = p.parentLinkId.flatMap { request.autoCorrections[$0] }
-            let available = (corr?.appliedYaw ?? false) || (corr?.appliedPerp ?? false)
-            let draft = p.parentLinkId.flatMap { manualDrafts[$0] }
-            let on = p.parentLinkId.flatMap { autoApplied[$0] } ?? false
+            let autoNudge = p.parentLinkId.flatMap { request.autoCorrections[$0]?.asNudge } ?? .zero
+            let nudge = p.parentLinkId.flatMap { manualDrafts[$0] } ?? .zero
             return StitchRoomRow(
                 id: p.locationId, name: item.name, tint: Color(uiColor: item.tint),
                 parentLinkId: p.parentLinkId,
-                yawDeg: corr?.yawDeg ?? 0, perpCm: corr?.perpCm ?? 0,
-                autoAvailable: available, autoOn: available && on,
-                hasManual: !(draft ?? .zero).isZero)
+                nudge: nudge, autoNudge: autoNudge,
+                isAuto: !autoNudge.isZero && Self.nudgesApproxEqual(nudge, autoNudge))
         }
+    }
+
+    /// Approx-equality so a seeded nudge reads as "in sync with Auto" despite float noise.
+    static func nudgesApproxEqual(_ a: ManualNudge, _ b: ManualNudge) -> Bool {
+        abs(a.yawDeg - b.yawDeg) < 0.05 && abs(a.dx - b.dx) < 0.005
+            && abs(a.dy - b.dy) < 0.005 && abs(a.dz - b.dz) < 0.005
     }
 
     /// Items whose mesh file actually exists on disk.
@@ -144,11 +142,11 @@ struct CombinedMeshScreen: View {
                     StitchLegendPanel(
                         rooms: rooms,
                         alwaysAutocorrect: $alwaysAutocorrect,
-                        anyAvailableOff: rooms.contains { $0.autoAvailable && !$0.autoOn },
-                        anyAutoOn: rooms.contains { $0.autoOn },
+                        anyAutoOfferable: rooms.contains { $0.autoAvailable && !$0.isAuto },
+                        anyCorrected: rooms.contains { $0.isCorrected },
                         onToggleAuto: { row in if let lid = row.parentLinkId { toggleAuto(lid) } },
                         onAutocorrectAll: autocorrectAll,
-                        onClearAll: clearAllAuto,
+                        onClearAll: clearAll,
                         onAdjust: { row in if let lid = row.parentLinkId { editingLinkId = lid } }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -253,10 +251,20 @@ struct CombinedMeshScreen: View {
 
     private func seedDrafts() {
         guard manualDrafts.isEmpty else { return }
+        var seededAny = false
         for e in request.edges {
-            manualDrafts[e.link.id] = e.link.manualNudge
-            autoApplied[e.link.id] = e.link.autoCorrectEffective
+            var nudge = e.link.manualNudge
+            // "Always autocorrect": transfer the solver's fix INTO an untouched join's nudge (and
+            // persist), so the value is real from here on and survives toggling always off.
+            if nudge.isZero, alwaysAutocorrect,
+               let auto = request.autoCorrections[e.link.id]?.asNudge, !auto.isZero {
+                nudge = auto
+                e.link.manualNudge = auto
+                seededAny = true
+            }
+            manualDrafts[e.link.id] = nudge
         }
+        if seededAny { persist() }
     }
 
     private func draftBinding(_ id: UUID) -> Binding<ManualNudge> {
@@ -285,49 +293,50 @@ struct CombinedMeshScreen: View {
         editingLinkId = nil
     }
 
-    // MARK: Auto-correct opt-in (per-join / all / always)
-
-    /// Link ids whose join has a trusted correction the solver could apply.
-    private func availableLinkIds() -> [UUID] {
-        request.edges.compactMap { e in
-            let c = request.autoCorrections[e.link.id]
-            return (c?.appliedYaw == true || c?.appliedPerp == true) ? e.link.id : nil
-        }
-    }
+    // MARK: Auto-correct = seed the single nudge (per-join / all / always)
 
     private func persist() {
         do { try modelContext.save() }
-        catch { print("[StitchCorrect] auto-correct save failed: \(error.localizedDescription)") }
+        catch { print("[StitchCorrect] stitch correction save failed: \(error.localizedDescription)") }
     }
 
+    private func setNudge(_ id: UUID, _ nudge: ManualNudge) {
+        manualDrafts[id] = nudge
+        link(for: id)?.manualNudge = nudge
+    }
+
+    /// The "Auto" chip: transfer the solver's fix into the join's nudge (so the sliders show it) —
+    /// or, if already in sync with Auto, clear it. Lets you flip a join corrected/raw to judge it.
     private func toggleAuto(_ id: UUID) {
-        let new = !(autoApplied[id] ?? false)
-        autoApplied[id] = new
-        link(for: id)?.autoCorrectOverride = new     // explicit per-join override (wins over global)
+        guard let auto = request.autoCorrections[id]?.asNudge, !auto.isZero else { return }
+        let cur = manualDrafts[id] ?? .zero
+        setNudge(id, Self.nudgesApproxEqual(cur, auto) ? .zero : auto)
         persist()
     }
 
     private func autocorrectAll() {
-        for id in availableLinkIds() {
-            autoApplied[id] = true
-            link(for: id)?.autoCorrectOverride = true
-        }
-        persist()
-    }
-
-    private func clearAllAuto() {
         for e in request.edges {
-            autoApplied[e.link.id] = false
-            e.link.autoCorrectOverride = false
+            guard let auto = request.autoCorrections[e.link.id]?.asNudge, !auto.isZero else { continue }
+            setNudge(e.link.id, auto)
         }
         persist()
     }
 
-    /// "Always autocorrect" changed: joins WITHOUT an explicit override follow the new global default.
+    private func clearAll() {
+        for e in request.edges { setNudge(e.link.id, .zero) }
+        persist()
+    }
+
+    /// "Always autocorrect" turned on: transfer the solver's fix into every untouched join. Turning
+    /// it off leaves already-transferred values in place (they're real corrections now).
     private func applyAlwaysChange(_ newVal: Bool) {
-        for e in request.edges where e.link.autoCorrectOverride == nil {
-            autoApplied[e.link.id] = newVal
+        guard newVal else { return }
+        for e in request.edges {
+            guard (manualDrafts[e.link.id] ?? .zero).isZero,
+                  let auto = request.autoCorrections[e.link.id]?.asNudge, !auto.isZero else { continue }
+            setNudge(e.link.id, auto)
         }
+        persist()
     }
 }
 
@@ -336,8 +345,8 @@ struct CombinedMeshScreen: View {
 private struct StitchLegendPanel: View {
     let rooms: [StitchRoomRow]
     @Binding var alwaysAutocorrect: Bool
-    let anyAvailableOff: Bool
-    let anyAutoOn: Bool
+    let anyAutoOfferable: Bool
+    let anyCorrected: Bool
     let onToggleAuto: (StitchRoomRow) -> Void
     let onAutocorrectAll: () -> Void
     let onClearAll: () -> Void
@@ -391,8 +400,8 @@ private struct StitchLegendPanel: View {
                     Text("Auto")
                         .font(.caption2.weight(.semibold))
                         .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(room.autoOn ? Color.orange : Color.white.opacity(0.12))
-                        .foregroundColor(room.autoOn ? .black : .white)
+                        .background(room.isAuto ? Color.orange : Color.white.opacity(0.12))
+                        .foregroundColor(room.isAuto ? .black : .white)
                         .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
@@ -412,12 +421,12 @@ private struct StitchLegendPanel: View {
     @ViewBuilder private func statusLine(_ room: StitchRoomRow) -> some View {
         if room.isBase {
             Text("Base map (reference)").font(.caption2).foregroundColor(.gray)
-        } else if room.hasManual {
-            Text("Manually adjusted").font(.caption2).foregroundColor(.cyan)
-        } else if room.autoOn {
-            Text("Auto-corrected · " + summary(room)).font(.caption2).foregroundColor(.orange).lineLimit(1)
+        } else if room.isAuto {
+            Text("Auto-corrected · " + summary(room.nudge)).font(.caption2).foregroundColor(.orange).lineLimit(1)
+        } else if room.isCorrected {
+            Text("Adjusted · " + summary(room.nudge)).font(.caption2).foregroundColor(.cyan).lineLimit(1)
         } else if room.autoAvailable {
-            Text("Auto-fix available · " + summary(room)).font(.caption2).foregroundColor(.yellow).lineLimit(1)
+            Text("Auto-fix available · " + summary(room.autoNudge)).font(.caption2).foregroundColor(.yellow).lineLimit(1)
         } else {
             Text("Aligned").font(.caption2).foregroundColor(.green.opacity(0.85))
         }
@@ -430,9 +439,9 @@ private struct StitchLegendPanel: View {
             }
             .toggleStyle(SwitchToggleStyle(tint: .cyan))
 
-            if anyAvailableOff || anyAutoOn {
+            if anyAutoOfferable || anyCorrected {
                 HStack(spacing: 8) {
-                    if anyAvailableOff {
+                    if anyAutoOfferable {
                         Button(action: onAutocorrectAll) {
                             Text("Autocorrect all").font(.caption2.weight(.semibold))
                                 .padding(.horizontal, 10).padding(.vertical, 5)
@@ -441,7 +450,7 @@ private struct StitchLegendPanel: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    if anyAutoOn {
+                    if anyCorrected {
                         Button(action: onClearAll) {
                             Text("Clear").font(.caption2.weight(.semibold))
                                 .padding(.horizontal, 10).padding(.vertical, 5)
@@ -456,10 +465,11 @@ private struct StitchLegendPanel: View {
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
 
-    private func summary(_ room: StitchRoomRow) -> String {
+    private func summary(_ n: ManualNudge) -> String {
         var parts: [String] = []
-        if abs(room.yawDeg) >= 0.05 { parts.append(String(format: "yaw %+.1f°", room.yawDeg)) }
-        if room.perpCm >= 0.5 { parts.append(String(format: "shift %.0f cm", room.perpCm)) }
+        if abs(n.yawDeg) >= 0.05 { parts.append(String(format: "yaw %+.1f°", n.yawDeg)) }
+        let d = sqrt(n.dx * n.dx + n.dy * n.dy + n.dz * n.dz)
+        if d >= 0.005 { parts.append(String(format: "shift %.0f cm", d * 100)) }
         return parts.isEmpty ? "—" : parts.joined(separator: ", ")
     }
 }
