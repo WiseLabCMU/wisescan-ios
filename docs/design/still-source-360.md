@@ -331,6 +331,43 @@ from the export (JPG + pose sidecar both). Device validation: export a scan cont
 360° stills with a person in frame (expect `360° privacy pass: … blurred`, pixelated
 person in the zip) and one with nobody (expect `clean`, byte-identical still).
 
+### Blur ordering: equirect-first (decision, 2026-07-28)
+
+The privacy pass pixelates person regions on the **full-resolution equirect first**
+(`EquirectPrivacyBlur`), then cube-face export (`EquirectFaceExport`) re-samples the
+already-blurred equirect into 5 pinhole faces. Because the gnomonic reprojection warps the
+equirect grid, the uniform-color pixelation blocks (rectangles in equirect space) become
+**warped quadrilaterals** on the cube faces — their shape distorts toward face edges where
+the projection stretches, and stays roughly rectangular near face centers.
+
+**Why equirect-first (chosen):**
+
+- **1 Vision segmentation pass per still** (6 cube faces for detection, projected back
+  into a single equirect mask) instead of 6 independent passes per still (one per exported
+  face + one for the archived equirect). The ~6× processing saving matters on-device,
+  especially for 61 MP Theta X stills where the per-still cost is already ~6 s.
+- The warped blocks remain **easily recognizable** as artificial: large (~1/128 of equirect
+  width ≈ 86 px on Theta X, 52 px on Z1), uniform-color regions that no natural texture
+  produces. Their uniformity is a **downstream detection signal** — ingestion pipelines can
+  identify these pixels as privacy-pixelated without requiring a matching depth mask,
+  and discount them from texture/coloring before applying to model surfaces (e.g. for
+  3DGS splat training, where privacy-blurred color would otherwise bleed into nearby
+  splats).
+- Privacy is equally effective: the blocks are identity-erasing at any viewing zoom
+  regardless of their warped shape on cube faces.
+
+**Discarded alternative — per-face post-cubemap blur:** generate 5 cube faces + 1 equirect
+first, then run Vision person segmentation independently on each. Produces clean,
+undistorted pixelation blocks per face and more accurate per-face masks (no
+equirect→face mask reprojection error), but costs ~6× the segmentation time per still.
+The downstream detectability advantage of the warped blocks and the processing cost make
+equirect-first the better tradeoff for this branch. If a future camera or ingestion
+pipeline makes per-face blur necessary, a new branch can revisit.
+
+**Downstream contract:** the pixel artifact characteristics (uniform-color blocks, warped
+shapes on faces, block size) are documented here; the actual detection/discounting logic
+belongs in wisescan-ingestion, not in the iOS export.
+
 ## Phasing
 
 | Phase | Deliverable | Gate |
