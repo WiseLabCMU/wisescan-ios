@@ -569,25 +569,9 @@ struct CaptureView: View {
 
                 // Top Controls
                 HStack {
-                    // Privacy Filter Toggle — LOCKED while recording: the setting must describe
-                    // the whole scan as one binary state. A mid-scan flip half-masks the capture
-                    // (segmentation masks exist only for the ON portion) while the exported
-                    // privacy_filter flag records just the stop-time value — the export blur gate
-                    // then mis-reasons about the unmasked half.
-                    HStack {
-                        Text("Privacy Filter")
-                            .font(.subheadline)
-                            .foregroundColor(.white)
-                        Toggle("", isOn: $isPrivacyFilterOn)
-                            .labelsHidden()
-                            .tint(.green)
-                            .disabled(isRecording)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(20)
-                    .opacity(isRecording ? 0.5 : 1)
+                    PrivacyFilterPill(isOn: $isPrivacyFilterOn,
+                                      locked: isRecording,
+                                      show360Note: thetaManager.isConnected)
 
                     Spacer()
 
@@ -1919,6 +1903,65 @@ struct CaptureView: View {
         while let presented = top.presentedViewController { top = presented }
         top.present(alert, animated: true)
         return true
+    }
+}
+
+/// Privacy Filter toggle pill. Expands with an informed-consent warning while OFF — capturing
+/// people is a supported, deliberate choice (e.g. a group-photo 3D model), and with a 360°
+/// camera connected that choice includes everyone around the operator, not just who the phone
+/// sees. LOCKED while recording: the setting must describe the whole scan as one binary state —
+/// a mid-scan flip half-masks the capture (segmentation masks exist only for the ON portion)
+/// while the exported `privacy_filter` flag records just the stop-time value, so the export
+/// blur gate would mis-reason about the unmasked half.
+private struct PrivacyFilterPill: View {
+    @Binding var isOn: Bool
+    let locked: Bool
+    let show360Note: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Privacy Filter")
+                    .font(.subheadline)
+                    .foregroundColor(.white)
+                Toggle("", isOn: $isOn)
+                    .labelsHidden()
+                    .tint(.green)
+                    .disabled(locked)
+            }
+            if !isOn {
+                Text(warningText)
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+        .cornerRadius(16)
+        .frame(maxWidth: 260, alignment: .leading)
+        .opacity(locked ? 0.5 : 1)
+        .animation(.easeInOut(duration: 0.2), value: isOn)
+    }
+
+    private var warningText: String {
+        var text = "People in view will be captured unblurred — moving people will corrupt texture maps."
+        if show360Note {
+            text += " The connected 360° camera captures ALL directions, including people behind you."
+        }
+        return text
+    }
+}
+
+#Preview("Privacy pill (off, 360)") {
+    ZStack {
+        Color.black.ignoresSafeArea()
+        VStack(spacing: 12) {
+            PrivacyFilterPill(isOn: .constant(true), locked: false, show360Note: false)
+            PrivacyFilterPill(isOn: .constant(false), locked: false, show360Note: false)
+            PrivacyFilterPill(isOn: .constant(false), locked: true, show360Note: true)
+        }
     }
 }
 

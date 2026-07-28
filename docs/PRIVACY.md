@@ -24,7 +24,9 @@ Person-shaped geometry is also excluded from the exported mesh, and a live on-sc
 
 ### 360° Camera Stills
 
-When an external 360° camera (e.g. Ricoh Theta) is connected, its equirectangular stills capture everyone around the operator — including people who never appeared in the phone's viewfinder. These stills therefore receive a **mandatory** person-privacy pass at export time, independent of the Privacy Filtering toggle: each still is resampled into perspective cube faces, person segmentation runs per face, and detected person regions are pixelated on the full-resolution image before it is included in any export. A still that cannot be verified is excluded from the export entirely — raw 360° imagery never leaves the device.
+When an external 360° camera (e.g. Ricoh Theta) is connected, its equirectangular stills capture everyone around the operator — including people who never appeared in the phone's viewfinder. When Privacy Filtering is enabled, each still receives a person-privacy pass at export time: it is resampled into perspective cube faces, person segmentation runs per face, and detected person regions are pixelated on the full-resolution image before it is included in any export. A still that cannot be verified is excluded from the export entirely — with the filter on, raw 360° imagery never leaves the device.
+
+Disabling Privacy Filtering is an explicit, per-scan choice — supporting captures where people are the subject (for example a posed group-photo 3D model). The capture screen warns that people in view will be captured unblurred and that a 360° camera captures every direction, including behind the operator; the setting is locked for the duration of each scan; and each scan's privacy state is recorded in its export metadata (`privacy_filter`) so downstream processing can honor it.
 
 ## Location Data
 

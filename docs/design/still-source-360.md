@@ -282,15 +282,16 @@ implementation blurs 360° stills REGARDLESS of the privacy-filter toggle. That 
 legitimate use case: a posed **group-photo 3D model**, where humans in frame are the point.
 Agreed direction to implement before this branch merges:
 
-1. **One toggle governs all capturing cameras** — phone frames, proxy (glasses) frames, and
-   360° stills follow the same Privacy Filter switch. `stageThetaStills` drops its
-   toggle-override and gates on the same `privacy_filter` state as the other passes.
-2. **Informed consent when OFF** — flipping the switch off expands it into a longer warning
-   pill acknowledging that people in view will be captured, e.g. *"People in view will be
-   captured unblurred, and moving people will corrupt your texture maps."* With a 360°
-   source connected, append the variant: *"…including everyone BEHIND you — the 360° camera
-   sees all directions."* (An operator can point a phone away from bystanders; they cannot
-   point a 360° camera away from anything.)
+1. **One toggle governs all capturing cameras** ✅ (2026-07-28) — phone frames, proxy
+   (glasses) frames, and 360° stills follow the same Privacy Filter switch:
+   `stageEquirectStills` gates on the shared `privacyFilterWasOn` resolution (masks ⇒ ON,
+   else the exported `privacy_filter` flag, fail-closed on garbage/unreadable metadata).
+2. **Informed consent when OFF** ✅ (2026-07-28) — the switch is now `PrivacyFilterPill`:
+   flipping it off expands an inline warning — *"People in view will be captured unblurred —
+   moving people will corrupt texture maps."* — appending, when a 360° source is connected,
+   *"The connected 360° camera captures ALL directions, including people behind you."*
+   (An operator can point a phone away from bystanders; they cannot point a 360° camera
+   away from anything.)
 3. **Binary state per scan** — the toggle locks during recording (✅ implemented 2026-07-24:
    `.disabled(isRecording)`), so a scan is wholly filtered or wholly consented, never mixed.
 4. **State travels with the data** — `privacy_filter` was already exported in
@@ -298,8 +299,7 @@ Agreed direction to implement before this branch merges:
    route/consent-check accordingly. The fail-CLOSED exclusion for *verification failures*
    stays even when the toggle is off? — no: with the toggle off there is nothing to verify;
    fail-closed applies only to the ON path, where a still that can't be verified must not
-   ship. PRIVACY.md's 360° clause must be reworded to "when Privacy Filtering is enabled"
-   at the same time. `EquirectPrivacyBlur`
+   ship. PRIVACY.md's 360° clause reworded accordingly ✅ (2026-07-28). `EquirectPrivacyBlur`
 resamples each still into 6 pinhole cube faces (from a ≤4K working decode), runs Vision
 person segmentation per face, projects the masks back into equirect space (longitude-
 wrapping dilation covers the ±180° seam), and pixelates person regions on the
