@@ -644,7 +644,7 @@ struct CombinedMeshView: UIViewRepresentable {
         // each frame the label is rescaled so ITS plate covers a fixed fraction of the viewport.
         private var labelBaseHeights: [UUID: Float] = [:]
         // Target on-screen height of a label plate, as a fraction of the viewport height.
-        private let labelScreenFraction: Float = 0.075
+        private let labelScreenFraction: Float = 0.035
         // Viewport size cached from the MAIN thread (updateUIView sets it). `willRenderScene` runs on
         // SceneKit's render thread, where touching the UIView's `bounds` would be a UIKit threading
         // violation — so we read the size from here instead. Internal so updateUIView can set it.
@@ -895,20 +895,66 @@ struct CombinedMeshView: UIViewRepresentable {
             return (container, Float(h))
         }
 
-        /// A small always-on-top emissive marker at a stitch pin, so the join is findable in the
-        /// combined render (drawn ignoring depth so it isn't hidden behind a wall).
+        /// Bright connector accent — matches the IN-SESSION connector marker (`ARCoverageView`), so the
+        /// stitch join reads with the same color/glyph here as during capture.
+        private static let connectorAccent = UIColor(red: 0.15, green: 1.0, blue: 0.55, alpha: 1.0)
+
+        /// The "link" SF Symbol baked once, tinted the connector accent and centered in a SQUARE
+        /// transparent canvas (the glyph is wider than tall) for the stitch-marker glyph plane.
+        private static let connectorGlyphImage: UIImage? = {
+            let side: CGFloat = 128
+            let config = UIImage.SymbolConfiguration(pointSize: side * 0.62, weight: .bold)
+            guard let symbol = UIImage(systemName: "link", withConfiguration: config)?
+                .withTintColor(connectorAccent, renderingMode: .alwaysOriginal) else { return nil }
+            let format = UIGraphicsImageRendererFormat()
+            format.opaque = false
+            format.scale = 1
+            return UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format).image { _ in
+                let origin = CGPoint(x: (side - symbol.size.width) / 2, y: (side - symbol.size.height) / 2)
+                symbol.draw(in: CGRect(origin: origin, size: symbol.size))
+            }
+        }()
+
+        /// A stitch-pin marker styled like the IN-SESSION connector: a dark disc scrim with a bright
+        /// "link" glyph, billboarded, at a real-world size (~13 cm, matching AR) so it reads the same
+        /// way here as during capture — NOT screen-constant like the name labels. Depth-independent so
+        /// the join stays findable behind geometry.
         private static func makeStitchMarker() -> SCNNode {
-            let sphere = SCNSphere(radius: 0.06)
-            let m = SCNMaterial()
-            m.lightingModel = .constant
-            m.diffuse.contents = UIColor.systemRed
-            m.emission.contents = UIColor.systemRed
-            m.readsFromDepthBuffer = false
-            m.writesToDepthBuffer = false
-            sphere.materials = [m]
-            let node = SCNNode(geometry: sphere)
-            node.renderingOrder = 10
-            return node
+            let iconSize: CGFloat = 0.266   // 2× the in-session connector size — reads better in the combined render
+            let container = SCNNode()
+
+            let disc = SCNPlane(width: iconSize, height: iconSize)
+            disc.cornerRadius = iconSize / 2                     // → circle
+            let dm = SCNMaterial()
+            dm.lightingModel = .constant
+            dm.diffuse.contents = UIColor.black.withAlphaComponent(0.72)
+            dm.isDoubleSided = true
+            dm.readsFromDepthBuffer = false
+            dm.writesToDepthBuffer = false
+            disc.materials = [dm]
+            let discNode = SCNNode(geometry: disc)
+            discNode.renderingOrder = 15
+            container.addChildNode(discNode)
+
+            if let glyph = connectorGlyphImage {
+                let glyphPlane = SCNPlane(width: iconSize, height: iconSize)
+                let gm = SCNMaterial()
+                gm.lightingModel = .constant
+                gm.diffuse.contents = glyph                      // green-tinted, transparent elsewhere
+                gm.isDoubleSided = true
+                gm.readsFromDepthBuffer = false
+                gm.writesToDepthBuffer = false
+                glyphPlane.materials = [gm]
+                let glyphNode = SCNNode(geometry: glyphPlane)
+                glyphNode.position = SCNVector3(0, 0, 0.001)     // just in front of the disc
+                glyphNode.renderingOrder = 16
+                container.addChildNode(glyphNode)
+            }
+
+            let bc = SCNBillboardConstraint()
+            bc.freeAxes = .all
+            container.constraints = [bc]
+            return container
         }
 
         /// A flat per-map variant of `geometry`: same vertices/normals/elements, but the per-vertex
