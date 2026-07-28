@@ -582,12 +582,13 @@ struct ScansListView: View {
                     checkBulkUploadCompletion()
                     continue
                 }
-                scan.uploadStatus = .zipping
+                scan.uploadStatus = .zipping(phase: nil)
                 let scanDir = scan.scanDirectory
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     guard let exportURL = ScanExportManager.prepareExport(
-                        filename: filename, scanDir: scanDir, format: format, bulkStitch: bulkStitch
+                        filename: filename, scanDir: scanDir, format: format, bulkStitch: bulkStitch,
+                        phase: { msg in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: msg) } }
                     ) else {
                         DispatchQueue.main.async {
                             scan.uploadStatus = .failed("Export failed")
@@ -1127,7 +1128,7 @@ struct ScanCard: View {
         .padding(.horizontal)
         .sheet(item: $exportItem, onDismiss: {
             // Safety net: if dismissed via swipe-down before completion handler fires, reset.
-            if scan.uploadStatus == .zipping {
+            if case .zipping = scan.uploadStatus {
                 scan.uploadStatus = .pending
                 onUpdate(scan)
             }
@@ -1539,7 +1540,7 @@ struct ScanCard: View {
             showPostprocessAlert = true
             return
         }
-        scan.uploadStatus = .zipping
+        scan.uploadStatus = .zipping(phase: nil)
         onUpdate(scan)
 
         let format = selectedFormat
@@ -1562,7 +1563,10 @@ struct ScanCard: View {
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let exportURL = ScanExportManager.prepareExport(filename: filename, scanDir: scanDir, format: format) else {
+            guard let exportURL = ScanExportManager.prepareExport(
+                filename: filename, scanDir: scanDir, format: format,
+                phase: { msg in DispatchQueue.main.async { self.scan.uploadStatus = .zipping(phase: msg) } }
+            ) else {
                 DispatchQueue.main.async {
                     self.scan.selectedFormat = self.selectedFormat
                     self.scan.uploadStatus = .failed("Export failed")
@@ -1628,7 +1632,7 @@ struct ScanCard: View {
             showPostprocessAlert = true
             return
         }
-        scan.uploadStatus = .zipping
+        scan.uploadStatus = .zipping(phase: nil)
         onUpdate(scan)
 
         let format = selectedFormat
@@ -1649,7 +1653,10 @@ struct ScanCard: View {
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            if let exportURL = ScanExportManager.prepareExport(filename: filename, scanDir: scanDir, format: format) {
+            if let exportURL = ScanExportManager.prepareExport(
+                filename: filename, scanDir: scanDir, format: format,
+                phase: { msg in DispatchQueue.main.async { self.scan.uploadStatus = .zipping(phase: msg) } }
+            ) {
                 DispatchQueue.main.async {
                     self.exportItem = ZipExportItem(url: exportURL)
                 }

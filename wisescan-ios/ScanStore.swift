@@ -72,7 +72,7 @@ class CapturedScan {
     @Transient var uploadStatus: UploadStatus {
         get {
             if uploadStatusStr == "pending" { return .pending }
-            if uploadStatusStr == "zipping" { return .zipping }
+            if uploadStatusStr == "zipping" { return .zipping(phase: nil) }
             if uploadStatusStr == "savedLocally" { return .savedLocally }
             if uploadStatusStr == "success" { return .success }
             if uploadStatusStr.starts(with: "failed:") {
@@ -211,7 +211,10 @@ enum ExportFormat: String, CaseIterable, Codable {
 
 enum UploadStatus: Equatable {
     case pending
-    case zipping
+    /// `phase` is a transient, human-readable progress line for the export pipeline
+    /// ("Privacy blur 12/41…", "Cube faces 1/2…", "Zipping…") — persisted as plain
+    /// "zipping" (a relaunch shows the generic label until the pipeline reports again).
+    case zipping(phase: String?)
     case uploading(progress: Double)
     case savedLocally
     case success
@@ -231,7 +234,7 @@ enum UploadStatus: Equatable {
     var label: String {
         switch self {
         case .pending: return "Ready"
-        case .zipping: return "Converting..."
+        case .zipping(let phase): return phase ?? "Converting..."
         case .uploading(let progress): return "Uploading (\(Int(progress * 100))%)..."
         case .savedLocally: return "Saved Locally"
         case .success: return "Uploaded"

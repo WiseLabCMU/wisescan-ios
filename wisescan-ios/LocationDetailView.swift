@@ -464,10 +464,11 @@ struct LocationDetailView: View {
             DispatchQueue.global(qos: .userInitiated).async {
                 var urls: [ZipExportItem] = []
                 for scan in scans {
-                    DispatchQueue.main.async { scan.uploadStatus = .zipping }
+                    DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: nil) }
                     let filename = scan.makeExportFilename(format: format)
                     if let url = ScanExportManager.prepareExport(
-                        filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch
+                        filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch,
+                        phase: { msg in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: msg) } }
                     ) {
                         urls.append(ZipExportItem(url: url))
                         DispatchQueue.main.async { scan.uploadStatus = .savedLocally }
@@ -499,12 +500,13 @@ struct LocationDetailView: View {
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             for scan in scans {
                 guard let url = URL(string: baseURLString + scan.makeExportFilename(format: format)) else { continue }
-                scan.uploadStatus = .zipping
+                scan.uploadStatus = .zipping(phase: nil)
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     let filename = scan.makeExportFilename(format: format)
                     guard let exportURL = ScanExportManager.prepareExport(
-                        filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch
+                        filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch,
+                        phase: { msg in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: msg) } }
                     ) else {
                         DispatchQueue.main.async { scan.uploadStatus = .failed("Export failed") }
                         return
