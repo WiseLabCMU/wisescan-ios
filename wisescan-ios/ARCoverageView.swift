@@ -990,6 +990,13 @@ struct ARCoverageView: UIViewRepresentable {
         // relocalization ε is stationary once settled; a handful of seats total is the contract).
         private var ghostAutoAlignStableCount = 0
         private var ghostAutoAlignConverged = false
+        // Lowest finalRMS among trusted seats this session. The ANCHOR fit (`ghostAutoAlignFit`,
+        // composed into Pin A at Confirm) is BEST-not-latest: unlike a rescan — which re-bakes the
+        // alignment at save, so its live seat is only visual — the adjacent stitch bakes this fit
+        // into the link at Confirm with NO post-save correction. So a later looser / wandering seat
+        // (boundary correspondence noise, a relocalization snap) must not overwrite a tighter one.
+        // Delegate-queue-owned (set in maybeRunGhostAutoAlign, reset in resetGhostAutoAlign).
+        private var ghostAutoAlignBestRMS: Float = .greatestFiniteMagnitude
         let manualNudgeActive = Atomic<Bool>(false)
 
         /// Ghost (re)load reset — main thread; the session was just re-run with
@@ -998,12 +1005,14 @@ struct ARCoverageView: UIViewRepresentable {
             ghostAutoAlign = matrix_identity_float4x4
             ghostReferencePlanes = referencePlanes
             scanStore?.icpAlignReady = nil // stale chip from a prior ghost/alignment
+            scanStore?.ghostAutoAlignFit = nil // stale pinA correction from a prior connect/ghost
             sessionDelegateQueue.async { [weak self] in
                 self?.livePlaneAnchors.removeAll()
                 self?.ghostAutoAlignApplied = matrix_identity_float4x4
                 self?.lastGhostAutoAlignAt = 0
                 self?.ghostAutoAlignStableCount = 0
                 self?.ghostAutoAlignConverged = false
+                self?.ghostAutoAlignBestRMS = .greatestFiniteMagnitude
             }
         }
 
@@ -1093,16 +1102,30 @@ struct ARCoverageView: UIViewRepresentable {
             ghostAutoAlignStableCount = 0
             ghostAutoAlignApplied = fit
 
-            print(String(format: "[PlaneReg] ghost auto-align: trans=%.1fcm yaw=%.2f° (RMS=%.1fmm walls=%d weakFrac=%.2f livePlanes=%d)",
-                         report.transM * 100, report.yawDeg, report.finalRMS * 1000,
-                         report.matchedWalls, report.weakAxisFrac, live.count))
             let transCm = report.transM * 100
             let yawDeg = report.yawDeg
+            // Anchor fit is BEST-not-latest (see ghostAutoAlignBestRMS): rank by finalRMS — how well
+            // the walls actually line up. The adjacent Pin-A composition bakes the winner with no
+            // post-save correction, so a later looser seat must not replace a tighter one. The visual
+            // seat + green chip below still track the LATEST fit (a rescan re-bakes at save anyway).
+            let isBestAnchorFit = report.finalRMS < ghostAutoAlignBestRMS
+            if isBestAnchorFit { ghostAutoAlignBestRMS = report.finalRMS }
+            // "★anchor←best" marks the seat composed into Pin A on the adjacent connect (tightest so
+            // far) — device validation reads which fit the stitch used, not just the latest.
+            print(String(format: "[PlaneReg] ghost auto-align: trans=%.1fcm yaw=%.2f° (RMS=%.1fmm walls=%d weakFrac=%.2f livePlanes=%d)%@",
+                         report.transM * 100, report.yawDeg, report.finalRMS * 1000,
+                         report.matchedWalls, report.weakAxisFrac, live.count,
+                         isBestAnchorFit ? " ★anchor←best" : ""))
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.isRecording.load(ordering: .relaxed),
                       !self.manualNudgeActive.load(ordering: .relaxed) else { return }
                 self.ghostAutoAlign = fit
                 self.ghostAnchorEntity?.transform = Transform(matrix: fit)
+                // Publish the fit so the adjacent-connect can compose it into pinA at Confirm — the
+                // stitch anchor then lands in the ghost's raw frame, not the raw relocalization pose.
+                // Best-not-latest: only a tighter-RMS seat replaces the published fit (pinA has no
+                // post-save bake, so the tightest trusted seat wins, not whatever's latest at Confirm).
+                if isBestAnchorFit { self.scanStore?.ghostAutoAlignFit = fit }
                 // A trusted plane fit IS the alignment-ready signal — drive the green chip from it
                 // (successor to the mesh-ICP refine's chip; that path is quiet for proxy ghosts).
                 self.scanStore?.icpAlignReady = ScanStore.ICPAlignReady(transCm: transCm, yawDeg: yawDeg)

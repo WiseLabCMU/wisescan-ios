@@ -380,6 +380,14 @@ class ScanStore {
         let yawDeg: Float
     }
 
+    /// The latest gate-trusted ghost auto-align fit (maps the ghost's raw frame → the live /
+    /// relocalized frame), published by the plane auto-align during a map-load alignment phase.
+    /// The adjacent connect composes its inverse into pinA so the stitch anchor lands in the ghost
+    /// location's (canonical owner's) raw frame — the frame `placeScans` lifts via `T` — instead of
+    /// the coarse raw relocalization pose. nil until a trusted fit forms; callers treat nil as
+    /// identity (no correction).
+    var ghostAutoAlignFit: simd_float4x4?
+
     // MARK: Post-process (DECISION 3)
 
     /// Set (to the scan's name) by `ScanPostprocessor.scheduleBadScanCheck` when a saved scan turns
@@ -470,6 +478,7 @@ class ScanStore {
         distanceToBoundaryAnchor = nil
         pendingStitchLink = nil
         icpAlignReady = nil
+        ghostAutoAlignFit = nil
         trackingUnreliable = nil
         // Clear the map-load failure latch too — otherwise a reset via a path that bypasses
         // CaptureView's onChange self-reset (onDisappear / cancelAlignment) leaves it true, and a
@@ -1059,6 +1068,9 @@ class ScanFileManager {
     }
 
     func deleteScan(_ scan: CapturedScan, context: ModelContext) {
+        // Preserve stitches if this room keeps another generation (re-point off the doomed scan);
+        // if this is the room's last scan, the link cascades away (bisect) as intended.
+        StitchLinkStore.repointIncidentLinks(beforeDeleting: [scan], in: context)
         try? FileManager.default.removeItem(at: scan.scanDirectory)
         context.delete(scan)
         try? context.save()

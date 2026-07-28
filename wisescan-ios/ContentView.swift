@@ -50,6 +50,9 @@ struct ContentView: View {
             // only begins executing after appear. Idempotent + UserDefaults-guarded + re-entrancy
             // guarded, so it's a safe no-op on every launch after the first.
             await StitchLinkStore.migrateFromFilesIfNeeded(context: modelContext)
+            // Sweep "Adjacent to …" locations orphaned with 0 scans when a freeze/crash hit the
+            // extend flow's record→save (the location is persisted before its scan is recorded).
+            StitchLinkStore.reconcileOrphanedAdjacentLocations(context: modelContext)
         }
         .alert("Lite Mode — No LiDAR", isPresented: $showLiDARWarning) {
             Button("Got it", role: .cancel) {}
