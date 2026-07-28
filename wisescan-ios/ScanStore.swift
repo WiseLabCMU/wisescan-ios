@@ -32,6 +32,12 @@ class CapturedScan {
     /// canonical frame (rescans yes; link-adjacent is a different physical room — never). Empty for
     /// legacy scans (pre-DECISION-3): those fall back to "non-oldest scan in location ⇒ rescan".
     var scanCaseRaw: String = ""
+    /// The saved world map's feature cloud carried a wandering outlier cluster (a tracking
+    /// excursion — e.g. an OS interruption with device motion — baked into the session map;
+    /// see `LocalizationDiag.mapSuspect`). ARKit relocalizes against those outliers, so a
+    /// rescan/link seated on this map can inherit an offset frame — the rescan/connect
+    /// buttons warn before proceeding. Defaulted for lightweight migration of existing scans.
+    var worldMapSuspect: Bool = false
 
     @Relationship(inverse: \ScanLocation.scans)
     var location: ScanLocation?
@@ -444,6 +450,10 @@ class ScanStore {
     /// path. The box builds the room and writes roomplan.json/_raw whenever both the didEndWith
     /// data and this destination are in hand. Weakly captures the coordinator.
     @ObservationIgnored var setRoomDataPersistDir: ((URL) -> Void)?
+    /// Re-runs the AR session's configuration if no frames have been delivered for several
+    /// seconds — the record button's escape from a wedged capture graph (set by ARCoverageView;
+    /// called from the record tap's "establishing tracking" bounce).
+    @ObservationIgnored var reviveARSession: (() -> Void)?
 
     // MARK: - State Reset
 
@@ -920,7 +930,8 @@ class ScanFileManager {
         vertexColors: Data?,
         worldMapURL: URL?,
         thumbnailData: Data? = nil,
-        scanCase: ScanCase = .rescanSpace
+        scanCase: ScanCase = .rescanSpace,
+        worldMapSuspect: Bool = false
     ) -> CapturedScan? {
         let targetLocation: ScanLocation
         // Track a location we create here so we can roll it back if the required mesh write fails
@@ -956,6 +967,19 @@ class ScanFileManager {
         // Persist the capture case so postprocess-time registration can tell rescans (register into
         // the canonical frame) from link-adjacent captures (different physical room — never).
         newScan.scanCaseRaw = scanCase.rawValue
+        newScan.worldMapSuspect = worldMapSuspect
+        // Surface the verdict to the backend too: patch scan4d_metadata.json (written at capture
+        // stop, before the map existed) while the raw dir is still at its pre-move path.
+        if worldMapSuspect, let raw = rawDataPath {
+            let metaURL = raw.appendingPathComponent("scan4d_metadata.json")
+            if let data = try? Data(contentsOf: metaURL),
+               var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                json["worldmap_suspect"] = true
+                if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+                    try? out.write(to: metaURL)
+                }
+            }
+        }
 
         // Link to the location FIRST: scanDirectory/meshFileURL derive from location?.id, so the
         // files must be written under the final, location-scoped path (not "unknown_location").

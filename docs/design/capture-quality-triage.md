@@ -7,16 +7,24 @@ the per-feature verification list in [voxel-accumulated-point-cloud.md](voxel-ac
 
 ## Verify on device
 
-### 1. Hi-res keyframe failure-path resilience
+### 1. Hi-res keyframe failure-path resilience — ✅ VERIFIED (2026-07-24, M2 iPad, `interrupt.log`)
 Trigger a session interruption mid-scan (Control Center pull-down, app switch, or a phone
 call) while pausing for keyframes. Expected: `Hi-res capture failed ... attempt N/3`
 **recovers on the next pause** rather than silently degrading to 2016×1512 for the rest of
 the scan; a wedged request should log the **5 s watchdog re-request**.
 
-### 2. Reject-blur OFF confirmation scan
+**Result:** stronger than expected — zero `Hi-res capture failed` lines across repeated
+Control-Center + app-switch interruptions; keyframes kept firing at 4032×3024 (sharpness
+98–464) straight through, watchdog never needed. But the run exposed a different
+interruption problem — see item 6.
+
+### 2. Reject-blur OFF confirmation scan — ✅ VERIFIED (2026-07-24, same run)
 Flip the reject-blur setting off and confirm the reticle, keyframes, and coverage overlay
 all still work. This path was **completely dead before the review fix** — worth one
 confirmation scan.
+
+**Result:** reticle, keyframes, and `[Coverage] Still overlap` logging all ran with
+reject-blur OFF. No dead path.
 
 ## Watch items (lever defined, not implemented)
 
@@ -76,6 +84,146 @@ alert presenting over the still-rendering ARView** (the exact CONTRIBUTING anti-
 MemDiag samples, and 1.4–1.8 s ARKit frame gaps. Post-stop so no capture data is at risk,
 but 7 s of frozen UI reads as a hang. Cosmetic co-symptom: `[VR] Tracking degraded —
 cleared accumulated voxels` fires during the teardown degradation, wiping the on-screen
-cloud early. **Lever:** move the name prompt off the capture screen (navigate to Scans tab
-first, prompt there — CONTRIBUTING's own recommendation), and profile what holds main
-during the VR teardown window (bloom callback removal? RealityKit scene teardown?).
+cloud early.
+
+### 6. OS interruption mid-recording silently corrupts the session map (2026-07-24, M2, `interrupt.log`)
+A Control-Center/app-switch interruption **while the user keeps moving** forces a full SLAM
+reinit (`vio_initialized(0) map_size(0)`, 7.9 s frame gap). The re-merge visually "catches
+up" the mesh, but: the saved world map carried a **223 m feature cloud (max dist-from-median
+152.8 m vs p99 7.1 m)** for a ~4×3 m room; scan 1's colorize frames projected from a
+different frame than the re-pinned mesh (colors wildly misplaced); scan 2, relocalized
+against that map, seated **~0.4–0.6 m / 20–30° off** (measured live by `[LocDiag ICP]`:
+trans=37.6 cm rot=30.52° pre-record) — the exact ghost/stitch offset observed. The VIO
+guard never tripped: resume reports `.initializing`/`.relocalizing`, the states the
+gap-trip deliberately treats as benign recovery.
+
+**Levers implemented (2026-07-24; app-switch trip + suspect flag device-validated runs 2–3):**
+- `sessionWasInterrupted` mid-recording now trips the VIO-halt path (Save Anyway / Discard,
+  `needsTrackingReset` armed) — deterministic, no gap heuristic. ✅ fires on app switch.
+- **Hard-gap belt** (`vioHardFrameGapTripSeconds` 4 s): a delivery gap this large trips the
+  halt regardless of how the recovery frame presents — Control Center on iPadOS fires **no
+  interruption callback at all** (runs 1–3), and run 1's 7.9 s gap resumed via benign-looking
+  `.initializing`.
+- `sessionShouldAttemptRelocalization` → true (resume relocalizes instead of re-origining).
+- Save-time **wandering-cluster check** (`LocalizationDiag.mapSuspect`: max>25 m AND
+  max>5×p99) → `CapturedScan.worldMapSuspect` + `worldmap_suspect` in scan4d_metadata;
+  Rescan/Connect warn before relocalizing against a flagged map; yellow rollup badge on
+  location/graph tiles + per-scan explainer. ✅ flagged both polluted runs; healthy control
+  maps (max 8–10 m, p99-proportional) passed clean.
+
+**Run 2–3 addenda:**
+- **CC pollutes silently**: run 3 scan 1 went suspect with *no* callback, *no* frame gap,
+  fps steady 30 — the save-time flag is the only reliable net for this class.
+- **Suspicion is heritable**: a rescan seeded from a flagged map re-baked its own outliers
+  (62 cm / 74° mid-recording corrections → its map flagged too). Expected; the dialogs now
+  say to delete flagged scans so the newest clean scan becomes the reference.
+- **Wedged capture graph after idle-resume** (`FigCaptureSourceRemote err=-17281` storm):
+  (a) recording with dead reconstruction — 60 fps camera despite the selected 30 fps format,
+  zero mesh anchors all scan; (b) idle with zero frames flowing — tracking `.initializing`
+  forever, record taps bounced endlessly → **record-tap revive** (re-run config when no
+  ARFrame for >3 s; nominal mode only, safe — RoomPlan never runs there).
+
+**Run 4 addenda (2026-07-24 evening):**
+- **Live config rebuild under RoomPlan is a crasher — withdrawn.** The first-cut depth
+  watchdog re-ran the session mid-recording; run 4 ended in `EXC_BREAKPOINT` inside
+  RoomPlan/ObjectUnderstanding (`OUSession updateWithKeyframes`, brk #0x1 on its queue) at
+  save after a meshless 60 fps scan. Replaced with a **mesh-start watchdog** (10 s, signal =
+  first `ARMeshAnchor`, which subsumes dead-depth AND dead-Recon3D) that **halts via the VIO
+  guard** — `needsTrackingReset` then rebuilds everything at the next record-start, the
+  manual fix that always worked. Skips proxy-streaming/Lite configs.
+- **Root cause of the 60 fps fallback found**: RoomPlan's internal reconfigure at
+  `didStartWith` resets the video format to ARKit's default (format[0], 1920×1440@60) —
+  run 4's failing scan logged the semantics re-assert firing but the format stayed 60 and
+  Recon3D never initialized. `reassertFrameSemantics` now **re-forces the selected video
+  format in the same run()** (respects the dev-mode format override), so the state should
+  be prevented, with the halt as backstop.
+
+**Run 6 (2026-07-24, M2, link-adjacent chains):**
+- **Mesh-halt backstop validated live**: post-idle wedge recurred *despite* the 30 fps
+  re-assert (graph wedge ≠ format-only) — watchdog halted at 10 s, `needsTrackingReset`
+  armed, next scan clean. Exactly the designed recovery.
+- **NEW CRASH, fixed**: `NSInvalidArgumentException "Invalid number value (NaN) in JSON
+  write"` from `writeTransformsJSON` during a thermal=serious link-adjacent stop —
+  JSONSerialization raises an ObjC exception for non-finite numbers that Swift `try?`
+  cannot catch. All FrameCaptureSession JSON writers now sanitize payloads (non-finite → 0)
+  and **log the offending key paths**, so the next occurrence identifies the true NaN
+  source (pose vs intrinsics vs sharpness/exposure).
+- **Thermal ceiling observation** (items 4/5 territory): the link-adjacent auto-save ran
+  >60 s under thermal=serious / CPU ~300% / ARFrame-retention storm while recording
+  continued ("Saving scan… do not move" held past a minute). The crash cut it short, so
+  unclear if it would have completed; watch on the next long chain.
+
+**Run 11 (2026-07-24, M2, link-adjacent) — startups steady, detector catches a THIRD
+corruption class:**
+- All record-starts clean across the link-adjacent runs (run-10 stale-status fix + run-8
+  resume fix validated again).
+- Last scan (96 frames, longest of the arc) flagged suspect on a **real 91.8 m outlier
+  cluster (p99 4.9 m, 19×)** — with tracking `.normal` throughout, zero snap corrections,
+  zero skipped integration, thermal nominal. A silent excursion in the SnapTracker's
+  documented blind spot (loop-closure under continuous normal tracking) that ONLY the
+  save-time detector can see. A 10% battery dialog appeared mid-scan (ARFrame-retention
+  burst present, consistent with Low Power Mode throttling) — correlation unprovable from
+  console logs, so `low_power_mode` is now recorded in scan4d_metadata at capture stop.
+
+**Run 10 (2026-07-24, M2) — the bounce loop's THIRD face, fixed:**
+- Loop recurred with the session **healthy and un-paused**: the post-save stats reset
+  hardcoded `scanStats.trackingStatus = .notAvailable`, and the UI copy only refreshes on
+  ARKit *transitions* — a teardown that leaves the live session in `.normal` throughout
+  (this run: zero transitions logged post-save) never corrects the lie, so the record gate
+  bounced forever against a healthy session. The revive was RIGHT to stay silent (it checks
+  the real session). The user's Analyse pass escaped it by forcing real transitions.
+- Fix: the stats reset no longer touches `trackingStatus` — the last pushed value stays
+  truthful, and any real tracking restart still updates via its transition. The three loop
+  faces are now: dead graph → revive rebuild; cold-stuck session → revive reset;
+  stale UI copy → removed. Battery-resume fix held again this run (post-resume scan clean).
+
+**Run 9 (2026-07-24, M2):**
+- **Battery-resume fix validated 2/2** — post-idle scans just worked (no wedge, no halt,
+  healthy maps).
+- **Last gap closed**: after the final save the session sat in cold tracking for minutes
+  *with frames flowing* — the record gate bounced and the revive's dead-graph branch
+  correctly didn't apply (run-3 loop, frames-alive variant). The revive now has a second
+  branch: frames flowing + tracking cold >5 s + was-ready-once + **no loaded world map**
+  (never yanks a rescan/link relocalization; cold-start warm-up can't trip it) → re-run
+  factory config with `.resetTracking + .removeExistingAnchors`. Pending device pass.
+
+**Run 8 (2026-07-24, M2, timing sweep — WEDGE ROOT-CAUSED & FIXED):**
+- The idle wedge reproduced **deterministically**: every battery-resume recording (×4) went
+  meshless and the tuned mesh-halt caught each one at 10 s post-settle (no false positives
+  this run); every post-halt retry recovered via `.resetTracking`. Frames always flowed, so
+  the revive path never applied.
+- **Root cause was the battery-resume itself**: it re-ran a *bare*
+  `ARWorldTrackingConfiguration()` — ARKit's default 60 fps format, not our selection — with
+  *no reset options*, carrying the Fig-wedged graph into the next recording. Resume now runs
+  the factory config with `[.resetTracking, .removeExistingAnchors]` — identical to the
+  recovery path that worked 100% of the time; nominal mode has nothing to preserve.
+- Expected next-run behavior: post-idle scans just work; the mesh-halt returns to being a
+  rare backstop; the record-tap revive becomes near-unreachable (kept as final belt).
+
+**Run 7 (2026-07-24, M2 hot, idle-tap sequence):**
+- Battery **resume path preempted the wedge** (frames flowing by the record tap), so the
+  revive correctly no-op'd — its positive case stays unexercised (needs the intermittent
+  Fig storm); bounded risk, nominal-only.
+- **Mesh watchdog false positive, fixed**: hot post-idle start took ~4 s of VIO init and the
+  user (primed by "hold steady") stood still — the 10 s budget expired as the first anchors
+  landed → spurious halt + mapless Save Anyway. The budget now starts at the recording's
+  **first `.normal` tracking frame**, so VIO init doesn't count against it; a truly dead
+  reconstruction (run 6: `.normal` in ~2 s, meshless forever) still trips.
+
+**Run 5 (2026-07-24, marginal iPad): all green.** Format re-force logged `@ 30fps` on all
+5 record-starts (AR + VR); interruption trip fired mid-rescan; no meshless scans, no
+watchdog/halt false-trips; suspect detector stayed silent on every clean save; **delete
+flagged/interrupted scan → rescan from the clean base validated** (healthy map, no
+warning). Remaining nice-to-have: record-tap revive confirmation on M2 (idle-wedge state
+only ever reproduced there).
+
+**Not implemented (escalate if Save-Anyway scans still mis-color):** per-frame reinit-epoch
+tag in transforms.json so colorize can drop pre-reinit poses.
+
+**Lever status (2026-07-23): prompt half DONE** — the name prompt is deferred until the
+save pipeline completes (world map/mesh/colors persisted, AR view downgraded; landed via
+PR #26, M2-validated: the alert now presents after TEARDOWN with an instant keyboard, and
+the world-map failure alert can no longer stack under it). M2 stop stalls measured
+3185/1969 ms post-fix vs 7056 ms. **Remaining half: profile what holds main during the VR
+teardown window itself** (bloom callback removal? RealityKit scene teardown? worldmap
+archive?) — an Instruments session on the marginal iPad.

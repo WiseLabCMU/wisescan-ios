@@ -376,7 +376,9 @@ private struct CompactLocationTile: View {
                             lineWidth: isEditing && isSelected ? 2 : 1)
             )
             .overlay(alignment: .topLeading) {
-                if hasMissingWorldMap {
+                // Yellow = relocalization concern: a world map file is missing, or a map was
+                // flagged suspect at save (tracking excursion baked into its feature cloud).
+                if hasMissingWorldMap || location.scans.contains(where: \.worldMapSuspect) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10))
                         .foregroundColor(.yellow)

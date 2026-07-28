@@ -8,6 +8,8 @@ import simd
 /// Developer-Mode flag is on (it routes through `PerfDiag.log`, same as the VIO
 /// instrumentation). The goal is to *prove* the diagnosis and produce the numbers
 /// Phase 1/2 act on — it changes no capture behaviour.
+/// (Exceptions that graduated to production behaviour: `refine` powers the Phase-2.1
+/// pre-record bake, and `mapSuspect` gates the save-time map-quality flag.)
 ///
 /// Three probes, tagged in the log so they're greppable:
 /// - `[LocDiag ε]`   — relocalization error: map stats at load + camera pose at settle (0.1)
@@ -46,6 +48,31 @@ enum LocalizationDiag {
         PerfDiag.log(String(
             format: "[LocDiag ε] map load (%@): features=%d anchors=%d extent=(%.2f,%.2f,%.2f) center=(%.2f,%.2f,%.2f)%@",
             context, fp, anchors, e.x, e.y, e.z, c.x, c.y, c.z, spread))
+    }
+
+    /// Wandering-cluster detector for a map about to be persisted — NOT PerfDiag-gated
+    /// (production behaviour, unlike the log probes above). A tracking excursion baked into
+    /// the session map (observed after an OS interruption with device motion: full SLAM
+    /// reinit merged dead-reckoned features → a room-sized scan saved a 223 m feature cloud,
+    /// max dist-from-median 152.8 m vs p99 7.1 m) leaves a signature the percentiles
+    /// disambiguate from a genuinely large space: `max >> p99` means a small far-flung
+    /// cluster (drift), while a real multi-room map grows p99 along with max (healthy same-
+    /// session control: max 9.4 m, p99 6.5 m — ratio 1.4). ARKit relocalizes against those
+    /// outliers, so a later rescan/link seated on this map inherits an offset frame.
+    static func mapSuspect(_ map: ARWorldMap) -> Bool {
+        let pts = map.rawFeaturePoints.points
+        guard pts.count > 50 else { return false }
+        let xs = pts.map { $0.x }.sorted()
+        let ys = pts.map { $0.y }.sorted()
+        let zs = pts.map { $0.z }.sorted()
+        let med = SIMD3<Float>(xs[xs.count / 2], ys[ys.count / 2], zs[zs.count / 2])
+        var dists = pts.map { simd_distance($0, med) }
+        dists.sort()
+        let p99 = dists[min(dists.count - 1, Int(Float(dists.count - 1) * 0.99))]
+        let maxD = dists[dists.count - 1]
+        // Both an absolute floor (a 20 m excursion in a 100 m warehouse map is fine) and the
+        // ratio (a genuinely huge chained map keeps p99 near max) must trip.
+        return maxD > 25 && maxD > 5 * p99
     }
 
     /// Log the live-camera pose the moment relocalization settles (tracking reaches

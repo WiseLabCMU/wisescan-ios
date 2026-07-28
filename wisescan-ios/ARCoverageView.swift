@@ -138,6 +138,11 @@ struct ARCoverageView: UIViewRepresentable {
         scanStore?.setRoomDataPersistDir = { [weak coordinator = context.coordinator] dir in
             coordinator?.currentDeferredRoomBox()?.setPersistDirectory(dir)
         }
+        // Record-tap escape hatch: lets CaptureView revive a wedged capture graph (no frames
+        // flowing) when the "establishing tracking" gate keeps bouncing the record button.
+        scanStore?.reviveARSession = { [weak coordinator = context.coordinator] in
+            coordinator?.reviveSessionIfStalled()
+        }
         // Genuine map-load failure on the fresh-view path (requested but archive missing/corrupt) —
         // knowable synchronously here. Mirror of the updateUIView relocalization branch; replaces the
         // racy per-frame inference removed from driveAlignmentPhase (see that comment + git log).
@@ -203,9 +208,15 @@ struct ARCoverageView: UIViewRepresentable {
             // config would relocalize to the abandoned map for nothing. If the user wants to extend
             // again they re-tap Extend, which reloads the map + ghost fresh; a brand-new scan's
             // record-start reconfigures and clears anchors. (Supersedes b579197.)
-            let resumeConfig = ARWorldTrackingConfiguration()
-            if Self.supportsLiDAR { resumeConfig.sceneReconstruction = [] }
-            uiView.session.run(resumeConfig)
+            // Full factory config + full reset, not a bare re-run. Two failure modes lived here
+            // (2026-07-24 run-8 timing sweep, M2): (1) the bare ARWorldTrackingConfiguration ran
+            // ARKit's DEFAULT video format (1920×1440@60), not our selected 30fps; (2) resuming a
+            // paused session without reset options left the capture graph wedged (Fig err=-17281
+            // storm) with Recon3D dead on EVERY post-resume recording — while the mesh-halt's
+            // .resetTracking retry recovered 100% of the time. Nominal mode has nothing to
+            // preserve (see above), so resume exactly the way the proven recovery path does.
+            uiView.session.run(ARCoverageView.makeConfiguration(),
+                               options: [.resetTracking, .removeExistingAnchors])
         }
 
         // Live active mesh color update — recolor all existing wireframe entities
@@ -782,6 +793,34 @@ struct ARCoverageView: UIViewRepresentable {
         /// delivery (the signature of ARKit VIO being starved). Touched only on the delegate queue.
         private var lastFrameTimestamp: TimeInterval = 0
 
+        /// Wall-clock (ms) of the most recent ARFrame delivery, readable from any thread.
+        /// 0 = no frame yet. Drives `reviveSessionIfStalled` — the record button's escape from a
+        /// dead capture graph (2026-07-24 run 3: after a battery-idle resume the Fig capture
+        /// source stayed wedged, no frames ever flowed, tracking sat in .initializing forever,
+        /// and every record tap bounced off the "establishing tracking" gate with no way out).
+        let lastFrameWallMs = Atomic<Int64>(0)
+        /// Wall-clock (ms) of the most recent frame whose tracking state the record gate would
+        /// accept (not .initializing/.notAvailable). 0 = never this session. The revive's second
+        /// signal: frames flowing but tracking stuck cold since long ago.
+        let lastTrackingReadyWallMs = Atomic<Int64>(0)
+
+        // ── LiDAR mesh-start watchdog (delegate-queue state) ──
+        // A recording on a LiDAR device that never produces an ARMeshAnchor means Recon3D is dead
+        // for this scan — the capture graph came up wrong (2026-07-24 runs: 60fps default-format
+        // fallback + Fig err storm after RoomPlan's internal reconfigure; faces=0 for the whole
+        // scan). Mesh anchors are the product-level signal: they subsume a dead depth stream
+        // (mesh needs depth) AND a dead reconstruction on a live stream. Action is a HALT via the
+        // VIO guard — NOT a live config rebuild: re-running the session under an active RoomPlan
+        // crashed ObjectUnderstanding (EXC_BREAKPOINT in OUSession updateWithKeyframes at save,
+        // run 4). The halt's needsTrackingReset gives the NEXT record-start the full fresh
+        // rebuild, which is the manual fix that always worked.
+        private var recordStartTimestamp: TimeInterval = 0
+        /// First .normal-tracking frame timestamp of this recording (0 until seen) — the mesh
+        /// budget starts here so VIO initialization time doesn't count against it.
+        private var meshWatchdogBaseline: TimeInterval = 0
+        private var sawMeshAnchorThisRecording = false
+        private var meshWatchdogFired = false
+
         // ── Phase-0 localization diagnostics (log-only; see docs/fix-localization-plan.md).
         //    All delegate-queue state. ──
         /// 0.1: one-shot guard + start stamp for the relocalization-settle ε log.
@@ -1237,7 +1276,14 @@ struct ARCoverageView: UIViewRepresentable {
                 self?.scanStats?.baselineMemoryMB = 0
                 self?.scanStats?.driftEstimate = 0
                 self?.scanStats?.averageQuality = 0
-                self?.scanStats?.trackingStatus = .notAvailable
+                // Do NOT reset trackingStatus here. The UI copy only refreshes on ARKit
+                // TRANSITIONS (cameraDidChangeTrackingState) — when a teardown leaves the live
+                // session in .normal the whole time, a hardcoded .notAvailable is never
+                // corrected, and the record gate bounces "Hold steady…" forever against a
+                // healthy session (2026-07-24 run 10; the revive rightly saw a healthy session
+                // and stayed silent — the staleness was here, not in ARKit). The last pushed
+                // value stays truthful: if the teardown really does restart tracking, the
+                // transition fires and updates it.
                 self?.scanStats?.detectedClasses.removeAll()
             }
         }
@@ -1704,10 +1750,69 @@ struct ARCoverageView: UIViewRepresentable {
                 config.frameSemantics.insert(.sceneDepth)
                 changed = true
             }
+            // RoomPlan's internal session run can also silently reset the video format to ARKit's
+            // default (1920×1440 @ 60fps — format[0]). Observed 2026-07-24 run 4: the 60fps
+            // fallback kept Recon3D from ever initializing (faces=0, fps=60 for the whole scan)
+            // and ObjectUnderstanding asserted at save. Re-force our selection in the SAME run()
+            // as the semantics fix — one restart, at the point already proven safe for post-
+            // RoomPlan reconfiguration. The factory re-runs format selection, so a Developer-Mode
+            // format override is respected, not fought.
+            let preferred = ARCoverageView.makeConfiguration().videoFormat
+            if config.videoFormat.framesPerSecond != preferred.framesPerSecond
+                || config.videoFormat.imageResolution != preferred.imageResolution {
+                config.videoFormat = preferred
+                changed = true
+            }
             guard changed else { return }
             session.run(config, options: []) // no reset → preserve tracking/world map and RoomPlan
-            PerfDiag.log("Re-asserted frame semantics after RoomPlan (sceneDepth + personSegmentation)")
+            PerfDiag.log("Re-asserted frame semantics after RoomPlan (sceneDepth + personSegmentation, "
+                + "\(Int(config.videoFormat.imageResolution.width))×\(Int(config.videoFormat.imageResolution.height)) "
+                + "@ \(config.videoFormat.framesPerSecond)fps)")
         }
+
+        /// Record-tap escape from a dead session (main thread): if the session hasn't delivered a
+        /// frame for several seconds, the capture graph is wedged (Fig err=-17281 storm after a
+        /// battery-idle resume — tracking then sits in .initializing forever and the record
+        /// button's "establishing tracking" gate bounces every tap with nothing to heal it).
+        /// Re-running the configuration rebuilds the graph; a no-op if frames are flowing and the
+        /// session is merely still initializing (fresh VIO warms up in ~1–2 s on its own).
+        func reviveSessionIfStalled() {
+            guard let session = arView?.session else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            let lastMs = lastFrameWallMs.load(ordering: .relaxed)
+            let stalledSecs = lastMs == 0 ? Double.greatestFiniteMagnitude : now - Double(lastMs) / 1000
+            if stalledSecs > 3 {
+                // Dead graph: no frames at all — rebuild it (same config, no reset).
+                let config = session.configuration ?? ARCoverageView.makeConfiguration()
+                session.run(config, options: [])
+                PerfDiag.log("[Session] revive: no ARFrame for "
+                    + (lastMs == 0 ? "this session" : "\(Int(stalledSecs))s")
+                    + " — re-ran configuration to rebuild the capture graph")
+                return
+            }
+            // Frames flowing but tracking stuck cold: a warm session can sit in .initializing
+            // indefinitely after a save (2026-07-24 run 9 tail — record taps bounced with frames
+            // alive, so the dead-graph branch above never applied). A plain new scan doesn't
+            // need the session's old map, so reset it. Never under a loaded world map — the
+            // rescan/link relocalization owns that state (its timeout UX recovers it), and
+            // .relocalizing counts as record-ready anyway. Requires having BEEN ready once
+            // (lastReadyMs > 0) so a normal cold-start warm-up is never reset mid-init.
+            let lastReadyMs = lastTrackingReadyWallMs.load(ordering: .relaxed)
+            guard lastReadyMs > 0, !hasWorldMap.load(ordering: .relaxed) else { return }
+            let stuckSecs = now - Double(lastReadyMs) / 1000
+            guard stuckSecs > 5 else { return }
+            session.run(ARCoverageView.makeConfiguration(),
+                        options: [.resetTracking, .removeExistingAnchors])
+            PerfDiag.log("[Session] revive: frames flowing but tracking cold for \(Int(stuckSecs))s "
+                + "— reset tracking for a fresh start")
+        }
+
+        // NOTE: there is deliberately no mid-recording config rebuild. Re-running the session
+        // under an active RoomPlan crashed ObjectUnderstanding (EXC_BREAKPOINT in
+        // OUSession updateWithKeyframes at save, 2026-07-24 run 4) — the mesh-start watchdog
+        // HALTS instead, and the halt's needsTrackingReset rebuilds everything at the next
+        // record-start. Live rebuilds are only safe in nominal mode (reviveSessionIfStalled,
+        // above) where RoomPlan is never running.
 
         /// Stops RoomPlan and stores the final CapturedRoom for export.
         /// Call on main thread before recording cleanup.
@@ -2173,6 +2278,41 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
+        // ── OS interruption guard ──
+        // A system interruption (Control Center, app switch, phone call) stops frame delivery
+        // entirely; on resume ARKit reports .initializing/.relocalizing — the exact states the
+        // gap-based VIO guard treats as "recovering", so it never trips. But if the device MOVED
+        // during the interruption, ARKit fully reinitializes SLAM (map_size→0) and merges
+        // dead-reckoned features into the session map (observed 2026-07-24 M2 interruption test:
+        // a room-sized scan saved a 223m feature cloud, poses written before the gap disagree
+        // with the re-pinned mesh → misplaced vertex colors, offset ghost for the next scan).
+        // ARKit tells us about interruptions directly — treat one mid-recording as a VIO trip:
+        // halt capture and let the user save what was gathered before the gap, or discard.
+        func sessionWasInterrupted(_ session: ARSession) {
+            let recording = isRecording.load(ordering: .relaxed)
+            PerfDiag.log("[Session] OS interruption began (recording=\(recording))")
+            guard recording else { return }
+            // Disarm the gap-based guard: the resume frame after this interruption will carry a
+            // multi-second gap that would hard-trip it a second time — one halt/alert is enough.
+            vioGuardArmed = false
+            DispatchQueue.main.async { [weak self] in
+                self?.vioCompromisedBinding?.wrappedValue = true
+            }
+        }
+
+        func sessionInterruptionEnded(_ session: ARSession) {
+            PerfDiag.log("[Session] OS interruption ended")
+        }
+
+        /// Ask ARKit to relocalize to the session's own map after an interruption instead of
+        /// resetting the world origin. Mid-recording we halt anyway (above), but for the benign
+        /// cases — interruption while idle, during a ghost preview, or before the halt's stop/save
+        /// flow grabs the world map — relocalizing preserves the existing frame (ghost alignment,
+        /// anchor poses) rather than silently re-origining. A relocalization that can't succeed
+        /// isn't a stuck-state risk: the halt path sets `needsTrackingReset`, which the next config
+        /// run consumes as a full `.resetTracking`.
+        func sessionShouldAttemptRelocalization(_ session: ARSession) -> Bool { true }
+
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
             memDiagFrameCount &+= 1 // [MemDiag] frames/sample → measured FPS (the "visible slowdown")
             prodFrameCount &+= 1    // production fps → capacity bar (ungated)
@@ -2296,9 +2436,56 @@ struct ARCoverageView: UIViewRepresentable {
             let ts = frame.timestamp
             let frameGap = lastFrameTimestamp > 0 ? ts - lastFrameTimestamp : 0
             lastFrameTimestamp = ts
+            lastFrameWallMs.store(Int64(CFAbsoluteTimeGetCurrent() * 1000), ordering: .relaxed)
+            // Record-tap revive's second signal: when tracking was last in a record-ready state
+            // (everything except the cold .initializing/.notAvailable the record gate blocks).
+            switch frame.camera.trackingState {
+            case .notAvailable, .limited(.initializing): break
+            default: lastTrackingReadyWallMs.store(Int64(CFAbsoluteTimeGetCurrent() * 1000), ordering: .relaxed)
+            }
             if PerfDiag.enabled, frameGap > 0.1 {
                 let normal = frame.camera.trackingState == .normal
                 PerfDiag.log("[PerfDiag] ARKit frame gap \(Int(frameGap * 1000))ms (tracking \(normal ? "normal" : "degraded"))")
+            }
+
+            // ── LiDAR mesh-start watchdog ──
+            // Cost when healthy: one Bool check per frame (the first ARMeshAnchor in didAdd
+            // latches sawMeshAnchorThisRecording within a second or two of any movement).
+            // Fires at most once per recording; the main hop re-verifies that this recording
+            // actually wants mesh (skips proxy-streaming and Lite-style configs).
+            //
+            // The budget starts at the recording's FIRST .normal tracking frame, not at
+            // record-start: on a hot post-idle start VIO takes ~4s to initialize and the user is
+            // primed by "hold steady" to stay still, so charging init time against the mesh
+            // budget false-halted a recoverable scan at exactly 10s (2026-07-24 run 7 — the
+            // anchors landed as the alert presented). A truly dead reconstruction still trips:
+            // those scans reach .normal within ~2s and then stay meshless forever (run 6).
+            if isRecording.load(ordering: .relaxed) {
+                if recordStartTimestamp == 0 {
+                    recordStartTimestamp = ts
+                    meshWatchdogBaseline = 0
+                    sawMeshAnchorThisRecording = false
+                    meshWatchdogFired = false
+                }
+                if meshWatchdogBaseline == 0, frame.camera.trackingState == .normal {
+                    meshWatchdogBaseline = ts
+                }
+                if !sawMeshAnchorThisRecording, !meshWatchdogFired, ARCoverageView.supportsLiDAR,
+                   meshWatchdogBaseline > 0,
+                   ts - meshWatchdogBaseline > AppConstants.meshStartWatchdogSeconds {
+                    meshWatchdogFired = true
+                    vioGuardArmed = false // one halt/alert is enough (re-arms on the next .normal frame)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, let session = self.arView?.session,
+                              let cfg = session.configuration as? ARWorldTrackingConfiguration,
+                              cfg.sceneReconstruction != [],
+                              !MetaWearableManager.shared.isStreaming else { return }
+                        PerfDiag.log("⛔️ [Session] No mesh anchor \(Int(AppConstants.meshStartWatchdogSeconds))s after tracking settled — reconstruction is dead, halting scan")
+                        self.vioCompromisedBinding?.wrappedValue = true
+                    }
+                }
+            } else {
+                recordStartTimestamp = 0
             }
 
             // ── VIO starvation guard ──
@@ -2339,10 +2526,19 @@ struct ARCoverageView: UIViewRepresentable {
                     default: recovered = false
                     }
                     let stalled = frameGap > AppConstants.vioFrameGapTripSeconds && !recovered
-                    if sustainedDegraded || stalled {
+                    // Belt for OS actions that stall delivery WITHOUT an interruption callback:
+                    // Control Center on iPadOS fired no sessionWasInterrupted on either 2026-07-24
+                    // run, and the 7.9s run-1 gap resumed via benign-looking .initializing (so
+                    // `recovered` above excused it) while SLAM fully reinitialized underneath. A
+                    // gap this large mid-recording means VIO dead-reckoned or reinitialized through
+                    // it no matter how the recovery frame presents — halt unconditionally.
+                    let hardStalled = frameGap > AppConstants.vioHardFrameGapTripSeconds
+                    if sustainedDegraded || stalled || hardStalled {
                         vioGuardArmed = false // fire once per recording
                         vioDegradedSince = 0
-                        let why = stalled ? "frame gap \(Int(frameGap * 1000))ms" : "tracking degraded >\(AppConstants.vioDegradedTripSeconds)s"
+                        let why = hardStalled ? "hard frame gap \(Int(frameGap * 1000))ms"
+                            : stalled ? "frame gap \(Int(frameGap * 1000))ms"
+                            : "tracking degraded >\(AppConstants.vioDegradedTripSeconds)s"
                         PerfDiag.log("⛔️ VIO guard tripped (\(why)) — halting scan")
                         DispatchQueue.main.async { [weak self] in
                             self?.vioCompromisedBinding?.wrappedValue = true
@@ -2438,6 +2634,10 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Track anchor update counts via delegate + build active mesh wireframe
         func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+            // Mesh-start watchdog: the first ARMeshAnchor proves Recon3D is alive this recording.
+            if !sawMeshAnchorThisRecording, anchors.contains(where: { $0 is ARMeshAnchor }) {
+                sawMeshAnchorThisRecording = true
+            }
             // Detect boundary anchors from loaded ARWorldMap (visual marker only —
             // phase transitions are driven by tracking state in didUpdate frame).
             for anchor in anchors {

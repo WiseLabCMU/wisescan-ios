@@ -29,16 +29,27 @@ struct UserGuideView: View {
                     )
                     guideRow(
                         icon: "3.circle.fill",
-                        title: "Name & Save",
-                        text: "Tap stop when done. Name your space to save it. " +
-                              "Your scan appears on the Workflows tab under its specific Location."
+                        title: "Stop, Name & Save",
+                        text: "Tap stop when done and choose Save & End (or Save & Scan Adjacent to " +
+                              "continue into the next room). The scan saves in the background — once " +
+                              "it finishes, name your space. Your scan appears on the Workflows tab " +
+                              "under its specific Location."
                     )
                     guideRow(
                         icon: "4.circle.fill",
+                        title: "Process",
+                        text: "Tap 'Process' on the scan card (or 'Process All' on a location) to finish " +
+                              "the scan on-device: it aligns rescans into the location's shared coordinate " +
+                              "frame, prepares the rescan ghost, and applies camera-based color. Upload, " +
+                              "export, and rescan unlock once processing completes."
+                    )
+                    guideRow(
+                        icon: "5.circle.fill",
                         title: "Rescan Space / Connect Adjacent Space",
                         text: "Tap 'Rescan Space' on any location to re-scan the identical area over time " +
                               "— a colored ghost overlay (default magenta, configurable in Settings) shows " +
-                              "your previous scan for reference. " +
+                              "your previous scan for reference, and each new scan is auto-aligned into " +
+                              "the location's shared frame using detected walls and floors. " +
                               "Tap 'Connect Adjacent Space' to scan a neighboring room: relocalize with your " +
                               "previous scan, walk to where the new connector should be, " +
                               "and confirm to place the connector and start scanning the new space. " +
@@ -46,15 +57,17 @@ struct UserGuideView: View {
                               "into the next space without stopping."
                     )
                     guideRow(
-                        icon: "5.circle.fill",
+                        icon: "6.circle.fill",
                         title: "Choose Format",
                         text: "Select an export format (Scan4D, Polycam, OBJ, PLY, USDZ, or RAW) " +
                               "using the format picker on each scan card."
                     )
                     guideRow(
-                        icon: "6.circle.fill",
+                        icon: "7.circle.fill",
                         title: "Save or Upload",
-                        text: "Save locally to Files, AirDrop to another device, or upload to your configured server."
+                        text: "Save locally to Files, AirDrop to another device, or upload to your " +
+                              "configured server. A cloud badge on each location shows upload state: " +
+                              "solid when every scan is uploaded, dimmed when only some are."
                     )
                 } header: {
                     Text("HOW TO USE")

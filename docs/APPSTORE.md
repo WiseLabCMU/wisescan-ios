@@ -52,14 +52,18 @@ PROXY MODE (Meta Ray-Ban Smart Glasses)
 
 TIME-SERIES SCANNING
 • Group scans by Location and re-scan the same space over time
-• Rescan Space and Link Adjacent Space load a configurable ghost-mesh overlay of previous captures
+• On-device Process step finishes each scan: room layout, plane-based registration, ghost proxy, and vertex coloring
+• Automatic plane registration aligns every rescan into the location's shared coordinate frame — walls and floors matched, unreliable fits refused rather than guessed
+• Rescan Space and Link Adjacent Space load a configurable ghost overlay of previous captures, with live auto-alignment against detected planes
 • Adjacent stitching: scan neighboring areas with shared coordinate frames
 • ARWorldMap relocalization with rejection and manual ghost mesh alignment
+• Bad-scan warning right after save, so a failed capture can be redone on the spot
 • Linked-scan graph visualization with combined-mesh viewer
 
 BULK OPERATIONS
 • Multi-select locations for bulk delete
-• Multi-select scans for bulk Save, Upload, and Delete
+• Multi-select scans for bulk Process, Save, Upload, and Delete with per-tile progress
+• Three-state upload badge per location: none, partially, or fully uploaded
 • Background post-scan processing with per-card progress
 
 FLEXIBLE EXPORT FORMATS
@@ -82,6 +86,25 @@ DEVELOPER MODE
 Designed for researchers, 3D scanning professionals, and spatial computing developers who need raw, high-fidelity sensor data with full control over the reconstruction pipeline.
 
 Requires a LiDAR-equipped iPhone or iPad Pro. Meta Ray-Ban Smart Glasses supported for proxy frame capture.
+```
+
+---
+
+## What's New (version 0.5.0 — upcoming release)
+
+```
+• Process step: finish scans on-device — room layout, plane-based registration into a shared per-location frame, rescan ghost, and vertex coloring — with upload/export gated until complete
+• Automatic rescan alignment: walls and floors register each rescan into the location's canonical coordinate frame; unreliable fits are refused, never guessed
+• Hi-res tap stills: hold still until the reticle locks, tap to capture a native-resolution photo; amber coverage overlay shows where photos are still needed
+• Photo coverage tracking: occlusion-correct world-space coverage grid with overlap and parallax coaching, exported for dataset triage
+• Stop safety: the stop button always asks — Save & End, Save & Scan Adjacent, Discard, or Cancel
+• Naming after save: the name prompt now waits for the save pipeline, eliminating the frozen-keyboard stall on stop
+• Bad-scan warning right after save so a failed capture can be redone on the spot
+• Three-state upload badge per location (none / partial / all uploaded) and per-tile bulk progress
+• Space analyzer: sweep progress in real degrees with honest partial results on timeout
+• Faster, safer exports: memory-bounded blur pipeline and double-tap guards on process, save, upload, and delete
+• Tracking recovery: automatic session re-bootstrap after a mid-scan tracking collapse
+• Many stability fixes across save, rescan, and VR capture
 ```
 
 ---

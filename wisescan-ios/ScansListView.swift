@@ -880,6 +880,12 @@ struct LocationGridTile: View {
         location.scans.max(by: { $0.capturedAt < $1.capturedAt })
     }
 
+    /// Any scan's world map flagged suspect at save (tracking excursion baked into the
+    /// feature cloud) — rolls into the yellow relocalization-concern badge.
+    private var hasSuspectWorldMap: Bool {
+        location.scans.contains { $0.worldMapSuspect }
+    }
+
     /// Small corner indicator for the top-leading overlay (matches the per-scan card style).
     private func tileWarningBadge(_ color: Color) -> some View {
         Image(systemName: "exclamationmark.triangle.fill")
@@ -935,11 +941,13 @@ struct LocationGridTile: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(alignment: .topLeading) {
-            // Stacked rollup indicators (mirrors the per-scan card): yellow = at least one scan is
-            // missing its world map (can't relocalize/extend); orange = at least one scan's
-            // depth/confidence capture is grossly incomplete. Both resolved off-main in `.task`.
+            // Stacked rollup indicators (mirrors the per-scan card): yellow = a relocalization
+            // concern on at least one scan (world map file missing, or the map was flagged
+            // suspect — a tracking excursion baked in at capture); orange = at least one scan's
+            // depth/confidence capture is grossly incomplete. File checks resolved off-main in
+            // `.task`; the suspect flag is a plain model read.
             VStack(alignment: .leading, spacing: 6) {
-                if hasMissingWorldMap { tileWarningBadge(.yellow) }
+                if hasMissingWorldMap || hasSuspectWorldMap { tileWarningBadge(.yellow) }
                 if hasIncompleteCaptureScan { tileWarningBadge(.orange) }
             }
             .padding(8)
@@ -1050,6 +1058,7 @@ struct ScanCard: View {
     @State private var showDataIntegrityAlert = false
     @State private var showMeshPreview = false
     @State private var showMissingRelocAlert = false
+    @State private var showSuspectMapAlert = false
     // Disk-derived values resolved off the main thread in `.task` (see below) so the
     // view body never performs synchronous FileManager I/O during layout/scroll.
     @State private var previewImage: UIImage?
@@ -1280,6 +1289,23 @@ struct ScanCard: View {
         VStack(alignment: .leading, spacing: 6) {
             if isRelocMissing {
                 warningBadge(color: .yellow) { showMissingRelocAlert = true }
+            }
+            // Suspect map (tracking excursion baked in at save). Mutually exclusive with
+            // isRelocMissing in practice — the flag only exists when a map file was saved.
+            // The alert attaches to the badge itself so the card body's modifier chain (already
+            // near the type-checker budget) doesn't grow.
+            if scan.worldMapSuspect {
+                warningBadge(color: .yellow) { showSuspectMapAlert = true }
+                    .alert("Map May Be Unreliable", isPresented: $showSuspectMapAlert) {
+                        Button("OK", role: .cancel) { }
+                    } message: {
+                        Text("Tracking was disrupted while this scan was recorded (for example by " +
+                             "an interruption), so its relocalization map may be unreliable. " +
+                             "Rescan and Connect Adjacent will warn before using it, and a rescan " +
+                             "seeded from it usually inherits the problem. To clear it, delete this " +
+                             "scan so the most recent clean scan becomes the reference. The scan's " +
+                             "own captured data is still usable — Processing auto-aligns it.")
+                    }
             }
             if dataIntegrityWarning != nil {
                 warningBadge(color: .orange) { showDataIntegrityAlert = true }

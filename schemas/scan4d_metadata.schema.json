@@ -84,6 +84,14 @@
       "type": "integer",
       "description": "Number of sharp stillness keyframes captured (hi-res stills when the device supports them, stream frames otherwise)."
     },
+    "low_power_mode": {
+      "type": "boolean",
+      "description": "Whether iOS Low Power Mode was active when the capture stopped. LPM throttling is a suspected contributor to silent tracking excursions (outlier feature clusters) under continuous normal tracking."
+    },
+    "worldmap_suspect": {
+      "type": "boolean",
+      "description": "Present and true when the saved relocalization world map's feature cloud carried a wandering outlier cluster (a tracking excursion baked into the session map, e.g. an OS interruption with device motion). Camera poses recorded before the excursion may disagree with the final mesh frame, and relocalizing later scans against this map can seat them with an offset — weight this dataset's poses/registration accordingly."
+    },
     "photo_coverage": {
       "type": "object",
       "description": "How much of the depth-scanned geometry was covered by sharp keyframe photos, measured on a coarse world-space voxel grid (occlusion-correct: only surfaces a keyframe's depth map actually measured are counted).",

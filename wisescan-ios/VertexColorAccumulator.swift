@@ -9,9 +9,13 @@ enum VertexColorAccumulator {
     // MARK: - Export Helpers
 
     /// Exports the current ARWorldMap to a local URL.
-    static func exportWorldMap(from session: ARSession?, completion: @escaping (URL?) -> Void) {
+    /// `suspect` is true when the map's feature cloud carries a wandering outlier cluster
+    /// (`LocalizationDiag.mapSuspect`) — a tracking excursion (e.g. an OS interruption with
+    /// motion) baked into the map. The map still saves; callers persist the flag so a later
+    /// rescan/link can warn before relocalizing against it.
+    static func exportWorldMap(from session: ARSession?, completion: @escaping (_ mapURL: URL?, _ suspect: Bool) -> Void) {
         guard let session = session else {
-            completion(nil)
+            completion(nil, false)
             return
         }
 
@@ -29,7 +33,7 @@ enum VertexColorAccumulator {
 
             guard let map = worldMap, error == nil else {
                 print("Error getting ARWorldMap: \(String(describing: error))")
-                completion(nil)
+                completion(nil, false)
                 return
             }
 
@@ -38,15 +42,22 @@ enum VertexColorAccumulator {
             // sudden collapse here is the inherited map being dropped before export.
             LocalizationDiag.logMapStats(map, context: "save (about to persist)")
 
+            // Wandering-cluster check (see mapSuspect doc): flag a map whose feature cloud was
+            // polluted by a tracking excursion so rescan/link flows can warn before trusting it.
+            let suspect = LocalizationDiag.mapSuspect(map)
+            if suspect {
+                print("[Warning] World map feature cloud looks corrupted (outlier cluster) — flagging scan's map as suspect")
+            }
+
             do {
                 let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
                 let filename = "worldmap_\(UUID().uuidString.prefix(8)).worldmap"
                 let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
                 try data.write(to: fileURL)
-                completion(fileURL)
+                completion(fileURL, suspect)
             } catch {
                 print("Error saving ARWorldMap: \(error)")
-                completion(nil)
+                completion(nil, false)
             }
         }
 
@@ -72,7 +83,7 @@ enum VertexColorAccumulator {
             completionLock.unlock()
 
             print("[Warning] ARWorldMap export timed out after \(worldMapTimeout)s. Proceeding without map.")
-            completion(nil)
+            completion(nil, false)
         }
     }
 
