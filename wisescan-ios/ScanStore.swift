@@ -72,7 +72,7 @@ class CapturedScan {
     @Transient var uploadStatus: UploadStatus {
         get {
             if uploadStatusStr == "pending" { return .pending }
-            if uploadStatusStr == "zipping" { return .zipping(phase: nil) }
+            if uploadStatusStr == "zipping" { return .zipping }
             if uploadStatusStr == "savedLocally" { return .savedLocally }
             if uploadStatusStr == "success" { return .success }
             if uploadStatusStr.starts(with: "failed:") {
@@ -232,10 +232,12 @@ struct ExportPhase: Equatable {
 
 enum UploadStatus: Equatable {
     case pending
-    /// `phase` is transient export-pipeline progress ("Privacy blur 12/41…" with its
-    /// fraction) — persisted as plain "zipping", so a relaunch shows the generic label
-    /// until the pipeline reports again.
-    case zipping(phase: ExportPhase?)
+    /// Export pipeline owns the scan. The live PHASE is not carried here: `uploadStatus`
+    /// round-trips through SwiftData strings (the setter would drop an associated payload,
+    /// and a @Transient model prop isn't reliably observed — same lesson as ScanCard's
+    /// `coloringMessage`), so phase progress lives in view state (`ScanCard.exportPhase` /
+    /// the parent's bulk dictionary) and composes with this state at render time.
+    case zipping
     case uploading(progress: Double)
     case savedLocally
     case success
@@ -255,29 +257,11 @@ enum UploadStatus: Equatable {
     var label: String {
         switch self {
         case .pending: return "Ready"
-        case .zipping(let phase): return phase?.label ?? "Converting…"
+        case .zipping: return "Converting…"
         case .uploading(let progress): return "Uploading (\(Int(progress * 100))%)..."
         case .savedLocally: return "Saved Locally"
         case .success: return "Uploaded"
         case .failed(let msg): return "Failed: \(msg)"
-        }
-    }
-
-    /// True while a pipeline owns this scan and the status pill should carry a meter
-    /// (export phases, upload) — pair with `meterFraction`, which is nil when the running
-    /// phase isn't countable (copy, zip) and the bar should be indeterminate.
-    var showsMeter: Bool {
-        switch self {
-        case .zipping, .uploading: return true
-        default: return false
-        }
-    }
-
-    var meterFraction: Double? {
-        switch self {
-        case .zipping(let phase): return phase?.fraction
-        case .uploading(let progress): return progress
-        default: return nil
         }
     }
 

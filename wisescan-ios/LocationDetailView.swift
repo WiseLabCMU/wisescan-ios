@@ -41,6 +41,10 @@ struct LocationDetailView: View {
     /// Per-scan coloring progress during a bulk colorize, keyed by scan id. SwiftUI @State so the
     /// cards reliably re-render as it updates (a SwiftData @Transient model prop is not observed).
     @State private var bulkColoringMessages: [PersistentIdentifier: String] = [:]
+    /// Per-scan export phase during a BULK save/upload (privacy blur / 360° / cube faces /
+    /// zip) — the model can't carry it (see UploadStatus.zipping), so the parent owns it and
+    /// hands each card its slice, mirroring `bulkColoringMessages`.
+    @State private var bulkExportPhases: [PersistentIdentifier: ExportPhase] = [:]
 
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.selectedExportFormat)
@@ -204,6 +208,7 @@ struct LocationDetailView: View {
                                     isEditing: isEditing,
                                     isSelected: selectedScans.contains(scan.id),
                                     bulkColoringMessage: bulkColoringMessages[scan.id],
+                                    bulkExportPhase: bulkExportPhases[scan.id],
                                     onUpdate: { _ in try? modelContext.save() },
                                     onDelete: { scanToDelete in
                                         ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
@@ -464,16 +469,22 @@ struct LocationDetailView: View {
             DispatchQueue.global(qos: .userInitiated).async {
                 var urls: [ZipExportItem] = []
                 for scan in scans {
-                    DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: nil) }
+                    DispatchQueue.main.async { scan.uploadStatus = .zipping }
                     let filename = scan.makeExportFilename(format: format)
                     if let url = ScanExportManager.prepareExport(
                         filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch,
-                        phase: { step in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: step) } }
+                        phase: { step in DispatchQueue.main.async { bulkExportPhases[scan.id] = step } }
                     ) {
                         urls.append(ZipExportItem(url: url))
-                        DispatchQueue.main.async { scan.uploadStatus = .savedLocally }
+                        DispatchQueue.main.async {
+                            self.bulkExportPhases[scan.id] = nil
+                            scan.uploadStatus = .savedLocally
+                        }
                     } else {
-                        DispatchQueue.main.async { scan.uploadStatus = .failed("Export failed") }
+                        DispatchQueue.main.async {
+                            self.bulkExportPhases[scan.id] = nil
+                            scan.uploadStatus = .failed("Export failed")
+                        }
                     }
                 }
 
@@ -500,19 +511,25 @@ struct LocationDetailView: View {
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             for scan in scans {
                 guard let url = URL(string: baseURLString + scan.makeExportFilename(format: format)) else { continue }
-                scan.uploadStatus = .zipping(phase: nil)
+                scan.uploadStatus = .zipping
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     let filename = scan.makeExportFilename(format: format)
                     guard let exportURL = ScanExportManager.prepareExport(
                         filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch,
-                        phase: { step in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: step) } }
+                        phase: { step in DispatchQueue.main.async { bulkExportPhases[scan.id] = step } }
                     ) else {
-                        DispatchQueue.main.async { scan.uploadStatus = .failed("Export failed") }
+                        DispatchQueue.main.async {
+                            self.bulkExportPhases[scan.id] = nil
+                            scan.uploadStatus = .failed("Export failed")
+                        }
                         return
                     }
 
-                    DispatchQueue.main.async { scan.uploadStatus = .uploading(progress: 0.0) }
+                    DispatchQueue.main.async {
+                        self.bulkExportPhases[scan.id] = nil
+                        scan.uploadStatus = .uploading(progress: 0.0)
+                    }
 
                     var request = URLRequest(url: url)
                     request.httpMethod = "PUT"

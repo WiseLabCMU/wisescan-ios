@@ -570,7 +570,9 @@ struct ScanExportManager {
     // swiftlint:disable:next function_body_length cyclomatic_complexity
     /// `phase`, when supplied, receives human-readable progress lines ("Copying frames…",
     /// "Privacy blur 12/41…", "Cube faces 1/2…", "Zipping…") from the export queue —
-    /// callers hop to main and surface them (UploadStatus.zipping(phase:)). The pipeline
+    /// callers hop to main and surface them in view state (ScanCard.exportPhase / the
+    /// parent's bulk dictionary — NOT on the model: uploadStatus round-trips through
+    /// SwiftData strings). The pipeline
     /// has grown real phases (privacy blur, 360° verification, cube faces); a bare
     /// "Converting..." hides where the time goes.
     static func prepareExport(filename: String, scanDir: URL, format: ExportFormat,

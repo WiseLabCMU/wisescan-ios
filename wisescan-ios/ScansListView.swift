@@ -582,13 +582,15 @@ struct ScansListView: View {
                     checkBulkUploadCompletion()
                     continue
                 }
-                scan.uploadStatus = .zipping(phase: nil)
+                scan.uploadStatus = .zipping
                 let scanDir = scan.scanDirectory
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     guard let exportURL = ScanExportManager.prepareExport(
-                        filename: filename, scanDir: scanDir, format: format, bulkStitch: bulkStitch,
-                        phase: { step in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: step) } }
+                        // No phase callback: this screen shows LOCATION tiles, not scan cards —
+                        // there's no per-scan pill here to report into (LocationDetailView's
+                        // bulk flows drive `bulkExportPhases`).
+                        filename: filename, scanDir: scanDir, format: format, bulkStitch: bulkStitch
                     ) else {
                         DispatchQueue.main.async {
                             scan.uploadStatus = .failed("Export failed")
@@ -1068,6 +1070,8 @@ struct ScanCard: View {
     // Single-card coloring progress (SwiftUI @State — reliably observed, unlike a SwiftData
     // @Transient model prop). Bulk coloring drives `bulkColoringMessage` from the parent instead.
     @State private var coloringMessage: String?
+    /// Single-card export progress, for the same reason coloringMessage is @State.
+    @State private var exportPhase: ExportPhase?
     /// DECISION 3 hard gate: upload requires this scan post-processed.
     @State private var showPostprocessAlert = false
 
@@ -1079,19 +1083,28 @@ struct ScanCard: View {
     /// Effective coloring progress: single-card @State, or the parent's bulk message.
     private var activeColoringMessage: String? { coloringMessage ?? bulkColoringMessage }
 
+    /// Live export-pipeline phase (privacy blur / 360° / cube faces / zip). Same ownership
+    /// rule as coloring: single-card work drives the local @State, a bulk run drives the
+    /// parent's dictionary — the model can't carry it (see UploadStatus.zipping).
+    private var activeExportPhase: ExportPhase? { exportPhase ?? bulkExportPhase }
+
     var isSelected: Bool = false
     var onSelect: (() -> Void)?
     /// Coloring progress message driven by the parent during a BULK colorize (nil otherwise).
     /// Single-card colorize uses the local `coloringMessage` @State.
     var bulkColoringMessage: String?
+    /// Export phase driven by the parent during a BULK save/upload (nil otherwise).
+    /// Single-card save/upload uses the local `exportPhase` @State.
+    var bulkExportPhase: ExportPhase?
 
-    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, bulkColoringMessage: String? = nil, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
+    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, bulkColoringMessage: String? = nil, bulkExportPhase: ExportPhase? = nil, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
         self.scan = scan
         self.isLatest = isLatest
         self.uploadURL = uploadURL
         self.isEditing = isEditing
         self.isSelected = isSelected
         self.bulkColoringMessage = bulkColoringMessage
+        self.bulkExportPhase = bulkExportPhase
         self.onUpdate = onUpdate
         self.onDelete = onDelete
         self.onSelect = onSelect
@@ -1498,26 +1511,36 @@ struct ScanCard: View {
     @ViewBuilder
     private var statusBadge: some View {
         let status = scan.uploadStatus
+        // While the export pipeline runs, the phase (view state) names the step and supplies
+        // the meter; upload uses its own numeric progress. A bare "Converting…" hid a
+        // multi-minute privacy/cube-face pass behind one word.
+        let phase = activeExportPhase
+        let label: String = {
+            if case .zipping = status, let phase { return phase.label }
+            return status.label
+        }()
+        let fraction: Double? = {
+            if case .uploading(let progress) = status { return progress }
+            if case .zipping = status { return phase?.fraction }
+            return nil
+        }()
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
                 Circle()
                     .fill(statusColor)
                     .frame(width: 8, height: 8)
-                Text(status.label)
+                Text(label)
                     .font(.caption2)
                     .foregroundColor(statusColor)
             }
-            // Meter for the pipeline states (export phases, upload): the phase label alone
-            // doesn't convey how far along a multi-minute privacy/cube-face pass is.
-            // Determinate where the phase is countable, indeterminate (animated) for copy/zip.
-            if status.showsMeter {
-                if let fraction = status.meterFraction {
+            if status.isInFlight {
+                if let fraction {
                     ProgressView(value: fraction)
                         .progressViewStyle(.linear)
                         .tint(statusColor)
                         .frame(height: 2)
                 } else {
-                    ProgressView()   // indeterminate: copy / zip phases
+                    ProgressView()   // indeterminate: copy / zip / not-yet-reported
                         .progressViewStyle(.linear)
                         .tint(statusColor)
                         .frame(height: 2)
@@ -1526,10 +1549,10 @@ struct ScanCard: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .frame(minWidth: status.showsMeter ? 150 : nil, alignment: .leading)
+        .frame(minWidth: status.isInFlight ? 150 : nil, alignment: .leading)
         .background(statusColor.opacity(0.15))
         .cornerRadius(8)
-        .animation(.easeInOut(duration: 0.15), value: status)
+        .animation(.easeInOut(duration: 0.15), value: label)
     }
 
     private var statusColor: Color {
@@ -1560,7 +1583,7 @@ struct ScanCard: View {
             showPostprocessAlert = true
             return
         }
-        scan.uploadStatus = .zipping(phase: nil)
+        scan.uploadStatus = .zipping
         onUpdate(scan)
 
         let format = selectedFormat
@@ -1585,9 +1608,10 @@ struct ScanCard: View {
         DispatchQueue.global(qos: .userInitiated).async {
             guard let exportURL = ScanExportManager.prepareExport(
                 filename: filename, scanDir: scanDir, format: format,
-                phase: { step in DispatchQueue.main.async { self.scan.uploadStatus = .zipping(phase: step) } }
+                phase: { step in DispatchQueue.main.async { self.exportPhase = step } }
             ) else {
                 DispatchQueue.main.async {
+                    self.exportPhase = nil
                     self.scan.selectedFormat = self.selectedFormat
                     self.scan.uploadStatus = .failed("Export failed")
                     self.onUpdate(self.scan)
@@ -1596,6 +1620,7 @@ struct ScanCard: View {
             }
 
             DispatchQueue.main.async {
+                self.exportPhase = nil
                 self.scan.uploadStatus = .uploading(progress: 0.0)
                 self.onUpdate(self.scan)
             }
@@ -1652,7 +1677,7 @@ struct ScanCard: View {
             showPostprocessAlert = true
             return
         }
-        scan.uploadStatus = .zipping(phase: nil)
+        scan.uploadStatus = .zipping
         onUpdate(scan)
 
         let format = selectedFormat
@@ -1675,13 +1700,15 @@ struct ScanCard: View {
         DispatchQueue.global(qos: .userInitiated).async {
             if let exportURL = ScanExportManager.prepareExport(
                 filename: filename, scanDir: scanDir, format: format,
-                phase: { step in DispatchQueue.main.async { self.scan.uploadStatus = .zipping(phase: step) } }
+                phase: { step in DispatchQueue.main.async { self.exportPhase = step } }
             ) {
                 DispatchQueue.main.async {
+                    self.exportPhase = nil
                     self.exportItem = ZipExportItem(url: exportURL)
                 }
             } else {
                 DispatchQueue.main.async {
+                    self.exportPhase = nil
                     self.scan.uploadStatus = .failed("Export failed")
                     self.onUpdate(self.scan)
                     self.showExportError = true
