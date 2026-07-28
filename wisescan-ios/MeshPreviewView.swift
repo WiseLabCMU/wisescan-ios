@@ -27,6 +27,12 @@ struct MeshPreviewContainer: View {
     @State private var keyframeMarkerMode: KeyframeMarkerMode = .none
     @State private var hasKeyframeMarkers = false
     @State private var showSetPoseConfirm = false
+    /// Which geometry is drawn (full mesh vs ghost proxy) — orthogonal to `semanticViewMode`.
+    @State private var meshSourceMode: MeshSourceMode = .full
+    /// Set by the viewer once it knows the proxy artifact actually parsed (same pattern as
+    /// `hasPrivacyMarkers`/`hasKeyframeMarkers`) — a file-existence check would offer the toggle
+    /// for a proxy that then fails to build.
+    @State private var hasProxyMesh = false
     /// Canonical frame from the location's ORIGINAL scan (see `canonicalRoomFrame`), resolved
     /// before the viewer mounts so all of a location's scans preview through an identical view.
     @State private var canonicalFrame: (center: SIMD3<Float>, span: Float)?
@@ -53,7 +59,9 @@ struct MeshPreviewContainer: View {
                         detectedClasses: $detectedClasses,
                         hasPrivacyMarkers: $hasPrivacyMarkers,
                         keyframeMarkerMode: $keyframeMarkerMode,
-                        hasKeyframeMarkers: $hasKeyframeMarkers
+                        hasKeyframeMarkers: $hasKeyframeMarkers,
+                        meshSourceMode: $meshSourceMode,
+                        hasProxyMesh: $hasProxyMesh
                     )
 
                     // 2D overlay icons projected from 3D face anchor positions
@@ -189,6 +197,17 @@ struct MeshPreviewContainer: View {
                     }
                 }
             }
+            if hasProxyMesh {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        meshSourceMode = meshSourceMode.next
+                    } label: {
+                        Image(systemName: meshSourceMode.iconName)
+                            .foregroundColor(meshSourceMode == .full ? .gray : .yellow)
+                    }
+                    .accessibilityLabel(meshSourceMode == .full ? "Show ghost proxy mesh" : "Show full mesh")
+                }
+            }
             if location != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     // Icon-only to keep the trailing bar uncrowded alongside the privacy/
@@ -240,9 +259,18 @@ struct MeshPreviewContainer: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Text(isColored ? "Preview · colored mesh" : "Preview · shading only, colors not final")
-                .font(.caption2)
-                .foregroundColor(isColored ? .green : .orange)
+            // Proxy takes over the note: its colors are never the photo colorize (colors.bin is
+            // aligned to mesh.obj's vertices, which the proxy compacts), and its dropped
+            // floor/ceiling faces are by design — say so rather than let it read as a bad scan.
+            if let tag = meshSourceMode.titleTag {
+                Text("Preview · \(tag) · height shading, faces dropped by design")
+                    .font(.caption2)
+                    .foregroundColor(.yellow)
+            } else {
+                Text(isColored ? "Preview · colored mesh" : "Preview · shading only, colors not final")
+                    .font(.caption2)
+                    .foregroundColor(isColored ? .green : .orange)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -379,6 +407,30 @@ struct MeshPreviewView: UIViewRepresentable {
     @Binding var hasPrivacyMarkers: Bool
     @Binding var keyframeMarkerMode: KeyframeMarkerMode
     @Binding var hasKeyframeMarkers: Bool
+    @Binding var meshSourceMode: MeshSourceMode
+    @Binding var hasProxyMesh: Bool
+
+    /// The ghost proxy artifact for a scan directory, if present — scan-dir top level then
+    /// `raw_data/` (the same two-candidate resolution the metadata/roomplan readers use, since
+    /// `writeBoth` mirrors the proxy into both).
+    static func proxyMeshURL(scanDirectoryURL: URL?) -> URL? {
+        guard let dir = scanDirectoryURL else { return nil }
+        let candidates = [
+            dir.appendingPathComponent("mesh_proxy.obj"),
+            dir.appendingPathComponent("raw_data").appendingPathComponent("mesh_proxy.obj")
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// Mesh visibility across BOTH axes: `SemanticViewMode` decides whether any geometry shows,
+    /// `MeshSourceMode` decides which one. Falls back to the full mesh when the proxy never
+    /// built, so the view can never end up empty.
+    private func applyMeshVisibility(_ coordinator: Coordinator) {
+        let showMesh = semanticViewMode.showMesh
+        let source: MeshSourceMode = coordinator.proxyMeshNode == nil ? .full : meshSourceMode
+        coordinator.meshNode?.isHidden = !(showMesh && source == .full)
+        coordinator.proxyMeshNode?.isHidden = !(showMesh && source == .proxy)
+    }
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -422,6 +474,18 @@ struct MeshPreviewView: UIViewRepresentable {
             }
             if let colorsURL = colorsFileURL {
                 colorsData = try? Data(contentsOf: colorsURL)
+            }
+
+            // Ghost proxy, loaded alongside so the source toggle is instant and keeps the
+            // camera (the alternative — reloading on switch — would tear down the SCNView).
+            // Frame-consistent with mesh.obj by construction (ScanPostprocessor rebuilds it
+            // whenever a late registration moves the mesh), so it needs no separate transform.
+            // NO vertex colors: colors.bin is per-vertex against mesh.obj and the proxy compacts
+            // vertices + appends quad corners, so it renders height-shaded instead.
+            var proxyGeometry: SCNGeometry?
+            if let proxyURL = Self.proxyMeshURL(scanDirectoryURL: self.scanDirectoryURL),
+               let proxyData = try? Data(contentsOf: proxyURL) {
+                proxyGeometry = Self.buildGeometry(from: proxyData, vertexColors: nil)?.0
             }
 
             var faceAnchors: [SCNVector3] = []
@@ -487,6 +551,19 @@ struct MeshPreviewView: UIViewRepresentable {
                     let containerNode = SCNNode()
                     containerNode.addChildNode(node)
 
+                    // Proxy rides the SAME center as the full mesh (not its own bbox) — they're
+                    // in one frame, so a shared offset keeps them coincident and toggling shows
+                    // true differences rather than a re-centering shift.
+                    var proxyNode: SCNNode?
+                    if let proxyGeometry {
+                        let pNode = SCNNode(geometry: proxyGeometry)
+                        pNode.name = "proxyMesh"
+                        pNode.position = SCNVector3(-center.x, -center.y, -center.z)
+                        containerNode.addChildNode(pNode)
+                        proxyNode = pNode
+                    }
+                    self.hasProxyMesh = proxyNode != nil
+
                     // Add semantic classification outlines + fills (same center offset as mesh)
                     if let outlines = semanticOutlines {
                         let semanticsNode = SCNNode()
@@ -515,6 +592,7 @@ struct MeshPreviewView: UIViewRepresentable {
 
                     scene.rootNode.addChildNode(containerNode)
                     context.coordinator.meshNode = node
+                    context.coordinator.proxyMeshNode = proxyNode
                     context.coordinator.semanticsNode = scene.rootNode
                         .childNode(withName: "semantics", recursively: true)
                     context.coordinator.semanticFillsNode = scene.rootNode
@@ -522,7 +600,7 @@ struct MeshPreviewView: UIViewRepresentable {
 
                     // Apply initial visibility based on the current mode
                     let mode = self.semanticViewMode
-                    node.isHidden = !mode.showMesh
+                    self.applyMeshVisibility(context.coordinator)
                     context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
                     context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
 
@@ -563,7 +641,7 @@ struct MeshPreviewView: UIViewRepresentable {
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         let mode = semanticViewMode
-        context.coordinator.meshNode?.isHidden = !mode.showMesh
+        applyMeshVisibility(context.coordinator)
         context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
         context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
         context.coordinator.keyframeStillsNode?.isHidden = !keyframeMarkerMode.showStills
@@ -578,6 +656,8 @@ struct MeshPreviewView: UIViewRepresentable {
         let markerState: MarkerProjectionState
         /// Reference to the mesh geometry node for toggling visibility.
         weak var meshNode: SCNNode?
+        /// Reference to the ghost-proxy geometry node; nil when no proxy artifact parsed.
+        weak var proxyMeshNode: SCNNode?
         /// Reference to the semantics outline (wireframe) node for toggling visibility.
         weak var semanticsNode: SCNNode?
         /// Reference to the semantics fill (translucent faces) node for toggling visibility.
