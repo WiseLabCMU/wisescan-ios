@@ -322,6 +322,18 @@ person in the zip) and one with nobody (expect `clean`, byte-identical still).
 | P3 | Post-process 360° pipeline: BLE/OSC trigger, ticket matching, rig calibration flow, equirect export + privacy cube-face blur | calibration residual under threshold on a real rig |
 | P4 | In-situ transfer + live coverage feedback; settings UI for source/rig profiles | scan cadence not degraded vs post-process |
 
+## Known environmental instability (A12Z / pre-Apple7 GPUs)
+
+RoomPlan's ObjectUnderstanding intermittently hits `EXC_BREAKPOINT` (`brk #0x1`, stack:
+RoomPlan → `OUSession updateWithKeyframes:ouframe:`) on the A12Z iPad, typically at
+save/teardown while its queue drains — observed repeatedly across branches (2026-07-24,
+2026-07-28) with a clean app-side flow. Mechanism (from RoomPlan's own log): *"Gpu device
+does not support RGBA16U/16f read_write and Apple7 family features. The fused frames will
+have random values due to undefined behavior."* — Apple's OU keyframing runs with declared
+UB on pre-Apple7 GPUs and occasionally asserts on the result. Not an app bug; RoomPlan
+officially supports these LiDAR devices. Mitigation when it gets crashy during dev runs:
+the Developer-Mode **Semantic Labeling** kill-switch disables the RoomPlan pipeline.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
