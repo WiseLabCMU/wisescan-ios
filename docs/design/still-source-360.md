@@ -282,7 +282,9 @@ implementation blurs 360° stills REGARDLESS of the privacy-filter toggle. That 
 legitimate use case: a posed **group-photo 3D model**, where humans in frame are the point.
 Agreed direction to implement before this branch merges:
 
-1. **One toggle governs all capturing cameras** ✅ (2026-07-28) — phone frames, proxy
+1. **One toggle governs all capturing cameras** ✅ (2026-07-28; consent path
+   device-validated same day: `360° stills staged UNBLURRED (1) — privacy filter was OFF`
+   in the export log, `privacy_filter: false` confirmed in scan4d_metadata) — phone frames, proxy
    (glasses) frames, and 360° stills follow the same Privacy Filter switch:
    `stageEquirectStills` gates on the shared `privacyFilterWasOn` resolution (masks ⇒ ON,
    else the exported `privacy_filter` flag, fail-closed on garbage/unreadable metadata).
