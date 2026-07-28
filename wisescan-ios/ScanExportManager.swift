@@ -247,6 +247,78 @@ struct ScanExportManager {
         print("[prepareExport] ✓ vision-blurred \(written)/\(files.count) images in \(imagesDir.lastPathComponent)/")
     }
 
+    // MARK: - 360° Still Staging (hard privacy invariant)
+
+    /// Stages `raw_data/theta_stills/` (equirect JPG + pose sidecar JSON pairs) into the export
+    /// and enforces the still-source-360 HARD privacy invariant on every equirect: cube-face
+    /// Vision person verification, pixelation where persons are found
+    /// (`EquirectPrivacyBlur`, docs/design/still-source-360.md → Privacy).
+    ///
+    /// Runs REGARDLESS of the phone privacy-filter toggle: a 360° still images everyone around
+    /// the operator — including people behind them who never appeared in the phone viewfinder
+    /// and could not be pointed away from — so raw 360° imagery never leaves the device even
+    /// when the operator chose raw phone frames.
+    ///
+    /// Fail-CLOSED per still: a still whose verification fails is EXCLUDED from the export
+    /// (JPG and sidecar both), never shipped raw.
+    private static func stageThetaStills(rawDataDir: URL, stagingDir: URL) {
+        let fileMgr = FileManager.default
+        let srcDir = rawDataDir.appendingPathComponent("theta_stills")
+        guard fileMgr.fileExists(atPath: srcDir.path) else { return }
+        let dstDir = stagingDir.appendingPathComponent("theta_stills")
+        do {
+            try fileMgr.copyItem(at: srcDir, to: dstDir)
+        } catch {
+            print("[prepareExport] ✗ failed to stage theta_stills: \(error.localizedDescription)")
+            return
+        }
+
+        let stills = ((try? fileMgr.contentsOfDirectory(at: dstDir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension.lowercased() == "jpg" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !stills.isEmpty else { return }
+        print("[prepareExport] 360° privacy pass on \(stills.count) equirect still(s)...")
+
+        var cleanCount = 0, blurredCount = 0, excludedCount = 0
+        for url in stills {
+            // Per-still pool: each pass decodes a working copy + renders a full-res composite
+            // through autoreleased CF/CI transients (same OOM lesson as the frame blur loops).
+            autoreleasepool {
+                let outcome: EquirectPrivacyBlur.Outcome
+                if let data = try? Data(contentsOf: url) {
+                    outcome = EquirectPrivacyBlur.process(equirectJPEG: data)
+                } else {
+                    outcome = .failed("could not read staged still")
+                }
+                switch outcome {
+                case .clean:
+                    cleanCount += 1
+                case .blurred(let blurredData):
+                    do {
+                        try blurredData.write(to: url, options: .atomic)
+                        blurredCount += 1
+                    } catch {
+                        excludeStill(url)   // couldn't persist the blurred version → never ship raw
+                        excludedCount += 1
+                    }
+                case .failed(let reason):
+                    print("[prepareExport] ✗ 360° still \(url.lastPathComponent) failed verification (\(reason)) — excluding from export")
+                    excludeStill(url)
+                    excludedCount += 1
+                }
+            }
+        }
+        print("[prepareExport] ✓ 360° privacy pass: \(cleanCount) clean, \(blurredCount) blurred, \(excludedCount) excluded")
+    }
+
+    /// Fail-closed removal of one staged 360° still: the equirect AND its pose sidecar (an
+    /// orphan sidecar would advertise a still the bundle doesn't contain).
+    private static func excludeStill(_ jpgURL: URL) {
+        let fileMgr = FileManager.default
+        try? fileMgr.removeItem(at: jpgURL)
+        try? fileMgr.removeItem(at: jpgURL.deletingPathExtension().appendingPathExtension("json"))
+    }
+
     /// Applies person pixelation to staged images and zeros person regions in staged depth maps
     /// using saved segmentation masks. Called during export when a `masks/` directory exists,
     /// indicating privacy filter was enabled during capture.
@@ -595,6 +667,10 @@ struct ScanExportManager {
                         }
                     }
                 }
+
+                // 360° stills (Theta): staged WITH the mandatory equirect privacy pass —
+                // stageThetaStills enforces the hard invariant internally (blur or exclude).
+                stageThetaStills(rawDataDir: rawDataDir, stagingDir: stagingDir)
 
                 return zipStaging(stagingDir)
             }
