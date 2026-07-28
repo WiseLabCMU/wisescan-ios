@@ -588,7 +588,7 @@ struct ScansListView: View {
                 DispatchQueue.global(qos: .userInitiated).async {
                     guard let exportURL = ScanExportManager.prepareExport(
                         filename: filename, scanDir: scanDir, format: format, bulkStitch: bulkStitch,
-                        phase: { msg in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: msg) } }
+                        phase: { step in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: step) } }
                     ) else {
                         DispatchQueue.main.async {
                             scan.uploadStatus = .failed("Export failed")
@@ -1498,18 +1498,38 @@ struct ScanCard: View {
     @ViewBuilder
     private var statusBadge: some View {
         let status = scan.uploadStatus
-        HStack(spacing: 4) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-            Text(status.label)
-                .font(.caption2)
-                .foregroundColor(statusColor)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                Text(status.label)
+                    .font(.caption2)
+                    .foregroundColor(statusColor)
+            }
+            // Meter for the pipeline states (export phases, upload): the phase label alone
+            // doesn't convey how far along a multi-minute privacy/cube-face pass is.
+            // Determinate where the phase is countable, indeterminate (animated) for copy/zip.
+            if status.showsMeter {
+                if let fraction = status.meterFraction {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .tint(statusColor)
+                        .frame(height: 2)
+                } else {
+                    ProgressView()   // indeterminate: copy / zip phases
+                        .progressViewStyle(.linear)
+                        .tint(statusColor)
+                        .frame(height: 2)
+                }
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
+        .frame(minWidth: status.showsMeter ? 150 : nil, alignment: .leading)
         .background(statusColor.opacity(0.15))
         .cornerRadius(8)
+        .animation(.easeInOut(duration: 0.15), value: status)
     }
 
     private var statusColor: Color {
@@ -1565,7 +1585,7 @@ struct ScanCard: View {
         DispatchQueue.global(qos: .userInitiated).async {
             guard let exportURL = ScanExportManager.prepareExport(
                 filename: filename, scanDir: scanDir, format: format,
-                phase: { msg in DispatchQueue.main.async { self.scan.uploadStatus = .zipping(phase: msg) } }
+                phase: { step in DispatchQueue.main.async { self.scan.uploadStatus = .zipping(phase: step) } }
             ) else {
                 DispatchQueue.main.async {
                     self.scan.selectedFormat = self.selectedFormat
@@ -1655,7 +1675,7 @@ struct ScanCard: View {
         DispatchQueue.global(qos: .userInitiated).async {
             if let exportURL = ScanExportManager.prepareExport(
                 filename: filename, scanDir: scanDir, format: format,
-                phase: { msg in DispatchQueue.main.async { self.scan.uploadStatus = .zipping(phase: msg) } }
+                phase: { step in DispatchQueue.main.async { self.scan.uploadStatus = .zipping(phase: step) } }
             ) {
                 DispatchQueue.main.async {
                     self.exportItem = ZipExportItem(url: exportURL)

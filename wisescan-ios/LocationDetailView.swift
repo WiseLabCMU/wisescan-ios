@@ -468,7 +468,7 @@ struct LocationDetailView: View {
                     let filename = scan.makeExportFilename(format: format)
                     if let url = ScanExportManager.prepareExport(
                         filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch,
-                        phase: { msg in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: msg) } }
+                        phase: { step in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: step) } }
                     ) {
                         urls.append(ZipExportItem(url: url))
                         DispatchQueue.main.async { scan.uploadStatus = .savedLocally }
@@ -506,7 +506,7 @@ struct LocationDetailView: View {
                     let filename = scan.makeExportFilename(format: format)
                     guard let exportURL = ScanExportManager.prepareExport(
                         filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch,
-                        phase: { msg in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: msg) } }
+                        phase: { step in DispatchQueue.main.async { scan.uploadStatus = .zipping(phase: step) } }
                     ) else {
                         DispatchQueue.main.async { scan.uploadStatus = .failed("Export failed") }
                         return

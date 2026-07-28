@@ -209,12 +209,33 @@ enum ExportFormat: String, CaseIterable, Codable {
     }
 }
 
+/// One export-pipeline phase for UI: a human-readable label plus, when the phase is
+/// countable, its within-phase fraction. Deliberately NOT an overall-pipeline percentage —
+/// which phases run depends on the scan (masks present? 360° stills? cube faces?), so any
+/// global weighting would be a fiction that stalls or jumps. The label names the phase, the
+/// bar shows progress inside it, and uncountable phases (copy, zip) render indeterminate.
+struct ExportPhase: Equatable {
+    let label: String
+    let fraction: Double?
+
+    init(_ label: String, fraction: Double? = nil) {
+        self.label = label
+        self.fraction = fraction
+    }
+
+    /// "Privacy blur 12/41…" with fraction 12/41.
+    static func counted(_ name: String, _ index: Int, of total: Int) -> ExportPhase {
+        ExportPhase("\(name) \(index)/\(total)…",
+                    fraction: total > 0 ? min(1, Double(index) / Double(total)) : nil)
+    }
+}
+
 enum UploadStatus: Equatable {
     case pending
-    /// `phase` is a transient, human-readable progress line for the export pipeline
-    /// ("Privacy blur 12/41…", "Cube faces 1/2…", "Zipping…") — persisted as plain
-    /// "zipping" (a relaunch shows the generic label until the pipeline reports again).
-    case zipping(phase: String?)
+    /// `phase` is transient export-pipeline progress ("Privacy blur 12/41…" with its
+    /// fraction) — persisted as plain "zipping", so a relaunch shows the generic label
+    /// until the pipeline reports again.
+    case zipping(phase: ExportPhase?)
     case uploading(progress: Double)
     case savedLocally
     case success
@@ -234,11 +255,29 @@ enum UploadStatus: Equatable {
     var label: String {
         switch self {
         case .pending: return "Ready"
-        case .zipping(let phase): return phase ?? "Converting..."
+        case .zipping(let phase): return phase?.label ?? "Converting…"
         case .uploading(let progress): return "Uploading (\(Int(progress * 100))%)..."
         case .savedLocally: return "Saved Locally"
         case .success: return "Uploaded"
         case .failed(let msg): return "Failed: \(msg)"
+        }
+    }
+
+    /// True while a pipeline owns this scan and the status pill should carry a meter
+    /// (export phases, upload) — pair with `meterFraction`, which is nil when the running
+    /// phase isn't countable (copy, zip) and the bar should be indeterminate.
+    var showsMeter: Bool {
+        switch self {
+        case .zipping, .uploading: return true
+        default: return false
+        }
+    }
+
+    var meterFraction: Double? {
+        switch self {
+        case .zipping(let phase): return phase?.fraction
+        case .uploading(let progress): return progress
+        default: return nil
         }
     }
 
