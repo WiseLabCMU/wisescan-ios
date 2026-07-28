@@ -334,6 +334,17 @@ UB on pre-Apple7 GPUs and occasionally asserts on the result. Not an app bug; Ro
 officially supports these LiDAR devices. Mitigation when it gets crashy during dev runs:
 the Developer-Mode **Semantic Labeling** kill-switch disables the RoomPlan pipeline.
 
+**Frequency escalation (2026-07-28): 2-for-2 on consecutive A12Z runs** at save-teardown
+under the VR + RoomPlan + 360-stills workload — near-deterministic there, not rare. Data
+is already crash-tolerant (the scan saves before the assert; DECISION-3 persists
+CapturedRoomData as a sidecar, so post-relaunch Process can still build the room; a scan
+whose sidecar didn't land surfaces through the bad-scan flow). Dev guidance: flip Semantic
+Labeling OFF on pre-Apple7 iPads for 360-branch test sessions — none of the 360 features
+under test need RoomPlan. **Product escalation lever (decision open):** if TestFlight
+users on 2020-era iPads report save-time crashes, default `semanticLabeling` OFF when
+`!MTLCreateSystemDefaultDevice().supportsFamily(.apple7)` — cost: no RoomPlan room, so no
+plane registration on those devices (rescans fall back to relocalization-only seating).
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
