@@ -22,6 +22,10 @@ Raw (unblurred) images exist temporarily in the app's sandboxed container betwee
 
 Person-shaped geometry is also excluded from the exported mesh, and a live on-screen indicator shows detected people during scanning. All privacy processing occurs entirely on-device.
 
+### 360° Camera Stills
+
+When an external 360° camera (e.g. Ricoh Theta) is connected, its equirectangular stills capture everyone around the operator — including people who never appeared in the phone's viewfinder. These stills therefore receive a **mandatory** person-privacy pass at export time, independent of the Privacy Filtering toggle: each still is resampled into perspective cube faces, person segmentation runs per face, and detected person regions are pixelated on the full-resolution image before it is included in any export. A still that cannot be verified is excluded from the export entirely — raw 360° imagery never leaves the device.
+
 ## Location Data
 
 Location data (GPS coordinates) is captured only when Location permissions are granted and is embedded in scan metadata for spatial alignment purposes. This data is never sent to third parties.

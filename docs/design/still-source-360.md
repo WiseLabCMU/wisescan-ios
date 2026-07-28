@@ -260,6 +260,19 @@ the same per-face-derived masks before leaving the device. This must land **befo
 any 360° source ships — it is a hard privacy invariant (no unblurred person leaves the
 device; docs/PRIVACY.md).
 
+**Status (2026-07-24): IMPLEMENTED, pending device validation.** `EquirectPrivacyBlur`
+resamples each still into 6 pinhole cube faces (from a ≤4K working decode), runs Vision
+person segmentation per face, projects the masks back into equirect space (longitude-
+wrapping dilation covers the ±180° seam), and pixelates person regions on the
+full-resolution equirect through CoreImage's lazy pipeline (~1%-of-width blocks). The
+bottom (operator) face is blurred, not skipped — it only drops in cube-map exports.
+`ScanExportManager.stageThetaStills` stages `theta_stills/` into Scan4D exports through
+this pass, **regardless of the phone privacy-filter toggle** (a 360° still images people
+the operator never saw), and **fail-CLOSED**: a still that cannot be verified is excluded
+from the export (JPG + pose sidecar both). Device validation: export a scan containing
+360° stills with a person in frame (expect `360° privacy pass: … blurred`, pixelated
+person in the zip) and one with nobody (expect `clean`, byte-identical still).
+
 ## Phasing
 
 | Phase | Deliverable | Gate |
