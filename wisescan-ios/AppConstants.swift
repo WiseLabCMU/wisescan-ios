@@ -271,6 +271,82 @@ enum KeyframeMarkerMode: String, CaseIterable {
     var showMotion: Bool { self == .stillsAndMotion }
 }
 
+/// Which GEOMETRY the mesh preview draws — an axis ORTHOGONAL to `SemanticViewMode` (which
+/// picks the overlay composition over whatever geometry is showing). Kept separate rather than
+/// folded in as a 4th `SemanticViewMode` case for three reasons: `SemanticViewMode` is shared
+/// with `CombinedMeshView`, which has no proxy (it draws N scans' mesh.obj) and would gain a
+/// dead cycle stop; `showMesh`/`showOutlines`/`showFills` answer "what overlay", so a source
+/// case would have to hardcode one arbitrary overlay combination; and proxy availability is
+/// runtime-conditional, which a pure `next` cycle can't express. As separate axes you get the
+/// product (source × overlay) rather than one hardcoded combination.
+///
+/// NOTE the source axis only bites in the two mesh-showing modes (`.meshOnly`,
+/// `.meshWithOutlines`) — `.semanticOnly` has `showMesh == false`, so both geometries are hidden
+/// and the toggle is a no-op there. `showFills` is true ONLY in that mode, so fills can never
+/// coexist with either mesh; drawing RoomPlan's floor quad OVER the proxy geometry (the direct
+/// way to see how far a floor quad overruns the mesh faces it stands in for) would need a
+/// mesh+fills mode, which `SemanticViewMode` does not currently have.
+///
+/// Used by BOTH the single-scan previewer and `CombinedMeshView` — each holds its own source state
+/// (they're independent views), and in both it stays a separate axis rather than a
+/// `SemanticViewMode` case, for the reasons above. In the combined render the proxy's clean
+/// RoomPlan wall quads are what make a join's coplanarity judgable, where lumpy mesh can't be
+/// eyeballed; there, maps lacking a proxy fall back to their full mesh (see `ProxyAvailability`).
+enum MeshSourceMode: String, CaseIterable {
+    /// The full captured mesh (`mesh.obj`) — the untouched save/export artifact.
+    case full
+    /// The ghost proxy (`mesh_proxy.obj`) — RoomPlan quads standing in for covered walls/floors,
+    /// lumpy mesh kept for content. The artifact the rescan ghost actually aligns against, which
+    /// otherwise has no inspection surface outside a live rescan session.
+    case proxy
+    /// The dynamic/content mesh (`mesh_dynamic.obj`) — content faces only, no walls, floors,
+    /// ceilings, or RoomPlan quads. The "4D" artifact: everything that isn't fixed room
+    /// infrastructure, so scrubbing across rescans shows only what changed between visits.
+    case dynamic
+
+    /// SF Symbol name for the toolbar button. Deliberately NOT a cube/layers glyph: it sits next
+    /// to `SemanticViewMode`'s `cube`/`cube.fill`/`square.3.layers.3d` cycle, and a same-family
+    /// silhouette read as another overlay control. A pyramid stays in "geometry" semantics (this
+    /// button is about the model) while being unmistakable at toolbar size. The dynamic mode uses
+    /// a shippingbox to convey "contents/movable stuff" — visually distinct from the pyramid pair.
+    var iconName: String {
+        switch self {
+        case .full:    return "pyramid"
+        case .proxy:   return "pyramid.fill"
+        case .dynamic: return "shippingbox"
+        }
+    }
+
+    /// Advance to the next mode in the cycle: full → proxy → dynamic → full.
+    var next: MeshSourceMode {
+        switch self {
+        case .full:    return .proxy
+        case .proxy:   return .dynamic
+        case .dynamic: return .full
+        }
+    }
+
+    /// Short tag for the preview title note — the proxy looks legitimately holey (floor/ceiling
+    /// faces are dropped by design), so viewing it must never be mistaken for a broken scan.
+    var titleTag: String? {
+        switch self {
+        case .full:    return nil
+        case .proxy:   return "proxy"
+        case .dynamic: return "dynamic"
+        }
+    }
+
+    /// VoiceOver label for the toolbar toggle — describes the NEXT mode it will switch to.
+    var accessibilityLabel: String {
+        switch self {
+        case .full:    return "Show ghost proxy mesh"
+        case .proxy:   return "Show dynamic content mesh"
+        case .dynamic: return "Show full mesh"
+        }
+    }
+}
+
+
 // MARK: - Semantic Classification
 
 /// Semantic display classes for AR/VR overlays, HUD, and preview rendering.

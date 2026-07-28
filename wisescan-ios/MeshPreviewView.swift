@@ -27,6 +27,14 @@ struct MeshPreviewContainer: View {
     @State private var keyframeMarkerMode: KeyframeMarkerMode = .none
     @State private var hasKeyframeMarkers = false
     @State private var showSetPoseConfirm = false
+    /// Which geometry is drawn (full mesh vs ghost proxy) — orthogonal to `semanticViewMode`.
+    @State private var meshSourceMode: MeshSourceMode = .full
+    /// Set by the viewer once it knows the proxy artifact actually parsed (same pattern as
+    /// `hasPrivacyMarkers`/`hasKeyframeMarkers`) — a file-existence check would offer the toggle
+    /// for a proxy that then fails to build.
+    @State private var hasProxyMesh = false
+    /// True once the dynamic mesh artifact parsed — gates the source-mode toggle alongside proxy.
+    @State private var hasDynamicMesh = false
     /// Canonical frame from the location's ORIGINAL scan (see `canonicalRoomFrame`), resolved
     /// before the viewer mounts so all of a location's scans preview through an identical view.
     @State private var canonicalFrame: (center: SIMD3<Float>, span: Float)?
@@ -53,7 +61,10 @@ struct MeshPreviewContainer: View {
                         detectedClasses: $detectedClasses,
                         hasPrivacyMarkers: $hasPrivacyMarkers,
                         keyframeMarkerMode: $keyframeMarkerMode,
-                        hasKeyframeMarkers: $hasKeyframeMarkers
+                        hasKeyframeMarkers: $hasKeyframeMarkers,
+                        meshSourceMode: $meshSourceMode,
+                        hasProxyMesh: $hasProxyMesh,
+                        hasDynamicMesh: $hasDynamicMesh
                     )
 
                     // 2D overlay icons projected from 3D face anchor positions
@@ -189,6 +200,17 @@ struct MeshPreviewContainer: View {
                     }
                 }
             }
+            if hasProxyMesh || hasDynamicMesh {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        meshSourceMode = meshSourceMode.next
+                    } label: {
+                        Image(systemName: meshSourceMode.iconName)
+                            .foregroundColor(meshSourceMode == .full ? .gray : .yellow)
+                    }
+                    .accessibilityLabel(meshSourceMode.accessibilityLabel)
+                }
+            }
             if location != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     // Icon-only to keep the trailing bar uncrowded alongside the privacy/
@@ -240,9 +262,22 @@ struct MeshPreviewContainer: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Text(isColored ? "Preview · colored mesh" : "Preview · shading only, colors not final")
-                .font(.caption2)
-                .foregroundColor(isColored ? .green : .orange)
+            // Proxy/dynamic take over the note: their colors are never the photo colorize
+            // (colors.bin is aligned to mesh.obj's vertices, which both compact), and their
+            // dropped faces are by design — say so rather than let it read as a bad scan.
+            if meshSourceMode == .dynamic {
+                Text("Preview · dynamic · content only, no walls/floor/ceiling")
+                    .font(.caption2)
+                    .foregroundColor(.yellow)
+            } else if let tag = meshSourceMode.titleTag {
+                Text("Preview · \(tag) · height shading, faces dropped by design")
+                    .font(.caption2)
+                    .foregroundColor(.yellow)
+            } else {
+                Text(isColored ? "Preview · colored mesh" : "Preview · shading only, colors not final")
+                    .font(.caption2)
+                    .foregroundColor(isColored ? .green : .orange)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -379,6 +414,49 @@ struct MeshPreviewView: UIViewRepresentable {
     @Binding var hasPrivacyMarkers: Bool
     @Binding var keyframeMarkerMode: KeyframeMarkerMode
     @Binding var hasKeyframeMarkers: Bool
+    @Binding var meshSourceMode: MeshSourceMode
+    @Binding var hasProxyMesh: Bool
+    @Binding var hasDynamicMesh: Bool
+
+    /// The ghost proxy artifact for a scan directory, if present — scan-dir top level then
+    /// `raw_data/` (the same two-candidate resolution the metadata/roomplan readers use, since
+    /// `writeBoth` mirrors the proxy into both).
+    static func proxyMeshURL(scanDirectoryURL: URL?) -> URL? {
+        guard let dir = scanDirectoryURL else { return nil }
+        let candidates = [
+            dir.appendingPathComponent("mesh_proxy.obj"),
+            dir.appendingPathComponent("raw_data").appendingPathComponent("mesh_proxy.obj")
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// The dynamic mesh artifact for a scan directory, if present — same two-candidate resolution
+    /// as `proxyMeshURL`.
+    static func dynamicMeshURL(scanDirectoryURL: URL?) -> URL? {
+        guard let dir = scanDirectoryURL else { return nil }
+        let candidates = [
+            dir.appendingPathComponent("mesh_dynamic.obj"),
+            dir.appendingPathComponent("raw_data").appendingPathComponent("mesh_dynamic.obj")
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// Mesh visibility across BOTH axes: `SemanticViewMode` decides whether any geometry shows,
+    /// `MeshSourceMode` decides which one. Falls back to the full mesh when the requested
+    /// alternate never built, so the view can never end up empty.
+    private func applyMeshVisibility(_ coordinator: Coordinator) {
+        let showMesh = semanticViewMode.showMesh
+        // Fall back to .full when the requested source's node doesn't exist.
+        let source: MeshSourceMode
+        switch meshSourceMode {
+        case .proxy   where coordinator.proxyMeshNode != nil:   source = .proxy
+        case .dynamic where coordinator.dynamicMeshNode != nil: source = .dynamic
+        default: source = .full
+        }
+        coordinator.meshNode?.isHidden        = !(showMesh && source == .full)
+        coordinator.proxyMeshNode?.isHidden   = !(showMesh && source == .proxy)
+        coordinator.dynamicMeshNode?.isHidden = !(showMesh && source == .dynamic)
+    }
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -422,6 +500,25 @@ struct MeshPreviewView: UIViewRepresentable {
             }
             if let colorsURL = colorsFileURL {
                 colorsData = try? Data(contentsOf: colorsURL)
+            }
+
+            // Ghost proxy, loaded alongside so the source toggle is instant and keeps the
+            // camera (the alternative — reloading on switch — would tear down the SCNView).
+            // Frame-consistent with mesh.obj by construction (ScanPostprocessor rebuilds it
+            // whenever a late registration moves the mesh), so it needs no separate transform.
+            // NO vertex colors: colors.bin is per-vertex against mesh.obj and the proxy compacts
+            // vertices + appends quad corners, so it renders height-shaded instead.
+            var proxyGeometry: SCNGeometry?
+            if let proxyURL = Self.proxyMeshURL(scanDirectoryURL: self.scanDirectoryURL),
+               let proxyData = try? Data(contentsOf: proxyURL) {
+                proxyGeometry = Self.buildGeometry(from: proxyData, vertexColors: nil)?.0
+            }
+
+            // Dynamic mesh (content only, no infrastructure) — same loading pattern as proxy.
+            var dynamicGeometry: SCNGeometry?
+            if let dynamicURL = Self.dynamicMeshURL(scanDirectoryURL: self.scanDirectoryURL),
+               let dynamicData = try? Data(contentsOf: dynamicURL) {
+                dynamicGeometry = Self.buildGeometry(from: dynamicData, vertexColors: nil)?.0
             }
 
             var faceAnchors: [SCNVector3] = []
@@ -487,6 +584,30 @@ struct MeshPreviewView: UIViewRepresentable {
                     let containerNode = SCNNode()
                     containerNode.addChildNode(node)
 
+                    // Proxy rides the SAME center as the full mesh (not its own bbox) — they're
+                    // in one frame, so a shared offset keeps them coincident and toggling shows
+                    // true differences rather than a re-centering shift.
+                    var proxyNode: SCNNode?
+                    if let proxyGeometry {
+                        let pNode = SCNNode(geometry: proxyGeometry)
+                        pNode.name = "proxyMesh"
+                        pNode.position = SCNVector3(-center.x, -center.y, -center.z)
+                        containerNode.addChildNode(pNode)
+                        proxyNode = pNode
+                    }
+                    self.hasProxyMesh = proxyNode != nil
+
+                    // Dynamic mesh rides the same center as full + proxy.
+                    var dynamicNode: SCNNode?
+                    if let dynamicGeometry {
+                        let dNode = SCNNode(geometry: dynamicGeometry)
+                        dNode.name = "dynamicMesh"
+                        dNode.position = SCNVector3(-center.x, -center.y, -center.z)
+                        containerNode.addChildNode(dNode)
+                        dynamicNode = dNode
+                    }
+                    self.hasDynamicMesh = dynamicNode != nil
+
                     // Add semantic classification outlines + fills (same center offset as mesh)
                     if let outlines = semanticOutlines {
                         let semanticsNode = SCNNode()
@@ -515,6 +636,8 @@ struct MeshPreviewView: UIViewRepresentable {
 
                     scene.rootNode.addChildNode(containerNode)
                     context.coordinator.meshNode = node
+                    context.coordinator.proxyMeshNode = proxyNode
+                    context.coordinator.dynamicMeshNode = dynamicNode
                     context.coordinator.semanticsNode = scene.rootNode
                         .childNode(withName: "semantics", recursively: true)
                     context.coordinator.semanticFillsNode = scene.rootNode
@@ -522,7 +645,7 @@ struct MeshPreviewView: UIViewRepresentable {
 
                     // Apply initial visibility based on the current mode
                     let mode = self.semanticViewMode
-                    node.isHidden = !mode.showMesh
+                    self.applyMeshVisibility(context.coordinator)
                     context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
                     context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
 
@@ -563,7 +686,7 @@ struct MeshPreviewView: UIViewRepresentable {
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         let mode = semanticViewMode
-        context.coordinator.meshNode?.isHidden = !mode.showMesh
+        applyMeshVisibility(context.coordinator)
         context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
         context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
         context.coordinator.keyframeStillsNode?.isHidden = !keyframeMarkerMode.showStills
@@ -578,6 +701,10 @@ struct MeshPreviewView: UIViewRepresentable {
         let markerState: MarkerProjectionState
         /// Reference to the mesh geometry node for toggling visibility.
         weak var meshNode: SCNNode?
+        /// Reference to the ghost-proxy geometry node; nil when no proxy artifact parsed.
+        weak var proxyMeshNode: SCNNode?
+        /// Reference to the dynamic (content-only) geometry node; nil when no dynamic artifact parsed.
+        weak var dynamicMeshNode: SCNNode?
         /// Reference to the semantics outline (wireframe) node for toggling visibility.
         weak var semanticsNode: SCNNode?
         /// Reference to the semantics fill (translucent faces) node for toggling visibility.
@@ -597,7 +724,14 @@ struct MeshPreviewView: UIViewRepresentable {
     }
 
     /// Parses OBJ data and creates geometry with vertex colors (camera-sampled or height-based fallback).
-    nonisolated static func buildGeometry(from data: Data, vertexColors: Data?) -> (SCNGeometry, Int)? {
+    ///
+    /// `heightRange` overrides the height ramp's normalization: pass a range shared across several
+    /// meshes (with each one's `heightTransform`) so one color means one height across all of them,
+    /// instead of each mesh normalizing to its own extent. Both nil = this mesh's own local extent,
+    /// which is what a single-mesh preview wants.
+    nonisolated static func buildGeometry(from data: Data, vertexColors: Data?,
+                                          heightRange: (min: Float, max: Float)? = nil,
+                                          heightTransform: simd_float4x4? = nil) -> (SCNGeometry, Int)? {
         guard let parsed = MeshParser.parseOBJ(from: data) else { return nil }
 
         let vertices: [SCNVector3] = parsed.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
@@ -606,11 +740,17 @@ struct MeshPreviewView: UIViewRepresentable {
             indices.append(contentsOf: [face.0, face.1, face.2])
         }
 
-        var minY: Float = .greatestFiniteMagnitude
-        var maxY: Float = -.greatestFiniteMagnitude
-        for v in parsed.vertices {
-            minY = min(minY, v.y)
-            maxY = max(maxY, v.y)
+        let minY: Float, maxY: Float
+        if let heightRange {
+            (minY, maxY) = (heightRange.min, heightRange.max)
+        } else {
+            var lo: Float = .greatestFiniteMagnitude
+            var hi: Float = -.greatestFiniteMagnitude
+            for v in parsed.vertices {
+                lo = min(lo, v.y)
+                hi = max(hi, v.y)
+            }
+            (minY, maxY) = (lo, hi)
         }
 
         guard !vertices.isEmpty && !indices.isEmpty else { return nil }
@@ -628,7 +768,8 @@ struct MeshPreviewView: UIViewRepresentable {
                 hasCameraColors = true
             } else {
                 // Count mismatch — fall back to gradient
-                colors = heightGradientColors(vertices: vertices, minY: minY, maxY: maxY)
+                colors = heightGradientColors(vertices: vertices, minY: minY, maxY: maxY,
+                                              transform: heightTransform)
             }
         } else {
             colors = heightGradientColors(vertices: vertices, minY: minY, maxY: maxY)
@@ -738,15 +879,50 @@ struct MeshPreviewView: UIViewRepresentable {
     }
 
 
-    nonisolated static func heightGradientColors(vertices: [SCNVector3], minY: Float, maxY: Float) -> [SIMD4<Float>] {
+    /// Five evenly-spaced stops across the FULL spectrum: blue (lowest) → cyan → green → yellow →
+    /// red (highest). The previous ramp pinned red to 0 and clamped the other two channels
+    /// (`g = min(1.5t, 1)`, `b = max(1 - 1.5t, 0.2)`), so it swept only blue→cyan→green AND went
+    /// completely FLAT above t ≈ 0.667 — the top third of every range had zero height
+    /// discrimination (a whole upper flight of a stairwell rendered as one green).
+    ///
+    /// `transform` lifts each vertex into the space `minY`/`maxY` are expressed in. The combined
+    /// render passes each map's stitch placement so every map shares ONE world-Y ramp; without it
+    /// each map colors in its own local frame and a map placed a floor up repeats the ground
+    /// floor's colors. Geometry stays local either way — the node transform still does the placing.
+    /// nil = vertices are already in the range's space.
+    nonisolated static func heightGradientColors(vertices: [SCNVector3], minY: Float, maxY: Float,
+                                                 transform: simd_float4x4? = nil) -> [SIMD4<Float>] {
+        let stops: [SIMD3<Float>] = [
+            SIMD3(0, 0, 1),   // blue   — lowest
+            SIMD3(0, 1, 1),   // cyan
+            SIMD3(0, 1, 0),   // green
+            SIMD3(1, 1, 0),   // yellow
+            SIMD3(1, 0, 0)    // red    — highest
+        ]
         let yRange = maxY - minY
+        let lastSegment = stops.count - 2
         return vertices.map { v in
-            let t = yRange > 0 ? (v.y - minY) / yRange : 0.5
-            let r: Float = 0.0
-            let g: Float = min(t * 1.5, 1.0)
-            let b: Float = max(1.0 - t * 1.5, 0.2)
-            return SIMD4<Float>(r, g, b, 1.0)
+            let y = transform.map { ($0 * SIMD4<Float>(v.x, v.y, v.z, 1)).y } ?? v.y
+            let t = yRange > 0 ? min(max((y - minY) / yRange, 0), 1) : 0.5
+            let scaled = t * Float(stops.count - 1)
+            let i = min(Int(scaled), lastSegment)
+            let c = stops[i] + (stops[i + 1] - stops[i]) * (scaled - Float(i))
+            return SIMD4<Float>(c.x, c.y, c.z, 1.0)
         }
+    }
+
+    /// World-Y extent of a parsed mesh under an optional placement transform — the per-map input
+    /// to a SHARED height ramp across several placed meshes. nil for an empty mesh.
+    nonisolated static func worldHeightRange(parsed: MeshParser.OBJData,
+                                             transform: simd_float4x4?) -> (min: Float, max: Float)? {
+        guard !parsed.vertices.isEmpty else { return nil }
+        var lo = Float.greatestFiniteMagnitude
+        var hi = -Float.greatestFiniteMagnitude
+        for v in parsed.vertices {
+            let y = transform.map { ($0 * SIMD4<Float>(v.x, v.y, v.z, 1)).y } ?? v.y
+            lo = min(lo, y); hi = max(hi, y)
+        }
+        return (lo, hi)
     }
 
     /// Generates a 2D snapshot of the mesh using an offscreen renderer. Pass the location's
