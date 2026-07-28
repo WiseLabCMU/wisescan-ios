@@ -444,6 +444,18 @@ struct ARCoverageView: UIViewRepresentable {
                     runOptions.insert(.resetTracking)
                     PerfDiag.log("record-start: pending post-halt .resetTracking applied")
                 }
+                if config.initialWorldMap == nil, !runOptions.contains(.resetTracking),
+                   case .limited(.relocalizing) = uiView.session.currentFrame?.camera.trackingState ?? .notAvailable {
+                    // A NEW scan starting while the session is chasing a relocalization (idle
+                    // OS-interruption resume relocalizes to the session's own map) has no use for
+                    // that old frame — and on a weak device the chase can never converge: the
+                    // recording then sits degraded indefinitely with Recon3D dead and BOTH
+                    // watchdogs unarmed (each waits for a first .normal frame). Observed
+                    // 2026-07-28 A12Z: minutes of "[VR] Tracking degraded", faces=0, no stillness
+                    // settle. Reset instead of chasing — a fresh scan starts from a fresh frame.
+                    runOptions.insert(.resetTracking)
+                    PerfDiag.log("record-start: session was relocalizing with no map to honor — .resetTracking for a fresh frame")
+                }
                 PerfDiag.log(config.initialWorldMap != nil
                     ? "record-start: extend → preserving anchors + world map"
                     : "record-start: new scan → .removeExistingAnchors (clear prior scan's mesh)")
@@ -2469,6 +2481,24 @@ struct ARCoverageView: UIViewRepresentable {
                 }
                 if meshWatchdogBaseline == 0, frame.camera.trackingState == .normal {
                     meshWatchdogBaseline = ts
+                }
+                // Never-settled backstop: a recording whose tracking NEVER reaches .normal has
+                // both graduated guards structurally unarmed (each waits for a first .normal
+                // frame), so a session stuck chasing a relocalization sits degraded forever —
+                // faces=0, no stillness, no trip (2026-07-28 A12Z). If .normal hasn't arrived
+                // within the generous settle budget, the recording is unusable: halt.
+                if meshWatchdogBaseline == 0, !meshWatchdogFired, ARCoverageView.supportsLiDAR,
+                   ts - recordStartTimestamp > AppConstants.trackingSettleWatchdogSeconds {
+                    meshWatchdogFired = true
+                    vioGuardArmed = false
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, let session = self.arView?.session,
+                              let cfg = session.configuration as? ARWorldTrackingConfiguration,
+                              cfg.sceneReconstruction != [],
+                              !MetaWearableManager.shared.isStreaming else { return }
+                        PerfDiag.log("⛔️ [Session] Tracking never settled \(Int(AppConstants.trackingSettleWatchdogSeconds))s into recording — halting scan")
+                        self.vioCompromisedBinding?.wrappedValue = true
+                    }
                 }
                 if !sawMeshAnchorThisRecording, !meshWatchdogFired, ARCoverageView.supportsLiDAR,
                    meshWatchdogBaseline > 0,
