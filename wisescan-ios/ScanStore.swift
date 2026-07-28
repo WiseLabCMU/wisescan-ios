@@ -157,6 +157,8 @@ class CapturedScan {
     @Transient var faceClassesURL: URL { scanDirectory.appendingPathComponent("face_classes.bin") }
     /// Ghost proxy (walls→RoomPlan quads, content→lumpy mesh) — the rescan overlay LOD.
     @Transient var meshProxyFileURL: URL { scanDirectory.appendingPathComponent("mesh_proxy.obj") }
+    /// Dynamic mesh (content faces only, no infrastructure) — the "4D" artifact.
+    @Transient var meshDynamicFileURL: URL { scanDirectory.appendingPathComponent("mesh_dynamic.obj") }
     /// Plane-registration sidecar (applied-or-not record; the ghost loader's de-registration input).
     @Transient var registrationFileURL: URL { scanDirectory.appendingPathComponent("registration.json") }
 
@@ -1046,7 +1048,7 @@ class ScanFileManager {
             // _raw are written directly to the scan dir by the deferred post-save RoomBuilder now,
             // but stay in the list for legacy save-time-pipeline scans.
             for rpFile in ["roomplan.json", "roomplan_raw.json", "registration.json", "mesh_proxy.obj",
-                           "face_classes.bin"] {
+                           "mesh_dynamic.obj", "face_classes.bin"] {
                 let src = newScan.rawDataPath.appendingPathComponent(rpFile)
                 let dst = newScan.scanDirectory.appendingPathComponent(rpFile)
                 if FileManager.default.fileExists(atPath: src.path) {

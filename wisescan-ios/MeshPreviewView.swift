@@ -33,6 +33,8 @@ struct MeshPreviewContainer: View {
     /// `hasPrivacyMarkers`/`hasKeyframeMarkers`) — a file-existence check would offer the toggle
     /// for a proxy that then fails to build.
     @State private var hasProxyMesh = false
+    /// True once the dynamic mesh artifact parsed — gates the source-mode toggle alongside proxy.
+    @State private var hasDynamicMesh = false
     /// Canonical frame from the location's ORIGINAL scan (see `canonicalRoomFrame`), resolved
     /// before the viewer mounts so all of a location's scans preview through an identical view.
     @State private var canonicalFrame: (center: SIMD3<Float>, span: Float)?
@@ -61,7 +63,8 @@ struct MeshPreviewContainer: View {
                         keyframeMarkerMode: $keyframeMarkerMode,
                         hasKeyframeMarkers: $hasKeyframeMarkers,
                         meshSourceMode: $meshSourceMode,
-                        hasProxyMesh: $hasProxyMesh
+                        hasProxyMesh: $hasProxyMesh,
+                        hasDynamicMesh: $hasDynamicMesh
                     )
 
                     // 2D overlay icons projected from 3D face anchor positions
@@ -197,7 +200,7 @@ struct MeshPreviewContainer: View {
                     }
                 }
             }
-            if hasProxyMesh {
+            if hasProxyMesh || hasDynamicMesh {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         meshSourceMode = meshSourceMode.next
@@ -205,7 +208,7 @@ struct MeshPreviewContainer: View {
                         Image(systemName: meshSourceMode.iconName)
                             .foregroundColor(meshSourceMode == .full ? .gray : .yellow)
                     }
-                    .accessibilityLabel(meshSourceMode == .full ? "Show ghost proxy mesh" : "Show full mesh")
+                    .accessibilityLabel(meshSourceMode.accessibilityLabel)
                 }
             }
             if location != nil {
@@ -259,10 +262,14 @@ struct MeshPreviewContainer: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            // Proxy takes over the note: its colors are never the photo colorize (colors.bin is
-            // aligned to mesh.obj's vertices, which the proxy compacts), and its dropped
-            // floor/ceiling faces are by design — say so rather than let it read as a bad scan.
-            if let tag = meshSourceMode.titleTag {
+            // Proxy/dynamic take over the note: their colors are never the photo colorize
+            // (colors.bin is aligned to mesh.obj's vertices, which both compact), and their
+            // dropped faces are by design — say so rather than let it read as a bad scan.
+            if meshSourceMode == .dynamic {
+                Text("Preview · dynamic · content only, no walls/floor/ceiling")
+                    .font(.caption2)
+                    .foregroundColor(.yellow)
+            } else if let tag = meshSourceMode.titleTag {
                 Text("Preview · \(tag) · height shading, faces dropped by design")
                     .font(.caption2)
                     .foregroundColor(.yellow)
@@ -409,6 +416,7 @@ struct MeshPreviewView: UIViewRepresentable {
     @Binding var hasKeyframeMarkers: Bool
     @Binding var meshSourceMode: MeshSourceMode
     @Binding var hasProxyMesh: Bool
+    @Binding var hasDynamicMesh: Bool
 
     /// The ghost proxy artifact for a scan directory, if present — scan-dir top level then
     /// `raw_data/` (the same two-candidate resolution the metadata/roomplan readers use, since
@@ -422,14 +430,32 @@ struct MeshPreviewView: UIViewRepresentable {
         return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
+    /// The dynamic mesh artifact for a scan directory, if present — same two-candidate resolution
+    /// as `proxyMeshURL`.
+    static func dynamicMeshURL(scanDirectoryURL: URL?) -> URL? {
+        guard let dir = scanDirectoryURL else { return nil }
+        let candidates = [
+            dir.appendingPathComponent("mesh_dynamic.obj"),
+            dir.appendingPathComponent("raw_data").appendingPathComponent("mesh_dynamic.obj")
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
     /// Mesh visibility across BOTH axes: `SemanticViewMode` decides whether any geometry shows,
-    /// `MeshSourceMode` decides which one. Falls back to the full mesh when the proxy never
-    /// built, so the view can never end up empty.
+    /// `MeshSourceMode` decides which one. Falls back to the full mesh when the requested
+    /// alternate never built, so the view can never end up empty.
     private func applyMeshVisibility(_ coordinator: Coordinator) {
         let showMesh = semanticViewMode.showMesh
-        let source: MeshSourceMode = coordinator.proxyMeshNode == nil ? .full : meshSourceMode
-        coordinator.meshNode?.isHidden = !(showMesh && source == .full)
-        coordinator.proxyMeshNode?.isHidden = !(showMesh && source == .proxy)
+        // Fall back to .full when the requested source's node doesn't exist.
+        let source: MeshSourceMode
+        switch meshSourceMode {
+        case .proxy   where coordinator.proxyMeshNode != nil:   source = .proxy
+        case .dynamic where coordinator.dynamicMeshNode != nil: source = .dynamic
+        default: source = .full
+        }
+        coordinator.meshNode?.isHidden        = !(showMesh && source == .full)
+        coordinator.proxyMeshNode?.isHidden   = !(showMesh && source == .proxy)
+        coordinator.dynamicMeshNode?.isHidden = !(showMesh && source == .dynamic)
     }
 
     func makeUIView(context: Context) -> SCNView {
@@ -486,6 +512,13 @@ struct MeshPreviewView: UIViewRepresentable {
             if let proxyURL = Self.proxyMeshURL(scanDirectoryURL: self.scanDirectoryURL),
                let proxyData = try? Data(contentsOf: proxyURL) {
                 proxyGeometry = Self.buildGeometry(from: proxyData, vertexColors: nil)?.0
+            }
+
+            // Dynamic mesh (content only, no infrastructure) — same loading pattern as proxy.
+            var dynamicGeometry: SCNGeometry?
+            if let dynamicURL = Self.dynamicMeshURL(scanDirectoryURL: self.scanDirectoryURL),
+               let dynamicData = try? Data(contentsOf: dynamicURL) {
+                dynamicGeometry = Self.buildGeometry(from: dynamicData, vertexColors: nil)?.0
             }
 
             var faceAnchors: [SCNVector3] = []
@@ -564,6 +597,17 @@ struct MeshPreviewView: UIViewRepresentable {
                     }
                     self.hasProxyMesh = proxyNode != nil
 
+                    // Dynamic mesh rides the same center as full + proxy.
+                    var dynamicNode: SCNNode?
+                    if let dynamicGeometry {
+                        let dNode = SCNNode(geometry: dynamicGeometry)
+                        dNode.name = "dynamicMesh"
+                        dNode.position = SCNVector3(-center.x, -center.y, -center.z)
+                        containerNode.addChildNode(dNode)
+                        dynamicNode = dNode
+                    }
+                    self.hasDynamicMesh = dynamicNode != nil
+
                     // Add semantic classification outlines + fills (same center offset as mesh)
                     if let outlines = semanticOutlines {
                         let semanticsNode = SCNNode()
@@ -593,6 +637,7 @@ struct MeshPreviewView: UIViewRepresentable {
                     scene.rootNode.addChildNode(containerNode)
                     context.coordinator.meshNode = node
                     context.coordinator.proxyMeshNode = proxyNode
+                    context.coordinator.dynamicMeshNode = dynamicNode
                     context.coordinator.semanticsNode = scene.rootNode
                         .childNode(withName: "semantics", recursively: true)
                     context.coordinator.semanticFillsNode = scene.rootNode
@@ -658,6 +703,8 @@ struct MeshPreviewView: UIViewRepresentable {
         weak var meshNode: SCNNode?
         /// Reference to the ghost-proxy geometry node; nil when no proxy artifact parsed.
         weak var proxyMeshNode: SCNNode?
+        /// Reference to the dynamic (content-only) geometry node; nil when no dynamic artifact parsed.
+        weak var dynamicMeshNode: SCNNode?
         /// Reference to the semantics outline (wireframe) node for toggling visibility.
         weak var semanticsNode: SCNNode?
         /// Reference to the semantics fill (translucent faces) node for toggling visibility.

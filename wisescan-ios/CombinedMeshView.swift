@@ -14,7 +14,6 @@ import simd
 // adjuster whose slider values recompose the placement transforms live (in-memory — no disk) and
 // persist to the link's stored `manualNudge`.
 
-/// One mesh to compose into the shared scene.
 /// World-Y span of the combined render's SHARED height ramp — one range across every placed map,
 /// so a color means a height everywhere in the render. Drives the legend key; a gradient with no
 /// key is guesswork. nil when nothing on screen is height-colored (fully photo-colorized set).
@@ -23,15 +22,20 @@ struct HeightKeyRange: Equatable {
     let max: Float
 }
 
-/// How many of the combined render's maps have a usable ghost proxy. Availability is per-scan (no
-/// `face_classes.bin`, no RoomPlan walls, or postprocess not run yet), so the render can be mixed:
-/// maps without one keep their full mesh, and `missing` drives a badge so that's never silent.
+/// How many of the combined render's maps have a usable ghost proxy and/or dynamic mesh.
+/// Availability is per-scan (no `face_classes.bin`, no RoomPlan walls, or postprocess not run yet),
+/// so the render can be mixed: maps without one keep their full mesh, and `missing`/`dynamicMissing`
+/// drive a badge so that's never silent.
 struct ProxyAvailability: Equatable {
     let available: Int
     let missing: Int
-    var any: Bool { available > 0 }
+    let dynamicAvailable: Int
+    let dynamicMissing: Int
+    /// True when at least one alternate mesh (proxy or dynamic) exists.
+    var any: Bool { available > 0 || dynamicAvailable > 0 }
 }
 
+/// One mesh to compose into the shared scene.
 struct CombinedMeshItem: Identifiable {
     let id: UUID            // scanId
     let name: String
@@ -170,7 +174,10 @@ struct CombinedMeshScreen: View {
                 if missingCount > 0 { missingBadge(missingCount) }
                 // Mixed render: never let "some maps aren't proxies" be silent.
                 if meshSourceMode == .proxy, let p = proxyAvailability, p.missing > 0 {
-                    proxyMixedBadge(p.missing)
+                    proxyMixedBadge("proxy", p.missing)
+                }
+                if meshSourceMode == .dynamic, let p = proxyAvailability, p.dynamicMissing > 0 {
+                    proxyMixedBadge("dynamic", p.dynamicMissing)
                 }
 
                 // Room legend + per-map correction status (Step 2c). Stays visible while adjusting
@@ -282,10 +289,10 @@ struct CombinedMeshScreen: View {
 
     /// Proxy view with some maps falling back to their full mesh (no `face_classes.bin`, no RoomPlan
     /// walls, or postprocess not run) — say so, since a mixed render otherwise reads as one style.
-    private func proxyMixedBadge(_ count: Int) -> some View {
+    private func proxyMixedBadge(_ label: String, _ count: Int) -> some View {
         VStack {
             Spacer()
-            Text("\(count) map\(count == 1 ? "" : "s") have no proxy — showing full mesh")
+            Text("\(count) map\(count == 1 ? "" : "s") have no \(label) — showing full mesh")
                 .font(.caption2).foregroundColor(.yellow)
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .background(Color.black.opacity(0.6))
@@ -333,7 +340,7 @@ struct CombinedMeshScreen: View {
                         Image(systemName: meshSourceMode.iconName)
                             .foregroundColor(meshSourceMode == .full ? .gray : .yellow)
                     }
-                    .accessibilityLabel(meshSourceMode == .full ? "Show ghost proxy meshes" : "Show full meshes")
+                    .accessibilityLabel(meshSourceMode.accessibilityLabel)
                 }
             }
         }
@@ -752,6 +759,9 @@ struct CombinedMeshView: UIViewRepresentable {
         // and falls back to its full mesh.
         private var proxyColoredGeometries: [UUID: SCNGeometry] = [:]
         private var proxyFlatGeometries: [UUID: SCNGeometry] = [:]
+        // Same pair for the dynamic (content-only) mesh.
+        private var dynamicColoredGeometries: [UUID: SCNGeometry] = [:]
+        private var dynamicFlatGeometries: [UUID: SCNGeometry] = [:]
 
         // swiftlint:disable:next function_parameter_count
         func load(into scnView: SCNView, items: [CombinedMeshItem], stitchPoints: [StitchPoint],
@@ -792,10 +802,13 @@ struct CombinedMeshView: UIViewRepresentable {
                 // PASS 2 — build. `heightTransform` lifts each map's local vertices into the shared
                 // world-Y range for coloring only; the geometry itself stays local.
                 var built: [(item: CombinedMeshItem, geometry: SCNGeometry, flat: SCNGeometry,
-                             proxy: SCNGeometry?, proxyFlat: SCNGeometry?)] = []
+                             proxy: SCNGeometry?, proxyFlat: SCNGeometry?,
+                             dynamic: SCNGeometry?, dynamicFlat: SCNGeometry?)] = []
                 var usedHeightRamp = false
                 var proxyAvailable = 0
                 var proxyMissing = 0
+                var dynamicAvailable = 0
+                var dynamicMissing = 0
                 for item in items {
                     guard let data = try? Data(contentsOf: item.meshURL) else { continue }
                     let colors = item.colorsURL.flatMap { try? Data(contentsOf: $0) }
@@ -824,8 +837,20 @@ struct CombinedMeshView: UIViewRepresentable {
                     }
                     if proxyGeom != nil { proxyAvailable += 1 } else { proxyMissing += 1 }
 
+                    // Dynamic mesh (content only, no infrastructure) — same pattern as proxy.
+                    var dynamicGeom: SCNGeometry?
+                    if let dynamicURL = MeshPreviewView.dynamicMeshURL(scanDirectoryURL: item.scanDirectoryURL),
+                       let dynamicData = try? Data(contentsOf: dynamicURL) {
+                        dynamicGeom = MeshPreviewView.buildGeometry(
+                            from: dynamicData, vertexColors: nil,
+                            heightRange: sharedRange, heightTransform: item.transform
+                        )?.0
+                    }
+                    if dynamicGeom != nil { dynamicAvailable += 1 } else { dynamicMissing += 1 }
+
                     built.append((item, geometry, Self.makeFlatTinted(from: geometry, tint: item.tint),
-                                  proxyGeom, proxyGeom.map { Self.makeFlatTinted(from: $0, tint: item.tint) }))
+                                  proxyGeom, proxyGeom.map { Self.makeFlatTinted(from: $0, tint: item.tint) },
+                                  dynamicGeom, dynamicGeom.map { Self.makeFlatTinted(from: $0, tint: item.tint) }))
                 }
 
                 // Build RoomPlan outlines + fills for each scan (tagged with the scan id so they can
@@ -850,7 +875,9 @@ struct CombinedMeshView: UIViewRepresentable {
                     heightKeyBinding.wrappedValue = usedHeightRamp
                         ? sharedRange.map { HeightKeyRange(min: $0.min, max: $0.max) } : nil
                     proxyBinding.wrappedValue = ProxyAvailability(available: proxyAvailable,
-                                                                 missing: proxyMissing)
+                                                                 missing: proxyMissing,
+                                                                 dynamicAvailable: dynamicAvailable,
+                                                                 dynamicMissing: dynamicMissing)
                     for entry in built {
                         let node = SCNNode(geometry: entry.geometry)
                         node.simdTransform = entry.item.transform
@@ -860,6 +887,8 @@ struct CombinedMeshView: UIViewRepresentable {
                         self.flatGeometries[entry.item.id] = entry.flat
                         self.proxyColoredGeometries[entry.item.id] = entry.proxy
                         self.proxyFlatGeometries[entry.item.id] = entry.proxyFlat
+                        self.dynamicColoredGeometries[entry.item.id] = entry.dynamic
+                        self.dynamicFlatGeometries[entry.item.id] = entry.dynamicFlat
                         // Local top-center of this mesh — where its floating name label anchors.
                         let (mn, mx) = node.boundingBox
                         self.labelAnchors[entry.item.id] = SIMD4<Float>((mn.x + mx.x) / 2, mx.y, (mn.z + mx.z) / 2, 1)
@@ -945,8 +974,13 @@ struct CombinedMeshView: UIViewRepresentable {
         func applyTint(colorByMap: Bool, source: MeshSourceMode) {
             for (id, node) in meshNodes {
                 let proxy = colorByMap ? proxyFlatGeometries[id] : proxyColoredGeometries[id]
+                let dynamic = colorByMap ? dynamicFlatGeometries[id] : dynamicColoredGeometries[id]
                 let full = colorByMap ? flatGeometries[id] : coloredGeometries[id]
-                node.geometry = source == .proxy ? (proxy ?? full) : full
+                switch source {
+                case .proxy:   node.geometry = proxy ?? full
+                case .dynamic: node.geometry = dynamic ?? full
+                case .full:    node.geometry = full
+                }
             }
         }
 

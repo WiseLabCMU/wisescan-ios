@@ -299,24 +299,30 @@ enum MeshSourceMode: String, CaseIterable {
     /// lumpy mesh kept for content. The artifact the rescan ghost actually aligns against, which
     /// otherwise has no inspection surface outside a live rescan session.
     case proxy
+    /// The dynamic/content mesh (`mesh_dynamic.obj`) — content faces only, no walls, floors,
+    /// ceilings, or RoomPlan quads. The "4D" artifact: everything that isn't fixed room
+    /// infrastructure, so scrubbing across rescans shows only what changed between visits.
+    case dynamic
 
     /// SF Symbol name for the toolbar button. Deliberately NOT a cube/layers glyph: it sits next
     /// to `SemanticViewMode`'s `cube`/`cube.fill`/`square.3.layers.3d` cycle, and a same-family
     /// silhouette read as another overlay control. A pyramid stays in "geometry" semantics (this
-    /// button is about the model) while being unmistakable at toolbar size.
+    /// button is about the model) while being unmistakable at toolbar size. The dynamic mode uses
+    /// a shippingbox to convey "contents/movable stuff" — visually distinct from the pyramid pair.
     var iconName: String {
         switch self {
-        case .full:  return "pyramid"
-        case .proxy: return "pyramid.fill"
+        case .full:    return "pyramid"
+        case .proxy:   return "pyramid.fill"
+        case .dynamic: return "shippingbox"
         }
     }
 
-    /// Advance to the next mode in the cycle (2 sources today; a derived-floor-planes source is
-    /// the planned third, which is why this is an enum rather than a Bool).
+    /// Advance to the next mode in the cycle: full → proxy → dynamic → full.
     var next: MeshSourceMode {
         switch self {
-        case .full:  return .proxy
-        case .proxy: return .full
+        case .full:    return .proxy
+        case .proxy:   return .dynamic
+        case .dynamic: return .full
         }
     }
 
@@ -324,11 +330,22 @@ enum MeshSourceMode: String, CaseIterable {
     /// faces are dropped by design), so viewing it must never be mistaken for a broken scan.
     var titleTag: String? {
         switch self {
-        case .full:  return nil
-        case .proxy: return "proxy"
+        case .full:    return nil
+        case .proxy:   return "proxy"
+        case .dynamic: return "dynamic"
+        }
+    }
+
+    /// VoiceOver label for the toolbar toggle — describes the NEXT mode it will switch to.
+    var accessibilityLabel: String {
+        switch self {
+        case .full:    return "Show ghost proxy mesh"
+        case .proxy:   return "Show dynamic content mesh"
+        case .dynamic: return "Show full mesh"
         }
     }
 }
+
 
 // MARK: - Semantic Classification
 
