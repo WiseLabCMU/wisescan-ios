@@ -283,11 +283,20 @@ struct ScanExportManager {
             .filter { $0.pathExtension.lowercased() == "jpg" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !stills.isEmpty else { return }
-        guard privacyFilterWasOn(rawDataDir: rawDataDir, maskedFrames: maskedFrameNames(rawDataDir: rawDataDir)) else {
+        if privacyFilterWasOn(rawDataDir: rawDataDir, maskedFrames: maskedFrameNames(rawDataDir: rawDataDir)) {
+            runEquirectPrivacyPass(on: stills)
+        } else {
             print("[prepareExport] 360° stills staged UNBLURRED (\(stills.count)) — privacy filter was OFF "
                 + "for this scan (informed per-scan consent; recorded as privacy_filter in scan4d_metadata)")
-            return
         }
+
+        // Cube-face emission AFTER the privacy pass — faces sample the staged (blurred or
+        // consented) pixels, so they inherit the scan's privacy state by construction.
+        emitCubeFaces(stagingDir: stagingDir, dstDir: dstDir)
+    }
+
+    /// Runs the fail-closed per-still verification/blur over the staged equirects (filter-ON path).
+    private static func runEquirectPrivacyPass(on stills: [URL]) {
         print("[prepareExport] 360° privacy pass on \(stills.count) equirect still(s)...")
 
         var cleanCount = 0, blurredCount = 0, excludedCount = 0
@@ -320,6 +329,35 @@ struct ScanExportManager {
             }
         }
         print("[prepareExport] ✓ 360° privacy pass: \(cleanCount) clean, \(blurredCount) blurred, \(excludedCount) excluded")
+    }
+
+    /// Reprojects every surviving staged equirect into 5 pinhole cube faces (bottom face —
+    /// operator/rod — dropped by construction) written as ordinary keyframe images into
+    /// `images/` with Polycam camera JSONs in `cameras/`, poses from the mechanical-prior
+    /// rig extrinsic (EquirectFaceExport). Non-fatal per still: a face-emission failure
+    /// just leaves the archived equirect as the only carrier for that still.
+    private static func emitCubeFaces(stagingDir: URL, dstDir: URL) {
+        let fileMgr = FileManager.default
+        let imagesDir = stagingDir.appendingPathComponent("images")
+        let camerasDir = stagingDir.appendingPathComponent("cameras")
+        guard fileMgr.fileExists(atPath: imagesDir.path), fileMgr.fileExists(atPath: camerasDir.path) else {
+            print("[prepareExport] ✗ cube faces skipped — images/ or cameras/ not staged")
+            return
+        }
+        let survivors = ((try? fileMgr.contentsOfDirectory(at: dstDir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension.lowercased() == "jpg" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !survivors.isEmpty else { return }
+        var facesWritten = 0
+        for url in survivors {
+            autoreleasepool {
+                let sidecar = url.deletingPathExtension().appendingPathExtension("json")
+                facesWritten += EquirectFaceExport.emitFaces(
+                    equirectURL: url, sidecarURL: sidecar,
+                    imagesDir: imagesDir, camerasDir: camerasDir)
+            }
+        }
+        print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) (rig prior: rod \(AppConstants.rigRodHeightMeters)m, yaw \(AppConstants.rigYawOffsetDegrees)°)")
     }
 
     /// Fail-closed removal of one staged 360° still: the equirect AND its pose sidecar (an

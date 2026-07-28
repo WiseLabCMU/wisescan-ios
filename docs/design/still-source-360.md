@@ -233,6 +233,16 @@ stillness gate gains a **rig mode**:
 
 ## Export: cube map, bottom face discarded
 
+> **Status (2026-07-28): IMPLEMENTED v1** — `EquirectFaceExport` emits 5 faces per staged
+> still (bottom dropped) into `images/` + Polycam `cameras/` JSONs (`is_keyframe`, exact
+> 90° intrinsics `fx=fy=cx=cy=side/2`, additive `face`/`camera_pose_source`/`still_source`
+> keys), sampled AFTER the privacy pass so faces inherit blur/consent. Poses use the
+> mechanical-prior rig extrinsic (`AppConstants.rigRodHeightMeters` = 1.0 m,
+> `rigYawOffsetDegrees` = 0). **Pending device validation:** face yaw sign + pano-center
+> convention against the mesh (open the export in nerfstudio or eyeball face frusta vs
+> room geometry); rig settings UI + solved calibration remain (calibration plan steps 2–3).
+> The archived equirect stays in `equirect_stills/` alongside the faces.
+
 Rather than exporting raw equirectangular frames, the export pipeline **reprojects each
 360° still into a cube map and discards the bottom face**, which is dominated by the
 operator, hand grip, and rod:
