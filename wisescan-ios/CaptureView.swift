@@ -569,7 +569,11 @@ struct CaptureView: View {
 
                 // Top Controls
                 HStack {
-                    // Privacy Filter Toggle
+                    // Privacy Filter Toggle — LOCKED while recording: the setting must describe
+                    // the whole scan as one binary state. A mid-scan flip half-masks the capture
+                    // (segmentation masks exist only for the ON portion) while the exported
+                    // privacy_filter flag records just the stop-time value — the export blur gate
+                    // then mis-reasons about the unmasked half.
                     HStack {
                         Text("Privacy Filter")
                             .font(.subheadline)
@@ -577,11 +581,13 @@ struct CaptureView: View {
                         Toggle("", isOn: $isPrivacyFilterOn)
                             .labelsHidden()
                             .tint(.green)
+                            .disabled(isRecording)
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(.ultraThinMaterial)
                     .cornerRadius(20)
+                    .opacity(isRecording ? 0.5 : 1)
 
                     Spacer()
 

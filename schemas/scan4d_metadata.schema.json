@@ -84,6 +84,10 @@
       "type": "integer",
       "description": "Number of sharp stillness keyframes captured (hi-res stills when the device supports them, stream frames otherwise)."
     },
+    "privacy_filter": {
+      "type": "boolean",
+      "description": "Whether the person-privacy filter was enabled for this capture (one binary state per scan — the toggle is locked during recording). True: person regions are pixelated in exported RGB and zeroed in depth. Absent on legacy scans that predate the flag."
+    },
     "low_power_mode": {
       "type": "boolean",
       "description": "Whether iOS Low Power Mode was active when the capture stopped. LPM throttling is a suspected contributor to silent tracking excursions (outlier feature clusters) under continuous normal tracking."
