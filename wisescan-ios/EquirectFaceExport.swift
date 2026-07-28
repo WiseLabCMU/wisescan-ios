@@ -24,6 +24,28 @@ import simd
 /// inherit. Never call this on a raw_data equirect.
 enum EquirectFaceExport {
 
+    /// Whether a camera model's panos can be trusted LEVEL — the rig-prior pose math assumes
+    /// zenith-corrected (internally "gimbaled") equirects; a non-leveling camera would bake
+    /// its roll/pitch into every face pose. Gate by the sidecar's reported model:
+    /// - `.validated` — leveling confirmed on device (Theta X).
+    /// - `.assumedLevel` — the hardware levels (Theta Z1 zenith correction) but we have not
+    ///   validated its OSC-configured behavior; faces emit with a marked pose source.
+    /// - `.unsupported` — unknown model: the level-pano assumption is unsafe, so NO pose-
+    ///   bearing faces are emitted (the archived equirect still ships). A later feature can
+    ///   compensate from the camera's own gyro metadata and lift this gate.
+    enum LevelingSupport {
+        case validated
+        case assumedLevel
+        case unsupported
+    }
+
+    static func levelingSupport(forModel model: String?) -> LevelingSupport {
+        guard let model = model?.uppercased() else { return .unsupported }
+        if model.contains("THETA X") { return .validated }
+        if model.contains("THETA Z1") { return .assumedLevel }
+        return .unsupported
+    }
+
     /// One emitted cube face: name suffix + its rotation FROM the rig camera frame.
     private struct Face {
         let name: String
@@ -53,6 +75,21 @@ enum EquirectFaceExport {
         guard let sidecarData = try? Data(contentsOf: sidecarURL),
               let sidecar = (try? JSONSerialization.jsonObject(with: sidecarData)) as? [String: Any],
               let flat = sidecar["phone_transform"] as? [Double], flat.count == 16 else { return 0 }
+        let stillSource = sidecar["still_source"] as? String
+        let poseSource: String
+        switch levelingSupport(forModel: stillSource) {
+        case .validated:
+            poseSource = "rig_prior"
+        case .assumedLevel:
+            poseSource = "rig_prior_unvalidated_leveling"
+            print("[prepareExport] ⚠️ \(equirectURL.lastPathComponent): \(stillSource ?? "?") leveling "
+                + "not yet device-validated — faces emitted with pose source '\(poseSource)'")
+        case .unsupported:
+            print("[prepareExport] ⚠️ \(equirectURL.lastPathComponent): '\(stillSource ?? "unknown")' has no "
+                + "validated zenith/leveling behavior — pose-bearing cube faces NOT emitted for this "
+                + "camera yet (the archived equirect still ships; gyro-metadata compensation is a future feature)")
+            return 0
+        }
         guard let bitmap = decodeBitmap(from: equirectURL) else { return 0 }
 
         let phoneToWorld = matrixFromColumnMajor(flat.map(Float.init))
@@ -65,7 +102,6 @@ enum EquirectFaceExport {
         let faceSize = min(AppConstants.equirectFaceSizeMax, bitmap.width / 4)
         guard faceSize >= 256 else { return 0 }
         let baseName = equirectURL.deletingPathExtension().lastPathComponent
-        let stillSource = sidecar["still_source"] as? String
 
         var written = 0
         for face in faces {
@@ -82,7 +118,8 @@ enum EquirectFaceExport {
                     position: camPos,
                     side: faceSize,
                     faceName: face.name,
-                    stillSource: stillSource), to: camerasDir)
+                    stillSource: stillSource,
+                    poseSource: poseSource), to: camerasDir)
                 written += 1
             }
         }
@@ -145,6 +182,7 @@ enum EquirectFaceExport {
         let side: Int
         let faceName: String
         let stillSource: String?
+        let poseSource: String
     }
 
     private static func writeCameraJSON(_ rec: FaceCameraRecord, to camerasDir: URL) {
@@ -161,7 +199,7 @@ enum EquirectFaceExport {
             "image_path": rec.imagePath,
             "is_keyframe": true,
             "face": rec.faceName,
-            "camera_pose_source": "rig_prior"
+            "camera_pose_source": rec.poseSource
         ]
         if let stillSource = rec.stillSource { json["still_source"] = stillSource }
         guard JSONSerialization.isValidJSONObject(json),

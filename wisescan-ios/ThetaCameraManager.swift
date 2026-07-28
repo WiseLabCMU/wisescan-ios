@@ -151,6 +151,19 @@ final class ThetaCameraManager {
             batteryLevel = try? await fetchBatteryLevel()
             log(.connection, "Connected: \(info.model) \(info.firmware)"
                 + (info.serial.map { " · \($0)" } ?? ""))
+            // Leveling gate: the 360° face-pose export assumes zenith-corrected (level) panos.
+            // Surface the support tier at connect time so an unvalidated/unsupported camera is
+            // known BEFORE a scan, not at export (the event mirrors into the Dashboard card).
+            switch EquirectFaceExport.levelingSupport(forModel: info.model) {
+            case .validated:
+                break
+            case .assumedLevel:
+                log(.connection, "⚠️ \(info.model): pano leveling not yet device-validated — "
+                    + "360° face poses will be marked unvalidated in exports")
+            case .unsupported:
+                log(.connection, "⚠️ \(info.model): unknown leveling behavior — stills capture "
+                    + "and archive, but pose-bearing 360° faces are not exported for this camera yet")
+            }
             currentStillFormat = try? await fetchStillResolution()
             await refreshSupportedStillFormats()
         } catch {

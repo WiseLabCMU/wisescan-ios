@@ -242,6 +242,13 @@ stillness gate gains a **rig mode**:
 > convention against the mesh (open the export in nerfstudio or eyeball face frusta vs
 > room geometry); rig settings UI + solved calibration remain (calibration plan steps 2–3).
 > The archived equirect stays in `equirect_stills/` alongside the faces.
+>
+> **Leveling gate (2026-07-28):** face poses assume zenith-corrected (level) panos, so the
+> exporter gates on the sidecar's camera model — Theta X: validated; Theta Z1: leveling
+> hardware exists but unvalidated → faces emit with `camera_pose_source =
+> "rig_prior_unvalidated_leveling"` + a warning; unknown models: NO pose-bearing faces
+> (equirect archives; connect-time warning on the Dashboard card) until a gyro-metadata
+> compensation feature lifts the gate.
 
 Rather than exporting raw equirectangular frames, the export pipeline **reprojects each
 360° still into a cube map and discards the bottom face**, which is dominated by the

@@ -105,7 +105,7 @@
     },
     "camera_pose_source": {
       "type": "string",
-      "description": "Present on synthetic 360° cube faces: how the pose was derived. 'rig_prior' = mechanical-prior rig extrinsic (rod height + yaw offset); a solved hand-eye calibration value replaces this later."
+      "description": "Present on synthetic 360° cube faces: how the pose was derived. 'rig_prior' = mechanical-prior rig extrinsic on a leveling-validated camera (Theta X); 'rig_prior_unvalidated_leveling' = same prior on a camera whose zenith correction exists but is not yet device-validated (Theta Z1). Cameras with unknown leveling emit no faces at all. A solved hand-eye calibration value replaces these later."
     },
     "still_source": {
       "type": "string",
