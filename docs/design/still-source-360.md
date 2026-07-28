@@ -260,7 +260,11 @@ the same per-face-derived masks before leaving the device. This must land **befo
 any 360° source ships — it is a hard privacy invariant (no unblurred person leaves the
 device; docs/PRIVACY.md).
 
-**Status (2026-07-24): IMPLEMENTED, pending device validation.** `EquirectPrivacyBlur`
+**Status (2026-07-24): IMPLEMENTED — blur path DEVICE-VALIDATED** (A12Z iPad, VR-mode
+scan, 2 stills with persons: `360° privacy pass: 0 clean, 2 blurred, 0 excluded`, masks
+visually confirmed on the exported equirects; the pass also survived a battery-idle pause
+mid-export). Remaining spot-checks: the `clean` byte-identical path (tripod/remote still
+with nobody in frame) and a seam/pole-straddling subject. `EquirectPrivacyBlur`
 resamples each still into 6 pinhole cube faces (from a ≤4K working decode), runs Vision
 person segmentation per face, projects the masks back into equirect space (longitude-
 wrapping dilation covers the ±180° seam), and pixelates person regions on the
