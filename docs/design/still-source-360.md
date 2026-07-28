@@ -122,6 +122,17 @@ struct StillImage {
 - `OnboardStillSource` wraps the existing hi-res path (retry budget, watchdog,
   admission-gated bookkeeping all stay).
 - `Theta360StillSource` implements OSC trigger + (in-situ or deferred) download.
+
+**Camera-agnostic contract (adopted 2026-07-24, ahead of the seam refactor):** the on-disk
+/export payload is generalized so supporting more 360° cameras never changes the data
+format — stills live in `raw_data/equirect_stills/` as `still_NNNN.{JPG,json}`, and
+the DEVICE identity travels in the sidecar's `still_source` field (the camera's reported
+model string, e.g. "RICOH THETA X"), never in path names. Code identity follows at the
+seam refactor: today's `ThetaCameraManager` is really an **OSC-family** manager (OSC is a
+published spec covering the Ricoh line and other compliant cameras) and renames
+accordingly when it moves behind `StillSource`; a non-OSC camera (Insta360's proprietary
+SDK + dual-fisheye stitching) becomes its own `StillSource` implementation writing the
+same contract.
 - The stillness gate, reticle, shutter feedback, and voxel coverage marking all sit
   **above** the seam and work identically for both sources — with one difference:
 
@@ -294,7 +305,7 @@ person segmentation per face, projects the masks back into equirect space (longi
 wrapping dilation covers the ±180° seam), and pixelates person regions on the
 full-resolution equirect through CoreImage's lazy pipeline (~1%-of-width blocks). The
 bottom (operator) face is blurred, not skipped — it only drops in cube-map exports.
-`ScanExportManager.stageThetaStills` stages `theta_stills/` into Scan4D exports through
+`ScanExportManager.stageEquirectStills` stages `equirect_stills/` into Scan4D exports through
 this pass, **regardless of the phone privacy-filter toggle** (a 360° still images people
 the operator never saw), and **fail-CLOSED**: a still that cannot be verified is excluded
 from the export (JPG + pose sidecar both). Device validation: export a scan containing

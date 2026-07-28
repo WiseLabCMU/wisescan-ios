@@ -290,7 +290,7 @@ final class ThetaCameraManager {
     /// Triggers a 360° still during a live scan, tags it with the **phone's** ARKit world
     /// pose + timestamp (captured by the caller at tap time), downloads the equirect, and
     /// writes it — JPEG + metadata sidecar — into the scan's raw-data dir under
-    /// `theta_stills/`. Storing the phone pose (not the camera pose) is deliberate: it
+    /// `equirect_stills/`. Storing the phone pose (not the camera pose) is deliberate: it
     /// captures the phone-pose ↔ equirect pairs the deferred rig-extrinsic calibration (P3)
     /// needs. No-op unless connected and no capture is already in flight.
     /// Returns false when the capture was NOT started (camera disconnected, or the previous
@@ -315,7 +315,7 @@ final class ThetaCameraManager {
                 let seq = scanStillCount + 1
                 // STOP-RACE GUARD: the ~7s trigger+download pipeline can cross the scan's Stop —
                 // saveScan then MOVES the capture dir, and writing to the stale path creates an
-                // orphaned theta_stills/ the saved bundle never sees (observed on device: still
+                // orphaned equirect_stills/ the saved bundle never sees (observed on device: still
                 // #3 landed after TEARDOWN). Writing into the moved bundle post-metadata is not
                 // safe either, so the honest outcome is a loud drop.
                 guard FileManager.default.fileExists(atPath: rawDataDir.path) else {
@@ -323,9 +323,10 @@ final class ThetaCameraManager {
                     isCapturing = false
                     return
                 }
+                let connectedModel: String = if case .connected(let model, _) = state { model } else { "unknown-360" }
                 let input = ScanStillInput(
                     sequence: seq, phoneTransform: phoneTransform, timestamp: timestamp,
-                    sourceURL: fileURL, format: currentStillFormat,
+                    sourceURL: fileURL, sourceModel: connectedModel, format: currentStillFormat,
                     triggerMs: triggerMs, transferMs: transferMs)
                 try await Self.writeScanStill(data: data, input: input, into: rawDataDir)
                 scanStillCount = seq

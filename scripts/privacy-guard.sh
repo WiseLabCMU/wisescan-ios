@@ -19,7 +19,7 @@
 PG_FORBIDDEN_PLIST_KEYS="UIFileSharingEnabled LSSupportsOpeningDocumentsInPlace"
 
 # Path patterns for raw capture artifacts that must never be committed.
-PG_FORBIDDEN_PATH_REGEX='(^|/)(raw_data|theta_stills)/|(^|/)R[0-9]{7}\.JPG$|\.xcappdata(/|$)'
+PG_FORBIDDEN_PATH_REGEX='(^|/)(raw_data|equirect_stills)/|(^|/)R[0-9]{7}\.JPG$|(^|/)still_[0-9]{4}\.JPG$|\.xcappdata(/|$)'
 
 # pg_plist_violations <plist-content>
 # Echoes a space-separated list of any forbidden keys found. Empty output => clean.

@@ -20,18 +20,21 @@ extension ThetaCameraManager {
         let phoneTransform: simd_float4x4
         let timestamp: TimeInterval
         let sourceURL: String
+        let sourceModel: String
         let format: StillFormat?
         let triggerMs: Int
         let transferMs: Int
     }
 
-    /// Writes the equirect + sidecar to `<rawDataDir>/theta_stills/theta_NNNN.{JPG,json}`.
+    /// Writes the equirect + sidecar to `<rawDataDir>/equirect_stills/still_NNNN.{JPG,json}`
+    /// — the camera-agnostic 360° contract (any equirectangular source writes here; the
+    /// device identity travels in the sidecar's `still_source`, not in path names).
     /// Nonisolated so the file write runs off the main actor.
     nonisolated static func writeScanStill(data: Data, input: ScanStillInput, into rawDataDir: URL) throws {
-        let dir = rawDataDir.appendingPathComponent("theta_stills")
+        let dir = rawDataDir.appendingPathComponent("equirect_stills")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        let base = String(format: "theta_%04d", input.sequence)
+        let base = String(format: "still_%04d", input.sequence)
         try data.write(to: dir.appendingPathComponent("\(base).JPG"))
 
         // Column-major 4×4 (matches the transforms.json convention used elsewhere).
@@ -39,10 +42,10 @@ extension ThetaCameraManager {
         let columns = [matrix.columns.0, matrix.columns.1, matrix.columns.2, matrix.columns.3]
         let flatTransform = columns.flatMap { [$0.x, $0.y, $0.z, $0.w] }
 
-        let metadata = ThetaStillMetadata(
+        let metadata = EquirectStillMetadata(
             sequence: input.sequence,
             timestamp: input.timestamp,
-            stillSource: "theta_x",
+            stillSource: input.sourceModel,
             cameraModel: "equirectangular",
             width: input.format?.width,
             height: input.format?.height,
@@ -63,7 +66,7 @@ extension ThetaCameraManager {
 /// solve the hand–eye calibration from phone-pose ↔ equirect pairs. Snake_case keys match
 /// the project's JSON conventions; kept separate from `transforms.json` for now (the design
 /// doc's export section folds cube-faces into transforms once calibration + export land).
-private struct ThetaStillMetadata: Encodable {
+private struct EquirectStillMetadata: Encodable {
     let sequence: Int
     let timestamp: TimeInterval
     let stillSource: String

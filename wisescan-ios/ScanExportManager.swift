@@ -249,7 +249,8 @@ struct ScanExportManager {
 
     // MARK: - 360° Still Staging (hard privacy invariant)
 
-    /// Stages `raw_data/theta_stills/` (equirect JPG + pose sidecar JSON pairs) into the export
+    /// Stages `raw_data/equirect_stills/` (equirect JPG + pose sidecar JSON pairs — any 360°
+    /// camera source) into the export
     /// and enforces the still-source-360 HARD privacy invariant on every equirect: cube-face
     /// Vision person verification, pixelation where persons are found
     /// (`EquirectPrivacyBlur`, docs/design/still-source-360.md → Privacy).
@@ -261,15 +262,15 @@ struct ScanExportManager {
     ///
     /// Fail-CLOSED per still: a still whose verification fails is EXCLUDED from the export
     /// (JPG and sidecar both), never shipped raw.
-    private static func stageThetaStills(rawDataDir: URL, stagingDir: URL) {
+    private static func stageEquirectStills(rawDataDir: URL, stagingDir: URL) {
         let fileMgr = FileManager.default
-        let srcDir = rawDataDir.appendingPathComponent("theta_stills")
+        let srcDir = rawDataDir.appendingPathComponent("equirect_stills")
         guard fileMgr.fileExists(atPath: srcDir.path) else { return }
-        let dstDir = stagingDir.appendingPathComponent("theta_stills")
+        let dstDir = stagingDir.appendingPathComponent("equirect_stills")
         do {
             try fileMgr.copyItem(at: srcDir, to: dstDir)
         } catch {
-            print("[prepareExport] ✗ failed to stage theta_stills: \(error.localizedDescription)")
+            print("[prepareExport] ✗ failed to stage equirect_stills: \(error.localizedDescription)")
             return
         }
 
@@ -668,9 +669,9 @@ struct ScanExportManager {
                     }
                 }
 
-                // 360° stills (Theta): staged WITH the mandatory equirect privacy pass —
-                // stageThetaStills enforces the hard invariant internally (blur or exclude).
-                stageThetaStills(rawDataDir: rawDataDir, stagingDir: stagingDir)
+                // 360° stills (any equirect camera): staged WITH the mandatory privacy pass —
+                // stageEquirectStills enforces the hard invariant internally (blur or exclude).
+                stageEquirectStills(rawDataDir: rawDataDir, stagingDir: stagingDir)
 
                 return zipStaging(stagingDir)
             }
