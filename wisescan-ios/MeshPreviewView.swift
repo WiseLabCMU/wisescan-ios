@@ -677,7 +677,14 @@ struct MeshPreviewView: UIViewRepresentable {
     }
 
     /// Parses OBJ data and creates geometry with vertex colors (camera-sampled or height-based fallback).
-    nonisolated static func buildGeometry(from data: Data, vertexColors: Data?) -> (SCNGeometry, Int)? {
+    ///
+    /// `heightRange` overrides the height ramp's normalization: pass a range shared across several
+    /// meshes (with each one's `heightTransform`) so one color means one height across all of them,
+    /// instead of each mesh normalizing to its own extent. Both nil = this mesh's own local extent,
+    /// which is what a single-mesh preview wants.
+    nonisolated static func buildGeometry(from data: Data, vertexColors: Data?,
+                                          heightRange: (min: Float, max: Float)? = nil,
+                                          heightTransform: simd_float4x4? = nil) -> (SCNGeometry, Int)? {
         guard let parsed = MeshParser.parseOBJ(from: data) else { return nil }
 
         let vertices: [SCNVector3] = parsed.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
@@ -686,11 +693,17 @@ struct MeshPreviewView: UIViewRepresentable {
             indices.append(contentsOf: [face.0, face.1, face.2])
         }
 
-        var minY: Float = .greatestFiniteMagnitude
-        var maxY: Float = -.greatestFiniteMagnitude
-        for v in parsed.vertices {
-            minY = min(minY, v.y)
-            maxY = max(maxY, v.y)
+        let minY: Float, maxY: Float
+        if let heightRange {
+            (minY, maxY) = (heightRange.min, heightRange.max)
+        } else {
+            var lo: Float = .greatestFiniteMagnitude
+            var hi: Float = -.greatestFiniteMagnitude
+            for v in parsed.vertices {
+                lo = min(lo, v.y)
+                hi = max(hi, v.y)
+            }
+            (minY, maxY) = (lo, hi)
         }
 
         guard !vertices.isEmpty && !indices.isEmpty else { return nil }
@@ -708,7 +721,8 @@ struct MeshPreviewView: UIViewRepresentable {
                 hasCameraColors = true
             } else {
                 // Count mismatch — fall back to gradient
-                colors = heightGradientColors(vertices: vertices, minY: minY, maxY: maxY)
+                colors = heightGradientColors(vertices: vertices, minY: minY, maxY: maxY,
+                                              transform: heightTransform)
             }
         } else {
             colors = heightGradientColors(vertices: vertices, minY: minY, maxY: maxY)
@@ -818,15 +832,50 @@ struct MeshPreviewView: UIViewRepresentable {
     }
 
 
-    nonisolated static func heightGradientColors(vertices: [SCNVector3], minY: Float, maxY: Float) -> [SIMD4<Float>] {
+    /// Five evenly-spaced stops across the FULL spectrum: blue (lowest) → cyan → green → yellow →
+    /// red (highest). The previous ramp pinned red to 0 and clamped the other two channels
+    /// (`g = min(1.5t, 1)`, `b = max(1 - 1.5t, 0.2)`), so it swept only blue→cyan→green AND went
+    /// completely FLAT above t ≈ 0.667 — the top third of every range had zero height
+    /// discrimination (a whole upper flight of a stairwell rendered as one green).
+    ///
+    /// `transform` lifts each vertex into the space `minY`/`maxY` are expressed in. The combined
+    /// render passes each map's stitch placement so every map shares ONE world-Y ramp; without it
+    /// each map colors in its own local frame and a map placed a floor up repeats the ground
+    /// floor's colors. Geometry stays local either way — the node transform still does the placing.
+    /// nil = vertices are already in the range's space.
+    nonisolated static func heightGradientColors(vertices: [SCNVector3], minY: Float, maxY: Float,
+                                                 transform: simd_float4x4? = nil) -> [SIMD4<Float>] {
+        let stops: [SIMD3<Float>] = [
+            SIMD3(0, 0, 1),   // blue   — lowest
+            SIMD3(0, 1, 1),   // cyan
+            SIMD3(0, 1, 0),   // green
+            SIMD3(1, 1, 0),   // yellow
+            SIMD3(1, 0, 0)    // red    — highest
+        ]
         let yRange = maxY - minY
+        let lastSegment = stops.count - 2
         return vertices.map { v in
-            let t = yRange > 0 ? (v.y - minY) / yRange : 0.5
-            let r: Float = 0.0
-            let g: Float = min(t * 1.5, 1.0)
-            let b: Float = max(1.0 - t * 1.5, 0.2)
-            return SIMD4<Float>(r, g, b, 1.0)
+            let y = transform.map { ($0 * SIMD4<Float>(v.x, v.y, v.z, 1)).y } ?? v.y
+            let t = yRange > 0 ? min(max((y - minY) / yRange, 0), 1) : 0.5
+            let scaled = t * Float(stops.count - 1)
+            let i = min(Int(scaled), lastSegment)
+            let c = stops[i] + (stops[i + 1] - stops[i]) * (scaled - Float(i))
+            return SIMD4<Float>(c.x, c.y, c.z, 1.0)
         }
+    }
+
+    /// World-Y extent of a parsed mesh under an optional placement transform — the per-map input
+    /// to a SHARED height ramp across several placed meshes. nil for an empty mesh.
+    nonisolated static func worldHeightRange(parsed: MeshParser.OBJData,
+                                             transform: simd_float4x4?) -> (min: Float, max: Float)? {
+        guard !parsed.vertices.isEmpty else { return nil }
+        var lo = Float.greatestFiniteMagnitude
+        var hi = -Float.greatestFiniteMagnitude
+        for v in parsed.vertices {
+            let y = transform.map { ($0 * SIMD4<Float>(v.x, v.y, v.z, 1)).y } ?? v.y
+            lo = min(lo, y); hi = max(hi, y)
+        }
+        return (lo, hi)
     }
 
     /// Generates a 2D snapshot of the mesh using an offscreen renderer. Pass the location's

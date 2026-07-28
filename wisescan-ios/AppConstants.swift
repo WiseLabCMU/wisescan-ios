@@ -287,7 +287,11 @@ enum KeyframeMarkerMode: String, CaseIterable {
 /// way to see how far a floor quad overruns the mesh faces it stands in for) would need a
 /// mesh+fills mode, which `SemanticViewMode` does not currently have.
 ///
-/// Previewer-local: `CombinedMeshView` does not use this.
+/// Used by BOTH the single-scan previewer and `CombinedMeshView` — each holds its own source state
+/// (they're independent views), and in both it stays a separate axis rather than a
+/// `SemanticViewMode` case, for the reasons above. In the combined render the proxy's clean
+/// RoomPlan wall quads are what make a join's coplanarity judgable, where lumpy mesh can't be
+/// eyeballed; there, maps lacking a proxy fall back to their full mesh (see `ProxyAvailability`).
 enum MeshSourceMode: String, CaseIterable {
     /// The full captured mesh (`mesh.obj`) — the untouched save/export artifact.
     case full

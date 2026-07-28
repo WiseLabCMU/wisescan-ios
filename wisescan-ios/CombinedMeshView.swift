@@ -15,6 +15,23 @@ import simd
 // persist to the link's stored `manualNudge`.
 
 /// One mesh to compose into the shared scene.
+/// World-Y span of the combined render's SHARED height ramp — one range across every placed map,
+/// so a color means a height everywhere in the render. Drives the legend key; a gradient with no
+/// key is guesswork. nil when nothing on screen is height-colored (fully photo-colorized set).
+struct HeightKeyRange: Equatable {
+    let min: Float
+    let max: Float
+}
+
+/// How many of the combined render's maps have a usable ghost proxy. Availability is per-scan (no
+/// `face_classes.bin`, no RoomPlan walls, or postprocess not run yet), so the render can be mixed:
+/// maps without one keep their full mesh, and `missing` drives a badge so that's never silent.
+struct ProxyAvailability: Equatable {
+    let available: Int
+    let missing: Int
+    var any: Bool { available > 0 }
+}
+
 struct CombinedMeshItem: Identifiable {
     let id: UUID            // scanId
     let name: String
@@ -49,6 +66,12 @@ struct CombinedMeshScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @State private var colorByMap = false
+    /// Shared height-ramp span reported by the load; nil = nothing height-colored, so no key.
+    @State private var heightKeyRange: HeightKeyRange?
+    /// Which geometry the render draws — full mesh or ghost proxy. The proxy replaces lumpy mesh
+    /// with RoomPlan wall quads, which is far easier to judge coplanarity against at a join.
+    @State private var meshSourceMode: MeshSourceMode = .full
+    @State private var proxyAvailability: ProxyAvailability?
     @State private var semanticViewMode: SemanticViewMode = .meshOnly
     @State private var detectedClasses: [SemanticClass] = []
     @State private var isLoading = true
@@ -129,14 +152,26 @@ struct CombinedMeshScreen: View {
                         items: presentItems, stitchPoints: placement.stitchPoints,
                         colorByMap: colorByMap, semanticViewMode: semanticViewMode,
                         detectedClasses: $detectedClasses,
+                        heightKeyRange: $heightKeyRange,
+                        proxyAvailability: $proxyAvailability,
+                        meshSourceMode: meshSourceMode,
                         onLoaded: { isLoading = false }
                     )
                     .ignoresSafeArea(edges: .bottom)
-                    .overlay(alignment: .bottomLeading) { semanticLegend }
+                    .overlay(alignment: .bottomLeading) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            heightKey
+                            semanticLegend
+                        }
+                    }
                 }
 
                 if isLoading && !presentItems.isEmpty { loadingOverlay(count: presentItems.count) }
                 if missingCount > 0 { missingBadge(missingCount) }
+                // Mixed render: never let "some maps aren't proxies" be silent.
+                if meshSourceMode == .proxy, let p = proxyAvailability, p.missing > 0 {
+                    proxyMixedBadge(p.missing)
+                }
 
                 // Room legend + per-map correction status (Step 2c). Stays visible while adjusting
                 // (top-right; the adjuster is bottom) — the edited map's row is highlighted, and any
@@ -190,6 +225,32 @@ struct CombinedMeshScreen: View {
 
     // MARK: Overlays (extracted for the type-check budget)
 
+    /// Key for the shared height ramp. Only meaningful when height colors are what's on screen:
+    /// "color by map" replaces them with flat tints, and `.semanticOnly` hides the mesh entirely.
+    @ViewBuilder private var heightKey: some View {
+        if let range = heightKeyRange, !colorByMap, semanticViewMode.showMesh {
+            HStack(spacing: 6) {
+                // Top of the bar = top of the range, matching the ramp (red highest).
+                LinearGradient(colors: [.red, .yellow, .green, .cyan, .blue],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(width: 8, height: 54)
+                    .clipShape(RoundedRectangle(cornerRadius: 2))
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(String(format: "%.1f m", range.max))
+                    Spacer()
+                    Text(String(format: "%.1f m", range.min))
+                }
+                .font(.caption2)
+                .foregroundColor(.white)
+                .frame(height: 54)
+            }
+            .padding(10)
+            .background(Color.black.opacity(0.7))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .padding(.leading, 16)
+        }
+    }
+
     @ViewBuilder private var semanticLegend: some View {
         if semanticViewMode.showOutlines && !detectedClasses.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
@@ -217,6 +278,20 @@ struct CombinedMeshScreen: View {
         .padding(20)
         .background(Color.black.opacity(0.6))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    /// Proxy view with some maps falling back to their full mesh (no `face_classes.bin`, no RoomPlan
+    /// walls, or postprocess not run) — say so, since a mixed render otherwise reads as one style.
+    private func proxyMixedBadge(_ count: Int) -> some View {
+        VStack {
+            Spacer()
+            Text("\(count) map\(count == 1 ? "" : "s") have no proxy — showing full mesh")
+                .font(.caption2).foregroundColor(.yellow)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color.black.opacity(0.6))
+                .clipShape(Capsule())
+                .padding(.bottom, 48)
+        }
     }
 
     private func missingBadge(_ count: Int) -> some View {
@@ -252,6 +327,14 @@ struct CombinedMeshScreen: View {
                     Image(systemName: colorByMap ? "paintpalette.fill" : "paintpalette")
                 }
                 .disabled(present.isEmpty)
+
+                if proxyAvailability?.any == true {
+                    Button { meshSourceMode = meshSourceMode.next } label: {
+                        Image(systemName: meshSourceMode.iconName)
+                            .foregroundColor(meshSourceMode == .full ? .gray : .yellow)
+                    }
+                    .accessibilityLabel(meshSourceMode == .full ? "Show ghost proxy meshes" : "Show full meshes")
+                }
             }
         }
     }
@@ -572,6 +655,11 @@ struct CombinedMeshView: UIViewRepresentable {
     let colorByMap: Bool
     let semanticViewMode: SemanticViewMode
     @Binding var detectedClasses: [SemanticClass]
+    /// Set by the load once it knows the shared ramp range (and whether anything used it).
+    @Binding var heightKeyRange: HeightKeyRange?
+    /// Set by the load once it knows how many maps have a usable ghost proxy.
+    @Binding var proxyAvailability: ProxyAvailability?
+    let meshSourceMode: MeshSourceMode
     var onLoaded: () -> Void = {}
 
     func makeUIView(context: Context) -> SCNView {
@@ -608,7 +696,8 @@ struct CombinedMeshView: UIViewRepresentable {
         context.coordinator.load(
             into: scnView, items: items, stitchPoints: stitchPoints, colorByMap: colorByMap,
             semanticViewMode: semanticViewMode, detectedClassesBinding: $detectedClasses,
-            onLoaded: onLoaded
+            heightKeyBinding: $heightKeyRange, proxyBinding: $proxyAvailability,
+            meshSourceMode: meshSourceMode, onLoaded: onLoaded
         )
         return scnView
     }
@@ -617,7 +706,7 @@ struct CombinedMeshView: UIViewRepresentable {
         // Re-tint in place when the toggle changes (no reload needed).
         // Cache the viewport size here (main thread) for the render-thread label sizing.
         context.coordinator.viewportSize = uiView.bounds.size
-        context.coordinator.applyTint(colorByMap: colorByMap)
+        context.coordinator.applyTint(colorByMap: colorByMap, source: meshSourceMode)
         context.coordinator.applyViewMode(semanticViewMode)
         // Live manual adjuster: move pieces + stitch markers to the recomputed transforms without
         // reloading meshes. No-ops until the async load has populated the nodes.
@@ -658,23 +747,85 @@ struct CombinedMeshView: UIViewRepresentable {
         // isn't multiplied into the vertex/normal colors, but keeps `.normal` so it's still lit.
         private var coloredGeometries: [UUID: SCNGeometry] = [:]
         private var flatGeometries: [UUID: SCNGeometry] = [:]
+        // Same pair again for the ghost proxy — the source toggle is a geometry swap, not a reload,
+        // so the camera framing survives. A map with no proxy artifact is simply ABSENT from these,
+        // and falls back to its full mesh.
+        private var proxyColoredGeometries: [UUID: SCNGeometry] = [:]
+        private var proxyFlatGeometries: [UUID: SCNGeometry] = [:]
 
         // swiftlint:disable:next function_parameter_count
         func load(into scnView: SCNView, items: [CombinedMeshItem], stitchPoints: [StitchPoint],
                   colorByMap: Bool, semanticViewMode: SemanticViewMode,
-                  detectedClassesBinding: Binding<[SemanticClass]>, onLoaded: @escaping () -> Void) {
+                  detectedClassesBinding: Binding<[SemanticClass]>,
+                  heightKeyBinding: Binding<HeightKeyRange?>,
+                  proxyBinding: Binding<ProxyAvailability?>,
+                  meshSourceMode: MeshSourceMode, onLoaded: @escaping () -> Void) {
             guard let scene = scnView.scene else { onLoaded(); return }
             self.detectedClassesBinding = detectedClassesBinding
             let contentNode = SCNNode()
             scene.rootNode.addChildNode(contentNode)
 
             DispatchQueue.global(qos: .userInitiated).async {
-                var built: [(item: CombinedMeshItem, geometry: SCNGeometry, flat: SCNGeometry)] = []
+                // PASS 1 — the SHARED height-ramp range: the union of every map's world-Y extent.
+                // Two reasons it can't be left to buildGeometry's per-mesh default. Each map's
+                // geometry is LOCAL (node.simdTransform places it), so a map stitched a floor up
+                // would otherwise repeat the ground floor's colors; and each map normalizing to its
+                // own extent means the same physical height is a different color per map — actively
+                // misleading for judging whether two landings sit at the same level.
+                //
+                // Deliberately re-parses in pass 2 rather than holding every parsed mesh in memory
+                // at once: N large meshes resident is the worse trade on device, and this runs
+                // off-main behind the existing "Loading N meshes…" overlay.
+                var unionMin = Float.greatestFiniteMagnitude
+                var unionMax = -Float.greatestFiniteMagnitude
+                for item in items {
+                    guard let data = try? Data(contentsOf: item.meshURL),
+                          let parsed = MeshParser.parseOBJ(from: data),
+                          let r = MeshPreviewView.worldHeightRange(parsed: parsed, transform: item.transform)
+                    else { continue }
+                    unionMin = min(unionMin, r.min)
+                    unionMax = max(unionMax, r.max)
+                }
+                let sharedRange: (min: Float, max: Float)? =
+                    unionMin <= unionMax ? (min: unionMin, max: unionMax) : nil
+
+                // PASS 2 — build. `heightTransform` lifts each map's local vertices into the shared
+                // world-Y range for coloring only; the geometry itself stays local.
+                var built: [(item: CombinedMeshItem, geometry: SCNGeometry, flat: SCNGeometry,
+                             proxy: SCNGeometry?, proxyFlat: SCNGeometry?)] = []
+                var usedHeightRamp = false
+                var proxyAvailable = 0
+                var proxyMissing = 0
                 for item in items {
                     guard let data = try? Data(contentsOf: item.meshURL) else { continue }
                     let colors = item.colorsURL.flatMap { try? Data(contentsOf: $0) }
-                    guard let (geometry, _) = MeshPreviewView.buildGeometry(from: data, vertexColors: colors) else { continue }
-                    built.append((item, geometry, Self.makeFlatTinted(from: geometry, tint: item.tint)))
+                    if colors == nil { usedHeightRamp = true }
+                    guard let (geometry, _) = MeshPreviewView.buildGeometry(
+                        from: data, vertexColors: colors,
+                        heightRange: sharedRange, heightTransform: item.transform
+                    ) else { continue }
+
+                    // Ghost proxy for this map, built alongside and cached so the source toggle is a
+                    // geometry swap (like applyTint) rather than a reload — a reload would re-run
+                    // frameCamera and lose the framing you set on a join, which is the whole point
+                    // of looking at the proxy here. Cheap-ish: makeFlatTinted shares buffers, and
+                    // the proxy is lighter than the full mesh by construction.
+                    //
+                    // Same sharedRange (derived from the FULL meshes) so toggling source never
+                    // changes the color↔height mapping. No vertex colors — colors.bin is aligned to
+                    // mesh.obj, which the proxy compacts.
+                    var proxyGeom: SCNGeometry?
+                    if let proxyURL = MeshPreviewView.proxyMeshURL(scanDirectoryURL: item.scanDirectoryURL),
+                       let proxyData = try? Data(contentsOf: proxyURL) {
+                        proxyGeom = MeshPreviewView.buildGeometry(
+                            from: proxyData, vertexColors: nil,
+                            heightRange: sharedRange, heightTransform: item.transform
+                        )?.0
+                    }
+                    if proxyGeom != nil { proxyAvailable += 1 } else { proxyMissing += 1 }
+
+                    built.append((item, geometry, Self.makeFlatTinted(from: geometry, tint: item.tint),
+                                  proxyGeom, proxyGeom.map { Self.makeFlatTinted(from: $0, tint: item.tint) }))
                 }
 
                 // Build RoomPlan outlines + fills for each scan (tagged with the scan id so they can
@@ -693,6 +844,13 @@ struct CombinedMeshView: UIViewRepresentable {
                 }
 
                 DispatchQueue.main.async {
+                    // Publish the ramp range for the legend key — only when something actually
+                    // rendered with it (a fully photo-colorized set shows no height colors, so a
+                    // key would be describing a ramp that isn't on screen).
+                    heightKeyBinding.wrappedValue = usedHeightRamp
+                        ? sharedRange.map { HeightKeyRange(min: $0.min, max: $0.max) } : nil
+                    proxyBinding.wrappedValue = ProxyAvailability(available: proxyAvailable,
+                                                                 missing: proxyMissing)
                     for entry in built {
                         let node = SCNNode(geometry: entry.geometry)
                         node.simdTransform = entry.item.transform
@@ -700,6 +858,8 @@ struct CombinedMeshView: UIViewRepresentable {
                         self.meshNodes[entry.item.id] = node
                         self.coloredGeometries[entry.item.id] = entry.geometry
                         self.flatGeometries[entry.item.id] = entry.flat
+                        self.proxyColoredGeometries[entry.item.id] = entry.proxy
+                        self.proxyFlatGeometries[entry.item.id] = entry.proxyFlat
                         // Local top-center of this mesh — where its floating name label anchors.
                         let (mn, mx) = node.boundingBox
                         self.labelAnchors[entry.item.id] = SIMD4<Float>((mn.x + mx.x) / 2, mx.y, (mn.z + mx.z) / 2, 1)
@@ -736,7 +896,7 @@ struct CombinedMeshView: UIViewRepresentable {
                     self.allDetectedClasses = SemanticClass.allCases.filter { detectedSet.contains($0) && $0 != .none }
                     detectedClassesBinding.wrappedValue = self.allDetectedClasses
 
-                    self.applyTint(colorByMap: colorByMap)
+                    self.applyTint(colorByMap: colorByMap, source: meshSourceMode)
                     self.frameCamera(scene: scene, contentNode: contentNode, scnView: scnView)
 
                     // Stitch-pin markers last, so their tiny spheres don't influence the camera framing.
@@ -779,9 +939,14 @@ struct CombinedMeshView: UIViewRepresentable {
         /// geometries rather than tinting the colored one — a `material.multiply` tint would multiply
         /// the map hue into the per-vertex colors, which over normals coloring reads as "shifted
         /// normals" instead of one discrete color.
-        func applyTint(colorByMap: Bool) {
+        /// Picks each map's geometry across BOTH axes: tint (per-vertex vs flat per-map) and source
+        /// (full mesh vs ghost proxy). A map with no proxy falls back to its full mesh, so a mixed
+        /// render still shows every map (the missing count drives a badge).
+        func applyTint(colorByMap: Bool, source: MeshSourceMode) {
             for (id, node) in meshNodes {
-                node.geometry = colorByMap ? flatGeometries[id] : coloredGeometries[id]
+                let proxy = colorByMap ? proxyFlatGeometries[id] : proxyColoredGeometries[id]
+                let full = colorByMap ? flatGeometries[id] : coloredGeometries[id]
+                node.geometry = source == .proxy ? (proxy ?? full) : full
             }
         }
 
