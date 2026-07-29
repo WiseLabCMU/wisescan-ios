@@ -524,14 +524,28 @@ not a CIImage in the privacy-blur decode path; Metal compute is consistent with 
 - `EquirectFaceExport`: same pattern for 5 export faces via `EquirectGPU.renderFace`.
   PerfDiag markers: `cf_reproject_gpu` vs `_cpu`.
 
-**Pending device validation:** run a profiled export to measure actual GPU timings and verify
-visual correctness (face imagery must match the CPU output — same longitude/latitude
-conventions, same bilinear quality).
+**Device-validated (2026-07-29, `360run5.log`, 7 equirect stills, same device):**
+
+| Metric | CPU (run4) | GPU (run5) | Speedup |
+| :--- | :--- | :--- | :--- |
+| `eq_face_extract` per face | 1,520 ms | **8 ms** | **190×** |
+| Privacy pass (7 stills) | 71.0 s | **8.0 s** | **8.9×** |
+| `cf_reproject` per face | 5,190 ms | **57 ms** | **91×** |
+| Cube face export (7 stills) | 188.6 s | **8.9 s** | **21×** |
+| **Total 360° export** | **259.6 s** | **16.9 s** | **15.4×** |
+
+The reprojection bottleneck is eliminated. The remaining per-still cost is now dominated by
+`cf_decode` (~930 ms, ImageIO bitmap decode for export faces), `eq_decode` (~250 ms),
+`eq_vision_segment` (~65 ms × 6 = 390 ms), `eq_mask_project` (~170 ms), and `eq_pixelate`
+(~185 ms). All of these are I/O-bound or Neural Engine-bound — further acceleration would
+require reducing the decode resolution or batching Vision requests.
+
 ### Step 3: GPU-accelerate privacy pixelation (deferred — low impact)
 
-Profiling shows `eq_pixelate` is only ~200 ms/still (2% of per-still cost). The CoreImage
-lazy pipeline already handles the full-res composite efficiently. This step is deferred
-unless GPU acceleration of steps 1–2 reveals pixelation as a new bottleneck.
+Profiling shows `eq_pixelate` is only ~185 ms/still (now ~17% of the GPU-era per-still
+privacy cost). The CoreImage lazy pipeline already handles the full-res composite
+efficiently. This step is deferred — the new bottleneck is Vision segmentation + bitmap
+decode, not pixelation.
 
 ### Transfer optimization: USB-PTP post-scan batch download
 
