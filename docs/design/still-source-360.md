@@ -174,40 +174,93 @@ mesh, sweep frames, and voxel grid.
 **Pose composition:**
 `T_world→360cam = T_world→phone (ARKit, at trigger timestamp) × T_phone→360cam (rig extrinsic)`
 
-**Rig extrinsic calibration (per rig profile, stored in settings):**
+### Calibration method: markerless mesh-edge reprojection (decision, 2026-07-28)
 
-1. **Mechanical prior** — measured rod length + mount geometry gives `T_phone→360cam`
-   to a few cm / few degrees.
-2. **Refinement capture** — a one-time guided calibration scan in a feature-rich room:
-   capture N 360° stills at stillness points alongside the LiDAR mesh + phone keyframes,
-   then solve the rig transform that best registers the equirect stills to the mesh
-   (feature correspondences between equirect projections and phone keyframes/mesh —
-   effectively a hand–eye calibration with the ARKit trajectory as ground truth).
-3. **Validation** — reproject mesh edges into the equirect still; report residual error
-   in-app; refuse to enable the source above a threshold.
+No AprilTags, no markers in the scene. The solver aligns **LiDAR mesh edges** (already in
+the ARKit world frame) with **detected edges in the 360° equirect stills** — a hand-eye
+calibration where ARKit's trajectory is ground truth and the rich structural data from
+LiDAR provides the correspondences. The equirect's full-sphere view guarantees many edge
+correspondences (walls, door frames, furniture) regardless of phone orientation.
 
-**Per-still corrections:**
+**Why not markers?** AprilTags in the scan area would need privacy-filter handling and
+pollute the very textures we're trying to capture cleanly. Tags on the rig itself could
+work but add hardware complexity and limit which rigs are supported. Natural-feature
+calibration using the LiDAR mesh the app already builds requires no extra hardware and
+works in any feature-rich indoor environment.
+
+### Solver: 4 DOF, on-device (Accelerate/simd)
+
+With the Theta's zenith correction handling roll/pitch (validated for Theta X), the
+unknowns reduce to **4 parameters**:
+
+1. **`dy`** — vertical offset (rod height along gravity)
+2. **`d_lateral`** — horizontal offset (phone clip distance from rod axis; typically ~2 cm)
+3. **`yaw`** — rotation around the vertical axis
+4. **`pitch_residual`** — small pitch correction for imperfect zenith compensation
+
+**Initial guess** from the mechanical prior: `dy` = measured rod length,
+`d_lateral` = measured clip offset, `yaw` = 0 (lenses aligned with phone),
+`pitch_residual` = 0. The solver (Nelder-Mead simplex or Levenberg-Marquardt on a
+4-parameter cost function) minimizes the distance between mesh edges projected into the
+equirect at the candidate rig transform and Canny edges detected in the equirect image.
+With 3 calibration stills × hundreds of edge correspondences each, the system is highly
+over-determined for 4 unknowns — convergence in milliseconds on-device.
+
+**No server dependency**, works offline, instant feedback.
+
+### Calibration UX: pre-scan, integrated into Dashboard card
+
+The calibration step runs **before pressing Record**, reusing the existing reticle +
+stillness gate + 360° trigger infrastructure:
+
+1. **Trigger** — when a 360° camera is connected and no calibration exists (or the user taps
+   **Re-calibrate** on the Dashboard card), the card transitions to **Calibration mode**.
+2. **Capture** — the user walks to **3 distinct positions** (~1–2 m apart) in the room
+   they're about to scan, pausing at each. The reticle confirms stillness, the 360° still
+   fires, and the card shows progress: *"Calibration still 1/3 captured"*.
+3. **Environment quality gate** — at each position, the app counts LiDAR mesh vertices
+   within a 3 m radius. If below ~500 vertices, a warning surfaces before the solver runs:
+   *"Move to an area with more visible surfaces for better calibration."*
+4. **Solve** — after 3 stills, the solver runs (~1–2 s). The card shows the **reprojection
+   residual** plus a **visual overlay** (mesh edges projected into one equirect still via
+   the solved transform — green lines should align with actual room edges in the image).
+5. **Accept / redo** — residual thresholds: green (≤ 2 cm), yellow (2–5 cm), red (≥ 5 cm,
+   suggest re-adjust rig and re-calibrate). The user accepts the calibration or taps
+   Re-calibrate to redo.
+
+**Trigger skew** between the phone and 360° camera is negligible for calibration: the
+stillness gate ensures the rig is confirmed still when both captures happen, so the
+phone pose barely changes during the ~1–3 s skew window. For production stills, the
+existing `t_trigger + Δt_exposure` pose sampling handles the timing offset.
+
+### Calibration persistence & reuse
+
+The solved rig transform is **persisted in the rig profile** (stored in settings), tagged
+with a timestamp and residual. At the start of each new scan, the Dashboard card shows the
+last calibration's age and residual: *"Calibrated 2h ago (1.4 cm residual)"* with a
+**Re-calibrate** button.
+
+- **No forced re-calibration** — the user is trusted to know when the rig has changed
+  (phone re-mounted, rod adjusted, etc.) and taps Re-calibrate accordingly.
+- **Telescoping rigs**: the reuse policy suggests validation at session start (the card
+  shows a yellow prompt if the last calibration is from a different session and the rig
+  type is marked telescoping).
+- **Fixed rigs**: calibration persists across sessions; the card stays green.
+- The calibration residual and the rig profile used for each scan both travel in
+  `scan4d_metadata` so drift is visible downstream.
+
+### Per-still corrections
 
 - **Timing** — trigger→exposure latency is nonzero and camera-specific; measure it in the
   calibration step and sample the ARKit pose at `t_trigger + Δt_exposure` (the stillness
   gate makes this forgiving — the pose barely moves during a valid capture).
 - **Orientation source** — Theta cameras apply internal zenith (level) correction using
-  their own IMU. **Disable in-camera zenith correction** and treat orientation as fully
-  determined by the rig transform, OR keep it and calibrate only position + yaw. Pick one
-  during the spike; mixing both silently double-corrects roll/pitch.
+  their own IMU. **Keep zenith correction enabled** and calibrate position + yaw +
+  pitch_residual (the 4 DOF model above). The pitch_residual absorbs any systematic bias
+  in the camera's zenith correction without risking double-correction of roll/pitch.
 - **Rod sway** — reject stills whose trigger window shows angular velocity above the
   stillness threshold; optionally cross-check the camera's own gyro metadata.
 
-**Calibration reuse policy (rig-type dependent):**
-
-- **Telescoping rigs**: assume the extrinsic does NOT survive collapse/extend cycles —
-  default to a quick re-calibration (or at least a validation capture) at the start of
-  each session.
-- **Fixed rigs**: persist the calibration profile and reuse across sessions.
-- The rig profile in settings records the rig type and a **user-reported repeatability
-  rating**; that rating drives whether the app demands re-calibration, suggests
-  validation, or silently reuses the stored transform. Calibration residuals from each
-  validation are logged into scan metadata so drift is visible downstream.
 
 ## Rod stillness metric
 
