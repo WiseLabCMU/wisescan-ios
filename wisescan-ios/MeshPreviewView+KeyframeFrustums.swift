@@ -37,6 +37,7 @@ extension MeshPreviewView {
         _ nodes: KeyframeMarkerNodes, to container: SCNNode, coordinator: Coordinator, center: SCNVector3
     ) {
         hasKeyframeMarkers = nodes.hasAny
+        hasEquirects = (nodes.equirectFaces != nil)
         let offset = SCNVector3(-center.x, -center.y, -center.z)
         if let stills = nodes.stills {
             stills.position = offset
