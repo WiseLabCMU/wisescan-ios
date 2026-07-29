@@ -114,7 +114,7 @@ extension CaptureView {
         saveMessage = nil
         scanCoach.reset()
         // Reset the per-scan 360° still counter so equirect_stills/ numbering starts at 1.
-        ThetaCameraManager.shared.beginScanStillSession()
+        ThetaCameraManager.shared.beginScanStillSession(rawDataDir: frameCaptureSession.captureDir)
 
         // Start frame capture for raw data export
         if let session = currentARSession {

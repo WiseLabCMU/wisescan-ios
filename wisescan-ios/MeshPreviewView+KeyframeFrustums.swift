@@ -287,7 +287,7 @@ extension MeshPreviewView {
         for sidecarURL in sidecars {
             guard let data = try? Data(contentsOf: sidecarURL),
                   let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                  let flat = dict["phone_transform"] as? [Double], flat.count == 16
+                  let flat = (dict["phone_transform"] ?? dict["phoneTransform"]) as? [Double], flat.count == 16
             else { continue }
 
             let phoneToWorld = simd_float4x4(columns: (

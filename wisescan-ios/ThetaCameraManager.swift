@@ -298,7 +298,20 @@ final class ThetaCameraManager {
     // MARK: - Live-scan capture
 
     /// Resets the per-scan still counter. Call at record start.
-    func beginScanStillSession() { scanStillCount = 0 }
+    func beginScanStillSession(rawDataDir: URL? = nil) {
+        scanStillCount = 0
+        if let dir = rawDataDir?.appendingPathComponent("equirect_stills"),
+           let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
+            let maxSeq = files.compactMap { file -> Int? in
+                if file.hasPrefix("still_"), file.hasSuffix(".JPG") || file.hasSuffix(".json") {
+                    let seqStr = file.dropFirst(6).prefix(4)
+                    return Int(seqStr)
+                }
+                return nil
+            }.max() ?? 0
+            scanStillCount = maxSeq
+        }
+    }
 
     /// Triggers a 360° still during a live scan, tags it with the **phone's** ARKit world
     /// pose + timestamp (captured by the caller at tap time), downloads the equirect, and

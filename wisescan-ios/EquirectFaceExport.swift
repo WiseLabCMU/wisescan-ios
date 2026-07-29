@@ -77,7 +77,7 @@ enum EquirectFaceExport {
                           rigProfile: RigProfile? = nil) -> Int {
         guard let sidecarData = try? Data(contentsOf: sidecarURL),
               let sidecar = (try? JSONSerialization.jsonObject(with: sidecarData)) as? [String: Any],
-              let flat = sidecar["phone_transform"] as? [Double], flat.count == 16 else { return 0 }
+              let flat = (sidecar["phone_transform"] ?? sidecar["phoneTransform"]) as? [Double], flat.count == 16 else { return 0 }
         let stillSource = sidecar["still_source"] as? String
         var poseSource: String
         switch levelingSupport(forModel: stillSource) {

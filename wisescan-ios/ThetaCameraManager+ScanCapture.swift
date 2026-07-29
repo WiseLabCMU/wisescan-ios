@@ -59,6 +59,7 @@ extension ThetaCameraManager {
             rigCalibrationResidualCm: rigProfile?.isSolved == true ? rigProfile?.residualCm : nil
         )
         let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(metadata).write(to: dir.appendingPathComponent("\(base).json"))
     }
