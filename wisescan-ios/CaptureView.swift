@@ -731,7 +731,7 @@ struct CaptureView: View {
             // Rig calibration overlay — pre-record only, when calibration is active.
             // Shows capture progress + solver spinner. Review/accept and failure/retry
             // display on the Dashboard card (auto-navigated by ContentView).
-            if !isRecording && isARSessionReady && rigCalibrationManager.isCalibrating {
+            if !isRecording && isARSessionReady && rigCalibrationManager.showsCalibrationOverlay {
                 calibrationOverlay
             }
 

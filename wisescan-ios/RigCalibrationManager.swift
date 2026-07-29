@@ -65,11 +65,10 @@ final class RigCalibrationManager {
         }
     }
 
-    /// Whether the calibration overlay should be visible in CaptureView.
-    /// Includes `.failed` so the user can see the error and retry.
+    /// Includes `.failed` and `.review` so the user can see the error and retry or accept the result.
     var showsCalibrationOverlay: Bool {
         switch state {
-        case .capturing, .solving, .failed: return true
+        case .capturing, .solving, .review, .failed: return true
         default: return false
         }
     }
