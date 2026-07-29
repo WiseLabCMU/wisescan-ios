@@ -93,7 +93,8 @@ enum EquirectFaceExport {
                 + "camera yet (the archived equirect still ships; gyro-metadata compensation is a future feature)")
             return 0
         }
-        guard let bitmap = decodeBitmap(from: equirectURL) else { return 0 }
+        let bitmap: Bitmap? = PerfDiag.timed("cf_decode") { decodeBitmap(from: equirectURL) }
+        guard let bitmap else { return 0 }
 
         let phoneToWorld = matrixFromColumnMajor(flat.map(Float.init))
 
@@ -131,11 +132,16 @@ enum EquirectFaceExport {
         var written = 0
         for face in faces {
             autoreleasepool {
-                guard let jpeg = renderFace(face.rotation, from: bitmap, side: faceSize) else { return }
+                let jpeg: Data? = PerfDiag.timed("cf_reproject") { renderFace(face.rotation, from: bitmap, side: faceSize) }
+                guard let jpeg else {
+                    return
+                }
                 let imageName = "\(baseName)_\(face.name).jpg"
                 do {
                     try jpeg.write(to: imagesDir.appendingPathComponent(imageName), options: .atomic)
-                } catch { return }
+                } catch {
+                    return
+                }
                 writeCameraJSON(FaceCameraRecord(
                     name: "\(baseName)_\(face.name)",
                     imagePath: "images/\(imageName)",

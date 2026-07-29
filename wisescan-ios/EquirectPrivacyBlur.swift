@@ -69,7 +69,8 @@ enum EquirectPrivacyBlur {
     /// Verify/blur one equirectangular JPEG. Pure function of the data; call off-main
     /// (export queue) inside the caller's per-still autoreleasepool.
     static func process(equirectJPEG data: Data) -> Outcome {
-        guard let working = decodeWorkingBitmap(from: data) else {
+        let working: Bitmap? = PerfDiag.timed("eq_decode") { decodeWorkingBitmap(from: data) }
+        guard let working else {
             return .failed("equirect decode failed")
         }
         var faceMasks: [FaceMask?] = []
@@ -77,11 +78,13 @@ enum EquirectPrivacyBlur {
         for faceIndex in 0..<faceBases.count {
             var outcome: Outcome?
             autoreleasepool {
-                guard let face = extractFace(faceIndex, from: working) else {
+                let face: CGImage? = PerfDiag.timed("eq_face_extract") { extractFace(faceIndex, from: working) }
+                guard let face else {
                     outcome = .failed("face \(faceIndex) extraction failed")
                     return
                 }
-                switch personMask(for: face) {
+                let segResult = PerfDiag.timed("eq_vision_segment") { personMask(for: face) }
+                switch segResult {
                 case .success(let mask):
                     faceMasks.append(mask)
                     if let mask { anyPerson = anyPerson || mask.hasPerson }
@@ -93,8 +96,9 @@ enum EquirectPrivacyBlur {
         }
         guard anyPerson else { return .clean }
 
-        let eqMask = buildEquirectMask(from: faceMasks)
-        guard let composited = composite(original: data, mask: eqMask) else {
+        let eqMask = PerfDiag.timed("eq_mask_project") { buildEquirectMask(from: faceMasks) }
+        let composited: Data? = PerfDiag.timed("eq_pixelate") { composite(original: data, mask: eqMask) }
+        guard let composited else {
             return .failed("composite/encode failed")
         }
         return .blurred(composited)

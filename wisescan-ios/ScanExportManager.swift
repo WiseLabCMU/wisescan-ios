@@ -304,6 +304,7 @@ struct ScanExportManager {
     /// Runs the fail-closed per-still verification/blur over the staged equirects (filter-ON path).
     private static func runEquirectPrivacyPass(on stills: [URL], phase: ((ExportPhase) -> Void)? = nil) {
         print("[prepareExport] 360° privacy pass on \(stills.count) equirect still(s)...")
+        let passStart = CFAbsoluteTimeGetCurrent()
 
         var cleanCount = 0, blurredCount = 0, excludedCount = 0
         for (index, url) in stills.enumerated() {
@@ -311,31 +312,40 @@ struct ScanExportManager {
             // Per-still pool: each pass decodes a working copy + renders a full-res composite
             // through autoreleased CF/CI transients (same OOM lesson as the frame blur loops).
             autoreleasepool {
+                let stillStart = CFAbsoluteTimeGetCurrent()
                 let outcome: EquirectPrivacyBlur.Outcome
                 if let data = try? Data(contentsOf: url) {
                     outcome = EquirectPrivacyBlur.process(equirectJPEG: data)
                 } else {
                     outcome = .failed("could not read staged still")
                 }
+                let label: String
                 switch outcome {
                 case .clean:
                     cleanCount += 1
+                    label = "clean"
                 case .blurred(let blurredData):
                     do {
                         try blurredData.write(to: url, options: .atomic)
                         blurredCount += 1
+                        label = "blurred"
                     } catch {
                         excludeStill(url)   // couldn't persist the blurred version → never ship raw
                         excludedCount += 1
+                        label = "excluded"
                     }
                 case .failed(let reason):
                     print("[prepareExport] ✗ 360° still \(url.lastPathComponent) failed verification (\(reason)) — excluding from export")
                     excludeStill(url)
                     excludedCount += 1
+                    label = "excluded"
                 }
+                let stillMs = Int((CFAbsoluteTimeGetCurrent() - stillStart) * 1000)
+                PerfDiag.log("[ExportDiag] still \(index + 1)/\(stills.count): \(label) — \(stillMs) ms")
             }
         }
-        print("[prepareExport] ✓ 360° privacy pass: \(cleanCount) clean, \(blurredCount) blurred, \(excludedCount) excluded")
+        let passMs = Int((CFAbsoluteTimeGetCurrent() - passStart) * 1000)
+        print("[prepareExport] ✓ 360° privacy pass: \(cleanCount) clean, \(blurredCount) blurred, \(excludedCount) excluded — \(passMs) ms total")
     }
 
     /// Reprojects every surviving staged equirect into 5 pinhole cube faces (bottom face —
@@ -357,6 +367,7 @@ struct ScanExportManager {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !survivors.isEmpty else { return }
         let rigProfile = RigProfile.load()
+        let faceStart = CFAbsoluteTimeGetCurrent()
         var facesWritten = 0
         for (index, url) in survivors.enumerated() {
             phase?(.counted("Cube faces", index + 1, of: survivors.count))
@@ -368,10 +379,11 @@ struct ScanExportManager {
                     rigProfile: rigProfile)
             }
         }
+        let faceMs = Int((CFAbsoluteTimeGetCurrent() - faceStart) * 1000)
         if let rp = rigProfile, rp.isSolved {
-            print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) (rig CALIBRATED: residual \(String(format: "%.1f", rp.residualCm)) cm, dy \(String(format: "%.3f", rp.dy))m, yaw \(String(format: "%.1f", rp.yaw * 180 / .pi))°)")
+            print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) — \(faceMs) ms (rig CALIBRATED: residual \(String(format: "%.1f", rp.residualCm)) cm, dy \(String(format: "%.3f", rp.dy))m, yaw \(String(format: "%.1f", rp.yaw * 180 / .pi))°)")
         } else {
-            print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) (rig prior: rod \(AppConstants.rigRodHeightMeters)m, yaw \(AppConstants.rigYawOffsetDegrees)°)")
+            print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) — \(faceMs) ms (rig prior: rod \(AppConstants.rigRodHeightMeters)m, yaw \(AppConstants.rigYawOffsetDegrees)°)")
         }
     }
 
