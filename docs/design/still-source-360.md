@@ -249,6 +249,29 @@ last calibration's age and residual: *"Calibrated 2h ago (1.4 cm residual)"* wit
 - The calibration residual and the rig profile used for each scan both travel in
   `scan4d_metadata` so drift is visible downstream.
 
+#### First-still drift spot-check
+
+An automatic sanity check guards against accidental rig changes between scans. When the
+**first 360° still** of a recording completes, the system:
+
+1. **Reads the downloaded JPEG** from disk (the first still is always downloaded inline,
+   even if bulk downloads are deferred to post-processing later).
+2. **Evaluates the cost function** at the stored calibration parameters against the live
+   capture's mesh edges + equirect edges — no re-optimization, just a single O(1) cost
+   evaluation (milliseconds).
+3. **Compares** the live residual to the stored calibration residual:
+   - If `liveResidual > storedResidual × 2.0` AND `liveResidual > 3.0 cm` (floor avoids
+     noise on very tight calibrations), a **warning toast** appears:
+     *"⚠️ Rig may have shifted — residual drifted from 1.4 → 4.2 cm"*.
+   - The warning is **non-blocking** — the scan continues (the user may have intentionally
+     adjusted the rig).
+4. The spot-check runs **once per recording session** (reset when recording starts).
+
+**Design contract**: the first 360° still of each scan is always downloaded inline for
+calibration validation, regardless of the bulk transfer strategy. This is a ~7s cost
+(trigger + download) that would be paid anyway for the first capture — the spot-check
+adds only the cost-function evaluation (milliseconds) on top.
+
 ### Per-still corrections
 
 - **Timing** — trigger→exposure latency is nonzero and camera-specific; measure it in the

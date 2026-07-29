@@ -1,0 +1,330 @@
+import ARKit
+import Foundation
+import Observation
+import os
+import simd
+
+/// Orchestrates the pre-scan rig calibration flow (docs/design/still-source-360.md →
+/// "Calibration UX: pre-scan, integrated into Dashboard card").
+///
+/// State machine: `.idle` → `.capturing` → `.solving` → `.review` → `.idle`.
+/// The manager accumulates calibration captures (phone pose + equirect + mesh edges),
+/// runs the solver on a background queue, and persists the result to UserDefaults.
+///
+/// Integrates with:
+/// - `ThetaCameraManager` for 360° still capture during calibration
+/// - `ARCoverageView.Coordinator` for mesh anchor access
+/// - `ThetaCameraCard` (Dashboard) for the calibration UI
+@Observable
+@MainActor
+final class RigCalibrationManager {
+    static let shared = RigCalibrationManager()
+
+    enum State: Equatable {
+        case idle
+        case capturing(stillsCollected: Int)
+        case solving
+        case review(residualCm: Float, converged: Bool)
+        case failed(String)
+    }
+
+    private(set) var state: State = .idle
+
+    /// The currently persisted calibration profile (loaded at init, updated after accept).
+    private(set) var currentProfile: RigProfile?
+
+    /// Last solved result (available during `.review`).
+    private(set) var lastResult: RigCalibrationSolver.CalibrationResult?
+
+    /// Mesh vertex count near the current phone position (updated by the AR delegate
+    /// for the environment quality gate).
+    var nearbyMeshVertexCount: Int = 0
+
+    /// Accumulated calibration inputs.
+    private var capturedInputs: [RigCalibrationSolver.CalibrationInput] = []
+
+    /// Temporary directory for calibration equirects (cleaned after solve).
+    private var calibrationTempDir: URL?
+
+    private let logger = Logger(subsystem: "org.arenaxr.scan4d", category: "rigcal")
+
+    private init() {
+        currentProfile = RigProfile.load()
+    }
+
+    // MARK: - Public API
+
+    var isCalibrating: Bool {
+        switch state {
+        case .capturing, .solving: return true
+        default: return false
+        }
+    }
+
+    var isEnvironmentSufficient: Bool {
+        nearbyMeshVertexCount >= AppConstants.calibrationMeshVertexMinimum
+    }
+
+    /// Human-readable calibration age for the Dashboard card.
+    var calibrationAgeDescription: String? {
+        guard let profile = currentProfile, profile.isSolved else { return nil }
+        let elapsed = Date().timeIntervalSince(profile.timestamp)
+        if elapsed < 60 { return "just now" }
+        if elapsed < 3600 { return "\(Int(elapsed / 60))m ago" }
+        if elapsed < 86400 { return "\(Int(elapsed / 3600))h ago" }
+        return "\(Int(elapsed / 86400))d ago"
+    }
+
+    /// Begin a calibration session. Resets any previous captures.
+    func beginCalibration() {
+        capturedInputs.removeAll()
+        lastResult = nil
+        state = .capturing(stillsCollected: 0)
+        logger.info("Calibration session started")
+
+        // Create a temporary directory for calibration equirects
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rig_calibration_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        calibrationTempDir = tempDir
+    }
+
+    /// Cancel the calibration session.
+    func cancelCalibration() {
+        capturedInputs.removeAll()
+        lastResult = nil
+        state = .idle
+        cleanupTempDir()
+        logger.info("Calibration cancelled")
+    }
+
+    /// Capture one calibration still. Called when the user taps during stillness in
+    /// calibration mode. The caller provides the phone pose and mesh anchors;
+    /// this method triggers the Theta capture + download, extracts mesh edges, and
+    /// detects equirect edges.
+    ///
+    /// Returns immediately; the capture runs asynchronously.
+    func captureCalibrationStill(
+        phoneTransform: simd_float4x4,
+        timestamp: TimeInterval,
+        meshAnchors: [ARMeshAnchor]
+    ) {
+        guard case .capturing(let count) = state,
+              count < AppConstants.calibrationStillCount else { return }
+
+        let thetaManager = ThetaCameraManager.shared
+        guard thetaManager.isConnected, !thetaManager.isCapturing else { return }
+
+        let phonePos = SIMD3<Float>(phoneTransform.columns.3.x,
+                                   phoneTransform.columns.3.y,
+                                   phoneTransform.columns.3.z)
+
+        // Extract mesh edges near the phone position
+        let (meshEdges, vertexCount) = RigCalibrationSolver.extractMeshEdges(
+            from: meshAnchors,
+            near: phonePos,
+            radius: AppConstants.calibrationMeshRadiusMeters
+        )
+        nearbyMeshVertexCount = vertexCount
+
+        if vertexCount < AppConstants.calibrationMeshVertexMinimum {
+            logger.warning("Low mesh density at calibration position: \(vertexCount) vertices")
+            // Don't block — the user sees the warning on the card
+        }
+
+        logger.info("Calibration still \(count + 1): triggering capture (\(meshEdges.count) edges, \(vertexCount) vertices)")
+
+        // Trigger the Theta capture
+        thetaManager.takePicture()
+
+        // Wait for the capture + download, then process
+        Task {
+            // Poll for the download to complete (the manager sets isCapturing = false)
+            var attempts = 0
+            while thetaManager.isCapturing && attempts < 100 {
+                try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
+                attempts += 1
+            }
+
+            guard let capture = thetaManager.lastCapture,
+                  let url = URL(string: capture.fileURL) else {
+                logger.error("Calibration capture: no capture result")
+                return
+            }
+
+            // Download the still
+            thetaManager.downloadLastCapture()
+            attempts = 0
+            while thetaManager.isDownloading && attempts < 150 {
+                try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
+                attempts += 1
+            }
+
+            guard let download = thetaManager.lastDownload else {
+                logger.error("Calibration capture: download failed")
+                return
+            }
+
+            // Re-download the JPEG data for edge detection (we need the raw bytes)
+            let jpegData: Data
+            do {
+                jpegData = try await thetaManager.downloadData(from: url)
+            } catch {
+                logger.error("Calibration capture: re-download failed: \(error.localizedDescription)")
+                return
+            }
+
+            // Detect edges in the equirect
+            guard let edgeMap = RigCalibrationSolver.detectEquirectEdges(in: jpegData) else {
+                logger.error("Calibration capture: edge detection failed")
+                return
+            }
+
+            let input = RigCalibrationSolver.CalibrationInput(
+                phoneToWorld: phoneTransform,
+                edgeMap: edgeMap,
+                meshEdges: meshEdges
+            )
+
+            await MainActor.run {
+                self.capturedInputs.append(input)
+                let newCount = self.capturedInputs.count
+                self.logger.info("Calibration still \(newCount)/\(AppConstants.calibrationStillCount) captured")
+
+                if newCount >= AppConstants.calibrationStillCount {
+                    self.runSolver()
+                } else {
+                    self.state = .capturing(stillsCollected: newCount)
+                }
+            }
+        }
+    }
+
+    /// Run the solver on a background queue after all stills are captured.
+    private func runSolver() {
+        state = .solving
+        let inputs = capturedInputs
+        let prior = currentProfile ?? .mechanicalPrior
+
+        logger.info("Running calibration solver with \(inputs.count) inputs...")
+
+        Task.detached(priority: .userInitiated) {
+            let result = RigCalibrationSolver.solve(inputs: inputs, prior: prior)
+
+            await MainActor.run {
+                self.lastResult = result
+                self.logger.info("Solver complete: residual \(result.residualCm) cm, converged: \(result.converged), iterations: \(result.iterations)")
+
+                if result.residualCm.isNaN || result.residualCm.isInfinite {
+                    self.state = .failed("Solver did not converge — try a more feature-rich area")
+                } else {
+                    self.state = .review(residualCm: result.residualCm, converged: result.converged)
+                }
+            }
+        }
+    }
+
+    /// Accept the calibration result and persist it.
+    func acceptCalibration() {
+        guard let result = lastResult else { return }
+        result.profile.save()
+        currentProfile = result.profile
+        state = .idle
+        cleanupTempDir()
+        logger.info("Calibration accepted and saved (residual: \(result.residualCm) cm)")
+    }
+
+    /// Reject the result and restart.
+    func redoCalibration() {
+        beginCalibration()
+    }
+
+    /// Clear the persisted calibration (explicit user action from settings).
+    func resetCalibration() {
+        RigProfile.clear()
+        currentProfile = nil
+        state = .idle
+        logger.info("Calibration profile cleared")
+    }
+
+    // MARK: - First-still drift spot-check
+
+    /// Warning message from the most recent drift spot-check (nil = OK or not checked).
+    /// The capture view observes this to show a transient warning toast.
+    private(set) var driftWarning: String?
+
+    /// Whether the first-still spot-check has already run for the current scan.
+    private var hasSpotChecked = false
+
+    /// Reset the spot-check flag at the start of each recording session.
+    func resetSpotCheck() {
+        hasSpotChecked = false
+        driftWarning = nil
+    }
+
+    /// Run the first-still calibration spot-check. Called after the first 360° still
+    /// of a scan downloads. Evaluates the cost function at the stored parameters against
+    /// the live capture — no optimization, O(1), milliseconds.
+    ///
+    /// - Returns: `true` if the check passed (or was skipped), `false` if drift detected.
+    @discardableResult
+    func spotCheckFirstStill(
+        phoneTransform: simd_float4x4,
+        jpegData: Data,
+        meshAnchors: [ARMeshAnchor]
+    ) -> Bool {
+        guard !hasSpotChecked else { return driftWarning == nil }
+        hasSpotChecked = true
+
+        guard let profile = currentProfile, profile.isSolved else {
+            logger.info("Spot-check: no calibration — skipped")
+            return true
+        }
+
+        let phonePos = SIMD3<Float>(phoneTransform.columns.3.x,
+                                   phoneTransform.columns.3.y,
+                                   phoneTransform.columns.3.z)
+        let (meshEdges, _) = RigCalibrationSolver.extractMeshEdges(
+            from: meshAnchors, near: phonePos,
+            radius: AppConstants.calibrationMeshRadiusMeters
+        )
+
+        guard let edgeMap = RigCalibrationSolver.detectEquirectEdges(
+            in: jpegData, maxWidth: AppConstants.calibrationEdgeDetectionWidth
+        ) else {
+            logger.warning("Spot-check: edge detection failed — skipped")
+            return true
+        }
+
+        let input = RigCalibrationSolver.CalibrationInput(
+            phoneToWorld: phoneTransform,
+            edgeMap: edgeMap,
+            meshEdges: meshEdges
+        )
+        let liveResidual = RigCalibrationSolver.validateCalibration(input: input, profile: profile)
+        let storedResidual = profile.residualCm
+        let driftRatio = storedResidual > 0 ? liveResidual / storedResidual : Float.greatestFiniteMagnitude
+
+        logger.info("Spot-check: live residual \(String(format: "%.1f", liveResidual)) cm vs stored \(String(format: "%.1f", storedResidual)) cm (ratio \(String(format: "%.1f", driftRatio))×)")
+
+        if liveResidual > AppConstants.calibrationDriftWarnFloorCm
+            && driftRatio > AppConstants.calibrationDriftWarnMultiplier {
+            let msg = String(format: "⚠️ Rig may have shifted — residual drifted from %.1f → %.1f cm", storedResidual, liveResidual)
+            driftWarning = msg
+            logger.warning("\(msg)")
+            return false
+        }
+
+        driftWarning = nil
+        return true
+    }
+
+    // MARK: - Private
+
+    private func cleanupTempDir() {
+        if let dir = calibrationTempDir {
+            try? FileManager.default.removeItem(at: dir)
+            calibrationTempDir = nil
+        }
+    }
+}

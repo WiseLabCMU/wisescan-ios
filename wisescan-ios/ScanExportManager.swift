@@ -356,6 +356,7 @@ struct ScanExportManager {
             .filter { $0.pathExtension.lowercased() == "jpg" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !survivors.isEmpty else { return }
+        let rigProfile = RigProfile.load()
         var facesWritten = 0
         for (index, url) in survivors.enumerated() {
             phase?(.counted("Cube faces", index + 1, of: survivors.count))
@@ -363,10 +364,15 @@ struct ScanExportManager {
                 let sidecar = url.deletingPathExtension().appendingPathExtension("json")
                 facesWritten += EquirectFaceExport.emitFaces(
                     equirectURL: url, sidecarURL: sidecar,
-                    imagesDir: imagesDir, camerasDir: camerasDir)
+                    imagesDir: imagesDir, camerasDir: camerasDir,
+                    rigProfile: rigProfile)
             }
         }
-        print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) (rig prior: rod \(AppConstants.rigRodHeightMeters)m, yaw \(AppConstants.rigYawOffsetDegrees)°)")
+        if let rp = rigProfile, rp.isSolved {
+            print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) (rig CALIBRATED: residual \(String(format: "%.1f", rp.residualCm)) cm, dy \(String(format: "%.3f", rp.dy))m, yaw \(String(format: "%.1f", rp.yaw * 180 / .pi))°)")
+        } else {
+            print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) (rig prior: rod \(AppConstants.rigRodHeightMeters)m, yaw \(AppConstants.rigYawOffsetDegrees)°)")
+        }
     }
 
     /// Fail-closed removal of one staged 360° still: the equirect AND its pose sidecar (an

@@ -70,18 +70,21 @@ enum EquirectFaceExport {
     /// Emit 5 face JPEGs + Polycam camera JSONs for one staged (privacy-processed) equirect.
     /// Returns the number of faces written; 0 on failure (the archived equirect still ships —
     /// faces are an additive convenience, so failure here is non-fatal and logged by caller).
+    /// When a solved `RigProfile` is provided, its calibrated parameters replace the
+    /// mechanical-prior constants for pose composition.
     static func emitFaces(equirectURL: URL, sidecarURL: URL,
-                          imagesDir: URL, camerasDir: URL) -> Int {
+                          imagesDir: URL, camerasDir: URL,
+                          rigProfile: RigProfile? = nil) -> Int {
         guard let sidecarData = try? Data(contentsOf: sidecarURL),
               let sidecar = (try? JSONSerialization.jsonObject(with: sidecarData)) as? [String: Any],
               let flat = sidecar["phone_transform"] as? [Double], flat.count == 16 else { return 0 }
         let stillSource = sidecar["still_source"] as? String
-        let poseSource: String
+        var poseSource: String
         switch levelingSupport(forModel: stillSource) {
         case .validated:
-            poseSource = "rig_prior"
+            poseSource = rigProfile?.isSolved == true ? "rig_calibrated" : "rig_prior"
         case .assumedLevel:
-            poseSource = "rig_prior_unvalidated_leveling"
+            poseSource = rigProfile?.isSolved == true ? "rig_calibrated_unvalidated_leveling" : "rig_prior_unvalidated_leveling"
             print("[prepareExport] ⚠️ \(equirectURL.lastPathComponent): \(stillSource ?? "?") leveling "
                 + "not yet device-validated — faces emitted with pose source '\(poseSource)'")
         case .unsupported:
@@ -93,11 +96,31 @@ enum EquirectFaceExport {
         guard let bitmap = decodeBitmap(from: equirectURL) else { return 0 }
 
         let phoneToWorld = matrixFromColumnMajor(flat.map(Float.init))
-        let camRot = rigCameraRotation(phoneToWorld: phoneToWorld)
-        var camPos = SIMD3<Float>(phoneToWorld.columns.3.x,
-                                  phoneToWorld.columns.3.y,
-                                  phoneToWorld.columns.3.z)
-        camPos.y += AppConstants.rigRodHeightMeters
+
+        // Compose the 360° camera pose using the solved calibration or mechanical prior
+        let camTransform: simd_float4x4
+        if let profile = rigProfile, profile.isSolved {
+            camTransform = RigCalibrationSolver.composeRigTransform(
+                phoneToWorld: phoneToWorld,
+                dy: profile.dy, dLateral: profile.dLateral,
+                yaw: profile.yaw, pitchResidual: profile.pitchResidual
+            )
+        } else {
+            // Mechanical prior fallback (original behavior)
+            camTransform = RigCalibrationSolver.composeRigTransform(
+                phoneToWorld: phoneToWorld,
+                dy: AppConstants.rigRodHeightMeters, dLateral: 0,
+                yaw: AppConstants.rigYawOffsetDegrees * .pi / 180, pitchResidual: 0
+            )
+        }
+        let camRot = simd_float3x3(columns: (
+            SIMD3<Float>(camTransform.columns.0.x, camTransform.columns.0.y, camTransform.columns.0.z),
+            SIMD3<Float>(camTransform.columns.1.x, camTransform.columns.1.y, camTransform.columns.1.z),
+            SIMD3<Float>(camTransform.columns.2.x, camTransform.columns.2.y, camTransform.columns.2.z)
+        ))
+        let camPos = SIMD3<Float>(camTransform.columns.3.x,
+                                  camTransform.columns.3.y,
+                                  camTransform.columns.3.z)
 
         let faceSize = min(AppConstants.equirectFaceSizeMax, bitmap.width / 4)
         guard faceSize >= 256 else { return 0 }
@@ -126,34 +149,11 @@ enum EquirectFaceExport {
         return written
     }
 
-    // MARK: - Rig pose (mechanical prior)
 
-    /// Level (gravity-aligned) camera rotation whose forward is the phone's horizontal
-    /// forward rotated by the rig yaw offset. Columns are the camera axes in world space
-    /// (+X right, +Y up, +Z back — OpenGL/ARKit camera convention).
-    private static func rigCameraRotation(phoneToWorld: simd_float4x4) -> simd_float3x3 {
-        let phoneFwd = -SIMD3<Float>(phoneToWorld.columns.2.x,
-                                     phoneToWorld.columns.2.y,
-                                     phoneToWorld.columns.2.z)
-        var horiz = SIMD3<Float>(phoneFwd.x, 0, phoneFwd.z)
-        if simd_length(horiz) < 1e-3 {
-            // Phone aimed straight up/down — yaw is unobservable from forward; fall back to
-            // the phone's +Y (top of device) projected to horizontal, which is where the
-            // operator faces in that grip.
-            let phoneUp = SIMD3<Float>(phoneToWorld.columns.1.x, 0, phoneToWorld.columns.1.z)
-            horiz = simd_length(phoneUp) > 1e-3 ? phoneUp : SIMD3<Float>(0, 0, -1)
-        }
-        var fwd = simd_normalize(horiz)
-        let yaw = AppConstants.rigYawOffsetDegrees * .pi / 180
-        if yaw != 0 {
-            let rot = simd_float3x3(simd_quatf(angle: yaw, axis: SIMD3<Float>(0, 1, 0)))
-            fwd = rot * fwd
-        }
-        let upv = SIMD3<Float>(0, 1, 0)
-        let back = -fwd
-        let right = simd_normalize(simd_cross(upv, back))
-        return simd_float3x3(columns: (right, upv, back))
-    }
+    // NOTE: rigCameraRotation (mechanical-prior pose composition) has been superseded by
+    // RigCalibrationSolver.composeRigTransform, which handles both the mechanical prior
+    // and solved calibration paths. See docs/design/still-source-360.md (Calibration).
+
 
     private static func yawRotation(_ angle: Float) -> simd_float3x3 {
         simd_float3x3(simd_quatf(angle: angle, axis: SIMD3<Float>(0, 1, 0)))

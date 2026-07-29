@@ -23,6 +23,7 @@ struct CaptureView: View {
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession?
     @State private var thetaManager = ThetaCameraManager.shared
+    @State var rigCalibrationManager = RigCalibrationManager.shared
     @State var saveMessage: String?
     /// Mesh vertex count captured at record-start. The "move to start the live mesh" cue is shown
     /// until enough NEW vertices appear; a baseline makes it fire in relocalized ghost/stitch flows
@@ -162,13 +163,115 @@ struct CaptureView: View {
         // previous still's ~7s pipeline is in flight, and a phantom "still #N…" for a
         // refused capture would overcount (the phone keyframe of this pause still fires;
         // that pair is simply phone-only).
+
+        // Snapshot the phone pose for the first-still spot-check (before the ~7s pipeline)
+        let phonePose = frame.camera.transform
+        let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+
         if thetaManager.captureStillForScan(
-            phoneTransform: frame.camera.transform,
+            phoneTransform: phonePose,
             timestamp: frame.timestamp,
             into: rawDataDir
         ) {
-            showTransientMessage("📸 360° still #\(thetaManager.scanStillCount + 1)…", duration: 2)
+            let stillNumber = thetaManager.scanStillCount + 1
+            showTransientMessage("📸 360° still #\(stillNumber)…", duration: 2)
+
+            // First-still calibration spot-check: after the capture pipeline downloads
+            // the JPEG, run a quick drift check against the stored calibration.
+            if stillNumber == 1 {
+                Task {
+                    // Wait for the capture pipeline to finish (isCapturing → false)
+                    while thetaManager.isCapturing {
+                        try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
+                    }
+                    // The JPEG was written to equirect_stills/still_0001.JPG
+                    let jpegURL = rawDataDir
+                        .appendingPathComponent("equirect_stills")
+                        .appendingPathComponent("still_0001.JPG")
+                    guard let jpegData = try? Data(contentsOf: jpegURL) else { return }
+
+                    let passed = rigCalibrationManager.spotCheckFirstStill(
+                        phoneTransform: phonePose,
+                        jpegData: jpegData,
+                        meshAnchors: meshAnchors
+                    )
+                    if !passed, let warning = rigCalibrationManager.driftWarning {
+                        showTransientMessage(warning, duration: 5)
+                    }
+                }
+            }
         }
+    }
+
+    /// Triggers a calibration capture using the current AR frame and mesh.
+    private func captureCalibrationStill() {
+        guard let frame = currentARSession?.currentFrame else { return }
+        let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+        rigCalibrationManager.captureCalibrationStill(
+            phoneTransform: frame.camera.transform,
+            timestamp: frame.timestamp,
+            meshAnchors: meshAnchors
+        )
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    /// Pre-record calibration banner — appears over the AR view when the user starts
+    /// calibration from the Dashboard card and switches to the Capture tab.
+    @ViewBuilder
+    private var calibrationOverlay: some View {
+        VStack(spacing: 8) {
+            if case .capturing(let count) = rigCalibrationManager.state {
+                HStack(spacing: 8) {
+                    Image(systemName: "scope")
+                        .foregroundColor(.cyan)
+                    Text("Calibration: still \(count)/\(AppConstants.calibrationStillCount)")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                }
+                Text("Walk to a position, pause, then tap Capture.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+
+                if !rigCalibrationManager.isEnvironmentSufficient {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundColor(.yellow)
+                        Text("Low mesh density — move to an area with more surfaces.")
+                            .font(.caption)
+                            .foregroundColor(.yellow)
+                    }
+                }
+
+                Button(action: captureCalibrationStill) {
+                    HStack {
+                        if thetaManager.isCapturing {
+                            ProgressView().tint(.black).padding(.trailing, 2)
+                        } else {
+                            Image(systemName: "camera.fill")
+                        }
+                        Text(thetaManager.isCapturing ? "Capturing…" : "Capture Calibration Still")
+                            .font(.subheadline.bold())
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.cyan.opacity(0.85))
+                    .cornerRadius(10)
+                    .foregroundColor(.black)
+                }
+                .disabled(thetaManager.isCapturing || !thetaManager.isConnected)
+
+                Button("Cancel Calibration") { rigCalibrationManager.cancelCalibration() }
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .cornerRadius(16)
+        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .padding(.bottom, 120)
     }
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State. SwiftData reads stay
@@ -497,6 +600,13 @@ struct CaptureView: View {
             // Permissions Overlay (Preempts user if not authorized)
             PermissionsOverlay(locationManager: locationManager)
                 .ignoresSafeArea()
+
+            // Rig calibration overlay — pre-record only, when calibration mode is active.
+            // Shows capture progress and a button to trigger calibration stills using the
+            // live AR session's mesh anchors and phone pose.
+            if !isRecording && isARSessionReady && rigCalibrationManager.isCalibrating {
+                calibrationOverlay
+            }
 
             // Stillness reticle — the hold-still-then-tap affordance. The ring fills as
             // the device settles, locks green when a shutter tap will capture, and shows

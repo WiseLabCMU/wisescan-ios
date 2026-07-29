@@ -42,6 +42,7 @@ extension ThetaCameraManager {
         let columns = [matrix.columns.0, matrix.columns.1, matrix.columns.2, matrix.columns.3]
         let flatTransform = columns.flatMap { [$0.x, $0.y, $0.z, $0.w] }
 
+        let rigProfile = RigProfile.load()
         let metadata = EquirectStillMetadata(
             sequence: input.sequence,
             timestamp: input.timestamp,
@@ -53,7 +54,9 @@ extension ThetaCameraManager {
             cameraFileURL: input.sourceURL,
             triggerMs: input.triggerMs,
             transferMs: input.transferMs,
-            bytes: data.count
+            bytes: data.count,
+            rigCalibrationSource: rigProfile?.isSolved == true ? "solved" : "mechanical_prior",
+            rigCalibrationResidualCm: rigProfile?.isSolved == true ? rigProfile?.residualCm : nil
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -78,6 +81,8 @@ private struct EquirectStillMetadata: Encodable {
     let triggerMs: Int
     let transferMs: Int
     let bytes: Int
+    let rigCalibrationSource: String?
+    let rigCalibrationResidualCm: Float?
 
     enum CodingKeys: String, CodingKey {
         case sequence
@@ -91,5 +96,7 @@ private struct EquirectStillMetadata: Encodable {
         case triggerMs = "trigger_ms"
         case transferMs = "transfer_ms"
         case bytes
+        case rigCalibrationSource = "rig_calibration_source"
+        case rigCalibrationResidualCm = "rig_calibration_residual_cm"
     }
 }

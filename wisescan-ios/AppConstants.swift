@@ -130,6 +130,18 @@ enum AppConstants {
     static let rigYawOffsetDegrees: Float = 0      // pano-center (camera-body forward) yaw relative to the phone's horizontal forward; 0 = lenses aligned with the phone
     static let equirectFaceSizeMax = 2048          // cube-face edge cap (native density is equirectWidth/4; 11K Theta X stills would yield 2752 — capped for JPEG size/memory)
     static let equirectFaceDecodeMax = 8192        // staged-equirect decode cap for face sampling (8192×4096 RGBA ≈ 134 MB transient, per-still pooled; width/4 already saturates the face cap)
+
+    // MARK: - 360° Rig Calibration (markerless mesh-edge solver — see docs/design/still-source-360.md)
+    static let calibrationStillCount = 3                               // stills captured at distinct positions before the solver runs
+    static let calibrationMeshRadiusMeters: Float = 3.0                // radius around each phone position for mesh edge extraction
+    static let calibrationMeshVertexMinimum = 500                      // minimum vertex count within radius for a reliable solve (environment quality gate)
+    static let calibrationResidualGreenCm: Float = 2.0                 // residual ≤ this → green (good calibration)
+    static let calibrationResidualYellowCm: Float = 5.0                // residual ≤ this → yellow (marginal); above → red (suggest re-do)
+    static let calibrationMaxIterations = 500                          // Nelder-Mead iteration cap
+    static let calibrationConvergenceTolerance: Float = 1e-5           // cost-range convergence threshold
+    static let calibrationEdgeDetectionWidth = 512                     // downsampled equirect width for Sobel edge detection
+    static let calibrationDriftWarnMultiplier: Float = 2.0             // first-still spot-check: warn if live residual > stored × this
+    static let calibrationDriftWarnFloorCm: Float = 3.0                // don't warn if the absolute live residual is below this (avoids noise on tight calibrations)
     static let vioDegradedTripSeconds: TimeInterval = 2.5    // VIO guard: tracking continuously degraded (limited/relocalizing/unavailable) this long mid-scan → halt
     static let voxelDecayInterval: TimeInterval = 0.5        // VR: min seconds between 350K-voxel confidence-decay passes; throttled off every-integration so the voxelQueue can't back up (drove multi-second stalls)
     static let arIdleTeardownSeconds: TimeInterval = 60      // battery: seconds on a non-capture tab before pausing the AR session (camera/sensors off); resumed on return. Long enough that rapid successive scans stay warm.

@@ -99,6 +99,7 @@ extension CaptureView {
         showManualAdjust = false // dismiss the manual-adjust panel once recording begins
 
         isRecording = true
+        rigCalibrationManager.resetSpotCheck()
         // Item 2: clear any prior scan's tracking-unreliable warning so it doesn't bleed into this run
         // (the coordinator's TrackingStabilityMonitor accumulators reset in resetForRecording).
         scanStore.trackingUnreliable = nil
