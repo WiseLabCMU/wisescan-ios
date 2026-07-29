@@ -46,9 +46,9 @@ kernel void vertexColorProject(
     device const float4          *normals   [[buffer(1)]],
     constant VertexColorParams   &params    [[buffer(2)]],
     device VertexColorResult     *results   [[buffer(3)]],
-    texture2d<half, access::sample> colorTex [[texture(0)]],
-    texture2d<half, access::sample> depthTex [[texture(1)]],
-    texture2d<half, access::sample> maskTex  [[texture(2)]],
+    texture2d<half, access::sample>   colorTex [[texture(0)]],
+    texture2d<ushort, access::read>    depthTex [[texture(1)]],
+    texture2d<half, access::sample>    maskTex  [[texture(2)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= params.vertexCount) return;
@@ -84,9 +84,9 @@ kernel void vertexColorProject(
         int dpx = px * params.downscaleFactor * params.depthW / max(params.imgW, 1);
         int dpy = py * params.downscaleFactor * params.depthH / max(params.imgH, 1);
         if (dpx >= 0 && dpx < params.depthW && dpy >= 0 && dpy < params.depthH) {
-            // Read 16-bit depth from R16Uint texture (in millimeters)
-            half depthVal = depthTex.read(uint2(dpx, dpy)).r;
-            float depthMM = float(depthVal);
+            // Read 16-bit depth directly (R16Uint → ushort in millimeters)
+            ushort depthRaw = depthTex.read(uint2(dpx, dpy)).r;
+            float depthMM = float(depthRaw);
             float expectedMM = -camPos.z * 1000.0;
 
             // depth == 0 → no valid depth / privacy mask
