@@ -314,6 +314,12 @@ enum VertexColorAccumulator {
         // Downscale factor — vertex coloring doesn't need full-res images
         let downscaleFactor = 2
 
+        // Upload vertices + normals to GPU once (reused for all frames).
+        let useGPU = VertexColorGPU.isAvailable
+        if useGPU {
+            VertexColorGPU.uploadVertices(vertices, normals: normals)
+        }
+
         for (frameIdx, cameraFile) in sampledFiles.enumerated() {
           // Bound peak memory: each frame decodes a UIImage/CGImage + a downsample
           // context + a depth image, all autoreleased. Without a per-frame pool these
@@ -406,6 +412,7 @@ enum VertexColorAccumulator {
             let scaledH = imgH / downscaleFactor
 
             // Load corresponding depth image for occlusion testing
+            var depthCGImage: CGImage?
             var depthPtr: UnsafePointer<UInt8>?
             var depthWidth = 0
             var depthHeight = 0
@@ -420,6 +427,7 @@ enum VertexColorAccumulator {
                    let cgDepth = depthImage.cgImage,
                    cgDepth.bitsPerPixel == 16,
                    let cgDepthData = cgDepth.dataProvider?.data {
+                    depthCGImage = cgDepth
                     depthPixelDataBuffer = cgDepthData
                     depthPtr = CFDataGetBytePtr(cgDepthData)
                     depthWidth = cgDepth.width
@@ -433,6 +441,7 @@ enum VertexColorAccumulator {
             // Load this frame's person mask (deferred-blur era only). No mask ⇒ the stencil hadn't
             // warmed up on this frame → skip the whole frame rather than risk baking an unmasked
             // person (the top-K redundancy across other frames absorbs the coverage loss).
+            var maskCGImage: CGImage?
             var maskPtr: UnsafePointer<UInt8>?
             var maskWidth = 0, maskHeight = 0, maskBytesPerRow = 0
             var maskDataBuffer: CFData?
@@ -443,6 +452,7 @@ enum VertexColorAccumulator {
                       let mImg = UIImage(data: mData)?.cgImage,
                       mImg.bitsPerPixel == 8,   // fail closed: only the known 8bpp-gray layout is safe to index 1 byte/pixel
                       let mProvider = mImg.dataProvider?.data else { return }   // missing/unreadable/unexpected mask → skip frame
+                maskCGImage = mImg
                 maskDataBuffer = mProvider
                 maskPtr = CFDataGetBytePtr(mProvider)
                 maskWidth = mImg.width
@@ -450,104 +460,148 @@ enum VertexColorAccumulator {
                 maskBytesPerRow = mImg.bytesPerRow
             }
 
-            // Project each vertex into this camera frame
+            // ── Project each vertex into this camera frame ──
             let projStart = CACurrentMediaTime()
-            for (i, vertex) in vertices.enumerated() {
-                let worldPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
-                let camPos = world2Cam * worldPos
 
-                // Must be in front of camera (z < 0 in camera space for ARKit convention)
-                guard camPos.z < 0 else { continue }
+            if useGPU, let gpuResults = VertexColorGPU.projectFrame(
+                world2Cam: world2Cam,
+                camWorldPos: camWorld,
+                fx: scaledFx, fy: scaledFy, cx: scaledCx, cy: scaledCy,
+                imgW: imgW, imgH: imgH,
+                downscaleFactor: downscaleFactor,
+                frameWeight: frameWeight,
+                colorImage: downsampled,
+                depthImage: depthCGImage,
+                maskImage: maskCGImage,
+                distFloor: distFloor,
+                occlusionToleranceMM: AppConstants.colorizationOcclusionToleranceMM
+            ) {
+                // GPU path: accumulate observations from GPU results into top-K buffers (CPU).
+                for i in 0..<vertexCount {
+                    let obs = gpuResults[i]
+                    guard obs.weight > 0 else { continue }
 
-                // Project using intrinsics (adjusted for downscale)
-                let invZ = -1.0 / camPos.z
-                let px = Int(scaledFx * camPos.x * invZ + scaledCx)
-                let py = Int(scaledCy - scaledFy * camPos.y * invZ)
-
-                guard px >= 0 && px < scaledW && py >= 0 && py < scaledH else { continue }
-                guard px < width && py < height else { continue }
-
-                // Depth Occlusion Test
-                if let dPtr = depthPtr {
-                    let dpx = px * downscaleFactor * depthWidth / max(imgW, 1)
-                    let dpy = py * downscaleFactor * depthHeight / max(imgH, 1)
-                    if dpx >= 0 && dpx < depthWidth && dpy >= 0 && dpy < depthHeight {
-                        let dOffset = dpy * depthBytesPerRow + dpx * 2
-                        let b0 = UInt16(dPtr[dOffset])
-                        let b1 = UInt16(dPtr[dOffset + 1])
-                        let depthValue = isDepthLittleEndian ? (b1 << 8) | b0 : (b0 << 8) | b1
-
-                        let depthMM = Float(depthValue)
-                        let expectedMM = -camPos.z * 1000.0
-
-                        // If depth pixel is 0, it means no valid depth or privacy mask. Skip coloring.
-                        if depthMM == 0 { continue }
-
-                        // If expected distance is > tolerance farther than what the depth sensor saw, we are occluded
-                        if expectedMM > depthMM + AppConstants.colorizationOcclusionToleranceMM { continue }
-                    }
-                }
-
-                // Person-mask exclusion (deferred-blur era): skip any vertex projecting into a
-                // person region so its pixels never bake into colors.bin. A ±1 mask-pixel
-                // neighborhood approximates export's 12 px silhouette dilation (the mask is ~⅛
-                // image resolution) — conservative on privacy, negligible coverage cost.
-                if let mPtr = maskPtr {
-                    let mpx = px * downscaleFactor * maskWidth / max(imgW, 1)
-                    let mpy = py * downscaleFactor * maskHeight / max(imgH, 1)
-                    var person = false
-                    for ddy in -1...1 where !person {
-                        for ddx in -1...1 {
-                            let sx = mpx + ddx, sy = mpy + ddy
-                            if sx >= 0, sx < maskWidth, sy >= 0, sy < maskHeight,
-                               mPtr[sy * maskBytesPerRow + sx] > 0 { person = true; break }
+                    let base = i * K
+                    let cnt = Int(obsCount[i])
+                    if cnt < K {
+                        obsR[base + cnt] = obs.r; obsG[base + cnt] = obs.g; obsB[base + cnt] = obs.b
+                        obsW[base + cnt] = obs.weight
+                        obsCount[i] = UInt8(cnt + 1)
+                    } else {
+                        var minIdx = base
+                        var minW = obsW[base]
+                        for k in 1..<K where obsW[base + k] < minW {
+                            minW = obsW[base + k]; minIdx = base + k
+                        }
+                        if obs.weight > minW {
+                            obsR[minIdx] = obs.r; obsG[minIdx] = obs.g; obsB[minIdx] = obs.b
+                            obsW[minIdx] = obs.weight
                         }
                     }
-                    if person { continue }
                 }
+                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project_gpu \(vertices.count) verts \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
+            } else {
+                // CPU fallback path
+                for (i, vertex) in vertices.enumerated() {
+                    let worldPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
+                    let camPos = world2Cam * worldPos
 
-                // Quality weight: head-on views and closer frames win.
-                let toCam = camWorld - vertex
-                let dist = simd_length(toCam)
-                guard dist > 0 else { continue }
-                let viewDir = toCam / dist
-                let angleWeight = abs(simd_dot(normals[i], viewDir))   // 1 = head-on, 0 = grazing
-                let clampedDist = max(dist, distFloor)
-                let distWeight = 1.0 / (clampedDist * clampedDist)     // inverse-square, floored
-                let weight = angleWeight * distWeight * frameWeight    // keyframes get a sharpness bonus
-                guard weight > 1e-6 else { continue }
+                    // Must be in front of camera (z < 0 in camera space for ARKit convention)
+                    guard camPos.z < 0 else { continue }
 
-                let offset = py * bytesPerRow + px * bytesPerPixel
-                let r = ptr[offset]
-                let g = ptr[offset + 1]
-                let b = ptr[offset + 2]
+                    // Project using intrinsics (adjusted for downscale)
+                    let invZ = -1.0 / camPos.z
+                    let px = Int(scaledFx * camPos.x * invZ + scaledCx)
+                    let py = Int(scaledCy - scaledFy * camPos.y * invZ)
 
-                // Keep the top-K observations by weight for this vertex.
-                let base = i * K
-                let cnt = Int(obsCount[i])
-                if cnt < K {
-                    obsR[base + cnt] = r; obsG[base + cnt] = g; obsB[base + cnt] = b
-                    obsW[base + cnt] = weight
-                    obsCount[i] = UInt8(cnt + 1)
-                } else {
-                    // Replace the lowest-weight slot if this observation is better.
-                    var minIdx = base
-                    var minW = obsW[base]
-                    for k in 1..<K where obsW[base + k] < minW {
-                        minW = obsW[base + k]; minIdx = base + k
+                    guard px >= 0 && px < scaledW && py >= 0 && py < scaledH else { continue }
+                    guard px < width && py < height else { continue }
+
+                    // Depth Occlusion Test
+                    if let dPtr = depthPtr {
+                        let dpx = px * downscaleFactor * depthWidth / max(imgW, 1)
+                        let dpy = py * downscaleFactor * depthHeight / max(imgH, 1)
+                        if dpx >= 0 && dpx < depthWidth && dpy >= 0 && dpy < depthHeight {
+                            let dOffset = dpy * depthBytesPerRow + dpx * 2
+                            let b0 = UInt16(dPtr[dOffset])
+                            let b1 = UInt16(dPtr[dOffset + 1])
+                            let depthValue = isDepthLittleEndian ? (b1 << 8) | b0 : (b0 << 8) | b1
+
+                            let depthMM = Float(depthValue)
+                            let expectedMM = -camPos.z * 1000.0
+
+                            // If depth pixel is 0, it means no valid depth or privacy mask. Skip coloring.
+                            if depthMM == 0 { continue }
+
+                            // If expected distance is > tolerance farther than what the depth sensor saw, we are occluded
+                            if expectedMM > depthMM + AppConstants.colorizationOcclusionToleranceMM { continue }
+                        }
                     }
-                    if weight > minW {
-                        obsR[minIdx] = r; obsG[minIdx] = g; obsB[minIdx] = b
-                        obsW[minIdx] = weight
+
+                    // Person-mask exclusion (deferred-blur era): skip any vertex projecting into a
+                    // person region so its pixels never bake into colors.bin. A ±1 mask-pixel
+                    // neighborhood approximates export's 12 px silhouette dilation (the mask is ~⅛
+                    // image resolution) — conservative on privacy, negligible coverage cost.
+                    if let mPtr = maskPtr {
+                        let mpx = px * downscaleFactor * maskWidth / max(imgW, 1)
+                        let mpy = py * downscaleFactor * maskHeight / max(imgH, 1)
+                        var person = false
+                        for ddy in -1...1 where !person {
+                            for ddx in -1...1 {
+                                let sx = mpx + ddx, sy = mpy + ddy
+                                if sx >= 0, sx < maskWidth, sy >= 0, sy < maskHeight,
+                                   mPtr[sy * maskBytesPerRow + sx] > 0 { person = true; break }
+                            }
+                        }
+                        if person { continue }
+                    }
+
+                    // Quality weight: head-on views and closer frames win.
+                    let toCam = camWorld - vertex
+                    let dist = simd_length(toCam)
+                    guard dist > 0 else { continue }
+                    let viewDir = toCam / dist
+                    let angleWeight = abs(simd_dot(normals[i], viewDir))   // 1 = head-on, 0 = grazing
+                    let clampedDist = max(dist, distFloor)
+                    let distWeight = 1.0 / (clampedDist * clampedDist)     // inverse-square, floored
+                    let weight = angleWeight * distWeight * frameWeight    // keyframes get a sharpness bonus
+                    guard weight > 1e-6 else { continue }
+
+                    let offset = py * bytesPerRow + px * bytesPerPixel
+                    let r = ptr[offset]
+                    let g = ptr[offset + 1]
+                    let b = ptr[offset + 2]
+
+                    // Keep the top-K observations by weight for this vertex.
+                    let base = i * K
+                    let cnt = Int(obsCount[i])
+                    if cnt < K {
+                        obsR[base + cnt] = r; obsG[base + cnt] = g; obsB[base + cnt] = b
+                        obsW[base + cnt] = weight
+                        obsCount[i] = UInt8(cnt + 1)
+                    } else {
+                        // Replace the lowest-weight slot if this observation is better.
+                        var minIdx = base
+                        var minW = obsW[base]
+                        for k in 1..<K where obsW[base + k] < minW {
+                            minW = obsW[base + k]; minIdx = base + k
+                        }
+                        if weight > minW {
+                            obsR[minIdx] = r; obsG[minIdx] = g; obsB[minIdx] = b
+                            obsW[minIdx] = weight
+                        }
                     }
                 }
+                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project_cpu \(vertices.count) verts \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
             }
             _ = depthPixelDataBuffer // Silence compiler warning while ensuring CFData buffer outlives the pointer
             _ = maskDataBuffer       // ditto — keep the mask CFData alive for the vertex loop
-            PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project \(vertices.count) verts \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
           } // autoreleasepool (per frame)
             progress?(Double(frameIdx + 1) / Double(sampledFiles.count))
         }
+
+        // Release GPU buffers now that all frames are processed.
+        if useGPU { VertexColorGPU.releaseBuffers() }
 
         // Reduce each vertex's observations to a per-channel weighted median.
         // Unsampled vertices keep a neutral gray so they read as "no data".
