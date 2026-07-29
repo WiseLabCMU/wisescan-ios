@@ -146,6 +146,28 @@ final class ThetaCameraManager {
     private func probe() async {
         do {
             let info = try await fetchInfo()
+
+            // Firmware Gate
+            let isZ1 = info.model.contains("Z1")
+            let isX = info.model.contains("X")
+            let minFirmware = isZ1 ? AppConstants.Theta.minFirmwareZ1 : (isX ? AppConstants.Theta.minFirmwareX : "0")
+            if info.firmware.compare(minFirmware, options: .numeric) == .orderedAscending {
+                state = .failed("Firmware too old. Update via Ricoh app")
+                lastError = "Unsupported firmware \(info.firmware) (min: \(minFirmware))"
+                return
+            }
+
+            // Force Auto-Leveling for consistent mesh alignment
+            do {
+                try await setTopBottomCorrection(to: "Apply")
+            } catch {
+                let errorMsg = Self.describe(error)
+                state = .failed("Auto-leveling failed to apply")
+                lastError = "Could not enforce zenith correction: \(errorMsg)"
+                log(.connection, "⚠️ Failed to enable auto-leveling: \(errorMsg). Connection blocked.")
+                return
+            }
+
             state = .connected(model: info.model, firmware: info.firmware)
             serialNumber = info.serial
             batteryLevel = try? await fetchBatteryLevel()
@@ -354,7 +376,8 @@ final class ThetaCameraManager {
                     sequence: seq, phoneTransform: phoneTransform, timestamp: timestamp,
                     sourceURL: fileURL, sourceModel: connectedModel, format: currentStillFormat,
                     triggerMs: triggerMs, transferMs: transferMs)
-                try await Self.writeScanStill(data: data, input: input, into: rawDataDir)
+                let rigProfile = RigCalibrationManager.shared.activeProfile
+                try await Self.writeScanStill(data: data, input: input, into: rawDataDir, rigProfile: rigProfile)
                 scanStillCount = seq
                 lastCapture = CaptureOutcome(fileURL: fileURL, roundTripMs: triggerMs)
                 lastDownload = DownloadOutcome(bytes: data.count, elapsedMs: transferMs)
