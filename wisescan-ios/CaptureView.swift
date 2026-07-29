@@ -215,6 +215,38 @@ struct CaptureView: View {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
+    /// Ensure the AR session has mesh reconstruction enabled for calibration.
+    /// Normally mesh is only enabled at record-start (to save battery/thermals);
+    /// calibration needs it pre-record so the solver has geometry to align against.
+    /// Called when the calibration overlay appears.
+    private func ensureCalibrationMesh() {
+        guard let session = currentARSession,
+              ARCoverageView.supportsLiDAR,
+              let currentConfig = session.configuration as? ARWorldTrackingConfiguration,
+              currentConfig.sceneReconstruction == [] else { return }
+
+        let config = ARCoverageView.makeConfiguration(enableMeshReconstruction: true)
+        // Preserve existing frame semantics (depth, person segmentation, etc.)
+        config.frameSemantics = currentConfig.frameSemantics
+        session.run(config, options: []) // no reset — keep coordinate frame
+        PerfDiag.log("Enabled mesh reconstruction for rig calibration")
+    }
+
+    /// Disable mesh reconstruction after calibration is done (returns to pre-record config
+    /// to save battery/thermals).
+    private func disableCalibrationMesh() {
+        guard let session = currentARSession,
+              !isRecording, // don't disable during recording — recording needs mesh
+              ARCoverageView.supportsLiDAR,
+              let currentConfig = session.configuration as? ARWorldTrackingConfiguration,
+              currentConfig.sceneReconstruction != [] else { return }
+
+        let config = ARCoverageView.makeConfiguration(enableMeshReconstruction: false)
+        config.frameSemantics = currentConfig.frameSemantics
+        session.run(config, options: [])
+        PerfDiag.log("Disabled mesh reconstruction after calibration")
+    }
+
     /// Pre-record calibration banner — appears over the AR view when the user starts
     /// calibration from the Dashboard card and switches to the Capture tab.
     @ViewBuilder
@@ -569,6 +601,15 @@ struct CaptureView: View {
                 // Main's VIO-loss guard: halt + prompt save/rescan when tracking is lost mid-scan.
                 .onChange(of: vioCompromised) { _, lost in
                     if lost { handleVIOCompromised() }
+                }
+                // Rig calibration: enable mesh reconstruction when calibration starts,
+                // disable when it ends (pre-record only — recording enables mesh itself).
+                .onChange(of: rigCalibrationManager.isCalibrating) { _, calibrating in
+                    if calibrating {
+                        ensureCalibrationMesh()
+                    } else {
+                        disableCalibrationMesh()
+                    }
                 }
 
             // Loading overlay while AR session initializes (camera + privacy models + depth pipeline)

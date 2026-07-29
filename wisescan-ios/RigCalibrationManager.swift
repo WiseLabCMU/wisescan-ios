@@ -46,6 +46,9 @@ final class RigCalibrationManager {
     /// Temporary directory for calibration equirects (cleaned after solve).
     private var calibrationTempDir: URL?
 
+    /// Re-entrancy guard: prevents double-taps during the async capture pipeline.
+    private var isCapturingCalibrationStill = false
+
     private let logger = Logger(subsystem: "org.arenaxr.scan4d", category: "rigcal")
 
     private init() {
@@ -110,10 +113,15 @@ final class RigCalibrationManager {
         meshAnchors: [ARMeshAnchor]
     ) {
         guard case .capturing(let count) = state,
-              count < AppConstants.calibrationStillCount else { return }
+              count < AppConstants.calibrationStillCount,
+              !isCapturingCalibrationStill else { return }
+        isCapturingCalibrationStill = true
 
         let thetaManager = ThetaCameraManager.shared
-        guard thetaManager.isConnected, !thetaManager.isCapturing else { return }
+        guard thetaManager.isConnected, !thetaManager.isCapturing else {
+            isCapturingCalibrationStill = false
+            return
+        }
 
         let phonePos = SIMD3<Float>(phoneTransform.columns.3.x,
                                    phoneTransform.columns.3.y,
@@ -139,6 +147,12 @@ final class RigCalibrationManager {
 
         // Wait for the capture + download, then process
         Task {
+            defer {
+                Task { @MainActor in
+                    self.isCapturingCalibrationStill = false
+                }
+            }
+
             // Poll for the download to complete (the manager sets isCapturing = false)
             var attempts = 0
             while thetaManager.isCapturing && attempts < 100 {
@@ -215,8 +229,9 @@ final class RigCalibrationManager {
                 self.lastResult = result
                 self.logger.info("Solver complete: residual \(result.residualCm) cm, converged: \(result.converged), iterations: \(result.iterations)")
 
-                if result.residualCm.isNaN || result.residualCm.isInfinite {
-                    self.state = .failed("Solver did not converge — try a more feature-rich area")
+                if !result.converged || result.residualCm < 0
+                    || result.residualCm.isNaN || result.residualCm.isInfinite {
+                    self.state = .failed("Solver did not converge — try calibrating in a more feature-rich area with visible mesh")
                 } else {
                     self.state = .review(residualCm: result.residualCm, converged: result.converged)
                 }

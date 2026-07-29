@@ -54,7 +54,17 @@ enum RigCalibrationSolver {
 
     /// Solve the 4-DOF rig transform from calibration inputs.
     /// Call on a background queue. The prior provides the initial guess.
+    /// Returns a failed result if no input contains mesh edges (solver has nothing to align).
     static func solve(inputs: [CalibrationInput], prior: RigProfile) -> CalibrationResult {
+        // Guard: if no input has mesh edges, the solver has nothing to work with.
+        let totalEdges = inputs.reduce(0) { $0 + $1.meshEdges.count }
+        if totalEdges == 0 {
+            return CalibrationResult(
+                profile: prior, residualCm: -1,
+                converged: false, iterations: 0
+            )
+        }
+
         // Initial simplex vertices: prior ± small perturbations
         let x0 = SIMD4<Float>(prior.dy, prior.dLateral, prior.yaw, prior.pitchResidual)
 
@@ -508,7 +518,7 @@ struct RigProfile: Codable, Equatable {
         )
     }
 
-    var isSolved: Bool { residualCm >= 0 }
+    var isSolved: Bool { residualCm >= 0 && residualCm.isFinite }
 
     // MARK: - Persistence
 

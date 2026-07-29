@@ -103,9 +103,12 @@ struct ARCoverageView: UIViewRepresentable {
         // proxy ghost has no ICP target, so skip it — the "drop mesh-during-alignment" prize
         // (plane detection below is far cheaper and serves the plane auto-align instead).
         let alignmentMesh = PerfDiag.enabled && initialWorldMapURL != nil && !ghostIsProxy
+        // Rig calibration needs mesh anchors to extract edges for the solver's cost function.
+        // Enable mesh reconstruction pre-record when calibration is active.
+        let calibrationMesh = RigCalibrationManager.shared.isCalibrating
         // Plane detection ONLY when the ghost auto-align can actually engage (reference planes
         // loaded) — never as free-floating load on the already-sensitive alignment phase.
-        let config = Self.makeConfiguration(enableMeshReconstruction: alignmentMesh, worldMapURL: initialWorldMapURL,
+        let config = Self.makeConfiguration(enableMeshReconstruction: alignmentMesh || calibrationMesh, worldMapURL: initialWorldMapURL,
                                             enablePlaneDetection: initialWorldMapURL != nil && !ghostReferencePlanes.isEmpty)
         let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
         if PerfDiag.enabled, let m = config.initialWorldMap {
