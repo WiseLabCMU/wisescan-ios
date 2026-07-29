@@ -40,6 +40,14 @@ extension ThetaCameraManager {
         if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setOptions failed") }
     }
 
+    /// Sets the `_topBottomCorrection` option (e.g. "Apply" or "Disapply").
+    func setTopBottomCorrection(to mode: String) async throws {
+        let body: [String: Any] = ["name": "camera.setOptions",
+                                   "parameters": ["options": ["_topBottomCorrection": mode]]]
+        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCCommandResponse.self)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setOptions failed for _topBottomCorrection") }
+    }
+
     /// Reads the JPEG still resolutions the camera reports as supported via the
     /// `fileFormatSupport` option (a RICOH extension). Empty when the camera/firmware
     /// doesn't report it — callers fall back to a model table. Non-JPEG entries
@@ -217,6 +225,7 @@ private struct OSCOptionsResponse: Decodable {
     struct Options: Decodable {
         let fileFormat: FileFormat?
         let fileFormatSupport: [FileFormat]?
+        let _topBottomCorrection: String?
     }
     struct FileFormat: Decodable { let type: String?; let width: Int?; let height: Int? }
     let results: Results?

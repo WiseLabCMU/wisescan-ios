@@ -22,6 +22,11 @@ enum AppConstants {
         static let pipPaddingY: CGFloat = 80 // To clear the REC indicator safely
     }
 
+    enum Theta {
+        static let minFirmwareZ1 = "3.00.1"
+        static let minFirmwareX = "2.92.0"
+    }
+
     // MARK: - AppStorage Keys
     enum Key {
         static let uploadURL = "uploadURL"
