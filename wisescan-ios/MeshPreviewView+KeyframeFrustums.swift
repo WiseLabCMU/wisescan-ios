@@ -20,11 +20,13 @@ private nonisolated struct FrustumGeometry {
 
 extension MeshPreviewView {
 
-    /// The two capture-pose marker groups, each a container node ready to attach (nil if empty).
+    /// Capture-pose marker groups, each a container node ready to attach (nil if empty).
     struct KeyframeMarkerNodes {
         let stills: SCNNode?
         let motion: SCNNode?
-        var hasAny: Bool { stills != nil || motion != nil }
+        let equirectFaces: SCNNode?
+        var hasAny: Bool { stills != nil || motion != nil || equirectFaces != nil }
+        var hasEquirects: Bool { equirectFaces != nil }
     }
 
     /// Attaches the marker groups to the mesh container, applies the mesh-centering offset
@@ -48,6 +50,12 @@ extension MeshPreviewView {
             container.addChildNode(motion)
             coordinator.keyframeMotionNode = motion
         }
+        if let equirect = nodes.equirectFaces {
+            equirect.position = offset
+            equirect.isHidden = !keyframeMarkerMode.showEquirectFaces
+            container.addChildNode(equirect)
+            coordinator.equirectFacesNode = equirect
+        }
     }
 
     /// Builds the still + motion frustum marker groups from the saved `transforms.json` poses.
@@ -58,7 +66,7 @@ extension MeshPreviewView {
     /// to build on any thread): a long scan parses a multi-MB transforms.json and assembles
     /// hundreds of wedge nodes, which would be a visible hitch stacked onto the main-thread attach.
     nonisolated static func buildKeyframeMarkerNodes(scanDirectoryURL: URL?) -> KeyframeMarkerNodes {
-        guard let scanDir = scanDirectoryURL else { return KeyframeMarkerNodes(stills: nil, motion: nil) }
+        guard let scanDir = scanDirectoryURL else { return KeyframeMarkerNodes(stills: nil, motion: nil, equirectFaces: nil) }
         let candidates = [
             scanDir.appendingPathComponent("raw_data").appendingPathComponent("transforms.json"),
             scanDir.appendingPathComponent("transforms.json")
@@ -72,7 +80,7 @@ extension MeshPreviewView {
             }
         }
         guard let root = root, let frames = root["frames"] as? [[String: Any]] else {
-            return KeyframeMarkerNodes(stills: nil, motion: nil)
+            return KeyframeMarkerNodes(stills: nil, motion: nil, equirectFaces: nil)
         }
 
         // Session-global intrinsics/dimensions (video stream); keyframes may override per-frame.
@@ -113,9 +121,13 @@ extension MeshPreviewView {
             if isStill { stillNodes.append(node) } else { motionNodes.append(node) }
         }
 
+        // Build equirect face frustums from sidecar JSONs (pure pose math, no pixel data).
+        let equirectNodes = buildEquirectFaceNodes(scanDirectoryURL: scanDir)
+
         return KeyframeMarkerNodes(
             stills: container(named: "keyframeStills", nodes: stillNodes),
-            motion: container(named: "keyframeMotion", nodes: motionNodes)
+            motion: container(named: "keyframeMotion", nodes: motionNodes),
+            equirectFaces: equirectNodes
         )
     }
 
@@ -200,7 +212,7 @@ extension MeshPreviewView {
     /// Assembles one marker node around a (shared) geometry set. Geometry lives on an inner node
     /// carrying the face rotation, so the caller can set the outer node's simdTransform = capture
     /// pose without clobbering the rotation. World placement is then pose × faceRotation ×
-    /// geometry (identity faceRotation for a pinhole still; the future 360° cube-face case
+    /// geometry (identity faceRotation for a pinhole still; the 360° cube-face case
     /// passes one rotation per face).
     private nonisolated static func makeFrustumNode(
         geometry: FrustumGeometry,
@@ -214,5 +226,104 @@ extension MeshPreviewView {
         let node = SCNNode()
         node.addChildNode(inner)
         return node
+    }
+
+    // MARK: - Equirect Face Frustums
+
+    /// Cube-face direction: name, rotation quaternion (cam-space, ARKit convention),
+    /// and direction-specific color. Matches EquirectFaceExport's face definitions.
+    private nonisolated struct EquirectFace {
+        let name: String
+        let rotation: simd_quatf
+        let color: SIMD4<Float>
+    }
+
+    /// The 5 cube-map faces (bottom dropped — operator/rod). Rotations are in camera
+    /// space: +X right, +Y up, -Z forward (ARKit/OpenGL convention).
+    private nonisolated static let equirectFaceDefinitions: [EquirectFace] = [
+        EquirectFace(name: "front", rotation: simd_quatf(ix: 0, iy: 0, iz: 0, r: 1),
+                     color: AppConstants.equirectFrontColor),
+        EquirectFace(name: "right", rotation: simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(0, 1, 0)),
+                     color: AppConstants.equirectRightColor),
+        EquirectFace(name: "back",  rotation: simd_quatf(angle: .pi, axis: SIMD3<Float>(0, 1, 0)),
+                     color: AppConstants.equirectBackColor),
+        EquirectFace(name: "left",  rotation: simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(0, 1, 0)),
+                     color: AppConstants.equirectLeftColor),
+        EquirectFace(name: "up",    rotation: simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(1, 0, 0)),
+                     color: AppConstants.equirectUpColor)
+    ]
+
+    /// Builds 5 direction-colored frustum cones per equirect still. Poses are computed
+    /// on-the-fly from the sidecar's `phone_transform` + rig calibration (or prior).
+    /// Each face is a 90° FOV pinhole (tan(45°) = 1.0). Runs off-main alongside the
+    /// keyframe builder. Returns nil if no equirect stills exist.
+    private nonisolated static func buildEquirectFaceNodes(scanDirectoryURL: URL) -> SCNNode? {
+        let fileMgr = FileManager.default
+        let equirectDir = scanDirectoryURL
+            .appendingPathComponent("raw_data")
+            .appendingPathComponent("equirect_stills")
+        guard fileMgr.fileExists(atPath: equirectDir.path) else { return nil }
+
+        let sidecars = ((try? fileMgr.contentsOfDirectory(at: equirectDir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension.lowercased() == "json" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !sidecars.isEmpty else { return nil }
+
+        // Load rig profile (calibrated or nil → mechanical prior)
+        let rigProfile = RigProfile.load()
+
+        // Pre-build geometry for each face direction (5 cache entries; shared across all stills).
+        // 90° FOV pinhole: tan(45°) = 1.0.
+        var geometryCache: [String: FrustumGeometry] = [:]
+        for face in equirectFaceDefinitions {
+            geometryCache[face.name] = makeFrustumGeometry(
+                tanHalfAngle: 1.0,
+                color: face.color,
+                scale: 1.0
+            )
+        }
+
+        var allNodes: [SCNNode] = []
+        for sidecarURL in sidecars {
+            guard let data = try? Data(contentsOf: sidecarURL),
+                  let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let flat = dict["phone_transform"] as? [Double], flat.count == 16
+            else { continue }
+
+            let phoneToWorld = simd_float4x4(columns: (
+                SIMD4<Float>(Float(flat[0]), Float(flat[1]), Float(flat[2]), Float(flat[3])),
+                SIMD4<Float>(Float(flat[4]), Float(flat[5]), Float(flat[6]), Float(flat[7])),
+                SIMD4<Float>(Float(flat[8]), Float(flat[9]), Float(flat[10]), Float(flat[11])),
+                SIMD4<Float>(Float(flat[12]), Float(flat[13]), Float(flat[14]), Float(flat[15]))
+            ))
+
+            // Compose rig camera pose (calibrated or mechanical prior)
+            let camTransform: simd_float4x4
+            if let profile = rigProfile, profile.isSolved {
+                camTransform = RigCalibrationSolver.composeRigTransform(
+                    phoneToWorld: phoneToWorld,
+                    dy: profile.dy, dLateral: profile.dLateral,
+                    yaw: profile.yaw, pitchResidual: profile.pitchResidual
+                )
+            } else {
+                camTransform = RigCalibrationSolver.composeRigTransform(
+                    phoneToWorld: phoneToWorld,
+                    dy: AppConstants.rigRodHeightMeters, dLateral: 0,
+                    yaw: AppConstants.rigYawOffsetDegrees * .pi / 180, pitchResidual: 0
+                )
+            }
+
+            // Build one frustum node per face direction at the rig camera position.
+            // The rig transform is the 360° camera's camera-to-world; each face rotation
+            // is composed into the frustum node's inner transform.
+            for face in equirectFaceDefinitions {
+                guard let geometry = geometryCache[face.name] else { continue }
+                let node = makeFrustumNode(geometry: geometry, faceRotation: face.rotation)
+                node.simdTransform = camTransform
+                allNodes.append(node)
+            }
+        }
+
+        return container(named: "equirectFaces", nodes: allNodes)
     }
 }

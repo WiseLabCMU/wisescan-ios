@@ -215,6 +215,12 @@ enum AppConstants {
     static let keyframeApexSize: Float = 0.04                 // m — solid cube marking the exact still-capture position
     static let keyframeMotionScale: Float = 0.6              // motion-frame wedges drawn smaller than stills (many of them; reduce clutter)
     static let colorizationKeyframeWeight: Float = 3.0         // vertex-color weight bonus for sharp stillness keyframes vs sweep frames
+    // Equirect cube-map face direction colors (mesh preview frustum markers)
+    static let equirectFrontColor  = SIMD4<Float>(0.2, 0.85, 1.0, 1.0) // cyan  — forward face
+    static let equirectRightColor  = SIMD4<Float>(0.3, 0.9, 0.4, 1.0)  // green — right face
+    static let equirectBackColor   = SIMD4<Float>(1.0, 0.6, 0.15, 1.0) // orange — back face
+    static let equirectLeftColor   = SIMD4<Float>(0.85, 0.3, 0.85, 1.0) // magenta — left face
+    static let equirectUpColor     = SIMD4<Float>(0.95, 0.95, 0.95, 1.0) // white — up face
 
     // MARK: - Space Analysis Constants
     static let analysisAmbientLightAlertThreshold: CGFloat = 250  // lux below which lighting is "Very Low" (alert tier — RGB nearly useless)
@@ -263,14 +269,17 @@ enum SemanticViewMode: String, CaseIterable {
     var showFills: Bool { self == .semanticOnly }
 }
 
-/// Three-tier toggle for still/motion capture-pose frustum markers in the mesh preview.
+/// Four-tier toggle for capture-pose frustum markers in the mesh preview.
 /// Mirrors `SemanticViewMode`'s cycle-button pattern; defaults to hidden so the preview
-/// stays clean until the user opts in.
+/// stays clean until the user opts in. The `.equirectFaces` tier is skipped for scans
+/// without 360° stills (controlled by `next(hasEquirects:)`).
 enum KeyframeMarkerMode: String, CaseIterable {
     /// No capture markers.
     case none
     /// Sharp still (keyframe) capture poses only.
     case stills
+    /// 360° equirect cube-map face frustums (5 per still: front/right/back/left/up).
+    case equirectFaces
     /// Still + motion (sweep) frame capture poses.
     case stillsAndMotion
 
@@ -279,21 +288,27 @@ enum KeyframeMarkerMode: String, CaseIterable {
         switch self {
         case .none:            return "camera.metering.none"
         case .stills:          return "camera.metering.partial"
+        case .equirectFaces:   return "pano"
         case .stillsAndMotion: return "camera.metering.matrix"
         }
     }
 
-    /// Advance to the next mode in the cycle.
-    var next: KeyframeMarkerMode {
+    /// Advance to the next mode, skipping `.equirectFaces` if no equirect data exists.
+    func next(hasEquirects: Bool) -> KeyframeMarkerMode {
         switch self {
         case .none:            return .stills
-        case .stills:          return .stillsAndMotion
+        case .stills:          return hasEquirects ? .equirectFaces : .stillsAndMotion
+        case .equirectFaces:   return .stillsAndMotion
         case .stillsAndMotion: return .none
         }
     }
 
-    var showStills: Bool { self != .none }
+    /// Legacy cycle (no equirect awareness) — kept for backward compatibility.
+    var next: KeyframeMarkerMode { next(hasEquirects: false) }
+
+    var showStills: Bool { self != .none && self != .equirectFaces }
     var showMotion: Bool { self == .stillsAndMotion }
+    var showEquirectFaces: Bool { self == .equirectFaces }
 }
 
 // MARK: - Semantic Classification

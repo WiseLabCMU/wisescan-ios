@@ -26,6 +26,7 @@ struct MeshPreviewContainer: View {
     @State private var isMeshLoaded = false
     @State private var keyframeMarkerMode: KeyframeMarkerMode = .none
     @State private var hasKeyframeMarkers = false
+    @State private var hasEquirects = false
     @State private var showSetPoseConfirm = false
     /// Canonical frame from the location's ORIGINAL scan (see `canonicalRoomFrame`), resolved
     /// before the viewer mounts so all of a location's scans preview through an identical view.
@@ -53,7 +54,8 @@ struct MeshPreviewContainer: View {
                         detectedClasses: $detectedClasses,
                         hasPrivacyMarkers: $hasPrivacyMarkers,
                         keyframeMarkerMode: $keyframeMarkerMode,
-                        hasKeyframeMarkers: $hasKeyframeMarkers
+                        hasKeyframeMarkers: $hasKeyframeMarkers,
+                        hasEquirects: $hasEquirects
                     )
 
                     // 2D overlay icons projected from 3D face anchor positions
@@ -73,10 +75,11 @@ struct MeshPreviewContainer: View {
                 .ignoresSafeArea()
 
                 // Bottom-left legend (semantic classes + privacy + capture markers)
-                let showSemanticLegend = semanticViewMode.showOutlines && !detectedClasses.isEmpty
-                let showPrivacyLegend = showPrivacyMarkers && hasPrivacyMarkers
+                let showSemanticLegend = detectedClasses.count > 0 && semanticViewMode != .meshOnly
+                let showPrivacyLegend = hasPrivacyMarkers && showPrivacyMarkers
                 let showStillsLegend = keyframeMarkerMode.showStills && hasKeyframeMarkers
-                if showSemanticLegend || showPrivacyLegend || showStillsLegend {
+                let showEquirectLegend = keyframeMarkerMode.showEquirectFaces && hasEquirects
+                if showSemanticLegend || showPrivacyLegend || showStillsLegend || showEquirectLegend {
                     VStack(alignment: .leading, spacing: 4) {
                         if showSemanticLegend {
                             ForEach(detectedClasses, id: \.rawValue) { cls in
@@ -105,6 +108,9 @@ struct MeshPreviewContainer: View {
                             if keyframeMarkerMode.showMotion {
                                 captureLegendRow(color: AppConstants.keyframeMotionColor, label: "Motion")
                             }
+                        }
+                        if showEquirectLegend {
+                            equirectLegendRow
                         }
                     }
                     .padding(8)
@@ -182,7 +188,7 @@ struct MeshPreviewContainer: View {
             if hasKeyframeMarkers {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        keyframeMarkerMode = keyframeMarkerMode.next
+                        keyframeMarkerMode = keyframeMarkerMode.next(hasEquirects: hasEquirects)
                     } label: {
                         Image(systemName: keyframeMarkerMode.iconName)
                             .foregroundColor(keyframeMarkerMode == .none ? .gray : .cyan)
@@ -250,6 +256,26 @@ struct MeshPreviewContainer: View {
         .cornerRadius(10)
         .shadow(color: .black.opacity(0.3), radius: 2)
         .padding(.horizontal, 60) // keep clear of leading/trailing toolbar buttons
+    }
+
+    private var equirectLegendRow: some View {
+        HStack(spacing: 8) {
+            let directions: [(String, SIMD4<Float>)] = [
+                ("front", AppConstants.equirectFrontColor),
+                ("right", AppConstants.equirectRightColor),
+                ("back", AppConstants.equirectBackColor),
+                ("left", AppConstants.equirectLeftColor),
+                ("up", AppConstants.equirectUpColor)
+            ]
+            ForEach(directions, id: \.0) { dir, color in
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color(red: Double(color.x), green: Double(color.y), blue: Double(color.z)))
+                        .frame(width: 8, height: 8)
+                    Text(dir).font(.caption2).foregroundColor(.gray)
+                }
+            }
+        }
     }
 
     /// One legend row for a capture-marker group (colored square + label).
@@ -379,6 +405,7 @@ struct MeshPreviewView: UIViewRepresentable {
     @Binding var hasPrivacyMarkers: Bool
     @Binding var keyframeMarkerMode: KeyframeMarkerMode
     @Binding var hasKeyframeMarkers: Bool
+    @Binding var hasEquirects: Bool
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
@@ -568,6 +595,7 @@ struct MeshPreviewView: UIViewRepresentable {
         context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
         context.coordinator.keyframeStillsNode?.isHidden = !keyframeMarkerMode.showStills
         context.coordinator.keyframeMotionNode?.isHidden = !keyframeMarkerMode.showMotion
+        context.coordinator.equirectFacesNode?.isHidden = !keyframeMarkerMode.showEquirectFaces
     }
 
     func makeCoordinator() -> Coordinator {
@@ -586,6 +614,8 @@ struct MeshPreviewView: UIViewRepresentable {
         weak var keyframeStillsNode: SCNNode?
         /// Reference to the motion (sweep) capture-marker container for toggling visibility.
         weak var keyframeMotionNode: SCNNode?
+        /// Reference to the equirect cube-face frustum container for toggling visibility.
+        weak var equirectFacesNode: SCNNode?
 
         init(markerState: MarkerProjectionState) {
             self.markerState = markerState
