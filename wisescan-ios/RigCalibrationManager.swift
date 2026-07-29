@@ -47,7 +47,8 @@ final class RigCalibrationManager {
     private var calibrationTempDir: URL?
 
     /// Re-entrancy guard: prevents double-taps during the async capture pipeline.
-    private var isCapturingCalibrationStill = false
+    /// Also observed by the calibration overlay for button disable + progress label.
+    private(set) var isCapturingCalibrationStill = false
 
     private let logger = Logger(subsystem: "org.arenaxr.scan4d", category: "rigcal")
 
@@ -60,6 +61,15 @@ final class RigCalibrationManager {
     var isCalibrating: Bool {
         switch state {
         case .capturing, .solving: return true
+        default: return false
+        }
+    }
+
+    /// Whether the calibration overlay should be visible in CaptureView.
+    /// Includes `.failed` so the user can see the error and retry.
+    var showsCalibrationOverlay: Bool {
+        switch state {
+        case .capturing, .solving, .failed: return true
         default: return false
         }
     }
@@ -222,10 +232,14 @@ final class RigCalibrationManager {
 
         logger.info("Running calibration solver with \(inputs.count) inputs...")
 
-        Task.detached(priority: .userInitiated) {
+        // Explicitly dispatch to GCD global queue. The solver's Nelder-Mead loop is
+        // compute-bound (2000 edges × 3 inputs × 100+ iterations); even with subsampling
+        // this must not block the main thread or the AR session's frame delivery.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = RigCalibrationSolver.solve(inputs: inputs, prior: prior)
 
-            await MainActor.run {
+            DispatchQueue.main.async {
+                guard let self else { return }
                 self.lastResult = result
                 self.logger.info("Solver complete: residual \(result.residualCm) cm, converged: \(result.converged), iterations: \(result.iterations)")
 

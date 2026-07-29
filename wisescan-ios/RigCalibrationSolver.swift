@@ -65,6 +65,23 @@ enum RigCalibrationSolver {
             )
         }
 
+        // Subsample mesh edges per input to cap solver time. With 70K+ edges and 100+
+        // iterations, the cost function dominates (O(edges × inputs × iters)); 2000
+        // uniformly-sampled edges per input are sufficient for convergence (~5s vs ~227s).
+        let maxEdges = AppConstants.calibrationMaxEdgesPerInput
+        let sampledInputs = inputs.map { input -> CalibrationInput in
+            if input.meshEdges.count <= maxEdges { return input }
+            let stride = max(1, input.meshEdges.count / maxEdges)
+            let sampled = Swift.stride(from: 0, to: input.meshEdges.count, by: stride)
+                .prefix(maxEdges)
+                .map { input.meshEdges[$0] }
+            return CalibrationInput(
+                phoneToWorld: input.phoneToWorld,
+                edgeMap: input.edgeMap,
+                meshEdges: sampled
+            )
+        }
+
         // Initial simplex vertices: prior ± small perturbations
         let x0 = SIMD4<Float>(prior.dy, prior.dLateral, prior.yaw, prior.pitchResidual)
 
@@ -77,7 +94,7 @@ enum RigCalibrationSolver {
             maxIterations: AppConstants.calibrationMaxIterations,
             tolerance: AppConstants.calibrationConvergenceTolerance
         ) { params in
-            totalCost(params: params, inputs: inputs)
+            totalCost(params: params, inputs: sampledInputs)
         }
 
         let solved = RigProfile(

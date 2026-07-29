@@ -142,6 +142,7 @@ enum AppConstants {
     static let calibrationEdgeDetectionWidth = 512                     // downsampled equirect width for Sobel edge detection
     static let calibrationDriftWarnMultiplier: Float = 2.0             // first-still spot-check: warn if live residual > stored × this
     static let calibrationDriftWarnFloorCm: Float = 3.0                // don't warn if the absolute live residual is below this (avoids noise on tight calibrations)
+    static let calibrationMaxEdgesPerInput = 2000                      // subsample mesh edges per input to cap solver time (~5s for 2000 × 3 × 100 iters vs ~227s for 70K × 3)
     static let vioDegradedTripSeconds: TimeInterval = 2.5    // VIO guard: tracking continuously degraded (limited/relocalizing/unavailable) this long mid-scan → halt
     static let voxelDecayInterval: TimeInterval = 0.5        // VR: min seconds between 350K-voxel confidence-decay passes; throttled off every-integration so the voxelQueue can't back up (drove multi-second stalls)
     static let arIdleTeardownSeconds: TimeInterval = 60      // battery: seconds on a non-capture tab before pausing the AR session (camera/sensors off); resumed on return. Long enough that rapid successive scans stay warm.

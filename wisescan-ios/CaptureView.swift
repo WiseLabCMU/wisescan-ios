@@ -249,6 +249,14 @@ struct CaptureView: View {
 
     /// Pre-record calibration banner — appears over the AR view when the user starts
     /// calibration from the Dashboard card and switches to the Capture tab.
+    /// Granular label for the calibration capture button, reflecting the pipeline stage.
+    private var calibrationButtonLabel: String {
+        if thetaManager.isCapturing { return "Triggering shutter…" }
+        if thetaManager.isDownloading { return "Downloading still…" }
+        if rigCalibrationManager.isCapturingCalibrationStill { return "Processing edges…" }
+        return "Capture Calibration Still"
+    }
+
     @ViewBuilder
     private var calibrationOverlay: some View {
         VStack(spacing: 8) {
@@ -277,12 +285,13 @@ struct CaptureView: View {
 
                 Button(action: captureCalibrationStill) {
                     HStack {
-                        if thetaManager.isCapturing {
+                        if thetaManager.isCapturing || thetaManager.isDownloading
+                            || rigCalibrationManager.isCapturingCalibrationStill {
                             ProgressView().tint(.black).padding(.trailing, 2)
                         } else {
                             Image(systemName: "camera.fill")
                         }
-                        Text(thetaManager.isCapturing ? "Capturing…" : "Capture Calibration Still")
+                        Text(calibrationButtonLabel)
                             .font(.subheadline.bold())
                     }
                     .frame(maxWidth: .infinity)
@@ -291,11 +300,47 @@ struct CaptureView: View {
                     .cornerRadius(10)
                     .foregroundColor(.black)
                 }
-                .disabled(thetaManager.isCapturing || !thetaManager.isConnected)
+                .disabled(thetaManager.isCapturing || thetaManager.isDownloading
+                          || rigCalibrationManager.isCapturingCalibrationStill
+                          || !thetaManager.isConnected)
 
                 Button("Cancel Calibration") { rigCalibrationManager.cancelCalibration() }
                     .font(.caption)
                     .foregroundColor(.gray)
+            }
+
+            if case .solving = rigCalibrationManager.state {
+                HStack(spacing: 8) {
+                    ProgressView().tint(.cyan)
+                    Text("Solving rig calibration…")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                }
+                Text("Aligning mesh edges to 360° images.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+
+            if case .failed(let reason) = rigCalibrationManager.state {
+                HStack(spacing: 8) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.red)
+                    Text("Calibration failed")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                }
+                Text(reason)
+                    .font(.caption)
+                    .foregroundColor(.gray)
+                    .multilineTextAlignment(.center)
+
+                Button("Retry") { rigCalibrationManager.beginCalibration() }
+                    .font(.subheadline.bold())
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 20)
+                    .background(Color.cyan.opacity(0.85))
+                    .cornerRadius(8)
+                    .foregroundColor(.black)
             }
         }
         .padding()
@@ -643,9 +688,9 @@ struct CaptureView: View {
                 .ignoresSafeArea()
 
             // Rig calibration overlay — pre-record only, when calibration mode is active.
-            // Shows capture progress and a button to trigger calibration stills using the
-            // live AR session's mesh anchors and phone pose.
-            if !isRecording && isARSessionReady && rigCalibrationManager.isCalibrating {
+            // Shows capture progress, solver spinner, failure + retry, using the live
+            // AR session's mesh anchors and phone pose.
+            if !isRecording && isARSessionReady && rigCalibrationManager.showsCalibrationOverlay {
                 calibrationOverlay
             }
 
