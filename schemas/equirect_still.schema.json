@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Equirectangular Still Sidecar Schema",
+  "description": "Metadata generated alongside each 360° equirectangular still capture in raw_data/equirect_stills/still_XXXX.json",
+  "type": "object",
+  "properties": {
+    "sequence": {
+      "type": "integer",
+      "description": "1-based sequence index of the still in the capture session."
+    },
+    "timestamp": {
+      "type": "number",
+      "description": "Unix epoch time (UTC) when the still was triggered."
+    },
+    "still_source": {
+      "type": "string",
+      "description": "Camera model or capture source identifier (e.g., RICOH THETA X)."
+    },
+    "camera_model": {
+      "type": "string",
+      "description": "Camera projection type, typically equirectangular."
+    },
+    "width": {
+      "type": ["integer", "null"],
+      "description": "Pixel width of the equirectangular JPEG image."
+    },
+    "height": {
+      "type": ["integer", "null"],
+      "description": "Pixel height of the equirectangular JPEG image."
+    },
+    "phone_transform": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 16,
+      "maxItems": 16,
+      "description": "4x4 column-major phone-to-world transform at the moment of capture."
+    },
+    "cam_transform": {
+      "type": ["array", "null"],
+      "items": { "type": "number" },
+      "minItems": 16,
+      "maxItems": 16,
+      "description": "4x4 column-major 360° camera-to-world transform, composed from phone pose + baked rig profile at capture time."
+    },
+    "camera_file_url": {
+      "type": "string",
+      "description": "Source URI or path on the external camera device."
+    },
+    "trigger_ms": {
+      "type": "integer",
+      "description": "Elapsed milliseconds to trigger the shutter."
+    },
+    "transfer_ms": {
+      "type": "integer",
+      "description": "Elapsed milliseconds to download the image from the camera."
+    },
+    "bytes": {
+      "type": "integer",
+      "description": "File size of the captured JPEG image in bytes."
+    },
+    "rig_calibration_source": {
+      "type": ["string", "null"],
+      "enum": ["solved", "mechanical_prior", null],
+      "description": "Source of the rig calibration used for cam_transform ('solved' or 'mechanical_prior')."
+    },
+    "rig_calibration_residual_cm": {
+      "type": ["number", "null"],
+      "description": "Calibration residual error in centimeters if solved."
+    }
+  },
+  "required": [
+    "sequence",
+    "timestamp",
+    "still_source",
+    "camera_model",
+    "phone_transform",
+    "camera_file_url",
+    "trigger_ms",
+    "transfer_ms",
+    "bytes"
+  ]
+}
