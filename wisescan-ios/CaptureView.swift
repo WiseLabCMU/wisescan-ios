@@ -157,6 +157,7 @@ struct CaptureView: View {
     /// here (synchronously) before the ~seconds-long trigger/download.
     private func captureThetaStill() {
         guard isRecording, thetaManager.isConnected,
+              !rigCalibrationManager.showsCalibrationOverlay,
               let frame = currentARSession?.currentFrame,
               let rawDataDir = frameCaptureSession.captureDir else { return }
         // Toast only when the capture actually started — the manager refuses while the
@@ -1130,8 +1131,9 @@ struct CaptureView: View {
                                             .foregroundColor(.white.opacity(0.7))
                                     }
                                 })
-                                .disabled(isAnalyzing || isProcessingMesh || isWaitingToSave)
-                                .opacity(isAnalyzing ? 0.4 : 1.0)
+                                .disabled(isAnalyzing || isProcessingMesh || isWaitingToSave
+                                          || rigCalibrationManager.showsCalibrationOverlay)
+                                .opacity(isAnalyzing || rigCalibrationManager.showsCalibrationOverlay ? 0.4 : 1.0)
                             }
 
                             // Record button
@@ -1179,7 +1181,11 @@ struct CaptureView: View {
                             // pre-recording window so a tap can't race ahead of the alignment overlay
                             // and start an un-aligned scan (the ~90°/offset ghost-jump race).
                             // activeScanCase is set synchronously at the trigger; cleared on save.
+                            // Also block during rig calibration overlay (capturing / solving /
+                            // review / failed) — the calibration mesh-reconstruction mode and the
+                            // still-capture pipeline conflict with scan recording.
                             .disabled(isProcessingMesh || isWaitingToSave || isStabilizingBeforeSave || isAnalyzing || showAnalysisReport
+                                      || rigCalibrationManager.showsCalibrationOverlay
                                       || (scanStore.activeScanCase == .linkAdjacent && !isRecording))
                             .offset(y: isRecording ? -20 : 0)
                         }
