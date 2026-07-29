@@ -208,7 +208,8 @@ enum VertexColorAccumulator {
         let fm = FileManager.default
 
         // Parse OBJ vertices using shared parser
-        guard let parsed = MeshParser.parseOBJ(from: objData) else { return nil }
+        let parsed: MeshParser.OBJData? = PerfDiag.timed("vc_obj_parse") { MeshParser.parseOBJ(from: objData) }
+        guard let parsed else { return nil }
         var vertices = parsed.vertices
         guard !vertices.isEmpty else { return nil }
 
@@ -232,7 +233,9 @@ enum VertexColorAccumulator {
         // Per-vertex surface normals (area-weighted face normals) drive the
         // view-angle weight. Sign/winding may be inconsistent across the mesh,
         // so the weight uses |normal · viewDir| and is sign-agnostic.
-        var normals = MeshParser.accumulateVertexNormals(vertices: vertices, faces: parsed.faces)
+        var normals = PerfDiag.timed("vc_normals") {
+            MeshParser.accumulateVertexNormals(vertices: vertices, faces: parsed.faces)
+        }
         for i in normals.indices {
             normals[i] = simd_length(normals[i]) > 0 ? simd_normalize(normals[i]) : SIMD3<Float>(0, 0, 1)
         }
@@ -316,6 +319,7 @@ enum VertexColorAccumulator {
           // context + a depth image, all autoreleased. Without a per-frame pool these
           // accumulate across every sampled frame and can spike memory / trigger jetsam.
           autoreleasepool {
+            let frameStart = CACurrentMediaTime()
             // Parse camera JSON (Polycam format with t_XX transform and intrinsics)
             guard let jsonData = try? Data(contentsOf: cameraFile),
                   let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else { return }
@@ -391,6 +395,7 @@ enum VertexColorAccumulator {
             let height = downsampled.height
             let bytesPerRow = downsampled.bytesPerRow
             let bytesPerPixel = downsampled.bitsPerPixel / 8
+            PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) decode \(Int((CACurrentMediaTime() - frameStart) * 1000))ms")
 
             // Adjust intrinsics for downscale
             let scaledFx = fx / Float(downscaleFactor)
@@ -446,6 +451,7 @@ enum VertexColorAccumulator {
             }
 
             // Project each vertex into this camera frame
+            let projStart = CACurrentMediaTime()
             for (i, vertex) in vertices.enumerated() {
                 let worldPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
                 let camPos = world2Cam * worldPos
@@ -538,6 +544,7 @@ enum VertexColorAccumulator {
             }
             _ = depthPixelDataBuffer // Silence compiler warning while ensuring CFData buffer outlives the pointer
             _ = maskDataBuffer       // ditto — keep the mask CFData alive for the vertex loop
+            PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project \(vertices.count) verts \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
           } // autoreleasepool (per frame)
             progress?(Double(frameIdx + 1) / Double(sampledFiles.count))
         }
@@ -548,6 +555,7 @@ enum VertexColorAccumulator {
         // Scratch buffers reused across vertices (sized K) to avoid per-vertex allocations.
         var sV = [Float](repeating: 0, count: K)
         var sW = [Float](repeating: 0, count: K)
+        let medianStart = CACurrentMediaTime()
 
         var data = Data(count: vertexCount * MemoryLayout<SIMD4<Float>>.stride)
         data.withUnsafeMutableBytes { raw in
@@ -566,6 +574,7 @@ enum VertexColorAccumulator {
                 coloredCount += 1
             }
         }
+        PerfDiag.log("[VertexColor] median resolve \(vertexCount) verts \(Int((CACurrentMediaTime() - medianStart) * 1000))ms")
         let elapsed = CACurrentMediaTime() - startTime
         print("[VertexColor] Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (weighted median, K=\(K)) in \(String(format: "%.1f", elapsed))s")
         return data
