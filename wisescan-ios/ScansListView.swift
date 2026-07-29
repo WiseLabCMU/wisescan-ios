@@ -1057,7 +1057,7 @@ struct ScanCard: View {
     @State private var exportItem: ZipExportItem?
     @State private var showExportError = false
     @State private var showDeleteConfirm = false
-    @State private var itemCounts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int)?
+    @State private var itemCounts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int, equirect: Int)?
     @State private var showDataIntegrityAlert = false
     @State private var showMeshPreview = false
     @State private var showMissingRelocAlert = false
@@ -1205,12 +1205,13 @@ struct ScanCard: View {
             let fm = FileManager.default
 
             let resolved = await Task.detached(priority: .utility) {
-                () -> (counts: (Int, Int, Int, Int, Int), relocMissing: Bool, sizeMB: Double) in
+                () -> (counts: (Int, Int, Int, Int, Int, Int), relocMissing: Bool, sizeMB: Double) in
                 let iCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("images").path))?.count ?? 0
                 let pCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("proxy_images").path))?.count ?? 0
                 let dCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("depth").path))?.count ?? 0
                 let confCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("confidence").path))?.count ?? 0
                 let cCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("cameras").path))?.count ?? 0
+                let eCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("equirect_stills").path))?.filter { $0.hasSuffix(".jpg") }.count ?? 0
 
                 let relocMissing = !fm.fileExists(atPath: worldMapPath)
 
@@ -1219,7 +1220,7 @@ struct ScanCard: View {
                 if let attr = try? fm.attributesOfItem(atPath: colorsPath) { bytes += attr[.size] as? Int64 ?? 0 }
                 let sizeMB = (bytes > 0 ? Double(bytes) : Double(fallbackBytes)) / (1024.0 * 1024.0)
 
-                return ((iCount, pCount, dCount, confCount, cCount), relocMissing, sizeMB)
+                return ((iCount, pCount, dCount, confCount, cCount, eCount), relocMissing, sizeMB)
             }.value
 
             itemCounts = resolved.counts
@@ -1388,7 +1389,7 @@ struct ScanCard: View {
     }
 
     @ViewBuilder
-    private func itemCountsText(_ counts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int)) -> some View {
+    private func itemCountsText(_ counts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int, equirect: Int)) -> some View {
         let parts = buildItemCountParts(counts)
         if !parts.isEmpty {
             Text(parts.joined(separator: " · "))
@@ -1397,13 +1398,14 @@ struct ScanCard: View {
         }
     }
 
-    private func buildItemCountParts(_ counts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int)) -> [String] {
+    private func buildItemCountParts(_ counts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int, equirect: Int)) -> [String] {
         var parts: [String] = []
         if counts.images > 0 { parts.append("\(counts.images) images") }
         if counts.proxy > 0 { parts.append("\(counts.proxy) proxy") }
         if counts.depth > 0 { parts.append("\(counts.depth) depth") }
         if counts.confidence > 0 { parts.append("\(counts.confidence) confidence") }
         if counts.cameras > 0 { parts.append("\(counts.cameras) cameras") }
+        if counts.equirect > 0 { parts.append("\(counts.equirect) equirects") }
         return parts
     }
 
