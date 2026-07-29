@@ -687,10 +687,10 @@ struct CaptureView: View {
             PermissionsOverlay(locationManager: locationManager)
                 .ignoresSafeArea()
 
-            // Rig calibration overlay — pre-record only, when calibration mode is active.
-            // Shows capture progress, solver spinner, failure + retry, using the live
-            // AR session's mesh anchors and phone pose.
-            if !isRecording && isARSessionReady && rigCalibrationManager.showsCalibrationOverlay {
+            // Rig calibration overlay — pre-record only, when calibration is active.
+            // Shows capture progress + solver spinner. Review/accept and failure/retry
+            // display on the Dashboard card (auto-navigated by ContentView).
+            if !isRecording && isARSessionReady && rigCalibrationManager.isCalibrating {
                 calibrationOverlay
             }
 
