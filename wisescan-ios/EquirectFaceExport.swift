@@ -77,7 +77,7 @@ enum EquirectFaceExport {
                           rigProfile: RigProfile? = nil) -> Int {
         guard let sidecarData = try? Data(contentsOf: sidecarURL),
               let sidecar = (try? JSONSerialization.jsonObject(with: sidecarData)) as? [String: Any],
-              let flat = (sidecar["phone_transform"] ?? sidecar["phoneTransform"]) as? [Double], flat.count == 16 else { return 0 }
+              let flat = sidecar["phone_transform"] as? [Double], flat.count == 16 else { return 0 }
         let stillSource = sidecar["still_source"] as? String
         var poseSource: String
         switch levelingSupport(forModel: stillSource) {
@@ -99,7 +99,7 @@ enum EquirectFaceExport {
 
         // Compose the 360° camera pose using the baked transform, solved calibration, or mechanical prior
         let camTransform: simd_float4x4
-        if let flatCam = (sidecar["cam_transform"] ?? sidecar["camTransform"]) as? [Double], flatCam.count == 16 {
+        if let flatCam = sidecar["cam_transform"] as? [Double], flatCam.count == 16 {
             camTransform = matrixFromColumnMajor(flatCam.map(Float.init))
         } else if let profile = rigProfile, profile.isSolved {
             camTransform = RigCalibrationSolver.composeRigTransform(

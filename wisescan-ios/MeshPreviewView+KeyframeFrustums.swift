@@ -288,7 +288,7 @@ extension MeshPreviewView {
         for sidecarURL in sidecars {
             guard let data = try? Data(contentsOf: sidecarURL),
                   let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                  let flat = (dict["phone_transform"] ?? dict["phoneTransform"]) as? [Double], flat.count == 16
+                  let flat = dict["phone_transform"] as? [Double], flat.count == 16
             else { continue }
 
             let phoneToWorld = simd_float4x4(columns: (
@@ -299,7 +299,7 @@ extension MeshPreviewView {
             ))
 
             let camTransform: simd_float4x4
-            if let flatCam = (dict["cam_transform"] ?? dict["camTransform"]) as? [Double], flatCam.count == 16 {
+            if let flatCam = dict["cam_transform"] as? [Double], flatCam.count == 16 {
                 camTransform = simd_float4x4(columns: (
                     SIMD4<Float>(Float(flatCam[0]), Float(flatCam[1]), Float(flatCam[2]), Float(flatCam[3])),
                     SIMD4<Float>(Float(flatCam[4]), Float(flatCam[5]), Float(flatCam[6]), Float(flatCam[7])),
