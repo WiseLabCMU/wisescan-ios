@@ -129,10 +129,24 @@ enum EquirectFaceExport {
         guard faceSize >= 256 else { return 0 }
         let baseName = equirectURL.deletingPathExtension().lastPathComponent
 
+        // Upload bitmap to GPU texture once; reused for all 5 face dispatches.
+        let gpuTexture = EquirectGPU.isAvailable
+            ? EquirectGPU.makeTexture(from: bitmap.pixels, width: bitmap.width, height: bitmap.height)
+            : nil
+
         var written = 0
         for face in faces {
             autoreleasepool {
-                let jpeg: Data? = PerfDiag.timed("cf_reproject") { renderFace(face.rotation, from: bitmap, side: faceSize) }
+                let jpeg: Data?
+                if let gpuTexture {
+                    jpeg = PerfDiag.timed("cf_reproject_gpu") {
+                        EquirectGPU.renderFace(from: gpuTexture,
+                                              rotation: face.rotation,
+                                              faceSize: faceSize)
+                    }
+                } else {
+                    jpeg = PerfDiag.timed("cf_reproject_cpu") { renderFace(face.rotation, from: bitmap, side: faceSize) }
+                }
                 guard let jpeg else {
                     return
                 }

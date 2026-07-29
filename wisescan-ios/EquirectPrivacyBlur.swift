@@ -73,12 +73,28 @@ enum EquirectPrivacyBlur {
         guard let working else {
             return .failed("equirect decode failed")
         }
+
+        // Upload working bitmap to GPU texture once; reused for all 6 face dispatches.
+        let gpuTexture = EquirectGPU.isAvailable
+            ? EquirectGPU.makeTexture(from: working.pixels, width: working.width, height: working.height)
+            : nil
+
         var faceMasks: [FaceMask?] = []
         var anyPerson = false
         for faceIndex in 0..<faceBases.count {
             var outcome: Outcome?
             autoreleasepool {
-                let face: CGImage? = PerfDiag.timed("eq_face_extract") { extractFace(faceIndex, from: working) }
+                let base = faceBases[faceIndex]
+                let face: CGImage?
+                if let gpuTexture {
+                    face = PerfDiag.timed("eq_face_extract_gpu") {
+                        EquirectGPU.extractFace(from: gpuTexture,
+                                               fwd: base.fwd, right: base.right, up: base.upv,
+                                               faceSize: faceSize)
+                    }
+                } else {
+                    face = PerfDiag.timed("eq_face_extract_cpu") { extractFace(faceIndex, from: working) }
+                }
                 guard let face else {
                     outcome = .failed("face \(faceIndex) extraction failed")
                     return
