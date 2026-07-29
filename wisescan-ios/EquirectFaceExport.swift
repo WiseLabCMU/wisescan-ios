@@ -97,9 +97,11 @@ enum EquirectFaceExport {
 
         let phoneToWorld = matrixFromColumnMajor(flat.map(Float.init))
 
-        // Compose the 360° camera pose using the solved calibration or mechanical prior
+        // Compose the 360° camera pose using the baked transform, solved calibration, or mechanical prior
         let camTransform: simd_float4x4
-        if let profile = rigProfile, profile.isSolved {
+        if let flatCam = (sidecar["cam_transform"] ?? sidecar["camTransform"]) as? [Double], flatCam.count == 16 {
+            camTransform = matrixFromColumnMajor(flatCam.map(Float.init))
+        } else if let profile = rigProfile, profile.isSolved {
             camTransform = RigCalibrationSolver.composeRigTransform(
                 phoneToWorld: phoneToWorld,
                 dy: profile.dy, dLateral: profile.dLateral,

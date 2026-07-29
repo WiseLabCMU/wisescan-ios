@@ -298,9 +298,15 @@ extension MeshPreviewView {
                 SIMD4<Float>(Float(flat[12]), Float(flat[13]), Float(flat[14]), Float(flat[15]))
             ))
 
-            // Compose rig camera pose (calibrated or mechanical prior)
             let camTransform: simd_float4x4
-            if let profile = rigProfile, profile.isSolved {
+            if let flatCam = (dict["cam_transform"] ?? dict["camTransform"]) as? [Double], flatCam.count == 16 {
+                camTransform = simd_float4x4(columns: (
+                    SIMD4<Float>(Float(flatCam[0]), Float(flatCam[1]), Float(flatCam[2]), Float(flatCam[3])),
+                    SIMD4<Float>(Float(flatCam[4]), Float(flatCam[5]), Float(flatCam[6]), Float(flatCam[7])),
+                    SIMD4<Float>(Float(flatCam[8]), Float(flatCam[9]), Float(flatCam[10]), Float(flatCam[11])),
+                    SIMD4<Float>(Float(flatCam[12]), Float(flatCam[13]), Float(flatCam[14]), Float(flatCam[15]))
+                ))
+            } else if let profile = rigProfile, profile.isSolved {
                 camTransform = RigCalibrationSolver.composeRigTransform(
                     phoneToWorld: phoneToWorld,
                     dy: profile.dy, dLateral: profile.dLateral,

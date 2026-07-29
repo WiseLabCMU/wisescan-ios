@@ -43,6 +43,23 @@ extension ThetaCameraManager {
         let flatTransform = columns.flatMap { [$0.x, $0.y, $0.z, $0.w] }
 
         let rigProfile = RigProfile.load()
+        let camTransformMatrix: simd_float4x4
+        if let profile = rigProfile, profile.isSolved {
+            camTransformMatrix = RigCalibrationSolver.composeRigTransform(
+                phoneToWorld: matrix,
+                dy: profile.dy, dLateral: profile.dLateral,
+                yaw: profile.yaw, pitchResidual: profile.pitchResidual
+            )
+        } else {
+            camTransformMatrix = RigCalibrationSolver.composeRigTransform(
+                phoneToWorld: matrix,
+                dy: AppConstants.rigRodHeightMeters, dLateral: 0,
+                yaw: AppConstants.rigYawOffsetDegrees * .pi / 180, pitchResidual: 0
+            )
+        }
+        let camCols = [camTransformMatrix.columns.0, camTransformMatrix.columns.1, camTransformMatrix.columns.2, camTransformMatrix.columns.3]
+        let flatCamTransform = camCols.flatMap { [$0.x, $0.y, $0.z, $0.w] }
+
         let metadata = EquirectStillMetadata(
             sequence: input.sequence,
             timestamp: input.timestamp,
@@ -51,6 +68,7 @@ extension ThetaCameraManager {
             width: input.format?.width,
             height: input.format?.height,
             phoneTransform: flatTransform,
+            camTransform: flatCamTransform,
             cameraFileURL: input.sourceURL,
             triggerMs: input.triggerMs,
             transferMs: input.transferMs,
@@ -78,6 +96,7 @@ private struct EquirectStillMetadata: Encodable {
     let width: Int?
     let height: Int?
     let phoneTransform: [Float]
+    let camTransform: [Float]?
     let cameraFileURL: String
     let triggerMs: Int
     let transferMs: Int
@@ -93,6 +112,7 @@ private struct EquirectStillMetadata: Encodable {
         case width
         case height
         case phoneTransform = "phone_transform"
+        case camTransform = "cam_transform"
         case cameraFileURL = "camera_file_url"
         case triggerMs = "trigger_ms"
         case transferMs = "transfer_ms"
