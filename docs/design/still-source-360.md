@@ -477,6 +477,109 @@ users on 2020-era iPads report save-time crashes, default `semanticLabeling` OFF
 `!MTLCreateSystemDefaultDevice().supportsFamily(.apple7)` — cost: no RoomPlan room, so no
 plane registration on those devices (rescans fall back to relocalization-only seating).
 
+## Performance Optimization Roadmap
+
+> **Context (2026-07-29):** The export pipeline is the primary performance bottleneck — not
+> the in-situ WiFi transfer during capture. A scan with 10+ equirect stills at 61MP spends
+> significant time on privacy blur (6× Vision segmentation + mask compositing per still)
+> and cube face generation (5× gnomonic reprojection + JPEG encode per still). The capture
+> flow's ~6s per-still WiFi round-trip is tolerable; the export wall-clock is not.
+
+### Step 1: Profile the export pipeline (prerequisite)
+
+Add `os_signpost` interval markers to the per-still export stages so a single export run
+with 5–10 equirects produces a concrete timing breakdown:
+
+| Stage | Where | Marker |
+| :--- | :--- | :--- |
+| Working decode | `EquirectPrivacyBlur.decodeWorkingBitmap` | `equirect_decode` |
+| Face extraction (×6) | `EquirectPrivacyBlur.extractFace` | `privacy_face_extract` |
+| Vision segmentation (×6) | `EquirectPrivacyBlur` VNRequest | `privacy_vision_segment` |
+| Mask projection | `EquirectPrivacyBlur` equirect mask compositing | `privacy_mask_project` |
+| Full-res pixelation | `EquirectPrivacyBlur` CoreImage composite | `privacy_pixelate` |
+| Cube face reprojection (×5) | `EquirectFaceExport.emitFaces` | `cubeface_reproject` |
+| JPEG encode (×5) | `EquirectFaceExport` ImageIO write | `cubeface_encode` |
+
+Run on device (iPhone 17 Pro) with Instruments → `os_signpost` to identify which stages
+dominate before writing any Metal code.
+
+### Step 2: GPU-accelerate equirect⇄pinhole reprojection (CIKernel)
+
+The gnomonic (equirect → pinhole face) sampling used by both `EquirectPrivacyBlur` (6×
+detection faces) and `EquirectFaceExport` (5× export faces) is the same per-pixel
+spherical→planar coordinate transform — embarrassingly parallel, ideal for GPU.
+
+**Approach: CIKernel (Metal Shading Language via CoreImage)**
+
+- Write a Metal-language `CIColorKernel` or `CIWarpKernel` that maps each output pixel
+  `(u,v)` in a pinhole face to a spherical direction, then to equirect `(lon,lat)` source
+  coordinates. The face basis (forward/right/up) and FOV are kernel parameters.
+- Integrates with the existing CoreImage lazy pipeline — critical for 61MP stills
+  (~242 MB decoded) where the tiled decode avoids peak memory pressure.
+- A single shared CIKernel serves both privacy blur (detection faces) and cube face export
+  (output faces), replacing the two independent CPU pixel-loop samplers.
+- The inverse transform (pinhole mask → equirect mask) for privacy blur mask projection
+  is the same kernel in reverse and can also be GPU-accelerated.
+
+**Why CIKernel over raw Metal compute:**
+- Inherits CoreImage's memory management (tiling, lazy decode) — the 61MP still never
+  needs to be fully decoded into a raw bitmap.
+- Minimal API surface change: `EquirectPrivacyBlur` and `EquirectFaceExport` call the
+  same CIFilter with different face parameters.
+- The export runs outside the capture view, so there is no GPU contention with
+  ARKit/RealityKit.
+
+### Step 3: GPU-accelerate privacy pixelation
+
+The privacy pixelation composite (uniform-color blocks over person regions on the
+full-res equirect) is also a candidate for CIKernel acceleration: the mask lookup + block
+quantization + color replacement is per-pixel arithmetic on the GPU. Combined with step 2,
+the entire per-still privacy pass (face extraction + segmentation + mask projection +
+pixelation) would be GPU-accelerated except for the Vision model inference itself (which
+already runs on the Neural Engine).
+
+### Transfer optimization: USB-PTP post-scan batch download
+
+> **Status:** Future enhancement — deferred pending export performance work.
+
+The WiFi AP transfer at ~4.5 MB/s is the capture-flow bottleneck (~2.5s per 11MB still).
+Two complementary approaches for different user profiles:
+
+**BLE trigger + post-scan USB-PTP batch download (power users):**
+- During scan: BLE triggers only (sub-second, no WiFi captivity). Record `StillTicket`
+  with sequence number + timestamp.
+- After scan: connect the Theta via USB-C cable. Use iOS `ImageCaptureCore`
+  (`ICDeviceBrowser` / `ICCameraDevice`) to enumerate and download files by path
+  (e.g. `/DCIM/100RICOH/R0010001.JPG`), matched to StillTickets by filename sequence or
+  EXIF timestamp.
+- USB 2.0 transfer at ~40 MB/s → 10× 11MB stills in ~3s total vs ~25s over WiFi.
+- Caveat: requires physical cable after each scan; requires `NSPhotoLibraryUsageDescription`
+  entitlement.
+
+**WiFi post-scan download (default / novice users):**
+- Same BLE trigger + StillTicket flow, but download over WiFi AP after scan ends.
+- No cable, slightly slower (~25s for 10 stills). Already described in the design doc's
+  post-process transfer mode.
+
+Both modes share the same StillTicket matching logic; the transport layer is the only
+difference. Support both with a per-session or per-profile setting.
+
+### Hybrid export: raw equirect + cube faces
+
+Export both representations so downstream pipelines can choose:
+
+- **Cube faces** (5× pinhole, current): immediate Polycam / basic pipeline compatibility.
+  Every tool that expects pinhole cameras works unchanged.
+- **Raw equirect** (archived in `equirect_stills/`): for Nerfstudio / 3DGS (gsplat)
+  direct ingestion. Nerfstudio supports `EQUIRECTANGULAR` as a native camera model
+  (`camera_type: 2`). 3DGS via gsplat also handles equirectangular.
+
+**Deferred schema change:** Adding equirect frames as entries in `transforms.json` (with
+`camera_model: "EQUIRECTANGULAR"` and the baked `cam_transform` as `transform_matrix`)
+is deferred until the Nerfstudio end-to-end integration is tested. The raw equirects +
+pose sidecars in `equirect_stills/` already carry all the information needed; the
+`transforms.json` integration is a convenience for pipelines that read a single manifest.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
@@ -491,3 +594,4 @@ plane registration on those devices (rescans fall back to relocalization-only se
 - How does the coverage overlay communicate "covered by 360° still pending transfer"
   (post-process mode) vs "confirmed on device" — a third visual state or optimistic
   clear with post-scan reconciliation report?
+
