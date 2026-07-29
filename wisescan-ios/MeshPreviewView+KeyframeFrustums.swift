@@ -66,7 +66,7 @@ extension MeshPreviewView {
     /// world frame. Runs OFF-main on the preview-load queue (detached SCNNode trees are legal
     /// to build on any thread): a long scan parses a multi-MB transforms.json and assembles
     /// hundreds of wedge nodes, which would be a visible hitch stacked onto the main-thread attach.
-    nonisolated static func buildKeyframeMarkerNodes(scanDirectoryURL: URL?) -> KeyframeMarkerNodes {
+    nonisolated static func buildKeyframeMarkerNodes(scanDirectoryURL: URL?, rigProfile: RigProfile?) -> KeyframeMarkerNodes {
         guard let scanDir = scanDirectoryURL else { return KeyframeMarkerNodes(stills: nil, motion: nil, equirectFaces: nil) }
         let candidates = [
             scanDir.appendingPathComponent("raw_data").appendingPathComponent("transforms.json"),
@@ -123,7 +123,7 @@ extension MeshPreviewView {
         }
 
         // Build equirect face frustums from sidecar JSONs (pure pose math, no pixel data).
-        let equirectNodes = buildEquirectFaceNodes(scanDirectoryURL: scanDir)
+        let equirectNodes = buildEquirectFaceNodes(scanDirectoryURL: scanDir, rigProfile: rigProfile)
 
         return KeyframeMarkerNodes(
             stills: container(named: "keyframeStills", nodes: stillNodes),
@@ -258,7 +258,7 @@ extension MeshPreviewView {
     /// on-the-fly from the sidecar's `phone_transform` + rig calibration (or prior).
     /// Each face is a 90° FOV pinhole (tan(45°) = 1.0). Runs off-main alongside the
     /// keyframe builder. Returns nil if no equirect stills exist.
-    private nonisolated static func buildEquirectFaceNodes(scanDirectoryURL: URL) -> SCNNode? {
+    private nonisolated static func buildEquirectFaceNodes(scanDirectoryURL: URL, rigProfile: RigProfile?) -> SCNNode? {
         let fileMgr = FileManager.default
         let equirectDir = scanDirectoryURL
             .appendingPathComponent("raw_data")
@@ -269,9 +269,6 @@ extension MeshPreviewView {
             .filter { $0.pathExtension.lowercased() == "json" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !sidecars.isEmpty else { return nil }
-
-        // Load rig profile (calibrated or nil → mechanical prior)
-        let rigProfile = RigProfile.load()
 
         // Pre-build geometry for each face direction (5 cache entries; shared across all stills).
         // 90° FOV pinhole: tan(45°) = 1.0.

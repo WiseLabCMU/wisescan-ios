@@ -30,7 +30,7 @@ extension ThetaCameraManager {
     /// — the camera-agnostic 360° contract (any equirectangular source writes here; the
     /// device identity travels in the sidecar's `still_source`, not in path names).
     /// Nonisolated so the file write runs off the main actor.
-    nonisolated static func writeScanStill(data: Data, input: ScanStillInput, into rawDataDir: URL) throws {
+    nonisolated static func writeScanStill(data: Data, input: ScanStillInput, into rawDataDir: URL, rigProfile: RigProfile?) throws {
         let dir = rawDataDir.appendingPathComponent("equirect_stills")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -41,8 +41,6 @@ extension ThetaCameraManager {
         let matrix = input.phoneTransform
         let columns = [matrix.columns.0, matrix.columns.1, matrix.columns.2, matrix.columns.3]
         let flatTransform = columns.flatMap { [$0.x, $0.y, $0.z, $0.w] }
-
-        let rigProfile = RigProfile.load()
         let camTransformMatrix: simd_float4x4
         if let profile = rigProfile, profile.isSolved {
             camTransformMatrix = RigCalibrationSolver.composeRigTransform(

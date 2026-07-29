@@ -1211,7 +1211,7 @@ struct ScanCard: View {
                 let dCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("depth").path))?.count ?? 0
                 let confCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("confidence").path))?.count ?? 0
                 let cCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("cameras").path))?.count ?? 0
-                let eCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("equirect_stills").path))?.filter { $0.hasSuffix(".jpg") }.count ?? 0
+                let eCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("equirect_stills").path))?.filter { $0.lowercased().hasSuffix(".jpg") }.count ?? 0
 
                 let relocMissing = !fm.fileExists(atPath: worldMapPath)
 

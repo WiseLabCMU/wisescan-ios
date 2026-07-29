@@ -104,7 +104,8 @@ enum RigCalibrationSolver {
             pitchResidual: result.point.w,
             residualCm: result.cost,
             timestamp: Date(),
-            cameraModel: prior.cameraModel
+            cameraModel: prior.cameraModel,
+            cameraSerialNumber: prior.cameraSerialNumber
         )
         return CalibrationResult(
             profile: solved,
@@ -521,6 +522,8 @@ struct RigProfile: Codable, Equatable {
     let timestamp: Date
     /// Camera model string (e.g. "RICOH THETA X") for provenance.
     let cameraModel: String?
+    /// Camera serial number for binding a calibration to a specific hardware device.
+    let cameraSerialNumber: String?
 
     /// The mechanical prior: `AppConstants` defaults, no calibration.
     static var mechanicalPrior: RigProfile {
@@ -531,11 +534,25 @@ struct RigProfile: Codable, Equatable {
             pitchResidual: 0,
             residualCm: -1,  // sentinel: not calibrated
             timestamp: .distantPast,
-            cameraModel: nil
+            cameraModel: nil,
+            cameraSerialNumber: nil
         )
     }
 
     var isSolved: Bool { residualCm >= 0 && residualCm.isFinite }
+
+    func with(cameraModel: String?, cameraSerialNumber: String?) -> RigProfile {
+        RigProfile(
+            dy: dy,
+            dLateral: dLateral,
+            yaw: yaw,
+            pitchResidual: pitchResidual,
+            residualCm: residualCm,
+            timestamp: timestamp,
+            cameraModel: cameraModel ?? self.cameraModel,
+            cameraSerialNumber: cameraSerialNumber ?? self.cameraSerialNumber
+        )
+    }
 
     // MARK: - Persistence
 

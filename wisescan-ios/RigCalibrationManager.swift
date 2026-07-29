@@ -33,6 +33,19 @@ final class RigCalibrationManager {
     /// The currently persisted calibration profile (loaded at init, updated after accept).
     private(set) var currentProfile: RigProfile?
 
+    /// The currently active profile. Returns `nil` if a camera is connected but its
+    /// serial number mismatches the profile's stored serial number.
+    var activeProfile: RigProfile? {
+        guard let profile = currentProfile else { return nil }
+        let theta = ThetaCameraManager.shared
+        if theta.isConnected, let serial = theta.serialNumber, let profileSerial = profile.cameraSerialNumber {
+            if serial != profileSerial {
+                return nil // Serial mismatch: calibration is physically invalid
+            }
+        }
+        return profile
+    }
+
     /// Last solved result (available during `.review`).
     private(set) var lastResult: RigCalibrationSolver.CalibrationResult?
 
@@ -252,11 +265,20 @@ final class RigCalibrationManager {
         }
     }
 
-    /// Accept the calibration result and persist it.
     func acceptCalibration() {
         guard let result = lastResult else { return }
-        result.profile.save()
-        currentProfile = result.profile
+        
+        let theta = ThetaCameraManager.shared
+        var model: String?
+        if case .connected(let m, _) = theta.state { model = m }
+        
+        let boundProfile = result.profile.with(
+            cameraModel: model,
+            cameraSerialNumber: theta.serialNumber
+        )
+        
+        boundProfile.save()
+        currentProfile = boundProfile
         state = .idle
         cleanupTempDir()
         logger.info("Calibration accepted and saved (residual: \(result.residualCm) cm)")

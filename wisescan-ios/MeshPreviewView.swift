@@ -439,8 +439,10 @@ struct MeshPreviewView: UIViewRepresentable {
         fillLight.eulerAngles = SCNVector3(Float.pi / 4, -Float.pi / 3, 0)
         scene.rootNode.addChildNode(fillLight)
 
+        let rigProfile = RigProfile.load()
+
         // Dispatch to background queue for loading files and parsing OBJ
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [rigProfile] in
             var meshData: Data?
             var colorsData: Data?
 
@@ -484,7 +486,7 @@ struct MeshPreviewView: UIViewRepresentable {
                 // (transforms.json). Derived entirely from existing raw data — no capture-time
                 // cost, and built here off-main (JSON parse + node flattening) so the one-time
                 // preview attach on main stays cheap. The three-tier mode toggles visibility.
-                let markerNodes = Self.buildKeyframeMarkerNodes(scanDirectoryURL: self.scanDirectoryURL)
+                let markerNodes = Self.buildKeyframeMarkerNodes(scanDirectoryURL: self.scanDirectoryURL, rigProfile: rigProfile)
 
                 DispatchQueue.main.async {
                     let node = SCNNode(geometry: geometry)
