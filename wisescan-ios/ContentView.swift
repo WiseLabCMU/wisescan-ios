@@ -46,8 +46,9 @@ struct ContentView: View {
                     // Stills + solver run on the Capture tab (needs AR session)
                     if selectedTab != 1 { selectedTab = 1 }
                 case .review, .failed:
-                    // Review/accept (or failure/retry) lives on the Dashboard card
-                    if selectedTab != 0 { selectedTab = 0 }
+                    // Review and failure UI are now integrated directly into the Capture tab
+                    // so the user can immediately begin a scan without switching tabs.
+                    if selectedTab != 1 { selectedTab = 1 }
                 case .idle:
                     break // stay wherever the user is
                 }

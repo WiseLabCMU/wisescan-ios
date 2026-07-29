@@ -321,6 +321,47 @@ struct CaptureView: View {
                     .foregroundColor(.gray)
             }
 
+            if case .review(let residualCm, _) = rigCalibrationManager.state {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(residualCm <= AppConstants.calibrationResidualGreenCm ? .green
+                              : residualCm <= AppConstants.calibrationResidualYellowCm ? .yellow
+                              : .red)
+                        .frame(width: 8, height: 8)
+                    Text(String(format: "Calibration residual: %.1f cm", residualCm))
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                }
+                
+                if residualCm > AppConstants.calibrationResidualYellowCm {
+                    Text("High residual — consider re-adjusting the rig and re-calibrating.")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                        .multilineTextAlignment(.center)
+                }
+                
+                HStack(spacing: 12) {
+                    Button(action: { rigCalibrationManager.acceptCalibration() }) {
+                        Text("Accept")
+                            .font(.subheadline.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.green.opacity(0.3))
+                            .cornerRadius(8)
+                            .foregroundColor(.green)
+                    }
+                    Button(action: { rigCalibrationManager.redoCalibration() }) {
+                        Text("Redo")
+                            .font(.subheadline.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.gray.opacity(0.3))
+                            .cornerRadius(8)
+                            .foregroundColor(.gray)
+                    }
+                }
+            }
+
             if case .failed(let reason) = rigCalibrationManager.state {
                 HStack(spacing: 8) {
                     Image(systemName: "xmark.circle.fill")
