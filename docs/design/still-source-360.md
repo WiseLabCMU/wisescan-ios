@@ -485,58 +485,53 @@ plane registration on those devices (rescans fall back to relocalization-only se
 > and cube face generation (5× gnomonic reprojection + JPEG encode per still). The capture
 > flow's ~6s per-still WiFi round-trip is tolerable; the export wall-clock is not.
 
-### Step 1: Profile the export pipeline (prerequisite)
+### Step 1: Profile the export pipeline ✅ (2026-07-29)
 
-Add `os_signpost` interval markers to the per-still export stages so a single export run
-with 5–10 equirects produces a concrete timing breakdown:
+`PerfDiag.timed()` markers added to all per-still export stages. Device profile (7 equirect
+stills, Theta Z1 6720×3360, iPhone — `360run4.log`) produced this breakdown:
 
-| Stage | Where | Marker |
-| :--- | :--- | :--- |
-| Working decode | `EquirectPrivacyBlur.decodeWorkingBitmap` | `equirect_decode` |
-| Face extraction (×6) | `EquirectPrivacyBlur.extractFace` | `privacy_face_extract` |
-| Vision segmentation (×6) | `EquirectPrivacyBlur` VNRequest | `privacy_vision_segment` |
-| Mask projection | `EquirectPrivacyBlur` equirect mask compositing | `privacy_mask_project` |
-| Full-res pixelation | `EquirectPrivacyBlur` CoreImage composite | `privacy_pixelate` |
-| Cube face reprojection (×5) | `EquirectFaceExport.emitFaces` | `cubeface_reproject` |
-| JPEG encode (×5) | `EquirectFaceExport` ImageIO write | `cubeface_encode` |
+| Stage | Per-Call (ms) | Calls/Still | Subtotal | % of Still |
+| :--- | :--- | :--- | :--- | :--- |
+| `eq_decode` | 253 | 1 | 253 | 2.5% |
+| **`eq_face_extract`** | **1,520** | **6** | **9,120** | **90.5%** |
+| `eq_vision_segment` | 62 | 6 | 372 | 3.7% |
+| `eq_mask_project` | 173 | 1 | 173 | 1.7% |
+| `eq_pixelate` | 200 | 1 | 200 | 2.0% |
+| **Privacy total** | | | **~10,100** | |
+| `cf_decode` | 945 | 1 | 945 | 3.5% |
+| **`cf_reproject`** | **5,190** | **5** | **25,950** | **96.4%** |
+| **Cube face total** | | | **~26,900** | |
 
-Run on device (iPhone 17 Pro) with Instruments → `os_signpost` to identify which stages
-dominate before writing any Metal code.
+**Result:** CPU gnomonic reprojection (the pixel-by-pixel equirect→pinhole bilinear
+sampler) is **94.5% of per-still cost** — the ONLY bottleneck. Vision segmentation
+(~62 ms/face on the Neural Engine), mask projection, and CoreImage pixelation are all fast.
 
-### Step 2: GPU-accelerate equirect⇄pinhole reprojection (CIKernel)
+### Step 2: GPU-accelerate equirect→pinhole reprojection ✅ (2026-07-29)
 
-The gnomonic (equirect → pinhole face) sampling used by both `EquirectPrivacyBlur` (6×
-detection faces) and `EquirectFaceExport` (5× export faces) is the same per-pixel
-spherical→planar coordinate transform — embarrassingly parallel, ideal for GPU.
+**Approach: Metal compute shader** (chosen over CIKernel because the input is a raw bitmap,
+not a CIImage in the privacy-blur decode path; Metal compute is consistent with the existing
+`Shaders/` codebase and gives precise control over texture upload + readback).
 
-**Approach: CIKernel (Metal Shading Language via CoreImage)**
+- `Shaders/EquirectReproject.metal`: two kernel variants — `equirectToFace` (axis-aligned
+  face bases for privacy blur) and `equirectToFaceRotated` (rotation-matrix faces for cube
+  face export). Hardware bilinear sampling with repeat-address longitude wrapping.
+- `EquirectGPU.swift`: Swift dispatch helper; shared `MTLDevice` + `MTLCommandQueue` for
+  process lifetime. Creates GPU textures from bitmap data, dispatches the kernel, reads back
+  `CGImage` (privacy) or JPEG `Data` (export). `isAvailable` guard for graceful CPU fallback.
+- `EquirectPrivacyBlur`: uploads working bitmap to GPU texture once per still, dispatches
+  all 6 face extractions via `EquirectGPU.extractFace`. Falls back to CPU `extractFace` if
+  Metal unavailable. PerfDiag markers: `eq_face_extract_gpu` vs `_cpu`.
+- `EquirectFaceExport`: same pattern for 5 export faces via `EquirectGPU.renderFace`.
+  PerfDiag markers: `cf_reproject_gpu` vs `_cpu`.
 
-- Write a Metal-language `CIColorKernel` or `CIWarpKernel` that maps each output pixel
-  `(u,v)` in a pinhole face to a spherical direction, then to equirect `(lon,lat)` source
-  coordinates. The face basis (forward/right/up) and FOV are kernel parameters.
-- Integrates with the existing CoreImage lazy pipeline — critical for 61MP stills
-  (~242 MB decoded) where the tiled decode avoids peak memory pressure.
-- A single shared CIKernel serves both privacy blur (detection faces) and cube face export
-  (output faces), replacing the two independent CPU pixel-loop samplers.
-- The inverse transform (pinhole mask → equirect mask) for privacy blur mask projection
-  is the same kernel in reverse and can also be GPU-accelerated.
+**Pending device validation:** run a profiled export to measure actual GPU timings and verify
+visual correctness (face imagery must match the CPU output — same longitude/latitude
+conventions, same bilinear quality).
+### Step 3: GPU-accelerate privacy pixelation (deferred — low impact)
 
-**Why CIKernel over raw Metal compute:**
-- Inherits CoreImage's memory management (tiling, lazy decode) — the 61MP still never
-  needs to be fully decoded into a raw bitmap.
-- Minimal API surface change: `EquirectPrivacyBlur` and `EquirectFaceExport` call the
-  same CIFilter with different face parameters.
-- The export runs outside the capture view, so there is no GPU contention with
-  ARKit/RealityKit.
-
-### Step 3: GPU-accelerate privacy pixelation
-
-The privacy pixelation composite (uniform-color blocks over person regions on the
-full-res equirect) is also a candidate for CIKernel acceleration: the mask lookup + block
-quantization + color replacement is per-pixel arithmetic on the GPU. Combined with step 2,
-the entire per-still privacy pass (face extraction + segmentation + mask projection +
-pixelation) would be GPU-accelerated except for the Vision model inference itself (which
-already runs on the Neural Engine).
+Profiling shows `eq_pixelate` is only ~200 ms/still (2% of per-still cost). The CoreImage
+lazy pipeline already handles the full-res composite efficiently. This step is deferred
+unless GPU acceleration of steps 1–2 reveals pixelation as a new bottleneck.
 
 ### Transfer optimization: USB-PTP post-scan batch download
 
