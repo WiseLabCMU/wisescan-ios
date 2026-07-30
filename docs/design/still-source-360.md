@@ -665,6 +665,34 @@ run-to-run drift guard, per design.
    FREE; only then widen the in-app yaw bound (screw-mount reality) and re-run on rig.
 4. Keep: bounds on dy/dLat/pitch, coverage + edge-count + stillness gates, spot-check.
 
+## Session yaw: not a rig constant (2026-07-30 EOD)
+
+Run 14 (two full calibration sessions, rig physically untouched between them): the
+solved yaw jumped −44.7° → +58.3° while dy/dLat/pitch repeated (Δ ≤ 4 cm / 1.3°), and
+the offline replica confirmed each session's solve found the true global basin OF ITS
+OWN IMAGES — i.e. **the Theta re-derives its equirect yaw reference per session**
+(its correction modes `ApplySemiAuto`/`ApplySave`/`ApplyLoad` exist precisely because
+per-image correction parameters vary). Meanwhile run 13 vs run 14-A yaw repeated within
+0.8° — the solver itself is precise; the reference under it moves.
+
+**Architecture (implemented):** the model is split.
+- **Calibration** persists the true rig constants — dy, dLateral, pitchResidual —
+  which repeat across sessions. The stored profile's yaw is only session-local.
+- **Session yaw** is re-solved from each scan's FIRST still
+  (`RigCalibrationSolver.solveSessionYaw`: 1-D global coarse scan + two fine passes,
+  ~46 cost evals) inside the existing first-still spot-check, which is thereby promoted
+  from drift detector to estimator. Scan stills bake `cam_transform` via
+  `scanBakeProfile` (calibrated geometry + session yaw); still_0001 — which uploads
+  before its own yaw exists — is re-baked after the solve.
+- **Drift semantics sharpened:** with yaw absorbed per scan, an elevated spot-check
+  residual now specifically means the rig GEOMETRY (clamp/rod) shifted.
+- Uncalibrated (mechanical-prior) scans keep the static `rigYawOffsetDegrees` — the
+  session-yaw solve currently requires a solved profile.
+
+Remaining precision levers if per-still yaw noise (±28° observed) matters for face
+poses: person-segmentation masking of the near-horizon operator, orientation-aware
+edge matching.
+
 ## Code-review follow-ups resolved (2026-07-29)
 
 The four open findings from the branch code review are closed:

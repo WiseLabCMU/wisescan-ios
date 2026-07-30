@@ -30,6 +30,31 @@ extension ThetaCameraManager {
     /// — the camera-agnostic 360° contract (any equirectangular source writes here; the
     /// device identity travels in the sidecar's `still_source`, not in path names).
     /// Nonisolated so the file write runs off the main actor.
+    /// Re-bake still_0001's cam_transform after the session-yaw solve. The first still
+    /// uploads BEFORE the yaw is known (it is the still the yaw solves FROM), so its
+    /// sidecar is initially written with the calibration-session yaw — stale on this
+    /// hardware (the Theta re-derives its equirect yaw reference per session; run14).
+    nonisolated static func rebakeFirstStillSidecar(rawDataDir: URL, profile: RigProfile) {
+        let url = rawDataDir.appendingPathComponent("equirect_stills/still_0001.json")
+        guard let data = try? Data(contentsOf: url),
+              var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let flat = obj["phone_transform"] as? [Double], flat.count == 16 else { return }
+        let cols = (0..<4).map { c in
+            SIMD4<Float>(Float(flat[c * 4]), Float(flat[c * 4 + 1]),
+                         Float(flat[c * 4 + 2]), Float(flat[c * 4 + 3]))
+        }
+        let phone = simd_float4x4(columns: (cols[0], cols[1], cols[2], cols[3]))
+        let cam = RigCalibrationSolver.composeRigTransform(
+            phoneToWorld: phone, dy: profile.dy, dLateral: profile.dLateral,
+            yaw: profile.yaw, pitchResidual: profile.pitchResidual)
+        let camCols = [cam.columns.0, cam.columns.1, cam.columns.2, cam.columns.3]
+        obj["cam_transform"] = camCols.flatMap { [Double($0.x), Double($0.y), Double($0.z), Double($0.w)] }
+        if let out = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) {
+            try? out.write(to: url)
+            PerfDiag.log("[RigCal] still_0001 sidecar re-baked with session yaw")
+        }
+    }
+
     nonisolated static func writeScanStill(data: Data, input: ScanStillInput, into rawDataDir: URL, rigProfile: RigProfile?) throws {
         let dir = rawDataDir.appendingPathComponent("equirect_stills")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

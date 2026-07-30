@@ -544,15 +544,36 @@ final class RigCalibrationManager {
     /// Whether the first-still spot-check has already run for the current scan.
     private var hasSpotChecked = false
 
+    /// Per-scan yaw solved from the scan's first still (nil until solved). The Theta
+    /// re-derives its equirect yaw reference per session (run14: 103° image-frame jump
+    /// with the rig physically untouched), so the calibrated profile's yaw is only valid
+    /// within the session that solved it — every scan re-estimates.
+    private(set) var sessionYaw: Float?
+
+    /// Profile to BAKE into scan-still sidecars: calibrated geometry with the per-scan
+    /// session yaw substituted once the first-still solve produced one.
+    var scanBakeProfile: RigProfile? {
+        guard let profile = activeProfile else { return nil }
+        guard profile.isSolved, let yaw = sessionYaw else { return profile }
+        return RigProfile(dy: profile.dy, dLateral: profile.dLateral, yaw: yaw,
+                          pitchResidual: profile.pitchResidual,
+                          residualPx: profile.residualPx, timestamp: profile.timestamp,
+                          cameraModel: profile.cameraModel,
+                          cameraSerialNumber: profile.cameraSerialNumber)
+    }
+
     /// Reset the spot-check flag at the start of each recording session.
     func resetSpotCheck() {
         hasSpotChecked = false
         driftWarning = nil
+        sessionYaw = nil
     }
 
-    /// Run the first-still calibration spot-check. Called after the first 360° still
-    /// of a scan downloads. Evaluates the cost function at the stored parameters against
-    /// the live capture — no optimization, O(1), milliseconds.
+    /// First-still session solve + drift spot-check. Called after the first 360° still
+    /// of a scan downloads. Solves the SESSION yaw (1-D global scan — yaw is not a rig
+    /// constant on this hardware, see `sessionYaw`) using the calibrated dy/dLat/pitch,
+    /// then compares the at-yaw residual against the stored calibration residual: with
+    /// yaw absorbed, elevated residual means the rig GEOMETRY (clamp/rod) shifted.
     ///
     /// - Returns: `true` if the check passed (or was skipped), `false` if drift detected.
     @discardableResult
@@ -575,7 +596,7 @@ final class RigCalibrationManager {
         // ALL compute off main: this runs MID-RECORDING (first 360° still of the scan) —
         // extraction alone can touch 100k+ live mesh vertices, and a main stall here is the
         // VIO-starvation class the capture pipeline is engineered to avoid.
-        let liveResidualOrNil: Float? = await Self.computeOffMain {
+        let solvedOrNil: (yaw: Float, residualPx: Float)? = await Self.computeOffMain {
             let (meshEdges, _) = RigCalibrationSolver.extractMeshEdges(
                 from: meshAnchors, near: phonePos,
                 radius: AppConstants.calibrationMeshRadiusMeters
@@ -588,12 +609,15 @@ final class RigCalibrationManager {
                 edgeMap: edgeMap,
                 meshEdges: meshEdges
             )
-            return RigCalibrationSolver.validateCalibration(input: input, profile: profile)
+            return RigCalibrationSolver.solveSessionYaw(input: input, profile: profile)
         }
-        guard let liveResidual = liveResidualOrNil else {
-            logger.warning("Spot-check: edge detection failed — skipped")
+        guard let (solvedYaw, liveResidual) = solvedOrNil else {
+            logger.warning("Spot-check: edge detection / yaw solve failed — skipped (stills bake with the calibration-session yaw)")
             return true
         }
+        sessionYaw = solvedYaw
+        PerfDiag.log(String(format: "[RigCal] session yaw solved: %.2f° (calibration-session yaw was %.2f°) — residual %.2f px",
+                            solvedYaw * 180 / .pi, profile.yaw * 180 / .pi, liveResidual))
         let storedResidual = profile.residualPx
         let driftRatio = storedResidual > 0 ? liveResidual / storedResidual : Float.greatestFiniteMagnitude
 

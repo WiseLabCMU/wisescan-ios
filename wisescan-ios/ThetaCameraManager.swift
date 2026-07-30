@@ -376,7 +376,7 @@ final class ThetaCameraManager {
                     sequence: seq, phoneTransform: phoneTransform, timestamp: timestamp,
                     sourceURL: fileURL, sourceModel: connectedModel, format: currentStillFormat,
                     triggerMs: triggerMs, transferMs: transferMs)
-                let rigProfile = RigCalibrationManager.shared.activeProfile
+                let rigProfile = RigCalibrationManager.shared.scanBakeProfile
                 try await Self.writeScanStill(data: data, input: input, into: rawDataDir, rigProfile: rigProfile)
                 scanStillCount = seq
                 lastCapture = CaptureOutcome(fileURL: fileURL, roundTripMs: triggerMs)

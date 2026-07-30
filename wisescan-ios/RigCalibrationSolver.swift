@@ -245,6 +245,58 @@ enum RigCalibrationSolver {
         return out as Data
     }
 
+    /// Solve the SESSION yaw from a single still, holding the calibrated dy/dLat/pitch
+    /// fixed. Run14 (rig untouched between sessions) proved the Theta re-derives its
+    /// equirect yaw reference per session — the image "front" moved 103° with zero
+    /// physical change — so yaw is NOT a persistable rig constant. dy/dLat/pitch repeat
+    /// across sessions (Δ ≤ 3 cm / ~2°); yaw must be re-solved from each scan's first
+    /// still. Coarse full-circle scan (15°) then two fine passes — ~46 cost evals, ms.
+    static func solveSessionYaw(input: CalibrationInput, profile: RigProfile)
+        -> (yaw: Float, residualPx: Float)? {
+        guard !input.meshEdges.isEmpty else { return nil }
+        let maxEdges = AppConstants.calibrationMaxEdgesPerInput
+        let edges: [MeshEdge]
+        if input.meshEdges.count <= maxEdges {
+            edges = input.meshEdges
+        } else {
+            let step = max(1, input.meshEdges.count / maxEdges)
+            edges = Swift.stride(from: 0, to: input.meshEdges.count, by: step)
+                .prefix(maxEdges).map { input.meshEdges[$0] }
+        }
+        let sub = CalibrationInput(phoneToWorld: input.phoneToWorld,
+                                   edgeMap: input.edgeMap, meshEdges: edges)
+        let anchor = RigProfile.mechanicalPrior
+        let rig = composeRigTransform(phoneToWorld: sub.phoneToWorld,
+                                      dy: anchor.dy, dLateral: 0, yaw: 0, pitchResidual: 0)
+        let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
+        let mask = anchorInclusionMask(edges: sub.meshEdges, camPos: camPos)
+
+        func cost(_ yaw: Float) -> Float {
+            totalCost(params: SIMD4<Float>(profile.dy, profile.dLateral,
+                                           yaw, profile.pitchResidual),
+                      inputs: [sub], masks: [mask])
+        }
+        var best: (yaw: Float, cost: Float) = (0, .greatestFiniteMagnitude)
+        for step in 0..<24 {
+            let yaw = -Float.pi + Float(step) * (2 * Float.pi / 24)
+            let c = cost(yaw)
+            if c < best.cost { best = (yaw, c) }
+        }
+        for halfSpanDeg in [Float(7.5), 1.5] {
+            let halfSpan = halfSpanDeg * .pi / 180
+            let step = halfSpan / 5
+            var localBest = best
+            var yaw = best.yaw - halfSpan
+            while yaw <= best.yaw + halfSpan + 1e-6 {
+                let c = cost(yaw)
+                if c < localBest.cost { localBest = (yaw, c) }
+                yaw += step
+            }
+            best = localBest
+        }
+        return (normalizeAngle(best.yaw), best.cost)
+    }
+
     /// Quick validation: evaluate the cost function at the stored calibration parameters
     /// against a single new capture. Returns the current residual — if significantly worse
     /// than the stored calibration residual, the rig may have shifted.

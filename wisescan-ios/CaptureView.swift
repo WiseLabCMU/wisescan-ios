@@ -201,6 +201,14 @@ struct CaptureView: View {
                     if !passed, let warning = rigCalibrationManager.driftWarning {
                         showTransientMessage(warning, duration: 5)
                     }
+                    // Still 1 was baked before its session yaw existed — re-bake its
+                    // sidecar now that the solve produced one (stills 2+ bake correctly
+                    // via scanBakeProfile at write time).
+                    if rigCalibrationManager.sessionYaw != nil,
+                       let bakeProfile = rigCalibrationManager.scanBakeProfile {
+                        ThetaCameraManager.rebakeFirstStillSidecar(
+                            rawDataDir: rawDataDir, profile: bakeProfile)
+                    }
                 }
             }
         }
