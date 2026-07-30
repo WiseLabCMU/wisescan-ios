@@ -27,6 +27,15 @@ while read -r local_ref local_oid remote_ref remote_oid; do
                 FAIL=1
             fi
             ;;
+        *.pbxproj)
+            hits=$(pg_pbxproj_violations "$(git show "$local_oid:$f" 2>/dev/null)")
+            if [ -n "$hits" ]; then
+                echo ""
+                echo "❌ PUSH BLOCKED: file-sharing key(s) via build settings in $f:$hits  ($local_ref)"
+                echo "   INFOPLIST_KEY_ passthroughs generate the same Info.plist keys — amend/rebase before pushing."
+                FAIL=1
+            fi
+            ;;
         esac
         if pg_is_forbidden_path "$f"; then
             echo ""

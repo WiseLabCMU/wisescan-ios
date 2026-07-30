@@ -37,6 +37,8 @@ To inspect saved scans (`Documents/Scans/…/raw_data/`) on-device via the **Fil
 
 They expose the app's entire Documents folder — including the raw, unblurred 360° stills above — so they are **debug-only and must never be committed or shipped in a production build**. Keep them as a local working-tree edit; when you need to commit *other* `Custom-Info.plist` changes, stage them selectively with `git add -p` so the debug keys stay out.
 
+The same keys can also leak via **Xcode build settings**: `INFOPLIST_KEY_UIFileSharingEnabled = YES` in `project.pbxproj` writes the identical key into the generated Info.plist at build time. The hooks scan `.pbxproj` files for the key names too (verified 2026-07-30 — the plist-only check originally missed this spelling).
+
 **Enforcement (install once after cloning):**
 
 ```bash
