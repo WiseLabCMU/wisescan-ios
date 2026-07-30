@@ -178,7 +178,8 @@ struct ScanExportManager {
     /// was off by choice. Only genuinely indeterminate scans (metadata missing/corrupt, or a
     /// present-but-garbage flag) fail CLOSED into the Vision pass, which re-encodes frames
     /// visually unchanged when no person is detected.
-    private static func applyExportPrivacyPasses(rawDataDir: URL, stagedDir: URL) {
+    private static func applyExportPrivacyPasses(rawDataDir: URL, stagedDir: URL,
+                                                 phase: ((ExportPhase) -> Void)? = nil) {
         let fm = FileManager.default
         let masksDir = rawDataDir.appendingPathComponent("masks")
         let maskedFrames: Set<String> = ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
@@ -207,14 +208,16 @@ struct ScanExportManager {
             applyPrivacyBlurAtExport(
                 masksDir: masksDir,
                 imagesDir: stagedDir.appendingPathComponent("images"),
-                depthDir: stagedDir.appendingPathComponent("depth")
+                depthDir: stagedDir.appendingPathComponent("depth"),
+                phase: phase
             )
         }
         applyVisionBlurAtExport(
             imagesDir: stagedDir.appendingPathComponent("images"),
-            skippingFrames: maskedFrames
+            skippingFrames: maskedFrames,
+            phase: phase
         )
-        applyVisionBlurAtExport(imagesDir: stagedDir.appendingPathComponent("proxy_images"))
+        applyVisionBlurAtExport(imagesDir: stagedDir.appendingPathComponent("proxy_images"), phase: phase)
     }
 
     /// Vision-based person pixelation for staged JPEGs that have no capture-time segmentation
@@ -223,7 +226,8 @@ struct ScanExportManager {
     /// `pixelatePersonsAndGetFaceCenters` returns the original data on any failure, so a frame
     /// is never dropped from the export; frames with no detected person re-encode visually
     /// unchanged.
-    private static func applyVisionBlurAtExport(imagesDir: URL, skippingFrames: Set<String> = []) {
+    private static func applyVisionBlurAtExport(imagesDir: URL, skippingFrames: Set<String> = [],
+                                                phase: ((ExportPhase) -> Void)? = nil) {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(at: imagesDir, includingPropertiesForKeys: nil)
             .filter({ $0.pathExtension == "jpg" && !skippingFrames.contains($0.deletingPathExtension().lastPathComponent) })
@@ -232,7 +236,8 @@ struct ScanExportManager {
 
         print("[prepareExport] Vision privacy blur on \(files.count) unmasked images in \(imagesDir.lastPathComponent)/...")
         var written = 0
-        for url in files {
+        for (index, url) in files.enumerated() {
+            phase?(.counted("Privacy check", index + 1, of: files.count))
             // Per-frame pool for the same reason as applyPrivacyBlurAtExport: each Vision pass
             // decodes + re-renders a full-resolution frame through autoreleased CF transients.
             autoreleasepool {
@@ -258,7 +263,8 @@ struct ScanExportManager {
     ///
     /// Privacy guarantee: no unblurred image or unmasked depth ever leaves the device.
     /// The masks/ directory itself is NOT included in the export archive.
-    private static func applyPrivacyBlurAtExport(masksDir: URL, imagesDir: URL, depthDir: URL) {
+    private static func applyPrivacyBlurAtExport(masksDir: URL, imagesDir: URL, depthDir: URL,
+                                                 phase: ((ExportPhase) -> Void)? = nil) {
         let fm = FileManager.default
         guard let maskFiles = try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)
             .filter({ $0.pathExtension == "png" })
@@ -271,7 +277,8 @@ struct ScanExportManager {
         var blurredCount = 0
         var maskedDepthCount = 0
 
-        for maskURL in maskFiles {
+        for (index, maskURL) in maskFiles.enumerated() {
+            phase?(.counted("Privacy blur", index + 1, of: maskFiles.count))
             // Per-frame autoreleasepool: each iteration decodes a 4032×3024 JPEG plus a 16-bit
             // depth PNG through UIImage/CoreImage/ImageIO, whose CF transients are autoreleased —
             // without draining per frame they accumulate across the whole 70+ frame pass
@@ -436,8 +443,16 @@ struct ScanExportManager {
     /// up in it instead of rebuilding the graph + hopping to the main actor per scan. nil for
     /// single-scan exports, which build on demand below.
     // swiftlint:disable:next function_body_length cyclomatic_complexity
+    /// `phase`, when supplied, receives human-readable progress lines ("Copying frames…",
+    /// "Privacy blur 12/41…", "Cube faces 1/2…", "Zipping…") from the export queue —
+    /// callers hop to main and surface them in view state (ScanCard.exportPhase / the
+    /// parent's bulk dictionary — NOT on the model: uploadStatus round-trips through
+    /// SwiftData strings). The pipeline
+    /// has grown real phases (privacy blur, 360° verification, cube faces); a bare
+    /// "Converting..." hides where the time goes.
     static func prepareExport(filename: String, scanDir: URL, format: ExportFormat,
-                              bulkStitch: BulkStitchArtifacts? = nil) -> URL? {
+                              bulkStitch: BulkStitchArtifacts? = nil,
+                              phase: ((ExportPhase) -> Void)? = nil) -> URL? {
         let fm = FileManager.default
         let rawDataDir = scanDir.appendingPathComponent("raw_data")
 
@@ -459,6 +474,7 @@ struct ScanExportManager {
         // NOTE: masks/ is intentionally excluded — it's internal-only, used below for
         // export-time privacy blur but never shipped in the archive.
         func stagePolycamPayload(to dir: URL) {
+            phase?(ExportPhase("Copying frames…"))
             let items = ["images", "proxy_images", "depth", "confidence", "cameras", "mesh_info.json"]
             for item in items {
                 let src = rawDataDir.appendingPathComponent(item)
@@ -478,11 +494,12 @@ struct ScanExportManager {
             // ── Export-time privacy blur ──
             // Runs off the critical capture path, so performance is not a concern
             // (export is already async). No-op unless privacy was on during capture.
-            applyExportPrivacyPasses(rawDataDir: rawDataDir, stagedDir: dir)
+            applyExportPrivacyPasses(rawDataDir: rawDataDir, stagedDir: dir, phase: phase)
         }
 
         // Zip a staging directory and return the zip URL
         func zipStaging(_ stagingDir: URL) -> URL? {
+            phase?(ExportPhase("Zipping…"))
             let zipURL = fm.temporaryDirectory.appendingPathComponent(filename)
             try? fm.removeItem(at: zipURL)
 
@@ -620,7 +637,7 @@ struct ScanExportManager {
                         print("[prepareExport] RAW: failed to copy \(src): \(error.localizedDescription)")
                     }
                 }
-                applyExportPrivacyPasses(rawDataDir: rawDataDir, stagedDir: stagingDir)
+                applyExportPrivacyPasses(rawDataDir: rawDataDir, stagedDir: stagingDir, phase: phase)
                 return zipStaging(stagingDir)
             }
 

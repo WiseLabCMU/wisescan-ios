@@ -211,8 +211,34 @@ enum ExportFormat: String, CaseIterable, Codable {
     }
 }
 
+/// One export-pipeline phase for UI: a human-readable label plus, when the phase is
+/// countable, its within-phase fraction. Deliberately NOT an overall-pipeline percentage —
+/// which phases run depends on the scan (masks present? 360° stills? cube faces?), so any
+/// global weighting would be a fiction that stalls or jumps. The label names the phase, the
+/// bar shows progress inside it, and uncountable phases (copy, zip) render indeterminate.
+struct ExportPhase: Equatable {
+    let label: String
+    let fraction: Double?
+
+    init(_ label: String, fraction: Double? = nil) {
+        self.label = label
+        self.fraction = fraction
+    }
+
+    /// "Privacy blur 12/41…" with fraction 12/41.
+    static func counted(_ name: String, _ index: Int, of total: Int) -> ExportPhase {
+        ExportPhase("\(name) \(index)/\(total)…",
+                    fraction: total > 0 ? min(1, Double(index) / Double(total)) : nil)
+    }
+}
+
 enum UploadStatus: Equatable {
     case pending
+    /// Export pipeline owns the scan. The live PHASE is not carried here: `uploadStatus`
+    /// round-trips through SwiftData strings (the setter would drop an associated payload,
+    /// and a @Transient model prop isn't reliably observed — same lesson as ScanCard's
+    /// `coloringMessage`), so phase progress lives in view state (`ScanCard.exportPhase` /
+    /// the parent's bulk dictionary) and composes with this state at render time.
     case zipping
     case uploading(progress: Double)
     case savedLocally
@@ -233,7 +259,7 @@ enum UploadStatus: Equatable {
     var label: String {
         switch self {
         case .pending: return "Ready"
-        case .zipping: return "Converting..."
+        case .zipping: return "Converting…"
         case .uploading(let progress): return "Uploading (\(Int(progress * 100))%)..."
         case .savedLocally: return "Saved Locally"
         case .success: return "Uploaded"
