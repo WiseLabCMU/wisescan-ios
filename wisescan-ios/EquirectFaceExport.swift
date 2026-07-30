@@ -70,21 +70,27 @@ enum EquirectFaceExport {
     /// Emit 5 face JPEGs + Polycam camera JSONs for one staged (privacy-processed) equirect.
     /// Returns the number of faces written; 0 on failure (the archived equirect still ships —
     /// faces are an additive convenience, so failure here is non-fatal and logged by caller).
-    /// When a solved `RigProfile` is provided, its calibrated parameters replace the
-    /// mechanical-prior constants for pose composition.
+    /// Poses come from the sidecar's capture-baked `cam_transform` (solved calibration or
+    /// mechanical prior, composed at capture — where the profile↔camera serial binding is
+    /// verified). A stored RigProfile is deliberately NOT applied here: export time cannot
+    /// verify it belongs to the rig that captured a pre-contract still (review finding #9).
     static func emitFaces(equirectURL: URL, sidecarURL: URL,
-                          imagesDir: URL, camerasDir: URL,
-                          rigProfile: RigProfile? = nil) -> Int {
+                          imagesDir: URL, camerasDir: URL) -> Int {
         guard let sidecarData = try? Data(contentsOf: sidecarURL),
               let sidecar = (try? JSONSerialization.jsonObject(with: sidecarData)) as? [String: Any],
               let flat = sidecar["phone_transform"] as? [Double], flat.count == 16 else { return 0 }
         let stillSource = sidecar["still_source"] as? String
+        let flatCam = sidecar["cam_transform"] as? [Double]
+        let hasBakedPose = flatCam?.count == 16
+        // "Solved" provenance is trusted only from the sidecar itself — stamped at capture,
+        // when the active profile's camera serial was checked against the connected camera.
+        let solvedPose = hasBakedPose && (sidecar["rig_calibration_source"] as? String) == "solved"
         var poseSource: String
         switch levelingSupport(forModel: stillSource) {
         case .validated:
-            poseSource = rigProfile?.isSolved == true ? "rig_calibrated" : "rig_prior"
+            poseSource = solvedPose ? "rig_calibrated" : "rig_prior"
         case .assumedLevel:
-            poseSource = rigProfile?.isSolved == true ? "rig_calibrated_unvalidated_leveling" : "rig_prior_unvalidated_leveling"
+            poseSource = solvedPose ? "rig_calibrated_unvalidated_leveling" : "rig_prior_unvalidated_leveling"
             print("[prepareExport] ⚠️ \(equirectURL.lastPathComponent): \(stillSource ?? "?") leveling "
                 + "not yet device-validated — faces emitted with pose source '\(poseSource)'")
         case .unsupported:
@@ -98,18 +104,14 @@ enum EquirectFaceExport {
 
         let phoneToWorld = matrixFromColumnMajor(flat.map(Float.init))
 
-        // Compose the 360° camera pose using the baked transform, solved calibration, or mechanical prior
+        // The 360° camera pose: capture-baked cam_transform, else the mechanical prior.
         let camTransform: simd_float4x4
-        if let flatCam = sidecar["cam_transform"] as? [Double], flatCam.count == 16 {
+        if hasBakedPose, let flatCam {
             camTransform = matrixFromColumnMajor(flatCam.map(Float.init))
-        } else if let profile = rigProfile, profile.isSolved {
-            camTransform = RigCalibrationSolver.composeRigTransform(
-                phoneToWorld: phoneToWorld,
-                dy: profile.dy, dLateral: profile.dLateral,
-                yaw: profile.yaw, pitchResidual: profile.pitchResidual
-            )
         } else {
-            // Mechanical prior fallback (original behavior)
+            // Pre-contract sidecar (no baked pose): mechanical prior only — nothing ties a
+            // stored solved profile to the rig that actually shot this still.
+            print("[prepareExport] \(equirectURL.lastPathComponent): no baked cam_transform (pre-contract still) — mechanical-prior pose")
             camTransform = RigCalibrationSolver.composeRigTransform(
                 phoneToWorld: phoneToWorld,
                 dy: AppConstants.rigRodHeightMeters, dLateral: 0,

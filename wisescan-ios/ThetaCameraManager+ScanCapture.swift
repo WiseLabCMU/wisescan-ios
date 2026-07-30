@@ -72,7 +72,7 @@ extension ThetaCameraManager {
             transferMs: input.transferMs,
             bytes: data.count,
             rigCalibrationSource: rigProfile?.isSolved == true ? "solved" : "mechanical_prior",
-            rigCalibrationResidualCm: rigProfile?.isSolved == true ? rigProfile?.residualCm : nil
+            rigCalibrationResidualPx: rigProfile?.isSolved == true ? rigProfile?.residualPx : nil
         )
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
@@ -100,7 +100,7 @@ private struct EquirectStillMetadata: Encodable {
     let transferMs: Int
     let bytes: Int
     let rigCalibrationSource: String?
-    let rigCalibrationResidualCm: Float?
+    let rigCalibrationResidualPx: Float?
 
     enum CodingKeys: String, CodingKey {
         case sequence
@@ -116,6 +116,6 @@ private struct EquirectStillMetadata: Encodable {
         case transferMs = "transfer_ms"
         case bytes
         case rigCalibrationSource = "rig_calibration_source"
-        case rigCalibrationResidualCm = "rig_calibration_residual_cm"
+        case rigCalibrationResidualPx = "rig_calibration_residual_px_rms"
     }
 }

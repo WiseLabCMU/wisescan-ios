@@ -254,7 +254,7 @@ struct CaptureView: View {
     private var calibrationButtonLabel: String {
         if thetaManager.isCapturing { return "Triggering shutter…" }
         if thetaManager.isDownloading { return "Downloading still…" }
-        if rigCalibrationManager.isCapturingCalibrationStill { return "Processing edges…" }
+        if rigCalibrationManager.isCapturingCalibrationStill { return "Transferring & processing…" }
         return "Capture Calibration Still"
     }
 
@@ -281,6 +281,18 @@ struct CaptureView: View {
                         Text("Low mesh density — move to an area with more surfaces.")
                             .font(.caption)
                             .foregroundColor(.yellow)
+                    }
+                }
+
+                if let captureError = rigCalibrationManager.captureErrorMessage {
+                    HStack(alignment: .top, spacing: 4) {
+                        Image(systemName: "xmark.octagon.fill")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                        Text(captureError)
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                            .multilineTextAlignment(.leading)
                     }
                 }
 
@@ -322,19 +334,19 @@ struct CaptureView: View {
                     .foregroundColor(.gray)
             }
 
-            if case .review(let residualCm, _) = rigCalibrationManager.state {
+            if case .review(let residualPx, _) = rigCalibrationManager.state {
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(residualCm <= AppConstants.calibrationResidualGreenCm ? .green
-                              : residualCm <= AppConstants.calibrationResidualYellowCm ? .yellow
+                        .fill(residualPx <= AppConstants.calibrationResidualGreenPx ? .green
+                              : residualPx <= AppConstants.calibrationResidualYellowPx ? .yellow
                               : .red)
                         .frame(width: 8, height: 8)
-                    Text(String(format: "Calibration residual: %.1f cm", residualCm))
+                    Text(String(format: "Calibration residual: %.1f px", residualPx))
                         .font(.subheadline.bold())
                         .foregroundColor(.white)
                 }
                 
-                if residualCm > AppConstants.calibrationResidualYellowCm {
+                if residualPx > AppConstants.calibrationResidualYellowPx {
                     Text("High residual — consider re-adjusting the rig and re-calibrating.")
                         .font(.caption)
                         .foregroundColor(.orange)

@@ -224,8 +224,12 @@ stillness gate + 360° trigger infrastructure:
 4. **Solve** — after 3 stills, the solver runs (~1–2 s). The card shows the **reprojection
    residual** plus a **visual overlay** (mesh edges projected into one equirect still via
    the solved transform — green lines should align with actual room edges in the image).
-5. **Accept / redo** — residual thresholds: green (≤ 2 cm), yellow (2–5 cm), red (≥ 5 cm,
-   suggest re-adjust rig and re-calibrate). The user accepts the calibration or taps
+5. **Accept / redo** — residual thresholds (RMS reprojection error in equirect pixels on
+   the 512-wide working image): green (≤ 1.4 px), yellow (1.4–2.2 px), red (≥ 2.2 px,
+   suggest re-adjust rig and re-calibrate). *Units fixed 2026-07-29 (review finding #3):
+   the residual was mean-SQUARED px mislabeled "cm"; now √-converted to honest RMS px with
+   behavior-preserving thresholds. True metric units would need per-edge range scaling —
+   possible later, not needed for a relative quality gate.* The user accepts the calibration or taps
    Re-calibrate to redo.
 
 **Trigger skew** between the phone and 360° camera is negligible for calibration: the
@@ -237,7 +241,7 @@ existing `t_trigger + Δt_exposure` pose sampling handles the timing offset.
 
 The solved rig transform is **persisted in the rig profile** (stored in settings), tagged
 with a timestamp and residual. At the start of each new scan, the Dashboard card shows the
-last calibration's age and residual: *"Calibrated 2h ago (1.4 cm residual)"* with a
+last calibration's age and residual: *"Calibrated 2h ago (1.2 px residual)"* with a
 **Re-calibrate** button.
 
 - **No forced re-calibration** — the user is trusted to know when the rig has changed
@@ -260,9 +264,10 @@ An automatic sanity check guards against accidental rig changes between scans. W
    capture's mesh edges + equirect edges — no re-optimization, just a single O(1) cost
    evaluation (milliseconds).
 3. **Compares** the live residual to the stored calibration residual:
-   - If `liveResidual > storedResidual × 2.0` AND `liveResidual > 3.0 cm` (floor avoids
-     noise on very tight calibrations), a **warning toast** appears:
-     *"⚠️ Rig may have shifted — residual drifted from 1.4 → 4.2 cm"*.
+   - If `liveResidual > storedResidual × 1.4` AND `liveResidual > 1.7 px` (floor avoids
+     noise on very tight calibrations; both √-converted from the pre-rename squared-space
+     2.0× / 3.0), a **warning toast** appears:
+     *"⚠️ Rig may have shifted — residual drifted from 1.2 → 2.4 px"*.
    - The warning is **non-blocking** — the scan continues (the user may have intentionally
      adjusted the rig).
 4. The spot-check runs **once per recording session** (reset when recording starts).
@@ -588,6 +593,29 @@ Export both representations so downstream pipelines can choose:
 is deferred until the Nerfstudio end-to-end integration is tested. The raw equirects +
 pose sidecars in `equirect_stills/` already carry all the information needed; the
 `transforms.json` integration is a convenience for pipelines that read a single manifest.
+
+## Code-review follow-ups resolved (2026-07-29)
+
+The four open findings from the branch code review are closed:
+
+- **#3 residual units** — solver now returns **RMS equirect pixels** (√ of the former
+  mean-squared value that was mislabeled "cm"); thresholds √-converted so trip points are
+  unchanged (green 1.4 / yellow 2.2 / drift floor 1.7 / drift multiplier 1.4). Sidecar
+  field renamed `rig_calibration_residual_cm` → `rig_calibration_residual_px_rms`; the
+  `RigProfile` Codable key change deliberately invalidates previously-persisted profiles
+  (a stored squared value must not be reinterpreted as RMS) — recalibrate after update.
+- **#8 double-download** — calibration stills are now fetched once (~11 MB saved per
+  still); the `downloadLastCapture` stats/preview pass was redundant with the raw-bytes
+  fetch.
+- **#9 export-time profile bypass** — `emitFaces` no longer applies a stored `RigProfile`:
+  poses come exclusively from the sidecar's capture-baked `cam_transform` (stamped where
+  the profile↔camera **serial binding is verified**); pre-contract sidecars without a baked
+  pose fall back to the mechanical prior with a log line. Pose provenance
+  (`camera_pose_source`) now derives from the sidecar's `rig_calibration_source`.
+- **#10 silent capture failures** — calibration capture failures (no capture result,
+  download failure, edge-detection failure) now surface on the calibration card via
+  `captureErrorMessage` with actionable text, instead of log-and-return leaving the card
+  stuck on "capturing".
 
 ## Open questions
 

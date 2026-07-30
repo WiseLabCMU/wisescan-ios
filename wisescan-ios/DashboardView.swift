@@ -675,8 +675,8 @@ struct ThetaCameraCard: View {
                     .font(.caption)
                     .foregroundColor(.white)
             }
-        case .review(let residualCm, _):
-            reviewCalibrationRow(residualCm: residualCm)
+        case .review(let residualPx, _):
+            reviewCalibrationRow(residualPx: residualPx)
         case .failed(let message):
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
@@ -697,8 +697,8 @@ struct ThetaCameraCard: View {
         HStack(spacing: 8) {
             if let profile = calibrationManager.currentProfile, profile.isSolved {
                 Circle()
-                    .fill(profile.residualCm <= AppConstants.calibrationResidualGreenCm ? .green
-                          : profile.residualCm <= AppConstants.calibrationResidualYellowCm ? .yellow
+                    .fill(profile.residualPx <= AppConstants.calibrationResidualGreenPx ? .green
+                          : profile.residualPx <= AppConstants.calibrationResidualYellowPx ? .yellow
                           : .red)
                     .frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 1) {
@@ -706,7 +706,7 @@ struct ThetaCameraCard: View {
                         .font(.caption.bold())
                         .foregroundColor(.white)
                     if let age = calibrationManager.calibrationAgeDescription {
-                        Text("\(age) · \(String(format: "%.1f", profile.residualCm)) cm residual")
+                        Text("\(age) · \(String(format: "%.1f", profile.residualPx)) px residual")
                             .font(.caption2)
                             .foregroundColor(.gray)
                     }
@@ -758,19 +758,19 @@ struct ThetaCameraCard: View {
         }
     }
 
-    private func reviewCalibrationRow(residualCm: Float) -> some View {
+    private func reviewCalibrationRow(residualPx: Float) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(residualCm <= AppConstants.calibrationResidualGreenCm ? .green
-                          : residualCm <= AppConstants.calibrationResidualYellowCm ? .yellow
+                    .fill(residualPx <= AppConstants.calibrationResidualGreenPx ? .green
+                          : residualPx <= AppConstants.calibrationResidualYellowPx ? .yellow
                           : .red)
                     .frame(width: 8, height: 8)
-                Text(String(format: "Calibration residual: %.1f cm", residualCm))
+                Text(String(format: "Calibration residual: %.1f px", residualPx))
                     .font(.caption.bold())
                     .foregroundColor(.white)
             }
-            if residualCm > AppConstants.calibrationResidualYellowCm {
+            if residualPx > AppConstants.calibrationResidualYellowPx {
                 Text("High residual — consider re-adjusting the rig and re-calibrating.")
                     .font(.caption2)
                     .foregroundColor(.orange)

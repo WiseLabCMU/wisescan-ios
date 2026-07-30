@@ -366,7 +366,6 @@ struct ScanExportManager {
             .filter { $0.pathExtension.lowercased() == "jpg" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !survivors.isEmpty else { return }
-        let rigProfile = RigProfile.load()
         let faceStart = CFAbsoluteTimeGetCurrent()
         var facesWritten = 0
         for (index, url) in survivors.enumerated() {
@@ -375,16 +374,11 @@ struct ScanExportManager {
                 let sidecar = url.deletingPathExtension().appendingPathExtension("json")
                 facesWritten += EquirectFaceExport.emitFaces(
                     equirectURL: url, sidecarURL: sidecar,
-                    imagesDir: imagesDir, camerasDir: camerasDir,
-                    rigProfile: rigProfile)
+                    imagesDir: imagesDir, camerasDir: camerasDir)
             }
         }
         let faceMs = Int((CFAbsoluteTimeGetCurrent() - faceStart) * 1000)
-        if let rp = rigProfile, rp.isSolved {
-            print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) — \(faceMs) ms (rig CALIBRATED: residual \(String(format: "%.1f", rp.residualCm)) cm, dy \(String(format: "%.3f", rp.dy))m, yaw \(String(format: "%.1f", rp.yaw * 180 / .pi))°)")
-        } else {
-            print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) — \(faceMs) ms (rig prior: rod \(AppConstants.rigRodHeightMeters)m, yaw \(AppConstants.rigYawOffsetDegrees)°)")
-        }
+        print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) — \(faceMs) ms (poses from capture-baked cam_transform; per-face provenance in camera_pose_source)")
     }
 
     /// Fail-closed removal of one staged 360° still: the equirect AND its pose sidecar (an

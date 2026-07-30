@@ -140,13 +140,13 @@ enum AppConstants {
     static let calibrationStillCount = 3                               // stills captured at distinct positions before the solver runs
     static let calibrationMeshRadiusMeters: Float = 3.0                // radius around each phone position for mesh edge extraction
     static let calibrationMeshVertexMinimum = 500                      // minimum vertex count within radius for a reliable solve (environment quality gate)
-    static let calibrationResidualGreenCm: Float = 2.0                 // residual ≤ this → green (good calibration)
-    static let calibrationResidualYellowCm: Float = 5.0                // residual ≤ this → yellow (marginal); above → red (suggest re-do)
+    static let calibrationResidualGreenPx: Float = 1.4                 // RMS reprojection error (equirect px, 512-wide) ≤ this → green. Behavior-preserving √ of the old mean-squared 2.0
+    static let calibrationResidualYellowPx: Float = 2.2                // ≤ this → yellow (marginal); above → red (suggest re-do). √5.0
     static let calibrationMaxIterations = 500                          // Nelder-Mead iteration cap
     static let calibrationConvergenceTolerance: Float = 1e-5           // cost-range convergence threshold
     static let calibrationEdgeDetectionWidth = 512                     // downsampled equirect width for Sobel edge detection
-    static let calibrationDriftWarnMultiplier: Float = 2.0             // first-still spot-check: warn if live residual > stored × this
-    static let calibrationDriftWarnFloorCm: Float = 3.0                // don't warn if the absolute live residual is below this (avoids noise on tight calibrations)
+    static let calibrationDriftWarnMultiplier: Float = 1.4             // first-still spot-check: warn if live residual > stored × this. RMS space — ≡ the old 2.0× on squared values (√2)
+    static let calibrationDriftWarnFloorPx: Float = 1.7                // don't warn if the absolute live residual is below this (avoids noise on tight calibrations). √3.0
     static let calibrationMaxEdgesPerInput = 2000                      // subsample mesh edges per input to cap solver time (~5s for 2000 × 3 × 100 iters vs ~227s for 70K × 3)
     static let vioDegradedTripSeconds: TimeInterval = 2.5    // VIO guard: tracking continuously degraded (limited/relocalizing/unavailable) this long mid-scan → halt
     static let voxelDecayInterval: TimeInterval = 0.5        // VR: min seconds between 350K-voxel confidence-decay passes; throttled off every-integration so the voxelQueue can't back up (drove multi-second stalls)

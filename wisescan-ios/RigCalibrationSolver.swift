@@ -45,7 +45,7 @@ enum RigCalibrationSolver {
     /// Solved calibration result.
     struct CalibrationResult {
         let profile: RigProfile
-        let residualCm: Float       // mean edge distance in cm (approximate)
+        let residualPx: Float       // RMS reprojection error in equirect pixels (512-wide working image)
         let converged: Bool
         let iterations: Int
     }
@@ -60,7 +60,7 @@ enum RigCalibrationSolver {
         let totalEdges = inputs.reduce(0) { $0 + $1.meshEdges.count }
         if totalEdges == 0 {
             return CalibrationResult(
-                profile: prior, residualCm: -1,
+                profile: prior, residualPx: -1,
                 converged: false, iterations: 0
             )
         }
@@ -102,14 +102,14 @@ enum RigCalibrationSolver {
             dLateral: result.point.y,
             yaw: result.point.z,
             pitchResidual: result.point.w,
-            residualCm: result.cost,
+            residualPx: result.cost,
             timestamp: Date(),
             cameraModel: prior.cameraModel,
             cameraSerialNumber: prior.cameraSerialNumber
         )
         return CalibrationResult(
             profile: solved,
-            residualCm: result.cost,
+            residualPx: result.cost,
             converged: result.converged,
             iterations: result.iterations
         )
@@ -146,8 +146,10 @@ enum RigCalibrationSolver {
                 count += 1
             }
         }
-        // Mean cost scaled to approximate cm (edge map pixels → rough spatial mapping)
-        return count > 0 ? total / Float(count) : Float.greatestFiniteMagnitude
+        // RMS pixel distance: edgeCost accumulates SQUARED px on the 512-wide equirect
+        // distance transform, so √(mean) restores honest linear-pixel units. (Previously
+        // the raw mean-squared value was returned and labeled "cm" — review finding #3.)
+        return count > 0 ? sqrt(total / Float(count)) : Float.greatestFiniteMagnitude
     }
 
     /// Cost of one mesh edge: sample points along the projected edge in equirect space
@@ -541,8 +543,11 @@ struct RigProfile: Codable, Equatable {
     let yaw: Float
     /// Pitch residual — small correction for imperfect zenith compensation (radians).
     let pitchResidual: Float
-    /// Calibration residual (approximate cm).
-    let residualCm: Float
+    /// Calibration residual — RMS reprojection error in equirect pixels (512-wide).
+    /// NOTE: renamed from residualCm (which was actually mean-SQUARED px, finding #3).
+    /// The Codable key change deliberately invalidates previously-persisted profiles —
+    /// a stored squared-px value must not be reinterpreted as RMS px. Recalibrate.
+    let residualPx: Float
     /// When this calibration was performed.
     let timestamp: Date
     /// Camera model string (e.g. "RICOH THETA X") for provenance.
@@ -557,14 +562,14 @@ struct RigProfile: Codable, Equatable {
             dLateral: 0,
             yaw: AppConstants.rigYawOffsetDegrees * .pi / 180,
             pitchResidual: 0,
-            residualCm: -1,  // sentinel: not calibrated
+            residualPx: -1,  // sentinel: not calibrated
             timestamp: .distantPast,
             cameraModel: nil,
             cameraSerialNumber: nil
         )
     }
 
-    var isSolved: Bool { residualCm >= 0 && residualCm.isFinite }
+    var isSolved: Bool { residualPx >= 0 && residualPx.isFinite }
 
     func with(cameraModel: String?, cameraSerialNumber: String?) -> RigProfile {
         RigProfile(
@@ -572,7 +577,7 @@ struct RigProfile: Codable, Equatable {
             dLateral: dLateral,
             yaw: yaw,
             pitchResidual: pitchResidual,
-            residualCm: residualCm,
+            residualPx: residualPx,
             timestamp: timestamp,
             cameraModel: cameraModel ?? self.cameraModel,
             cameraSerialNumber: cameraSerialNumber ?? self.cameraSerialNumber

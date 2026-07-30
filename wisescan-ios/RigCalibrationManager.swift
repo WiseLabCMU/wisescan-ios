@@ -24,7 +24,7 @@ final class RigCalibrationManager {
         case idle
         case capturing(stillsCollected: Int)
         case solving
-        case review(residualCm: Float, converged: Bool)
+        case review(residualPx: Float, converged: Bool)
         case failed(String)
     }
 
@@ -62,6 +62,12 @@ final class RigCalibrationManager {
     /// Re-entrancy guard: prevents double-taps during the async capture pipeline.
     /// Also observed by the calibration overlay for button disable + progress label.
     private(set) var isCapturingCalibrationStill = false
+
+    /// User-visible reason the last calibration capture attempt failed, shown on the
+    /// calibration card and cleared when a new capture starts. (Review finding #10:
+    /// failures used to logger.error and bail, leaving the card stuck on "capturing"
+    /// with no feedback.)
+    private(set) var captureErrorMessage: String?
 
     private let logger = Logger(subsystem: "org.arenaxr.scan4d", category: "rigcal")
 
@@ -138,6 +144,7 @@ final class RigCalibrationManager {
               count < AppConstants.calibrationStillCount,
               !isCapturingCalibrationStill else { return }
         isCapturingCalibrationStill = true
+        captureErrorMessage = nil
 
         let thetaManager = ThetaCameraManager.shared
         guard thetaManager.isConnected, !thetaManager.isCapturing else {
@@ -179,7 +186,7 @@ final class RigCalibrationManager {
             }
             self.logger.info("Calibration still: \(meshEdges.count) edges, \(vertexCount) vertices near position")
 
-            // Poll for the download to complete (the manager sets isCapturing = false)
+            // Poll for the capture to complete (the manager sets isCapturing = false)
             var attempts = 0
             while thetaManager.isCapturing && attempts < 100 {
                 try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
@@ -188,29 +195,18 @@ final class RigCalibrationManager {
 
             guard let capture = thetaManager.lastCapture,
                   let url = URL(string: capture.fileURL) else {
-                logger.error("Calibration capture: no capture result")
+                self.failCapture("The camera didn't report a finished still — check the Theta and tap Capture again.")
                 return
             }
 
-            // Download the still
-            thetaManager.downloadLastCapture()
-            attempts = 0
-            while thetaManager.isDownloading && attempts < 150 {
-                try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
-                attempts += 1
-            }
-
-            guard let download = thetaManager.lastDownload else {
-                logger.error("Calibration capture: download failed")
-                return
-            }
-
-            // Re-download the JPEG data for edge detection (we need the raw bytes)
+            // Single download of the ~11 MB equirect (review finding #8: this used to run
+            // twice — once via downloadLastCapture for transfer stats/preview, then again
+            // for the raw bytes).
             let jpegData: Data
             do {
                 jpegData = try await thetaManager.downloadData(from: url)
             } catch {
-                logger.error("Calibration capture: re-download failed: \(error.localizedDescription)")
+                self.failCapture("Downloading the still failed (\(error.localizedDescription)) — check the Theta Wi-Fi link and tap Capture again.")
                 return
             }
 
@@ -219,7 +215,7 @@ final class RigCalibrationManager {
                 RigCalibrationSolver.detectEquirectEdges(in: jpegData)
             }
             guard let edgeMap = detected else {
-                logger.error("Calibration capture: edge detection failed")
+                self.failCapture("Couldn't detect edges in the still — try a brighter position with more visible structure.")
                 return
             }
 
@@ -243,6 +239,13 @@ final class RigCalibrationManager {
         }
     }
 
+    /// Route a calibration capture failure to the card UI + log (finding #10 — was a
+    /// silent log-and-return; the user saw a button that just popped back to idle).
+    private func failCapture(_ message: String) {
+        captureErrorMessage = message
+        logger.error("Calibration capture failed: \(message)")
+    }
+
     /// Run the solver on a background queue after all stills are captured.
     private func runSolver() {
         state = .solving
@@ -260,13 +263,13 @@ final class RigCalibrationManager {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.lastResult = result
-                self.logger.info("Solver complete: residual \(result.residualCm) cm, converged: \(result.converged), iterations: \(result.iterations)")
+                self.logger.info("Solver complete: residual \(result.residualPx) px RMS, converged: \(result.converged), iterations: \(result.iterations)")
 
-                if !result.converged || result.residualCm < 0
-                    || result.residualCm.isNaN || result.residualCm.isInfinite {
+                if !result.converged || result.residualPx < 0
+                    || result.residualPx.isNaN || result.residualPx.isInfinite {
                     self.state = .failed("Solver did not converge — try calibrating in a more feature-rich area with visible mesh")
                 } else {
-                    self.state = .review(residualCm: result.residualCm, converged: result.converged)
+                    self.state = .review(residualPx: result.residualPx, converged: result.converged)
                 }
             }
         }
@@ -288,7 +291,7 @@ final class RigCalibrationManager {
         currentProfile = boundProfile
         state = .idle
         cleanupTempDir()
-        logger.info("Calibration accepted and saved (residual: \(result.residualCm) cm)")
+        logger.info("Calibration accepted and saved (residual: \(result.residualPx) px RMS)")
     }
 
     /// Reject the result and restart.
@@ -363,14 +366,14 @@ final class RigCalibrationManager {
             logger.warning("Spot-check: edge detection failed — skipped")
             return true
         }
-        let storedResidual = profile.residualCm
+        let storedResidual = profile.residualPx
         let driftRatio = storedResidual > 0 ? liveResidual / storedResidual : Float.greatestFiniteMagnitude
 
-        logger.info("Spot-check: live residual \(String(format: "%.1f", liveResidual)) cm vs stored \(String(format: "%.1f", storedResidual)) cm (ratio \(String(format: "%.1f", driftRatio))×)")
+        logger.info("Spot-check: live residual \(String(format: "%.1f", liveResidual)) px RMS vs stored \(String(format: "%.1f", storedResidual)) px RMS (ratio \(String(format: "%.1f", driftRatio))×)")
 
-        if liveResidual > AppConstants.calibrationDriftWarnFloorCm
+        if liveResidual > AppConstants.calibrationDriftWarnFloorPx
             && driftRatio > AppConstants.calibrationDriftWarnMultiplier {
-            let msg = String(format: "⚠️ Rig may have shifted — residual drifted from %.1f → %.1f cm", storedResidual, liveResidual)
+            let msg = String(format: "⚠️ Rig may have shifted — residual drifted from %.1f → %.1f px", storedResidual, liveResidual)
             driftWarning = msg
             logger.warning("\(msg)")
             return false
