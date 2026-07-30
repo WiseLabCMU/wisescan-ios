@@ -22,6 +22,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.vrBloomEnabled) private var vrBloomEnabled: Bool = AppConstants.vrBloomEnabled
     @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
     @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
+    @AppStorage(AppConstants.Key.gpuColorize) private var gpuColorize: Bool = AppConstants.gpuColorize
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     // 0 = Auto (no override); N = force format index N-1 of supportedVideoFormats.
     @AppStorage(AppConstants.Key.videoFormatIndex) private var videoFormatIndex: Int = 0
@@ -269,6 +270,9 @@ struct SettingsView: View {
                                     // production, where it would silently drop per-face classification
                                     // (the wall/non-wall labels plane registration depends on).
                                     self.meshClassifier = AppConstants.meshClassifier
+                                    // Default-TRUE dev toggle: same leak rule as meshClassifier —
+                                    // a bench-OFF value must not survive dev-mode exit.
+                                    self.gpuColorize = AppConstants.gpuColorize
                                     // Diagnostics toggles gate on their own keys (not developerMode),
                                     // so a bench-ON value would keep costing after dev-mode exit.
                                     self.hideLivePoints = AppConstants.hideLivePoints
@@ -339,6 +343,18 @@ struct SettingsView: View {
                             .tint(.orange)
                             .padding(.vertical, 4)
                             #endif
+
+                            Toggle(isOn: $gpuColorize) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("GPU Colorize")
+                                        .foregroundColor(.white)
+                                    Text("Uses the Metal compute path for vertex-color projection (default). Turn OFF to force the CPU reference implementation — recolor the same scan once per setting to isolate suspected GPU artifacts (occlusion bleed-through, mask misses). The two paths must produce the same result; a difference is a GPU bug.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
 
                             Toggle(isOn: $hideLivePoints) {
                                 VStack(alignment: .leading, spacing: 4) {

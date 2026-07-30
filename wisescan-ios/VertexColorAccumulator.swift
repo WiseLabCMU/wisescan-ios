@@ -315,7 +315,11 @@ enum VertexColorAccumulator {
         let downscaleFactor = 2
 
         // Upload vertices + normals to GPU once (reused for all frames).
+        // Dev A/B: the GPU projection is default-ON; the Developer-Mode "GPU Colorize" toggle
+        // forces the CPU reference path to isolate suspected GPU artifacts on the same scan.
         let useGPU = VertexColorGPU.isAvailable
+            && UserDefaults.standard.bool(forKey: AppConstants.Key.gpuColorize)
+        PerfDiag.log("[VertexColor] projection path: \(useGPU ? "GPU" : "CPU")")
         if useGPU {
             VertexColorGPU.uploadVertices(vertices, normals: normals)
         }
@@ -477,9 +481,11 @@ enum VertexColorAccumulator {
                 occlusionToleranceMM: AppConstants.colorizationOcclusionToleranceMM
             ) {
                 // GPU path: accumulate observations from GPU results into top-K buffers (CPU).
+                var visibleCount = 0
                 for i in 0..<vertexCount {
                     let obs = gpuResults[i]
                     guard obs.weight > 0 else { continue }
+                    visibleCount += 1
 
                     let base = i * K
                     let cnt = Int(obsCount[i])
@@ -499,9 +505,10 @@ enum VertexColorAccumulator {
                         }
                     }
                 }
-                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project_gpu \(vertices.count) verts \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
+                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project_gpu \(vertices.count) verts, \(visibleCount) visible, \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
             } else {
                 // CPU fallback path
+                var visibleCount = 0
                 for (i, vertex) in vertices.enumerated() {
                     let worldPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
                     let camPos = world2Cam * worldPos
@@ -571,6 +578,7 @@ enum VertexColorAccumulator {
                     let r = ptr[offset]
                     let g = ptr[offset + 1]
                     let b = ptr[offset + 2]
+                    visibleCount += 1
 
                     // Keep the top-K observations by weight for this vertex.
                     let base = i * K
@@ -592,7 +600,7 @@ enum VertexColorAccumulator {
                         }
                     }
                 }
-                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project_cpu \(vertices.count) verts \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
+                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project_cpu \(vertices.count) verts, \(visibleCount) visible, \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
             }
             _ = depthPixelDataBuffer // Silence compiler warning while ensuring CFData buffer outlives the pointer
             _ = maskDataBuffer       // ditto — keep the mask CFData alive for the vertex loop

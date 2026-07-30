@@ -51,6 +51,7 @@ enum AppConstants {
         static let registerLegacyScans = "registerLegacyScans"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
+        static let gpuColorize = "gpuColorize"                        // Developer Mode: GPU vertex-color projection (A/B vs CPU path)
     }
 
     // MARK: - Default Values
@@ -114,6 +115,13 @@ enum AppConstants {
     /// legacy scan would light up "needs postprocess" (gating every old location at update),
     /// and a legacy adjacent-link is indistinguishable from a legacy rescan (false-lock risk).
     static let registerLegacyScans: Bool = false
+    /// Developer Mode A/B toggle for the GPU vertex-color projection path (default ON —
+    /// production uses the GPU). OFF forces the CPU reference implementation so a suspected
+    /// GPU-path artifact (occlusion bleed-through, mask misses) can be isolated on the SAME
+    /// scan in the SAME viewer: recolor once per setting and compare. The depth/occlusion
+    /// semantics of the two paths are meant to be identical — a visual difference here is a
+    /// GPU-path bug by definition.
+    static let gpuColorize: Bool = true
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
