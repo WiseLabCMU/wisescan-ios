@@ -162,8 +162,9 @@ enum StitchGraphBuilder {
             return
         }
         let compass = c.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a"
-        // When applied, report the SIGNED yaw actually baked in (alignScore can flip the sign vs the
-        // measured median); when held, report the measured value so the log says what was considered.
+        // When applied, report the SIGNED yaw actually baked in; when held, report the measured value
+        // so the log says what was considered. (These now agree — the raw atan2 sign is used directly
+        // — but they stay distinct so a future re-sign can't silently mislabel the log.)
         let yaw = String(format: "yaw %+.1f°→%@", c.appliedYaw ? c.yawSigned : c.yawDeg, c.appliedYaw ? "applied" : "held")
         let perp = c.appliedPerp ? String(format: "⊥ %.0fcm→applied", c.perpCm)
                                  : (c.doorwayPerpCm.map { String(format: "⊥ %.0fcm→held", $0) } ?? "⊥ n/a")
@@ -363,21 +364,22 @@ enum StitchGraphBuilder {
         let trustworthy = out.compassDeg.map { abs(abs(yawFix) - $0) <= 15 } ?? false
         guard trustworthy else { return out }
 
-        // De-yaw sign is convention-ambiguous → pick the sign that ALIGNS opposite faces. Reused for
-        // both the yaw matrix and the ⊥ measurement.
+        // De-yaw spinner, reused for the yaw matrix and the ⊥ doorway measurement.
         func spinner(_ deg: Float) -> (SIMD3<Float>) -> SIMD3<Float> {
             let a = deg * Float.pi / 180, cA = cos(a), sA = sin(a)
             return { v in SIMD3(cA * v.x + sA * v.z, v.y, -sA * v.x + cA * v.z) }
         }
-        func alignScore(_ deg: Float) -> Int {
-            let sp = spinner(deg); var n = 0
-            for s in sW { for t in tW {
-                let nDot = simd_dot(s.normal, sp(t.normal))
-                if acos(min(abs(nDot), 1)) * 180 / Float.pi < 10, nDot < 0 { n += 1 }
-            }}
-            return n
-        }
-        let signedYaw = alignScore(-yawFix) >= alignScore(yawFix) ? -yawFix : yawFix
+        // `yawFix` is ALREADY correctly signed: each pair's target normal is first flipped into
+        // agreement with the source (`nt`, above), so the atan2 is the signed rotation carrying the
+        // source orientation onto the target — sign included.
+        //
+        // This previously ran through an `alignScore` "tiebreak" that re-derived the sign by counting
+        // opposite-facing pairs, on the belief the sign was convention-ambiguous. That was a bug, not
+        // a safeguard: it selected `-yawFix` on `alignScore(-yawFix) >= alignScore(yawFix)`, so when
+        // NEITHER sign found any opposite-facing pair — two rooms that don't physically overlap, e.g.
+        // the cubicle join — the comparison was 0 >= 0 and it flipped a perfectly good sign
+        // unconditionally. Device-confirmed: that join reported +1.5° and had -2.0° applied.
+        let signedYaw = yawFix
         let spin = spinner(signedYaw)
 
         // C_yaw about the pin — applied only when the yaw is beyond noise (>1°).
