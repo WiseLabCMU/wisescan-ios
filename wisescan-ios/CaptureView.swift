@@ -191,7 +191,7 @@ struct CaptureView: View {
                         .appendingPathComponent("still_0001.JPG")
                     guard let jpegData = try? Data(contentsOf: jpegURL) else { return }
 
-                    let passed = rigCalibrationManager.spotCheckFirstStill(
+                    let passed = await rigCalibrationManager.spotCheckFirstStill(
                         phoneTransform: phonePose,
                         jpegData: jpegData,
                         meshAnchors: meshAnchors

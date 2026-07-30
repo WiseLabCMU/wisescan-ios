@@ -49,8 +49,11 @@ void equirectToFace(uint2 gid [[thread_position_in_grid]],
     float u = (lon + M_PI_F) / (2.0f * M_PI_F);
     float v = (M_PI_F / 2.0f - lat) / M_PI_F;
 
-    // Hardware bilinear sampling (texture sampler handles interpolation + wrapping)
-    constexpr sampler texSampler(address::repeat, filter::linear, coord::normalized);
+    // Hardware bilinear sampling: longitude wraps (s), latitude CLAMPS (t) — repeat on t
+    // made the up face's pole rows bilinear-blend with the opposite pole's edge row
+    // (the CPU sampler clamps rows).
+    constexpr sampler texSampler(s_address::repeat, t_address::clamp_to_edge,
+                                 filter::linear, coord::normalized);
     half4 color = equirect.sample(texSampler, float2(u, v));
 
     face.write(half4(color.rgb, 1.0h), gid);
@@ -97,7 +100,8 @@ void equirectToFaceRotated(uint2 gid [[thread_position_in_grid]],
     float u = (lon + M_PI_F) / (2.0f * M_PI_F);
     float v = (M_PI_F / 2.0f - lat) / M_PI_F;
 
-    constexpr sampler texSampler(address::repeat, filter::linear, coord::normalized);
+    constexpr sampler texSampler(s_address::repeat, t_address::clamp_to_edge,
+                                 filter::linear, coord::normalized);
     half4 color = equirect.sample(texSampler, float2(u, v));
 
     face.write(half4(color.rgb, 1.0h), gid);

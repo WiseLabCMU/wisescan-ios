@@ -253,15 +253,27 @@ enum RigCalibrationSolver {
 
         for anchor in anchors {
             let transform = anchor.transform
+            // Anchor-level cull BEFORE any per-vertex work: mesh anchors are ~1–2 m tiles, so
+            // an anchor whose origin is far outside the radius can't contribute edges. Saves
+            // transforming every vertex of every distant anchor on a large mid-scan mesh.
+            let anchorOrigin = SIMD3<Float>(transform.columns.3.x,
+                                            transform.columns.3.y,
+                                            transform.columns.3.z)
+            guard simd_distance(anchorOrigin, position) <= radius + 5.0 else { continue }
+
             let geometry = anchor.geometry
             let vertexSource = geometry.vertices
             let faceElement = geometry.faces
 
-            // Read vertices from the raw MTLBuffer (ARGeometrySource is not subscriptable)
-            let vertexCount_local = vertexSource.count
-            let vertexStride = vertexSource.stride
+            // Read vertices from the raw MTLBuffer (ARGeometrySource is not subscriptable).
+            // BOUNDED reads: clamp the advertised count to what the buffer actually holds —
+            // live geometry buffers have bitten this repo before (page-aligned overread
+            // EXC_BAD_ACCESS in the wireframe reader; same clamp pattern as ARCoverageView).
+            let vertexStride = max(vertexSource.stride, MemoryLayout<Float>.size * 3)
             let vertexOffset = vertexSource.offset
             let vertexBuffer = vertexSource.buffer.contents()
+            let vertexBytesAvail = max(0, vertexSource.buffer.length - vertexOffset)
+            let vertexCount_local = min(vertexSource.count, vertexBytesAvail / vertexStride)
 
             var worldVerts: [SIMD3<Float>] = []
             worldVerts.reserveCapacity(vertexCount_local)
@@ -283,11 +295,15 @@ enum RigCalibrationSolver {
                 }
             }
 
-            // Extract triangle edges (deduplicated by sorting vertex indices)
-            let faceCount = faceElement.count
+            // Extract triangle edges (deduplicated by sorting vertex indices). Face reads are
+            // bounded the same way as vertex reads.
             let indexBuffer = faceElement.buffer.contents()
             let bytesPerIndex = faceElement.bytesPerIndex
             let indexCountPerPrimitive = faceElement.indexCountPerPrimitive
+            let bytesPerPrimitive = indexCountPerPrimitive * bytesPerIndex
+            let faceCount = bytesPerPrimitive > 0
+                ? min(faceElement.count, faceElement.buffer.length / bytesPerPrimitive)
+                : 0
             var edgeSet: Set<UInt64> = []
 
             for f in 0..<faceCount {
@@ -302,6 +318,9 @@ enum RigCalibrationSolver {
                     }
                 }
 
+                // Skip triangles referencing out-of-range vertices (clamped vertex read above
+                // can leave stale indices pointing past worldVerts).
+                guard indices.allSatisfy({ Int($0) < worldVerts.count }) else { continue }
                 // Check if any vertex of this triangle is within radius
                 let triNear = indices.contains { idx in
                     simd_distance(worldVerts[Int(idx)], position) <= radius
@@ -341,14 +360,20 @@ enum RigCalibrationSolver {
         let width = cgImage.width
         let height = cgImage.height
 
-        // Convert to grayscale bitmap
+        // Convert to grayscale bitmap. The context must not outlive the pointer, so both
+        // creation and draw stay inside withUnsafeMutableBytes (an `&array` argument is only
+        // valid for the call itself — same pattern as EquirectPrivacyBlur.decodeWorkingBitmap).
         let bytesPerRow = width
         var grayscale = [UInt8](repeating: 0, count: bytesPerRow * height)
-        guard let ctx = CGContext(data: &grayscale, width: width, height: height,
-                                  bitsPerComponent: 8, bytesPerRow: bytesPerRow,
-                                  space: CGColorSpaceCreateDeviceGray(),
-                                  bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
-        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let drawn = grayscale.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(data: raw.baseAddress, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: bytesPerRow,
+                                      space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
+            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return nil }
 
         // Simple Sobel edge detection
         var edgeMask = [Bool](repeating: false, count: width * height)

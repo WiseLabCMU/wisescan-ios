@@ -114,14 +114,19 @@ enum VertexColorGPU {
               let vBuf = vertexBuffer, let nBuf = normalBuffer,
               vertexCount > 0 else { return nil }
 
-        // Create textures
+        // Create textures. FAIL CLOSED: when a depth/mask image is PROVIDED but its texture
+        // can't be built, return nil so the caller's per-frame CPU fallback (which honors
+        // occlusion + the person mask exactly) handles the frame — never silently proceed
+        // without an exclusion the caller asked for (the mask path is privacy-relevant:
+        // colors.bin ships in PLY/Scan4D exports).
         guard let colorTex = makeRGBATexture(from: colorImage, device: device) else { return nil }
 
         // Depth texture (R16Uint) — optional
         let depthTex: MTLTexture
         let hasDepth: Bool
         var depthW: Int32 = 0, depthH: Int32 = 0
-        if let depthCG = depthImage, let dt = makeDepthTexture(from: depthCG, device: device) {
+        if let depthCG = depthImage {
+            guard let dt = makeDepthTexture(from: depthCG, device: device) else { return nil }
             depthTex = dt
             hasDepth = true
             depthW = Int32(depthCG.width)
@@ -131,7 +136,8 @@ enum VertexColorGPU {
             let desc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .r16Uint, width: 1, height: 1, mipmapped: false)
             desc.usage = .shaderRead
-            depthTex = device.makeTexture(descriptor: desc)!
+            guard let dummy = device.makeTexture(descriptor: desc) else { return nil }
+            depthTex = dummy
             hasDepth = false
         }
 
@@ -139,7 +145,8 @@ enum VertexColorGPU {
         let maskTex: MTLTexture
         let hasMask: Bool
         var maskW: Int32 = 0, maskH: Int32 = 0
-        if let maskCG = maskImage, let mt = makeMaskTexture(from: maskCG, device: device) {
+        if let maskCG = maskImage {
+            guard let mt = makeMaskTexture(from: maskCG, device: device) else { return nil }
             maskTex = mt
             hasMask = true
             maskW = Int32(maskCG.width)
@@ -148,7 +155,8 @@ enum VertexColorGPU {
             let desc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .r8Unorm, width: 1, height: 1, mipmapped: false)
             desc.usage = .shaderRead
-            maskTex = device.makeTexture(descriptor: desc)!
+            guard let dummy = device.makeTexture(descriptor: desc) else { return nil }
+            maskTex = dummy
             hasMask = false
         }
 
@@ -232,10 +240,34 @@ enum VertexColorGPU {
         desc.usage = .shaderRead
         guard let tex = device.makeTexture(descriptor: desc),
               let dataProvider = image.dataProvider,
-              let cfData = dataProvider.data else { return nil }
-        let ptr = CFDataGetBytePtr(cfData)!
-        tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
-                    withBytes: ptr, bytesPerRow: image.bytesPerRow)
+              let cfData = dataProvider.data,
+              let srcPtr = CFDataGetBytePtr(cfData) else { return nil }
+
+        // Byte order: Metal reads .r16Uint host-little-endian, but 16-bit PNGs typically
+        // decode BIG-endian (the CPU path checks the same CGBitmapInfo flags and swaps —
+        // see VertexColorAccumulator's isDepthLittleEndian). Uploading raw big-endian bytes
+        // scrambled every depth (1000mm read as ~59k mm), silently disabling the occlusion
+        // test on the GPU path. Swap into a staging buffer when needed (~98KB at 256×192).
+        let info = image.bitmapInfo.rawValue
+        let isLittleEndian = (info & CGBitmapInfo.byteOrder16Little.rawValue) != 0
+            || (info & CGBitmapInfo.byteOrder32Little.rawValue) != 0
+        if isLittleEndian {
+            tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
+                        withBytes: srcPtr, bytesPerRow: image.bytesPerRow)
+        } else {
+            let srcRow = image.bytesPerRow
+            var swapped = [UInt8](repeating: 0, count: w * h * 2)
+            for row in 0..<h {
+                let rowBase = row * srcRow
+                let dstBase = row * w * 2
+                for col in 0..<w {
+                    swapped[dstBase + col * 2] = srcPtr[rowBase + col * 2 + 1]
+                    swapped[dstBase + col * 2 + 1] = srcPtr[rowBase + col * 2]
+                }
+            }
+            tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
+                        withBytes: swapped, bytesPerRow: w * 2)
+        }
         return tex
     }
 

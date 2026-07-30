@@ -149,22 +149,10 @@ final class RigCalibrationManager {
                                    phoneTransform.columns.3.y,
                                    phoneTransform.columns.3.z)
 
-        // Extract mesh edges near the phone position
-        let (meshEdges, vertexCount) = RigCalibrationSolver.extractMeshEdges(
-            from: meshAnchors,
-            near: phonePos,
-            radius: AppConstants.calibrationMeshRadiusMeters
-        )
-        nearbyMeshVertexCount = vertexCount
+        logger.info("Calibration still \(count + 1): triggering capture")
 
-        if vertexCount < AppConstants.calibrationMeshVertexMinimum {
-            logger.warning("Low mesh density at calibration position: \(vertexCount) vertices")
-            // Don't block — the user sees the warning on the card
-        }
-
-        logger.info("Calibration still \(count + 1): triggering capture (\(meshEdges.count) edges, \(vertexCount) vertices)")
-
-        // Trigger the Theta capture
+        // Trigger the Theta capture FIRST — the ~2s in-camera exposure/stitch overlaps the
+        // mesh-edge extraction below instead of waiting behind it.
         thetaManager.takePicture()
 
         // Wait for the capture + download, then process
@@ -174,6 +162,22 @@ final class RigCalibrationManager {
                     self.isCapturingCalibrationStill = false
                 }
             }
+
+            // Extract mesh edges near the phone position — OFF main (transforms every vertex
+            // of every nearby anchor; on main this froze the UI and stalled the AR session).
+            let (meshEdges, vertexCount) = await Self.computeOffMain {
+                RigCalibrationSolver.extractMeshEdges(
+                    from: meshAnchors,
+                    near: phonePos,
+                    radius: AppConstants.calibrationMeshRadiusMeters
+                )
+            }
+            self.nearbyMeshVertexCount = vertexCount
+            if vertexCount < AppConstants.calibrationMeshVertexMinimum {
+                self.logger.warning("Low mesh density at calibration position: \(vertexCount) vertices")
+                // Don't block — the user sees the warning on the card
+            }
+            self.logger.info("Calibration still: \(meshEdges.count) edges, \(vertexCount) vertices near position")
 
             // Poll for the download to complete (the manager sets isCapturing = false)
             var attempts = 0
@@ -210,8 +214,11 @@ final class RigCalibrationManager {
                 return
             }
 
-            // Detect edges in the equirect
-            guard let edgeMap = RigCalibrationSolver.detectEquirectEdges(in: jpegData) else {
+            // Detect edges in the equirect — off main (Sobel + chamfer over the working image)
+            let detected = await Self.computeOffMain {
+                RigCalibrationSolver.detectEquirectEdges(in: jpegData)
+            }
+            guard let edgeMap = detected else {
                 logger.error("Calibration capture: edge detection failed")
                 return
             }
@@ -322,7 +329,7 @@ final class RigCalibrationManager {
         phoneTransform: simd_float4x4,
         jpegData: Data,
         meshAnchors: [ARMeshAnchor]
-    ) -> Bool {
+    ) async -> Bool {
         guard !hasSpotChecked else { return driftWarning == nil }
         hasSpotChecked = true
 
@@ -334,24 +341,28 @@ final class RigCalibrationManager {
         let phonePos = SIMD3<Float>(phoneTransform.columns.3.x,
                                    phoneTransform.columns.3.y,
                                    phoneTransform.columns.3.z)
-        let (meshEdges, _) = RigCalibrationSolver.extractMeshEdges(
-            from: meshAnchors, near: phonePos,
-            radius: AppConstants.calibrationMeshRadiusMeters
-        )
-
-        guard let edgeMap = RigCalibrationSolver.detectEquirectEdges(
-            in: jpegData, maxWidth: AppConstants.calibrationEdgeDetectionWidth
-        ) else {
+        // ALL compute off main: this runs MID-RECORDING (first 360° still of the scan) —
+        // extraction alone can touch 100k+ live mesh vertices, and a main stall here is the
+        // VIO-starvation class the capture pipeline is engineered to avoid.
+        let liveResidualOrNil: Float? = await Self.computeOffMain {
+            let (meshEdges, _) = RigCalibrationSolver.extractMeshEdges(
+                from: meshAnchors, near: phonePos,
+                radius: AppConstants.calibrationMeshRadiusMeters
+            )
+            guard let edgeMap = RigCalibrationSolver.detectEquirectEdges(
+                in: jpegData, maxWidth: AppConstants.calibrationEdgeDetectionWidth
+            ) else { return nil }
+            let input = RigCalibrationSolver.CalibrationInput(
+                phoneToWorld: phoneTransform,
+                edgeMap: edgeMap,
+                meshEdges: meshEdges
+            )
+            return RigCalibrationSolver.validateCalibration(input: input, profile: profile)
+        }
+        guard let liveResidual = liveResidualOrNil else {
             logger.warning("Spot-check: edge detection failed — skipped")
             return true
         }
-
-        let input = RigCalibrationSolver.CalibrationInput(
-            phoneToWorld: phoneTransform,
-            edgeMap: edgeMap,
-            meshEdges: meshEdges
-        )
-        let liveResidual = RigCalibrationSolver.validateCalibration(input: input, profile: profile)
         let storedResidual = profile.residualCm
         let driftRatio = storedResidual > 0 ? liveResidual / storedResidual : Float.greatestFiniteMagnitude
 
@@ -370,6 +381,22 @@ final class RigCalibrationManager {
     }
 
     // MARK: - Private
+
+    /// Run the CPU-heavy calibration compute (mesh-edge extraction, and optionally equirect
+    /// edge detection + a cost evaluation) OFF the main actor. Everything here is read-only
+    /// over the snapshot inputs; results hop back to the caller's actor. Never run these
+    /// inline on main — extraction transforms every vertex of every nearby anchor, and the
+    /// spot-check variant runs MID-RECORDING where a main stall starves VIO (the ARFrame-
+    /// retention failure class this repo fights hardest).
+    private nonisolated static func computeOffMain<T: Sendable>(
+        _ work: @escaping @Sendable () -> T
+    ) async -> T {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: work())
+            }
+        }
+    }
 
     private func cleanupTempDir() {
         if let dir = calibrationTempDir {
