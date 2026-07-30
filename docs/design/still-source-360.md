@@ -622,6 +622,46 @@ can download" is approximated by three controls, strongest first:
 
 Recon checklist for the above lives in the 2026-07-30 test plan (§9).
 
+## Calibration solver: field findings 2026-07-30 (runs 6-10) + revised plan
+
+**Rig reality (photos, 2026-07-30):** test rig = floor stand, Theta ~0.7-0.9 m above an
+iPad tilted back ~30-45° in a clamp ~0.1-0.2 m off the rod axis. PRODUCT rig = handheld
+telescoping grip, device size/angle, rod length, and Theta screw-mount rotation vary
+per user AND per run. Consequences: **yaw is arbitrary by construction** (screw threads),
+so mechanical yaw bounds are the wrong model; dy/dLat/pitch remain physically bounded
+(rod range, clamp arm, zenith correction ⇒ pitch ≈ 0). The first-still spot-check is the
+run-to-run drift guard, per design.
+
+**What the runs established, in order:**
+- run6: square-format downshift bug (2752×2752 → 512×512 working image) inflated all
+  residuals; fixed (2:1-only). Three 0-edge stills sailed to a failed solve; fixed
+  (edge-count hard gate). No stillness gate; fixed (settle-before-trigger).
+- run8: unbounded solver scattered wildly on an unchanged rig (dy 0.87→4.38 m, yaw
+  +17→−240°) at indistinguishable residuals ⇒ chamfer-proximity cost surface is
+  near-flat in cluttered rooms. Physical bounds added.
+- run9: diagnostics overlays (white=image edges, cyan=prior, red=solved) showed (a) the
+  Sobel map SATURATED (ribbed ceiling = stripe field), (b) all mesh edges in one ~60°
+  wedge — only the direction the iPad had meshed. Coverage hard gate added (90° yaw span)
+  + card teaches a full-circle sweep; input bundles (jpg+pose+edges.bin) persist under
+  Documents/rigcal_diag/inputs/ on perf-diag builds for OFFLINE solver work.
+- run10: with 360° coverage and 104-155K edges, the solve STILL pinned to the same bound
+  corner as run9 (dLat≈+0.3, yaw≈−30°, pitch≈−10°) — a consistent directional pull across
+  runs/coverage regimes. Combined with the photos (pitch ≈ 0 physically, dLat ≈ 0.15),
+  the pull is non-physical: prime suspect is the OPERATOR (the one scene element that
+  moves WITH the rig ⇒ a systematic attractor), compounded by edge saturation.
+
+**Revised plan (cost function is the critical path, iterated OFFLINE on the bundles):**
+1. Operator exclusion: mask the operator from the equirect edge map (elevation band
+   below the camera and/or person-segmentation on the 512-px working image), and skip
+   cost samples projecting into the masked region (symmetric, so excluded zones don't
+   inflate residuals).
+2. Discriminative matching: orientation-aware chamfer (projected mesh-edge direction
+   must agree with the image edge orientation it matches) + strong-edge thinning /
+   adaptive Sobel threshold targeting a fixed edge density (fixes saturated scenes).
+3. Validate offline against photo-derived truth (dy≈0.8, dLat≈0.15, pitch≈0) with yaw
+   FREE; only then widen the in-app yaw bound (screw-mount reality) and re-run on rig.
+4. Keep: bounds on dy/dLat/pitch, coverage + edge-count + stillness gates, spot-check.
+
 ## Code-review follow-ups resolved (2026-07-29)
 
 The four open findings from the branch code review are closed:
