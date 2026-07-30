@@ -52,6 +52,7 @@ enum AppConstants {
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
         static let gpuColorize = "gpuColorize"                        // Developer Mode: GPU vertex-color projection (A/B vs CPU path)
+        static let keyframeWeightBonus = "keyframeWeightBonus"        // Developer Mode: keyframe weight bonus in colorization (A/B vs equal still/sweep weighting)
     }
 
     // MARK: - Default Values
@@ -122,6 +123,13 @@ enum AppConstants {
     /// semantics of the two paths are meant to be identical — a visual difference here is a
     /// GPU-path bug by definition.
     static let gpuColorize: Bool = true
+    /// Developer Mode A/B toggle for the keyframe weight bonus in colorization (default ON —
+    /// production gives sharp stillness keyframes a ×colorizationKeyframeWeight vote in the
+    /// weighted median). OFF weights stills and sweep frames EQUALLY: recolor the same scan
+    /// once per setting to see whether the bonus amplifies edge bleed (a close keyframe's
+    /// silhouette-straddling samples get the bonus AND the 1/d² boost) or, conversely,
+    /// whether equal weighting lets blurry sweep colors mush crisp keyframe surfaces.
+    static let keyframeWeightBonus: Bool = true
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
@@ -148,7 +156,14 @@ enum AppConstants {
     static let depthOcclusionToleranceMM: Float = 150.0      // mm tolerance for depth occlusion test
     static let colorizationMaxObservations: Int = 12         // max per-vertex observations kept (top-N by quality) for the weighted-median colorizer
     static let colorizationMinDistanceM: Float = 0.3         // distance floor (m) for the inverse-square distance weight, so very close frames don't dominate
-    static let colorizationOcclusionToleranceMM: Float = 50.0 // tighter mm tolerance used during colorization to cull backface/occluded samples (lower = more aggressive culling, but ARKit mesh noise can reject valid samples)
+    // ── Colorization anti-bleed tuning ──────────────────────────────────────────
+    // Effective occlusion tolerance = max(ToleranceMM, ToleranceFrac × depth). The old fixed
+    // 50 mm was thicker than a tabletop (near-field bleed-through) yet tight vs LiDAR noise
+    // at range. To bisect a knob's effect, set it to its listed "disable" value and recolor.
+    static let colorizationOcclusionToleranceMM: Float = 25.0 // FLOOR (mm) of the depth-occlusion tolerance (lower = more aggressive culling near-field; ARKit mesh noise can reject valid samples)
+    static let colorizationOcclusionToleranceFrac: Float = 0.03 // distance-proportional tolerance (LiDAR error grows with range): 3% ⇒ 30 mm @1 m, 120 mm @4 m. 0 disables (fixed floor only)
+    static let colorizationDepthEdgeMaxSpreadFrac: Float = 0.15 // reject observations whose 3×3 depth neighborhood spans > frac × depth — they straddle a silhouette, where the coarse 256×192 depth and the color raster disagree (the main bleed source). 0 disables
+    static let colorizationBackfaceDotMin: Float = 0.0        // reject observations with signed n·v below this — a back-facing vertex is seen THROUGH its own surface (e.g. tabletop color baking onto the underside). -1 disables (legacy abs() behavior)
     static let thumbnailMaxWidth: CGFloat = 800              // max width for scan thumbnails
     static let thumbnailJpegQuality: CGFloat = 0.6           // JPEG quality for thumbnails
     static let stabilizationPollIntervalMs: Int = 200         // ms between tracking-state polls after session reset

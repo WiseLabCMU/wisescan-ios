@@ -23,6 +23,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
     @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
     @AppStorage(AppConstants.Key.gpuColorize) private var gpuColorize: Bool = AppConstants.gpuColorize
+    @AppStorage(AppConstants.Key.keyframeWeightBonus) private var keyframeWeightBonus: Bool = AppConstants.keyframeWeightBonus
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     // 0 = Auto (no override); N = force format index N-1 of supportedVideoFormats.
     @AppStorage(AppConstants.Key.videoFormatIndex) private var videoFormatIndex: Int = 0
@@ -273,6 +274,7 @@ struct SettingsView: View {
                                     // Default-TRUE dev toggle: same leak rule as meshClassifier —
                                     // a bench-OFF value must not survive dev-mode exit.
                                     self.gpuColorize = AppConstants.gpuColorize
+                                    self.keyframeWeightBonus = AppConstants.keyframeWeightBonus
                                     // Diagnostics toggles gate on their own keys (not developerMode),
                                     // so a bench-ON value would keep costing after dev-mode exit.
                                     self.hideLivePoints = AppConstants.hideLivePoints
@@ -349,6 +351,18 @@ struct SettingsView: View {
                                     Text("GPU Colorize")
                                         .foregroundColor(.white)
                                     Text("Uses the Metal compute path for vertex-color projection (default). Turn OFF to force the CPU reference implementation — recolor the same scan once per setting to isolate suspected GPU artifacts (occlusion bleed-through, mask misses). The two paths must produce the same result; a difference is a GPU bug.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $keyframeWeightBonus) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Keyframe Weight Bonus")
+                                        .foregroundColor(.white)
+                                    Text("Gives sharp stillness keyframes a 3× vote in the vertex-color weighted median (default). Turn OFF to weight stills and motion frames equally — recolor the same scan once per setting to see whether the bonus amplifies edge bleed or, conversely, equal weighting lets blurry sweep colors mush crisp surfaces.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

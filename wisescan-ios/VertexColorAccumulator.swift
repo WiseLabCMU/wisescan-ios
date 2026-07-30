@@ -319,7 +319,12 @@ enum VertexColorAccumulator {
         // forces the CPU reference path to isolate suspected GPU artifacts on the same scan.
         let useGPU = VertexColorGPU.isAvailable
             && UserDefaults.standard.bool(forKey: AppConstants.Key.gpuColorize)
-        PerfDiag.log("[VertexColor] projection path: \(useGPU ? "GPU" : "CPU")")
+        // Dev A/B: OFF weights stills and sweep frames equally, to test whether the 3×
+        // keyframe bonus amplifies bleed (a close keyframe's silhouette-straddling samples
+        // get the bonus AND the 1/d² boost, which can flip the weighted median).
+        let keyframeBonus: Float = UserDefaults.standard.bool(forKey: AppConstants.Key.keyframeWeightBonus)
+            ? AppConstants.colorizationKeyframeWeight : 1.0
+        PerfDiag.log("[VertexColor] projection path: \(useGPU ? "GPU" : "CPU"), keyframe bonus ×\(keyframeBonus)")
         if useGPU {
             VertexColorGPU.uploadVertices(vertices, normals: normals)
         }
@@ -373,7 +378,7 @@ enum VertexColorAccumulator {
             // observations get a weight bonus — where a keyframe saw a surface, its
             // crisp samples dominate the weighted median over blur-prone sweep samples.
             let frameWeight: Float = (json["is_keyframe"] as? Bool) == true
-                ? AppConstants.colorizationKeyframeWeight : 1.0
+                ? keyframeBonus : 1.0
 
             // Load corresponding image
             guard let imagePath = json["image_path"] as? String else { return }
@@ -440,6 +445,11 @@ enum VertexColorAccumulator {
                     let info = cgDepth.bitmapInfo.rawValue
                     isDepthLittleEndian = (info & CGBitmapInfo.byteOrder16Little.rawValue) != 0 || (info & CGBitmapInfo.byteOrder32Little.rawValue) != 0
                 }
+            }
+            if depthPtr == nil {
+                // Without depth this frame paints EVERY vertex in its frustum — occluded or
+                // not — so a single such frame can smear bleed across the whole scan.
+                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count): no usable depth — occlusion test OFF for this frame")
             }
 
             // Load this frame's person mask (deferred-blur era only). No mask ⇒ the stencil hadn't
@@ -524,24 +534,46 @@ enum VertexColorAccumulator {
                     guard px >= 0 && px < scaledW && py >= 0 && py < scaledH else { continue }
                     guard px < width && py < height else { continue }
 
-                    // Depth Occlusion Test
+                    // Depth Occlusion Test (mirrors the GPU kernel exactly — keep in lockstep)
                     if let dPtr = depthPtr {
                         let dpx = px * downscaleFactor * depthWidth / max(imgW, 1)
                         let dpy = py * downscaleFactor * depthHeight / max(imgH, 1)
                         if dpx >= 0 && dpx < depthWidth && dpy >= 0 && dpy < depthHeight {
-                            let dOffset = dpy * depthBytesPerRow + dpx * 2
-                            let b0 = UInt16(dPtr[dOffset])
-                            let b1 = UInt16(dPtr[dOffset + 1])
-                            let depthValue = isDepthLittleEndian ? (b1 << 8) | b0 : (b0 << 8) | b1
-
-                            let depthMM = Float(depthValue)
+                            // Byte-order-aware 16-bit read, shared by the center sample and the edge scan.
+                            func depthAt(_ sx: Int, _ sy: Int) -> Float {
+                                let o = sy * depthBytesPerRow + sx * 2
+                                let b0 = UInt16(dPtr[o]), b1 = UInt16(dPtr[o + 1])
+                                return Float(isDepthLittleEndian ? (b1 << 8) | b0 : (b0 << 8) | b1)
+                            }
+                            let depthMM = depthAt(dpx, dpy)
                             let expectedMM = -camPos.z * 1000.0
 
                             // If depth pixel is 0, it means no valid depth or privacy mask. Skip coloring.
                             if depthMM == 0 { continue }
 
-                            // If expected distance is > tolerance farther than what the depth sensor saw, we are occluded
-                            if expectedMM > depthMM + AppConstants.colorizationOcclusionToleranceMM { continue }
+                            // Occluded if expected distance exceeds stored depth + tolerance; the
+                            // tolerance scales with range (LiDAR error grows) over a near-field floor.
+                            let tolMM = max(AppConstants.colorizationOcclusionToleranceMM,
+                                            AppConstants.colorizationOcclusionToleranceFrac * depthMM)
+                            if expectedMM > depthMM + tolMM { continue }
+
+                            // Silhouette guard: reject observations straddling a depth discontinuity,
+                            // where the coarse depth raster and the color raster disagree about which
+                            // side of the edge a pixel is on (the main occlusion-bleed source).
+                            let edgeFrac = AppConstants.colorizationDepthEdgeMaxSpreadFrac
+                            if edgeFrac > 0 {
+                                var dMin = depthMM, dMax = depthMM
+                                for ddy in -1...1 {
+                                    for ddx in -1...1 {
+                                        let sx = dpx + ddx, sy = dpy + ddy
+                                        guard sx >= 0, sx < depthWidth, sy >= 0, sy < depthHeight else { continue }
+                                        let dn = depthAt(sx, sy)
+                                        if dn == 0 { continue }   // no-data neighbors are not a discontinuity
+                                        dMin = min(dMin, dn); dMax = max(dMax, dn)
+                                    }
+                                }
+                                if dMax - dMin > edgeFrac * depthMM { continue }
+                            }
                         }
                     }
 
@@ -568,7 +600,11 @@ enum VertexColorAccumulator {
                     let dist = simd_length(toCam)
                     guard dist > 0 else { continue }
                     let viewDir = toCam / dist
-                    let angleWeight = abs(simd_dot(normals[i], viewDir))   // 1 = head-on, 0 = grazing
+                    // Back-face rejection: a vertex whose normal points away from the camera is
+                    // being seen THROUGH its own surface — abs() used to give it full weight.
+                    let dotNV = simd_dot(normals[i], viewDir)
+                    guard dotNV >= AppConstants.colorizationBackfaceDotMin else { continue }
+                    let angleWeight = abs(dotNV)                           // 1 = head-on, 0 = grazing
                     let clampedDist = max(dist, distFloor)
                     let distWeight = 1.0 / (clampedDist * clampedDist)     // inverse-square, floored
                     let weight = angleWeight * distWeight * frameWeight    // keyframes get a sharpness bonus

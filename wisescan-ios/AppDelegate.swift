@@ -36,7 +36,8 @@ struct Scan4DApp: App {
             AppConstants.Key.meshClassifier: AppConstants.meshClassifier,
             AppConstants.Key.colorizeOnPostprocess: AppConstants.colorizeOnPostprocess,
             AppConstants.Key.registerLegacyScans: AppConstants.registerLegacyScans,
-            AppConstants.Key.gpuColorize: AppConstants.gpuColorize
+            AppConstants.Key.gpuColorize: AppConstants.gpuColorize,
+            AppConstants.Key.keyframeWeightBonus: AppConstants.keyframeWeightBonus
         ])
         print("Application directory: \(NSHomeDirectory())")
         do {
