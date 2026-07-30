@@ -250,9 +250,13 @@ enum RigCalibrationSolver {
     private static let sinElevationCutoff =
         sin(AppConstants.calibrationElevationCutoffDeg * Float.pi / 180)
 
-    /// First equirect row at or below the elevation cutoff (rows span +90°…−90°).
+    /// First equirect row at or below the elevation cutoff. Rows map latitude via
+    /// eqY = (90° − lat)/180° × H (top row = +90°), so cutoff −45° ⇒ row 0.75 H and
+    /// cutoff −90° (disabled) ⇒ row H (no masking). run11: the sign was flipped
+    /// ((90 + cutoff) ⇒ 0.25 H), which cleared edges from 75% of the image while the
+    /// cost still sampled into the void — 112 px residuals, all params wall-pinned.
     private static func maskStartRow(height: Int) -> Int {
-        let frac = (90 + AppConstants.calibrationElevationCutoffDeg) / 180
+        let frac = (90 - AppConstants.calibrationElevationCutoffDeg) / 180
         return min(height, max(0, Int(Float(height) * frac)))
     }
 
