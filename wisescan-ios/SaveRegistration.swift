@@ -138,6 +138,14 @@ enum SaveRegistration {
                            report.matchedWalls, report.matchedFloors, report.weakAxisFrac,
                            report.converged ? "yes" : "NO")
         if let w = trimmedWall { stats += " trimmed=wall[\(w)]" }
+        // Pre-fit floor gap paired with the gate it cleared — the two numbers that tune
+        // matchFloorOffsetM. A gap near the gate together with a large applied trans is the
+        // level-mismatch signature (RoomPlan gives one floor plane per room, at whichever level
+        // that scan covered lowest, so two generations can seat on different physical levels).
+        if let dy = report.floorPreFitYDeltaM {
+            stats += String(format: " floorΔy=%+.1fcm/gate%.0fcm",
+                            dy * 100, PlaneRegistration.matchFloorOffsetM * 100)
+        }
 
         let applied: Bool
         let reason: String
