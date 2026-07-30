@@ -144,6 +144,14 @@ enum AppConstants {
     static let calibrationResidualGreenPx: Float = 1.4                 // RMS reprojection error (equirect px, 512-wide) ≤ this → green. Behavior-preserving √ of the old mean-squared 2.0
     static let calibrationResidualYellowPx: Float = 2.2                // ≤ this → yellow (marginal); above → red (suggest re-do). √5.0
     static let calibrationMaxIterations = 500                          // Nelder-Mead iteration cap
+    // Physical solve bounds, anchored to the MECHANICAL prior (the rig's ground truth).
+    // run8 (2026-07-30): with a near-flat chamfer cost surface in cluttered rooms, the
+    // unbounded solver accepted dy=4.4 m / yaw=−240° at residuals indistinguishable
+    // from plausible poses. A monopod rig cannot physically be outside these ranges.
+    static let calibrationBoundDyM: Float = 0.3                        // rod height search half-range (m) around the mechanical prior
+    static let calibrationBoundLateralM: Float = 0.3                   // lateral offset half-range (m) around 0
+    static let calibrationBoundYawDeg: Float = 30                      // yaw half-range (deg) around the mechanical prior
+    static let calibrationBoundPitchDeg: Float = 10                    // pitch-residual half-range (deg) around 0 (zenith correction should leave only small error)
     static let calibrationConvergenceTolerance: Float = 1e-5           // cost-range convergence threshold
     static let calibrationEdgeDetectionWidth = 512                     // downsampled equirect width for Sobel edge detection
     static let calibrationDriftWarnMultiplier: Float = 1.4             // first-still spot-check: warn if live residual > stored × this. RMS space — ≡ the old 2.0× on squared values (√2)

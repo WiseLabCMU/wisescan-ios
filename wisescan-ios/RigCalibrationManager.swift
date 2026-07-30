@@ -351,6 +351,27 @@ final class RigCalibrationManager {
                                 p.dy, p.dLateral, p.yaw * 180 / .pi, p.pitchResidual * 180 / .pi,
                                 result.residualPx, result.converged ? "converged" : "NOT converged"))
 
+            // Alignment diagnostics: white = image edges, cyan = mechanical prior, red =
+            // solved. One PNG per still under Documents/rigcal_diag — if red doesn't hug
+            // white better than cyan, the solve added nothing (flat cost surface).
+            if result.converged {
+                let solvedProfile = result.profile
+                let diagInputs = solveInputs
+                await Self.computeOffMain {
+                    let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("rigcal_diag", isDirectory: true)
+                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    let stamp = Int(Date().timeIntervalSince1970)
+                    for (idx, input) in diagInputs.enumerated() {
+                        guard let png = RigCalibrationSolver.renderDiagnostic(
+                            input: input, solved: solvedProfile, prior: .mechanicalPrior) else { continue }
+                        try? png.write(to: dir.appendingPathComponent("cal_\(stamp)_still\(idx + 1).png"))
+                    }
+                    return ()
+                }
+                PerfDiag.log("[RigCal] alignment diagnostics written to Documents/rigcal_diag/cal_*.png")
+            }
+
             if !result.converged || result.residualPx < 0
                 || result.residualPx.isNaN || result.residualPx.isInfinite {
                 self.state = .failed("Solver did not converge — try calibrating in a more feature-rich area with visible mesh")

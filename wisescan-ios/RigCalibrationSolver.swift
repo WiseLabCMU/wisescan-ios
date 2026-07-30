@@ -82,8 +82,27 @@ enum RigCalibrationSolver {
             )
         }
 
-        // Initial simplex vertices: prior ± small perturbations
-        let x0 = SIMD4<Float>(prior.dy, prior.dLateral, prior.yaw, prior.pitchResidual)
+        // Physical bounds anchored to the MECHANICAL prior (not the possibly-garbage
+        // stored profile): a monopod rig cannot be outside rod ±0.3 m, |lateral| 0.3 m,
+        // yaw ±30°, pitch ±10°. Candidates outside hit a flat penalty wall — run8 showed
+        // the chamfer surface is flat enough that the unbounded solver wandered to
+        // dy=4.4 m / yaw=−240° at "normal" residuals.
+        let anchor = RigProfile.mechanicalPrior
+        let yawHalf = AppConstants.calibrationBoundYawDeg * Float.pi / 180
+        let pitchHalf = AppConstants.calibrationBoundPitchDeg * Float.pi / 180
+        let lo = SIMD4<Float>(anchor.dy - AppConstants.calibrationBoundDyM,
+                              -AppConstants.calibrationBoundLateralM,
+                              anchor.yaw - yawHalf,
+                              -pitchHalf)
+        let hi = SIMD4<Float>(anchor.dy + AppConstants.calibrationBoundDyM,
+                              AppConstants.calibrationBoundLateralM,
+                              anchor.yaw + yawHalf,
+                              pitchHalf)
+
+        // Initial simplex vertices: prior ± small perturbations, clamped into bounds
+        // (the stored prior itself may be a garbage unbounded-era solve).
+        let x0 = simd_clamp(
+            SIMD4<Float>(prior.dy, prior.dLateral, prior.yaw, prior.pitchResidual), lo, hi)
 
         // Perturbation scales per parameter (order: dy, dLat, yaw, pitch)
         let scales = SIMD4<Float>(0.1, 0.05, 0.1, 0.05) // meters, meters, radians, radians
@@ -94,7 +113,8 @@ enum RigCalibrationSolver {
             maxIterations: AppConstants.calibrationMaxIterations,
             tolerance: AppConstants.calibrationConvergenceTolerance
         ) { params in
-            totalCost(params: params, inputs: sampledInputs)
+            if any(params .< lo) || any(params .> hi) { return 1e6 }
+            return totalCost(params: params, inputs: sampledInputs)
         }
 
         let solved = RigProfile(
@@ -113,6 +133,67 @@ enum RigCalibrationSolver {
             converged: result.converged,
             iterations: result.iterations
         )
+    }
+
+    // MARK: - Diagnostic overlay
+
+    /// Render a per-still alignment diagnostic PNG: detected image edges (white, the
+    /// distance-transform zeros), mesh edges projected at the mechanical PRIOR (cyan)
+    /// and at the SOLVED params (red). If red doesn't hug white visibly better than
+    /// cyan, the solve added nothing over the prior — the ground-truth visual for a
+    /// flat/mushy cost surface that residual numbers can't distinguish.
+    static func renderDiagnostic(input: CalibrationInput,
+                                 solved: RigProfile,
+                                 prior: RigProfile) -> Data? {
+        let width = input.edgeMap.width
+        let height = input.edgeMap.height
+        guard width > 0, height > 0 else { return nil }
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        for i in 0..<(width * height) {
+            if input.edgeMap.distances[i] == 0 {
+                rgba[i * 4] = 255; rgba[i * 4 + 1] = 255; rgba[i * 4 + 2] = 255
+            }
+            rgba[i * 4 + 3] = 255
+        }
+
+        func splat(_ profile: RigProfile, red: UInt8, green: UInt8, blue: UInt8) {
+            let rig = composeRigTransform(
+                phoneToWorld: input.phoneToWorld,
+                dy: profile.dy, dLateral: profile.dLateral,
+                yaw: profile.yaw, pitchResidual: profile.pitchResidual)
+            let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
+            for edge in input.meshEdges {
+                for i in 0..<4 {
+                    let t = (Float(i) + 0.5) / 4
+                    let point = edge.a + t * (edge.b - edge.a)
+                    let dir = simd_normalize(point - camPos)
+                    let (eqX, eqY) = dirToEquirect(dir: dir, width: width, height: height)
+                    let col = Int(eqX), row = Int(eqY)
+                    guard col >= 0, col < width, row >= 0, row < height else { continue }
+                    let idx = (row * width + col) * 4
+                    rgba[idx] = red; rgba[idx + 1] = green; rgba[idx + 2] = blue
+                }
+            }
+        }
+        splat(prior, red: 0, green: 190, blue: 255)     // cyan = mechanical prior
+        splat(solved, red: 255, green: 70, blue: 70)    // red = solved (draws over cyan)
+
+        let bytesPerRow = width * 4
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData),
+              let cgImage = CGImage(width: width, height: height,
+                                    bitsPerComponent: 8, bitsPerPixel: 32,
+                                    bytesPerRow: bytesPerRow,
+                                    space: CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                    provider: provider, decode: nil,
+                                    shouldInterpolate: false, intent: .defaultIntent)
+        else { return nil }
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, "public.png" as CFString, 1, nil)
+        else { return nil }
+        CGImageDestinationAddImage(dest, cgImage, nil)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return out as Data
     }
 
     /// Quick validation: evaluate the cost function at the stored calibration parameters
