@@ -252,9 +252,8 @@ struct CaptureView: View {
     /// calibration from the Dashboard card and switches to the Capture tab.
     /// Granular label for the calibration capture button, reflecting the pipeline stage.
     private var calibrationButtonLabel: String {
-        if thetaManager.isCapturing { return "Triggering shutter…" }
-        if thetaManager.isDownloading { return "Downloading still…" }
-        if rigCalibrationManager.isCapturingCalibrationStill { return "Transferring & processing…" }
+        if thetaManager.isCapturing { return "Capturing — hold steady…" }
+        if rigCalibrationManager.isCapturingCalibrationStill { return "Saving position…" }
         return "Capture Calibration Still"
     }
 
@@ -329,7 +328,7 @@ struct CaptureView: View {
                         .font(.subheadline.bold())
                         .foregroundColor(.white)
                 }
-                Text("Aligning mesh edges to 360° images.")
+                Text(rigCalibrationManager.solvingStatusMessage ?? "Aligning mesh edges to 360° images.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }

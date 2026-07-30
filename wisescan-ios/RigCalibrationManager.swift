@@ -53,8 +53,26 @@ final class RigCalibrationManager {
     /// for the environment quality gate).
     var nearbyMeshVertexCount: Int = 0
 
-    /// Accumulated calibration inputs.
-    private var capturedInputs: [RigCalibrationSolver.CalibrationInput] = []
+    /// One collected calibration position: everything needed to build a solver input
+    /// EXCEPT the equirect bytes, which stay on the camera until the batch download at
+    /// solve time. (The per-still download + edge detect used to gate the Capture button
+    /// ~2-4 s per position; deferred, the user walks as soon as the camera is ready.)
+    private struct PendingStill {
+        let phoneToWorld: simd_float4x4
+        let meshEdges: [RigCalibrationSolver.MeshEdge]
+        let fileURL: URL
+    }
+
+    /// Collected calibration positions awaiting the solve-time batch download.
+    private var pendingStills: [PendingStill] = []
+
+    /// User-visible progress through the download → edge-detect → solve pipeline,
+    /// shown on the calibration card during `.solving`.
+    private(set) var solvingStatusMessage: String?
+
+    /// Invalidates in-flight capture/solve pipelines when the session is cancelled or
+    /// restarted — an awaited download must not resurrect a cancelled session's state.
+    private var sessionGeneration = 0
 
     /// Temporary directory for calibration equirects (cleaned after solve).
     private var calibrationTempDir: URL?
@@ -108,8 +126,11 @@ final class RigCalibrationManager {
 
     /// Begin a calibration session. Resets any previous captures.
     func beginCalibration() {
-        capturedInputs.removeAll()
+        sessionGeneration += 1
+        pendingStills.removeAll()
         lastResult = nil
+        captureErrorMessage = nil
+        solvingStatusMessage = nil
         state = .capturing(stillsCollected: 0)
         logger.info("Calibration session started")
 
@@ -122,17 +143,22 @@ final class RigCalibrationManager {
 
     /// Cancel the calibration session.
     func cancelCalibration() {
-        capturedInputs.removeAll()
+        sessionGeneration += 1
+        pendingStills.removeAll()
         lastResult = nil
+        captureErrorMessage = nil
+        solvingStatusMessage = nil
         state = .idle
         cleanupTempDir()
         logger.info("Calibration cancelled")
     }
 
     /// Capture one calibration still. Called when the user taps during stillness in
-    /// calibration mode. The caller provides the phone pose and mesh anchors;
-    /// this method triggers the Theta capture + download, extracts mesh edges, and
-    /// detects equirect edges.
+    /// calibration mode. The caller provides the phone pose and mesh anchors; this
+    /// method triggers the Theta capture and extracts mesh edges (overlapped with the
+    /// in-camera stitch), then stashes the position — the ~11 MB download and edge
+    /// detection are DEFERRED to a batch when the last still is collected, so the
+    /// button frees as soon as the camera can take the next shot.
     ///
     /// Returns immediately; the capture runs asynchronously.
     func captureCalibrationStill(
@@ -157,6 +183,7 @@ final class RigCalibrationManager {
                                    phoneTransform.columns.3.z)
 
         logger.info("Calibration still \(count + 1): triggering capture")
+        let generation = sessionGeneration
 
         // Trigger the Theta capture FIRST — the ~2s in-camera exposure/stitch overlaps the
         // mesh-edge extraction below instead of waiting behind it.
@@ -172,6 +199,7 @@ final class RigCalibrationManager {
 
             // Extract mesh edges near the phone position — OFF main (transforms every vertex
             // of every nearby anchor; on main this froze the UI and stalled the AR session).
+            let extractStart = Date()
             let (meshEdges, vertexCount) = await Self.computeOffMain {
                 RigCalibrationSolver.extractMeshEdges(
                     from: meshAnchors,
@@ -184,7 +212,7 @@ final class RigCalibrationManager {
                 self.logger.warning("Low mesh density at calibration position: \(vertexCount) vertices")
                 // Don't block — the user sees the warning on the card
             }
-            self.logger.info("Calibration still: \(meshEdges.count) edges, \(vertexCount) vertices near position")
+            PerfDiag.log("[RigCal] mesh edges: \(meshEdges.count) edges from \(vertexCount) verts in \(Int(Date().timeIntervalSince(extractStart) * 1000))ms (overlapped with camera stitch)")
 
             // Poll for the capture to complete (the manager sets isCapturing = false)
             var attempts = 0
@@ -199,39 +227,21 @@ final class RigCalibrationManager {
                 return
             }
 
-            // Single download of the ~11 MB equirect (review finding #8: this used to run
-            // twice — once via downloadLastCapture for transfer stats/preview, then again
-            // for the raw bytes).
-            let jpegData: Data
-            do {
-                jpegData = try await thetaManager.downloadData(from: url)
-            } catch {
-                self.failCapture("Downloading the still failed (\(error.localizedDescription)) — check the Theta Wi-Fi link and tap Capture again.")
-                return
-            }
-
-            // Detect edges in the equirect — off main (Sobel + chamfer over the working image)
-            let detected = await Self.computeOffMain {
-                RigCalibrationSolver.detectEquirectEdges(in: jpegData)
-            }
-            guard let edgeMap = detected else {
-                self.failCapture("Couldn't detect edges in the still — try a brighter position with more visible structure.")
-                return
-            }
-
-            let input = RigCalibrationSolver.CalibrationInput(
-                phoneToWorld: phoneTransform,
-                edgeMap: edgeMap,
-                meshEdges: meshEdges
-            )
-
+            // Defer the ~11 MB download + edge detection to the solve-time batch: the shot
+            // persists on the camera, so only the pose + mesh edges + file URL are stashed
+            // here and the button frees for the next position.
             await MainActor.run {
-                self.capturedInputs.append(input)
-                let newCount = self.capturedInputs.count
-                self.logger.info("Calibration still \(newCount)/\(AppConstants.calibrationStillCount) captured")
+                guard self.sessionGeneration == generation else { return }   // cancelled mid-flight
+                self.pendingStills.append(PendingStill(
+                    phoneToWorld: phoneTransform,
+                    meshEdges: meshEdges,
+                    fileURL: url
+                ))
+                let newCount = self.pendingStills.count
+                self.logger.info("Calibration still \(newCount)/\(AppConstants.calibrationStillCount) collected (download deferred)")
 
                 if newCount >= AppConstants.calibrationStillCount {
-                    self.runSolver()
+                    self.runSolverPipeline()
                 } else {
                     self.state = .capturing(stillsCollected: newCount)
                 }
@@ -246,31 +256,83 @@ final class RigCalibrationManager {
         logger.error("Calibration capture failed: \(message)")
     }
 
-    /// Run the solver on a background queue after all stills are captured.
-    private func runSolver() {
+    /// Batch phase after the last still is collected: download every deferred equirect
+    /// (with retries — the shots persist on the camera, so a Wi-Fi hiccup never costs a
+    /// walked position), detect edges, then solve. The card shows per-step progress via
+    /// `solvingStatusMessage`; every stage emits a [RigCal] PerfDiag timing so the
+    /// GPU-acceleration question can be decided from device numbers.
+    private func runSolverPipeline() {
         state = .solving
-        let inputs = capturedInputs
+        let pending = pendingStills
         let prior = currentProfile ?? .mechanicalPrior
+        let total = pending.count
+        let generation = sessionGeneration
+        let thetaManager = ThetaCameraManager.shared
 
-        logger.info("Running calibration solver with \(inputs.count) inputs...")
-
-        // Explicitly dispatch to GCD global queue. The solver's Nelder-Mead loop is
-        // compute-bound (2000 edges × 3 inputs × 100+ iterations); even with subsampling
-        // this must not block the main thread or the AR session's frame delivery.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = RigCalibrationSolver.solve(inputs: inputs, prior: prior)
-
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.lastResult = result
-                self.logger.info("Solver complete: residual \(result.residualPx) px RMS, converged: \(result.converged), iterations: \(result.iterations)")
-
-                if !result.converged || result.residualPx < 0
-                    || result.residualPx.isNaN || result.residualPx.isInfinite {
-                    self.state = .failed("Solver did not converge — try calibrating in a more feature-rich area with visible mesh")
-                } else {
-                    self.state = .review(residualPx: result.residualPx, converged: result.converged)
+        Task {
+            var inputs: [RigCalibrationSolver.CalibrationInput] = []
+            for (index, still) in pending.enumerated() {
+                self.solvingStatusMessage = "Downloading still \(index + 1)/\(total)…"
+                var jpegData: Data?
+                for attempt in 1...3 {
+                    do {
+                        let t0 = Date()
+                        let data = try await thetaManager.downloadData(from: still.fileURL)
+                        PerfDiag.log("[RigCal] download \(index + 1)/\(total): \(data.count / 1024) KB in \(Int(Date().timeIntervalSince(t0) * 1000))ms (attempt \(attempt))")
+                        jpegData = data
+                        break
+                    } catch {
+                        self.logger.warning("Calibration download \(index + 1) attempt \(attempt) failed: \(error.localizedDescription)")
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    }
                 }
+                guard self.sessionGeneration == generation else { return }   // cancelled
+                guard let jpegData else {
+                    self.solvingStatusMessage = nil
+                    self.state = .failed("Downloading still \(index + 1) failed — the shots are still on the camera; check the Theta Wi-Fi link and re-run calibration.")
+                    return
+                }
+
+                self.solvingStatusMessage = "Finding edges in still \(index + 1)/\(total)…"
+                let t1 = Date()
+                let detected = await Self.computeOffMain {
+                    RigCalibrationSolver.detectEquirectEdges(in: jpegData)
+                }
+                PerfDiag.log("[RigCal] edge detect \(index + 1)/\(total): \(Int(Date().timeIntervalSince(t1) * 1000))ms")
+                guard self.sessionGeneration == generation else { return }   // cancelled
+                guard let edgeMap = detected else {
+                    self.solvingStatusMessage = nil
+                    self.state = .failed("Couldn't detect edges in still \(index + 1) — re-run calibration from brighter positions with more visible structure.")
+                    return
+                }
+                inputs.append(RigCalibrationSolver.CalibrationInput(
+                    phoneToWorld: still.phoneToWorld,
+                    edgeMap: edgeMap,
+                    meshEdges: still.meshEdges
+                ))
+            }
+
+            self.solvingStatusMessage = "Solving rig parameters…"
+            self.logger.info("Running calibration solver with \(inputs.count) inputs...")
+            let solveInputs = inputs
+            let t2 = Date()
+            // Off main: the Nelder-Mead loop is compute-bound (edges × inputs × 100+
+            // iterations) and must not stall the AR session's frame delivery.
+            let result = await Self.computeOffMain {
+                RigCalibrationSolver.solve(inputs: solveInputs, prior: prior)
+            }
+            PerfDiag.log("[RigCal] solve: \(Int(Date().timeIntervalSince(t2) * 1000))ms, \(result.iterations) iterations")
+            guard self.sessionGeneration == generation else { return }   // cancelled
+
+            self.solvingStatusMessage = nil
+            self.lastResult = result
+            self.logger.info("Solver complete: residual \(result.residualPx) px RMS, converged: \(result.converged), iterations: \(result.iterations)")
+
+            if !result.converged || result.residualPx < 0
+                || result.residualPx.isNaN || result.residualPx.isInfinite {
+                self.state = .failed("Solver did not converge — try calibrating in a more feature-rich area with visible mesh")
+            } else {
+                self.state = .review(residualPx: result.residualPx, converged: result.converged)
             }
         }
     }

@@ -606,7 +606,18 @@ The four open findings from the branch code review are closed:
   (a stored squared value must not be reinterpreted as RMS) — recalibrate after update.
 - **#8 double-download** — calibration stills are now fetched once (~11 MB saved per
   still); the `downloadLastCapture` stats/preview pass was redundant with the raw-bytes
-  fetch.
+  fetch. Superseded same day by **deferred batch downloads**: capture now stashes only
+  pose + mesh edges + camera file URL, freeing the button as soon as the camera can take
+  the next shot (~2–4 s per position instead of ~5–8 s); the downloads + edge detection +
+  solve run as one progress-labeled batch when the last still is collected (retries per
+  download — the shots persist on the camera, so a Wi-Fi hiccup never costs a walked
+  position, but do NOT power the camera off between positions). Every stage logs a
+  `[RigCal]` PerfDiag timing (mesh-edge extract, download, edge detect, solve) so the
+  GPU-acceleration question is decided from device numbers: extraction is already
+  overlapped under the in-camera stitch (wall-clock free unless it exceeds ~2 s) and the
+  solver is one CPU step at the end — Accelerate `vvatan2f` batching (~5–10×) is the
+  first lever if the numbers say it matters, a Metal cost kernel (VertexColorGPU pattern)
+  the second.
 - **#9 export-time profile bypass** — `emitFaces` no longer applies a stored `RigProfile`:
   poses come exclusively from the sidecar's capture-baked `cam_transform` (stamped where
   the profile↔camera **serial binding is verified**); pre-contract sidecars without a baked
