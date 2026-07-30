@@ -794,6 +794,16 @@ struct ThetaCameraCard: View {
                         .cornerRadius(8)
                         .foregroundColor(.white)
                 }
+                // Discard the result, keep the previously saved calibration (if any).
+                Button(action: { calibrationManager.cancelCalibration() }) {
+                    Text("Cancel")
+                        .font(.subheadline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(8)
+                        .foregroundColor(.white.opacity(0.7))
+                }
             }
         }
     }

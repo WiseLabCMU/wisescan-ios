@@ -440,7 +440,18 @@ struct CaptureView: View {
                             .padding(.vertical, 8)
                             .background(Color.gray.opacity(0.3))
                             .cornerRadius(8)
-                            .foregroundColor(.gray)
+                            .foregroundColor(.white)
+                    }
+                    // Third choice: discard this result WITHOUT starting over — the
+                    // previously saved calibration (if any) stays in force.
+                    Button(action: { rigCalibrationManager.cancelCalibration() }) {
+                        Text("Cancel")
+                            .font(.subheadline.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.gray.opacity(0.15))
+                            .cornerRadius(8)
+                            .foregroundColor(.white.opacity(0.7))
                     }
                 }
             }
