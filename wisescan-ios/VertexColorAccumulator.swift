@@ -647,12 +647,17 @@ enum VertexColorAccumulator {
         // Release GPU buffers now that all frames are processed.
         if useGPU { VertexColorGPU.releaseBuffers() }
 
-        // Reduce each vertex's observations to a per-channel weighted median.
-        // Unsampled vertices keep a neutral gray so they read as "no data".
+        // Reduce each vertex's observations to a single color. Dev A/B: consensus
+        // vector median (default; excludes minority bleed colors outright) vs the
+        // legacy per-channel weighted median. Both consume the same top-K buffers,
+        // so this is independent of the GPU/CPU projection choice and cannot lose
+        // coverage. Unsampled vertices keep a neutral gray so they read as "no data".
+        let robustReduce = UserDefaults.standard.bool(forKey: AppConstants.Key.robustColorMedian)
         var coloredCount = 0
         // Scratch buffers reused across vertices (sized K) to avoid per-vertex allocations.
         var sV = [Float](repeating: 0, count: K)
         var sW = [Float](repeating: 0, count: K)
+        let obs = ObsBuffers(r: obsR, g: obsG, b: obsB, w: obsW)
         let medianStart = CACurrentMediaTime()
 
         var data = Data(count: vertexCount * MemoryLayout<SIMD4<Float>>.stride)
@@ -665,17 +670,70 @@ enum VertexColorAccumulator {
                     continue
                 }
                 let base = i * K
-                let r = Self.weightedMedian(values: obsR, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
-                let g = Self.weightedMedian(values: obsG, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
-                let b = Self.weightedMedian(values: obsB, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
-                out[i] = SIMD4<Float>(r / 255.0, g / 255.0, b / 255.0, 1.0)
+                if robustReduce {
+                    let c = Self.consensusColor(obs: obs, base: base, count: cnt)
+                    out[i] = SIMD4<Float>(c.x / 255.0, c.y / 255.0, c.z / 255.0, 1.0)
+                } else {
+                    let r = Self.weightedMedian(values: obsR, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
+                    let g = Self.weightedMedian(values: obsG, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
+                    let b = Self.weightedMedian(values: obsB, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
+                    out[i] = SIMD4<Float>(r / 255.0, g / 255.0, b / 255.0, 1.0)
+                }
                 coloredCount += 1
             }
         }
-        PerfDiag.log("[VertexColor] median resolve \(vertexCount) verts \(Int((CACurrentMediaTime() - medianStart) * 1000))ms")
+        let reducerName = robustReduce ? "consensus median" : "per-channel median"
+        PerfDiag.log("[VertexColor] \(reducerName) resolve \(vertexCount) verts \(Int((CACurrentMediaTime() - medianStart) * 1000))ms")
         let elapsed = CACurrentMediaTime() - startTime
-        print("[VertexColor] Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (weighted median, K=\(K)) in \(String(format: "%.1f", elapsed))s")
+        print("[VertexColor] Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (\(reducerName), K=\(K)) in \(String(format: "%.1f", elapsed))s")
         return data
+    }
+
+    /// The flat top-K observation buffers, bundled so the consensus reducer stays
+    /// under the parameter-count lint (arrays are COW references — no copies).
+    private struct ObsBuffers {
+        let r: [UInt8]
+        let g: [UInt8]
+        let b: [UInt8]
+        let w: [Float]
+    }
+
+    /// Weighted vector median + trimmed mean over one vertex's observations
+    /// (`base..<base+count` in the flat buffers).
+    ///
+    /// Picks the observation minimizing the weighted sum of L1 RGB distances to the
+    /// others — a consensus color that was actually SEEN (per-channel medians can mix
+    /// channels from different observations into a color nobody observed) — then
+    /// returns the weighted mean of just its cluster (observations within
+    /// `colorizationConsensusTrimL1`). Minority outlier colors, e.g. a foreground
+    /// surface bled through a marginal occlusion pass, are excluded entirely instead
+    /// of merely being out-voted channel by channel.
+    private static func consensusColor(obs: ObsBuffers, base: Int, count: Int) -> SIMD3<Float> {
+        if count == 1 {
+            return SIMD3<Float>(Float(obs.r[base]), Float(obs.g[base]), Float(obs.b[base]))
+        }
+        var bestIdx = base
+        var bestCost = Float.greatestFiniteMagnitude
+        for i in base..<(base + count) {
+            let ri = Int32(obs.r[i]), gi = Int32(obs.g[i]), bi = Int32(obs.b[i])
+            var cost: Float = 0
+            for j in base..<(base + count) where j != i {
+                let d = abs(ri - Int32(obs.r[j])) + abs(gi - Int32(obs.g[j])) + abs(bi - Int32(obs.b[j]))
+                cost += obs.w[j] * Float(d)
+            }
+            if cost < bestCost { bestCost = cost; bestIdx = i }
+        }
+        let rb = Int32(obs.r[bestIdx]), gb = Int32(obs.g[bestIdx]), bb = Int32(obs.b[bestIdx])
+        var sr: Float = 0, sg: Float = 0, sb: Float = 0, sw: Float = 0
+        for j in base..<(base + count) {
+            let d = abs(rb - Int32(obs.r[j])) + abs(gb - Int32(obs.g[j])) + abs(bb - Int32(obs.b[j]))
+            guard d <= AppConstants.colorizationConsensusTrimL1 else { continue }
+            let w = obs.w[j]
+            sr += w * Float(obs.r[j]); sg += w * Float(obs.g[j]); sb += w * Float(obs.b[j])
+            sw += w
+        }
+        guard sw > 0 else { return SIMD3<Float>(Float(rb), Float(gb), Float(bb)) }
+        return SIMD3<Float>(sr / sw, sg / sw, sb / sw)
     }
 
     /// Weighted median of one color channel over a vertex's observations.

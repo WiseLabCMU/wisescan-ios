@@ -24,6 +24,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
     @AppStorage(AppConstants.Key.gpuColorize) private var gpuColorize: Bool = AppConstants.gpuColorize
     @AppStorage(AppConstants.Key.keyframeWeightBonus) private var keyframeWeightBonus: Bool = AppConstants.keyframeWeightBonus
+    @AppStorage(AppConstants.Key.robustColorMedian) private var robustColorMedian: Bool = AppConstants.robustColorMedian
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     // 0 = Auto (no override); N = force format index N-1 of supportedVideoFormats.
     @AppStorage(AppConstants.Key.videoFormatIndex) private var videoFormatIndex: Int = 0
@@ -275,6 +276,7 @@ struct SettingsView: View {
                                     // a bench-OFF value must not survive dev-mode exit.
                                     self.gpuColorize = AppConstants.gpuColorize
                                     self.keyframeWeightBonus = AppConstants.keyframeWeightBonus
+                                    self.robustColorMedian = AppConstants.robustColorMedian
                                     // Diagnostics toggles gate on their own keys (not developerMode),
                                     // so a bench-ON value would keep costing after dev-mode exit.
                                     self.hideLivePoints = AppConstants.hideLivePoints
@@ -363,6 +365,18 @@ struct SettingsView: View {
                                     Text("Keyframe Weight Bonus")
                                         .foregroundColor(.white)
                                     Text("Gives sharp stillness keyframes a 3× vote in the vertex-color weighted median (default). Turn OFF to weight stills and motion frames equally — recolor the same scan once per setting to see whether the bonus amplifies edge bleed or, conversely, equal weighting lets blurry sweep colors mush crisp surfaces.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $robustColorMedian) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Robust Color Median")
+                                        .foregroundColor(.white)
+                                    Text("Resolves each vertex color by consensus: picks the observation that most agrees with the others and averages only its cluster, so minority bleed colors are excluded outright and the result is always a color that was actually seen (default). Turn OFF for the legacy per-channel weighted median — recolor the same scan once per setting to compare.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

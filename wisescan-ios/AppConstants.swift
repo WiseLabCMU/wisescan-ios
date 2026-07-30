@@ -53,6 +53,7 @@ enum AppConstants {
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
         static let gpuColorize = "gpuColorize"                        // Developer Mode: GPU vertex-color projection (A/B vs CPU path)
         static let keyframeWeightBonus = "keyframeWeightBonus"        // Developer Mode: keyframe weight bonus in colorization (A/B vs equal still/sweep weighting)
+        static let robustColorMedian = "robustColorMedian"            // Developer Mode: consensus vector-median color reduce (A/B vs legacy per-channel median)
     }
 
     // MARK: - Default Values
@@ -130,6 +131,21 @@ enum AppConstants {
     /// silhouette-straddling samples get the bonus AND the 1/d² boost) or, conversely,
     /// whether equal weighting lets blurry sweep colors mush crisp keyframe surfaces.
     static let keyframeWeightBonus: Bool = true
+    /// Developer Mode A/B toggle for the colorize REDUCE step (default ON — production
+    /// candidate). ON resolves each vertex by weighted vector consensus: pick the stored
+    /// observation most agreeing with the others, then average only its color cluster, so
+    /// minority bleed colors are EXCLUDED from the result instead of merely out-voted —
+    /// and the answer is always a color that was actually seen (per-channel medians can
+    /// mix channels from different observations into a color nobody observed). OFF = the
+    /// legacy per-channel weighted median. Unlike projection-side rejection this cannot
+    /// lose coverage: every vertex keeps all its observations. Recolor the same scan once
+    /// per setting to compare.
+    static let robustColorMedian: Bool = true
+    /// L1 RGB distance (0–765) within which observations count as agreeing with the
+    /// consensus winner and join the trimmed average. Distinct-surface bleed colors sit
+    /// far above this; raising it toward 765 degrades to a plain weighted mean, 0 = the
+    /// winner observation alone (max rejection, may speckle).
+    static let colorizationConsensusTrimL1: Int32 = 60
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
@@ -156,14 +172,19 @@ enum AppConstants {
     static let depthOcclusionToleranceMM: Float = 150.0      // mm tolerance for depth occlusion test
     static let colorizationMaxObservations: Int = 12         // max per-vertex observations kept (top-N by quality) for the weighted-median colorizer
     static let colorizationMinDistanceM: Float = 0.3         // distance floor (m) for the inverse-square distance weight, so very close frames don't dominate
-    // ── Colorization anti-bleed tuning ──────────────────────────────────────────
-    // Effective occlusion tolerance = max(ToleranceMM, ToleranceFrac × depth). The old fixed
-    // 50 mm was thicker than a tabletop (near-field bleed-through) yet tight vs LiDAR noise
-    // at range. To bisect a knob's effect, set it to its listed "disable" value and recolor.
-    static let colorizationOcclusionToleranceMM: Float = 25.0 // FLOOR (mm) of the depth-occlusion tolerance (lower = more aggressive culling near-field; ARKit mesh noise can reject valid samples)
-    static let colorizationOcclusionToleranceFrac: Float = 0.03 // distance-proportional tolerance (LiDAR error grows with range): 3% ⇒ 30 mm @1 m, 120 mm @4 m. 0 disables (fixed floor only)
-    static let colorizationDepthEdgeMaxSpreadFrac: Float = 0.15 // reject observations whose 3×3 depth neighborhood spans > frac × depth — they straddle a silhouette, where the coarse 256×192 depth and the color raster disagree (the main bleed source). 0 disables
-    static let colorizationBackfaceDotMin: Float = 0.0        // reject observations with signed n·v below this — a back-facing vertex is seen THROUGH its own surface (e.g. tabletop color baking onto the underside). -1 disables (legacy abs() behavior)
+    // ── Colorization anti-bleed projection knobs — ALL DISABLED by default ──────
+    // Device verdict 2026-07-29 (M2, three large scans): shipping these ON together
+    // (25 mm floor + 3% frac + 0.15 edge guard + 0.0 backface) was decisively WORSE —
+    // widespread gray (= vertices with ZERO surviving observations) and wilder bleed.
+    // Mechanism: the smoothed mesh and the upsampled 256×192 depth routinely disagree
+    // by ±20–40 mm on perfectly valid front surfaces, so aggressive rejection guts the
+    // GOOD observation population; the junk that survives then wins the median.
+    // Anti-bleed now lives in the REDUCE step (robustColorMedian), which can't lose
+    // coverage. If revisiting these, change ONE knob per recolor.
+    static let colorizationOcclusionToleranceMM: Float = 50.0 // FLOOR (mm) of the depth-occlusion tolerance; effective tol = max(floor, frac × depth). 25 mm starved inliers (see above)
+    static let colorizationOcclusionToleranceFrac: Float = 0  // distance-proportional tolerance part (LiDAR error grows with range). 0 = fixed floor only (legacy)
+    static let colorizationDepthEdgeMaxSpreadFrac: Float = 0  // reject observations whose 3×3 depth neighborhood spans > frac × depth (silhouette-straddle guard). 0 = disabled (legacy); 0.15 killed too much near ALL edges
+    static let colorizationBackfaceDotMin: Float = -1          // reject observations with signed n·v below this (seen-through-own-surface guard). -1 = disabled (legacy abs() weighting); 0.0 also zeroed noisy-normal grazing coverage
     static let thumbnailMaxWidth: CGFloat = 800              // max width for scan thumbnails
     static let thumbnailJpegQuality: CGFloat = 0.6           // JPEG quality for thumbnails
     static let stabilizationPollIntervalMs: Int = 200         // ms between tracking-state polls after session reset
