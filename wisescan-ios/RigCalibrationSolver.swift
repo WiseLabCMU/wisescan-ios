@@ -156,6 +156,15 @@ enum RigCalibrationSolver {
             rgba[i * 4 + 3] = 255
         }
 
+        // Mark the masked-band boundary (everything below is excluded from the solve).
+        let maskBoundary = maskStartRow(height: height)
+        if maskBoundary < height {
+            for col in 0..<width {
+                let idx = (maskBoundary * width + col) * 4
+                rgba[idx] = 255; rgba[idx + 1] = 200; rgba[idx + 2] = 0
+            }
+        }
+
         func splat(_ profile: RigProfile, red: UInt8, green: UInt8, blue: UInt8) {
             let rig = composeRigTransform(
                 phoneToWorld: input.phoneToWorld,
@@ -167,6 +176,7 @@ enum RigCalibrationSolver {
                     let t = (Float(i) + 0.5) / 4
                     let point = edge.a + t * (edge.b - edge.a)
                     let dir = simd_normalize(point - camPos)
+                    if dir.y < sinElevationCutoff { continue }   // masked from the solve — don't draw
                     let (eqX, eqY) = dirToEquirect(dir: dir, width: width, height: height)
                     let col = Int(eqX), row = Int(eqY)
                     guard col >= 0, col < width, row >= 0, row < height else { continue }
@@ -223,8 +233,10 @@ enum RigCalibrationSolver {
                                      rigTransform.columns.3.y,
                                      rigTransform.columns.3.z)
             for edge in input.meshEdges {
-                total += edgeCost(edge: edge, camPos: camPos, edgeMap: input.edgeMap)
-                count += 1
+                if let cost = edgeCost(edge: edge, camPos: camPos, edgeMap: input.edgeMap) {
+                    total += cost
+                    count += 1
+                }
             }
         }
         // RMS pixel distance: edgeCost accumulates SQUARED px on the 512-wide equirect
@@ -233,22 +245,40 @@ enum RigCalibrationSolver {
         return count > 0 ? sqrt(total / Float(count)) : Float.greatestFiniteMagnitude
     }
 
+    /// sin of the elevation cutoff: a normalized direction is below the cutoff iff
+    /// dir.y < sin(cutoff) (asin is monotonic). −90° disables (sin = −1).
+    private static let sinElevationCutoff =
+        sin(AppConstants.calibrationElevationCutoffDeg * Float.pi / 180)
+
+    /// First equirect row at or below the elevation cutoff (rows span +90°…−90°).
+    private static func maskStartRow(height: Int) -> Int {
+        let frac = (90 + AppConstants.calibrationElevationCutoffDeg) / 180
+        return min(height, max(0, Int(Float(height) * frac)))
+    }
+
     /// Cost of one mesh edge: sample points along the projected edge in equirect space
-    /// and sum their distances to the nearest detected image edge.
-    private static func edgeCost(edge: MeshEdge, camPos: SIMD3<Float>, edgeMap: EdgeMap) -> Float {
+    /// and sum their distances to the nearest detected image edge. Samples below the
+    /// elevation cutoff are EXCLUDED (symmetric with the detect-time band mask, so the
+    /// masked zone neither attracts nor inflates the residual); returns nil when every
+    /// sample is masked so the edge drops out of the mean entirely.
+    private static func edgeCost(edge: MeshEdge, camPos: SIMD3<Float>, edgeMap: EdgeMap) -> Float? {
         let samples = 8
         var cost: Float = 0
+        var counted = 0
         for i in 0..<samples {
             let t = (Float(i) + 0.5) / Float(samples)
             let point = edge.a + t * (edge.b - edge.a)
             let dir = simd_normalize(point - camPos)
+            if dir.y < sinElevationCutoff { continue }
             let (eqX, eqY) = dirToEquirect(dir: dir, width: edgeMap.width, height: edgeMap.height)
             let col = max(0, min(edgeMap.width - 1, Int(eqX)))
             let row = max(0, min(edgeMap.height - 1, Int(eqY)))
             let dist = edgeMap.distances[row * edgeMap.width + col]
             cost += dist * dist
+            counted += 1
         }
-        return cost / Float(samples)
+        guard counted > 0 else { return nil }
+        return cost / Float(counted)
     }
 
     // MARK: - Rig transform composition
@@ -477,6 +507,17 @@ enum RigCalibrationSolver {
                     - Float(grayscale[(row - 1) * width + col + 1])
                 let mag = sqrt(gx * gx + gy * gy)
                 if mag > threshold { edgeMask[row * width + col] = true }
+            }
+        }
+
+        // Exclude the bottom elevation band: it holds the rig hardware (rod/tripod) and
+        // usually the operator — the only scene content that moves WITH the rig, i.e.
+        // systematic attractors for the solve (runs 8-10). Symmetric with edgeCost's
+        // per-sample skip; the spot-check shares this path automatically.
+        let maskStart = maskStartRow(height: height)
+        if maskStart < height {
+            for row in maskStart..<height {
+                for col in 0..<width { edgeMask[row * width + col] = false }
             }
         }
 

@@ -651,10 +651,13 @@ run-to-run drift guard, per design.
   moves WITH the rig ⇒ a systematic attractor), compounded by edge saturation.
 
 **Revised plan (cost function is the critical path, iterated OFFLINE on the bundles):**
-1. Operator exclusion: mask the operator from the equirect edge map (elevation band
-   below the camera and/or person-segmentation on the 512-px working image), and skip
-   cost samples projecting into the masked region (symmetric, so excluded zones don't
-   inflate residuals).
+1. Operator exclusion — elevation band ✅ (2026-07-30): everything below −45° elevation
+   is excluded from the solve AND spot-check, symmetrically (detect-time band mask +
+   per-sample skip + fully-masked edges drop out of the mean; diagnostics draw the
+   boundary in yellow and omit masked splats). Kills the rod/tripod (always below,
+   rigidly attached — the most systematic attractor of all) and the handheld-rig
+   operator; a stepped-back operator near the horizon still needs person-segmentation
+   masking if repeatability stays poor. `calibrationElevationCutoffDeg` (−90 disables).
 2. Discriminative matching: orientation-aware chamfer (projected mesh-edge direction
    must agree with the image edge orientation it matches) + strong-edge thinning /
    adaptive Sobel threshold targeting a fixed edge density (fixes saturated scenes).

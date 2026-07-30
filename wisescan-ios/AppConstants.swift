@@ -142,6 +142,7 @@ enum AppConstants {
     static let calibrationMeshVertexMinimum = 500                      // minimum vertex count within radius for a reliable solve (environment quality gate)
     static let calibrationMinMeshEdges = 500                           // HARD gate at capture: fewer extracted mesh edges than this → reject the position (run6: three 0-edge stills sailed through to a guaranteed-failed solve)
     static let calibrationMinCoverageDeg: Float = 90                   // HARD gate at capture: yaw span of mesh edges around the position. run9 diagnostics: mesh confined to one ~60° wedge → 4-DOF solve is ambiguous (yaw slides along the wedge, dy/pitch trade off) no matter how many edges the wedge holds
+    static let calibrationElevationCutoffDeg: Float = -45              // calibration cost (solve AND spot-check) ignores everything below this elevation: the bottom band holds the rod/tripod and usually the operator — the only content that moves WITH the rig, i.e. systematic attractors (runs 8-10 pulled params toward it). -90 disables
     static let calibrationResidualGreenPx: Float = 1.4                 // RMS reprojection error (equirect px, 512-wide) ≤ this → green. Behavior-preserving √ of the old mean-squared 2.0
     static let calibrationResidualYellowPx: Float = 2.2                // ≤ this → yellow (marginal); above → red (suggest re-do). √5.0
     static let calibrationMaxIterations = 500                          // Nelder-Mead iteration cap
