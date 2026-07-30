@@ -131,6 +131,35 @@ phases (Privacy blur i/n → Cube faces i/n → Zipping…) with a real meter �
 - One rescan/adjacent link to confirm nothing in the interruption-hardening arc
   regressed on this branch.
 
+## 9. Security recon — 360° link (feeds the mitigation design)
+
+**Threat**: in AP mode the Theta broadcasts its serial in the SSID
+(`THETAYLxxxxxxxx.OSC`), the factory Wi-Fi password IS those serial digits, and the OSC
+HTTP API requires **no authentication** once joined — so anyone in Wi-Fi range while the
+camera is on can list and download raw UNBLURRED equirects, bypassing the app's entire
+privacy pipeline. Shots currently persist on the camera indefinitely. Recon today,
+mitigations to implement after (see design doc → "Security: the 360° camera link").
+
+1. **Confirm the default-credential state** on the X: SSID contains the serial; factory
+   password = the serial digits. Note firmware version.
+2. **Demonstrate the hole** (2 min, laptop joined to the camera AP):
+   `curl -s -X POST http://192.168.1.1/osc/commands/execute -H 'Content-Type: application/json' -d '{"name":"camera.listFiles","parameters":{"fileType":"image","entryCount":3}}'`
+   then GET one returned `fileUrl` — expect both to succeed with **no auth**.
+3. **Password rotation**: change the Wi-Fi password on the X (camera touchscreen
+   Settings → Wi-Fi; Z1 needs the RICOH app). Reconnect our app with the new password
+   and note HOW the password enters our connect flow (iOS Settings join vs in-app) —
+   this determines whether the app can detect "password == serial digits" and warn.
+4. **Persistence window**: after a normal scan + downloads complete, list DCIM on the
+   camera — stills should (currently) still be there. That's the exposure we'll close
+   with post-transfer auto-delete.
+5. **Auto-delete feasibility**: from the laptop, `camera.delete` one old test file
+   (`{"name":"camera.delete","parameters":{"fileUrls":["<fileUrl>"]}}`) and confirm it
+   disappears from the listing — the API call the app will use.
+
+Bring back: firmware version, whether rotation broke anything in our connect flow, and
+curl results. Don't leave the rotated password set if it complicates the rest of the
+test day — factory-reset behavior (password reverts to serial) is itself a finding.
+
 ## Skip / don't chase
 
 - A12Z marginal iPad: RoomPlan/OU crashes there are environmental (pre-Apple7 GPU UB) —

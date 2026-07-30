@@ -594,6 +594,34 @@ is deferred until the Nerfstudio end-to-end integration is tested. The raw equir
 pose sidecars in `equirect_stills/` already carry all the information needed; the
 `transforms.json` integration is a convenience for pipelines that read a single manifest.
 
+## Security: the 360° camera link (threat model + planned controls)
+
+**Threat model.** Theta cameras in AP mode broadcast the serial number in the SSID and
+ship with the Wi-Fi password SET TO those serial digits; the OSC HTTP API has no
+authentication in AP mode. Raw equirects capture bystanders in all directions and are
+exactly the imagery our privacy pipeline exists to protect — but they sit on the
+camera's storage (unencrypted, indefinitely), joinable by anyone nearby who can read an
+SSID. Honest scope: Theta hardware has no per-client authorization, so "only this app
+can download" is approximated by three controls, strongest first:
+
+1. **Post-transfer auto-delete (P1, app-owned, fully in our control)** — after a
+   verified download (scan stills at bulk-download completion; calibration stills after
+   the solve-time batch), issue `camera.delete` for the transferred files so raw
+   imagery never lingers on the weakly-secured device. Ordering matters: delete only
+   AFTER verified transfer — the batch-download retry logic depends on camera-side
+   persistence until then. A failed batch keeps files (retry works); a successful one
+   leaves nothing to steal. Consider a "keep originals on camera" dev toggle for
+   debugging only.
+2. **Default-credential detection + rotation prompt (P2)** — if the connect flow holds
+   the join password, warn when it equals the serial digits and point the user at the
+   camera's password setting (X: on-camera touchscreen; Z1: RICOH app). Note factory
+   reset reverts to the default, so the warning must persist, not be one-shot.
+3. **Client-mode digest auth (P3, evaluate)** — in CL mode the OSC API supports digest
+   authentication; if operationally viable on site Wi-Fi it closes the open-API hole
+   properly, at the cost of network setup complexity.
+
+Recon checklist for the above lives in the 2026-07-30 test plan (§9).
+
 ## Code-review follow-ups resolved (2026-07-29)
 
 The four open findings from the branch code review are closed:
