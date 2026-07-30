@@ -219,6 +219,14 @@ final class RigCalibrationManager {
             }
             PerfDiag.log("[RigCal] mesh edges: \(meshEdges.count) edges from \(vertexCount) verts in \(Int(Date().timeIntervalSince(extractStart) * 1000))ms (overlapped with camera stitch)")
 
+            // HARD gate, not just the card warning: a position with (near-)zero mesh edges
+            // contributes nothing but noise, and three of them waste the whole session on a
+            // guaranteed-failed solve (run6). The camera shot is a harmless orphan.
+            if meshEdges.count < AppConstants.calibrationMinMeshEdges {
+                self.failCapture("Not enough LiDAR mesh here (\(meshEdges.count) edges) — sweep the iPad around this position to build mesh, then tap Capture again.")
+                return
+            }
+
             // Poll for the capture to complete (the manager sets isCapturing = false)
             var attempts = 0
             while thetaManager.isCapturing && attempts < 100 {
@@ -354,7 +362,12 @@ final class RigCalibrationManager {
     private func downshiftStillFormatForCalibration() {
         let theta = ThetaCameraManager.shared
         guard theta.isConnected else { return }
+        // Full-equirect (2:1) formats ONLY: the X also reports square 1:1 stills, and
+        // run6 (2026-07-30) downshifted into 2752×2752 — a 512×512 working image whose
+        // vertical pixel scale is 2× the 512×256 the solver and thresholds assume,
+        // inflating every residual.
         guard let smallest = theta.stillFormatMenu
+                  .filter({ $0.width == $0.height * 2 })
                   .min(by: { $0.width * $0.height < $1.width * $1.height }),
               let current = theta.currentStillFormat, smallest != current else { return }
         preCalibrationFormat = current

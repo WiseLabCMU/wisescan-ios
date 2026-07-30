@@ -23,6 +23,8 @@ struct CaptureView: View {
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession?
     @State private var thetaManager = ThetaCameraManager.shared
+    /// Calibration capture is settle-gated: true while waiting for rig stillness after a tap.
+    @State private var isSettlingCalibration = false
     @State var rigCalibrationManager = RigCalibrationManager.shared
     @State var saveMessage: String?
     /// Mesh vertex count captured at record-start. The "move to start the live mesh" cue is shown
@@ -235,16 +237,52 @@ struct CaptureView: View {
         .cornerRadius(6)
     }
 
-    /// Triggers a calibration capture using the current AR frame and mesh.
+    /// Triggers a calibration capture using the current AR frame and mesh — but only
+    /// once the rig is confirmed STILL. The phone pose is sampled at trigger time, so a
+    /// rod still swaying from the walk bakes cm-level pose error straight into the
+    /// solve (the scan flow arms keyframes on the same stillness rule; calibration had
+    /// no gate at all). Tap → settle-wait (≤2 s) → trigger; if it never settles, a
+    /// transient message asks for a re-tap.
     private func captureCalibrationStill() {
-        guard let frame = currentARSession?.currentFrame else { return }
-        let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
-        rigCalibrationManager.captureCalibrationStill(
-            phoneTransform: frame.camera.transform,
-            timestamp: frame.timestamp,
-            meshAnchors: meshAnchors
-        )
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        guard let session = currentARSession, !isSettlingCalibration else { return }
+        isSettlingCalibration = true
+        Task { @MainActor in
+            defer { isSettlingCalibration = false }
+            var lastTransform = session.currentFrame?.camera.transform
+            var lastTime = session.currentFrame?.timestamp ?? 0
+            let deadline = Date().addingTimeInterval(2.0)
+            var settled = false
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                guard let frame = session.currentFrame, let prev = lastTransform else { break }
+                let dt = Float(frame.timestamp - lastTime)
+                let cur = frame.camera.transform
+                lastTransform = cur
+                lastTime = frame.timestamp
+                guard dt > 0 else { continue }
+                let dPos = simd_distance(
+                    SIMD3<Float>(prev.columns.3.x, prev.columns.3.y, prev.columns.3.z),
+                    SIMD3<Float>(cur.columns.3.x, cur.columns.3.y, cur.columns.3.z))
+                let dRot = simd_quatf(from: simd_quatf(prev).act(SIMD3<Float>(0, 0, 1)),
+                                      to: simd_quatf(cur).act(SIMD3<Float>(0, 0, 1))).angle
+                if dPos / dt < AppConstants.stillnessTranslationalThreshold,
+                   dRot / dt < AppConstants.stillnessAngularThreshold {
+                    settled = true
+                    break
+                }
+            }
+            guard settled, let frame = session.currentFrame else {
+                showTransientMessage("Hold the rig still, then tap Capture again.", duration: 3)
+                return
+            }
+            let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+            rigCalibrationManager.captureCalibrationStill(
+                phoneTransform: frame.camera.transform,
+                timestamp: frame.timestamp,
+                meshAnchors: meshAnchors
+            )
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
     }
 
     /// Ensure the AR session has mesh reconstruction enabled for calibration.
@@ -283,6 +321,7 @@ struct CaptureView: View {
     /// calibration from the Dashboard card and switches to the Capture tab.
     /// Granular label for the calibration capture button, reflecting the pipeline stage.
     private var calibrationButtonLabel: String {
+        if isSettlingCalibration { return "Settling — hold still…" }
         if thetaManager.isCapturing { return "Capturing — hold steady…" }
         if rigCalibrationManager.isCapturingCalibrationStill { return "Saving position…" }
         return "Capture Calibration Still"
@@ -301,7 +340,7 @@ struct CaptureView: View {
                 }
                 Text("Walk to a position, pause, then tap Capture.")
                     .font(.caption)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.85))
 
                 if !rigCalibrationManager.isEnvironmentSufficient {
                     HStack(spacing: 4) {
@@ -343,13 +382,14 @@ struct CaptureView: View {
                     .cornerRadius(10)
                     .foregroundColor(.black)
                 }
-                .disabled(thetaManager.isCapturing || thetaManager.isDownloading
+                .disabled(isSettlingCalibration || thetaManager.isCapturing
+                          || thetaManager.isDownloading
                           || rigCalibrationManager.isCapturingCalibrationStill
                           || !thetaManager.isConnected)
 
                 Button("Cancel Calibration") { rigCalibrationManager.cancelCalibration() }
                     .font(.caption)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.7))
             }
 
             if case .solving = rigCalibrationManager.state {
@@ -361,7 +401,7 @@ struct CaptureView: View {
                 }
                 Text(rigCalibrationManager.solvingStatusMessage ?? "Aligning mesh edges to 360° images.")
                     .font(.caption)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.85))
             }
 
             if case .review(let residualPx, _) = rigCalibrationManager.state {
