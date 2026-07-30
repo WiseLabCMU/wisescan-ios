@@ -338,7 +338,7 @@ struct CaptureView: View {
                         .font(.subheadline.bold())
                         .foregroundColor(.white)
                 }
-                Text("Walk to a position, pause, then tap Capture.")
+                Text("Walk to a position, sweep the iPad in a full circle to mesh the room, then pause and tap Capture.")
                     .font(.caption)
                     .foregroundColor(.white.opacity(0.85))
 

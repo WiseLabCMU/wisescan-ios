@@ -227,6 +227,17 @@ final class RigCalibrationManager {
                 return
             }
 
+            // Angular-coverage gate: run9 diagnostics showed tens of thousands of edges
+            // ALL in one ~60° wedge (the only direction the iPad had meshed) — count alone
+            // passes while the solve stays hopelessly ambiguous. Require the edges to span
+            // a real arc around the position.
+            let coverage = Self.yawCoverageDegrees(of: meshEdges, around: phonePos)
+            PerfDiag.log("[RigCal] mesh coverage: \(Int(coverage))° yaw span (\(meshEdges.count) edges)")
+            if coverage < AppConstants.calibrationMinCoverageDeg {
+                self.failCapture("Mesh covers only ~\(Int(coverage))° around you — sweep the iPad in a full circle at this spot, then tap Capture again.")
+                return
+            }
+
             // Poll for the capture to complete (the manager sets isCapturing = false)
             var attempts = 0
             while thetaManager.isCapturing && attempts < 100 {
@@ -262,11 +273,63 @@ final class RigCalibrationManager {
         }
     }
 
+    /// Yaw span (degrees) of mesh-edge midpoints around a position: 16 azimuth bins,
+    /// a bin counts when it holds a meaningful number of edges, result = filled × 22.5°.
+    /// Cheap ambiguity guard — one dense wedge can hold 50K+ edges and still leave the
+    /// 4-DOF solve unconstrained.
+    private nonisolated static func yawCoverageDegrees(
+        of edges: [RigCalibrationSolver.MeshEdge], around position: SIMD3<Float>
+    ) -> Float {
+        guard !edges.isEmpty else { return 0 }
+        var bins = [Int](repeating: 0, count: 16)
+        for edge in edges {
+            let mid = (edge.a + edge.b) * 0.5
+            let dx = mid.x - position.x, dz = mid.z - position.z
+            guard dx * dx + dz * dz > 0.01 else { continue }   // ignore directly under/over
+            let yaw = atan2(dx, -dz)   // ARKit convention, matches the solver
+            let bin = Int((yaw + .pi) / (2 * .pi) * 16) % 16
+            bins[bin < 0 ? bin + 16 : bin] += 1
+        }
+        let perBinFloor = max(10, edges.count / 200)   // a bin must hold >0.5% of edges
+        return Float(bins.filter { $0 >= perBinFloor }.count) * 22.5
+    }
+
     /// Route a calibration capture failure to the card UI + log (finding #10 — was a
     /// silent log-and-return; the user saw a button that just popped back to idle).
     private func failCapture(_ message: String) {
         captureErrorMessage = message
         logger.error("Calibration capture failed: \(message)")
+    }
+
+    /// Write one calibration input bundle under Documents/rigcal_diag/inputs/:
+    /// still<i>.jpg (raw equirect), still<i>_pose.json (phone_to_world, column-major),
+    /// still<i>_edges.bin (Float32 LE, 6 per edge: ax ay az bx by bz). Dev diagnostics
+    /// for offline solver work — never exported.
+    private nonisolated static func persistCalibrationInput(
+        still: PendingStill, jpegData: Data, index: Int
+    ) {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("rigcal_diag/inputs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let base = "still\(index + 1)"
+        try? jpegData.write(to: dir.appendingPathComponent("\(base).jpg"))
+
+        let m = still.phoneToWorld
+        let flat = [m.columns.0, m.columns.1, m.columns.2, m.columns.3]
+            .flatMap { [$0.x, $0.y, $0.z, $0.w] }
+        if let pose = try? JSONSerialization.data(
+            withJSONObject: ["phone_to_world": flat], options: [.prettyPrinted]) {
+            try? pose.write(to: dir.appendingPathComponent("\(base)_pose.json"))
+        }
+
+        var floats = [Float]()
+        floats.reserveCapacity(still.meshEdges.count * 6)
+        for e in still.meshEdges {
+            floats.append(contentsOf: [e.a.x, e.a.y, e.a.z, e.b.x, e.b.y, e.b.z])
+        }
+        floats.withUnsafeBufferPointer {
+            try? Data(buffer: $0).write(to: dir.appendingPathComponent("\(base)_edges.bin"))
+        }
     }
 
     /// Batch phase after the last still is collected: download every deferred equirect
@@ -326,6 +389,14 @@ final class RigCalibrationManager {
                     edgeMap: edgeMap,
                     meshEdges: still.meshEdges
                 ))
+
+                // Perf-diag builds persist the full solver input (equirect JPEG + pose +
+                // mesh edges) so the cost function can be iterated OFFLINE against real
+                // captures instead of burning rig time. Local Documents only — these are
+                // raw, unblurred captures; they must never leave the device via export.
+                if PerfDiag.enabled {
+                    Self.persistCalibrationInput(still: still, jpegData: jpegData, index: index)
+                }
             }
 
             self.solvingStatusMessage = "Solving rig parameters…"
