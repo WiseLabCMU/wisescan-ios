@@ -396,6 +396,7 @@ final class RigCalibrationManager {
                 // raw, unblurred captures; they must never leave the device via export.
                 if PerfDiag.enabled {
                     Self.persistCalibrationInput(still: still, jpegData: jpegData, index: index)
+                    PerfDiag.log("[RigCal] input bundle persisted: still\(index + 1) (\(jpegData.count / 1024) KB jpg + \(still.meshEdges.count) edges) → Documents/rigcal_diag/inputs/")
                 }
             }
 
