@@ -74,6 +74,9 @@ final class RigCalibrationManager {
     /// restarted — an awaited download must not resurrect a cancelled session's state.
     private var sessionGeneration = 0
 
+    /// Still format in force before calibration downshifted it (restored at session end).
+    private var preCalibrationFormat: ThetaCameraManager.StillFormat?
+
     /// Temporary directory for calibration equirects (cleaned after solve).
     private var calibrationTempDir: URL?
 
@@ -132,6 +135,7 @@ final class RigCalibrationManager {
         captureErrorMessage = nil
         solvingStatusMessage = nil
         state = .capturing(stillsCollected: 0)
+        downshiftStillFormatForCalibration()
         logger.info("Calibration session started")
 
         // Create a temporary directory for calibration equirects
@@ -149,6 +153,7 @@ final class RigCalibrationManager {
         captureErrorMessage = nil
         solvingStatusMessage = nil
         state = .idle
+        restoreStillFormat()
         cleanupTempDir()
         logger.info("Calibration cancelled")
     }
@@ -263,6 +268,9 @@ final class RigCalibrationManager {
     /// GPU-acceleration question can be decided from device numbers.
     private func runSolverPipeline() {
         state = .solving
+        // All triggers are done — the downloads below fetch files already on the camera,
+        // so the scan-time format can come back right away.
+        restoreStillFormat()
         let pending = pendingStills
         let prior = currentProfile ?? .mechanicalPrior
         let total = pending.count
@@ -333,6 +341,51 @@ final class RigCalibrationManager {
                 self.state = .failed("Solver did not converge — try calibrating in a more feature-rich area with visible mesh")
             } else {
                 self.state = .review(residualPx: result.residualPx, converged: result.converged)
+            }
+        }
+    }
+
+    /// Calibration solves on a 512-px-wide edge map, so full-resolution stills are ~10×
+    /// oversampled: capture at the camera's SMALLEST JPEG size instead. On a THETA X
+    /// (11K/60 MP → 5.5K/15 MP) that shrinks the in-camera stitch — the per-position
+    /// "hold steady" gate — and cuts the batch download ~4×. Restored at pipeline entry
+    /// (before downloads; the files are already on the camera) and on cancel; scan
+    /// stills are never captured mid-calibration. Single-format cameras (Z1/V) no-op.
+    private func downshiftStillFormatForCalibration() {
+        let theta = ThetaCameraManager.shared
+        guard theta.isConnected else { return }
+        guard let smallest = theta.stillFormatMenu
+                  .min(by: { $0.width * $0.height < $1.width * $1.height }),
+              let current = theta.currentStillFormat, smallest != current else { return }
+        preCalibrationFormat = current
+        Task {
+            do {
+                try await theta.applyStillResolution(smallest)
+                PerfDiag.log("[RigCal] still format downshifted \(current.width)×\(current.height) → \(smallest.width)×\(smallest.height) for calibration")
+                // If a restore already ran while this was in flight (instant cancel),
+                // undo immediately so the camera never sticks at the small size.
+                if self.preCalibrationFormat == nil {
+                    try await theta.applyStillResolution(current)
+                    PerfDiag.log("[RigCal] downshift landed after session end — re-restored \(current.width)×\(current.height)")
+                }
+            } catch {
+                self.preCalibrationFormat = nil
+                self.logger.warning("Calibration format downshift failed (continuing at full size): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Restore the pre-calibration still format. Idempotent — called from every
+    /// session-end path (pipeline entry, cancel).
+    private func restoreStillFormat() {
+        guard let format = preCalibrationFormat else { return }
+        preCalibrationFormat = nil
+        Task {
+            do {
+                try await ThetaCameraManager.shared.applyStillResolution(format)
+                PerfDiag.log("[RigCal] still format restored to \(format.width)×\(format.height)")
+            } catch {
+                self.logger.error("Failed to restore still format \(format.width)×\(format.height) — re-select it on the camera card before scanning: \(error.localizedDescription)")
             }
         }
     }

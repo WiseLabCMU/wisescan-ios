@@ -1,6 +1,7 @@
 # 360 Branch Device Test Plan — 2026-07-30
 
-Branch: `feat/still-source-360` @ `f9a3d73`. Device: M2 iPad + Theta X on rig (Z1 if
+Branch: `feat/still-source-360` @ `HEAD` (includes calibration format downshift +
+360° source chip). Device: M2 iPad + Theta X on rig (Z1 if
 charged). Enable **Developer Mode + Perf Diagnostics** before starting — several tests
 are decided by `PerfDiag` log lines. Save console logs per run to `~/Desktop/` as usual.
 
@@ -30,10 +31,22 @@ are decided by `PerfDiag` log lines. Save console logs per run to `~/Desktop/` a
 
 | Stage | Line | Expected ballpark |
 |---|---|---|
+| Format downshift | `still format downshifted 11008×5504 → 5504×2752` | at session start (X only; Z1/V no-op) |
 | Mesh-edge extract | `mesh edges: N edges from M verts in XXXms` | < 2000 ms (overlapped w/ stitch — free unless it exceeds stitch) |
-| Download ×3 | `download i/3: NNNN KB in XXXms` | ~1000–2500 ms each |
-| Edge detect ×3 | `edge detect i/3: XXXms` | ~300–800 ms each |
+| Download ×3 | `download i/3: NNNN KB in XXXms` | ~3500 KB, well under 1 s each (was ~11 MB) |
+| Edge detect ×3 | `edge detect i/3: XXXms` | ~200–500 ms each (15 MP decode) |
 | Solve | `solve: XXXms, N iterations` | ~1000–2000 ms |
+| Format restore | `still format restored to 11008×5504` | at pipeline entry AND after cancel |
+
+**Format-restore check (important)**: after calibration completes (and once after a
+mid-session Cancel), confirm the restore log line fired and the Dashboard resolution
+picker still shows the full scan size; then verify the next SCAN still is full-res
+(file size ~11 MB in `equirect_stills/`). A camera stuck at 5.5K would silently degrade
+scan texture quality — that's the one regression this feature could cause.
+
+**Stitch-time comparison**: note the "Capturing — hold steady…" duration per position —
+at 5.5K the X's in-camera stitch should be noticeably shorter than the ~4 s you're used
+to at 11K. This number decides whether the downshift stays.
 
 Decision rule afterward: if solve > ~2 s or extract > stitch time on a big mesh, we do
 the Accelerate/Metal solver work; otherwise the batching already took the win.
@@ -48,6 +61,17 @@ the Accelerate/Metal solver work; otherwise the batching already took the win.
    shots are still on the camera. Power the camera on, re-run calibration end-to-end.
 3. **Cancel during solve**: run to "Downloading still 1/3…" and hit Cancel — the card
    must return to idle and STAY idle (no zombie review card seconds later).
+
+## 2b. 360° source chip (new)
+
+With the Theta connected (wearables NOT connected — the chip shares that corner), the
+Capture tab should show a top-right chip: model + serial, and a calibration line —
+green/yellow "Calibrated · X.X px" after Test 1, gray "Rig prior — not calibrated"
+before it. During Test 3's forced drift, the chip must turn orange "Rig may have
+shifted" and STAY orange for the rest of that scan (the 5 s toast is the transient
+signal; the chip is the persistent one). Also verify the serial-mismatch line if you
+have a second Theta: connect the other camera after calibrating → red "Calibration
+from another camera".
 
 ## 3. First-still drift spot-check (px units)
 

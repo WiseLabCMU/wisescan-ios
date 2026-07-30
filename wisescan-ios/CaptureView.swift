@@ -204,6 +204,37 @@ struct CaptureView: View {
         }
     }
 
+    /// Rig-calibration state line for the 360° source chip: green/yellow/red by
+    /// residual, orange while drift is flagged, red if the stored calibration belongs
+    /// to a different camera (serial mismatch), gray for the mechanical prior.
+    @ViewBuilder
+    private var thetaCalibrationChip: some View {
+        let status: (color: Color, label: String) = {
+            if rigCalibrationManager.driftWarning != nil {
+                return (.orange, "Rig may have shifted")
+            }
+            if let profile = rigCalibrationManager.activeProfile, profile.isSolved {
+                let color: Color = profile.residualPx <= AppConstants.calibrationResidualGreenPx ? .green
+                    : profile.residualPx <= AppConstants.calibrationResidualYellowPx ? .yellow : .red
+                return (color, String(format: "Calibrated · %.1f px", profile.residualPx))
+            }
+            if rigCalibrationManager.currentProfile?.isSolved == true {
+                return (.red, "Calibration from another camera")
+            }
+            return (.gray, "Rig prior — not calibrated")
+        }()
+        HStack(spacing: 5) {
+            Circle().fill(status.color).frame(width: 7, height: 7)
+            Text(status.label)
+        }
+        .font(.caption2).bold()
+        .foregroundColor(.white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial)
+        .cornerRadius(6)
+    }
+
     /// Triggers a calibration capture using the current AR frame and mesh.
     private func captureCalibrationStill() {
         guard let frame = currentARSession?.currentFrame else { return }
@@ -974,6 +1005,27 @@ struct CaptureView: View {
                                     .padding(.trailing, AppConstants.UI.pipPaddingX)
                             }
                         }
+                    }
+                } else if thetaManager.isConnected {
+                    // 360° source chip — same corner as the wearable PiP (the two capture
+                    // sources are mutually exclusive): which camera feeds this scan, and
+                    // whether its rig pose is calibrated. Turns orange for the rest of the
+                    // scan if the first-still spot-check flags drift (the transient toast
+                    // alone was easy to miss).
+                    HStack {
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 6) {
+                            Text("\(thetaManager.model ?? "360° camera")\(thetaManager.serialNumber.map { " · \($0)" } ?? "")")
+                                .font(.caption2).bold()
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(6)
+
+                            thetaCalibrationChip
+                        }
+                        .padding(.trailing, AppConstants.UI.pipPaddingX)
                     }
                 }
 

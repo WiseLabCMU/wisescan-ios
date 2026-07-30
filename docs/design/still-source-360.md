@@ -617,7 +617,14 @@ The four open findings from the branch code review are closed:
   overlapped under the in-camera stitch (wall-clock free unless it exceeds ~2 s) and the
   solver is one CPU step at the end — Accelerate `vvatan2f` batching (~5–10×) is the
   first lever if the numbers say it matters, a Metal cost kernel (VertexColorGPU pattern)
-  the second.
+  the second. Additionally, calibration **downshifts the still format** to the camera's
+  smallest JPEG for the session (X: 11K → 5.5K; the solver's 512-px edge map is ~10×
+  oversampled either way), shrinking both the per-position stitch gate and the batch
+  downloads; the scan format is restored at pipeline entry and on cancel, with a
+  re-restore guard for instant-cancel races. The Capture tab also shows a **360° source
+  chip** (model + serial + calibration state, sharing the wearable-PiP corner — the two
+  sources are mutually exclusive) that turns orange persistently when the first-still
+  spot-check flags drift, complementing the 5 s transient toast.
 - **#9 export-time profile bypass** — `emitFaces` no longer applies a stored `RigProfile`:
   poses come exclusively from the sidecar's capture-baked `cam_transform` (stamped where
   the profile↔camera **serial binding is verified**); pre-contract sidecars without a baked
