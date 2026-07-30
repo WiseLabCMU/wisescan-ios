@@ -82,40 +82,72 @@ enum RigCalibrationSolver {
             )
         }
 
-        // Physical bounds anchored to the MECHANICAL prior (not the possibly-garbage
-        // stored profile): a monopod rig cannot be outside rod ±0.3 m, |lateral| 0.3 m,
-        // yaw ±30°, pitch ±10°. Candidates outside hit a flat penalty wall — run8 showed
-        // the chamfer surface is flat enough that the unbounded solver wandered to
-        // dy=4.4 m / yaw=−240° at "normal" residuals.
+        // Freeze the elevation-cut sample set at the ANCHOR pose (offline finding,
+        // run12 bundle): when inclusion depends on the candidate, the optimizer GAMES
+        // the cut — raising dy pushes awkward samples below the line where they cost
+        // nothing (cost fell monotonically to the dy wall, retained samples 57%→23%).
+        // With inclusion frozen, a real dy basin appears.
         let anchor = RigProfile.mechanicalPrior
+        let sampleMasks = sampledInputs.map { input -> [Bool] in
+            let rig = composeRigTransform(phoneToWorld: input.phoneToWorld,
+                                          dy: anchor.dy, dLateral: 0, yaw: 0, pitchResidual: 0)
+            let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
+            return anchorInclusionMask(edges: input.meshEdges, camPos: camPos)
+        }
+
+        // Coarse full-circle yaw scan (offline finding): the camera-frame cost gives yaw
+        // a real basin, but a rectangular room aliases every ~90°, so a single local
+        // descent lands in the wrong lobe. 24 cheap evals pick the best starts; local
+        // Nelder-Mead runs from each within ±calibrationBoundYawDeg.
+        var yawStarts: [(yaw: Float, cost: Float)] = []
+        for step in 0..<24 {
+            let yaw = -Float.pi + Float(step) * (2 * Float.pi / 24)
+            let params = SIMD4<Float>(anchor.dy, 0, yaw, 0)
+            yawStarts.append((yaw, totalCost(params: params, inputs: sampledInputs, masks: sampleMasks)))
+        }
+        yawStarts.sort { $0.cost < $1.cost }
+        // Keep the best starts at least 60° apart (distinct lobes, not one lobe thrice).
+        var starts: [Float] = []
+        for cand in yawStarts where starts.allSatisfy({ abs(angleDelta(cand.yaw, $0)) > Float.pi / 3 }) {
+            starts.append(cand.yaw)
+            if starts.count >= 2 { break }
+        }
+
         let yawHalf = AppConstants.calibrationBoundYawDeg * Float.pi / 180
         let pitchHalf = AppConstants.calibrationBoundPitchDeg * Float.pi / 180
-        let lo = SIMD4<Float>(anchor.dy - AppConstants.calibrationBoundDyM,
-                              -AppConstants.calibrationBoundLateralM,
-                              anchor.yaw - yawHalf,
-                              -pitchHalf)
-        let hi = SIMD4<Float>(anchor.dy + AppConstants.calibrationBoundDyM,
-                              AppConstants.calibrationBoundLateralM,
-                              anchor.yaw + yawHalf,
-                              pitchHalf)
-
-        // Initial simplex vertices: prior ± small perturbations, clamped into bounds
-        // (the stored prior itself may be a garbage unbounded-era solve).
-        let x0 = simd_clamp(
-            SIMD4<Float>(prior.dy, prior.dLateral, prior.yaw, prior.pitchResidual), lo, hi)
-
         // Perturbation scales per parameter (order: dy, dLat, yaw, pitch)
         let scales = SIMD4<Float>(0.1, 0.05, 0.1, 0.05) // meters, meters, radians, radians
 
-        let result = nelderMead(
-            initial: x0,
-            scales: scales,
-            maxIterations: AppConstants.calibrationMaxIterations,
-            tolerance: AppConstants.calibrationConvergenceTolerance
-        ) { params in
-            if any(params .< lo) || any(params .> hi) { return 1e6 }
-            return totalCost(params: params, inputs: sampledInputs)
+        var result: NMResult?
+        for yaw0 in starts {
+            let lo = SIMD4<Float>(anchor.dy - AppConstants.calibrationBoundDyM,
+                                  -AppConstants.calibrationBoundLateralM,
+                                  yaw0 - yawHalf,
+                                  -pitchHalf)
+            let hi = SIMD4<Float>(anchor.dy + AppConstants.calibrationBoundDyM,
+                                  AppConstants.calibrationBoundLateralM,
+                                  yaw0 + yawHalf,
+                                  pitchHalf)
+            let x0 = SIMD4<Float>(anchor.dy, 0, yaw0, 0)
+            let run = nelderMead(
+                initial: x0,
+                scales: scales,
+                maxIterations: AppConstants.calibrationMaxIterations,
+                tolerance: AppConstants.calibrationConvergenceTolerance
+            ) { params in
+                if any(params .< lo) || any(params .> hi) { return 1e6 }
+                return totalCost(params: params, inputs: sampledInputs, masks: sampleMasks)
+            }
+            if result == nil || run.cost < result!.cost { result = run }
         }
+        guard var result else {
+            return CalibrationResult(profile: prior, residualPx: -1, converged: false, iterations: 0)
+        }
+        // Normalize yaw to (−π, π] for storage/display.
+        result = NMResult(point: SIMD4<Float>(result.point.x, result.point.y,
+                                              normalizeAngle(result.point.z), result.point.w),
+                          cost: result.cost, converged: result.converged,
+                          iterations: result.iterations)
 
         let solved = RigProfile(
             dy: result.point.x,
@@ -171,12 +203,19 @@ enum RigCalibrationSolver {
                 dy: profile.dy, dLateral: profile.dLateral,
                 yaw: profile.yaw, pitchResidual: profile.pitchResidual)
             let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
+            // Camera-frame projection — must match edgeCost's lookup exactly.
+            let rot = simd_float3x3(
+                SIMD3<Float>(rig.columns.0.x, rig.columns.0.y, rig.columns.0.z),
+                SIMD3<Float>(rig.columns.1.x, rig.columns.1.y, rig.columns.1.z),
+                SIMD3<Float>(rig.columns.2.x, rig.columns.2.y, rig.columns.2.z)
+            ).transpose
             for edge in input.meshEdges {
                 for i in 0..<4 {
                     let t = (Float(i) + 0.5) / 4
                     let point = edge.a + t * (edge.b - edge.a)
-                    let dir = simd_normalize(point - camPos)
-                    if dir.y < sinElevationCutoff { continue }   // masked from the solve — don't draw
+                    let dirWorld = simd_normalize(point - camPos)
+                    if dirWorld.y < sinElevationCutoff { continue }   // masked from the solve — don't draw
+                    let dir = rot * dirWorld
                     let (eqX, eqY) = dirToEquirect(dir: dir, width: width, height: height)
                     let col = Int(eqX), row = Int(eqY)
                     guard col >= 0, col < width, row >= 0, row < height else { continue }
@@ -214,16 +253,56 @@ enum RigCalibrationSolver {
     /// runs in milliseconds. Called automatically on the first 360° still of each scan.
     static func validateCalibration(input: CalibrationInput, profile: RigProfile) -> Float {
         let params = SIMD4<Float>(profile.dy, profile.dLateral, profile.yaw, profile.pitchResidual)
-        return totalCost(params: params, inputs: [input])
+        // Same anchor-frozen inclusion as the solve, so residuals are comparable.
+        let anchor = RigProfile.mechanicalPrior
+        let rig = composeRigTransform(phoneToWorld: input.phoneToWorld,
+                                      dy: anchor.dy, dLateral: 0, yaw: 0, pitchResidual: 0)
+        let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
+        let mask = anchorInclusionMask(edges: input.meshEdges, camPos: camPos)
+        return totalCost(params: params, inputs: [input], masks: [mask])
     }
 
     // MARK: - Cost function
 
+    /// Smallest signed difference between two angles (radians).
+    private static func angleDelta(_ a: Float, _ b: Float) -> Float {
+        var d = a - b
+        while d > .pi { d -= 2 * .pi }
+        while d < -.pi { d += 2 * .pi }
+        return d
+    }
+
+    /// Normalize an angle to (−π, π].
+    private static func normalizeAngle(_ a: Float) -> Float {
+        var v = a
+        while v > .pi { v -= 2 * .pi }
+        while v <= -.pi { v += 2 * .pi }
+        return v
+    }
+
+    /// Elevation-cut inclusion per edge sample, evaluated ONCE at the anchor camera
+    /// position (candidate-independent, so the optimizer can't game the cut). Layout:
+    /// edges × 8 samples, flattened.
+    static func anchorInclusionMask(edges: [MeshEdge], camPos: SIMD3<Float>) -> [Bool] {
+        var mask = [Bool](repeating: false, count: edges.count * 8)
+        for (e, edge) in edges.enumerated() {
+            for i in 0..<8 {
+                let t = (Float(i) + 0.5) / 8
+                let point = edge.a + t * (edge.b - edge.a)
+                let dir = simd_normalize(point - camPos)
+                mask[e * 8 + i] = dir.y >= sinElevationCutoff
+            }
+        }
+        return mask
+    }
+
     /// Total cost across all calibration inputs for a candidate rig parameter set.
-    private static func totalCost(params: SIMD4<Float>, inputs: [CalibrationInput]) -> Float {
+    /// `masks` is the anchor-frozen per-sample inclusion (see anchorInclusionMask).
+    private static func totalCost(params: SIMD4<Float>, inputs: [CalibrationInput],
+                                  masks: [[Bool]]) -> Float {
         var total: Float = 0
         var count = 0
-        for input in inputs {
+        for (k, input) in inputs.enumerated() {
             let rigTransform = composeRigTransform(
                 phoneToWorld: input.phoneToWorld,
                 dy: params.x, dLateral: params.y,
@@ -232,8 +311,20 @@ enum RigCalibrationSolver {
             let camPos = SIMD3<Float>(rigTransform.columns.3.x,
                                      rigTransform.columns.3.y,
                                      rigTransform.columns.3.z)
-            for edge in input.meshEdges {
-                if let cost = edgeCost(edge: edge, camPos: camPos, edgeMap: input.edgeMap) {
+            // World→camera rotation (transpose of the cam→world basis columns): the
+            // equirect lookup happens in the CAMERA frame, so yaw and pitch genuinely
+            // move the projection. (The old world-frame lookup made both parameters
+            // literally unobservable — cost flat across ±180° of yaw; run12 bundle.)
+            let rot = simd_float3x3(
+                SIMD3<Float>(rigTransform.columns.0.x, rigTransform.columns.0.y, rigTransform.columns.0.z),
+                SIMD3<Float>(rigTransform.columns.1.x, rigTransform.columns.1.y, rigTransform.columns.1.z),
+                SIMD3<Float>(rigTransform.columns.2.x, rigTransform.columns.2.y, rigTransform.columns.2.z)
+            ).transpose
+            let mask = masks[k]
+            for (e, edge) in input.meshEdges.enumerated() {
+                if let cost = edgeCost(edge: edge, camPos: camPos, worldToCam: rot,
+                                       edgeMap: input.edgeMap,
+                                       mask: mask, maskBase: e * 8) {
                     total += cost
                     count += 1
                 }
@@ -260,20 +351,22 @@ enum RigCalibrationSolver {
         return min(height, max(0, Int(Float(height) * frac)))
     }
 
-    /// Cost of one mesh edge: sample points along the projected edge in equirect space
-    /// and sum their distances to the nearest detected image edge. Samples below the
-    /// elevation cutoff are EXCLUDED (symmetric with the detect-time band mask, so the
-    /// masked zone neither attracts nor inflates the residual); returns nil when every
-    /// sample is masked so the edge drops out of the mean entirely.
-    private static func edgeCost(edge: MeshEdge, camPos: SIMD3<Float>, edgeMap: EdgeMap) -> Float? {
+    /// Cost of one mesh edge: sample points along the edge, project into the CAMERA
+    /// frame, and mean the squared distance-transform lookups. Sample inclusion comes
+    /// from the anchor-frozen `mask` (elevation cut evaluated once, candidate-
+    /// independent); returns nil when every sample is masked so the edge drops out of
+    /// the mean entirely.
+    private static func edgeCost(edge: MeshEdge, camPos: SIMD3<Float>,
+                                 worldToCam: simd_float3x3, edgeMap: EdgeMap,
+                                 mask: [Bool], maskBase: Int) -> Float? {
         let samples = 8
         var cost: Float = 0
         var counted = 0
         for i in 0..<samples {
+            guard mask[maskBase + i] else { continue }
             let t = (Float(i) + 0.5) / Float(samples)
             let point = edge.a + t * (edge.b - edge.a)
-            let dir = simd_normalize(point - camPos)
-            if dir.y < sinElevationCutoff { continue }
+            let dir = worldToCam * simd_normalize(point - camPos)
             let (eqX, eqY) = dirToEquirect(dir: dir, width: edgeMap.width, height: edgeMap.height)
             let col = max(0, min(edgeMap.width - 1, Int(eqX)))
             let row = max(0, min(edgeMap.height - 1, Int(eqY)))

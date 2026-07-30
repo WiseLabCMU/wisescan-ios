@@ -152,7 +152,7 @@ enum AppConstants {
     // from plausible poses. A monopod rig cannot physically be outside these ranges.
     static let calibrationBoundDyM: Float = 0.3                        // rod height search half-range (m) around the mechanical prior
     static let calibrationBoundLateralM: Float = 0.3                   // lateral offset half-range (m) around 0
-    static let calibrationBoundYawDeg: Float = 30                      // yaw half-range (deg) around the mechanical prior
+    static let calibrationBoundYawDeg: Float = 45                      // yaw half-range (deg) around EACH coarse-scan start (yaw is solved globally: the 360° cam screws onto the rod at an arbitrary rotation, so a full-circle coarse scan picks the basin and local bounds keep Nelder-Mead inside it)
     static let calibrationBoundPitchDeg: Float = 10                    // pitch-residual half-range (deg) around 0 (zenith correction should leave only small error)
     static let calibrationConvergenceTolerance: Float = 1e-5           // cost-range convergence threshold
     static let calibrationEdgeDetectionWidth = 512                     // downsampled equirect width for Sobel edge detection
