@@ -168,6 +168,16 @@ final class ThetaCameraManager {
                 return
             }
 
+            // Keep the camera awake while connected: a sleep/wake mid-session is the
+            // prime suspect for the per-session yaw-reference jump (run14), and wake
+            // latency hurts mid-recording still triggers. Non-fatal — log and continue.
+            do {
+                try await disableAutoSleep()
+                log(.connection, "Auto-sleep disabled for the session")
+            } catch {
+                log(.connection, "⚠️ Could not disable auto-sleep: \(Self.describe(error))")
+            }
+
             state = .connected(model: info.model, firmware: info.firmware)
             serialNumber = info.serial
             batteryLevel = try? await fetchBatteryLevel()

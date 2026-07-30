@@ -40,6 +40,18 @@ extension ThetaCameraManager {
         if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setOptions failed") }
     }
 
+    /// Disables the camera's auto-sleep while connected (OSC `sleepDelay` = 65535,
+    /// "never"). A sleep/wake cycle is the prime suspect for the per-session equirect
+    /// yaw-reference jump (run14: 103° with the rig physically untouched — the zenith
+    /// correction's yaw component appears to re-initialize), and a sleeping camera also
+    /// adds wake latency to scan-still triggers mid-recording.
+    func disableAutoSleep() async throws {
+        let body: [String: Any] = ["name": "camera.setOptions",
+                                   "parameters": ["options": ["sleepDelay": 65535]]]
+        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCCommandResponse.self)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setOptions failed for sleepDelay") }
+    }
+
     /// Sets the `_topBottomCorrection` option (e.g. "Apply" or "Disapply").
     func setTopBottomCorrection(to mode: String) async throws {
         let body: [String: Any] = ["name": "camera.setOptions",
