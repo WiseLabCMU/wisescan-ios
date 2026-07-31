@@ -23,6 +23,7 @@ struct CaptureView: View {
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession?
     @State private var thetaManager = ThetaCameraManager.shared
+    @AppStorage(AppConstants.Key.rigMeasuredDyMeters) private var rigMeasuredDyMeters: Double = 0
     /// Calibration capture is settle-gated: true while waiting for rig stillness after a tap.
     @State private var isSettlingCalibration = false
     @State var rigCalibrationManager = RigCalibrationManager.shared
@@ -178,6 +179,11 @@ struct CaptureView: View {
         ) {
             let stillNumber = thetaManager.scanStillCount + 1
             showTransientMessage("📸 360° still #\(stillNumber)…", duration: 2)
+            if stillNumber == 1, rigMeasuredDyMeters <= 0.1 {
+                // First 360° still of the scan on an unmeasured rig: one actionable
+                // heads-up (the chip shows the persistent orange state).
+                showTransientMessage("⚠️ Rig height not set — poses will be estimated. Settings → 360° Rig Height.", duration: 5)
+            }
             // Post-process pivot: no first-still spot-check / session-yaw solve here —
             // calibration runs in the Process step against the completed scan's own
             // stills and mesh, where the yaw reference and the poses share a session
@@ -207,6 +213,29 @@ struct CaptureView: View {
         }
         .font(.caption2).bold()
         .foregroundColor(.white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial)
+        .cornerRadius(6)
+    }
+
+    /// Rig-height state on the 360° chip: the tape-measured value when set (the solve's
+    /// bootstrap anchor), or an orange call-to-action when unset — an unmeasured rig
+    /// falls back to the mechanical envelope, where the solve's known +dy pull operates
+    /// unchecked (360post4: solved 1.30 m vs measured 0.79 m).
+    @ViewBuilder
+    private var thetaRigHeightChip: some View {
+        let measured = rigMeasuredDyMeters > 0.1
+        HStack(spacing: 5) {
+            Circle()
+                .fill(measured ? Color.cyan : Color.orange)
+                .frame(width: 7, height: 7)
+            Text(measured
+                 ? String(format: "Rig height %.2f m", rigMeasuredDyMeters)
+                 : "Rig height unset — Settings")
+        }
+        .font(.caption2).bold()
+        .foregroundColor(measured ? .white : .orange)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(.ultraThinMaterial)
@@ -1082,6 +1111,8 @@ struct CaptureView: View {
                                 .cornerRadius(6)
 
                             thetaCalibrationChip
+
+                            thetaRigHeightChip
 
                             if isRecording {
                                 thetaSufficiencyChip
