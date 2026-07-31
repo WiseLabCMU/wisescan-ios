@@ -259,22 +259,12 @@ struct MeshPreviewContainer: View {
     }
 
     private var equirectLegendRow: some View {
-        HStack(spacing: 8) {
-            let directions: [(String, SIMD4<Float>)] = [
-                ("front", AppConstants.equirectFrontColor),
-                ("right", AppConstants.equirectRightColor),
-                ("back", AppConstants.equirectBackColor),
-                ("left", AppConstants.equirectLeftColor),
-                ("up", AppConstants.equirectUpColor)
-            ]
-            ForEach(directions, id: \.0) { dir, color in
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(Color(red: Double(color.x), green: Double(color.y), blue: Double(color.z)))
-                        .frame(width: 8, height: 8)
-                    Text(dir).font(.caption2).foregroundColor(.gray)
-                }
-            }
+        HStack(spacing: 6) {
+            let accent = AppConstants.equirectFrontColor
+            Circle()
+                .fill(Color(red: Double(accent.x), green: Double(accent.y), blue: Double(accent.z)))
+                .frame(width: 8, height: 8)
+            Text("360° stills (arrow = front)").font(.caption2).foregroundColor(.gray)
         }
     }
 

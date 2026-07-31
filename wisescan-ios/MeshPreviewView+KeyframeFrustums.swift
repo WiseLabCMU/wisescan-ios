@@ -231,33 +231,63 @@ extension MeshPreviewView {
 
     // MARK: - Equirect Face Frustums
 
-    /// Cube-face direction: name, rotation quaternion (cam-space, ARKit convention),
-    /// and direction-specific color. Matches EquirectFaceExport's face definitions.
-    private nonisolated struct EquirectFace {
-        let name: String
-        let rotation: simd_quatf
-        let color: SIMD4<Float>
+    /// Shared geometry for the 360° still sphere marker.
+    private nonisolated struct EquirectSphereGeometry {
+        let sphere: SCNSphere
+        let ring: SCNTorus
+        let box: SCNBox
+        let arrow: SCNCone
     }
 
-    /// The 5 cube-map faces (bottom dropped — operator/rod). Rotations are in camera
-    /// space: +X right, +Y up, -Z forward (ARKit/OpenGL convention).
-    private nonisolated static let equirectFaceDefinitions: [EquirectFace] = [
-        EquirectFace(name: "front", rotation: simd_quatf(ix: 0, iy: 0, iz: 0, r: 1),
-                     color: AppConstants.equirectFrontColor),
-        EquirectFace(name: "right", rotation: simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(0, 1, 0)),
-                     color: AppConstants.equirectRightColor),
-        EquirectFace(name: "back",  rotation: simd_quatf(angle: .pi, axis: SIMD3<Float>(0, 1, 0)),
-                     color: AppConstants.equirectBackColor),
-        EquirectFace(name: "left",  rotation: simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(0, 1, 0)),
-                     color: AppConstants.equirectLeftColor),
-        EquirectFace(name: "up",    rotation: simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(1, 0, 0)),
-                     color: AppConstants.equirectUpColor)
-    ]
+    private nonisolated static func makeEquirectSphereGeometry() -> EquirectSphereGeometry {
+        let radius = CGFloat(AppConstants.equirectMarkerRadius)
+        let accent = AppConstants.equirectFrontColor
+        let accentColor = UIColor(red: CGFloat(accent.x), green: CGFloat(accent.y),
+                                  blue: CGFloat(accent.z), alpha: 1.0)
 
-    /// Builds 5 direction-colored frustum cones per equirect still. Poses are computed
-    /// on-the-fly from the sidecar's `phone_transform` + rig calibration (or prior).
-    /// Each face is a 90° FOV pinhole (tan(45°) = 1.0). Runs off-main alongside the
-    /// keyframe builder. Returns nil if no equirect stills exist.
+        let sphere = SCNSphere(radius: radius)
+        sphere.segmentCount = 24
+        let sphereMat = SCNMaterial()
+        sphereMat.lightingModel = .constant
+        sphereMat.diffuse.contents = UIColor.white
+        sphereMat.transparency = 0.15
+        sphereMat.isDoubleSided = true
+        sphere.materials = [sphereMat]
+
+        let solid = SCNMaterial()
+        solid.lightingModel = .constant
+        solid.diffuse.contents = accentColor
+
+        let ring = SCNTorus(ringRadius: radius, pipeRadius: radius * 0.035)
+        ring.materials = [solid]
+        let box = SCNBox(width: 0.02, height: 0.02, length: 0.02, chamferRadius: 0)
+        box.materials = [solid]
+        let arrow = SCNCone(topRadius: 0, bottomRadius: radius * 0.18, height: radius * 0.5)
+        arrow.materials = [solid]
+        return EquirectSphereGeometry(sphere: sphere, ring: ring, box: box, arrow: arrow)
+    }
+
+    /// Assemble one marker node (geometry shared across stills; nodes own transforms).
+    private nonisolated static func makeEquirectSphereNode(marker: EquirectSphereGeometry) -> SCNNode {
+        let node = SCNNode()
+        node.addChildNode(SCNNode(geometry: marker.sphere))
+        node.addChildNode(SCNNode(geometry: marker.ring))       // equator rim (XZ plane)
+        node.addChildNode(SCNNode(geometry: marker.box))        // origin cube
+
+        // Forward arrow: cone apex pointing along −Z (camera forward = equirect front).
+        // SCNCone points +Y; rotate −90° about X so +Y → −Z, park it just outside the rim.
+        let arrowNode = SCNNode(geometry: marker.arrow)
+        arrowNode.eulerAngles.x = -.pi / 2
+        arrowNode.position = SCNVector3(0, 0, -Float(AppConstants.equirectMarkerRadius) * 1.3)
+        node.addChildNode(arrowNode)
+        return node
+    }
+
+    /// One sphere marker per 360° still: a translucent sphere (the full capture volume)
+    /// with an equator rim ring, a small origin cube, and a forward arrow along the
+    /// camera's −Z (the equirect's front/identity direction). Replaced the 5-frustum
+    /// rendering, which was too busy to read at a glance. Poses come from the sidecar's
+    /// baked `cam_transform` (Process-step calibration) or the prior. Runs off-main.
     private nonisolated static func buildEquirectFaceNodes(scanDirectoryURL: URL, rigProfile: RigProfile?) -> SCNNode? {
         let fileMgr = FileManager.default
         let equirectDir = scanDirectoryURL
@@ -270,16 +300,8 @@ extension MeshPreviewView {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !sidecars.isEmpty else { return nil }
 
-        // Pre-build geometry for each face direction (5 cache entries; shared across all stills).
-        // 90° FOV pinhole: tan(45°) = 1.0.
-        var geometryCache: [String: FrustumGeometry] = [:]
-        for face in equirectFaceDefinitions {
-            geometryCache[face.name] = makeFrustumGeometry(
-                tanHalfAngle: 1.0,
-                color: face.color,
-                scale: 1.0
-            )
-        }
+        // Shared marker geometry (one set across all stills).
+        let marker = makeEquirectSphereGeometry()
 
         var allNodes: [SCNNode] = []
         for sidecarURL in sidecars {
@@ -317,15 +339,9 @@ extension MeshPreviewView {
                 )
             }
 
-            // Build one frustum node per face direction at the rig camera position.
-            // The rig transform is the 360° camera's camera-to-world; each face rotation
-            // is composed into the frustum node's inner transform.
-            for face in equirectFaceDefinitions {
-                guard let geometry = geometryCache[face.name] else { continue }
-                let node = makeFrustumNode(geometry: geometry, faceRotation: face.rotation)
-                node.simdTransform = camTransform
-                allNodes.append(node)
-            }
+            let node = makeEquirectSphereNode(marker: marker)
+            node.simdTransform = camTransform
+            allNodes.append(node)
         }
 
         return container(named: "equirectFaces", nodes: allNodes)

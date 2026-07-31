@@ -229,6 +229,7 @@ enum AppConstants {
     static let keyframeMotionScale: Float = 0.6              // motion-frame wedges drawn smaller than stills (many of them; reduce clutter)
     static let colorizationKeyframeWeight: Float = 3.0         // vertex-color weight bonus for sharp stillness keyframes vs sweep frames
     // Equirect cube-map face direction colors (mesh preview frustum markers)
+    static let equirectMarkerRadius: Float = 0.12                      // m — 360° still sphere marker radius in the mesh preview
     static let equirectFrontColor  = SIMD4<Float>(0.2, 0.85, 1.0, 1.0) // cyan  — forward face
     static let equirectRightColor  = SIMD4<Float>(0.3, 0.9, 0.4, 1.0)  // green — right face
     static let equirectBackColor   = SIMD4<Float>(1.0, 0.6, 0.15, 1.0) // orange — back face
@@ -291,37 +292,38 @@ enum KeyframeMarkerMode: String, CaseIterable {
     case none
     /// Sharp still (keyframe) capture poses only.
     case stills
-    /// 360° equirect cube-map face frustums (5 per still: front/right/back/left/up).
+    /// 360° equirect sphere markers (one translucent sphere + forward arrow per still).
     case equirectFaces
-    /// Still + motion (sweep) frame capture poses.
-    case stillsAndMotion
+    /// Motion (sweep) frame capture poses only.
+    case motion
+    /// Everything at once.
+    case all
 
     /// SF Symbol name for the toolbar button.
     var iconName: String {
         switch self {
-        case .none:            return "camera.metering.none"
-        case .stills:          return "camera.metering.partial"
-        case .equirectFaces:   return "pano"
-        case .stillsAndMotion: return "camera.metering.matrix"
+        case .none:          return "camera.metering.none"
+        case .stills:        return "camera.metering.partial"
+        case .equirectFaces: return "pano"
+        case .motion:        return "camera.metering.center.weighted"
+        case .all:           return "camera.metering.matrix"
         }
     }
 
     /// Advance to the next mode, skipping `.equirectFaces` if no equirect data exists.
     func next(hasEquirects: Bool) -> KeyframeMarkerMode {
         switch self {
-        case .none:            return .stills
-        case .stills:          return hasEquirects ? .equirectFaces : .stillsAndMotion
-        case .equirectFaces:   return .stillsAndMotion
-        case .stillsAndMotion: return .none
+        case .none:          return .stills
+        case .stills:        return hasEquirects ? .equirectFaces : .motion
+        case .equirectFaces: return .motion
+        case .motion:        return .all
+        case .all:           return .none
         }
     }
 
-    /// Legacy cycle (no equirect awareness) — kept for backward compatibility.
-    var next: KeyframeMarkerMode { next(hasEquirects: false) }
-
-    var showStills: Bool { self != .none && self != .equirectFaces }
-    var showMotion: Bool { self == .stillsAndMotion }
-    var showEquirectFaces: Bool { self == .equirectFaces }
+    var showStills: Bool { self == .stills || self == .all }
+    var showMotion: Bool { self == .motion || self == .all }
+    var showEquirectFaces: Bool { self == .equirectFaces || self == .all }
 }
 
 // MARK: - Semantic Classification
