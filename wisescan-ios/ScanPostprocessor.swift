@@ -226,7 +226,10 @@ enum ScanPostprocessor {
         return out.sorted { $0.sequence < $1.sequence }
     }
 
-    /// True while any still sidecar lacks `rig_calibration_source` — poses not yet baked.
+    /// True while any still sidecar lacks `rig_calibration_source` — or carries a stamp
+    /// from an older solver version (bumps force a re-solve on the next Process; this is
+    /// how the poisoned-anchor scans from 360post1, including pre-pivot capture-baked
+    /// ones, heal themselves).
     nonisolated static func equirectCalibrationPending(rawDataPath: URL) -> Bool {
         let dir = rawDataPath.appendingPathComponent("equirect_stills")
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return false }
@@ -235,6 +238,9 @@ enum ScanPostprocessor {
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             else { continue }
             if obj["rig_calibration_source"] == nil { return true }
+            if (obj["rig_calibration_solver_version"] as? Int ?? 0) < EquirectPostCalibration.solverVersion {
+                return true
+            }
         }
         return false
     }

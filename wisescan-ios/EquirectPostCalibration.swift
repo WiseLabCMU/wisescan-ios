@@ -28,6 +28,12 @@ enum EquirectPostCalibration {
     static let sourceYawOnly = "solved_postprocess_yaw_only"
     static let sourcePrior = "prior_postprocess"
 
+    /// Bumped when the solver/anchoring changes enough that already-stamped scans should
+    /// re-calibrate on their next Process. v2: 360post1 — the rolling-refinement anchor
+    /// trusted a poisoned unbounded-era profile (dLat 0.574 m persisted → every baked
+    /// pose offset ~0.6 m in x/z); v2 sanity-gates the anchor and re-solves everything.
+    static let solverVersion = 2
+
     struct StillRecord {
         let sequence: Int
         let sidecarURL: URL
@@ -41,6 +47,8 @@ enum EquirectPostCalibration {
     /// JPG is on disk, so the solve sees the scan's full still set.
     nonisolated static func run(scanDir: URL, rawDataDir: URL,
                                 report: (String) -> Void) -> String {
+        let t0 = Date()
+        func ms(_ since: Date) -> Int { Int(Date().timeIntervalSince(since) * 1000) }
         let stills = loadStills(rawDataDir: rawDataDir)
         guard !stills.isEmpty else { return "no stills" }
 
@@ -98,9 +106,12 @@ enum EquirectPostCalibration {
         // use the wide mechanical bounds. Yaw is global either way (screw mount + per-
         // session reference).
         report("Solving 360° rig calibration…")
+        let inputsMs = ms(t0)
+        let tSolve = Date()
         let bounds: RigCalibrationSolver.SolveBounds = stored.isSolved
             ? .refinement(around: stored) : .mechanical
         let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds)
+        let solveMs = ms(tSolve)
         let p = result.profile
         PerfDiag.log(String(format: "[RigCal] postprocess solve: dy=%.3fm dLat=%.3fm yaw=%.2f° pitch=%.2f° (residual %.2f px, %@, %d inputs)",
                             p.dy, p.dLateral, p.yaw * 180 / .pi, p.pitchResidual * 180 / .pi,
@@ -122,7 +133,9 @@ enum EquirectPostCalibration {
         if PerfDiag.enabled {
             writeDiagnostics(inputs: inputs, solved: result.profile)
         }
-        return String(format: "solved (%.2f px, %d inputs)", result.residualPx, inputs.count)
+        return String(format: "solved (%.2f px, %d inputs; prep %ds + solve %ds, %d iters)",
+                      result.residualPx, inputs.count, inputsMs / 1000, solveMs / 1000,
+                      result.iterations)
     }
 
     // MARK: - Stills
@@ -185,6 +198,7 @@ enum EquirectPostCalibration {
             let cols = [cam.columns.0, cam.columns.1, cam.columns.2, cam.columns.3]
             obj["cam_transform"] = cols.flatMap { [Double($0.x), Double($0.y), Double($0.z), Double($0.w)] }
             obj["rig_calibration_source"] = source
+            obj["rig_calibration_solver_version"] = solverVersion
             if let residual { obj["rig_calibration_residual_px_rms"] = Double(residual) }
             if let out = try? JSONSerialization.data(withJSONObject: obj,
                                                      options: [.prettyPrinted, .sortedKeys]) {
@@ -195,8 +209,24 @@ enum EquirectPostCalibration {
 
     // MARK: - Helpers
 
+    /// The persisted profile, accepted ONLY if its geometry lies inside the mechanical
+    /// bounds — profiles saved by unbounded-era solves (or any future corruption) must
+    /// not seed the refinement anchor or the yaw-only geometry (360post1: a stored
+    /// dLat of 0.574 m dragged every baked pose ~0.6 m off in x/z, and ±0.15 m
+    /// refinement bounds could never walk back to the true ~0.1 m).
     private nonisolated static func persistedOrPrior() -> RigProfile {
-        RigProfile.load() ?? .mechanicalPrior
+        guard let stored = RigProfile.load(), stored.isSolved else { return .mechanicalPrior }
+        let mech = RigProfile.mechanicalPrior
+        let pitchMax = AppConstants.calibrationBoundPitchDeg * Float.pi / 180
+        let sane = abs(stored.dy - mech.dy) <= AppConstants.calibrationBoundDyM
+            && abs(stored.dLateral) <= AppConstants.calibrationBoundLateralM
+            && abs(stored.pitchResidual) <= pitchMax
+        if !sane {
+            PerfDiag.log(String(format: "[RigCal] persisted profile REJECTED (outside mechanical bounds: dy=%.3f dLat=%.3f pitch=%.1f°) — using mechanical prior",
+                                stored.dy, stored.dLateral, stored.pitchResidual * 180 / .pi))
+            return .mechanicalPrior
+        }
+        return stored
     }
 
     private nonisolated static func meshURL(scanDir: URL, rawDataDir: URL) -> URL {

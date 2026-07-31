@@ -130,9 +130,13 @@ enum RigCalibrationSolver {
             yawStarts.append((yaw, totalCost(params: params, inputs: sampledInputs, masks: sampleMasks)))
         }
         yawStarts.sort { $0.cost < $1.cost }
-        // Keep the best starts at least 60° apart (distinct lobes, not one lobe thrice).
+        // Keep the best starts at least 60° apart (distinct lobes, not one lobe thrice) —
+        // and skip the runner-up entirely when the best lobe is decisive (>25% cheaper):
+        // the second local descent roughly doubles solve time and, on a decisive
+        // landscape, never wins (360post1: 60-70 s Debug postprocess solves).
         var starts: [Float] = []
         for cand in yawStarts where starts.allSatisfy({ abs(angleDelta(cand.yaw, $0)) > Float.pi / 3 }) {
+            if starts.count == 1, cand.cost > yawStarts[0].cost * 1.25 { break }
             starts.append(cand.yaw)
             if starts.count >= 2 { break }
         }
