@@ -101,16 +101,16 @@ enum EquirectPostCalibration {
             return "yaw-only solve from \(inputs.count) still(s)"
         }
 
-        // Full solve. Geometry bounds tighten around a previously-SOLVED profile (rolling
-        // refinement, run13/14: dy/dLat/pitch repeat across sessions); first-ever solves
-        // use the wide mechanical bounds. Yaw is global either way (screw mount + per-
-        // session reference).
+        // Full solve — mechanical bounds, yaw global (see below).
         report("Solving 360° rig calibration…")
         let inputsMs = ms(t0)
         let tSolve = Date()
-        let bounds: RigCalibrationSolver.SolveBounds = stored.isSolved
-            ? .refinement(around: stored) : .mechanical
-        let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds)
+        // ALWAYS the full mechanical box: the product rig is handheld/telescoping and the
+        // user may re-clamp between scans, and the Theta wakes from power-save with every
+        // correction parameter fresh — a tight refinement box around the previous scan's
+        // geometry would clip a legitimately re-rigged setup. The persisted profile still
+        // warm-starts the solve and provides the yaw-only fallback geometry.
+        let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: .mechanical)
         let solveMs = ms(tSolve)
         let p = result.profile
         PerfDiag.log(String(format: "[RigCal] postprocess solve: dy=%.3fm dLat=%.3fm yaw=%.2f° pitch=%.2f° (residual %.2f px, %@, %d inputs)",

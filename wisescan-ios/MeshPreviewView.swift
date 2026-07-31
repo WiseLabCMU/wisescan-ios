@@ -571,6 +571,21 @@ struct MeshPreviewView: UIViewRepresentable {
                     }
                     scene.rootNode.addChildNode(cameraNode)
 
+                    // Zoom-out headroom: the default camera controller's dolly-out
+                    // ceiling derives from the scene's bounding sphere, which the room
+                    // mesh keeps tight. Two invisible specks far outside the model widen
+                    // the bounds (~6× the span) so pinch-out can pull well back — the
+                    // default pose above is unchanged. (CombinedMeshView effectively has
+                    // this headroom already via its farther initial camera.)
+                    for sign: Float in [-1, 1] {
+                        let speck = SCNNode(geometry: SCNSphere(radius: 0.001))
+                        speck.geometry?.firstMaterial?.transparency = 0
+                        speck.position = SCNVector3(sign * maxDimension * 3,
+                                                    sign * maxDimension * 3,
+                                                    sign * maxDimension * 3)
+                        scene.rootNode.addChildNode(speck)
+                    }
+
                     // Signal that mesh is ready
                     self.isMeshLoaded = true
                 }
