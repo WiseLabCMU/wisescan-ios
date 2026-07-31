@@ -33,8 +33,11 @@ enum EquirectPostCalibration {
     /// trusted a poisoned unbounded-era profile (dLat 0.574 m persisted → every baked
     /// pose offset ~0.6 m in x/z); v2 sanity-gates the anchor and re-solves everything.
     /// v3: 360post4 — dy box widened to the telescoping envelope (±0.6 m); scans solved
-    /// against the old 1.3 m ceiling re-solve unclipped.
-    static let solverVersion = 3
+    /// against the old 1.3 m ceiling re-solve unclipped. v4: tape measure (0.787 m) vs
+    /// solve (1.299 m) proved a systematic +dy pull in the chamfer cost — dy now anchors
+    /// to the user-measured rig height when provided (±0.15), unmeasured envelope back
+    /// to ±0.3.
+    static let solverVersion = 4
 
     struct StillRecord {
         let sequence: Int
@@ -113,12 +116,22 @@ enum EquirectPostCalibration {
         // Full solve — mechanical bounds, yaw global (see below).
         report("Solving 360° rig calibration…")
         let tSolve = Date()
-        // ALWAYS the full mechanical box: the product rig is handheld/telescoping and the
-        // user may re-clamp between scans, and the Theta wakes from power-save with every
-        // correction parameter fresh — a tight refinement box around the previous scan's
-        // geometry would clip a legitimately re-rigged setup. The persisted profile still
-        // warm-starts the solve and provides the yaw-only fallback geometry.
-        let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: .mechanical)
+        // dy anchors to the USER-MEASURED rig height when one is set (Settings → 360° rig):
+        // the chamfer cost has a systematic +dy pull (dense image-edge bands attract the
+        // sparse projected mesh downward → camera up; 360post4 solved 1.299 m vs a
+        // 0.787 m tape measure), so the measurement is treated as ground truth with a
+        // small slop window. Unmeasured rigs fall back to the mechanical envelope.
+        // dLat/pitch/yaw always solve free — they have no such attractor and match
+        // physical truth when dy isn't straining (post2/3).
+        let measuredDy = Float(UserDefaults.standard.double(forKey: AppConstants.Key.rigMeasuredDyMeters))
+        let bounds: RigCalibrationSolver.SolveBounds = measuredDy > 0.1
+            ? RigCalibrationSolver.SolveBounds(
+                anchorDy: measuredDy, anchorLat: 0,
+                dyHalf: AppConstants.calibrationMeasuredDyHalfM,
+                latHalf: AppConstants.calibrationBoundLateralM,
+                pitchHalfDeg: AppConstants.calibrationBoundPitchDeg)
+            : .mechanical
+        let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds)
         let solveMs = ms(tSolve)
         let p = result.profile
         PerfDiag.log(String(format: "[RigCal] postprocess solve: dy=%.3fm dLat=%.3fm yaw=%.2f° pitch=%.2f° (residual %.2f px, %@, %d inputs)",

@@ -29,6 +29,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
     @AppStorage(AppConstants.Key.scanCoachingEnabled) private var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
+    @AppStorage(AppConstants.Key.rigMeasuredDyMeters) private var rigMeasuredDyMeters: Double = 0
     @AppStorage(AppConstants.Key.registerLegacyScans) private var registerLegacyScans: Bool = AppConstants.registerLegacyScans
     @Environment(\.dismiss) private var dismiss
 
@@ -212,6 +213,24 @@ struct SettingsView: View {
                             }
                         }
                         .tint(.cyan)
+                        .padding(.vertical, 4)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("360° Rig Height")
+                                    .foregroundColor(.white)
+                                Spacer()
+                                TextField("0.00", value: $rigMeasuredDyMeters, format: .number.precision(.fractionLength(0...3)))
+                                    .keyboardType(.decimalPad)
+                                    .multilineTextAlignment(.trailing)
+                                    .frame(width: 80)
+                                    .foregroundColor(.cyan)
+                                Text("m").foregroundColor(.gray)
+                            }
+                            Text("Tape-measured distance from the iPad's camera cluster to the 360° camera's lens center, in meters (31 in ≈ 0.79). Calibration treats it as ground truth for the vertical offset — the image-based solve has a known upward pull without it. 0 = unmeasured.")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
                         .padding(.vertical, 4)
 
                     } header: {

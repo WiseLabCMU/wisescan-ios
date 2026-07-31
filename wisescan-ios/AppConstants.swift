@@ -55,6 +55,7 @@ enum AppConstants {
         static let registerLegacyScans = "registerLegacyScans"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
+        static let rigMeasuredDyMeters = "rigMeasuredDyMeters"        // user's tape-measured iPad-camera→360°-lens distance (m); 0 = unmeasured
     }
 
     // MARK: - Default Values
@@ -147,7 +148,8 @@ enum AppConstants {
     // run8 (2026-07-30): with a near-flat chamfer cost surface in cluttered rooms, the
     // unbounded solver accepted dy=4.4 m / yaw=−240° at residuals indistinguishable
     // from plausible poses. A monopod rig cannot physically be outside these ranges.
-    static let calibrationBoundDyM: Float = 0.6                        // rod height search half-range (m) around the mechanical prior: the product rig TELESCOPES, so the box must cover the physical envelope (~0.4-1.6 m), not one setup — 360post4 (rig re-rigged taller) pinned dy at the old 1.3 wall with dLat/pitch absorbing the leftover error
+    static let calibrationBoundDyM: Float = 0.3                        // rod height half-range (m) around the anchor when the user hasn't MEASURED the rig. The chamfer cost has a systematic +dy pull (dense image-edge band above the elevation cut attracts the sparse projected mesh downward → camera up; 360post4: solved 1.299 vs tape-measured 0.787), so an unmeasured box stays tight to limit the damage — a measured rig uses ±calibrationMeasuredDyHalfM instead
+    static let calibrationMeasuredDyHalfM: Float = 0.15                // dy half-range around the USER-MEASURED rig height (Settings → 360° rig) — the measurement is ground truth; the window only absorbs clamp/tape slop
     static let calibrationBoundLateralM: Float = 0.3                   // lateral offset half-range (m) around 0
     static let calibrationBoundYawDeg: Float = 45                      // yaw half-range (deg) around EACH coarse-scan start (yaw is solved globally: the 360° cam screws onto the rod at an arbitrary rotation, so a full-circle coarse scan picks the basin and local bounds keep Nelder-Mead inside it)
     static let calibrationBoundPitchDeg: Float = 10                    // pitch-residual half-range (deg) around 0 (zenith correction should leave only small error)
