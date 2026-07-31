@@ -248,11 +248,25 @@ enum EquirectPostCalibration {
             .appendingPathComponent("rigcal_diag", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let stamp = Int(Date().timeIntervalSince1970)
+        let renderStart = Date()
         for (idx, input) in inputs.enumerated() {
+            // Subsample edges for the overlay like the solve does — splatting the full
+            // uncapped set (~50k edges/still) cost ~30 s of the 360post3 total.
+            let maxEdges = AppConstants.calibrationMaxEdgesPerInput
+            let edges: [RigCalibrationSolver.MeshEdge]
+            if input.meshEdges.count <= maxEdges {
+                edges = input.meshEdges
+            } else {
+                let step = max(1, input.meshEdges.count / maxEdges)
+                edges = Swift.stride(from: 0, to: input.meshEdges.count, by: step)
+                    .prefix(maxEdges).map { input.meshEdges[$0] }
+            }
+            let slim = RigCalibrationSolver.CalibrationInput(
+                phoneToWorld: input.phoneToWorld, edgeMap: input.edgeMap, meshEdges: edges)
             guard let png = RigCalibrationSolver.renderDiagnostic(
-                input: input, solved: solved, prior: .mechanicalPrior) else { continue }
+                input: slim, solved: solved, prior: .mechanicalPrior) else { continue }
             try? png.write(to: dir.appendingPathComponent("post_\(stamp)_still\(idx + 1).png"))
         }
-        PerfDiag.log("[RigCal] postprocess diagnostics → Documents/rigcal_diag/post_*.png")
+        PerfDiag.log("[RigCal] postprocess diagnostics (\(Int(Date().timeIntervalSince(renderStart) * 1000)) ms) → Documents/rigcal_diag/post_*.png")
     }
 }
