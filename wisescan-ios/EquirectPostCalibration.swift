@@ -38,7 +38,11 @@ enum EquirectPostCalibration {
     /// to the user-measured rig height when provided (±0.15), unmeasured envelope back
     /// to ±0.3. v5: measured window tightened to ±0.05 — the pull saturates any window
     /// (post5: solved at the +0.15 wall), so it should be no wider than tape/clamp slop.
-    static let solverVersion = 5
+    /// v6: the pull's ROOT CAUSE isolated offline — a uniform elevation-registration
+    /// offset (image rows vs latitude mapping; +5.6° stand rig, ~+10° sagging handheld
+    /// clamp) that pitch cannot represent; now solved per scan as a 1-D nuisance and
+    /// stamped as elevation_offset_deg.
+    static let solverVersion = 6
 
     struct StillRecord {
         let sequence: Int
@@ -136,8 +140,9 @@ enum EquirectPostCalibration {
         let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds)
         let solveMs = ms(tSolve)
         let p = result.profile
-        PerfDiag.log(String(format: "[RigCal] postprocess solve: dy=%.3fm dLat=%.3fm yaw=%.2f° pitch=%.2f° (residual %.2f px, %@, %d inputs)",
+        PerfDiag.log(String(format: "[RigCal] postprocess solve: dy=%.3fm dLat=%.3fm yaw=%.2f° pitch=%.2f° elev=%.1f° (residual %.2f px, %@, %d inputs)",
                             p.dy, p.dLateral, p.yaw * 180 / .pi, p.pitchResidual * 180 / .pi,
+                            result.elevOffsetDeg,
                             result.residualPx, result.converged ? "converged" : "NOT converged",
                             inputs.count))
 
@@ -147,7 +152,7 @@ enum EquirectPostCalibration {
         }
 
         bake(stills: stills, profile: result.profile, source: sourceSolved,
-             residual: result.residualPx)
+             residual: result.residualPx, elevOffsetDeg: result.elevOffsetDeg)
         // Rolling geometry: persist the refined rig constants (yaw stored too, but it is
         // session-local by hardware behavior — the next scan re-solves it).
         result.profile.with(cameraModel: stored.cameraModel,
@@ -209,7 +214,8 @@ enum EquirectPostCalibration {
 
     /// Write cam_transform + provenance (+ residual when solved) into every sidecar.
     private nonisolated static func bake(stills: [StillRecord], profile: RigProfile,
-                                         source: String, residual: Float?) {
+                                         source: String, residual: Float?,
+                                         elevOffsetDeg: Float? = nil) {
         for still in stills {
             guard let data = try? Data(contentsOf: still.sidecarURL),
                   var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -223,6 +229,9 @@ enum EquirectPostCalibration {
             obj["rig_calibration_source"] = source
             obj["rig_calibration_solver_version"] = solverVersion
             if let residual { obj["rig_calibration_residual_px_rms"] = Double(residual) }
+            // Image-vertical registration nuisance — consumers sampling the equirect with
+            // the standard mapping (e.g. face export) can compensate by this much.
+            if let elevOffsetDeg { obj["elevation_offset_deg"] = Double(elevOffsetDeg) }
             if let out = try? JSONSerialization.data(withJSONObject: obj,
                                                      options: [.prettyPrinted, .sortedKeys]) {
                 try? out.write(to: still.sidecarURL, options: .atomic)

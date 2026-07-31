@@ -48,6 +48,10 @@ enum RigCalibrationSolver {
         let residualPx: Float       // RMS reprojection error in equirect pixels (512-wide working image)
         let converged: Bool
         let iterations: Int
+        /// Uniform vertical (elevation) registration offset between the equirect rows and
+        /// the latitude mapping, solved per scan as a 1-D nuisance (deg; + = image content
+        /// sits lower than geometry predicts). Rig/mount-tilt dependent, NOT constant.
+        let elevOffsetDeg: Float
     }
 
     // MARK: - Entry
@@ -85,7 +89,7 @@ enum RigCalibrationSolver {
         if totalEdges == 0 {
             return CalibrationResult(
                 profile: prior, residualPx: -1,
-                converged: false, iterations: 0
+                converged: false, iterations: 0, elevOffsetDeg: 0
             )
         }
 
@@ -131,6 +135,21 @@ enum RigCalibrationSolver {
                                              masks: sampleMasks, stride: 3)))
         }
         yawStarts.sort { $0.cost < $1.cost }
+
+        // ELEVATION-REGISTRATION nuisance (5th parameter, 1-D): a uniform vertical
+        // offset between the equirect's rows and the latitude mapping — measured +5.6°
+        // on the stand rig and ~+10° on the sagging handheld clamp (offline, 2026-07-31).
+        // Pitch cannot absorb it (rotation: front-horizon down = back-horizon up) so dy
+        // used to fake it (+0.3-0.5 m bias vs tape measure). Clean basin → cheap sweep
+        // at the best coarse yaw; NM then solves geometry with the offset held fixed.
+        var bestElevRows: Float = 0
+        var bestElevCost = Float.greatestFiniteMagnitude
+        for rows in Swift.stride(from: -16, through: 16, by: 2) {
+            let params = SIMD4<Float>(anchor.dy, 0, yawStarts[0].yaw, 0)
+            let cost = totalCost(params: params, inputs: sampledInputs, masks: sampleMasks,
+                                 stride: 3, elevOffsetRows: Float(rows))
+            if cost < bestElevCost { bestElevCost = cost; bestElevRows = Float(rows) }
+        }
         // Keep the best starts at least 60° apart (distinct lobes, not one lobe thrice) —
         // and skip the runner-up entirely when the best lobe is decisive (>25% cheaper):
         // the second local descent roughly doubles solve time and, on a decisive
@@ -165,12 +184,14 @@ enum RigCalibrationSolver {
                 tolerance: AppConstants.calibrationConvergenceTolerance
             ) { params in
                 if any(params .< lo) || any(params .> hi) { return 1e6 }
-                return totalCost(params: params, inputs: sampledInputs, masks: sampleMasks)
+                return totalCost(params: params, inputs: sampledInputs, masks: sampleMasks,
+                                 elevOffsetRows: bestElevRows)
             }
             if result == nil || run.cost < result!.cost { result = run }
         }
         guard var result else {
-            return CalibrationResult(profile: prior, residualPx: -1, converged: false, iterations: 0)
+            return CalibrationResult(profile: prior, residualPx: -1, converged: false,
+                                     iterations: 0, elevOffsetDeg: 0)
         }
         // Normalize yaw to (−π, π] for storage/display.
         result = NMResult(point: SIMD4<Float>(result.point.x, result.point.y,
@@ -192,7 +213,8 @@ enum RigCalibrationSolver {
             profile: solved,
             residualPx: result.cost,
             converged: result.converged,
-            iterations: result.iterations
+            iterations: result.iterations,
+            elevOffsetDeg: bestElevRows * 180 / Float(sampledInputs.first?.edgeMap.height ?? 256)
         )
     }
 
@@ -382,7 +404,8 @@ enum RigCalibrationSolver {
     /// `stride` evaluates every Nth edge — the coarse yaw scan only ranks lobes, so it
     /// runs 3× cheaper without changing which basin wins.
     private static func totalCost(params: SIMD4<Float>, inputs: [CalibrationInput],
-                                  masks: [[Bool]], stride: Int = 1) -> Float {
+                                  masks: [[Bool]], stride: Int = 1,
+                                  elevOffsetRows: Float = 0) -> Float {
         var total: Float = 0
         var count = 0
         for (k, input) in inputs.enumerated() {
@@ -408,7 +431,8 @@ enum RigCalibrationSolver {
                 guard stride == 1 || e % stride == 0 else { continue }
                 if let cost = edgeCost(edge: edge, camPos: camPos, worldToCam: rot,
                                        edgeMap: input.edgeMap,
-                                       mask: mask, maskBase: e * 8) {
+                                       mask: mask, maskBase: e * 8,
+                                       elevOffsetRows: elevOffsetRows) {
                     total += cost
                     count += 1
                 }
@@ -442,7 +466,8 @@ enum RigCalibrationSolver {
     /// the mean entirely.
     private static func edgeCost(edge: MeshEdge, camPos: SIMD3<Float>,
                                  worldToCam: simd_float3x3, edgeMap: EdgeMap,
-                                 mask: [Bool], maskBase: Int) -> Float? {
+                                 mask: [Bool], maskBase: Int,
+                                 elevOffsetRows: Float = 0) -> Float? {
         let samples = 8
         var cost: Float = 0
         var counted = 0
@@ -453,7 +478,7 @@ enum RigCalibrationSolver {
             let dir = worldToCam * simd_normalize(point - camPos)
             let (eqX, eqY) = dirToEquirect(dir: dir, width: edgeMap.width, height: edgeMap.height)
             let col = max(0, min(edgeMap.width - 1, Int(eqX)))
-            let row = max(0, min(edgeMap.height - 1, Int(eqY)))
+            let row = max(0, min(edgeMap.height - 1, Int(eqY + elevOffsetRows)))
             let dist = edgeMap.distances[row * edgeMap.width + col]
             cost += dist * dist
             counted += 1
