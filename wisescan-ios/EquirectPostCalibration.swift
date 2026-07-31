@@ -36,8 +36,9 @@ enum EquirectPostCalibration {
     /// against the old 1.3 m ceiling re-solve unclipped. v4: tape measure (0.787 m) vs
     /// solve (1.299 m) proved a systematic +dy pull in the chamfer cost — dy now anchors
     /// to the user-measured rig height when provided (±0.15), unmeasured envelope back
-    /// to ±0.3.
-    static let solverVersion = 4
+    /// to ±0.3. v5: measured window tightened to ±0.05 — the pull saturates any window
+    /// (post5: solved at the +0.15 wall), so it should be no wider than tape/clamp slop.
+    static let solverVersion = 5
 
     struct StillRecord {
         let sequence: Int
