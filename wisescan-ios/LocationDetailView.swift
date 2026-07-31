@@ -289,6 +289,7 @@ struct LocationDetailView: View {
             }
         }
         .navigationTitle(location.name)
+        .onAppear { autoProcessPending() }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
@@ -766,22 +767,26 @@ struct LocationDetailView: View {
         return true
     }
 
-    /// Entry point for the bulk Process button: run every achievable pending step (room /
-    /// registration / proxy, + colorize per the "Colorize during post-process" setting). When the
-    /// whole selection is already processed, falls through to the legacy re-color prompt (the one
-    /// deliberately re-runnable step).
+    /// Entry point for the bulk Process button — the manual re-run of the AUTOMATED
+    /// processing that starts on landing (unfinished downloads, late roomplans, solver
+    /// upgrades). Structural only: coloring is entirely manual via the Color button.
     private func requestBulkPostprocess() {
         let selected = location.scans.filter { selectedScans.contains($0.id) }
         guard !selected.isEmpty else { return }
-        let colorize = ScanPostprocessor.colorizeEnabled
         let anyPending = selected.contains {
-            !ScanPostprocessor.pendingSteps(for: $0, includeColorize: colorize).isEmpty
+            !ScanPostprocessor.pendingSteps(for: $0, includeColorize: false).isEmpty
         }
-        if anyPending {
-            bulkPostprocess(scans: selected)
-        } else {
-            requestBulkColorize()
-        }
+        if anyPending { bulkPostprocess(scans: selected) }
+    }
+
+    /// Post-process pivot: processing is AUTOMATED — landing on a location kicks off every
+    /// achievable pending structural step (incl. the equirect download sweep). The engine's
+    /// per-scan in-flight claims make overlapping kicks no-ops.
+    private func autoProcessPending() {
+        guard !isBulkColoring else { return }
+        let pending = ScanPostprocessor.scansNeedingPostprocess(in: location)
+        guard !pending.isEmpty else { return }
+        bulkPostprocess(scans: pending)
     }
 
     /// Run the postprocessor over `scans` (it re-sorts oldest-first internally). Reuses the bulk

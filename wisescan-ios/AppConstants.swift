@@ -52,7 +52,6 @@ enum AppConstants {
         static let memDiagForceReclaim = "memDiagForceReclaim"
         static let meshClassifier = "meshClassifier"
         static let scanCoachingEnabled = "scanCoachingEnabled"
-        static let colorizeOnPostprocess = "colorizeOnPostprocess"
         static let registerLegacyScans = "registerLegacyScans"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
@@ -110,10 +109,6 @@ enum AppConstants {
     /// so the bad-scan check just needs to wait out the realistic tail before warning the user to
     /// redo the scan (while they're still standing in the room).
     static let roomDataBadScanGraceSeconds: TimeInterval = 30
-    /// Colorize as part of Post-process (production setting, default ON). Off = structural-only
-    /// postprocess (room/registration/proxy — fast); coloring can still be run later (re-running
-    /// Post-process picks up whatever is pending).
-    static let colorizeOnPostprocess: Bool = true
     /// Dev-gated: let legacy scans (saved before scanCaseRaw was persisted) enter retroactive
     /// registration at postprocess. OFF by default — on an existing install every non-oldest
     /// legacy scan would light up "needs postprocess" (gating every old location at update),

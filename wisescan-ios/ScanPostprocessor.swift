@@ -54,7 +54,7 @@ enum ScanPostprocessor {
     // MARK: - Steps + per-artifact status
 
     enum Step: String {
-        case registration, proxy, colorize
+        case equirectDownloads, registration, proxy, colorize
     }
 
     /// Find an artifact at the scan dir top level or in raw_data/ — late-arriving sidecars
@@ -134,6 +134,14 @@ enum ScanPostprocessor {
         let fm = FileManager.default
         let roomDone = artifactURL("roomplan.json", in: scan) != nil
 
+        // Equirect JPGs the capture-time queue didn't finish (post-process pivot: download
+        // state is derived from disk — sidecar present + JPG missing). Pending downloads
+        // gate save/upload via needsPostprocess: exports need the bytes for the privacy
+        // pass, and the calibration solve needs them for poses.
+        if !pendingEquirectDownloads(rawDataPath: scan.rawDataPath).isEmpty {
+            steps.append(.equirectDownloads)
+        }
+
         // Registration is pending when never attempted, or when a REFUSED attempt predates the
         // current solver (`SaveRegistration.sidecarVersion` bump ⇒ refused scans retry with the
         // upgraded solver — e.g. v2's trim rescue). APPLIED sidecars are final regardless of
@@ -191,11 +199,39 @@ enum ScanPostprocessor {
             .filter { needsPostprocess($0) }
     }
 
-    /// The user's "Colorize during post-process" setting (production, default ON).
-    static var colorizeEnabled: Bool {
-        UserDefaults.standard.object(forKey: AppConstants.Key.colorizeOnPostprocess) == nil
-            ? AppConstants.colorizeOnPostprocess
-            : UserDefaults.standard.bool(forKey: AppConstants.Key.colorizeOnPostprocess)
+    /// Sidecar-present / JPG-missing stills under raw_data/equirect_stills, in sequence
+    /// order — the shared definition of "download pending" (the live capture queue and
+    /// this sweep both derive state from disk, never from memory).
+    nonisolated static func pendingEquirectDownloads(rawDataPath: URL) -> [(sequence: Int, url: String)] {
+        let dir = rawDataPath.appendingPathComponent("equirect_stills")
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
+        var out: [(sequence: Int, url: String)] = []
+        for file in files where file.hasPrefix("still_") && file.hasSuffix(".json") {
+            let base = String(file.dropLast(5))
+            guard !FileManager.default.fileExists(atPath: dir.appendingPathComponent(base + ".JPG").path),
+                  let data = try? Data(contentsOf: dir.appendingPathComponent(file)),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let urlStr = obj["camera_file_url"] as? String,
+                  let seq = obj["sequence"] as? Int else { continue }
+            out.append((seq, urlStr))
+        }
+        return out.sorted { $0.sequence < $1.sequence }
+    }
+
+    /// Synchronous GET against the camera's HTTP server (processOne runs on a background
+    /// queue, not in an async context). nil on any failure — the step stays pending and
+    /// the next Process retries.
+    private nonisolated static func syncDownload(_ url: URL, timeout: TimeInterval = 30) -> Data? {
+        var result: Data?
+        let sem = DispatchSemaphore(value: 0)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            if let http = response as? HTTPURLResponse, http.statusCode == 200 { result = data }
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + timeout + 5)
+        return result
     }
 
     // MARK: - The engine
@@ -243,7 +279,7 @@ enum ScanPostprocessor {
     /// on disk first). `progress` fires on main with a short per-scan status line (nil = done with
     /// that scan); `completion` fires on main after the whole batch.
     static func run(scans: [CapturedScan],
-                    colorize: Bool = colorizeEnabled,
+                    colorize: Bool = false,
                     modelContext: ModelContext,
                     progress: ((CapturedScan, String?) -> Void)? = nil,
                     completion: (() -> Void)? = nil) {
@@ -356,6 +392,26 @@ enum ScanPostprocessor {
         func artifact(_ name: String) -> URL? {
             [dir.appendingPathComponent(name), raw.appendingPathComponent(name)]
                 .first { fm.fileExists(atPath: $0.path) }
+        }
+
+        // ── 0. EQUIRECT DOWNLOADS ──
+        // Finish whatever the live capture queue didn't: the camera must be reachable
+        // (its Wi-Fi joined). Per-still failures leave the step pending — gates hold and
+        // the next Process retries; the scan itself is never failed by absent bytes.
+        if steps.contains(.equirectDownloads) {
+            let pending = pendingEquirectDownloads(rawDataPath: raw)
+            let stillsDir = raw.appendingPathComponent("equirect_stills")
+            var fetched = 0
+            for (idx, item) in pending.enumerated() {
+                report("360° still \(idx + 1)/\(pending.count)…")
+                guard let url = URL(string: item.url), let data = syncDownload(url) else { continue }
+                let dst = stillsDir.appendingPathComponent(String(format: "still_%04d.JPG", item.sequence))
+                if (try? data.write(to: dst, options: .atomic)) != nil { fetched += 1 }
+            }
+            log.info("postprocess \(w.name, privacy: .public): equirect sweep \(fetched)/\(pending.count) downloaded")
+            if fetched < pending.count {
+                report("360° camera needed for \(pending.count - fetched) still(s)")
+            }
         }
 
         // ── 1. REGISTRATION ──

@@ -29,7 +29,6 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
     @AppStorage(AppConstants.Key.scanCoachingEnabled) private var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
-    @AppStorage(AppConstants.Key.colorizeOnPostprocess) private var colorizeOnPostprocess: Bool = AppConstants.colorizeOnPostprocess
     @AppStorage(AppConstants.Key.registerLegacyScans) private var registerLegacyScans: Bool = AppConstants.registerLegacyScans
     @Environment(\.dismiss) private var dismiss
 
@@ -208,18 +207,6 @@ struct SettingsView: View {
                                 Text("Semantic Labeling")
                                     .foregroundColor(.white)
                                 Text("Enables room structure detection (walls, floors, doors) during scanning for semantic labels in exports and AR overlays.")
-                                    .font(.caption)
-                                    .foregroundColor(.gray)
-                            }
-                        }
-                        .tint(.cyan)
-                        .padding(.vertical, 4)
-
-                        Toggle(isOn: $colorizeOnPostprocess) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Colorize During Post-process")
-                                    .foregroundColor(.white)
-                                Text("Include photo-based mesh coloring when post-processing a scan. Off = structural processing only (room model, alignment, rescan reference) — faster; you can color later by re-running Process.")
                                     .font(.caption)
                                     .foregroundColor(.gray)
                             }

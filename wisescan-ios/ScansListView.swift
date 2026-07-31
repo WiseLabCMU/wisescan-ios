@@ -679,14 +679,13 @@ struct ScansListView: View {
     private func requestBulkPostprocess() {
         let selected = resolveTargetScans()
         guard !selected.isEmpty else { return }
-        let colorize = ScanPostprocessor.colorizeEnabled
         let anyPending = selected.contains {
-            !ScanPostprocessor.pendingSteps(for: $0, includeColorize: colorize).isEmpty
+            !ScanPostprocessor.pendingSteps(for: $0, includeColorize: false).isEmpty
         }
         if anyPending {
             bulkPostprocess(scans: selected)
         } else {
-            requestBulkColorize()
+            requestBulkColorize()   // fully-processed selection: Process degrades to re-color prompt
         }
     }
 
@@ -1489,8 +1488,7 @@ struct ScanCard: View {
     /// + colorize per the "Colorize during post-process" setting); when nothing is pending, fall
     /// back to a plain re-color.
     private func postprocessScan() {
-        let colorize = ScanPostprocessor.colorizeEnabled
-        guard !ScanPostprocessor.pendingSteps(for: scan, includeColorize: colorize).isEmpty else {
+        guard !ScanPostprocessor.pendingSteps(for: scan, includeColorize: false).isEmpty else {
             colorizeScan()
             return
         }
