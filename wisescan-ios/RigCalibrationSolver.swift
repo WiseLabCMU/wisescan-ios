@@ -127,7 +127,8 @@ enum RigCalibrationSolver {
         for step in 0..<24 {
             let yaw = -Float.pi + Float(step) * (2 * Float.pi / 24)
             let params = SIMD4<Float>(anchor.dy, 0, yaw, 0)
-            yawStarts.append((yaw, totalCost(params: params, inputs: sampledInputs, masks: sampleMasks)))
+            yawStarts.append((yaw, totalCost(params: params, inputs: sampledInputs,
+                                             masks: sampleMasks, stride: 3)))
         }
         yawStarts.sort { $0.cost < $1.cost }
         // Keep the best starts at least 60° apart (distinct lobes, not one lobe thrice) —
@@ -136,7 +137,7 @@ enum RigCalibrationSolver {
         // landscape, never wins (360post1: 60-70 s Debug postprocess solves).
         var starts: [Float] = []
         for cand in yawStarts where starts.allSatisfy({ abs(angleDelta(cand.yaw, $0)) > Float.pi / 3 }) {
-            if starts.count == 1, cand.cost > yawStarts[0].cost * 1.25 { break }
+            if starts.count == 1, cand.cost > yawStarts[0].cost * 1.15 { break }
             starts.append(cand.yaw)
             if starts.count >= 2 { break }
         }
@@ -378,8 +379,10 @@ enum RigCalibrationSolver {
 
     /// Total cost across all calibration inputs for a candidate rig parameter set.
     /// `masks` is the anchor-frozen per-sample inclusion (see anchorInclusionMask).
+    /// `stride` evaluates every Nth edge — the coarse yaw scan only ranks lobes, so it
+    /// runs 3× cheaper without changing which basin wins.
     private static func totalCost(params: SIMD4<Float>, inputs: [CalibrationInput],
-                                  masks: [[Bool]]) -> Float {
+                                  masks: [[Bool]], stride: Int = 1) -> Float {
         var total: Float = 0
         var count = 0
         for (k, input) in inputs.enumerated() {
@@ -402,6 +405,7 @@ enum RigCalibrationSolver {
             ).transpose
             let mask = masks[k]
             for (e, edge) in input.meshEdges.enumerated() {
+                guard stride == 1 || e % stride == 0 else { continue }
                 if let cost = edgeCost(edge: edge, camPos: camPos, worldToCam: rot,
                                        edgeMap: input.edgeMap,
                                        mask: mask, maskBase: e * 8) {
@@ -564,21 +568,25 @@ enum RigCalibrationSolver {
     }
 
     /// Same semantics as the live-anchor variant — every deduplicated polygon edge with
-    /// at least one endpoint within `radius` of `position`.
-    static func extractMeshEdges(mesh: SavedMeshOBJ, near position: SIMD3<Float>,
-                                 radius: Float) -> [MeshEdge] {
-        var edges: [MeshEdge] = []
-        var edgeSet: Set<UInt64> = []
+    /// at least one endpoint within `radius` of a position — extracted for ALL positions
+    /// in ONE pass over the faces (the face loop dominates; 360post2's prep spent ~20 s
+    /// running it once per still).
+    static func extractMeshEdges(mesh: SavedMeshOBJ, nearAll positions: [SIMD3<Float>],
+                                 radius: Float) -> [[MeshEdge]] {
+        var edges = [[MeshEdge]](repeating: [], count: positions.count)
+        var edgeSets = [Set<UInt64>](repeating: [], count: positions.count)
         let verts = mesh.vertices
         for face in mesh.faces {
             guard face.allSatisfy({ Int($0) < verts.count }) else { continue }
-            let near = face.contains { simd_distance(verts[Int($0)], position) <= radius }
-            guard near else { continue }
-            for i in 0..<face.count {
-                let a = face[i], b = face[(i + 1) % face.count]
-                let key = a < b ? (UInt64(a) << 32 | UInt64(b)) : (UInt64(b) << 32 | UInt64(a))
-                guard edgeSet.insert(key).inserted else { continue }
-                edges.append(MeshEdge(a: verts[Int(a)], b: verts[Int(b)]))
+            for (p, position) in positions.enumerated() {
+                let near = face.contains { simd_distance(verts[Int($0)], position) <= radius }
+                guard near else { continue }
+                for i in 0..<face.count {
+                    let a = face[i], b = face[(i + 1) % face.count]
+                    let key = a < b ? (UInt64(a) << 32 | UInt64(b)) : (UInt64(b) << 32 | UInt64(a))
+                    guard edgeSets[p].insert(key).inserted else { continue }
+                    edges[p].append(MeshEdge(a: verts[Int(a)], b: verts[Int(b)]))
+                }
             }
         }
         return edges

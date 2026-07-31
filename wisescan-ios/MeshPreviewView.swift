@@ -25,6 +25,7 @@ struct MeshPreviewContainer: View {
     @State private var hasPrivacyMarkers = false
     @State private var isMeshLoaded = false
     @State private var keyframeMarkerMode: KeyframeMarkerMode = .none
+    @State private var sceneBox = SceneViewBox()
     @State private var hasKeyframeMarkers = false
     @State private var hasEquirects = false
     @State private var showSetPoseConfirm = false
@@ -55,7 +56,8 @@ struct MeshPreviewContainer: View {
                         hasPrivacyMarkers: $hasPrivacyMarkers,
                         keyframeMarkerMode: $keyframeMarkerMode,
                         hasKeyframeMarkers: $hasKeyframeMarkers,
-                        hasEquirects: $hasEquirects
+                        hasEquirects: $hasEquirects,
+                        sceneBox: sceneBox
                     )
 
                     // 2D overlay icons projected from 3D face anchor positions
@@ -194,6 +196,14 @@ struct MeshPreviewContainer: View {
                             .foregroundColor(keyframeMarkerMode == .none ? .gray : .cyan)
                     }
                 }
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                // Pinch zoom-out is capped by the default camera controller; this steps
+                // the camera back 40% per tap so tall marker spheres etc. stay reachable.
+                Button { sceneBox.zoomOut() } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .disabled(!isMeshLoaded)
             }
             if location != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -371,6 +381,22 @@ class MarkerProjectionState: ObservableObject {
 }
 
 /// Renders a 3D preview of captured OBJ mesh data using SceneKit.
+/// Bridges the SwiftUI toolbar to the live SCNView for programmatic camera moves:
+/// the default camera controller caps pinch zoom-out (widening the scene bounds did
+/// NOT lift it — device-tested), so the toolbar offers an explicit step-back instead.
+final class SceneViewBox {
+    weak var view: SCNView?
+
+    /// Dolly the point of view 40% farther from the origin-centered model. Works on the
+    /// interactive camera clone too (allowsCameraControl), so it composes with gestures.
+    func zoomOut() {
+        guard let pov = view?.pointOfView else { return }
+        pov.position = SCNVector3(pov.position.x * 1.4,
+                                  pov.position.y * 1.4,
+                                  pov.position.z * 1.4)
+    }
+}
+
 struct MeshPreviewView: UIViewRepresentable {
     var meshFileURL: URL?
     var colorsFileURL: URL?
@@ -396,9 +422,11 @@ struct MeshPreviewView: UIViewRepresentable {
     @Binding var keyframeMarkerMode: KeyframeMarkerMode
     @Binding var hasKeyframeMarkers: Bool
     @Binding var hasEquirects: Bool
+    let sceneBox: SceneViewBox
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
+        sceneBox.view = scnView
         scnView.backgroundColor = UIColor(white: 0.15, alpha: 1.0) // charcoal background
         scnView.allowsCameraControl = true // user can rotate/zoom
         scnView.antialiasingMode = .multisampling4X
@@ -570,21 +598,6 @@ struct MeshPreviewView: UIViewRepresentable {
                         cameraNode.look(at: SCNVector3Zero)
                     }
                     scene.rootNode.addChildNode(cameraNode)
-
-                    // Zoom-out headroom: the default camera controller's dolly-out
-                    // ceiling derives from the scene's bounding sphere, which the room
-                    // mesh keeps tight. Two invisible specks far outside the model widen
-                    // the bounds (~6× the span) so pinch-out can pull well back — the
-                    // default pose above is unchanged. (CombinedMeshView effectively has
-                    // this headroom already via its farther initial camera.)
-                    for sign: Float in [-1, 1] {
-                        let speck = SCNNode(geometry: SCNSphere(radius: 0.001))
-                        speck.geometry?.firstMaterial?.transparency = 0
-                        speck.position = SCNVector3(sign * maxDimension * 3,
-                                                    sign * maxDimension * 3,
-                                                    sign * maxDimension * 3)
-                        scene.rootNode.addChildNode(speck)
-                    }
 
                     // Signal that mesh is ready
                     self.isMeshLoaded = true

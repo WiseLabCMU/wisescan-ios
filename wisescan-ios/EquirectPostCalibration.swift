@@ -60,28 +60,35 @@ enum EquirectPostCalibration {
             return "registration already baked — prior poses stamped for \(stills.count) still(s)"
         }
 
+        report("Reading scan mesh…")
+        let tParse = Date()
         guard let mesh = RigCalibrationSolver.SavedMeshOBJ.load(objURL: meshURL(scanDir: scanDir, rawDataDir: rawDataDir)) else {
             bake(stills: stills, profile: persistedOrPrior(), source: sourcePrior,
                  residual: nil)
             return "mesh.obj unavailable — prior poses stamped for \(stills.count) still(s)"
         }
+        let parseMs = ms(tParse)
 
         // Build solver inputs from the best-spread subset (aliasing shrinks and the
-        // solve sharpens with baseline; cost grows linearly with inputs).
+        // solve sharpens with baseline; cost grows linearly with inputs). Mesh edges for
+        // ALL positions extract in one face pass; the edge maps decode per still.
+        let tPrep = Date()
         let selected = selectBySpread(stills, cap: 5)
+        let edgesPerStill = RigCalibrationSolver.extractMeshEdges(
+            mesh: mesh, nearAll: selected.map(\.phonePos),
+            radius: AppConstants.calibrationMeshRadiusMeters)
         var inputs: [RigCalibrationSolver.CalibrationInput] = []
         for (idx, still) in selected.enumerated() {
             report("Calibrating 360° rig (\(idx + 1)/\(selected.count))…")
-            guard let jpegData = try? Data(contentsOf: still.jpgURL),
+            let edges = edgesPerStill[idx]
+            guard edges.count >= AppConstants.calibrationMinMeshEdges,
+                  let jpegData = try? Data(contentsOf: still.jpgURL),
                   let edgeMap = RigCalibrationSolver.detectEquirectEdges(in: jpegData)
             else { continue }
-            let edges = RigCalibrationSolver.extractMeshEdges(
-                mesh: mesh, near: still.phonePos,
-                radius: AppConstants.calibrationMeshRadiusMeters)
-            guard edges.count >= AppConstants.calibrationMinMeshEdges else { continue }
             inputs.append(RigCalibrationSolver.CalibrationInput(
                 phoneToWorld: still.phoneToWorld, edgeMap: edgeMap, meshEdges: edges))
         }
+        let prepMs = ms(tPrep)
 
         let stored = persistedOrPrior()
 
@@ -103,7 +110,6 @@ enum EquirectPostCalibration {
 
         // Full solve — mechanical bounds, yaw global (see below).
         report("Solving 360° rig calibration…")
-        let inputsMs = ms(t0)
         let tSolve = Date()
         // ALWAYS the full mechanical box: the product rig is handheld/telescoping and the
         // user may re-clamp between scans, and the Theta wakes from power-save with every
@@ -133,9 +139,9 @@ enum EquirectPostCalibration {
         if PerfDiag.enabled {
             writeDiagnostics(inputs: inputs, solved: result.profile)
         }
-        return String(format: "solved (%.2f px, %d inputs; prep %ds + solve %ds, %d iters)",
-                      result.residualPx, inputs.count, inputsMs / 1000, solveMs / 1000,
-                      result.iterations)
+        return String(format: "solved (%.2f px, %d inputs; parse %ds + prep %ds + solve %ds, %d iters; total %ds)",
+                      result.residualPx, inputs.count, parseMs / 1000, prepMs / 1000,
+                      solveMs / 1000, result.iterations, ms(t0) / 1000)
     }
 
     // MARK: - Stills
