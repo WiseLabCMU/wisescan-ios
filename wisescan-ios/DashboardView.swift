@@ -657,10 +657,16 @@ struct ThetaCameraCard: View {
         .cornerRadius(16)
     }
 
-    // MARK: - Rig Calibration Section
+    // MARK: - Rig Calibration Section (dev diagnostics bench)
+    //
+    // Post-process pivot (2026-07-30): production calibration happens in the Process
+    // step from each scan's own stills — no pre-scan ritual. This walk-3-positions
+    // bench remains for solver diagnostics (controlled captures, alignment overlays,
+    // input bundles) and is Developer-Mode only.
 
     @ViewBuilder
     private var rigCalibrationSection: some View {
+      if UserDefaults.standard.bool(forKey: AppConstants.Key.developerMode) {
         Divider().background(Color.white.opacity(0.1))
 
         switch calibrationManager.state {
@@ -691,6 +697,7 @@ struct ThetaCameraCard: View {
                     .foregroundColor(.cyan)
             }
         }
+      }
     }
 
     private var idleCalibrationRow: some View {

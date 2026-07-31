@@ -183,15 +183,12 @@ struct CaptureView: View {
         }
     }
 
-    /// Rig-calibration state line for the 360° source chip: green/yellow/red by
-    /// residual, orange while drift is flagged, red if the stored calibration belongs
-    /// to a different camera (serial mismatch), gray for the mechanical prior.
+    /// Rig-geometry state line for the 360° source chip: green/yellow/red by residual
+    /// of the ROLLING profile (refined by each scan's Process-step solve), red if the
+    /// stored profile belongs to a different camera, gray before any solve.
     @ViewBuilder
     private var thetaCalibrationChip: some View {
         let status: (color: Color, label: String) = {
-            if rigCalibrationManager.driftWarning != nil {
-                return (.orange, "Rig may have shifted")
-            }
             if let profile = rigCalibrationManager.activeProfile, profile.isSolved {
                 let color: Color = profile.residualPx <= AppConstants.calibrationResidualGreenPx ? .green
                     : profile.residualPx <= AppConstants.calibrationResidualYellowPx ? .yellow : .red
