@@ -665,6 +665,44 @@ run-to-run drift guard, per design.
    FREE; only then widen the in-app yaw bound (screw-mount reality) and re-run on rig.
 4. Keep: bounds on dy/dLat/pitch, coverage + edge-count + stillness gates, spot-check.
 
+## PROPOSED PIVOT (2026-07-30 EOD): post-process calibration
+
+User-proposed redesign, endorsed on the evidence — most of the day's fixes patched the
+PRE-SCAN RITUAL (young mesh, sweep gates, stillness, format, sleep); this deletes the
+ritual and keeps the solver (camera-frame cost, frozen masks, coverage metrics,
+diagnostics all transfer 1:1, running at a better time with better inputs).
+
+**Capture (during scan):** stillness-gated full-res equirect triggers only. Sidecar
+records phone_transform + timestamp + trigger metrics + camera file URL + enumeration —
+NO cam_transform yet. An off-main download queue tracks per-still state (not started /
+downloading / done), yields to recording (shared Theta Wi-Fi), and may defer any or all
+downloads to post-process under memory pressure. Live PiP/meter shows calibration
+sufficiency (still count, distance spread, wedge coverage) — cheap, no solving.
+
+**Process (automated post step):** finish pending downloads (camera-gone ⇒ card shows
+"needs the 360° camera", queue persists; auto-delete from camera after verified download
+per the security plan) → sample the best keyframe/equirect pairs by stillness, distance
+spread, wedge coverage → run the calibration solve against the COMPLETE scan mesh with a
+tight prior on persisted dy/dLat/pitch (proven repeatable across sessions) and yaw free
+(proven per-session) → bake cam_transform + full pose data into every equirect sidecar →
+persist refined geometry (rolling estimate, refined every scan). Insufficient equirects
+or non-convergence ⇒ bake mechanical-prior/last-known poses, stamp provenance, warn —
+never lose the scan. Drops: pre-scan calibration ritual (kept only as an optional
+diagnostics bench), first-still spot-check + session-yaw bridging (self-calibrating
+scans have nothing to drift from), Theta no-sleep outside recording (battery back).
+
+**Process-button split (wanted regardless):** post processing becomes AUTOMATED on
+landing at location detail; coloring returns to fully manual. Two states: isProcessed
+(gates save/upload/rescan/link/color) + isColored. Progress via the per-scan phase pill
+(reuse the export-progress machinery). Keep a manual "Redo Processing" in a menu
+(unfinished downloads, solver errors, future pipeline upgrades). All jobs on the
+background postprocess queue, FIFO, never blocking capture of the next adjacent space;
+scan cards + location rollups surface in-flight state.
+
+**Mesh preview markers (independent):** replace the 5-frustum equirect rendering with a
+partially opaque sphere + small origin box + rim outline + forward arrow; preview cycle
+becomes none / keyframes / equirects / motions / all.
+
 ## Session yaw: not a rig constant (2026-07-30 EOD)
 
 Run 14 (two full calibration sessions, rig physically untouched between them): the
