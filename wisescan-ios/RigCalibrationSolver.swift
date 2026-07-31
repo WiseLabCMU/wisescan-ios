@@ -55,7 +55,31 @@ enum RigCalibrationSolver {
     /// Solve the 4-DOF rig transform from calibration inputs.
     /// Call on a background queue. The prior provides the initial guess.
     /// Returns a failed result if no input contains mesh edges (solver has nothing to align).
-    static func solve(inputs: [CalibrationInput], prior: RigProfile) -> CalibrationResult {
+    /// Geometry search box for the solve. Yaw is ALWAYS global (coarse circle scan) —
+    /// only dy/dLateral/pitch are bounded, around either the mechanical prior (first
+    /// solve) or a previously-solved profile (rolling refinement — run13/14 showed the
+    /// geometry repeats across sessions within ~4 cm / 2°).
+    struct SolveBounds {
+        let anchorDy: Float
+        let anchorLat: Float
+        let dyHalf: Float
+        let latHalf: Float
+        let pitchHalfDeg: Float
+
+        static let mechanical = SolveBounds(
+            anchorDy: RigProfile.mechanicalPrior.dy, anchorLat: 0,
+            dyHalf: AppConstants.calibrationBoundDyM,
+            latHalf: AppConstants.calibrationBoundLateralM,
+            pitchHalfDeg: AppConstants.calibrationBoundPitchDeg)
+
+        static func refinement(around profile: RigProfile) -> SolveBounds {
+            SolveBounds(anchorDy: profile.dy, anchorLat: profile.dLateral,
+                        dyHalf: 0.15, latHalf: 0.15, pitchHalfDeg: 6)
+        }
+    }
+
+    static func solve(inputs: [CalibrationInput], prior: RigProfile,
+                      bounds: SolveBounds = .mechanical) -> CalibrationResult {
         // Guard: if no input has mesh edges, the solver has nothing to work with.
         let totalEdges = inputs.reduce(0) { $0 + $1.meshEdges.count }
         if totalEdges == 0 {
@@ -114,21 +138,21 @@ enum RigCalibrationSolver {
         }
 
         let yawHalf = AppConstants.calibrationBoundYawDeg * Float.pi / 180
-        let pitchHalf = AppConstants.calibrationBoundPitchDeg * Float.pi / 180
+        let pitchHalf = bounds.pitchHalfDeg * Float.pi / 180
         // Perturbation scales per parameter (order: dy, dLat, yaw, pitch)
         let scales = SIMD4<Float>(0.1, 0.05, 0.1, 0.05) // meters, meters, radians, radians
 
         var result: NMResult?
         for yaw0 in starts {
-            let lo = SIMD4<Float>(anchor.dy - AppConstants.calibrationBoundDyM,
-                                  -AppConstants.calibrationBoundLateralM,
+            let lo = SIMD4<Float>(bounds.anchorDy - bounds.dyHalf,
+                                  bounds.anchorLat - bounds.latHalf,
                                   yaw0 - yawHalf,
                                   -pitchHalf)
-            let hi = SIMD4<Float>(anchor.dy + AppConstants.calibrationBoundDyM,
-                                  AppConstants.calibrationBoundLateralM,
+            let hi = SIMD4<Float>(bounds.anchorDy + bounds.dyHalf,
+                                  bounds.anchorLat + bounds.latHalf,
                                   yaw0 + yawHalf,
                                   pitchHalf)
-            let x0 = SIMD4<Float>(anchor.dy, 0, yaw0, 0)
+            let x0 = SIMD4<Float>(bounds.anchorDy, bounds.anchorLat, yaw0, 0)
             let run = nelderMead(
                 initial: x0,
                 scales: scales,
@@ -500,6 +524,62 @@ enum RigCalibrationSolver {
         return (eqX, eqY)
     }
 
+    // MARK: - Saved-mesh edge extraction (post-process solve)
+
+    /// A parsed mesh.obj (RAW capture frame — the post-process solve runs BEFORE
+    /// registration bakes the file). Parsed once per scan, queried per still position.
+    struct SavedMeshOBJ {
+        let vertices: [SIMD3<Float>]
+        let faces: [[UInt32]]
+
+        static func load(objURL: URL) -> SavedMeshOBJ? {
+            guard let text = try? String(contentsOf: objURL, encoding: .utf8) else { return nil }
+            var vertices: [SIMD3<Float>] = []
+            var faces: [[UInt32]] = []
+            for line in text.split(separator: "\n") {
+                if line.hasPrefix("v ") {
+                    let parts = line.split(separator: " ")
+                    guard parts.count >= 4,
+                          let x = Float(parts[1]), let y = Float(parts[2]), let z = Float(parts[3])
+                    else { continue }
+                    vertices.append(SIMD3<Float>(x, y, z))
+                } else if line.hasPrefix("f ") {
+                    // "f v", "f v/vt", "f v/vt/vn", "f v//vn" — vertex index is the first field,
+                    // 1-based; negative (relative) indices are not produced by our exporter.
+                    let idx = line.split(separator: " ").dropFirst().compactMap { part -> UInt32? in
+                        guard let first = part.split(separator: "/").first,
+                              let v = Int(first), v > 0 else { return nil }
+                        return UInt32(v - 1)
+                    }
+                    if idx.count >= 3 { faces.append(idx) }
+                }
+            }
+            guard !vertices.isEmpty, !faces.isEmpty else { return nil }
+            return SavedMeshOBJ(vertices: vertices, faces: faces)
+        }
+    }
+
+    /// Same semantics as the live-anchor variant — every deduplicated polygon edge with
+    /// at least one endpoint within `radius` of `position`.
+    static func extractMeshEdges(mesh: SavedMeshOBJ, near position: SIMD3<Float>,
+                                 radius: Float) -> [MeshEdge] {
+        var edges: [MeshEdge] = []
+        var edgeSet: Set<UInt64> = []
+        let verts = mesh.vertices
+        for face in mesh.faces {
+            guard face.allSatisfy({ Int($0) < verts.count }) else { continue }
+            let near = face.contains { simd_distance(verts[Int($0)], position) <= radius }
+            guard near else { continue }
+            for i in 0..<face.count {
+                let a = face[i], b = face[(i + 1) % face.count]
+                let key = a < b ? (UInt64(a) << 32 | UInt64(b)) : (UInt64(b) << 32 | UInt64(a))
+                guard edgeSet.insert(key).inserted else { continue }
+                edges.append(MeshEdge(a: verts[Int(a)], b: verts[Int(b)]))
+            }
+        }
+        return edges
+    }
+
     // MARK: - Mesh edge extraction
 
     /// Extract triangle boundary edges from ARMeshAnchors within `radius` of `position`.
@@ -841,6 +921,13 @@ struct RigProfile: Codable, Equatable {
     }
 
     var isSolved: Bool { residualPx >= 0 && residualPx.isFinite }
+
+    /// Same geometry with a substituted (per-session) yaw.
+    func replacingYaw(_ yaw: Float) -> RigProfile {
+        RigProfile(dy: dy, dLateral: dLateral, yaw: yaw, pitchResidual: pitchResidual,
+                   residualPx: residualPx, timestamp: timestamp,
+                   cameraModel: cameraModel, cameraSerialNumber: cameraSerialNumber)
+    }
 
     func with(cameraModel: String?, cameraSerialNumber: String?) -> RigProfile {
         RigProfile(

@@ -54,7 +54,7 @@ enum ScanPostprocessor {
     // MARK: - Steps + per-artifact status
 
     enum Step: String {
-        case equirectDownloads, registration, proxy, colorize
+        case equirectDownloads, equirectCalibration, registration, proxy, colorize
     }
 
     /// Find an artifact at the scan dir top level or in raw_data/ — late-arriving sidecars
@@ -142,6 +142,14 @@ enum ScanPostprocessor {
             steps.append(.equirectDownloads)
         }
 
+        // Rig calibration + pose baking, pending until every sidecar carries provenance
+        // (rig_calibration_source). Solved OR prior-stamped both count as done — a
+        // failed solve must not gate the scan forever; the sweep step above keeps this
+        // one waiting while JPGs are still on the camera.
+        if equirectCalibrationPending(rawDataPath: scan.rawDataPath) {
+            steps.append(.equirectCalibration)
+        }
+
         // Registration is pending when never attempted, or when a REFUSED attempt predates the
         // current solver (`SaveRegistration.sidecarVersion` bump ⇒ refused scans retry with the
         // upgraded solver — e.g. v2's trim rescue). APPLIED sidecars are final regardless of
@@ -216,6 +224,19 @@ enum ScanPostprocessor {
             out.append((seq, urlStr))
         }
         return out.sorted { $0.sequence < $1.sequence }
+    }
+
+    /// True while any still sidecar lacks `rig_calibration_source` — poses not yet baked.
+    nonisolated static func equirectCalibrationPending(rawDataPath: URL) -> Bool {
+        let dir = rawDataPath.appendingPathComponent("equirect_stills")
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return false }
+        for file in files where file.hasPrefix("still_") && file.hasSuffix(".json") {
+            guard let data = try? Data(contentsOf: dir.appendingPathComponent(file)),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else { continue }
+            if obj["rig_calibration_source"] == nil { return true }
+        }
+        return false
     }
 
     /// Synchronous GET against the camera's HTTP server (processOne runs on a background
@@ -411,6 +432,18 @@ enum ScanPostprocessor {
             log.info("postprocess \(w.name, privacy: .public): equirect sweep \(fetched)/\(pending.count) downloaded")
             if fetched < pending.count {
                 report("360° camera needed for \(pending.count - fetched) still(s)")
+            }
+        }
+
+        // ── 0.6 EQUIRECT CALIBRATION ── (RAW frame: must precede registration's bake;
+        // waits for a complete still set — the sweep above may have just finished it.)
+        if steps.contains(.equirectCalibration) {
+            if pendingEquirectDownloads(rawDataPath: raw).isEmpty {
+                report("Calibrating 360° rig…")
+                let status = EquirectPostCalibration.run(scanDir: dir, rawDataDir: raw, report: report)
+                log.info("postprocess \(w.name, privacy: .public): equirect calibration — \(status, privacy: .public)")
+            } else {
+                log.info("postprocess \(w.name, privacy: .public): equirect calibration deferred — downloads incomplete")
             }
         }
 

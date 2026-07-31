@@ -84,7 +84,8 @@ enum EquirectFaceExport {
         let hasBakedPose = flatCam?.count == 16
         // "Solved" provenance is trusted only from the sidecar itself — stamped at capture,
         // when the active profile's camera serial was checked against the connected camera.
-        let solvedPose = hasBakedPose && (sidecar["rig_calibration_source"] as? String) == "solved"
+        let solvedPose = hasBakedPose
+            && ((sidecar["rig_calibration_source"] as? String)?.hasPrefix("solved") ?? false)
         var poseSource: String
         switch levelingSupport(forModel: stillSource) {
         case .validated:
