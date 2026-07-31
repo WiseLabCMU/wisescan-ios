@@ -1,3 +1,4 @@
+import AudioToolbox
 import Foundation
 import Observation
 import UIKit
@@ -448,6 +449,13 @@ final class ThetaCameraManager {
                 // Sidecar NOW (phone pose can't be reconstructed later); JPG via the queue;
                 // cam_transform is baked by the Process step's calibration solve.
                 try Self.writeScanStillSidecar(input: input, into: rawDataDir)
+                // THIRD cue — "360° done, you can move." The cue sequence trains the
+                // operator: stillness chime → phone shutter click → (Theta exposes:
+                // chip shows hold) → THIS tone. Without it, the shutter click reads as
+                // "done" and the walk resumes mid-exposure (the trigger-motion probe
+                // exists to quantify exactly that). Conservative timing: fires when the
+                // camera lists the file, i.e. exposure + stitch are certainly over.
+                playThetaDoneCue()
                 scanStillCount = seq
                 scanStillPositions.append(SIMD3<Float>(phoneTransform.columns.3.x,
                                                        phoneTransform.columns.3.y,
@@ -468,6 +476,15 @@ final class ThetaCameraManager {
             isCapturing = false
         }
         return true
+    }
+
+    /// Distinct completion tone + success haptic when a 360° still finishes (audio
+    /// gated by the same capture-audio setting as the shutter click; haptic always —
+    /// people scan with the ringer off).
+    private func playThetaDoneCue() {
+        let audioOn = (UserDefaults.standard.object(forKey: AppConstants.Key.captureAudioEnabled) as? Bool) ?? true
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        if audioOn { AudioServicesPlaySystemSound(1114) }
     }
 
     /// Drain queued equirect downloads one at a time, yielding to any in-flight trigger
