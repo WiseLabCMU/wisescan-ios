@@ -551,7 +551,13 @@ enum RigCalibrationSolver {
     /// Convention: lon 0 = +Z (equirect center), lat +90° = +Y (north pole).
     private static func dirToEquirect(dir: SIMD3<Float>, width: Int, height: Int) -> (Float, Float) {
         let lat = asin(max(-1, min(1, dir.y)))
-        let lon = atan2(dir.x, dir.z)
+        // atan2(x, −z): PROPER chirality (device-verified 2026-07-31 — the old
+        // atan2(x, z) sampled the equirect MIRRORED: whiteboard text read backwards in
+        // pinhole re-renders; a rotation can never mirror, so every solve was matching
+        // flipped geometry) AND front-centered, matching EquirectFaceExport's sampler —
+        // the solver and the face cut now share one convention, closing the 180°
+        // solver-vs-export yaw question.
+        let lon = atan2(dir.x, -dir.z)
         let eqX = (lon + .pi) / (2 * .pi) * Float(width)
         let eqY = (.pi / 2 - lat) / .pi * Float(height)
         return (eqX, eqY)

@@ -41,8 +41,10 @@ enum EquirectPostCalibration {
     /// v6: the pull's ROOT CAUSE isolated offline — a uniform elevation-registration
     /// offset (image rows vs latitude mapping; +5.6° stand rig, ~+10° sagging handheld
     /// clamp) that pitch cannot represent; now solved per scan as a 1-D nuisance and
-    /// stamped as elevation_offset_deg.
-    static let solverVersion = 6
+    /// stamped as elevation_offset_deg. v7: the equirect longitude mapping was MIRRORED
+    /// (chirality-flipped) vs the real image — every prior solve matched flipped
+    /// geometry; fixed to the face-export convention (atan2(x, −z)), all scans re-solve.
+    static let solverVersion = 7
 
     struct StillRecord {
         let sequence: Int
