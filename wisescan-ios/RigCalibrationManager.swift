@@ -433,7 +433,7 @@ final class RigCalibrationManager {
                     let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                         .appendingPathComponent("rigcal_diag", isDirectory: true)
                     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                    let stamp = Int(Date().timeIntervalSince1970)
+                    let stamp = Int64(Date().timeIntervalSince1970 * 1000)   // epoch ms (CONTRIBUTING → Units & time)
                     for (idx, input) in diagInputs.enumerated() {
                         guard let png = RigCalibrationSolver.renderDiagnostic(
                             input: input, solved: solvedProfile, prior: .mechanicalPrior) else { continue }

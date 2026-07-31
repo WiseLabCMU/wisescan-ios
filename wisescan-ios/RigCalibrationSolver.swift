@@ -960,11 +960,15 @@ struct RigProfile: Codable, Equatable {
 
     static func load() -> RigProfile? {
         guard let data = UserDefaults.standard.data(forKey: userDefaultsKey) else { return nil }
-        return try? JSONDecoder().decode(RigProfile.self, from: data)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .millisecondsSince1970   // CONTRIBUTING → Units & time
+        return try? decoder.decode(RigProfile.self, from: data)
     }
 
     func save() {
-        guard let data = try? JSONEncoder().encode(self) else { return }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970   // CONTRIBUTING → Units & time
+        guard let data = try? encoder.encode(self) else { return }
         UserDefaults.standard.set(data, forKey: Self.userDefaultsKey)
     }
 

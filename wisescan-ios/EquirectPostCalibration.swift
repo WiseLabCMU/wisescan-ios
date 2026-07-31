@@ -263,7 +263,7 @@ enum EquirectPostCalibration {
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("rigcal_diag", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let stamp = Int(Date().timeIntervalSince1970)
+        let stamp = Int64(Date().timeIntervalSince1970 * 1000)   // epoch ms (CONTRIBUTING → Units & time)
         let renderStart = Date()
         for (idx, input) in inputs.enumerated() {
             // Subsample edges for the overlay like the solve does — splatting the full

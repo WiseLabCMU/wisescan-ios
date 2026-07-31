@@ -393,6 +393,7 @@ final class ThetaCameraManager {
                              into rawDataDir: URL,
                              samplePose: (() -> simd_float4x4?)? = nil) -> Bool {
         guard isConnected, !isCapturing else { return false }
+        let capturedAtEpochMs = Int64(Date().timeIntervalSince1970 * 1000)
         isCapturing = true
         lastError = nil
         Task {
@@ -442,7 +443,8 @@ final class ThetaCameraManager {
                 }
                 let connectedModel: String = if case .connected(let model, _) = state { model } else { "unknown-360" }
                 let input = ScanStillInput(
-                    sequence: seq, phoneTransform: phoneTransform, timestamp: timestamp,
+                    sequence: seq, phoneTransform: phoneTransform,
+                    frameTimestamp: timestamp, capturedAtEpochMs: capturedAtEpochMs,
                     sourceURL: fileURL, sourceModel: connectedModel, format: currentStillFormat,
                     triggerMs: triggerMs,
                     triggerMotionM: motion?.m, triggerMotionDeg: motion?.deg)

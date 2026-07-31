@@ -18,7 +18,11 @@ extension ThetaCameraManager {
     struct ScanStillInput {
         let sequence: Int
         let phoneTransform: simd_float4x4
-        let timestamp: TimeInterval
+        /// ARKit frame timestamp at the trigger tap — BOOT-RELATIVE, same clock as
+        /// transforms.json (pairs stills with keyframes). Not wall-clock.
+        let frameTimestamp: TimeInterval
+        /// Wall-clock capture moment, UTC epoch milliseconds (CONTRIBUTING → Units & time).
+        let capturedAtEpochMs: Int64
         let sourceURL: String
         let sourceModel: String
         let format: StillFormat?
@@ -50,7 +54,8 @@ extension ThetaCameraManager {
 
         let metadata = EquirectStillMetadata(
             sequence: input.sequence,
-            timestamp: input.timestamp,
+            frameTimestamp: input.frameTimestamp,
+            capturedAtEpochMs: input.capturedAtEpochMs,
             stillSource: input.sourceModel,
             cameraModel: "equirectangular",
             width: input.format?.width,
@@ -80,7 +85,8 @@ extension ThetaCameraManager {
 /// doc's export section folds cube-faces into transforms once calibration + export land).
 private struct EquirectStillMetadata: Encodable {
     let sequence: Int
-    let timestamp: TimeInterval
+    let frameTimestamp: TimeInterval
+    let capturedAtEpochMs: Int64
     let stillSource: String
     let cameraModel: String
     let width: Int?
@@ -98,7 +104,8 @@ private struct EquirectStillMetadata: Encodable {
 
     enum CodingKeys: String, CodingKey {
         case sequence
-        case timestamp
+        case frameTimestamp = "frame_timestamp"
+        case capturedAtEpochMs = "captured_at_epoch_ms"
         case stillSource = "still_source"
         case cameraModel = "camera_model"
         case width

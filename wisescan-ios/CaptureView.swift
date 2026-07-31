@@ -422,14 +422,14 @@ struct CaptureView: View {
                         .font(.subheadline.bold())
                         .foregroundColor(.white)
                 }
-                
+
                 if residualPx > AppConstants.calibrationResidualYellowPx {
                     Text("High residual — consider re-adjusting the rig and re-calibrating.")
                         .font(.caption)
                         .foregroundColor(.orange)
                         .multilineTextAlignment(.center)
                 }
-                
+
                 HStack(spacing: 12) {
                     Button(action: { rigCalibrationManager.acceptCalibration() }) {
                         Text("Accept")
@@ -2170,7 +2170,7 @@ struct CaptureView: View {
     }
 
     // Recording / save / stitching methods are organized into extension files:
-    // CaptureView+Recording.swift  — toggleRecording, startRecording, stopRecording, 
+    // CaptureView+Recording.swift  — toggleRecording, startRecording, stopRecording,
     // performStopRecording, savePendingScan, etc.
     //   CaptureView+Extend.swift     — pinAndExtend (Flow A: mid-session extend)
     //   CaptureView+Alignment.swift  — confirmAlignment, cancelAlignment (Flow B: cross-session alignment)
