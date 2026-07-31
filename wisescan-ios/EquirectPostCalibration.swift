@@ -32,7 +32,9 @@ enum EquirectPostCalibration {
     /// re-calibrate on their next Process. v2: 360post1 — the rolling-refinement anchor
     /// trusted a poisoned unbounded-era profile (dLat 0.574 m persisted → every baked
     /// pose offset ~0.6 m in x/z); v2 sanity-gates the anchor and re-solves everything.
-    static let solverVersion = 2
+    /// v3: 360post4 — dy box widened to the telescoping envelope (±0.6 m); scans solved
+    /// against the old 1.3 m ceiling re-solve unclipped.
+    static let solverVersion = 3
 
     struct StillRecord {
         let sequence: Int
