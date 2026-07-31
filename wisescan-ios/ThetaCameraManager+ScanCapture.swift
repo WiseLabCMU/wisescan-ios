@@ -23,65 +23,25 @@ extension ThetaCameraManager {
         let sourceModel: String
         let format: StillFormat?
         let triggerMs: Int
-        let transferMs: Int
     }
 
     /// Writes the equirect + sidecar to `<rawDataDir>/equirect_stills/still_NNNN.{JPG,json}`
     /// — the camera-agnostic 360° contract (any equirectangular source writes here; the
     /// device identity travels in the sidecar's `still_source`, not in path names).
     /// Nonisolated so the file write runs off the main actor.
-    /// Re-bake still_0001's cam_transform after the session-yaw solve. The first still
-    /// uploads BEFORE the yaw is known (it is the still the yaw solves FROM), so its
-    /// sidecar is initially written with the calibration-session yaw — stale on this
-    /// hardware (the Theta re-derives its equirect yaw reference per session; run14).
-    nonisolated static func rebakeFirstStillSidecar(rawDataDir: URL, profile: RigProfile) {
-        let url = rawDataDir.appendingPathComponent("equirect_stills/still_0001.json")
-        guard let data = try? Data(contentsOf: url),
-              var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let flat = obj["phone_transform"] as? [Double], flat.count == 16 else { return }
-        let cols = (0..<4).map { c in
-            SIMD4<Float>(Float(flat[c * 4]), Float(flat[c * 4 + 1]),
-                         Float(flat[c * 4 + 2]), Float(flat[c * 4 + 3]))
-        }
-        let phone = simd_float4x4(columns: (cols[0], cols[1], cols[2], cols[3]))
-        let cam = RigCalibrationSolver.composeRigTransform(
-            phoneToWorld: phone, dy: profile.dy, dLateral: profile.dLateral,
-            yaw: profile.yaw, pitchResidual: profile.pitchResidual)
-        let camCols = [cam.columns.0, cam.columns.1, cam.columns.2, cam.columns.3]
-        obj["cam_transform"] = camCols.flatMap { [Double($0.x), Double($0.y), Double($0.z), Double($0.w)] }
-        if let out = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) {
-            try? out.write(to: url)
-            PerfDiag.log("[RigCal] still_0001 sidecar re-baked with session yaw")
-        }
-    }
-
-    nonisolated static func writeScanStill(data: Data, input: ScanStillInput, into rawDataDir: URL, rigProfile: RigProfile?) throws {
+    /// Writes the metadata SIDECAR at trigger time — phone pose, timing, and the camera
+    /// file URL; NO cam_transform and no JPEG yet (post-process pivot, 2026-07-30: poses
+    /// are baked by the Process step's calibration solve, and the equirect bytes drain
+    /// through the download queue / Process sweep). Download state is derived from disk:
+    /// sidecar present + JPG missing ⇒ pending.
+    nonisolated static func writeScanStillSidecar(input: ScanStillInput, into rawDataDir: URL) throws {
         let dir = rawDataDir.appendingPathComponent("equirect_stills")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-
-        let base = String(format: "still_%04d", input.sequence)
-        try data.write(to: dir.appendingPathComponent("\(base).JPG"))
 
         // Column-major 4×4 (matches the transforms.json convention used elsewhere).
         let matrix = input.phoneTransform
         let columns = [matrix.columns.0, matrix.columns.1, matrix.columns.2, matrix.columns.3]
         let flatTransform = columns.flatMap { [$0.x, $0.y, $0.z, $0.w] }
-        let camTransformMatrix: simd_float4x4
-        if let profile = rigProfile, profile.isSolved {
-            camTransformMatrix = RigCalibrationSolver.composeRigTransform(
-                phoneToWorld: matrix,
-                dy: profile.dy, dLateral: profile.dLateral,
-                yaw: profile.yaw, pitchResidual: profile.pitchResidual
-            )
-        } else {
-            camTransformMatrix = RigCalibrationSolver.composeRigTransform(
-                phoneToWorld: matrix,
-                dy: AppConstants.rigRodHeightMeters, dLateral: 0,
-                yaw: AppConstants.rigYawOffsetDegrees * .pi / 180, pitchResidual: 0
-            )
-        }
-        let camCols = [camTransformMatrix.columns.0, camTransformMatrix.columns.1, camTransformMatrix.columns.2, camTransformMatrix.columns.3]
-        let flatCamTransform = camCols.flatMap { [$0.x, $0.y, $0.z, $0.w] }
 
         let metadata = EquirectStillMetadata(
             sequence: input.sequence,
@@ -91,18 +51,18 @@ extension ThetaCameraManager {
             width: input.format?.width,
             height: input.format?.height,
             phoneTransform: flatTransform,
-            camTransform: flatCamTransform,
+            camTransform: nil,
             cameraFileURL: input.sourceURL,
             triggerMs: input.triggerMs,
-            transferMs: input.transferMs,
-            bytes: data.count,
-            rigCalibrationSource: rigProfile?.isSolved == true ? "solved" : "mechanical_prior",
-            rigCalibrationResidualPx: rigProfile?.isSolved == true ? rigProfile?.residualPx : nil
+            transferMs: nil,
+            bytes: nil,
+            rigCalibrationSource: nil,
+            rigCalibrationResidualPx: nil
         )
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(metadata).write(to: dir.appendingPathComponent("\(base).json"))
+        try encoder.encode(metadata).write(to: dir.appendingPathComponent(String(format: "still_%04d.json", input.sequence)))
     }
 }
 
@@ -122,8 +82,8 @@ private struct EquirectStillMetadata: Encodable {
     let camTransform: [Float]?
     let cameraFileURL: String
     let triggerMs: Int
-    let transferMs: Int
-    let bytes: Int
+    let transferMs: Int?
+    let bytes: Int?
     let rigCalibrationSource: String?
     let rigCalibrationResidualPx: Float?
 

@@ -167,9 +167,7 @@ struct CaptureView: View {
         // refused capture would overcount (the phone keyframe of this pause still fires;
         // that pair is simply phone-only).
 
-        // Snapshot the phone pose for the first-still spot-check (before the ~7s pipeline)
         let phonePose = frame.camera.transform
-        let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
 
         if thetaManager.captureStillForScan(
             phoneTransform: phonePose,
@@ -178,39 +176,10 @@ struct CaptureView: View {
         ) {
             let stillNumber = thetaManager.scanStillCount + 1
             showTransientMessage("📸 360° still #\(stillNumber)…", duration: 2)
-
-            // First-still calibration spot-check: after the capture pipeline downloads
-            // the JPEG, run a quick drift check against the stored calibration.
-            if stillNumber == 1 {
-                Task {
-                    // Wait for the capture pipeline to finish (isCapturing → false)
-                    while thetaManager.isCapturing {
-                        try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
-                    }
-                    // The JPEG was written to equirect_stills/still_0001.JPG
-                    let jpegURL = rawDataDir
-                        .appendingPathComponent("equirect_stills")
-                        .appendingPathComponent("still_0001.JPG")
-                    guard let jpegData = try? Data(contentsOf: jpegURL) else { return }
-
-                    let passed = await rigCalibrationManager.spotCheckFirstStill(
-                        phoneTransform: phonePose,
-                        jpegData: jpegData,
-                        meshAnchors: meshAnchors
-                    )
-                    if !passed, let warning = rigCalibrationManager.driftWarning {
-                        showTransientMessage(warning, duration: 5)
-                    }
-                    // Still 1 was baked before its session yaw existed — re-bake its
-                    // sidecar now that the solve produced one (stills 2+ bake correctly
-                    // via scanBakeProfile at write time).
-                    if rigCalibrationManager.sessionYaw != nil,
-                       let bakeProfile = rigCalibrationManager.scanBakeProfile {
-                        ThetaCameraManager.rebakeFirstStillSidecar(
-                            rawDataDir: rawDataDir, profile: bakeProfile)
-                    }
-                }
-            }
+            // Post-process pivot: no first-still spot-check / session-yaw solve here —
+            // calibration runs in the Process step against the completed scan's own
+            // stills and mesh, where the yaw reference and the poses share a session
+            // by construction.
         }
     }
 
@@ -236,6 +205,34 @@ struct CaptureView: View {
         HStack(spacing: 5) {
             Circle().fill(status.color).frame(width: 7, height: 7)
             Text(status.label)
+        }
+        .font(.caption2).bold()
+        .foregroundColor(.white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial)
+        .cornerRadius(6)
+    }
+
+    /// Live calibration-sufficiency meter while recording: still count, baseline
+    /// spread, and queued downloads — what the Process-step solve will have to work
+    /// with. Green when count and spread clear the floors. No solving happens live.
+    @ViewBuilder
+    private var thetaSufficiencyChip: some View {
+        let count = thetaManager.scanStillCount
+        let spread = thetaManager.scanStillSpreadMeters
+        let pending = thetaManager.pendingStillDownloads.count
+        let sufficient = count >= AppConstants.calibrationMinStillsForSolve
+            && spread >= AppConstants.calibrationMinSpreadMeters
+        HStack(spacing: 5) {
+            Circle()
+                .fill(count == 0 ? Color.gray : sufficient ? Color.green : Color.yellow)
+                .frame(width: 7, height: 7)
+            Text(count == 0
+                 ? "No 360° stills yet"
+                 : String(format: "%d still%@ · spread %.1f m%@",
+                          count, count == 1 ? "" : "s", spread,
+                          pending > 0 ? " · ↓\(pending)" : ""))
         }
         .font(.caption2).bold()
         .foregroundColor(.white)
@@ -1083,6 +1080,10 @@ struct CaptureView: View {
                                 .cornerRadius(6)
 
                             thetaCalibrationChip
+
+                            if isRecording {
+                                thetaSufficiencyChip
+                            }
                         }
                         .padding(.trailing, AppConstants.UI.pipPaddingX)
                     }

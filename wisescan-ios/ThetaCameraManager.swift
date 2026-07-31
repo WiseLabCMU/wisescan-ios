@@ -77,6 +77,38 @@ final class ThetaCameraManager {
     private(set) var events: [ThetaEvent] = []
     /// Count of 360° stills captured into the current scan (reset at record start).
     private(set) var scanStillCount = 0
+
+    /// One queued equirect transfer: the sidecar is already on disk; only the JPG bytes
+    /// are outstanding on the camera.
+    struct PendingStillDownload {
+        let dir: URL
+        let sequence: Int
+        let fileURL: String
+    }
+
+    /// Deferred scan-still downloads, drained between triggers (a download must never
+    /// delay the next still). Anything left when the scan ends — or that fails here —
+    /// is swept by the Process step, which re-derives pending state from disk
+    /// (sidecar present + JPG missing).
+    private(set) var pendingStillDownloads: [PendingStillDownload] = []
+    private var isDrainingStills = false
+
+    /// Phone positions at each scan-still trigger — feeds the live calibration
+    /// sufficiency meter (count + baseline spread).
+    private(set) var scanStillPositions: [SIMD3<Float>] = []
+
+    /// Max pairwise distance (m) between this scan's still positions: the calibration
+    /// baseline. O(N²) over a handful of stills.
+    var scanStillSpreadMeters: Float {
+        guard scanStillPositions.count >= 2 else { return 0 }
+        var best: Float = 0
+        for i in 0..<(scanStillPositions.count - 1) {
+            for j in (i + 1)..<scanStillPositions.count {
+                best = max(best, simd_distance(scanStillPositions[i], scanStillPositions[j]))
+            }
+        }
+        return best
+    }
     private(set) var lastError: String?
 
     /// Theta **direct (AP) mode** default host. Client/LAN mode uses a different address;
@@ -332,6 +364,7 @@ final class ThetaCameraManager {
     /// Resets the per-scan still counter. Call at record start.
     func beginScanStillSession(rawDataDir: URL? = nil) {
         scanStillCount = 0
+        scanStillPositions.removeAll()
         if let dir = rawDataDir?.appendingPathComponent("equirect_stills"),
            let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
             let maxSeq = files.compactMap { file -> Int? in
@@ -359,25 +392,17 @@ final class ThetaCameraManager {
         guard isConnected, !isCapturing else { return false }
         isCapturing = true
         lastError = nil
-        lastDownload = nil
-        previewImage = nil
         Task {
             let start = Date()
             do {
                 let fileURL = try await triggerStill()
                 let triggerMs = Int(Date().timeIntervalSince(start) * 1000)
-                guard let url = URL(string: fileURL) else { throw URLError(.badURL) }
-                let dlStart = Date()
-                let data = try await downloadData(from: url)
-                let transferMs = Int(Date().timeIntervalSince(dlStart) * 1000)
                 let seq = scanStillCount + 1
-                // STOP-RACE GUARD: the ~7s trigger+download pipeline can cross the scan's Stop —
-                // saveScan then MOVES the capture dir, and writing to the stale path creates an
-                // orphaned equirect_stills/ the saved bundle never sees (observed on device: still
-                // #3 landed after TEARDOWN). Writing into the moved bundle post-metadata is not
-                // safe either, so the honest outcome is a loud drop.
+                // STOP-RACE GUARD: the trigger can still cross the scan's Stop — saveScan
+                // MOVES the capture dir, and a sidecar written to the stale path creates an
+                // orphaned equirect_stills/ the saved bundle never sees. Loud drop.
                 guard FileManager.default.fileExists(atPath: rawDataDir.path) else {
-                    log(.capture, "Scan still #\(seq) discarded — scan ended before the 360° download finished")
+                    log(.capture, "Scan still #\(seq) discarded — scan ended before the 360° trigger finished")
                     isCapturing = false
                     return
                 }
@@ -385,15 +410,21 @@ final class ThetaCameraManager {
                 let input = ScanStillInput(
                     sequence: seq, phoneTransform: phoneTransform, timestamp: timestamp,
                     sourceURL: fileURL, sourceModel: connectedModel, format: currentStillFormat,
-                    triggerMs: triggerMs, transferMs: transferMs)
-                let rigProfile = RigCalibrationManager.shared.scanBakeProfile
-                try await Self.writeScanStill(data: data, input: input, into: rawDataDir, rigProfile: rigProfile)
+                    triggerMs: triggerMs)
+                // Sidecar NOW (phone pose can't be reconstructed later); JPG via the queue;
+                // cam_transform is baked by the Process step's calibration solve.
+                try Self.writeScanStillSidecar(input: input, into: rawDataDir)
                 scanStillCount = seq
+                scanStillPositions.append(SIMD3<Float>(phoneTransform.columns.3.x,
+                                                       phoneTransform.columns.3.y,
+                                                       phoneTransform.columns.3.z))
                 lastCapture = CaptureOutcome(fileURL: fileURL, roundTripMs: triggerMs)
-                lastDownload = DownloadOutcome(bytes: data.count, elapsedMs: transferMs)
-                previewImage = Self.downsampledImage(from: data, maxPixel: 1200)
-                log(.capture, String(format: "Scan still #%d — trigger %d ms, %.1f MB in %d ms",
-                                     seq, triggerMs, Double(data.count) / 1_000_000, transferMs))
+                pendingStillDownloads.append(PendingStillDownload(dir: rawDataDir, sequence: seq, fileURL: fileURL))
+                log(.capture, String(format: "Scan still #%d — trigger %d ms, download queued (%d pending)",
+                                     seq, triggerMs, pendingStillDownloads.count))
+                isCapturing = false
+                drainStillDownloads()
+                return
             } catch {
                 let message = Self.describe(error)
                 lastError = message
@@ -403,6 +434,50 @@ final class ThetaCameraManager {
             isCapturing = false
         }
         return true
+    }
+
+    /// Drain queued equirect downloads one at a time, yielding to any in-flight trigger
+    /// (a download must never delay the next still — that was the old inline pipeline's
+    /// ~7 s tax). Re-kicked after each trigger completes. Failures and scan-ended-
+    /// mid-download cases are dropped here without retry: the sidecar survives in the
+    /// (possibly moved) bundle, and the Process step sweeps sidecar-present/JPG-missing
+    /// stills to finish the job.
+    func drainStillDownloads() {
+        guard !isDrainingStills, !pendingStillDownloads.isEmpty, !isCapturing else { return }
+        isDrainingStills = true
+        Task {
+            while !pendingStillDownloads.isEmpty && !isCapturing {
+                let item = pendingStillDownloads[0]
+                guard let url = URL(string: item.fileURL) else {
+                    pendingStillDownloads.removeFirst()
+                    continue
+                }
+                do {
+                    let dlStart = Date()
+                    let data = try await downloadData(from: url)
+                    let ms = Int(Date().timeIntervalSince(dlStart) * 1000)
+                    let stillsDir = item.dir.appendingPathComponent("equirect_stills")
+                    if FileManager.default.fileExists(atPath: stillsDir.path) {
+                        try? data.write(to: stillsDir.appendingPathComponent(
+                            String(format: "still_%04d.JPG", item.sequence)))
+                        lastDownload = DownloadOutcome(bytes: data.count, elapsedMs: ms)
+                        previewImage = Self.downsampledImage(from: data, maxPixel: 1200)
+                        log(.transfer, String(format: "Still #%d downloaded — %.1f MB in %d ms (%d queued)",
+                                              item.sequence, Double(data.count) / 1_000_000, ms,
+                                              pendingStillDownloads.count - 1))
+                    } else {
+                        log(.transfer, "Still #\(item.sequence): scan dir moved — download deferred to Process")
+                    }
+                } catch {
+                    log(.transfer, "Still #\(item.sequence) download failed (\(Self.describe(error))) — deferred to Process")
+                }
+                pendingStillDownloads.removeFirst()
+            }
+            isDrainingStills = false
+            // A trigger may have interrupted the drain; if it finished before we exited,
+            // pick the queue back up rather than stranding it until the next trigger.
+            if !pendingStillDownloads.isEmpty && !isCapturing { drainStillDownloads() }
+        }
     }
 }
 
