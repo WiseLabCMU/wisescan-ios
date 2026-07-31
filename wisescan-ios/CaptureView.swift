@@ -169,10 +169,12 @@ struct CaptureView: View {
 
         let phonePose = frame.camera.transform
 
+        let session = currentARSession
         if thetaManager.captureStillForScan(
             phoneTransform: phonePose,
             timestamp: frame.timestamp,
-            into: rawDataDir
+            into: rawDataDir,
+            samplePose: { session?.currentFrame?.camera.transform }
         ) {
             let stillNumber = thetaManager.scanStillCount + 1
             showTransientMessage("📸 360° still #\(stillNumber)…", duration: 2)
@@ -223,9 +225,12 @@ struct CaptureView: View {
             && spread >= AppConstants.calibrationMinSpreadMeters
         HStack(spacing: 5) {
             Circle()
-                .fill(count == 0 ? Color.gray : sufficient ? Color.green : Color.yellow)
+                .fill(thetaManager.isCapturing ? Color.orange
+                      : count == 0 ? Color.gray : sufficient ? Color.green : Color.yellow)
                 .frame(width: 7, height: 7)
-            Text(count == 0
+            Text(thetaManager.isCapturing
+                 ? "📸 exposing — hold still…"
+                 : count == 0
                  ? "No 360° stills yet"
                  : String(format: "%d still%@ · spread %.1f m%@",
                           count, count == 1 ? "" : "s", spread,

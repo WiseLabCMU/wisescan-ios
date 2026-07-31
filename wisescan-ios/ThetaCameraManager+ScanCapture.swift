@@ -23,6 +23,11 @@ extension ThetaCameraManager {
         let sourceModel: String
         let format: StillFormat?
         let triggerMs: Int
+        /// Max phone translation (m) / rotation (deg) observed across the trigger window
+        /// vs the tap pose — the camera exposes ~0.3-1 s AFTER the tap, so rig motion in
+        /// that window means blur AND a baked pose that doesn't match the exposure.
+        let triggerMotionM: Float?
+        let triggerMotionDeg: Float?
     }
 
     /// Writes the equirect + sidecar to `<rawDataDir>/equirect_stills/still_NNNN.{JPG,json}`
@@ -57,7 +62,9 @@ extension ThetaCameraManager {
             transferMs: nil,
             bytes: nil,
             rigCalibrationSource: nil,
-            rigCalibrationResidualPx: nil
+            rigCalibrationResidualPx: nil,
+            triggerMotionM: input.triggerMotionM,
+            triggerMotionDeg: input.triggerMotionDeg
         )
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
@@ -86,6 +93,8 @@ private struct EquirectStillMetadata: Encodable {
     let bytes: Int?
     let rigCalibrationSource: String?
     let rigCalibrationResidualPx: Float?
+    let triggerMotionM: Float?
+    let triggerMotionDeg: Float?
 
     enum CodingKeys: String, CodingKey {
         case sequence
@@ -102,5 +111,7 @@ private struct EquirectStillMetadata: Encodable {
         case bytes
         case rigCalibrationSource = "rig_calibration_source"
         case rigCalibrationResidualPx = "rig_calibration_residual_px_rms"
+        case triggerMotionM = "trigger_motion_m"
+        case triggerMotionDeg = "trigger_motion_deg"
     }
 }

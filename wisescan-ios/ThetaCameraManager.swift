@@ -388,15 +388,48 @@ final class ThetaCameraManager {
     /// still's ~7s trigger+download pipeline is still in flight) — the caller's toast must
     /// only show for captures that actually began, or fast taps display phantom stills.
     @discardableResult
-    func captureStillForScan(phoneTransform: simd_float4x4, timestamp: TimeInterval, into rawDataDir: URL) -> Bool {
+    func captureStillForScan(phoneTransform: simd_float4x4, timestamp: TimeInterval,
+                             into rawDataDir: URL,
+                             samplePose: (() -> simd_float4x4?)? = nil) -> Bool {
         guard isConnected, !isCapturing else { return false }
         isCapturing = true
         lastError = nil
         Task {
             let start = Date()
+            // Trigger-window motion probe: the camera exposes well after the tap, so
+            // sample the phone pose every 250 ms until the camera reports the file and
+            // record the worst translation/rotation vs the tap pose. Measurement first —
+            // sidecar fields decide whether exposure-time pose compensation is warranted.
+            let motionProbe: Task<(Float, Float), Never>? = samplePose.map { sample in
+                Task { @MainActor in
+                    let tapPos = SIMD3<Float>(phoneTransform.columns.3.x,
+                                              phoneTransform.columns.3.y,
+                                              phoneTransform.columns.3.z)
+                    let tapRot = simd_quatf(phoneTransform)
+                    var maxM: Float = 0
+                    var maxDeg: Float = 0
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                        guard let pose = sample() else { continue }
+                        let pos = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
+                        maxM = max(maxM, simd_distance(tapPos, pos))
+                        let delta = (tapRot.inverse * simd_quatf(pose)).angle * 180 / .pi
+                        maxDeg = max(maxDeg, min(delta, 360 - delta))
+                    }
+                    return (maxM, maxDeg)
+                }
+            }
             do {
                 let fileURL = try await triggerStill()
                 let triggerMs = Int(Date().timeIntervalSince(start) * 1000)
+                motionProbe?.cancel()
+                let motion: (m: Float, deg: Float)? = if let probe = motionProbe {
+                    await probe.value
+                } else { nil }
+                if let motion {
+                    PerfDiag.log(String(format: "[360Still] trigger-window motion: %.3f m / %.1f° over %d ms",
+                                        motion.m, motion.deg, triggerMs))
+                }
                 let seq = scanStillCount + 1
                 // STOP-RACE GUARD: the trigger can still cross the scan's Stop — saveScan
                 // MOVES the capture dir, and a sidecar written to the stale path creates an
@@ -410,7 +443,8 @@ final class ThetaCameraManager {
                 let input = ScanStillInput(
                     sequence: seq, phoneTransform: phoneTransform, timestamp: timestamp,
                     sourceURL: fileURL, sourceModel: connectedModel, format: currentStillFormat,
-                    triggerMs: triggerMs)
+                    triggerMs: triggerMs,
+                    triggerMotionM: motion?.m, triggerMotionDeg: motion?.deg)
                 // Sidecar NOW (phone pose can't be reconstructed later); JPG via the queue;
                 // cam_transform is baked by the Process step's calibration solve.
                 try Self.writeScanStillSidecar(input: input, into: rawDataDir)
