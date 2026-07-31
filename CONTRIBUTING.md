@@ -13,6 +13,20 @@ Use `@AppStorage` for persistent user preferences and UI toggles.
 - Battery is reclaimed by an **idle timer** (`AppConstants.arIdleTeardownSeconds`) that pauses the session **only after the user has left the capture tab and stayed away**; returning resumes in the nominal config with no main-thread stall. Rapid successive scans return before it fires and stay hot.
 - Leaving the capture **tab** abandons an in-progress Extend (its ghost/world-map state is cleared in `CaptureView.onDisappear`); the user re-taps Extend to restore it. A modal sheet *over* the capture screen (e.g. Settings) does **not** leave the tab, so it stays hot — that's intentional (user may be flipping AR↔VR before recording).
 
+### 1.5 Units & time conventions
+
+- **Persist metric, always.** Anything written to disk, sidecars, exports, UserDefaults,
+  or sent across systems is SI (meters, radians noted where used). UI may *display and
+  accept* imperial, converting at the UI edge only (see the 360° Rig Height field in
+  SettingsView for the pattern). Never store a value whose unit depends on a user
+  preference.
+- **Wall-clock time is UTC epoch milliseconds**, internally and across systems —
+  sidecars, telemetry, filenames that encode time, anything another machine will parse.
+  No local-timezone strings, no seconds-resolution truncation when ordering matters.
+- **Monotonic timestamps stay monotonic.** ARKit frame timestamps (and anything else
+  boot-relative) are valid for intra-session deltas only — never let one masquerade as
+  wall-clock time in persisted data; if both are needed, store both, labeled.
+
 ### 2. Privacy Filtering Patterns
 
 Privacy has two distinct paths — **do not conflate them**:

@@ -119,8 +119,9 @@ enum EquirectPostCalibration {
         // dy anchors to the USER-MEASURED rig height when one is set (Settings → 360° rig):
         // the chamfer cost has a systematic +dy pull (dense image-edge bands attract the
         // sparse projected mesh downward → camera up; 360post4 solved 1.299 m vs a
-        // 0.787 m tape measure), so the measurement is treated as ground truth with a
-        // small slop window. Unmeasured rigs fall back to the mechanical envelope.
+        // 0.787 m tape measure). The measurement is a BOOTSTRAP anchor, not an override —
+        // the solve still refines dy inside the slop window (its repeatability there is
+        // the health check). Unmeasured rigs fall back to the mechanical envelope.
         // dLat/pitch/yaw always solve free — they have no such attractor and match
         // physical truth when dy isn't straining (post2/3).
         let measuredDy = Float(UserDefaults.standard.double(forKey: AppConstants.Key.rigMeasuredDyMeters))

@@ -30,6 +30,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
     @AppStorage(AppConstants.Key.scanCoachingEnabled) private var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
     @AppStorage(AppConstants.Key.rigMeasuredDyMeters) private var rigMeasuredDyMeters: Double = 0
+    @AppStorage(AppConstants.Key.rigHeightUnitImperial) private var rigHeightUnitImperial: Bool = false
     @AppStorage(AppConstants.Key.registerLegacyScans) private var registerLegacyScans: Bool = AppConstants.registerLegacyScans
     @Environment(\.dismiss) private var dismiss
 
@@ -220,14 +221,24 @@ struct SettingsView: View {
                                 Text("360° Rig Height")
                                     .foregroundColor(.white)
                                 Spacer()
-                                TextField("0.00", value: $rigMeasuredDyMeters, format: .number.precision(.fractionLength(0...3)))
+                                // Entry converts at the UI edge only — persisted value is
+                                // ALWAYS meters (see CONTRIBUTING → Units & time).
+                                TextField("0.00", value: Binding(
+                                    get: { rigHeightUnitImperial ? rigMeasuredDyMeters / 0.0254 : rigMeasuredDyMeters },
+                                    set: { rigMeasuredDyMeters = rigHeightUnitImperial ? $0 * 0.0254 : $0 }
+                                ), format: .number.precision(.fractionLength(0...3)))
                                     .keyboardType(.decimalPad)
                                     .multilineTextAlignment(.trailing)
                                     .frame(width: 80)
                                     .foregroundColor(.cyan)
-                                Text("m").foregroundColor(.gray)
+                                Picker("", selection: $rigHeightUnitImperial) {
+                                    Text("m").tag(false)
+                                    Text("in").tag(true)
+                                }
+                                .pickerStyle(.segmented)
+                                .frame(width: 90)
                             }
-                            Text("Tape-measured distance from the iPad's camera cluster to the 360° camera's lens center, in meters (31 in ≈ 0.79). Calibration treats it as ground truth for the vertical offset — the image-based solve has a known upward pull without it. 0 = unmeasured.")
+                            Text("Tape-measured distance from the iPad's camera cluster to the 360° camera's lens center. Used as the BOOTSTRAP anchor for each scan's calibration solve (the solve refines within a small window — the image-based solve has a known upward pull without an anchor). Stored in meters regardless of entry unit. 0 = unmeasured.")
                                 .font(.caption)
                                 .foregroundColor(.gray)
                         }
