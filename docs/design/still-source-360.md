@@ -665,7 +665,14 @@ run-to-run drift guard, per design.
    FREE; only then widen the in-app yaw bound (screw-mount reality) and re-run on rig.
 4. Keep: bounds on dy/dLat/pitch, coverage + edge-count + stillness gates, spot-check.
 
-## PROPOSED PIVOT (2026-07-30 EOD): post-process calibration
+## PIVOT IMPLEMENTED (2026-07-30 EOD): post-process calibration
+
+Landed as five commits — c7736f2 (capture side: sidecar-at-trigger, download queue,
+sufficiency meter), 370af5c (auto-process on landing, manual-only coloring, equirect
+download sweep step), ef1852e (EquirectPostCalibration: raw-frame solve against the
+saved mesh, hybrid bounds, provenance stamping, rolling profile), a387969 (pre-scan
+ritual → Developer-Mode diagnostics bench; session-yaw bridging deleted), 1435716
+(sphere markers + 5-way preview cycle). Original proposal below for rationale.
 
 User-proposed redesign, endorsed on the evidence — most of the day's fixes patched the
 PRE-SCAN RITUAL (young mesh, sweep gates, stillness, format, sleep); this deletes the
