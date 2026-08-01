@@ -783,6 +783,96 @@ The four open findings from the branch code review are closed:
   `captureErrorMessage` with actionable text, instead of log-and-return leaving the card
   stuck on "capturing".
 
+## Status for next week (2026-08-01 stock-take)
+
+Verified against the actual code (not just recalled) before writing this — two items
+below turned out different from what earlier status notes implied.
+
+### Solid — don't re-litigate
+- Post-process calibration pivot is fully live: capture defers pose, batch download
+  queue yields to recording, Process solves against the complete mesh, phase pill on
+  scan cards is real (`bulkColoringMessages` reused for auto-postprocess, confirmed
+  wired card-side, not just logged).
+- Camera-frame lookup, anchor-frozen masks, global yaw solve, elevation-offset nuisance,
+  and the **mirrored-longitude fix (v7)** are shipped and each individually confirmed
+  against real captures via the scratchpad offline harness (numpy/PIL/cv2 + bench
+  bundles) before landing.
+- Measured-dy rig-height anchor (Settings, metric-persisted, m/in entry) works as a
+  bootstrap; solve time is 5-6 s in Release (was 45-78 s Debug).
+- Trigger-window motion probe + 3-cue rhythm (chime → click → done-tone) confirmed
+  centimeter-scale motion in the field — the pose-compensation question is closed.
+- Sphere/arrow preview markers with the full none → stills → equirectFaces → motion →
+  all cycle are implemented exactly as specified (`KeyframeMarkerMode` in
+  AppConstants.swift), not partial.
+- Privacy guard now catches the pbxproj spelling of the file-sharing keys too (both
+  vectors tested live-fire).
+
+### Two corrections to earlier status
+- **The pre-scan calibration ritual was never retired.** Dashboard's Calibrate/
+  Re-calibrate buttons and CaptureView's full walk-3-positions overlay are still live
+  code, running IN PARALLEL with the new automatic post-process calibration. This
+  wasn't a leftover-cruft oversight so much as a decision that never got made — does the
+  pre-scan flow still earn its place (e.g., as a bootstrap prior, or a diagnostics
+  bench), or should it be removed now that Process calibrates every scan automatically?
+  Needs a decision before it's either wired in deliberately or deleted.
+- **Session-yaw bridging (the mid-recording spot-check/drift-toast UI) IS confirmed
+  removed** — `spotCheckFirstStill`/`driftWarning`/`hasSpotChecked` no longer exist in
+  RigCalibrationManager, and CaptureView has zero references. (`solveSessionYaw` the
+  *solver function* is intentionally kept and reused for the <3-still yaw-only
+  fallback path in EquirectPostCalibration — that one's correct, not dead code.)
+
+### Major unproven questions — need device time next week
+1. **Repeatability post-mirror-fix.** Only one v7 data point exists (360post6: dy=0.840,
+   dLat=0.06, pitch=−3.5°, elev=+2.8°). Run 2-3 back-to-back scans, same rig untouched,
+   and confirm dy/dLat/pitch/elev cluster the way dy/dLat/pitch did pre-mirror-fix
+   (run13/14: yaw repeated to 0.8-1°). This is the highest-value test — it tells us
+   whether the mirror bug explains the whole "systematic pull" story or whether a
+   residual pull still needs offline cost work.
+2. **Cube-face orientation ground truth.** Never actually confirmed since the mirror
+   fix: export a scan, check the front face's content against the phone's heading at
+   that pause, confirm left/right aren't swapped and nothing reads mirrored. This also
+   validates the solver-vs-export convention unification (both use atan2(x,−z) now)
+   downstream, not just in the solver's own diagnostic overlays.
+3. **PnP path** — still "promising, unproven." SIFT found ~46 raw correspondences
+   face↔keyframe; the homography acceptance test was the wrong model for a short
+   baseline over a 3D scene. Next offline step (scratchpad `pnp_probe2.py` is the start):
+   depth-backed `solvePnPRansac` using the keyframes' own LiDAR depth, run BEFORE more
+   device time is spent on it.
+4. **Does the "attractor" story fully close post-mirror-fix?** The elevation-offset
+   nuisance and the operator-masking backlog were both diagnosed partly from PRE-mirror-
+   fix data (mirrored geometry could itself have looked like an attractor). Re ‑derive
+   whether operator masking is still needed once #1 above gives 2-3 clean repeatability
+   runs — don't build it speculatively.
+5. **Z1 leveling** — still "if available," never device-validated. `.assumedLevel`
+   stands; promoting to `.validated` is a one-line change once someone does the run.
+6. **Battery/thermal impact of `disableAutoSleep`** — never measured. Camera no longer
+   naps between scans; a long field day's battery drain is unknown.
+7. **Color-from-360°-faces dev switch** — built and committed, ZERO device runs. First
+   test: toggle ON, recolor a people-free scan, compare against the OFF baseline.
+8. **Downstream face+pose registration** — test plan item, never confirmed executed:
+   drop exported faces/poses into the actual Polycam-format consumer and check they
+   register against the mesh, not just that the sidecars look self-consistent.
+
+### Remaining implementation work
+- **Decide + act on the pre-scan ritual** (see correction above) — this is the biggest
+  open architecture item, not just a test.
+- **"Redo Processing" manual re-run** — designed (user question answered: keep it, in a
+  menu, for camera-gone recovery / solver upgrades) but never built. No UI entry point
+  exists today if someone needs to force a re-solve outside the version-bump mechanism.
+- **Security P1 (post-transfer `camera.delete`)** — documented threat model and design
+  only; zero implementation. Raw equirects still persist indefinitely on the Theta's
+  unauthenticated storage. This is the one security item that's fully in our control and
+  still open.
+- **Security P2 (default-credential warning)** and **P3 (CL-mode digest auth)** — same,
+  design-only, no code. P2 blocked on knowing whether the connect flow ever holds the
+  join password (recon item from the original security test-plan section, never run).
+- **`elevation_offset_deg` is stamped but not consumed** — `EquirectFaceExport` doesn't
+  yet compensate the cube-face sampling by it. Low priority until #1/#2 above show
+  whether the offset is large enough to matter downstream.
+- **Rig-settings UI beyond the height field** — ticket-matching/BLE trigger, coverage
+  marking, and other original P3 backlog items from earlier in the design doc remain
+  untouched by the pivot.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
