@@ -57,6 +57,7 @@ enum AppConstants {
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
         static let rigMeasuredDyMeters = "rigMeasuredDyMeters"        // user's tape-measured iPad-camera→360°-lens distance — ALWAYS persisted in METERS (UI may display/accept imperial); 0 = unmeasured
         static let rigHeightUnitImperial = "rigHeightUnitImperial"    // display/entry unit preference for the rig height field (false = metric)
+        static let colorizeFrom360Faces = "colorizeFrom360Faces"      // Developer Mode: color the preview mesh from 360° cube faces instead of keyframes (pose-accuracy probe)
     }
 
     // MARK: - Default Values
@@ -116,6 +117,13 @@ enum AppConstants {
     /// legacy scan would light up "needs postprocess" (gating every old location at update),
     /// and a legacy adjacent-link is indistinguishable from a legacy rescan (false-lock risk).
     static let registerLegacyScans: Bool = false
+    /// Developer Mode A/B (default OFF — production coloring). ON colors the preview
+    /// mesh EXCLUSIVELY from cube faces cut from the scan's 360° stills at their BAKED
+    /// poses (keyframe/motion frames excluded), turning the colorizer into a
+    /// measurement instrument for cube-face pose quality: misplaced color on the mesh
+    /// reads back pose error directly. Face frames carry no depth, so occlusion is off
+    /// in this mode — bleed-through is expected and not the signal being judged.
+    static let colorizeFrom360Faces: Bool = false
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)

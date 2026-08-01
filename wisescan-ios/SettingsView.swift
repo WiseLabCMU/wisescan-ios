@@ -22,6 +22,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.vrBloomEnabled) private var vrBloomEnabled: Bool = AppConstants.vrBloomEnabled
     @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
     @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
+    @AppStorage(AppConstants.Key.colorizeFrom360Faces) private var colorizeFrom360Faces: Bool = AppConstants.colorizeFrom360Faces
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     // 0 = Auto (no override); N = force format index N-1 of supportedVideoFormats.
     @AppStorage(AppConstants.Key.videoFormatIndex) private var videoFormatIndex: Int = 0
@@ -289,6 +290,7 @@ struct SettingsView: View {
                                     // Diagnostics toggles gate on their own keys (not developerMode),
                                     // so a bench-ON value would keep costing after dev-mode exit.
                                     self.hideLivePoints = AppConstants.hideLivePoints
+                                    self.colorizeFrom360Faces = AppConstants.colorizeFrom360Faces
                                     self.perfDiagnostics = AppConstants.perfDiagnostics
                                     self.pauseVRCompute = AppConstants.pauseVRCompute
                                     self.memDiagForceReclaim = AppConstants.memDiagForceReclaim
@@ -356,6 +358,18 @@ struct SettingsView: View {
                             .tint(.orange)
                             .padding(.vertical, 4)
                             #endif
+
+                            Toggle(isOn: $colorizeFrom360Faces) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Color from 360° Faces")
+                                        .foregroundColor(.white)
+                                    Text("Colors the preview mesh EXCLUSIVELY from cube faces cut from the scan's 360° stills at their baked poses (normal keyframe/motion frames excluded). A measurement tool: misplaced color reads back cube-face pose error directly. Faces carry no depth, so occlusion is off — bleed-through is expected and not the signal. Privacy fail-closed still applies: on privacy-ON deferred-blur scans, maskless face frames are skipped entirely — probe with a people-free or consent (filter OFF) scan. Re-run Color after toggling.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
 
                             Toggle(isOn: $hideLivePoints) {
                                 VStack(alignment: .leading, spacing: 4) {

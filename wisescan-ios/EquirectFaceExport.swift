@@ -65,6 +65,39 @@ enum EquirectFaceExport {
         Face(name: "up", rotation: pitchRotation(.pi / 2))
     ]
 
+    // MARK: - Colorize source (Developer Mode probe)
+
+    /// (Re)generate cube-face frames for the COLORIZER under `raw_data/face_frames/`
+    /// ({cameras,images} in the exact Polycam per-frame shape the colorizer reads;
+    /// faces carry is_keyframe=true and NO depth). Regenerated from scratch on every
+    /// call so re-solved sidecar poses (solver-version bumps) are always reflected.
+    /// PRIVACY: sources are RAW equirects — the output stays inside raw_data (which the
+    /// export stages selectively and the repo privacy guard blocks) and must never be
+    /// staged for export.
+    static func generateFaceFramesForColorize(rawDataDir: URL) -> (cameras: URL, images: URL)? {
+        let stillsDir = rawDataDir.appendingPathComponent("equirect_stills")
+        let root = rawDataDir.appendingPathComponent("face_frames")
+        let camerasDir = root.appendingPathComponent("cameras")
+        let imagesDir = root.appendingPathComponent("images")
+        let fm = FileManager.default
+        guard let stills = try? fm.contentsOfDirectory(at: stillsDir, includingPropertiesForKeys: nil)
+        else { return nil }
+        let jpgs = stills.filter { $0.pathExtension.lowercased() == "jpg" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !jpgs.isEmpty else { return nil }
+        try? fm.removeItem(at: root)
+        try? fm.createDirectory(at: camerasDir, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+        var written = 0
+        for jpg in jpgs {
+            let sidecar = jpg.deletingPathExtension().appendingPathExtension("json")
+            written += emitFaces(equirectURL: jpg, sidecarURL: sidecar,
+                                 imagesDir: imagesDir, camerasDir: camerasDir)
+        }
+        PerfDiag.log("[Colorize] face_frames regenerated: \(written) faces from \(jpgs.count) still(s)")
+        return written > 0 ? (camerasDir, imagesDir) : nil
+    }
+
     // MARK: - Entry
 
     /// Emit 5 face JPEGs + Polycam camera JSONs for one staged (privacy-processed) equirect.

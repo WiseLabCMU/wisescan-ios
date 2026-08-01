@@ -240,9 +240,27 @@ enum VertexColorAccumulator {
             normals[i] = simd_length(normals[i]) > 0 ? simd_normalize(normals[i]) : SIMD3<Float>(0, 0, 1)
         }
 
-        // Find saved camera JSONs
-        let camerasDir = rawDir.appendingPathComponent("cameras")
-        let imagesDir = rawDir.appendingPathComponent("images")
+        // Frame source. Dev A/B "Color from 360° Faces": color EXCLUSIVELY from cube
+        // faces cut from the scan's own 360° stills at their BAKED poses — a measurement
+        // tool for cube-face pose quality (misplaced color = pose error). Faces carry
+        // is_keyframe=true and NO depth (occlusion off in that mode). face_frames/ is
+        // regenerated per run so re-solved poses always apply, and it lives inside
+        // raw_data so it can never leak into an export.
+        let useFaces = UserDefaults.standard.bool(forKey: AppConstants.Key.colorizeFrom360Faces)
+        let camerasDir: URL
+        let imagesDir: URL
+        if useFaces {
+            guard let dirs = EquirectFaceExport.generateFaceFramesForColorize(rawDataDir: rawDir) else {
+                print("[VertexColor] Color-from-360°-faces is ON but no faces could be generated (no stills / no baked poses) — aborting colorize")
+                return nil
+            }
+            camerasDir = dirs.cameras
+            imagesDir = dirs.images
+            PerfDiag.log("[VertexColor] frame source: 360° cube faces (dev probe)")
+        } else {
+            camerasDir = rawDir.appendingPathComponent("cameras")
+            imagesDir = rawDir.appendingPathComponent("images")
+        }
         guard fm.fileExists(atPath: camerasDir.path),
               fm.fileExists(atPath: imagesDir.path) else { return nil }
 
