@@ -665,6 +665,10 @@ run-to-run drift guard, per design.
    FREE; only then widen the in-app yaw bound (screw-mount reality) and re-run on rig.
 4. Keep: bounds on dy/dLat/pitch, coverage + edge-count + stillness gates, spot-check.
 
+> **Flows & sequence diagrams for the implemented architecture:
+> [360-flows.md](360-flows.md)** — overview + detailed diagrams for startup/start
+> capture, AR/VR capture, stop/save, auto post-process, colorize, export/upload.
+
 ## PIVOT IMPLEMENTED (2026-07-30 EOD): post-process calibration
 
 Landed as five commits — c7736f2 (capture side: sidecar-at-trigger, download queue,
