@@ -933,6 +933,32 @@ answered): cube-face FOV — 90° exact vs ~100° overlapping for seam feature-m
 calibrate-once vs per-still (the motion probe gives partial data already); where
 dual-fisheye→equirect stitching runs for non-Theta cameras.
 
+### Rig capture leaves LiDAR holes: ceiling + floor patches (field observation, 2026-08-02)
+
+On the rig the iPad's pitch is clamp-fixed, so the scan translates but never pitches —
+the ceiling (nearly all of it) and floor patches (especially near walls) never enter
+the LiDAR frustum. Sorting the consequences honestly:
+
+- **Fine downstream for the ceiling, with a texture caveat**: every still exports an
+  `up` face with a good pose, so splat/NeRF pipelines reconstruct ceilings well;
+  classic MVS struggles exactly where ceilings are blank/textureless.
+- **The floor is the harder gap**: the bottom face is deliberately dropped (operator at
+  nadir), so floor imagery is only oblique/grazing — weak for reconstruction AND absent
+  from LiDAR. If floor completeness matters to the deliverable, this is the real hole.
+- **Our own solver is quietly degraded**: missing ceiling mesh is part of why the
+  diagnostic overlays show mesh edges confined to a thin band — the solver can't use the
+  strongest vertical image structure (ceiling fixtures) as counterpart geometry, which
+  softens elevation/dy constraints. More ceiling mesh sharpens solves for free.
+- **Future coverage marking** would raycast against a holed mesh → false visibility.
+
+**Mitigation available today (technique)**: a deliberate rig tilt at the first or last
+pause — pitch the rod up a couple of seconds to paint the ceiling (optionally down at an
+open floor patch). ~5 s per scan; improves the solver input and the mesh product at
+once. **Later (build)**: detect the gap (mesh bbox top vs RoomPlan wall height) and
+coach it ("ceiling not meshed — tilt the rig up briefly"); and the deferred
+`transforms.json` EQUIRECTANGULAR entries let downstream use the full equirects
+(including up face and partial nadir) rather than only the cut faces.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
