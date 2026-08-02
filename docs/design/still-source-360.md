@@ -873,6 +873,66 @@ below turned out different from what earlier status notes implied.
   marking, and other original P3 backlog items from earlier in the design doc remain
   untouched by the pivot.
 
+### From the original plan — omitted in the first pass (2026-08-02 addendum)
+
+The first stock-take covered the pivot arc but skipped the original design's roadmap.
+Verified status per item:
+
+**Communications — the largest omitted cluster, and the biggest remaining capture-
+cadence lever (all unbuilt; ThetaCameraManager's own header says so):**
+- **BLE trigger** (P3 line item: sub-second, no Wi-Fi captivity, phone keeps its
+  network) — zero code. Today's trigger is OSC-over-Wi-Fi with a 2-4.5 s round-trip
+  including stitch; BLE is the plan's answer to per-pause cadence.
+- **`NEHotspotConfiguration` programmatic AP join** — zero code; the operator still
+  joins the camera's Wi-Fi manually in iOS Settings.
+- **USB-PTP post-scan batch download** (ImageCaptureCore, ~40 MB/s ≈ 10× the Wi-Fi AP)
+  — designed in detail, explicitly deferred, zero code. Relevance went DOWN since the
+  pivot (the yielding queue hides most Wi-Fi transfer inside the scan), but it's still
+  the answer for many-still scans and camera-gone-at-Process recovery via cable.
+- **In-situ vs post-process transfer as a per-session setting** — the pivot hard-wired
+  an opportunistic middle path (queue drains between triggers, Process finishes the
+  rest); no user-facing mode exists. Revisit only if a field need appears.
+- **StillTicket matching** — DONE by other means: the sidecar-derived queue IS ticket
+  matching (sidecar at trigger = the ticket; JPG matched later via camera_file_url).
+
+**Rod-stillness "rig mode"** — unbuilt in full (lever-arm-scaled angular threshold,
+sway settle detection, camera-IMU cross-check, honest reticle fill). Evidence note: the
+trigger-window motion probe measured 0.7-6 cm with the cue rhythm followed, so the
+current gate is adequate for a careful operator — rig mode is about making that robust
+for everyone. The related per-still **sway REJECTION** ("Per-still corrections": reject
+stills whose trigger window exceeds threshold, optionally cross-check camera gyro) is
+also unbuilt — we measure and stamp `trigger_motion_m/deg` but never reject or retry.
+
+**Exposure-time pose sampling** (`t_trigger + Δt_exposure`) — unbuilt, and closed BY
+DATA for now: probe numbers say the tap pose is fine when the cue rhythm is followed.
+Reopen only if field sidecars show routine >5 cm despite the done-tone.
+
+**360° coverage marking** (mark all voxels within radius of the elevated camera with a
+depth-tested occlusion check; the P0-gated item) — unbuilt; the sufficiency chip
+(count · spread · pending) is the interim. The plan's open UX question stands: how the
+overlay distinguishes "covered, transfer pending" from "confirmed".
+
+**`StillSource` abstraction (P1)** — never landed as code; ThetaCameraManager is
+concrete. The DATA layer is camera-agnostic (still_source in sidecars, equirect_stills
+naming), but adding Insta360 or another camera still means refactor-first. The Insta360
+SDK-access question (approval time, what the iOS SDK exposes) remains unanswered, so
+P2's "written go/no-go per camera" is complete only for Theta X (go) and half of Z1
+(leveling validation pending).
+
+**Hybrid export** — SHIPPED (equirects + cube faces both export today). Deferred
+remainder: equirect entries in `transforms.json` (`camera_model: EQUIRECTANGULAR`) for
+Nerfstudio/3DGS direct ingestion — gated on an end-to-end downstream test, unchanged.
+
+**Superseded by the pivot** (close these, don't carry them): pre-scan calibration
+promotion/validation as the P3 gate (per-scan post-solve + parameter repeatability is
+the metric now); GPU privacy pixelation stays deferred-low-impact as documented.
+
+**Still-open design questions from the original plan** (cheap to answer, never
+answered): cube-face FOV — 90° exact vs ~100° overlapping for seam feature-matching
+(directly relevant to the weak PnP probe results); trigger→exposure latency variance —
+calibrate-once vs per-still (the motion probe gives partial data already); where
+dual-fisheye→equirect stitching runs for non-Theta cameras.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
