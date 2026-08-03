@@ -94,6 +94,22 @@ enum EquirectFaceExport {
             written += emitFaces(equirectURL: jpg, sidecarURL: sidecar,
                                  imagesDir: imagesDir, camerasDir: camerasDir)
         }
+        // emitFaces writes staging-relative image paths ("images/<name>") for the
+        // EXPORT layout; the colorizer resolves image_path against rawDir, so rewrite
+        // to rawDir-relative ("face_frames/images/<name>"). 360post7: without this,
+        // every face frame failed its image load silently and the model colored gray.
+        if let cams = try? fm.contentsOfDirectory(at: camerasDir, includingPropertiesForKeys: nil) {
+            for cam in cams where cam.pathExtension == "json" {
+                guard let data = try? Data(contentsOf: cam),
+                      var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                      let imagePath = obj["image_path"] as? String,
+                      imagePath.hasPrefix("images/") else { continue }
+                obj["image_path"] = "face_frames/" + imagePath
+                if let out = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) {
+                    try? out.write(to: cam)
+                }
+            }
+        }
         PerfDiag.log("[Colorize] face_frames regenerated: \(written) faces from \(jpgs.count) still(s)")
         return written > 0 ? (camerasDir, imagesDir) : nil
     }

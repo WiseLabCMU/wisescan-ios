@@ -250,6 +250,17 @@ enum VertexColorAccumulator {
         let camerasDir: URL
         let imagesDir: URL
         if useFaces {
+            // Privacy gate FIRST, before the (expensive) face generation: on a
+            // privacy-ON deferred-blur scan, mask mode skips every maskless frame —
+            // face frames have no masks, so the run would burn ~20 s generating faces
+            // and then paint the whole model gray (360post7). Bail loudly and KEEP the
+            // existing colors instead. (colors.bin ships in exports, and faces are cut
+            // from raw unblurred equirects — the fail-closed skip is correct; the probe
+            // needs a filter-OFF/consent or people-free scan.)
+            if Self.privacyMaskModeWouldApply(rawDir: rawDir) {
+                print("[VertexColor] Color-from-360°-faces requires a privacy-filter-OFF (consent) or people-free scan — deferred-blur masks don't exist for face frames. Keeping existing colors.")
+                return nil
+            }
             guard let dirs = EquirectFaceExport.generateFaceFramesForColorize(rawDataDir: rawDir) else {
                 print("[VertexColor] Color-from-360°-faces is ON but no faces could be generated (no stills / no baked poses) — aborting colorize")
                 return nil
@@ -287,35 +298,7 @@ enum VertexColorAccumulator {
         // pixel is ever baked. Legacy captures have no masks/ dir → this stays dormant and the
         // depth==0 skip keeps protecting them; privacy-off captures have an empty masks/ → no-op.
         let masksDir = rawDir.appendingPathComponent("masks")
-        // Deferred-blur era (RAW depth, needs per-frame masks) vs legacy (depth already person-zeroed
-        // at capture, so the depth==0 skip protects). masks/ (created unconditionally at session
-        // start) is the primary signal. If it was lost (partial restore / manual cleanup), the
-        // metadata `privacy_filter` KEY marks the era — every deferred capture stamps it
-        // (FrameCaptureSession), legacy metadata predates it. UNREADABLE metadata (missing/corrupt —
-        // abnormal, since it's written for every scan) fails CLOSED into the deferred era so a
-        // lost-masks deferred scan can't silently colorize raw depth. Only READABLE metadata WITHOUT
-        // the key is genuine legacy. Mirrors ScanExportManager's gate.
-        let meta: [String: Any]? = {
-            guard let metaData = try? Data(contentsOf: rawDir.appendingPathComponent("scan4d_metadata.json")),
-                  let obj = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] else { return nil }
-            return obj
-        }()
-        let masksDirExists = fm.fileExists(atPath: masksDir.path)
-        let hasPrivacyKey = meta?.keys.contains("privacy_filter") ?? false
-        let deferredBlurEra = masksDirExists || hasPrivacyKey || meta == nil
-        var privacyWasOn = false
-        if deferredBlurEra {
-            let maskCount = !masksDirExists ? 0
-                : ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
-                    .filter { $0.pathExtension == "png" }.count
-            privacyWasOn = maskCount > 0
-            if !privacyWasOn {
-                // No surviving masks: honor an explicit Bool; a present-but-garbage flag or
-                // unreadable metadata fails CLOSED (assume privacy was on — never bake a person).
-                privacyWasOn = (meta?["privacy_filter"] as? Bool) ?? true
-            }
-        }
-        let maskMode = deferredBlurEra && privacyWasOn   // sample per-frame masks + skip unmasked frames
+        let maskMode = Self.privacyMaskModeWouldApply(rawDir: rawDir)   // sample per-frame masks + skip unmasked frames
         if maskMode { print("[VertexColor] privacy mask mode ON (deferred-blur capture) — masking person regions") }
 
         // Per-vertex top-N observation buffers (flat, row = K entries per vertex).
@@ -650,6 +633,40 @@ enum VertexColorAccumulator {
         let elapsed = CACurrentMediaTime() - startTime
         print("[VertexColor] Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (weighted median, K=\(K)) in \(String(format: "%.1f", elapsed))s")
         return data
+    }
+
+    /// Whether deferred-blur privacy mask mode applies to this scan (per-frame person
+    /// masks required; maskless frames are SKIPPED). Shared by the colorize path and the
+    /// faces-probe upfront gate so the two derivations can't drift.
+    ///
+    /// Deferred-blur era (RAW depth, needs per-frame masks) vs legacy (depth already
+    /// person-zeroed at capture, so the depth==0 skip protects). masks/ (created
+    /// unconditionally at session start) is the primary signal. If it was lost (partial
+    /// restore / manual cleanup), the metadata `privacy_filter` KEY marks the era —
+    /// every deferred capture stamps it (FrameCaptureSession), legacy metadata predates
+    /// it. UNREADABLE metadata (missing/corrupt — abnormal, since it's written for every
+    /// scan) fails CLOSED into the deferred era so a lost-masks deferred scan can't
+    /// silently colorize raw depth. Only READABLE metadata WITHOUT the key is genuine
+    /// legacy. Mirrors ScanExportManager's gate.
+    static func privacyMaskModeWouldApply(rawDir: URL) -> Bool {
+        let fm = FileManager.default
+        let masksDir = rawDir.appendingPathComponent("masks")
+        let meta: [String: Any]? = {
+            guard let metaData = try? Data(contentsOf: rawDir.appendingPathComponent("scan4d_metadata.json")),
+                  let obj = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] else { return nil }
+            return obj
+        }()
+        let masksDirExists = fm.fileExists(atPath: masksDir.path)
+        let hasPrivacyKey = meta?.keys.contains("privacy_filter") ?? false
+        let deferredBlurEra = masksDirExists || hasPrivacyKey || meta == nil
+        guard deferredBlurEra else { return false }
+        let maskCount = !masksDirExists ? 0
+            : ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "png" }.count
+        if maskCount > 0 { return true }
+        // No surviving masks: honor an explicit Bool; a present-but-garbage flag or
+        // unreadable metadata fails CLOSED (assume privacy was on — never bake a person).
+        return (meta?["privacy_filter"] as? Bool) ?? true
     }
 
     /// Weighted median of one color channel over a vertex's observations.
