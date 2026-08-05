@@ -116,6 +116,16 @@ class ScanCoach {
 
     /// Main evaluation entry point. Called at ~1Hz from CaptureView.
     /// Computes the highest-priority active tip and publishes it.
+    /// Per-face ARMeshClassification census over the live mesh — the mesh-gap coach
+    /// input, logged each refresh ([Coach] census) so the floor/ceiling thresholds can
+    /// be tuned from field runs. wall/total ride along for that tuning only.
+    struct MeshClassCensus {
+        let ceiling: Int
+        let floor: Int
+        let wall: Int
+        let total: Int
+    }
+
     func evaluate(
         scanStats: ScanStats,
         frameCaptureSession: FrameCaptureSession,
@@ -123,7 +133,8 @@ class ScanCoach {
         semanticLabelingEnabled: Bool,
         isRecording: Bool,
         coachingEnabled: Bool = true,
-        rigMeshCensus: (ceiling: Int, floor: Int)? = nil
+        meshGapCensus: MeshClassCensus? = nil,
+        rigMode: Bool = false
     ) {
         guard isRecording else {
             if currentTip != nil {
@@ -203,7 +214,8 @@ class ScanCoach {
                 standpointDiversity: standpointDiversity,
                 now: now,
                 coachingEnabled: coachingEnabled,
-                rigMeshCensus: rigMeshCensus
+                meshGapCensus: meshGapCensus,
+                rigMode: rigMode
             )
 
             DispatchQueue.main.async { [weak self] in
@@ -270,7 +282,8 @@ class ScanCoach {
         standpointDiversity: Double,
         now: Date,
         coachingEnabled: Bool,
-        rigMeshCensus: (ceiling: Int, floor: Int)? = nil
+        meshGapCensus: MeshClassCensus? = nil,
+        rigMode: Bool = false
     ) -> CoachTip? {
         // Evaluate rules in priority order — first match wins
 
@@ -323,21 +336,24 @@ class ScanCoach {
                        priority: .warning, now: now)
         }
 
-        // Rig-mode mesh gaps: the clamp-fixed iPad pitch never paints the ceiling or
-        // near-wall floor into the LiDAR frustum (the scan translates but never
-        // pitches). FLOOR first and at WARNING tier — the nadir face is dropped
-        // downstream (operator), so LiDAR is the floor's ONLY source; ceiling at
-        // guidance (up-faces give it image coverage; mesh still helps the solver).
-        if let census = rigMeshCensus, sessionDuration > AppConstants.coachRigGapSeconds {
+        // Mesh-gap coach — ALL scans (field verdict 2026-08-05: "useful with or without
+        // 360 capture"), wording per source: on the rig the clamp-fixed pitch is the
+        // cause (tilt the rod); handheld it's just an unswept surface. FLOOR at WARNING
+        // tier — the nadir face is dropped downstream (operator), so LiDAR is the
+        // floor's ONLY source; ceiling at guidance (up-faces give it image coverage;
+        // mesh still helps the solver).
+        if let census = meshGapCensus, sessionDuration > AppConstants.coachRigGapSeconds {
             if census.floor < AppConstants.coachFloorMinFaces {
                 if let gapTip = tip("warning.rigFloorGap",
-                                    "⬇️ Floor gaps — tilt the rig down briefly",
+                                    rigMode ? "⬇️ Floor gaps — tilt the rig down briefly"
+                                            : "⬇️ Floor not meshed — sweep the floor",
                                     icon: "arrow.down.to.line",
                                     priority: .warning, now: now) { return gapTip }
             }
             if census.ceiling < AppConstants.coachCeilingMinFaces, coachingEnabled {
                 if let gapTip = tip("guidance.rigCeilingGap",
-                                    "⬆️ Ceiling not meshed — tilt the rig up briefly",
+                                    rigMode ? "⬆️ Ceiling not meshed — tilt the rig up briefly"
+                                            : "⬆️ Ceiling not meshed — sweep the ceiling",
                                     icon: "arrow.up.to.line",
                                     priority: .guidance, now: now) { return gapTip }
             }

@@ -1058,8 +1058,15 @@ BLE scan → read model/serial over GATT → wake the camera's AP (Network Type 
 staying the bulk-transfer plane and BLE Take Picture as the trigger. Pursued right
 after **one more device round on the campaign build**, which gates it:
 
-1. Rig scan long enough to leave real gaps → floor/ceiling coach prompts fire (and a
-   normal handheld phone scan never shows them).
+1. Rig scan long enough to leave real gaps → floor/ceiling coach prompts fire.
+   Field round 1 (360post11): ceiling prompt fired and earned its sweep; floor stayed
+   quiet because the floor MESH was genuinely there (oblique LiDAR paints floor counts
+   fast — the gray floor in keyframe coloring was an IMAGE-coverage gap, which the
+   mesh census can't and shouldn't see). Verdict: prompts are useful with or without
+   360 capture → now enabled for ALL scans with source-appropriate wording ("tilt the
+   rig" vs "sweep"), and every census refresh logs `[Coach] census: floor= ceiling=
+   wall= total=` so the thresholds (floor 1500 / ceiling 500) get tuned from real
+   numbers next round.
 2. After stills transfer mid-scan, confirm the originals are GONE from camera storage
    (sidecars gain `camera_file_deleted`); flip "Keep 360° Originals on Camera" for a
    control run if needed.

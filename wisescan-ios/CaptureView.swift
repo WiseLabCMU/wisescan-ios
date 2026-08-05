@@ -26,10 +26,10 @@ struct CaptureView: View {
     @AppStorage(AppConstants.Key.rigMeasuredDyMeters) private var rigMeasuredDyMeters: Double = 0
     /// Calibration capture is settle-gated: true while waiting for rig stillness after a tap.
     @State private var isSettlingCalibration = false
-    /// Rig-mode coach input: throttled ceiling/floor face census over the live mesh
-    /// (nil = phone-only scan or census not yet computed).
-    @State private var rigMeshCensus: (ceiling: Int, floor: Int)?
-    @State private var rigCensusLastAt = Date.distantPast
+    /// Mesh-gap coach input: throttled classification census over the live mesh
+    /// (nil = not yet computed this scan). All scans — rig or handheld.
+    @State private var meshGapCensus: ScanCoach.MeshClassCensus?
+    @State private var meshCensusLastAt = Date.distantPast
     @State var rigCalibrationManager = RigCalibrationManager.shared
     @State var saveMessage: String?
     /// Mesh vertex count captured at record-start. The "move to start the live mesh" cue is shown
@@ -2175,7 +2175,7 @@ struct CaptureView: View {
     /// GUIDANCE/INFO are suppressed when coaching is disabled.
     private func evaluateScanCoach() {
         guard isRecording else { return }
-        refreshRigMeshCensusIfDue()
+        refreshMeshGapCensusIfDue()
         scanCoach.evaluate(
             scanStats: scanStats,
             frameCaptureSession: frameCaptureSession,
@@ -2183,33 +2183,39 @@ struct CaptureView: View {
             semanticLabelingEnabled: semanticLabeling,
             isRecording: isRecording,
             coachingEnabled: scanCoachingEnabled,
-            rigMeshCensus: thetaManager.isConnected ? rigMeshCensus : nil
+            meshGapCensus: meshGapCensus,
+            rigMode: thetaManager.isConnected
         )
     }
 
-    /// Throttled (5 s) ceiling/floor classification census over the live mesh anchors —
-    /// rig-mode coach input only (phone-only scans skip it: the operator naturally
-    /// sweeps pitch, and the prompts would nag). Runs off-main; ~ms for 300k faces.
-    private func refreshRigMeshCensusIfDue() {
-        guard thetaManager.isConnected,
-              Date().timeIntervalSince(rigCensusLastAt) > 5,
+    /// Throttled (5 s) classification census over the live mesh anchors — the mesh-gap
+    /// coach input for every scan (rig or handheld; field verdict 2026-08-05). Runs
+    /// off-main; ~ms for 300k faces. Each refresh logs the counts ([Coach] census) so
+    /// the floor/ceiling thresholds can be tuned from real runs — 360post11's floor
+    /// prompt staying quiet was count-correct but left us blind on the margin.
+    private func refreshMeshGapCensusIfDue() {
+        guard Date().timeIntervalSince(meshCensusLastAt) > 5,
               let anchors = currentARSession?.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
               !anchors.isEmpty else { return }
-        rigCensusLastAt = Date()
+        meshCensusLastAt = Date()
         Task.detached(priority: .utility) {
             var ceiling = 0
             var floor = 0
+            var wall = 0
+            var total = 0
             for anchor in anchors {
                 let geometry = anchor.geometry
                 guard let cls = geometry.classification, cls.count == geometry.faces.count else { continue }
                 let base = cls.buffer.contents().advanced(by: cls.offset)
+                total += cls.count
                 for faceIdx in 0..<cls.count {
                     let raw = base.advanced(by: faceIdx * cls.stride).assumingMemoryBound(to: UInt8.self).pointee
-                    if raw == UInt8(ARMeshClassification.ceiling.rawValue) { ceiling += 1 } else if raw == UInt8(ARMeshClassification.floor.rawValue) { floor += 1 }
+                    if raw == UInt8(ARMeshClassification.ceiling.rawValue) { ceiling += 1 } else if raw == UInt8(ARMeshClassification.floor.rawValue) { floor += 1 } else if raw == UInt8(ARMeshClassification.wall.rawValue) { wall += 1 }
                 }
             }
-            let census = (ceiling: ceiling, floor: floor)
-            await MainActor.run { rigMeshCensus = census }
+            let census = ScanCoach.MeshClassCensus(ceiling: ceiling, floor: floor, wall: wall, total: total)
+            PerfDiag.log("[Coach] census: floor=\(census.floor) ceiling=\(census.ceiling) wall=\(census.wall) total=\(census.total)")
+            await MainActor.run { meshGapCensus = census }
         }
     }
 
