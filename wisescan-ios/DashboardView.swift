@@ -434,6 +434,16 @@ struct WearableCard: View {
 struct ThetaCameraCard: View {
     @Bindable var manager: ThetaCameraManager
     @State private var calibrationManager = RigCalibrationManager.shared
+    @State private var showNetworkSheet = false
+    @State private var sheetSSID = ""
+    @State private var sheetPassphrase = ""
+
+    /// Wearables-style single action: what the primary button does right now.
+    private enum PrimaryAction { case add, connectStored, disconnect }
+    private var primaryAction: PrimaryAction {
+        if manager.isConnected { return .disconnect }
+        return manager.hasStoredNetwork ? .connectStored : .add
+    }
 
     private var statusColor: Color {
         switch manager.state {
@@ -451,6 +461,42 @@ struct ThetaCameraCard: View {
         case .connected(let model, let firmware): return "\(model) · \(firmware)"
         case .failed: return "Connection failed"
         }
+    }
+
+    /// First-run "Add Camera" sheet: stores the camera's Wi-Fi so Connect is one tap
+    /// (NEHotspotConfiguration join — no Settings round-trip). Mirrors the wearables
+    /// add-device flow.
+    private var networkSheet: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("THETAYL12345678.OSC", text: $sheetSSID)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+                    SecureField("Password", text: $sheetPassphrase)
+                } header: {
+                    Text("Camera Wi-Fi")
+                } footer: {
+                    Text("The SSID is printed on the camera (and shown on its screen under Wi-Fi). Theta factory password is the serial digits from the SSID — changing it on the camera is recommended; see the security notes.")
+                }
+                Section {
+                    Button("Save & Connect") {
+                        manager.saveNetwork(ssid: sheetSSID, passphrase: sheetPassphrase)
+                        showNetworkSheet = false
+                        manager.connect()
+                    }
+                    .disabled(sheetSSID.trimmingCharacters(in: .whitespaces).isEmpty || sheetPassphrase.isEmpty)
+                }
+            }
+            .navigationTitle("Add 360° Camera")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { showNetworkSheet = false }
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 
     var body: some View {
@@ -521,21 +567,37 @@ struct ThetaCameraCard: View {
             }
 
             HStack(spacing: 12) {
-                Button(action: { manager.refreshConnection() }, label: {
+                // Wearables-style one-button flow: Add Camera… (first run, opens the
+                // network sheet) → Connect (joins the stored Wi-Fi + probes, no Settings
+                // round-trip) → Disconnect (restores camera auto-sleep, releases Wi-Fi).
+                Button(action: {
+                    switch primaryAction {
+                    case .add:
+                        sheetSSID = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID) ?? ""
+                        sheetPassphrase = UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase) ?? ""
+                        showNetworkSheet = true
+                    case .connectStored:
+                        manager.connect()
+                    case .disconnect:
+                        manager.disconnect()
+                    }
+                }, label: {
                     HStack {
                         if manager.state == .connecting {
                             ProgressView().tint(.white).padding(.trailing, 2)
                         } else {
-                            Image(systemName: "arrow.clockwise")
+                            Image(systemName: primaryAction == .disconnect ? "xmark.circle"
+                                  : primaryAction == .add ? "plus.circle" : "wifi")
                         }
-                        Text("Check Connection")
+                        Text(primaryAction == .disconnect ? "Disconnect"
+                             : primaryAction == .add ? "Add Camera…" : "Connect")
                             .font(.subheadline)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
                     .background(.ultraThinMaterial)
                     .cornerRadius(10)
-                    .foregroundColor(.white)
+                    .foregroundColor(primaryAction == .disconnect ? .orange : .white)
                 })
                 .disabled(manager.state == .connecting)
 
@@ -647,10 +709,17 @@ struct ThetaCameraCard: View {
                 }
             }
 
-            Text("Join the camera's Wi‑Fi in Settings, then Check Connection.")
+            if manager.hasStoredNetwork, !manager.isConnected {
+                Button("Edit camera network…") {
+                    sheetSSID = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID) ?? ""
+                    sheetPassphrase = UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase) ?? ""
+                    showNetworkSheet = true
+                }
                 .font(.caption2)
                 .foregroundColor(.gray.opacity(0.7))
+            }
         }
+        .sheet(isPresented: $showNetworkSheet) { networkSheet }
         .padding()
         .background(.ultraThinMaterial)
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))

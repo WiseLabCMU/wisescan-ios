@@ -1,5 +1,6 @@
 import AudioToolbox
 import Foundation
+import NetworkExtension
 import Observation
 import UIKit
 import ImageIO
@@ -161,6 +162,17 @@ final class ThetaCameraManager {
                 guard let self, self.lastPathSatisfied != satisfied else { return }
                 self.lastPathSatisfied = satisfied
                 self.log(.network, satisfied ? "Network up\(usesWiFi ? " (Wi‑Fi)" : "")" : "Network down")
+                // Fluid state: losing the network while connected drops the card to
+                // disconnected immediately (no waiting for the next op to fail); the
+                // network coming back with a stored camera silently re-probes — one
+                // cheap /osc/info, no join — so a camera wake/roam self-heals.
+                if !satisfied, self.isConnected {
+                    self.state = .disconnected
+                    self.log(.connection, "Camera network lost — disconnected")
+                } else if satisfied, self.state == .disconnected, self.hasStoredNetwork {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)   // let the interface settle
+                    if self.state == .disconnected { await self.probe() }
+                }
             }
         }
         pathMonitor.start(queue: DispatchQueue(label: "com.scan4d.theta.path", qos: .utility))
@@ -174,6 +186,99 @@ final class ThetaCameraManager {
         state = .connecting
         lastError = nil
         Task { await probe() }
+    }
+
+    // MARK: - One-tap connect / disconnect (wearables-style flow)
+
+    /// Whether a camera network is stored for one-tap join.
+    var hasStoredNetwork: Bool {
+        UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID)?.isEmpty == false
+    }
+
+    func saveNetwork(ssid: String, passphrase: String) {
+        UserDefaults.standard.set(ssid.trimmingCharacters(in: .whitespaces), forKey: AppConstants.Key.thetaSSID)
+        UserDefaults.standard.set(passphrase, forKey: AppConstants.Key.thetaPassphrase)
+    }
+
+    /// One-tap connect: join the stored camera Wi-Fi programmatically (no Settings
+    /// round-trip), give the interface a beat to settle, then probe. Join outcomes that
+    /// mean "already there" count as success; other join failures still probe — the
+    /// user may be joined manually.
+    func connect() {
+        guard state != .connecting else { return }
+        state = .connecting
+        lastError = nil
+        Task {
+            await joinStoredNetworkIfNeeded()
+            await probe()
+        }
+    }
+
+    private func joinStoredNetworkIfNeeded() async {
+        guard let ssid = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID), !ssid.isEmpty,
+              let pass = UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase), !pass.isEmpty
+        else { return }
+        let config = NEHotspotConfiguration(ssid: ssid, passphrase: pass, isWEP: false)
+        config.joinOnce = false
+        do {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                NEHotspotConfigurationManager.shared.apply(config) { error in
+                    if let error { cont.resume(throwing: error) } else { cont.resume() }
+                }
+            }
+            log(.connection, "Joined camera Wi-Fi \(ssid)")
+        } catch let error as NSError where error.domain == NEHotspotConfigurationErrorDomain
+                    && error.code == NEHotspotConfigurationError.alreadyAssociated.rawValue {
+            log(.connection, "Already on camera Wi-Fi \(ssid)")
+        } catch {
+            log(.connection, "⚠️ Wi-Fi join failed (\(Self.describe(error))) — trying camera anyway")
+        }
+        // Interface settle: HTTP to the camera flaps for a moment after association.
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+    }
+
+    /// Manual disconnect: kindly restore the camera's auto-sleep, release the phone from
+    /// the camera's Wi-Fi (iOS returns to the previous network), and clear session
+    /// state. Download state lives ON DISK (sidecar-derived), so pending JPGs simply
+    /// resume on the next connect / Process pass.
+    func disconnect() {
+        let ssid = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID)
+        Task {
+            try? await setSleepDelaySeconds(Self.kindSleepDelaySeconds)   // best-effort before dropping
+            if let ssid, !ssid.isEmpty {
+                NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: ssid)
+            }
+            state = .disconnected
+            serialNumber = nil
+            batteryLevel = nil
+            currentStillFormat = nil
+            lastCapture = nil
+            lastDownload = nil
+            lastError = nil
+            log(.connection, "Disconnected (manual) — camera auto-sleep restored, Wi-Fi released")
+        }
+    }
+
+    // MARK: - Camera power profile
+
+    /// Kind default when we're NOT actively capturing (matches the camera's own
+    /// out-of-the-box behavior scale; the AR session has the same idle-teardown ethos).
+    static let kindSleepDelaySeconds = 180
+
+    /// Awake(true) = never sleep (active capture: yaw-reference stability + zero wake
+    /// latency on still triggers). Awake(false) = restore auto-sleep so an idle camera
+    /// naps. Driven by the capture tab's lifecycle (same timer as the AR idle teardown).
+    func setKeepAwake(_ awake: Bool) {
+        guard isConnected else { return }
+        Task {
+            do {
+                try await setSleepDelaySeconds(awake ? 65535 : Self.kindSleepDelaySeconds)
+                log(.connection, awake ? "Camera keep-awake ON (capture active)"
+                                       : "Camera keep-awake off — auto-sleep restored (idle)")
+            } catch {
+                log(.connection, "⚠️ sleepDelay change failed: \(Self.describe(error))")
+            }
+        }
     }
 
     private func probe() async {
@@ -199,16 +304,6 @@ final class ThetaCameraManager {
                 lastError = "Could not enforce zenith correction: \(errorMsg)"
                 log(.connection, "⚠️ Failed to enable auto-leveling: \(errorMsg). Connection blocked.")
                 return
-            }
-
-            // Keep the camera awake while connected: a sleep/wake mid-session is the
-            // prime suspect for the per-session yaw-reference jump (run14), and wake
-            // latency hurts mid-recording still triggers. Non-fatal — log and continue.
-            do {
-                try await disableAutoSleep()
-                log(.connection, "Auto-sleep disabled for the session")
-            } catch {
-                log(.connection, "⚠️ Could not disable auto-sleep: \(Self.describe(error))")
             }
 
             state = .connected(model: info.model, firmware: info.firmware)

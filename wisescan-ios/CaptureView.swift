@@ -1662,6 +1662,10 @@ struct CaptureView: View {
             idleTeardownTimer?.invalidate()
             idleTeardownTimer = nil
             pauseARSession = false
+            // Camera power kindness: entering the capture tab keeps the Theta awake
+            // (yaw-reference stability + instant still triggers) — the idle teardown
+            // below restores its auto-sleep, mirroring the AR session's own ethos.
+            thetaManager.setKeepAwake(true)
 
             if let locId = scanStore.activeLocationForScan {
                 let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
@@ -1760,6 +1764,8 @@ struct CaptureView: View {
                 let processing = isProcessingMesh || pendingScan != nil
                 if selectedTab != 1 && !isRecording && !processing && !scanStore.isProcessingScan {
                     pauseARSession = true
+                    // Same idle moment: let the camera nap too (sleepDelay restored).
+                    Task { @MainActor in ThetaCameraManager.shared.setKeepAwake(false) }
                 }
             }
 
