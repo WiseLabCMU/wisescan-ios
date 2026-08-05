@@ -245,6 +245,32 @@ enum ScanPostprocessor {
         return false
     }
 
+    /// Manual "Redo 360° Calibration" (ScanCard long-press menu): strip the calibration
+    /// provenance stamps from every still sidecar so `equirectCalibrationPending` turns
+    /// true and the next Process re-runs the solve — the user-initiated redo the
+    /// solver-version bump can't cover (remeasured rig height, remounted camera, solver
+    /// doubts). `cam_transform` and the rest of the baked pose stay in place: the scan
+    /// remains fully usable if the redo never runs, and the solve rewrites them
+    /// wholesale when it does. Returns the number of sidecars stripped.
+    nonisolated static func resetEquirectCalibration(rawDataPath: URL) -> Int {
+        let dir = rawDataPath.appendingPathComponent("equirect_stills")
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return 0 }
+        var cleared = 0
+        for file in files where file.hasPrefix("still_") && file.hasSuffix(".json") {
+            let url = dir.appendingPathComponent(file)
+            guard let data = try? Data(contentsOf: url),
+                  var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  obj["rig_calibration_source"] != nil else { continue }
+            obj.removeValue(forKey: "rig_calibration_source")
+            obj.removeValue(forKey: "rig_calibration_solver_version")
+            guard let out = try? JSONSerialization.data(withJSONObject: obj,
+                                                        options: [.prettyPrinted, .sortedKeys]),
+                  (try? out.write(to: url, options: .atomic)) != nil else { continue }
+            cleared += 1
+        }
+        return cleared
+    }
+
     /// Synchronous GET against the camera's HTTP server (processOne runs on a background
     /// queue, not in an async context). nil on any failure — the step stays pending and
     /// the next Process retries.

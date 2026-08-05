@@ -1459,20 +1459,27 @@ struct ScanCard: View {
 
             // Post-process (né Color — DECISION 3): room build + registration + proxy + colorize
             // per setting; when nothing is pending it re-colors (overwrites colors.bin).
+            // 360° scans get a long-press menu — the designed manual "Redo Processing"
+            // for steps whose provenance stamps already say done.
             do {
-                Button(action: { postprocessScan() }) {
-                    HStack {
-                        Image(systemName: "wand.and.stars")
-                        Text("Process")
-                            .font(.subheadline).bold()
+                let processDisabled = isEditing || activeColoringMessage != nil
+                if (itemCounts?.equirect ?? 0) > 0 {
+                    Menu {
+                        Button(action: { redoCalibration() }, label: {
+                            Label("Redo 360° Calibration", systemImage: "arrow.triangle.2.circlepath")
+                        })
+                    } label: {
+                        processButtonLabel(disabled: processDisabled)
+                    } primaryAction: {
+                        postprocessScan()
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(isEditing || activeColoringMessage != nil ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
-                    .foregroundColor(isEditing || activeColoringMessage != nil ? .gray : .white)
-                    .cornerRadius(10)
+                    .disabled(processDisabled)
+                } else {
+                    Button(action: { postprocessScan() }, label: {
+                        processButtonLabel(disabled: processDisabled)
+                    })
+                    .disabled(processDisabled)
                 }
-                .disabled(isEditing || activeColoringMessage != nil)
             }
         }
         .alert("Post-process Required", isPresented: $showPostprocessAlert) {
@@ -1481,6 +1488,39 @@ struct ScanCard: View {
         } message: {
             Text("You haven't post-processed this scan — do it now. Uploading and exporting " +
                  "need the processed room data (room model, registration, and rescan reference).")
+        }
+    }
+
+    private func processButtonLabel(disabled: Bool) -> some View {
+        HStack {
+            Image(systemName: "wand.and.stars")
+            Text("Process")
+                .font(.subheadline).bold()
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(disabled ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
+        .foregroundColor(disabled ? .gray : .white)
+        .cornerRadius(10)
+    }
+
+    /// The designed manual "Redo Processing" path: strip the calibration provenance
+    /// stamps, then run the normal engine — which now sees the calibration step pending
+    /// and re-solves against current Settings (rig height) + persisted geometry. The
+    /// claim guards the strip against a concurrent batch rewriting the same sidecars.
+    private func redoCalibration() {
+        guard ScanPostprocessor.claimInFlight(scan.id) else { return }   // a batch owns it right now
+        coloringMessage = "Resetting 360° calibration…"
+        let raw = scan.rawDataPath
+        DispatchQueue.global(qos: .utility).async {
+            let cleared = ScanPostprocessor.resetEquirectCalibration(rawDataPath: raw)
+            DispatchQueue.main.async {
+                ScanPostprocessor.releaseInFlight(scan.id)
+                coloringMessage = nil
+                if cleared > 0 || !ScanPostprocessor.pendingSteps(for: scan, includeColorize: false).isEmpty {
+                    postprocessScan()
+                }
+            }
         }
     }
 
