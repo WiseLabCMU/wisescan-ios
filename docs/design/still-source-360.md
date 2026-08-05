@@ -1052,6 +1052,35 @@ needs its own auth/pairing flow), sub-second trigger without Wi-Fi captivity. Sc
 out of this campaign as the one item needing dedicated protocol work; the connect
 cluster's UX (stored camera identity on the dashboard card) is built to absorb it.
 
+**BLE bootstrap findings (2026-08-05, verified against ricohapi/theta-api-specs
+theta-bluetooth-api):** BLE can seed the whole Wi-Fi flow with no extra entitlement —
+CoreBluetooth needs only an Info.plist usage string, unlike NEHotspotHelper.
+- **THETA X: no Wi-Fi dependency at all.** The spec's getting-started opens with
+  "RICOH THETA V and Z1 require following steps… RICOH THETA X does not require these
+  steps" — on X, Bluetooth is enabled on the camera's touchscreen and the app connects
+  directly, no UUID registration.
+- **V/Z1: Wi-Fi first, but only ONCE.** Register the app's UUID over OSC
+  (`camera._setBluetoothDevice`, plus `_bluetoothPower: ON`), which returns the BLE
+  deviceName (= serial); thereafter BLE authenticates standalone by writing the UUID to
+  the Auth characteristic (service 0F291746-0C80-4726-87A7-3C501FD3B4B6, char
+  EBAFB2F0-0E0F-40A2-A84F-E2F098DC13C3). Natural hook: register during the first
+  Add Camera Wi-Fi session, which we already own.
+- **Identity over GATT (V/Z1/X, read-only Camera Information service):** Model Number,
+  Serial Number, Firmware, WLAN MAC, BT MAC. Serial digits = factory password; model +
+  serial = SSID candidates. Caveat: `NEHotspotConfiguration` needs the EXACT SSID
+  string and the 2-letter model code + suffix vary in the field (.OSC vs the observed
+  .ASC) — try candidate SSIDs (a failed apply is cheap) or confirm once with the user.
+- **WLAN Network Type is writable over BLE (V/Z1/X):** 0 = OFF, 1 = Direct (the
+  camera's own AP), 2 = Client — the app can wake the camera's AP without anyone
+  touching it. Dream bootstrap: BLE scan → read model/serial → write Direct mode →
+  join derived SSID → probe.
+- **Read WLAN Password State (Z1 ≥3.50.2, X ≥2.80.1; ours is 2.92.0):** BLE-side
+  default-credential detection — feeds security P2's warning directly.
+- **Take Picture characteristic (V/Z1/X):** the sub-second trigger itself; Camera
+  Control Command v2 Get Info/State/Options on Z1 ≥3.10.2 / X ≥2.20.1.
+Next-session probe order: CoreBluetooth scan on the X (what name it advertises) →
+read Camera Information → Take Picture → then wire the bootstrap into Add Camera.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
