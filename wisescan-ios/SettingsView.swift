@@ -33,6 +33,37 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.scanCoachingEnabled) private var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
     @AppStorage(AppConstants.Key.rigMeasuredDyMeters) private var rigMeasuredDyMeters: Double = 0
     @AppStorage(AppConstants.Key.rigHeightUnitImperial) private var rigHeightUnitImperial: Bool = false
+    /// Edit buffer for the rig-height field. A value-bound TextField re-formats through
+    /// the m⇄in conversion on EVERY keystroke — the trailing "." vanishes as you type
+    /// and the first digit resurrects on delete (field report 2026-08-05, "26.5 in").
+    /// The buffer is free text while editing; it parses and persists (metric, always)
+    /// only on commit: focus loss, unit flip, or leaving Settings.
+    @State private var rigHeightText: String = ""
+    @FocusState private var rigHeightFocused: Bool
+
+    /// Stored metric value rendered in the current display unit, trailing zeros trimmed.
+    private func formattedRigHeight() -> String {
+        guard rigMeasuredDyMeters > 0 else { return "" }
+        let display = rigHeightUnitImperial ? rigMeasuredDyMeters / 0.0254 : rigMeasuredDyMeters
+        var text = String(format: "%.3f", display)
+        while text.hasSuffix("0") { text.removeLast() }
+        if text.hasSuffix(".") { text.removeLast() }
+        return text
+    }
+
+    /// Parse the edit buffer (decimal comma tolerated) and persist in METERS; on
+    /// unparseable input, revert the buffer to the stored value rather than guessing.
+    private func commitRigHeight() {
+        let cleaned = rigHeightText
+            .replacingOccurrences(of: ",", with: ".")
+            .trimmingCharacters(in: .whitespaces)
+        guard let value = Double(cleaned), value >= 0, value.isFinite else {
+            rigHeightText = formattedRigHeight()
+            return
+        }
+        rigMeasuredDyMeters = rigHeightUnitImperial ? value * 0.0254 : value
+        rigHeightText = formattedRigHeight()
+    }
     @AppStorage(AppConstants.Key.registerLegacyScans) private var registerLegacyScans: Bool = AppConstants.registerLegacyScans
     @Environment(\.dismiss) private var dismiss
 
@@ -225,15 +256,24 @@ struct SettingsView: View {
                                 Spacer()
                                 // Entry converts at the UI edge only — persisted value is
                                 // ALWAYS meters (see CONTRIBUTING → Units & time).
-                                TextField("0.00", value: Binding(
-                                    get: { rigHeightUnitImperial ? rigMeasuredDyMeters / 0.0254 : rigMeasuredDyMeters },
-                                    set: { rigMeasuredDyMeters = rigHeightUnitImperial ? $0 * 0.0254 : $0 }
-                                ), format: .number.precision(.fractionLength(0...3)))
+                                // Free-text while editing; parsed on commit (see rigHeightText).
+                                TextField("0.00", text: $rigHeightText)
                                     .keyboardType(.decimalPad)
+                                    .focused($rigHeightFocused)
+                                    .onChange(of: rigHeightFocused) { _, focused in
+                                        if !focused { commitRigHeight() }
+                                    }
                                     .multilineTextAlignment(.trailing)
                                     .frame(width: 80)
                                     .foregroundColor(.cyan)
-                                Picker("", selection: $rigHeightUnitImperial) {
+                                Picker("", selection: Binding(
+                                    get: { rigHeightUnitImperial },
+                                    set: { imperial in
+                                        commitRigHeight()   // parse pending text under the OLD unit
+                                        rigHeightUnitImperial = imperial
+                                        rigHeightText = formattedRigHeight()
+                                    }
+                                )) {
                                     Text("m").tag(false)
                                     Text("in").tag(true)
                                 }
@@ -245,6 +285,8 @@ struct SettingsView: View {
                                 .foregroundColor(.gray)
                         }
                         .padding(.vertical, 4)
+                        .onAppear { rigHeightText = formattedRigHeight() }
+                        .onDisappear { commitRigHeight() }
 
                     } header: {
                         Text("SCAN CAPTURE")

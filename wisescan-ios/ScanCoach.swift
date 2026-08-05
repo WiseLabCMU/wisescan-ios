@@ -257,6 +257,10 @@ class ScanCoach {
                         self.tipShownAt = now
                         self.tipShowCounts[newTip.id, default: 0] += 1
                         self.tipCooldowns[newTip.id] = now
+                        // Field-log which tips actually fired — 360post13 validated the
+                        // near-depth warning only via the operator's word; logs should
+                        // carry it (PerfDiag → Logger, survives Release).
+                        PerfDiag.log("[Coach] tip: \(newTip.id)")
                     }
                 } else if let current = self.currentTip, current.priority >= .warning {
                     // CRITICAL/WARNING condition resolved (no candidate tip this eval) — clear
