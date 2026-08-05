@@ -1052,7 +1052,27 @@ needs its own auth/pairing flow), sub-second trigger without Wi-Fi captivity. Sc
 out of this campaign as the one item needing dedicated protocol work; the connect
 cluster's UX (stored camera identity on the dashboard card) is built to absorb it.
 
-**BLE bootstrap findings (2026-08-05, verified against ricohapi/theta-api-specs
+**DECIDED 2026-08-05: the BLE-first bootstrap below is the IDEAL connect flow** —
+BLE scan → read model/serial over GATT → wake the camera's AP (Network Type = Direct)
+→ derive SSID + factory password → `NEHotspotConfiguration` join → probe — with Wi-Fi
+staying the bulk-transfer plane and BLE Take Picture as the trigger. Pursued right
+after **one more device round on the campaign build**, which gates it:
+
+1. Rig scan long enough to leave real gaps → floor/ceiling coach prompts fire (and a
+   normal handheld phone scan never shows them).
+2. After stills transfer mid-scan, confirm the originals are GONE from camera storage
+   (sidecars gain `camera_file_deleted`); flip "Keep 360° Originals on Camera" for a
+   control run if needed.
+3. Long-press Process → "Redo 360° Calibration" re-solves and the sphere markers stay
+   put (stamps stripped + rewritten).
+4. Add Camera sheet: factory password prefills while typing the SSID; a hand-typed
+   password survives SSID edits.
+5. Power kindness cycle: keep-awake on entering capture, camera back to 180 s nap on
+   idle teardown and on manual disconnect.
+6. Rig-mode stillness: the lever-scaled angular gate still fills the chip at a
+   comfortable pause cadence on the real rod.
+
+**BLE bootstrap findings (verified against ricohapi/theta-api-specs
 theta-bluetooth-api):** BLE can seed the whole Wi-Fi flow with no extra entitlement —
 CoreBluetooth needs only an Info.plist usage string, unlike NEHotspotHelper.
 - **THETA X: no Wi-Fi dependency at all.** The spec's getting-started opens with
@@ -1078,8 +1098,9 @@ CoreBluetooth needs only an Info.plist usage string, unlike NEHotspotHelper.
   default-credential detection — feeds security P2's warning directly.
 - **Take Picture characteristic (V/Z1/X):** the sub-second trigger itself; Camera
   Control Command v2 Get Info/State/Options on Z1 ≥3.10.2 / X ≥2.20.1.
-Next-session probe order: CoreBluetooth scan on the X (what name it advertises) →
-read Camera Information → Take Picture → then wire the bootstrap into Add Camera.
+BLE-session probe order: CoreBluetooth scan on the X (what name it advertises) →
+read Camera Information → Take Picture → wake AP via Network Type → then wire the
+full bootstrap into Add Camera.
 
 ## Open questions
 
