@@ -158,7 +158,7 @@ struct LocationDetailView: View {
                                 HStack {
                                     Text("Global Export Format")
                                         .font(.caption)
-                                        .foregroundColor(.gray)
+                                        .foregroundColor(.white.opacity(0.7))
                                     Spacer()
                                     Picker("Format", selection: $globalSelectedFormatStr) {
                                         ForEach(ExportFormat.allCases, id: \.self) { (format: ExportFormat) in
@@ -1036,7 +1036,7 @@ struct WorkflowCard: View {
 
                 Text(description)
                     .font(.caption)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.7))
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack {
@@ -1053,7 +1053,7 @@ struct WorkflowCard: View {
                             .padding(.vertical, 6)
                             .background(isDisabled ? Color.gray.opacity(0.3) :
                                         (isPrimary ? Color.blue : Color.white.opacity(0.2)))
-                            .foregroundColor(isDisabled ? .gray : .white)
+                            .foregroundColor(isDisabled ? .white.opacity(0.45) : .white)
                             .cornerRadius(8)
                     })
                     .disabled(isDisabled)

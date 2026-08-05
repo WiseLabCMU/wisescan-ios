@@ -913,7 +913,7 @@ struct LocationGridTile: View {
                 } else {
                     Image(systemName: "photo")
                         .font(.largeTitle)
-                        .foregroundColor(.gray.opacity(0.5))
+                        .foregroundColor(.white.opacity(0.4))
                 }
             }
             .frame(height: 120)
@@ -929,12 +929,12 @@ struct LocationGridTile: View {
                 HStack {
                     Text("\(location.scans.count) scan\(location.scans.count == 1 ? "" : "s")")
                         .font(.caption2)
-                        .foregroundColor(.gray)
+                        .foregroundColor(.white.opacity(0.7))
                     Spacer()
                     if let latest = latestScan {
                         Text(latest.timeSinceCapture)
                             .font(.caption2)
-                            .foregroundColor(.gray)
+                            .foregroundColor(.white.opacity(0.7))
                     }
                 }
             }
@@ -1252,7 +1252,7 @@ struct ScanCard: View {
                         Color.black.opacity(0.3)
                         Image(systemName: "photo")
                             .font(.largeTitle)
-                            .foregroundColor(.gray.opacity(0.5))
+                            .foregroundColor(.white.opacity(0.4))
                     }
                 }
             }
@@ -1361,10 +1361,10 @@ struct ScanCard: View {
                     Text("\(formattedCount(scan.faceCount)) polys")
                 }
                 .font(.caption)
-                .foregroundColor(.gray)
+                .foregroundColor(.white.opacity(0.7))
                 Text(scan.timeSinceCapture)
                     .font(.caption)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.7))
                 Text(scan.hardwareDeviceModel)
                     .font(.caption2)
                     .foregroundColor(.cyan)
@@ -1393,7 +1393,7 @@ struct ScanCard: View {
         if !parts.isEmpty {
             Text(parts.joined(separator: " · "))
                 .font(.caption2)
-                .foregroundColor(.gray.opacity(0.8))
+                .foregroundColor(.white.opacity(0.65))
         }
     }
 
@@ -1597,7 +1597,7 @@ struct ScanCard: View {
 
     private var statusColor: Color {
         switch scan.uploadStatus {
-        case .pending: return .gray
+        case .pending: return .white.opacity(0.6)   // was .gray — unreadable on the badge's own gray tint
         case .zipping: return .cyan
         case .savedLocally: return .green
         case .uploading: return .blue

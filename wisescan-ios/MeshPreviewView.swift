@@ -130,11 +130,11 @@ struct MeshPreviewContainer: View {
             if !isMeshLoaded {
                 VStack(spacing: 16) {
                     ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .gray))
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white.opacity(0.7)))
                         .scaleEffect(1.5)
                     Text("Loading Mesh...")
                         .font(.headline)
-                        .foregroundColor(.gray)
+                        .foregroundColor(.white.opacity(0.7))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(white: 0.15))
@@ -274,7 +274,7 @@ struct MeshPreviewContainer: View {
             Circle()
                 .fill(Color(red: Double(accent.x), green: Double(accent.y), blue: Double(accent.z)))
                 .frame(width: 8, height: 8)
-            Text("360° stills (arrow = front)").font(.caption2).foregroundColor(.gray)
+            Text("360° stills (arrow = front)").font(.caption2).foregroundColor(.white)
         }
     }
 

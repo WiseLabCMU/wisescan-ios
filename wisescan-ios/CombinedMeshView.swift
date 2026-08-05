@@ -47,9 +47,9 @@ struct CombinedMeshScreen: View {
                     VStack(spacing: 12) {
                         Image(systemName: "cube.transparent")
                             .font(.system(size: 44))
-                            .foregroundColor(.gray)
+                            .foregroundColor(.white.opacity(0.6))
                         Text("No meshes available")
-                            .foregroundColor(.gray)
+                            .foregroundColor(.white.opacity(0.7))
                     }
                 } else {
                     CombinedMeshView(
@@ -88,7 +88,7 @@ struct CombinedMeshScreen: View {
                             .tint(.white)
                         Text("Loading \(presentItems.count) mesh\(presentItems.count == 1 ? "" : "es")…")
                             .font(.caption)
-                            .foregroundColor(.gray)
+                            .foregroundColor(.white.opacity(0.8))
                     }
                     .padding(20)
                     .background(Color.black.opacity(0.6))

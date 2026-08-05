@@ -349,7 +349,7 @@ private struct CompactLocationTile: View {
                             .aspectRatio(contentMode: .fill)
                     } else {
                         Image(systemName: "photo")
-                            .foregroundColor(.gray.opacity(0.5))
+                            .foregroundColor(.white.opacity(0.4))
                     }
                 }
                 .frame(height: 64)
@@ -362,7 +362,7 @@ private struct CompactLocationTile: View {
                         .lineLimit(1)
                     Text("\(location.scans.count) scan\(location.scans.count == 1 ? "" : "s")")
                         .font(.caption2)
-                        .foregroundColor(.gray)
+                        .foregroundColor(.white.opacity(0.7))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 8)

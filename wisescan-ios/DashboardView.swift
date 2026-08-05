@@ -62,7 +62,7 @@ struct DashboardView: View {
 
                             Text(uploadURL.isEmpty ? "No upload server configured — set in Settings" : uploadURL)
                                 .font(.caption2)
-                                .foregroundColor(uploadURL.isEmpty ? .orange : .gray)
+                                .foregroundColor(uploadURL.isEmpty ? .orange : .white.opacity(0.7))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
@@ -105,7 +105,7 @@ struct DashboardView: View {
                                 }
                                 Text("Your glasses firmware needs an update before they can be used reliably.")
                                     .font(.caption)
-                                    .foregroundColor(.gray)
+                                    .foregroundColor(.white.opacity(0.8))
 
                                 Button(action: {
                                     wearableManager.openFirmwareUpdate()
@@ -144,7 +144,7 @@ struct DashboardView: View {
                                 }
                                 Text("Camera access must be granted in the Meta AI companion app before streaming can start.")
                                     .font(.caption)
-                                    .foregroundColor(.gray)
+                                    .foregroundColor(.white.opacity(0.8))
 
                                 Button(action: {
                                     wearableManager.requestPermissions()
@@ -309,7 +309,7 @@ struct ServerCard: View {
     var body: some View {
         HStack {
             Image(systemName: isConnected ? "wifi" : "wifi.slash")
-                .foregroundColor(isConnected ? .green : .gray)
+                .foregroundColor(isConnected ? .green : .white.opacity(0.6))
                 .font(.title2)
                 .frame(width: 40)
 
@@ -325,12 +325,12 @@ struct ServerCard: View {
                     } else {
                         Text("(Available)")
                             .font(.caption)
-                            .foregroundColor(.gray)
+                            .foregroundColor(.white.opacity(0.7))
                     }
                 }
                 Text("Model: \(model)")
                     .font(.caption)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.7))
             }
             Spacer()
 
@@ -340,7 +340,7 @@ struct ServerCard: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                     .background(isDisabled ? Color.gray.opacity(0.3) : (isConnected ? Color.green.opacity(0.2) : Color.white.opacity(0.1)))
-                    .foregroundColor(isDisabled ? .gray : (isConnected ? .green : .white))
+                    .foregroundColor(isDisabled ? .white.opacity(0.45) : (isConnected ? .green : .white))
                     .cornerRadius(8)
             }
             .disabled(isDisabled)
@@ -379,7 +379,7 @@ struct WearableCard: View {
                         HStack(spacing: 2) {
                             Text("(Paired)")
                                 .font(.caption)
-                                .foregroundColor(.gray)
+                                .foregroundColor(.white.opacity(0.7))
                             Text("●")
                                 .foregroundColor(.green)
                                 .font(.caption2)
@@ -388,7 +388,7 @@ struct WearableCard: View {
                 }
                 Text("Device ID: \(deviceId)")
                     .font(.caption)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.7))
             }
             Spacer()
 
@@ -526,12 +526,12 @@ struct ThetaCameraCard: View {
                         Circle().fill(statusColor).frame(width: 8, height: 8)
                         Text(statusLabel)
                             .font(.caption)
-                            .foregroundColor(.gray)
+                            .foregroundColor(.white.opacity(0.7))
                             .lineLimit(1)
                         if let battery = manager.batteryLevel {
                             Text("· 🔋 \(Int(battery * 100))%")
                                 .font(.caption)
-                                .foregroundColor(.gray)
+                                .foregroundColor(.white.opacity(0.7))
                         }
                     }
                 }
@@ -542,7 +542,7 @@ struct ThetaCameraCard: View {
             if let serial = manager.serialNumber {
                 Text("Device ID: \(serial)")
                     .font(.caption2)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.7))
                     .textSelection(.enabled)
             }
 
@@ -557,7 +557,7 @@ struct ThetaCameraCard: View {
                 HStack {
                     Text("Still resolution")
                         .font(.caption)
-                        .foregroundColor(.gray)
+                        .foregroundColor(.white.opacity(0.7))
                     Spacer()
                     Menu {
                         ForEach(manager.stillFormatMenu, id: \.label) { format in
@@ -656,7 +656,7 @@ struct ThetaCameraCard: View {
                 } else {
                     Text(capture.fileURL)
                         .font(.caption2)
-                        .foregroundColor(.gray)
+                        .foregroundColor(.white.opacity(0.7))
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -684,7 +684,7 @@ struct ThetaCameraCard: View {
                     Text(String(format: "Downloaded %.1f MB in %d ms (%.1f MB/s)",
                                 download.megabytes, download.elapsedMs, download.megabytesPerSecond))
                         .font(.caption2)
-                        .foregroundColor(.gray)
+                        .foregroundColor(.white.opacity(0.7))
                 }
                 if let preview = manager.previewImage {
                     Image(uiImage: preview)
@@ -707,15 +707,15 @@ struct ThetaCameraCard: View {
                 Divider().background(Color.white.opacity(0.1))
                 Text("RECENT EVENTS")
                     .font(.caption2).bold()
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.7))
                 ForEach(Array(manager.events.prefix(6))) { event in
                     HStack(alignment: .top, spacing: 6) {
                         Text(event.date, format: .dateTime.hour().minute().second())
                             .font(.system(.caption2, design: .monospaced))
-                            .foregroundColor(.gray.opacity(0.6))
+                            .foregroundColor(.white.opacity(0.5))
                         Text(event.message)
                             .font(.caption2)
-                            .foregroundColor(.gray)
+                            .foregroundColor(.white.opacity(0.7))
                             .lineLimit(2)
                         Spacer(minLength: 0)
                     }
@@ -729,7 +729,7 @@ struct ThetaCameraCard: View {
                     showNetworkSheet = true
                 }
                 .font(.caption2)
-                .foregroundColor(.gray.opacity(0.7))
+                .foregroundColor(.white.opacity(0.6))
             }
         }
         .sheet(isPresented: $showNetworkSheet) { networkSheet }
@@ -797,7 +797,7 @@ struct ThetaCameraCard: View {
                     if let age = calibrationManager.calibrationAgeDescription {
                         Text("\(age) · \(String(format: "%.1f", profile.residualPx)) px residual")
                             .font(.caption2)
-                            .foregroundColor(.gray)
+                            .foregroundColor(.white.opacity(0.7))
                     }
                 }
                 Spacer()
@@ -828,11 +828,11 @@ struct ThetaCameraCard: View {
                 Spacer()
                 Button("Cancel") { calibrationManager.cancelCalibration() }
                     .font(.caption)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.7))
             }
             Text("Walk to \(AppConstants.calibrationStillCount) positions (~1–2 m apart), pause at each to capture.")
                 .font(.caption2)
-                .foregroundColor(.gray)
+                .foregroundColor(.white.opacity(0.7))
 
             if !calibrationManager.isEnvironmentSufficient {
                 HStack(spacing: 4) {

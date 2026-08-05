@@ -507,7 +507,7 @@ struct CaptureView: View {
                 }
                 Text(reason)
                     .font(.caption)
-                    .foregroundColor(.gray)
+                    .foregroundColor(.white.opacity(0.75))
                     .multilineTextAlignment(.center)
 
                 Button("Retry") { rigCalibrationManager.beginCalibration() }
@@ -1201,7 +1201,7 @@ struct CaptureView: View {
                                                 .foregroundColor(.green)
                                             Text("sharp")
                                                 .font(.caption2)
-                                                .foregroundColor(.gray)
+                                                .foregroundColor(.white.opacity(0.6))
                                         }
                                         HStack(spacing: 4) {
                                             Image(systemName: "photo.on.rectangle")
@@ -1212,7 +1212,7 @@ struct CaptureView: View {
                                                 .foregroundColor(.white.opacity(0.6))
                                             Text("total")
                                                 .font(.caption2)
-                                                .foregroundColor(.gray)
+                                                .foregroundColor(.white.opacity(0.6))
                                         }
                                         Spacer()
                                         // Stillness indicator
@@ -1233,7 +1233,7 @@ struct CaptureView: View {
                                     HStack {
                                         Text("Session Capacity")
                                             .font(.caption2)
-                                            .foregroundColor(.gray)
+                                            .foregroundColor(.white.opacity(0.7))
                                         Spacer()
                                         Text("\(scanStats.capacityPercent)%")
                                             .font(.caption2).bold()
