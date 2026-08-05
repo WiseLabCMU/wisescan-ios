@@ -1020,6 +1020,33 @@ download; `StillSource` abstraction (stored data is already camera-agnostic);
 each still's estimated capture position (~one entity per still, trivial cost);
 cube-face FOV 90° vs ~100° overlap; `transforms.json` EQUIRECTANGULAR entries.
 
+**Connect cluster device-validated (2026-08-05, 360post10):** join → probe →
+`Connected: RICOH THETA X` twice in one session, manual disconnect restored the
+camera's auto-sleep and released the Wi-Fi, re-join 8 s later, keep-awake armed on
+entering capture. Known cosmetic: **iOS pops "Unable to join" for the camera's
+internet-less AP even when the association is up** — the system's captive-portal probe
+finds no internet and calls that failure; our probe is authoritative and the card
+status reflects it (footer text + code comment document this). The Add Camera sheet
+now prefills the factory password (serial digits parsed from the SSID, suffix-agnostic
+— real-world SSIDs vary: `.OSC`/`.ASC`) whenever the password field is empty or still
+holds our own prefill.
+
+**Connect UX — future design notes (user brainstorm, deliberately not built):**
+- A dropdown of NEARBY camera SSIDs is not buildable with standard entitlements —
+  Wi-Fi scanning needs `NEHotspotHelper`, a special entitlement Apple grants by
+  written approval. `NEHotspotConfiguration(ssidPrefix: "THETA")` exists but can't
+  blind-join: the passphrase is per-camera (serial digits), so a prefix join only
+  helps a shared-passphrase fleet.
+- A dropdown of STORED cameras = multi-camera profiles (today we store exactly one
+  SSID/passphrase). Natural home for the idea once >1 camera per operator matters;
+  the sheet + card flow was built to absorb it.
+- Automated password rotation (extends security P2): the app could set a strong
+  password on the camera after first connect. Needs an edge-case plan before
+  building — rotation silently invalidates every OTHER paired device's stored
+  password (rotation ownership? propagation? manual fallback?), and a factory reset
+  reverts to the serial-digits default behind our back (the P2 warning must stay
+  persistent, not one-shot).
+
 **BLE trigger — next focused session:** camera-specific GATT pairing (Theta's BLE API
 needs its own auth/pairing flow), sub-second trigger without Wi-Fi captivity. Scoped
 out of this campaign as the one item needing dedicated protocol work; the connect

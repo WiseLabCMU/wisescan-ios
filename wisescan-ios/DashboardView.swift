@@ -437,6 +437,10 @@ struct ThetaCameraCard: View {
     @State private var showNetworkSheet = false
     @State private var sheetSSID = ""
     @State private var sheetPassphrase = ""
+    /// Last value WE wrote into the password field (factory digits derived from the
+    /// SSID) — lets the prefill keep tracking SSID edits without ever overwriting a
+    /// password the user typed themselves.
+    @State private var sheetPassAutoFill = ""
 
     /// Wearables-style single action: what the primary button does right now.
     private enum PrimaryAction { case add, connectStored, disconnect }
@@ -473,11 +477,20 @@ struct ThetaCameraCard: View {
                     TextField("THETAYL12345678.OSC", text: $sheetSSID)
                         .autocapitalization(.none)
                         .disableAutocorrection(true)
+                        .onChange(of: sheetSSID) { _, newSSID in
+                            // Factory password = the serial digits in the SSID; prefill
+                            // while the field is empty or still holds our own prefill.
+                            guard sheetPassphrase.isEmpty || sheetPassphrase == sheetPassAutoFill else { return }
+                            if let factory = ThetaCameraManager.factoryPassphrase(fromSSID: newSSID) {
+                                sheetPassphrase = factory
+                                sheetPassAutoFill = factory
+                            }
+                        }
                     SecureField("Password", text: $sheetPassphrase)
                 } header: {
                     Text("Camera Wi-Fi")
                 } footer: {
-                    Text("The SSID is printed on the camera (and shown on its screen under Wi-Fi). Theta factory password is the serial digits from the SSID — changing it on the camera is recommended; see the security notes.")
+                    Text("The SSID is printed on the camera (and shown on its screen under Wi-Fi). The factory password — the serial digits in the SSID — is prefilled when recognized; changing it on the camera is recommended, see the security notes. iOS may report the join failed for the camera's internet-less Wi-Fi even when it succeeded — the card status above is the truth: the app verifies the camera link directly.")
                 }
                 Section {
                     Button("Save & Connect") {

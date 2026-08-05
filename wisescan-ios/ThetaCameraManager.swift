@@ -195,6 +195,17 @@ final class ThetaCameraManager {
         UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID)?.isEmpty == false
     }
 
+    /// Factory Wi-Fi password for a Theta SSID — the 8 serial digits embedded in it
+    /// (e.g. "THETAYR14100112.ASC" → "14100112"; suffix varies by model/firmware).
+    /// nil when the SSID doesn't look like a Theta AP. Prefills the Add Camera sheet;
+    /// the security plan's P2 warning fires when the live password still equals this.
+    static func factoryPassphrase(fromSSID ssid: String) -> String? {
+        let trimmed = ssid.trimmingCharacters(in: .whitespaces).uppercased()
+        guard trimmed.hasPrefix("THETA") else { return nil }
+        let digits = trimmed.drop { !$0.isNumber }.prefix { $0.isNumber }
+        return digits.count == 8 ? String(digits) : nil
+    }
+
     func saveNetwork(ssid: String, passphrase: String) {
         UserDefaults.standard.set(ssid.trimmingCharacters(in: .whitespaces), forKey: AppConstants.Key.thetaSSID)
         UserDefaults.standard.set(passphrase, forKey: AppConstants.Key.thetaPassphrase)
@@ -233,6 +244,10 @@ final class ThetaCameraManager {
         } catch {
             log(.connection, "⚠️ Wi-Fi join failed (\(Self.describe(error))) — trying camera anyway")
         }
+        // Known cosmetic (360post10, device-validated): iOS pops "Unable to join" for
+        // the camera's internet-less AP even when the association is UP — the system's
+        // captive-portal probe finds no internet and calls that a failure. The probe
+        // below is the truth; the card state reflects it, never the OS alert.
         // Interface settle: HTTP to the camera flaps for a moment after association.
         try? await Task.sleep(nanoseconds: 1_500_000_000)
     }
