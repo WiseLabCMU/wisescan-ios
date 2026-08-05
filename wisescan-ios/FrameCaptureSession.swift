@@ -62,6 +62,44 @@ class FrameCaptureSession {
 
     private var stillnessStartTime: TimeInterval?
     private(set) var isCurrentlyStill: Bool = false
+
+    /// Fraction of valid LiDAR samples closer than `nearDepthObstructionMeters` in the
+    /// latest census (throttled ~1 s). A rig knob/strap/finger at the frame edge shows
+    /// up as a PERSISTENT very-near return and quietly corrupts depth + mesh (field
+    /// case: rig tension knob glancing the side view, 2026-08-05). ScanCoach turns
+    /// sustained presence into a warning; transients die in its sustain gate.
+    private(set) var nearDepthFraction: Float = 0
+    private var lastNearDepthCensusAt: TimeInterval = 0
+
+    /// Stride-sampled near-depth census over the 256×192 depth map (~3k reads at 1 Hz).
+    private func updateNearDepthCensus(depthMap: CVPixelBuffer?, at timestamp: TimeInterval) {
+        guard let depthMap, timestamp - lastNearDepthCensusAt >= 1 else { return }
+        lastNearDepthCensusAt = timestamp
+        guard CVPixelBufferGetPixelFormatType(depthMap) == kCVPixelFormatType_DepthFloat32 else { return }
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return }
+        let width = CVPixelBufferGetWidth(depthMap)
+        let height = CVPixelBufferGetHeight(depthMap)
+        let rowBytes = CVPixelBufferGetBytesPerRow(depthMap)
+        var near = 0
+        var total = 0
+        var row = 0
+        while row < height {
+            let rowPtr = base.advanced(by: row * rowBytes).assumingMemoryBound(to: Float32.self)
+            var col = 0
+            while col < width {
+                let depth = rowPtr[col]
+                if depth.isFinite, depth > 0 {
+                    total += 1
+                    if depth < AppConstants.nearDepthObstructionMeters { near += 1 }
+                }
+                col += 4
+            }
+            row += 4
+        }
+        nearDepthFraction = total > 0 ? Float(near) / Float(total) : 0
+    }
     /// Ring-fill progress for the stillness reticle: 0 while moving, climbing to 1 over the
     /// confirmation window once the device settles, held at 1 while confirmed still.
     private(set) var stillnessProgress: Double = 0
@@ -446,6 +484,7 @@ class FrameCaptureSession {
         let confidenceMap = frame?.sceneDepth?.confidenceMap
         let trackingState = frame?.camera.trackingState
         let frameTimestamp = frame?.timestamp ?? 0
+        updateNearDepthCensus(depthMap: depthMap, at: frameTimestamp)
         let segBuffer = self.privacyFilter ? frame?.segmentationBuffer : nil
 
         // ⚡ ARFrame reference is now released — only extracted values are retained

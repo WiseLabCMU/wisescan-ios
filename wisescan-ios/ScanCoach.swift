@@ -89,6 +89,13 @@ class ScanCoach {
     /// Timestamp of last evaluation (throttle gate).
     private var lastEvaluationTime: Date = .distantPast
 
+    /// When the fast-motion blur condition became continuously true (nil = not active).
+    /// The demoted fastMotion hint requires the condition SUSTAINED, not a spike.
+    private var blurActiveSince: Date?
+
+    /// When the near-depth obstruction condition became continuously true.
+    private var nearDepthActiveSince: Date?
+
     /// Background queue for evaluation (keeps main thread free).
     private let evaluationQueue = DispatchQueue(label: "com.scan4d.scancoach", qos: .utility)
 
@@ -98,6 +105,8 @@ class ScanCoach {
     func reset() {
         currentTip = nil
         tipShownAt = nil
+        blurActiveSince = nil
+        nearDepthActiveSince = nil
         tipCooldowns.removeAll()
         tipShowCounts.removeAll()
         tipDismissCounts.removeAll()
@@ -161,6 +170,17 @@ class ScanCoach {
         let trackingStatus = scanStats.trackingStatus
         let isBlurActive = frameCaptureSession.isBlurWarningActive
         let blurReason = frameCaptureSession.blurWarningReason
+        // Thermal state read directly (cheap, main-thread safe): on the field iPad,
+        // .serious preceded the RoomPlan/OU EXC_BREAKPOINT crash by ~30 s (360post12) —
+        // enough warning to wrap up and SAVE instead of losing the scan.
+        let thermalState = ProcessInfo.processInfo.thermalState
+        // Sustained-condition trackers (helpers keep evaluate's complexity flat):
+        // the demoted fastMotion hint and the near-depth obstruction warning both
+        // require their condition held continuously, not a spike.
+        let fastMotionSustained = updateFastMotionSustain(
+            isBlurActive: isBlurActive, blurReason: blurReason, now: now)
+        let nearDepthSustained = updateNearDepthSustain(
+            fraction: frameCaptureSession.nearDepthFraction, now: now)
         let isNearCapacity = scanStats.isNearCapacity
         let isAtCapacity = scanStats.isAtCapacity
         let sessionDuration = scanStats.sessionDuration
@@ -215,7 +235,10 @@ class ScanCoach {
                 now: now,
                 coachingEnabled: coachingEnabled,
                 meshGapCensus: meshGapCensus,
-                rigMode: rigMode
+                rigMode: rigMode,
+                thermalState: thermalState,
+                fastMotionSustained: fastMotionSustained,
+                nearDepthSustained: nearDepthSustained
             )
 
             DispatchQueue.main.async { [weak self] in
@@ -283,11 +306,24 @@ class ScanCoach {
         now: Date,
         coachingEnabled: Bool,
         meshGapCensus: MeshClassCensus? = nil,
-        rigMode: Bool = false
+        rigMode: Bool = false,
+        thermalState: ProcessInfo.ThermalState = .nominal,
+        fastMotionSustained: TimeInterval = 0,
+        nearDepthSustained: TimeInterval = 0
     ) -> CoachTip? {
         // Evaluate rules in priority order — first match wins
 
         // ── CRITICAL ──
+
+        // Thermal runaway outranks everything: past .serious the OS is seconds-to-
+        // minutes from killing RoomPlan/OU (360post12: ~30 s), and an unsaved scan is
+        // a total loss — no other coaching matters if the session dies.
+        if thermalState == .critical {
+            return tip("critical.thermalCritical",
+                       "🌡️ Device critically hot — save the scan NOW",
+                       icon: "thermometer.high",
+                       priority: .critical, now: now)
+        }
 
         // Tracking degraded (not initializing/relocalizing — those are normal recovery)
         switch trackingStatus {
@@ -312,12 +348,27 @@ class ScanCoach {
 
         // ── WARNING ──
 
-        // Motion blur (fast motion) — reframed as informational in the two-purpose capture
-        // paradigm: movement builds depth coverage (good!), but no sharp photos are captured.
-        if isBlurActive, blurReason == .fastMotion {
-            return tip("warning.fastMotion",
-                       "⚡ Moving fast — depth only (pause for photos)",
-                       icon: "hare.fill",
+        // Device hot: persistent while .serious — the one warning where persistence is
+        // the point (crash imminent, action = end the scan). Everything chronic and
+        // merely informational (fastMotion) lives in guidance now, so this channel
+        // stays credible for exactly this moment.
+        if thermalState == .serious {
+            return tip("warning.thermalSerious",
+                       "🌡️ Device hot — wrap up and save",
+                       icon: "thermometer.high",
+                       priority: .warning, now: now)
+        }
+
+        // Near-depth obstruction: something is parked centimeters from the LiDAR —
+        // rig hardware (tension knob, strap) or a grip finger — and it is corrupting
+        // depth on every frame it appears in. Condition-driven persistent warning:
+        // it clears the moment the hardware is adjusted, and unlike fastMotion this
+        // is never normal operation. The sustain gate keeps passing hands silent.
+        if nearDepthSustained >= AppConstants.coachNearDepthSustainSeconds {
+            return tip("warning.nearDepthObstruction",
+                       rigMode ? "🔧 Something is right in front of the camera — check the rig clamp/knob"
+                               : "🔧 Something is right in front of the camera — check your grip",
+                       icon: "eye.trianglebadge.exclamationmark",
                        priority: .warning, now: now)
         }
 
@@ -362,6 +413,20 @@ class ScanCoach {
         // ── GUIDANCE ── (suppressed when coaching is disabled)
 
         guard coachingEnabled else { return nil }
+
+        // Fast motion — DEMOTED from warning (field verdict 2026-08-05: as a persistent
+        // warning it fired through every normal walk phase and trained the operator to
+        // ignore the channel). It is informational by its own logic — moving builds
+        // depth, only photo capture pauses — so it now (a) requires the motion
+        // SUSTAINED for a few seconds, not a spike, (b) inherits guidance auto-dismiss
+        // (6 s) + 30 s cooldown + swipe suppression, and (c) caps out per session.
+        if fastMotionSustained >= AppConstants.coachFastMotionSustainSeconds,
+           tipShowCounts["guidance.fastMotion", default: 0] < AppConstants.coachFastMotionMaxShows {
+            if let hint = tip("guidance.fastMotion",
+                              "⚡ Moving fast — depth only (pause for photos)",
+                              icon: "hare.fill",
+                              priority: .guidance, now: now) { return hint }
+        }
 
         let isEarlyScan = sessionDuration < AppConstants.earlyScanThresholdSeconds
 
@@ -499,6 +564,30 @@ class ScanCoach {
         }
 
         return nil
+    }
+
+    // MARK: - Sustained-condition trackers
+
+    /// How long the fast-motion blur condition has been continuously true.
+    private func updateFastMotionSustain(isBlurActive: Bool,
+                                         blurReason: FrameCaptureSession.CaptureWarning?,
+                                         now: Date) -> TimeInterval {
+        if isBlurActive, blurReason == .fastMotion {
+            if blurActiveSince == nil { blurActiveSince = now }
+        } else {
+            blurActiveSince = nil
+        }
+        return blurActiveSince.map { now.timeIntervalSince($0) } ?? 0
+    }
+
+    /// How long the near-depth obstruction fraction has been continuously over threshold.
+    private func updateNearDepthSustain(fraction: Float, now: Date) -> TimeInterval {
+        if fraction >= AppConstants.nearDepthObstructionMinFraction {
+            if nearDepthActiveSince == nil { nearDepthActiveSince = now }
+        } else {
+            nearDepthActiveSince = nil
+        }
+        return nearDepthActiveSince.map { now.timeIntervalSince($0) } ?? 0
     }
 
     // MARK: - Tip Factory (with cooldown/dismiss checks)

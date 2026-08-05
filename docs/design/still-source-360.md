@@ -1079,6 +1079,20 @@ after **one more device round on the campaign build**, which gates it:
 6. Rig-mode stillness: the lever-scaled angular gate still fills the chip at a
    comfortable pause cadence on the real rod.
 
+Round 2 additions (post-360post12 thermal crash + field feedback): **thermal coach**
+("🌡️ Device hot — wrap up and save" at `.serious`, critical wording at `.critical` —
+on the field iPad, serious preceded the RoomPlan/OU crash by ~30 s, enough to save);
+**near-depth obstruction warning** ("🔧 Something is right in front of the camera…",
+rig/handheld wording) from a throttled LiDAR census — returns under 0.2 m sustained
+4 s = rig knob/strap/finger corrupting depth (field case: tension knob glancing the
+side view all day); and **fastMotion demoted to guidance** — as a warning it fired
+through every normal walk phase (warnings are exempt from cooldown/dismiss by design)
+and trained the operator to ignore the channel; it now needs 3 s sustained motion,
+shows ≤3×/session with 30 s cooldown, and the warning channel stays credible for the
+rare act-now moments (thermal, obstruction, capacity). Verify on the next run: knob
+warning fires with a finger held near the lens ~5 s; fastMotion appears at most
+briefly; thermal line appears if the device ramps again.
+
 **BLE bootstrap findings (verified against ricohapi/theta-api-specs
 theta-bluetooth-api):** BLE can seed the whole Wi-Fi flow with no extra entitlement —
 CoreBluetooth needs only an Info.plist usage string, unlike NEHotspotHelper.

@@ -213,6 +213,11 @@ enum AppConstants {
     static let infoAutoDismissSeconds: TimeInterval = 5.0      // INFO tips auto-dismiss after this duration
     static let earlyScanThresholdSeconds: TimeInterval = 30.0  // first N seconds considered "early scan" for pattern tips
     static let coachMaxDismissCount: Int = 2                   // after this many manual dismissals, tip won't re-show for the session
+    static let coachFastMotionSustainSeconds: TimeInterval = 3 // fastMotion hint (guidance) needs the blur condition SUSTAINED this long — spikes during normal walking must not fire it
+    static let coachFastMotionMaxShows: Int = 3                // per-session cap on the fastMotion hint — after this many the user knows the depth-vs-photos tradeoff
+    static let nearDepthObstructionMeters: Float = 0.2         // LiDAR returns closer than this are rig hardware / fingers, not scene (sensor min range ≈ 0.25 m — field case: rig tension knob glancing the frame edge, 2026-08-05)
+    static let nearDepthObstructionMinFraction: Float = 0.01   // fraction of valid depth samples under nearDepthObstructionMeters that counts as an obstruction (a knob sliver at the frame edge is ~1-5%)
+    static let coachNearDepthSustainSeconds: TimeInterval = 4  // obstruction must persist this long before the coach warns — a hand passing the lens must not fire it
     static let scanCoachingEnabled: Bool = true                // default for the scan coaching toggle
     static let captureAudioEnabled: Bool = true                // default for shutter-click + chime sounds
 
