@@ -1121,7 +1121,14 @@ CoreBluetooth needs only an Info.plist usage string, unlike NEHotspotHelper.
   Control Command v2 Get Info/State/Options on Z1 ≥3.10.2 / X ≥2.20.1.
 BLE-session probe order: CoreBluetooth scan on the X (what name it advertises) →
 read Camera Information → Take Picture → wake AP via Network Type → then wire the
-full bootstrap into Add Camera.
+full bootstrap into Add Camera. **Probe bench BUILT (2026-08-05): Developer Mode
+surfaces a "360° BLE Probe" card on the dashboard (ThetaBLEProbe.swift) — Scan lists
+every named peripheral with RSSI (learns the X's advertised name), tapping one
+connects and logs a FULL service/characteristic discovery, Camera Information
+model/serial/firmware are read automatically (auth errors here = pairing needed —
+also probe data), and Take Picture / Wake AP buttons drive the two write probes.
+All findings land in the on-card log + unified log (category `bleprobe`). Camera-side
+prerequisite: Bluetooth ON in the X's touchscreen menu.**
 
 ## Open questions
 

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.developerMode) private var developerMode = false
     @State private var showSettings = false
     @State private var serverStatus: ServerStatus = .unknown
     @State private var wearableManager = MetaWearableManager.shared
@@ -210,6 +211,9 @@ struct DashboardView: View {
 
                         ThetaCameraCard(manager: thetaManager)
                             .padding(.horizontal)
+
+                        // BLE bootstrap probe bench (see ThetaBLEProbe) — dev only.
+                        if developerMode { ThetaBLEProbeCard().padding(.horizontal) }
                     }
                     .padding(.vertical)
                 }
@@ -296,6 +300,71 @@ struct DashboardView: View {
                 }
             }
         }.resume()
+    }
+}
+
+/// Developer-mode bench for the BLE bootstrap probe — surfaces ThetaBLEProbe's
+/// discovery list, the three probe actions, and its live log. Field goals in the
+/// probe's header doc; findings graduate into the production connect flow.
+struct ThetaBLEProbeCard: View {
+    private var probe: ThetaBLEProbe { .shared }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "dot.radiowaves.left.and.right")
+                    .foregroundColor(probe.connectedName != nil ? .green : .white.opacity(0.7))
+                Text("360° BLE Probe")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                Spacer()
+                Button(probe.isScanning ? "Stop" : "Scan", action: {
+                    probe.isScanning ? probe.stopScan() : probe.startScan()
+                })
+                .font(.subheadline).bold()
+                .foregroundColor(.cyan)
+            }
+
+            if let connected = probe.connectedName {
+                Text(connected)
+                    .font(.caption.bold())
+                    .foregroundColor(.green)
+                HStack(spacing: 14) {
+                    Button("Take Picture", action: { probe.takePicture() })
+                    Button("Wake AP", action: { probe.wakeAP() })
+                    Button("Disconnect", action: { probe.disconnect() })
+                        .foregroundColor(.orange)
+                }
+                .font(.caption.bold())
+                .foregroundColor(.cyan)
+            } else {
+                ForEach(probe.found) { item in
+                    Button(action: { probe.connect(item.id) }, label: {
+                        HStack {
+                            Text(item.name).foregroundColor(.white)
+                            Spacer()
+                            Text("\(item.rssi) dBm").foregroundColor(.white.opacity(0.6))
+                        }
+                        .font(.caption)
+                    })
+                }
+            }
+
+            if !probe.logLines.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(probe.logLines.suffix(12).enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundColor(.white.opacity(0.7))
+                            .lineLimit(1)
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))
+        .cornerRadius(16)
     }
 }
 
