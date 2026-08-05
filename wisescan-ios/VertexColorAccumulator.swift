@@ -1,10 +1,17 @@
 import Foundation
 import ARKit
+import os
 import UIKit
 
 /// Post-processing utilities for vertex coloring and ARWorldMap export.
 /// Extracted from ARCoverageView for clearer separation of concerns.
 enum VertexColorAccumulator {
+
+    /// Result-class lines log through the unified system log so RELEASE-build captures
+    /// keep them — print() output is invisible to Console/log-collect off Release
+    /// (360post8: the whole colorize outcome vanished from the log). Per-frame perf
+    /// chatter stays on PerfDiag/print.
+    private static let log = Logger(subsystem: "org.arenaxr.scan4d", category: "colorize")
 
     // MARK: - Export Helpers
 
@@ -258,11 +265,11 @@ enum VertexColorAccumulator {
             // from raw unblurred equirects — the fail-closed skip is correct; the probe
             // needs a filter-OFF/consent or people-free scan.)
             if Self.privacyMaskModeWouldApply(rawDir: rawDir) {
-                print("[VertexColor] Color-from-360°-faces requires a privacy-filter-OFF (consent) or people-free scan — deferred-blur masks don't exist for face frames. Keeping existing colors.")
+                Self.log.warning("Color-from-360°-faces requires a privacy-filter-OFF (consent) or people-free scan — deferred-blur masks don't exist for face frames. Keeping existing colors.")
                 return nil
             }
             guard let dirs = EquirectFaceExport.generateFaceFramesForColorize(rawDataDir: rawDir) else {
-                print("[VertexColor] Color-from-360°-faces is ON but no faces could be generated (no stills / no baked poses) — aborting colorize")
+                Self.log.warning("Color-from-360°-faces is ON but no faces could be generated (no stills / no baked poses) — aborting colorize")
                 return nil
             }
             camerasDir = dirs.cameras
@@ -299,7 +306,7 @@ enum VertexColorAccumulator {
         // depth==0 skip keeps protecting them; privacy-off captures have an empty masks/ → no-op.
         let masksDir = rawDir.appendingPathComponent("masks")
         let maskMode = Self.privacyMaskModeWouldApply(rawDir: rawDir)   // sample per-frame masks + skip unmasked frames
-        if maskMode { print("[VertexColor] privacy mask mode ON (deferred-blur capture) — masking person regions") }
+        if maskMode { Self.log.info("privacy mask mode ON (deferred-blur capture) — masking person regions") }
 
         // Per-vertex top-N observation buffers (flat, row = K entries per vertex).
         // Colors are kept as 8-bit (the source precision) to bound memory.
@@ -631,7 +638,7 @@ enum VertexColorAccumulator {
         }
         PerfDiag.log("[VertexColor] median resolve \(vertexCount) verts \(Int((CACurrentMediaTime() - medianStart) * 1000))ms")
         let elapsed = CACurrentMediaTime() - startTime
-        print("[VertexColor] Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (weighted median, K=\(K)) in \(String(format: "%.1f", elapsed))s")
+        Self.log.info("Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (weighted median, K=\(K)) in \(String(format: "%.1f", elapsed))s")
         return data
     }
 
