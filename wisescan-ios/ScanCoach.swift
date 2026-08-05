@@ -122,7 +122,8 @@ class ScanCoach {
         capturedRoom: CapturedRoom?,
         semanticLabelingEnabled: Bool,
         isRecording: Bool,
-        coachingEnabled: Bool = true
+        coachingEnabled: Bool = true,
+        rigMeshCensus: (ceiling: Int, floor: Int)? = nil
     ) {
         guard isRecording else {
             if currentTip != nil {
@@ -201,7 +202,8 @@ class ScanCoach {
                 meanStillOverlap: meanStillOverlap,
                 standpointDiversity: standpointDiversity,
                 now: now,
-                coachingEnabled: coachingEnabled
+                coachingEnabled: coachingEnabled,
+                rigMeshCensus: rigMeshCensus
             )
 
             DispatchQueue.main.async { [weak self] in
@@ -267,7 +269,8 @@ class ScanCoach {
         meanStillOverlap: Double,
         standpointDiversity: Double,
         now: Date,
-        coachingEnabled: Bool
+        coachingEnabled: Bool,
+        rigMeshCensus: (ceiling: Int, floor: Int)? = nil
     ) -> CoachTip? {
         // Evaluate rules in priority order — first match wins
 
@@ -318,6 +321,26 @@ class ScanCoach {
             return tip("warning.nearCapacity",
                        "Approaching session limits — consider saving",
                        priority: .warning, now: now)
+        }
+
+        // Rig-mode mesh gaps: the clamp-fixed iPad pitch never paints the ceiling or
+        // near-wall floor into the LiDAR frustum (the scan translates but never
+        // pitches). FLOOR first and at WARNING tier — the nadir face is dropped
+        // downstream (operator), so LiDAR is the floor's ONLY source; ceiling at
+        // guidance (up-faces give it image coverage; mesh still helps the solver).
+        if let census = rigMeshCensus, sessionDuration > AppConstants.coachRigGapSeconds {
+            if census.floor < AppConstants.coachFloorMinFaces {
+                if let gapTip = tip("warning.rigFloorGap",
+                                    "⬇️ Floor gaps — tilt the rig down briefly",
+                                    icon: "arrow.down.to.line",
+                                    priority: .warning, now: now) { return gapTip }
+            }
+            if census.ceiling < AppConstants.coachCeilingMinFaces, coachingEnabled {
+                if let gapTip = tip("guidance.rigCeilingGap",
+                                    "⬆️ Ceiling not meshed — tilt the rig up briefly",
+                                    icon: "arrow.up.to.line",
+                                    priority: .guidance, now: now) { return gapTip }
+            }
         }
 
         // ── GUIDANCE ── (suppressed when coaching is disabled)
