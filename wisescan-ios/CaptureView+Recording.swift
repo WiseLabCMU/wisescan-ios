@@ -115,6 +115,16 @@ extension CaptureView {
         // Reset the per-scan 360° still counter so equirect_stills/ numbering starts at 1.
         ThetaCameraManager.shared.beginScanStillSession(rawDataDir: frameCaptureSession.captureDir)
 
+        // Rod-stillness rig mode: with the 360° camera riding above the phone, tighten
+        // the angular stillness gate by the lever arm (measured rig height when set,
+        // mechanical prior otherwise). Phone-only scans keep the base thresholds.
+        if ThetaCameraManager.shared.isConnected {
+            let measured = Float(UserDefaults.standard.double(forKey: AppConstants.Key.rigMeasuredDyMeters))
+            frameCaptureSession.rigLeverArmMeters = measured > 0.1 ? measured : AppConstants.rigRodHeightMeters
+        } else {
+            frameCaptureSession.rigLeverArmMeters = nil
+        }
+
         // Start frame capture for raw data export
         if let session = currentARSession {
             // Provide LocationManager to frame capture session so it can grab metadata

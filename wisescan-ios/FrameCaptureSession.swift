@@ -52,6 +52,14 @@ class FrameCaptureSession {
     // Tracks device motion state to identify "sharp" frames (device stationary) vs
     // "sweep" frames (device in motion). Sharp frames get audio feedback (shutter click)
     // and are counted separately for the quality bar UI.
+    /// Non-nil while capturing on the 360° rig: lever arm (m) from the phone to the
+    /// elevated camera, set at record start. Rod-stillness "rig mode": phone stillness
+    /// is not rig stillness — a 1 m arm turns small hand rotations into large camera-
+    /// position sway (≈ L × angular velocity), so the angular gate tightens to keep
+    /// CAMERA-position noise inside the same budget as the phone's translational gate
+    /// (ω ≤ v_still / L). The reticle inherits the honest, slower fill for free.
+    var rigLeverArmMeters: Float?
+
     private var stillnessStartTime: TimeInterval?
     private(set) var isCurrentlyStill: Bool = false
     /// Ring-fill progress for the stillness reticle: 0 while moving, climbing to 1 over the
@@ -474,9 +482,13 @@ class FrameCaptureSession {
         // Still only when we have a motion baseline, tracking is reliable, and both
         // velocities are under the stillness thresholds. Tracking loss or fast motion
         // resets the state machine so the reticle never shows a stale locked-green ring.
+        let rigAngularLimit = rigLeverArmMeters.map {
+            min(AppConstants.stillnessAngularThreshold,
+                AppConstants.stillnessTranslationalThreshold / max($0, 0.3))
+        } ?? AppConstants.stillnessAngularThreshold
         let isStill = hasMotionBaseline && trackingNormal &&
                       velocity < AppConstants.stillnessTranslationalThreshold &&
-                      angularVelocity < AppConstants.stillnessAngularThreshold
+                      angularVelocity < rigAngularLimit
         let confirmedStill = updateStillness(isStill: isStill, frameTimestamp: frameTimestamp)
 
         // Reject blurred frames based on camera tracking quality
