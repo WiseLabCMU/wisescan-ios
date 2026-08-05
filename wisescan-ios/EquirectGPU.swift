@@ -59,6 +59,7 @@ enum EquirectGPU {
         var faceSize: UInt32
         var equirectWidth: UInt32
         var equirectHeight: UInt32
+        var vOffsetFrac: Float
     }
 
     // MARK: - Texture creation
@@ -145,7 +146,8 @@ enum EquirectGPU {
     static func renderFace(from equirectTexture: MTLTexture,
                            rotation: simd_float3x3,
                            faceSize: Int,
-                           jpegQuality: CGFloat = 0.9) -> Data? {
+                           jpegQuality: CGFloat = 0.9,
+                           vOffsetFrac: Float = 0) -> Data? {
         guard let device, let pipeline = rotatedPipeline, let queue = commandQueue else { return nil }
 
         let desc = MTLTextureDescriptor.texture2DDescriptor(
@@ -160,7 +162,8 @@ enum EquirectGPU {
             rotCol2: rotation.columns.2,
             faceSize: UInt32(faceSize),
             equirectWidth: UInt32(equirectTexture.width),
-            equirectHeight: UInt32(equirectTexture.height))
+            equirectHeight: UInt32(equirectTexture.height),
+            vOffsetFrac: vOffsetFrac)
 
         guard let cmdBuf = queue.makeCommandBuffer(),
               let encoder = cmdBuf.makeComputeCommandEncoder() else { return nil }

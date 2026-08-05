@@ -181,6 +181,13 @@ enum EquirectFaceExport {
         guard faceSize >= 256 else { return 0 }
         let baseName = equirectURL.deletingPathExtension().lastPathComponent
 
+        // Elevation-registration nuisance solved per scan and stamped by
+        // EquirectPostCalibration: image content sits `elevation_offset_deg` LOWER than
+        // geometry predicts, so face sampling shifts down by it — face pixels then land
+        // where the POSE says they should (≈3° ≈ 10 cm at 2 m otherwise; visible both in
+        // the colorize probe and in downstream registration).
+        let elevOffsetFrac = Float((sidecar["elevation_offset_deg"] as? Double) ?? 0) / 180
+
         // Upload bitmap to GPU texture once; reused for all 5 face dispatches.
         let gpuTexture = EquirectGPU.isAvailable
             ? EquirectGPU.makeTexture(from: bitmap.pixels, width: bitmap.width, height: bitmap.height)
@@ -194,10 +201,14 @@ enum EquirectFaceExport {
                     jpeg = PerfDiag.timed("cf_reproject_gpu") {
                         EquirectGPU.renderFace(from: gpuTexture,
                                               rotation: face.rotation,
-                                              faceSize: faceSize)
+                                              faceSize: faceSize,
+                                              vOffsetFrac: elevOffsetFrac)
                     }
                 } else {
-                    jpeg = PerfDiag.timed("cf_reproject_cpu") { renderFace(face.rotation, from: bitmap, side: faceSize) }
+                    jpeg = PerfDiag.timed("cf_reproject_cpu") {
+                        renderFace(face.rotation, from: bitmap, side: faceSize,
+                                   vOffsetFrac: elevOffsetFrac)
+                    }
                 }
                 guard let jpeg else {
                     return
@@ -320,7 +331,8 @@ enum EquirectFaceExport {
     /// Render one face by gnomonic sampling. The face's view direction is `rotation * -Z`,
     /// with the equirect's lon 0 (image center) at the camera frame's -Z — the same axes the
     /// face POSE uses, so imagery and pose stay consistent by construction.
-    private static func renderFace(_ rotation: simd_float3x3, from bmp: Bitmap, side: Int) -> Data? {
+    private static func renderFace(_ rotation: simd_float3x3, from bmp: Bitmap, side: Int,
+                                   vOffsetFrac: Float = 0) -> Data? {
         var buf = [UInt8](repeating: 255, count: side * side * 4)
         for row in 0..<side {
             let ndcV = 1 - 2 * (Float(row) + 0.5) / Float(side)
@@ -333,7 +345,7 @@ enum EquirectFaceExport {
                 // atan2(dir.x, dir.z), so feeding dir = (x, y, -z) makes lon ≡ ψ exactly.
                 let camRay = simd_normalize(rotation * SIMD3<Float>(ndcU, ndcV, -1))
                 let dir = SIMD3<Float>(camRay.x, camRay.y, -camRay.z)
-                let rgb = sample(bmp, dir: dir)
+                let rgb = sample(bmp, dir: dir, vOffsetFrac: vOffsetFrac)
                 let out = (row * side + col) * 4
                 buf[out] = UInt8(max(0, min(255, rgb.x)))
                 buf[out + 1] = UInt8(max(0, min(255, rgb.y)))
@@ -354,11 +366,12 @@ enum EquirectFaceExport {
 
     /// Bilinear equirect sample; longitude wraps, latitude clamps. `dir` is in the equirect
     /// sampling frame (lon 0 = +Z, lat +90° = +Y) — same convention as EquirectPrivacyBlur.
-    private static func sample(_ bmp: Bitmap, dir: SIMD3<Float>) -> SIMD3<Float> {
+    private static func sample(_ bmp: Bitmap, dir: SIMD3<Float>,
+                               vOffsetFrac: Float = 0) -> SIMD3<Float> {
         let lat = asin(max(-1, min(1, dir.y)))
         let lon = atan2(dir.x, dir.z)
         let eqX = (lon + .pi) / (2 * .pi) * Float(bmp.width) - 0.5
-        let eqY = (Float.pi / 2 - lat) / .pi * Float(bmp.height) - 0.5
+        let eqY = (Float.pi / 2 - lat + vOffsetFrac * .pi) / .pi * Float(bmp.height) - 0.5
         let floorX = floor(eqX), floorY = floor(eqY)
         let wgtX = eqX - floorX, wgtY = eqY - floorY
         func texel(_ col: Int, _ row: Int) -> SIMD3<Float> {

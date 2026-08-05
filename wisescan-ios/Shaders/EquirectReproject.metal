@@ -69,6 +69,10 @@ struct EquirectFaceRotatedParams {
     uint faceSize;
     uint equirectWidth;
     uint equirectHeight;
+    // Per-scan elevation-registration nuisance (solver: elevation_offset_deg / 180),
+    // normalized to the v axis: image content sits this much LOWER than geometry
+    // predicts, so sampling shifts down by it. 0 = no correction.
+    float vOffsetFrac;
 };
 
 [[kernel]]
@@ -98,7 +102,7 @@ void equirectToFaceRotated(uint2 gid [[thread_position_in_grid]],
     float lon = atan2(dir.x, dir.z);
 
     float u = (lon + M_PI_F) / (2.0f * M_PI_F);
-    float v = (M_PI_F / 2.0f - lat) / M_PI_F;
+    float v = (M_PI_F / 2.0f - lat) / M_PI_F + params.vOffsetFrac;
 
     constexpr sampler texSampler(s_address::repeat, t_address::clamp_to_edge,
                                  filter::linear, coord::normalized);
