@@ -271,6 +271,89 @@ enum ScanPostprocessor {
         return cleared
     }
 
+    /// Security P1 (post-transfer auto-delete): remove camera-side originals whose bytes
+    /// are VERIFIED on disk — sidecar carries `camera_file_url`, the JPG sits next to it,
+    /// and no `camera_file_deleted` stamp yet. Stamps each sidecar after the camera
+    /// confirms, so the sweep is disk-derived and crash-safe like the download queue; a
+    /// bad-fileUrl OSC error also stamps (the file is already gone — retrying forever
+    /// would be worse). A transport failure aborts the sweep (camera unreachable — every
+    /// later call would just eat its timeout). Never gates anything: pure hygiene,
+    /// re-attempted on every drain/Process pass. The Developer Mode "Keep 360° Originals
+    /// on Camera" toggle turns it off for debugging.
+    nonisolated static func sweepCameraOriginals(rawDataPath: URL) -> Int {
+        guard !UserDefaults.standard.bool(forKey: AppConstants.Key.keepCameraOriginals) else { return 0 }
+        let dir = rawDataPath.appendingPathComponent("equirect_stills")
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return 0 }
+        var deleted = 0
+        for file in files.sorted() where file.hasPrefix("still_") && file.hasSuffix(".json") {
+            let sidecarURL = dir.appendingPathComponent(file)
+            let jpgPath = dir.appendingPathComponent(String(file.dropLast(5)) + ".JPG").path
+            guard let data = try? Data(contentsOf: sidecarURL),
+                  var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let fileUrl = obj["camera_file_url"] as? String,
+                  obj["camera_file_deleted"] == nil,
+                  FileManager.default.fileExists(atPath: jpgPath)
+            else { continue }
+            switch syncCameraDelete(fileUrl: fileUrl) {
+            case .unreachable:
+                log.info("camera delete sweep: camera unreachable — \(deleted) deleted, rest deferred")
+                return deleted
+            case .kept:
+                continue   // camera answered but refused (e.g. busy mid-trigger) — next sweep retries
+            case .deleted, .alreadyGone:
+                obj["camera_file_deleted"] = true
+                if let out = try? JSONSerialization.data(withJSONObject: obj,
+                                                         options: [.prettyPrinted, .sortedKeys]) {
+                    try? out.write(to: sidecarURL, options: .atomic)
+                }
+                deleted += 1
+            }
+        }
+        return deleted
+    }
+
+    private enum CameraDeleteResult { case deleted, alreadyGone, kept, unreachable }
+
+    /// One synchronous `camera.delete` POST against the camera that owns `fileUrl` (base
+    /// URL derived from the file URL itself — no manager state, callable from any queue).
+    /// Short timeout: the sweep runs on utility queues where a vanished camera must fail
+    /// fast, and per-file calls keep the stamps exact.
+    private nonisolated static func syncCameraDelete(fileUrl: String,
+                                                     timeout: TimeInterval = 5) -> CameraDeleteResult {
+        guard let url = URL(string: fileUrl), let host = url.host,
+              var comps = URLComponents(string: "http://\(host)/osc/commands/execute")
+        else { return .kept }
+        if let port = url.port { comps.port = port }
+        guard let endpoint = comps.url,
+              let body = try? JSONSerialization.data(withJSONObject: [
+                  "name": "camera.delete", "parameters": ["fileUrls": [fileUrl]]
+              ])
+        else { return .kept }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json;charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        request.timeoutInterval = timeout
+        var outcome = CameraDeleteResult.unreachable
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { sem.signal() }
+            guard let http = response as? HTTPURLResponse else { return }   // transport failure
+            let obj = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+            let state = obj?["state"] as? String
+            if (200...299).contains(http.statusCode), state == "done" || state == "inProgress" {
+                outcome = .deleted
+                return
+            }
+            // Camera answered but refused. A rejected fileUrl means the file is already
+            // gone (manual delete, SD swap) — stamp it; anything else retries next sweep.
+            let code = (obj?["error"] as? [String: Any])?["code"] as? String ?? ""
+            outcome = code == "invalidParameterValue" ? .alreadyGone : .kept
+        }.resume()
+        _ = sem.wait(timeout: .now() + timeout + 5)
+        return outcome
+    }
+
     /// Synchronous GET against the camera's HTTP server (processOne runs on a background
     /// queue, not in an async context). nil on any failure — the step stays pending and
     /// the next Process retries.
@@ -305,6 +388,7 @@ enum ScanPostprocessor {
         let origId: UUID?
         let pose: [Float]?
         let frameCenter: SIMD3<Float>?
+        let thetaReachable: Bool
     }
 
     /// Guards two Process/Color passes from touching the SAME scan concurrently. Registration
@@ -384,7 +468,8 @@ enum ScanPostprocessor {
                 origRoomPlanURL: orig.flatMap { artifactURL("roomplan.json", in: $0) },
                 origId: orig?.id,
                 pose: scan.location?.imagingPoseMatrix,
-                frameCenter: frameCenter
+                frameCenter: frameCenter,
+                thetaReachable: ThetaCameraManager.shared.isConnected
             )
         }
 
@@ -464,6 +549,17 @@ enum ScanPostprocessor {
             log.info("postprocess \(w.name, privacy: .public): equirect sweep \(fetched)/\(pending.count) downloaded")
             if fetched < pending.count {
                 report("360° camera needed for \(pending.count - fetched) still(s)")
+            }
+        }
+
+        // ── 0.5 CAMERA-SIDE DELETE (security P1) ── best-effort, never gates: originals
+        // whose bytes are verified on disk come off the weakly-secured camera. Gated on
+        // the connection snapshot so a disconnected pass doesn't eat the HTTP timeout,
+        // and ordered BEFORE calibration so the sidecar stamps can't race its pose bake.
+        if w.thetaReachable {
+            let swept = sweepCameraOriginals(rawDataPath: raw)
+            if swept > 0 {
+                log.info("postprocess \(w.name, privacy: .public): deleted \(swept) transferred still(s) from camera")
             }
         }
 

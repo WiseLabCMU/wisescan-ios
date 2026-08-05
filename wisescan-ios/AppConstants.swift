@@ -58,6 +58,7 @@ enum AppConstants {
         static let rigMeasuredDyMeters = "rigMeasuredDyMeters"        // user's tape-measured iPad-camera→360°-lens distance — ALWAYS persisted in METERS (UI may display/accept imperial); 0 = unmeasured
         static let rigHeightUnitImperial = "rigHeightUnitImperial"    // display/entry unit preference for the rig height field (false = metric)
         static let colorizeFrom360Faces = "colorizeFrom360Faces"      // Developer Mode: color the preview mesh from 360° cube faces instead of keyframes (pose-accuracy probe)
+        static let keepCameraOriginals = "keepCameraOriginals"        // Developer Mode: skip the security-P1 sweep that deletes each 360° still from the camera after verified transfer
         static let thetaSSID = "thetaSSID"                            // stored camera Wi-Fi SSID for one-tap join (NEHotspotConfiguration)
         static let thetaPassphrase = "thetaPassphrase"                // stored camera Wi-Fi passphrase. TODO(security P2): move to Keychain + default-credential warning — see design doc Security section
     }
@@ -126,6 +127,11 @@ enum AppConstants {
     /// reads back pose error directly. Face frames carry no depth, so occlusion is off
     /// in this mode — bleed-through is expected and not the signal being judged.
     static let colorizeFrom360Faces: Bool = false
+    /// Developer Mode, debugging only: keep 360° originals on the camera after verified
+    /// transfer. Default OFF = the security-P1 sweep deletes them — raw equirects capture
+    /// bystanders in every direction, and the camera (open AP, factory password = serial
+    /// digits, unauthenticated OSC API) is the weakest place to leave them.
+    static let keepCameraOriginals: Bool = false
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)

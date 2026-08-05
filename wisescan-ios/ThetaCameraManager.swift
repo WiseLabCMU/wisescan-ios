@@ -594,6 +594,7 @@ final class ThetaCameraManager {
         guard !isDrainingStills, !pendingStillDownloads.isEmpty, !isCapturing else { return }
         isDrainingStills = true
         Task {
+            var drainedDirs = Set<URL>()   // scans whose bytes landed — security-P1 sweep targets
             while !pendingStillDownloads.isEmpty && !isCapturing {
                 let item = pendingStillDownloads[0]
                 guard let url = URL(string: item.fileURL) else {
@@ -608,6 +609,7 @@ final class ThetaCameraManager {
                     if FileManager.default.fileExists(atPath: stillsDir.path) {
                         try? data.write(to: stillsDir.appendingPathComponent(
                             String(format: "still_%04d.JPG", item.sequence)))
+                        drainedDirs.insert(item.dir)
                         lastDownload = DownloadOutcome(bytes: data.count, elapsedMs: ms)
                         previewImage = Self.downsampledImage(from: data, maxPixel: 1200)
                         log(.transfer, String(format: "Still #%d downloaded — %.1f MB in %d ms (%d queued)",
@@ -622,6 +624,20 @@ final class ThetaCameraManager {
                 pendingStillDownloads.removeFirst()
             }
             isDrainingStills = false
+            // Security P1: bytes verified on disk → remove the originals from the camera
+            // (sidecar-stamped, so nothing double-fires and Process finishes stragglers).
+            // Skipped while a trigger is in flight — the camera would answer busy; the
+            // next drain re-fires. Detached: the sweep does its own synchronous HTTP.
+            if !isCapturing {
+                for dir in drainedDirs {
+                    Task.detached(priority: .utility) { [weak self] in
+                        let count = ScanPostprocessor.sweepCameraOriginals(rawDataPath: dir)
+                        if count > 0 {
+                            await MainActor.run { self?.log(.transfer, "Deleted \(count) transferred still(s) from camera") }
+                        }
+                    }
+                }
+            }
             // A trigger may have interrupted the drain; if it finished before we exited,
             // pick the queue back up rather than stranding it until the next trigger.
             if !pendingStillDownloads.isEmpty && !isCapturing { drainStillDownloads() }
