@@ -959,6 +959,72 @@ coach it ("ceiling not meshed — tilt the rig up briefly"); and the deferred
 `transforms.json` EQUIRECTANGULAR entries let downstream use the full equirects
 (including up face and partial nadir) rather than only the cut faces.
 
+## Ready-for-main campaign: built + decided (2026-08-05)
+
+The user's close-out list for merging this branch, worked as one campaign. Everything
+below is committed and builds green; device validation of the connect cluster still
+needs one run with automatic signing (first build must register the new
+`com.apple.developer.networking.HotspotConfiguration` capability with the profile).
+
+**Built this campaign:**
+- **Connect UX cluster** (`06754fe`) — wearables-style one-button flow on the dashboard
+  card (Add Camera… sheet storing SSID/passphrase → Connect → Disconnect), programmatic
+  AP join via `NEHotspotConfiguration` (stored network applied on connect; join-then-
+  probe), fluid path-monitor states (network lost → disconnected immediately; network
+  back + stored → silent 2 s settle → probe), and a manual disconnect that removes the
+  hotspot configuration and restores the camera's sleep delay.
+- **Power-save kindness** (same commit) — `setSleepDelaySeconds` replaces the blanket
+  no-sleep: keep-awake (65535 s) only while the capture tab is active; the AR-session
+  idle teardown timer also returns the camera to its 180 s nap. A sleep/wake cycle
+  re-derives the equirect yaw reference, which the per-scan solve now absorbs by design.
+- **Rod-stillness "rig mode"** (`bb35184`) — when the Theta is connected at record
+  start, `FrameCaptureSession.rigLeverArmMeters` (measured rig height, else the 1.0 m
+  rod fallback) scales the angular stillness gate: ω ≤ v_still / L, floored at 0.3 m
+  lever. Small phone rotations are magnified into camera translation by the rod; the
+  translational gate is unchanged.
+- **Ceiling/floor gap coach** (`13dd1fc`) — while recording with the Theta connected, a
+  throttled off-main census of `ARMeshClassification` faces feeds ScanCoach: floor
+  < 1500 faces late in the scan → WARNING "tilt the rig down briefly" (floor outranks —
+  the nadir face is dropped downstream, LiDAR is the floor's only source); ceiling
+  < 500 → guidance "tilt the rig up briefly". Both wait out 25 s of recording;
+  phone-only scans never see them.
+- **Redo Processing** (`f99a723`) — the designed manual re-run finally exists: on scans
+  with 360° stills the Process button becomes a long-press menu with "Redo 360°
+  Calibration", which strips the calibration provenance stamps and runs the normal
+  engine (fresh solve against current Settings). Covers remeasured rig height /
+  remounted camera / solver doubt — the cases the version-bump path can't.
+- **Security P1** (`40b1d2a`) — post-transfer auto-delete per the security plan:
+  disk-derived sweep (JPG verified on device + `camera_file_url` + no
+  `camera_file_deleted` stamp) issues per-file `camera.delete`, stamps sidecars, runs
+  from the live drain loop (files leave the camera seconds after transfer, mid-scan)
+  and from the Process sweep for stragglers. Busy retries; already-gone stamps;
+  unreachable aborts the pass. Developer Mode "Keep 360° Originals on Camera" toggle
+  (default OFF, reset on dev-mode exit) for debugging.
+
+**Residual decision (the "is the residual still useful?" question):** the solve
+residual stays a DIAGNOSTIC, never a user-facing gate. It is logged per solve and
+stamped into every sidecar (`rig_calibration_residual_px_rms`) — useful offline and for
+downstream trust decisions — but absolute px thresholds went stale with every solver
+change (square-format fix, elevation cut, camera-frame lookup, mirror fix) and the
+value is scene-dependent (edge density, room size). Parameter REPEATABILITY across
+scans (dy/dLat/pitch/elev) is the quality metric. Accordingly the capture-view 360°
+chip no longer colors by profile residual; it reports state (rig prior ready / new
+camera / none — all "solves at Process"). The green/yellow px constants survive only
+inside the pre-scan calibration ritual (Dashboard Calibrate + overlay), which the pivot
+already designates an optional diagnostics bench — recommended follow-up: retire it to
+a dev-gated bench in its own pass, not in this campaign.
+
+**Deliberately deferred (user-confirmed, downstream tests first):** USB-PTP batch
+download; `StillSource` abstraction (stored data is already camera-agnostic);
+360° coverage marking — user is weighing a cheaper alternative, a live AR marker at
+each still's estimated capture position (~one entity per still, trivial cost);
+cube-face FOV 90° vs ~100° overlap; `transforms.json` EQUIRECTANGULAR entries.
+
+**BLE trigger — next focused session:** camera-specific GATT pairing (Theta's BLE API
+needs its own auth/pairing flow), sub-second trigger without Wi-Fi captivity. Scoped
+out of this campaign as the one item needing dedicated protocol work; the connect
+cluster's UX (stored camera identity on the dashboard card) is built to absorb it.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the

@@ -195,21 +195,22 @@ struct CaptureView: View {
         }
     }
 
-    /// Rig-geometry state line for the 360° source chip: green/yellow/red by residual
-    /// of the ROLLING profile (refined by each scan's Process-step solve), red if the
-    /// stored profile belongs to a different camera, gray before any solve.
+    /// Rig-geometry state line for the 360° source chip. Post-pivot the profile is only
+    /// the per-scan Process solve's warm prior, so the chip reports STATE (prior ready /
+    /// other camera / none) — not residual-colored quality: absolute px thresholds went
+    /// stale with every solver change (square-format fix, elevation cut, camera-frame
+    /// lookup, mirror fix) and the residual is scene-dependent. It stays a logged +
+    /// sidecar-stamped diagnostic; parameter repeatability is the quality metric.
     @ViewBuilder
     private var thetaCalibrationChip: some View {
         let status: (color: Color, label: String) = {
             if let profile = rigCalibrationManager.activeProfile, profile.isSolved {
-                let color: Color = profile.residualPx <= AppConstants.calibrationResidualGreenPx ? .green
-                    : profile.residualPx <= AppConstants.calibrationResidualYellowPx ? .yellow : .red
-                return (color, String(format: "Calibrated · %.1f px", profile.residualPx))
+                return (.green, "Rig prior ready — refines at Process")
             }
             if rigCalibrationManager.currentProfile?.isSolved == true {
-                return (.red, "Calibration from another camera")
+                return (.yellow, "New camera — fresh solve at Process")
             }
-            return (.gray, "Rig prior — not calibrated")
+            return (.gray, "No rig prior — solves at Process")
         }()
         HStack(spacing: 5) {
             Circle().fill(status.color).frame(width: 7, height: 7)
