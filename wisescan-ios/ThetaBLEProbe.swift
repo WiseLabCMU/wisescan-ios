@@ -32,11 +32,26 @@ final class ThetaBLEProbe: NSObject {
     // WLAN Control — Network Type: 0 OFF / 1 Direct (camera's own AP) / 2 Client.
     static let wlanService = CBUUID(string: "F37F568F-9071-445D-A938-5441F2E82399")
     static let networkTypeChar = CBUUID(string: "9111CDD0-9F01-45C4-A2D4-E09E8FB0424D")
+    // Bluetooth Control — Auth Bluetooth Device (write-only, UTF-8 UUID string).
+    // Field finding (360ble1-R2): the X enumerates its FULL GATT unauthenticated but
+    // every functional read/write returns "handle is invalid" until this is written —
+    // the spec's "X does not require these steps" evidently means only the Wi-Fi-side
+    // UUID registration; the auth write itself still gates. Probe: a self-generated
+    // UUID (persisted, no camera._setBluetoothDevice) — does the X accept it?
+    static let authService = CBUUID(string: "0F291746-0C80-4726-87A7-3C501FD3B4B6")
+    static let authChar = CBUUID(string: "EBAFB2F0-0E0F-40A2-A84F-E2F098DC13C3")
+    // Camera Control Command v2 — Get Info (UTF-8 JSON: model/serial/firmware/MACs/
+    // uptime in ONE read; X ≥2.20.1). The X-native identity path.
+    static let ccv2Service = CBUUID(string: "B6AC7A7E-8C01-4A52-B188-68D53DF53EA2")
+    static let ccv2GetInfoChar = CBUUID(string: "A0452E2D-C7D8-4314-8CD6-7B8BBAB4D523")
 
     struct Found: Identifiable {
         let id: UUID          // CBPeripheral.identifier
         let name: String
         var rssi: Int
+        /// Field finding (360ble1): the X advertises its bare 8-digit serial — same
+        /// convention as V/Z1. Float those to the top and tag them in the UI.
+        var isLikelyTheta: Bool { name.count == 8 && name.allSatisfy(\.isNumber) }
     }
 
     private(set) var isScanning = false
@@ -48,6 +63,19 @@ final class ThetaBLEProbe: NSObject {
     private var peripheral: CBPeripheral?
     private var knownChars: [CBUUID: CBCharacteristic] = [:]
     private var wantsScan = false
+    private var connectWatchdog: Task<Void, Never>?
+    /// One re-discovery pass per connection, run after the auth write is accepted —
+    /// probes whether auth unlocks handles (and whether hidden services appear).
+    private var didPostAuthRediscover = false
+
+    /// Self-generated auth identity, persisted so the camera sees the SAME central
+    /// UUID across sessions (V/Z1 semantics; harmless if the X ignores it).
+    private var authUUID: String {
+        if let stored = UserDefaults.standard.string(forKey: "bleProbeAuthUUID") { return stored }
+        let fresh = UUID().uuidString
+        UserDefaults.standard.set(fresh, forKey: "bleProbeAuthUUID")
+        return fresh
+    }
     private static let oslog = Logger(subsystem: "org.arenaxr.scan4d", category: "bleprobe")
 
     // MARK: - Actions
@@ -81,6 +109,15 @@ final class ThetaBLEProbe: NSObject {
         target.delegate = self
         log("Connecting to \(target.name ?? id.uuidString)…")
         central.connect(target)
+        // CBCentralManager.connect pends SILENTLY forever — without this, a camera
+        // that stopped listening (BLE idles when the X sleeps) looks like a dead tap
+        // (360ble1: zero feedback was indistinguishable from a missed touch).
+        connectWatchdog?.cancel()
+        connectWatchdog = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard let self, !Task.isCancelled, self.connectedName == nil, self.peripheral != nil else { return }
+            self.log("⏱ still connecting after 10 s — wake the camera (its BLE idles in sleep), or toggle camera Bluetooth, then rescan")
+        }
     }
 
     func disconnect() {
@@ -88,6 +125,7 @@ final class ThetaBLEProbe: NSObject {
         peripheral = nil
         connectedName = nil
         knownChars.removeAll()
+        didPostAuthRediscover = false
     }
 
     /// Probe #4: one-byte 1 → the camera should click (notify logs status bytes).
@@ -158,12 +196,17 @@ extension ThetaBLEProbe: CBCentralManagerDelegate {
             found[idx].rssi = RSSI.intValue
         } else {
             found.append(Found(id: peripheral.identifier, name: name, rssi: RSSI.intValue))
-            found.sort { $0.rssi > $1.rssi }
+            // Likely-Theta rows first (8-digit serial names), then by signal.
+            found.sort {
+                if $0.isLikelyTheta != $1.isLikelyTheta { return $0.isLikelyTheta }
+                return $0.rssi > $1.rssi
+            }
             log("Found \"\(name)\" rssi=\(RSSI.intValue)\(advName != nil ? " (advertised)" : " (GAP name)")")
         }
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        connectWatchdog?.cancel()
         connectedName = peripheral.name ?? peripheral.identifier.uuidString
         log("✅ Connected \(connectedName ?? "?") — discovering ALL services…")
         peripheral.discoverServices(nil)
@@ -198,8 +241,13 @@ extension ThetaBLEProbe: CBPeripheralDelegate {
             log("  char \(Self.shortUUID(char.uuid)) [\(Self.describeProps(char.properties))]")
             knownChars[char.uuid] = char
             switch char.uuid {
-            case Self.modelNumberChar, Self.serialNumberChar, Self.firmwareChar:
-                peripheral.readValue(for: char)   // probe #3: unauthenticated identity read
+            case Self.authChar:
+                // Auth FIRST — everything else answered "handle is invalid" without it
+                // (360ble1-R2). Success path re-discovers and re-reads (didWriteValueFor).
+                log("→ auth write \(authUUID)")
+                peripheral.writeValue(Data(authUUID.utf8), for: char, type: .withResponse)
+            case Self.modelNumberChar, Self.serialNumberChar, Self.firmwareChar, Self.ccv2GetInfoChar:
+                peripheral.readValue(for: char)   // pre-auth attempt = comparison data
             case Self.takePictureChar, Self.networkTypeChar:
                 if char.properties.contains(.notify) { peripheral.setNotifyValue(true, for: char) }
                 if char.properties.contains(.read) { peripheral.readValue(for: char) }
@@ -214,6 +262,7 @@ extension ThetaBLEProbe: CBPeripheralDelegate {
         case Self.modelNumberChar: "Model"
         case Self.serialNumberChar: "Serial"
         case Self.firmwareChar: "Firmware"
+        case Self.ccv2GetInfoChar: "GetInfo(v2)"
         case Self.takePictureChar: "TakePicture(status)"
         case Self.networkTypeChar: "NetworkType"
         default: Self.shortUUID(characteristic.uuid)
@@ -234,6 +283,18 @@ extension ThetaBLEProbe: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if characteristic.uuid == Self.authChar {
+            if let error {
+                log("❌ auth: \(error.localizedDescription)")
+                return
+            }
+            log("✅ auth accepted — re-discovering (do handles unlock? do hidden services appear?)")
+            if !didPostAuthRediscover {
+                didPostAuthRediscover = true
+                peripheral.discoverServices(nil)
+            }
+            return
+        }
         let name = Self.shortUUID(characteristic.uuid)
         log(error.map { "❌ write \(name): \($0.localizedDescription)" } ?? "✅ write \(name) accepted")
     }

@@ -340,13 +340,23 @@ struct ThetaBLEProbeCard: View {
             } else {
                 ForEach(probe.found) { item in
                     Button(action: { probe.connect(item.id) }, label: {
-                        HStack {
-                            Text(item.name).foregroundColor(.white)
+                        HStack(spacing: 6) {
+                            if item.isLikelyTheta {
+                                Image(systemName: "camera.aperture").foregroundColor(.cyan)
+                                Text(item.name).bold().foregroundColor(.cyan)
+                                Text("Theta?").foregroundColor(.cyan.opacity(0.7))
+                            } else {
+                                Text(item.name).foregroundColor(.white)
+                            }
                             Spacer()
                             Text("\(item.rssi) dBm").foregroundColor(.white.opacity(0.6))
+                            Image(systemName: "chevron.right").foregroundColor(.white.opacity(0.4))
                         }
                         .font(.caption)
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())   // whole row tappable — the Spacer gap ate taps
                     })
+                    .buttonStyle(.plain)
                 }
             }
 

@@ -1130,6 +1130,34 @@ also probe data), and Take Picture / Wake AP buttons drive the two write probes.
 All findings land in the on-card log + unified log (category `bleprobe`). Camera-side
 prerequisite: Bluetooth ON in the X's touchscreen menu.**
 
+**BLE field rounds 1–2 (360ble1 / 360ble1-R2, 2026-08-05 evening):**
+- **Probe #1 ANSWERED:** the X advertises its bare 8-digit serial ("14100112",
+  advertised name) — same convention as V/Z1. Production scan filter = 8-digit-name
+  match / exact stored serial.
+- **Probe #2 ANSWERED:** full GATT enumerates while UNAUTHENTICATED — 10 services
+  including Bluetooth Control (0F291746, auth char EBAFB2F0 write-only), Camera
+  Information (9A5ED1C5), WLAN Control (F37F568F, Network Type 9111CDD0 R/W/N), and
+  Camera Control Command v2 (B6AC7A7E). **The v1 Shooting Control service (1D0F3602)
+  is ABSENT on X 2.92.0** — Take Picture must ride the v2 command channel (or appear
+  post-auth; round 3 tells).
+- **Probe #3 ANSWERED (negatively):** every functional read/write — Camera Info reads,
+  Network Type read AND write — returns "The handle is invalid" until authenticated.
+  The spec's "X does not require these steps" evidently means only the Wi-Fi-side
+  UUID registration; the AUTH WRITE still gates everything. Wake AP therefore never
+  fired (and the Wi-Fi side's repeated /osc/info timeouts that evening were the
+  camera's AP napping — exactly the case BLE wake exists for).
+- **Round-3 build (ready):** on connect the probe now auto-writes a self-generated
+  persisted UUID (UTF-8 string, no camera._setBluetoothDevice registration) to the
+  auth char, then re-discovers and re-reads — including Camera Control Command v2
+  **Get Info (A0452E2D)**, which returns model/serial/firmware/MACs/uptime as ONE
+  JSON read (the X-native identity path, X ≥2.20.1). Bench also hardened: likely-
+  Theta rows float to top tagged in cyan, whole row tappable (round 1's dead taps =
+  Spacer gap not hit-testable), and a 10 s connect watchdog logs when
+  CBCentralManager.connect pends silently (it never times out on its own).
+- **Round-3 open questions:** does the X accept an unregistered auth UUID? Do handles
+  unlock after it (Get Info JSON readable, Network Type writable)? Does a shooting
+  service appear post-auth, or does Take Picture require the v2 command protocol?**
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
