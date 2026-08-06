@@ -1398,18 +1398,66 @@ buttons. Watch for: does the Z1 advertise pre-registration? does auth unlock the
 chars (Camera Information reads, TakePicture 0x01, NetworkType 1)? is CCv2 present
 (needs ≥3.10.2)?
 
+## Z1 BLE: root cause was OURS, and the Z1's real contract (2026-08-06, 360ble9/10)
+
+**Root cause of "Add Camera finds the Z1 but fails to connect":** not the camera.
+360ble9 shows the Z1 (serial 34103606, fw 3.60.3) connecting and serving
+GetInfo/GetState/GetState2 for ~25 s while **unregistered and unbonded**. Our
+readiness gate required all four CCv2 characteristics; a Z1 exposes only the
+read-only subset (GetInfo A0452E2D, GetState 083D92B0, GetState2 8881CE4E,
+GetOptions 7CFFAAE3, NotifyState D32CE140) and **no SetOptions or Shutter**, so the
+gate could never pass, the 12 s link watchdog fired, and `cancelPeripheralConnection`
+produced the log's bare "link dropped" — the missing error text is the proof it was
+our cancel, since a camera-initiated drop reports `CBError.peripheralDisconnected`.
+Fixed in `3c0aa18` (minimum working set + capability flags + discovery-complete
+detection + model gate before the 60 s write + prefilled hand-off + Cancel).
+
+**"No PIN on the camera screen" is CORRECT Z1 behavior, not a fault.** Spec verbatim
+(theta-bluetooth-api/getting_started.md): *"RICOH THETA authenticates a central
+device via Web API and Bluetooth API. The camera does not use pairing."* The official
+SDK confirms the split — `ThetaBle.kt` calls `tryBond()` **only** when no UUID is
+supplied (the X path); supplying a UUID (the V/Z1 path) never bonds. Never build
+passkey UI for a Z1.
+
+**The Z1's real BLE contract (spec + SDK, for the future increment):**
+- Two characteristic tables: *"Auth Bluetooth Device required (V/Z1)"* = the whole v1
+  family, and *"Auth Bluetooth Device not required (Z1/X)"* = Camera Control Command
+  v2 only, footnoted Z1 ≥ **3.10.2** / X ≥ 2.20.1. That is exactly why our Z1 read
+  identity with no auth while every v1 char and the auth char itself answered
+  handle-invalid.
+- Enabling control: `camera._setBluetoothDevice {uuid}` + `_bluetoothPower: ON` over
+  **Wi-Fi/OSC** (X is unsupported for this command — the two auth schemes are
+  mutually exclusive by model), then write that UUID to EBAFB2F0 on service 0F291746
+  over BLE. Registration persists; **the auth write does NOT — it must be repeated on
+  every BLE session, and again after any sleep/wake**, which makes it a step inside
+  `establishLink`, not a one-time pairing.
+- Wake path differs too: Z1 uses the v1 Camera Power characteristic (B58CE84C, write
+  0x01), not the X's `SetOptions {"cameraPower":"on"}`.
+- **Z1 SSID prefix is `YN`** (SDK `ThetaModel.kt`; X = `YR`) — our `THETAYL` guess was
+  wrong and is corrected to `THETAYN<serial>.OSC`.
+
+**Decision: ship Z1 Wi-Fi-only first; Z1 BLE is a separate, now fully-specified
+increment.** The Wi-Fi path is already ready (firmware gate, SSID map, resolution-
+agnostic solver + face cut), and the user's goal is a low-light comparison scan that
+needs no BLE. Gate the increment on two probe answers: (1) does Camera Power wake a
+sleeping Z1 after auth, and (2) does the Z1 push `_latestFileUrl` over CCv2
+NotifyState? Without (2), a BLE shutter still needs an OSC round-trip for the file
+URL, which erases most of the win; without (1), the increment isn't worth a
+per-connection auth state machine at all.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
   iOS SDK expose still trigger + dual-fisheye download + on-device stitching, or only a
   subset?
+  - The developer-agreement approval for the Insta360 SDK takes up to three working days. The iOS SDK provides access to dual-fisheye download and on-device stitching, but may not expose all functionalities available in the SDK.
 - Cube-face resolution/overlap: is 90° FOV per face optimal for splat training, or do
   slightly-overlapping faces (e.g. 100° FOV) help feature matching at face seams?
 - Where does dual-fisheye → equirect stitching run for Insta360 (on device, in the
   camera, or in wisescan-ingestion)?
+  - The stitching of dual-fisheye images to create equirectangular panoramas for Insta360 cameras typically occurs during the image processing phase after the footage is ingested. This means that the stitching is not performed directly on the camera device itself.
 - Trigger→exposure latency variance per camera: constant enough to calibrate once, or
   does it need per-still estimation from camera timestamps?
 - How does the coverage overlay communicate "covered by 360° still pending transfer"
   (post-process mode) vs "confirmed on device" — a third visual state or optimistic
   clear with post-scan reconciliation report?
-
