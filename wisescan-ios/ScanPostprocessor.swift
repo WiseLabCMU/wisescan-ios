@@ -667,7 +667,8 @@ enum ScanPostprocessor {
             if let mesh = try? Data(contentsOf: dir.appendingPathComponent("mesh.obj")),
                let colors = VertexColorAccumulator.colorizeFromSavedFrames(
                    objData: mesh, rawDataDir: raw,
-                   progress: { p in report("Coloring \(Int(p * 100))%") }) {
+                   progress: { p in report("Coloring \(Int(p * 100))%") },
+                   phase: { step in report(step) }) {
                 try? colors.write(to: dir.appendingPathComponent("colors.bin"), options: .atomic)
                 outcome.didColorize = true
             }

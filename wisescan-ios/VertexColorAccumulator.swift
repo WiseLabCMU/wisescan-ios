@@ -209,12 +209,19 @@ enum VertexColorAccumulator {
         return stems
     }
 
-    static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?, progress: ((Double) -> Void)? = nil) -> Data? {
+    /// `phase` names the step currently running; `progress` reports the per-frame
+    /// fraction once projection starts. The setup work before the first frame is not
+    /// instant on a large scan — mesh parse, normals, and (faces probe) a ~20 s cube-face
+    /// cut — so a bare "Coloring…" looked stalled. Callers show whichever arrives last.
+    static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?,
+                                        progress: ((Double) -> Void)? = nil,
+                                        phase: ((String) -> Void)? = nil) -> Data? {
         guard let rawDir = rawDataDir else { return nil }
         let startTime = CACurrentMediaTime()
         let fm = FileManager.default
 
         // Parse OBJ vertices using shared parser
+        phase?("Reading mesh…")
         let parsed: MeshParser.OBJData? = PerfDiag.timed("vc_obj_parse") { MeshParser.parseOBJ(from: objData) }
         guard let parsed else { return nil }
         var vertices = parsed.vertices
@@ -240,6 +247,7 @@ enum VertexColorAccumulator {
         // Per-vertex surface normals (area-weighted face normals) drive the
         // view-angle weight. Sign/winding may be inconsistent across the mesh,
         // so the weight uses |normal · viewDir| and is sign-agnostic.
+        phase?("Computing surface normals…")
         var normals = PerfDiag.timed("vc_normals") {
             MeshParser.accumulateVertexNormals(vertices: vertices, faces: parsed.faces)
         }
@@ -268,6 +276,7 @@ enum VertexColorAccumulator {
                 Self.log.warning("Color-from-360°-faces requires a privacy-filter-OFF (consent) or people-free scan — deferred-blur masks don't exist for face frames. Keeping existing colors.")
                 return nil
             }
+            phase?("Cutting 360° cube faces…")
             guard let dirs = EquirectFaceExport.generateFaceFramesForColorize(rawDataDir: rawDir) else {
                 Self.log.warning("Color-from-360°-faces is ON but no faces could be generated (no stills / no baked poses) — aborting colorize")
                 return nil
@@ -289,6 +298,7 @@ enum VertexColorAccumulator {
         guard !cameraFiles.isEmpty else { return nil }
 
         // Sample up to maxColorizationFrames, preferring sharp keyframes (see helper).
+        phase?("Selecting frames…")
         let sampledFiles = Self.selectColorizationFrames(
             from: cameraFiles, max: AppConstants.maxColorizationFrames,
             keyframeStems: Self.keyframeStems(rawDir: rawDir)
@@ -617,6 +627,7 @@ enum VertexColorAccumulator {
         // Scratch buffers reused across vertices (sized K) to avoid per-vertex allocations.
         var sV = [Float](repeating: 0, count: K)
         var sW = [Float](repeating: 0, count: K)
+        phase?("Blending colors…")
         let medianStart = CACurrentMediaTime()
 
         var data = Data(count: vertexCount * MemoryLayout<SIMD4<Float>>.stride)

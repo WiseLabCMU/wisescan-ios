@@ -798,6 +798,11 @@ struct ScansListView: View {
                         DispatchQueue.main.async {
                             self.bulkProgressMessage = "Coloring \(idx + 1)/\(totalScans) — \(scanName): \(pct)%"
                         }
+                    },
+                    phase: { step in
+                        DispatchQueue.main.async {
+                            self.bulkProgressMessage = "Coloring \(idx + 1)/\(totalScans) — \(scanName): \(step)"
+                        }
                     }
                 )
 
@@ -1789,6 +1794,9 @@ struct ScanCard: View {
                     guard pct != lastPct else { return } // throttle to whole-percent changes
                     lastPct = pct
                     DispatchQueue.main.async { self.coloringMessage = "Coloring \(pct)%" }
+                },
+                phase: { step in
+                    DispatchQueue.main.async { self.coloringMessage = step }
                 }
             )
 

@@ -880,6 +880,9 @@ struct LocationDetailView: View {
                         guard pct != lastPct else { return } // throttle to whole-percent changes
                         lastPct = pct
                         DispatchQueue.main.async { self.bulkColoringMessages[info.scan.id] = "Coloring \(pct)%" }
+                    },
+                    phase: { step in
+                        DispatchQueue.main.async { self.bulkColoringMessages[info.scan.id] = step }
                     }
                 )
 
