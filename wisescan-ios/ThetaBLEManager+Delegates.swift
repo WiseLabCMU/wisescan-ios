@@ -104,29 +104,40 @@ extension ThetaBLEManager: CBPeripheralDelegate {
         guard error == nil, let data = characteristic.value,
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
         switch characteristic.uuid {
-        case Self.ccv2GetInfoChar:
-            if let pending = infoPending {
-                clearWatchdog("info")
-                infoPending = nil
-                pending.resume(returning: Identity(
-                    model: obj["model"] as? String ?? "RICOH THETA",
-                    serial: obj["serialNumber"] as? String ?? "",
-                    firmware: obj["firmwareVersion"] as? String ?? ""))
-            }
-        case Self.ccv2GetStateChar:
-            if let url = obj["_latestFileUrl"] as? String { lastFileUrl = url }
-        case Self.ccv2NotifyStateChar:
-            if let url = obj["_latestFileUrl"] as? String, !url.isEmpty, url != lastFileUrl {
-                lastFileUrl = url
-                if let pending = shutterPending {
-                    clearWatchdog("shutter")
-                    shutterPending = nil
-                    pending.resume(returning: url)
-                }
-            }
-        default:
-            break
+        case Self.ccv2GetInfoChar: resolveIdentity(obj)
+        case Self.ccv2GetStateChar: lastFileUrl = (obj["_latestFileUrl"] as? String) ?? lastFileUrl
+        case Self.ccv2GetOptionsChar: resolveOptions(obj)
+        case Self.ccv2NotifyStateChar: resolveNotifyState(obj)
+        default: break
         }
+    }
+
+    private func resolveIdentity(_ obj: [String: Any]) {
+        guard let pending = infoPending else { return }
+        clearWatchdog("info")
+        infoPending = nil
+        pending.resume(returning: Identity(
+            model: obj["model"] as? String ?? "RICOH THETA",
+            serial: obj["serialNumber"] as? String ?? "",
+            firmware: obj["firmwareVersion"] as? String ?? ""))
+    }
+
+    private func resolveOptions(_ obj: [String: Any]) {
+        guard let pending = optionsPending else { return }
+        clearWatchdog("options")
+        optionsPending = nil
+        pending.resume(returning: obj["_networkType"] as? String)
+    }
+
+    /// NotifyState pushes CHANGES only — a new `_latestFileUrl` is the shutter's
+    /// completion signal and doubles as the download ticket.
+    private func resolveNotifyState(_ obj: [String: Any]) {
+        guard let url = obj["_latestFileUrl"] as? String, !url.isEmpty, url != lastFileUrl else { return }
+        lastFileUrl = url
+        guard let pending = shutterPending else { return }
+        clearWatchdog("shutter")
+        shutterPending = nil
+        pending.resume(returning: url)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {

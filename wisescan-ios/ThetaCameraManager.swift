@@ -365,6 +365,7 @@ final class ThetaCameraManager {
                 ? " — if you meant another camera, switch it on the card"
                 : " — is that camera powered on with Wi-Fi enabled?"
             log(.connection, "⚠️ Couldn't join \(ssid)\(hint)")
+            await warnIfClientMode()
         } catch {
             log(.connection, "⚠️ Wi-Fi join failed for \(ssid) (\(Self.describe(error))) — trying camera anyway")
         }
@@ -743,6 +744,44 @@ final class ThetaCameraManager {
         if model.contains("THETA X") { return "THETAYR\(serial).OSC" }
         if model.contains("Z1") { return "THETAYN\(serial).OSC" }
         return nil
+    }
+
+    // MARK: - Camera storage + WLAN mode
+
+    /// File count on the camera (nil when it can't be asked).
+    func cameraFileCount() async -> Int? {
+        guard isConnected else { return nil }
+        return try? await fetchFileCount()
+    }
+
+    /// Erase every photo/video on the camera. Caller confirms first — this is
+    /// irreversible and unrelated to the per-scan security sweep.
+    @discardableResult
+    func deleteAllCameraFiles() async -> Bool {
+        guard isConnected else { return false }
+        do {
+            let before = (try? await fetchFileCount()) ?? 0
+            try await deleteAllFiles()
+            let after = (try? await fetchFileCount()) ?? 0
+            log(.transfer, "Erased camera storage — \(before) file(s) before, \(after) after")
+            return true
+        } catch {
+            log(.transfer, "⚠️ Erase failed: \(Self.describe(error))")
+            return false
+        }
+    }
+
+    /// Client-mode (CL) gotcha: the camera has joined ANOTHER network, so it never
+    /// advertises its own SSID and no amount of retrying will join it — but it looks
+    /// perfectly healthy. Only BLE can ask while Wi-Fi is unreachable, so this runs
+    /// off the bonded link when there is one, and stays silent otherwise.
+    private func warnIfClientMode() async {
+        guard let mode = await ThetaBLEManager.shared.readNetworkType() else { return }
+        if mode.uppercased().hasPrefix("CL") {
+            log(.connection, "⚠️ The camera is in CLIENT (CL) Wi-Fi mode — it joined another "
+                + "network and isn't broadcasting its own. Switch it to AP/Direct mode on the "
+                + "camera, or use Wake Camera to bring its access point back.")
+        }
     }
 
     /// Forget the ACTIVE camera: drop its roster entry and its Wi-Fi/hotspot/BLE

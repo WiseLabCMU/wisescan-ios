@@ -63,6 +63,7 @@ final class ThetaBLEManager: NSObject {
     static let ccv2NotifyStateChar = CBUUID(string: "D32CE140-B0C2-4C07-AF15-2301B5057B8C")
     static let ccv2SetOptionsChar = CBUUID(string: "F0BCD2F9-5862-4653-B50D-80DC51E8CB82")
     static let ccv2ShutterChar = CBUUID(string: "6E2DEEBE-88B0-42A5-829D-1B2C6ABCE750")
+    static let ccv2GetOptionsChar = CBUUID(string: "7CFFAAE3-8467-4D0C-A9DD-7F70B4F52863")
 
     /// `internal(set)` rather than `private(set)`: the delegate callbacks live in
     /// ThetaBLEManager+Delegates.swift and Swift's `private` does not cross files.
@@ -100,6 +101,7 @@ final class ThetaBLEManager: NSObject {
     var infoPending: CheckedContinuation<Identity, Error>?
     var writePending: [CBUUID: CheckedContinuation<Void, Error>] = [:]
     var shutterPending: CheckedContinuation<String, Error>?
+    var optionsPending: CheckedContinuation<String?, Never>?
     /// One watchdog per slot key ("scan", "link", …, or a char UUID string), cancelled
     /// the moment its slot resumes — a stale long watchdog (pairing's 60 s) must never
     /// fire into a LATER pending operation on the same slot.
@@ -181,6 +183,25 @@ final class ThetaBLEManager: NSObject {
                 self?.shutterPending?.resume(throwing: BLEError.timeout("no capture confirmation"))
                 self?.shutterPending = nil
             }
+        }
+    }
+
+    /// Ask the camera which WLAN mode it is in ("AP" / "CL") over BLE — the only
+    /// channel that works when the camera is in CL mode and its AP is therefore
+    /// absent. Probe round 7 proved GetOptions answers on the NOTIFY, not the read,
+    /// so the response arrives via didUpdateValueFor. nil when unavailable.
+    func readNetworkType() async -> String? {
+        guard (try? await ensureLinkReady()) != nil, isLinkReady,
+              let peripheral, let char = chars[Self.ccv2GetOptionsChar] else { return nil }
+        if char.properties.contains(.notify) { peripheral.setNotifyValue(true, for: char) }
+        return await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
+            optionsPending = cont
+            armWatchdog("options", 5) { [weak self] in
+                self?.optionsPending?.resume(returning: nil)
+                self?.optionsPending = nil
+            }
+            peripheral.writeValue(Data("{\"optionNames\":[\"_networkType\"]}".utf8),
+                                  for: char, type: .withResponse)
         }
     }
 
@@ -312,6 +333,7 @@ final class ThetaBLEManager: NSObject {
         linkPending?.resume(throwing: error); linkPending = nil
         infoPending?.resume(throwing: error); infoPending = nil
         shutterPending?.resume(throwing: error); shutterPending = nil
+        optionsPending?.resume(returning: nil); optionsPending = nil
         for (_, cont) in writePending { cont.resume(throwing: error) }
         writePending.removeAll()
     }

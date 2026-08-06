@@ -96,6 +96,37 @@ extension ThetaCameraManager {
         if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setOptions failed for _bluetoothPower") }
     }
 
+    /// Total files on the camera (`camera.listFiles` with entryCount 0 returns just
+    /// the count — no entries, no thumbnails). fileType: "all" | "image" | "video".
+    func fetchFileCount(fileType: String = "all") async throws -> Int {
+        let body: [String: Any] = ["name": "camera.listFiles",
+                                   "parameters": ["fileType": fileType, "entryCount": 0,
+                                                  "maxThumbSize": 0, "startPosition": 0]]
+        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCListFilesResponse.self)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "listFiles failed") }
+        return response.results?.totalEntries ?? 0
+    }
+
+    /// Bulk erase. The spec's special values ("all" / "image" / "video") must be sent
+    /// ALONE in fileUrls. Not permitted during video recording.
+    func deleteAllFiles(fileType: String = "all") async throws {
+        let body: [String: Any] = ["name": "camera.delete",
+                                   "parameters": ["fileUrls": [fileType]]]
+        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCCommandResponse.self)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "delete failed") }
+    }
+
+    /// Current WLAN mode as the camera reports it — "AP" (its own access point) or
+    /// "CL" (joined someone else's network). CL is the field gotcha: the camera looks
+    /// on and healthy but never advertises its SSID, so joining silently can't work.
+    func fetchNetworkType() async throws -> String? {
+        let body: [String: Any] = ["name": "camera.getOptions",
+                                   "parameters": ["optionNames": ["_networkType"]]]
+        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCOptionsResponse.self)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "getOptions failed") }
+        return response.results?.options.networkType
+    }
+
     /// Fires `camera.takePicture` and resolves to the saved file URL (polls if async).
     func triggerStill() async throws -> String {
         switch try await execute(name: "camera.takePicture") {
@@ -258,12 +289,25 @@ private struct OSCCommandResponse: Decodable {
     let error: OSCErrorBody?
 }
 
+private struct OSCListFilesResponse: Decodable {
+    struct Results: Decodable { let totalEntries: Int? }
+    let results: Results?
+    let error: OSCErrorBody?
+}
+
 private struct OSCOptionsResponse: Decodable {
     struct Results: Decodable { let options: Options }
     struct Options: Decodable {
         let fileFormat: FileFormat?
         let fileFormatSupport: [FileFormat]?
-        let _topBottomCorrection: String?
+        let topBottomCorrection: String?
+        let networkType: String?
+        // RICOH's extension options are underscore-prefixed on the wire.
+        enum CodingKeys: String, CodingKey {
+            case fileFormat, fileFormatSupport
+            case topBottomCorrection = "_topBottomCorrection"
+            case networkType = "_networkType"
+        }
     }
     struct FileFormat: Decodable { let type: String?; let width: Int?; let height: Int? }
     let results: Results?

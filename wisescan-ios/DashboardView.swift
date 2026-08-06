@@ -540,6 +540,11 @@ struct ThetaCameraCard: View {
     /// without this, a second camera could only overwrite the first (field: the Z1
     /// probe run kept trying the X's SSID because no add-another path existed).
     @State private var sheetIsAdding = false
+    /// Camera storage panel: file count + bulk erase (the vendor apps make this
+    /// painful, and a rig session leaves hundreds of stills behind).
+    @State private var cameraFileCount: Int?
+    @State private var storageBusy = false
+    @State private var showEraseConfirm = false
 
     /// Wearables-style single action: what the primary button does right now.
     private enum PrimaryAction { case add, connectStored, disconnect }
@@ -736,6 +741,50 @@ struct ThetaCameraCard: View {
                 }
                 .font(.caption2)
                 .foregroundColor(.cyan)
+            }
+
+            // Camera storage: count on demand, erase with confirmation. Distinct from
+            // the per-scan security sweep — this wipes EVERYTHING on the camera.
+            if manager.isConnected {
+                HStack(spacing: 10) {
+                    Image(systemName: "internaldrive")
+                    if let count = cameraFileCount {
+                        Text("\(count) file\(count == 1 ? "" : "s") on camera")
+                    } else {
+                        Text("Camera storage")
+                    }
+                    Spacer()
+                    if storageBusy {
+                        ProgressView()
+                    } else {
+                        Button("Count") {
+                            Task {
+                                storageBusy = true
+                                cameraFileCount = await manager.cameraFileCount()
+                                storageBusy = false
+                            }
+                        }
+                        if (cameraFileCount ?? 0) > 0 {
+                            Button("Erase All", role: .destructive) { showEraseConfirm = true }
+                                .foregroundColor(.red)
+                        }
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(.white.opacity(0.7))
+                .confirmationDialog("Erase the camera?", isPresented: $showEraseConfirm, titleVisibility: .visible) {
+                    Button("Erase \(cameraFileCount ?? 0) file(s)", role: .destructive) {
+                        Task {
+                            storageBusy = true
+                            _ = await manager.deleteAllCameraFiles()
+                            cameraFileCount = await manager.cameraFileCount()
+                            storageBusy = false
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("Permanently deletes every photo and video on the camera — including anything not yet transferred to this device. This cannot be undone.")
+                }
             }
 
             // Multi-camera switcher (X for texture, Z1 for low light — per collection).
