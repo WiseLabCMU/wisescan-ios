@@ -1339,6 +1339,42 @@ its Wi-Fi manually (THETAYL<serial>.OSC / serial digits) → Register → Scan+t
 the BLE probe → Auth → standard buttons. Production ThetaBLEManager stays X-only
 until the Z1 probe run writes the facts.
 
+## v8 FINAL DESIGN: keyframe-anchored yaw (failing-scan validation, 2026-08-06 PM)
+
+The staging bundle of the alias scan overturned two assumptions and settled the
+design. Chain of evidence (scratchpad: lobe_check_scan.py, point_sanity.py,
+keyframe_anchor.py, frame_check.py):
+
+1. **Frame conventions proven:** the numpy replica reproduces the sidecar's baked
+   `cam_transform` at the solved yaw to 1e-4 (rotation and translation) — every
+   offline number below is in the solver's exact frame.
+2. **The error was 136°, not 180°:** keyframe-anchored scoring (project each
+   keyframe's depth-validated 3D points into the nearest still's equirect through
+   candidate geometry; compare grays against the keyframe pixels — phone imagery
+   carries ABSOLUTE orientation) finds the true yaw at **+72°** (top-5 all within
+   69–81°). v7 solved −151.5°. The user's "180° off" was an eyeball approximation.
+   A flip-only post-check would NOT have fixed this scan (score at +28.5° = 0.304
+   vs 0.267 at +72° vs 0.326 at solved) — good thing it was validated first.
+3. **Still↔still consistency is NOT a safe disambiguator:** it picked −72° — wrong
+   sign. With stills laid out along a dominant walk axis, still↔still photometric
+   consistency is quasi-invariant under yaw REFLECTION about that axis; keyframe
+   anchoring breaks the symmetry because keyframe orientations are absolute.
+   (The cal-era 1.95× result measured lobe contrast, not ground truth.)
+4. **Depth-unprojection validated** independently: cross-keyframe |Δgray| 0.10–0.15
+   vs 0.24–0.32 shuffled baseline.
+
+**v8 design (to implement):** keyframe-anchored yaw SEEDING in
+EquirectPostCalibration — load up to ~8 spread keyframes (images/ + depth/ +
+cameras/ live in raw_data already; the colorizer's depth reader knows the PNG
+format), unproject at stride, decode stills to small grays, scan the yaw circle
+(3° steps) with the keyframe-anchored score, then constrain the existing edge-cost
+solve's global yaw scan to ±35° of the photometric winner (edge cost still does
+the precise local refinement — it is precise, run13/14 proved ±1°; only its BASIN
+CHOICE is scene-gameable). Stamp `yaw_anchor_deg` + provenance. **Bump
+solverVersion to 8 — the alias scan then re-solves and self-heals its coloring on
+the next Process.** Also reconcile the profile-gate vs solve-envelope bounds
+disagreement (pitch 2.2° rejected / −3.83° accepted) in the same pass.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
