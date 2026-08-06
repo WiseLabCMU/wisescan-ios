@@ -219,22 +219,18 @@ final class ThetaBLEProbe: NSObject {
         return str.count > 8 ? String(str.prefix(8)) : str
     }
 
+    private static let charNames: [CBUUID: String] = [
+        ccv2GetInfoChar: "GetInfo(v2)", ccv2GetStateChar: "GetState(v2)",
+        ccv2GetState2Char: "GetState2(v2)", ccv2NotifyStateChar: "NotifyState(v2)",
+        ccv2ShutterChar: "Shutter(v2)", wlanV2SetNetworkTypeChar: "SetNetworkType(v2)",
+        wlanV2WifiInfoReadChar: "WifiInfo(v2)", wlanV2WifiInfoNotifyChar: "WifiInfo(v2)",
+        wlanV2ScannedSSIDChar: "ScannedSSID(v2)", ccv2GetOptionsChar: "GetOptions(v2)",
+        cameraPowerChar: "CameraPower", wlanPasswordStateChar: "WlanPasswordState"
+    ]
+
     /// Human name for the chars the probe knows; short UUID otherwise.
     private static func charName(_ uuid: CBUUID) -> String {
-        switch uuid {
-        case ccv2GetInfoChar: return "GetInfo(v2)"
-        case ccv2GetStateChar: return "GetState(v2)"
-        case ccv2GetState2Char: return "GetState2(v2)"
-        case ccv2NotifyStateChar: return "NotifyState(v2)"
-        case ccv2ShutterChar: return "Shutter(v2)"
-        case wlanV2SetNetworkTypeChar: return "SetNetworkType(v2)"
-        case wlanV2WifiInfoReadChar, wlanV2WifiInfoNotifyChar: return "WifiInfo(v2)"
-        case wlanV2ScannedSSIDChar: return "ScannedSSID(v2)"
-        case ccv2GetOptionsChar: return "GetOptions(v2)"
-        case cameraPowerChar: return "CameraPower"
-        case wlanPasswordStateChar: return "WlanPasswordState"
-        default: return shortUUID(uuid)
-        }
+        charNames[uuid] ?? shortUUID(uuid)
     }
 }
 
