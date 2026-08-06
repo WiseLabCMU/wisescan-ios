@@ -30,6 +30,8 @@ struct CaptureView: View {
     /// (nil = not yet computed this scan). All scans — rig or handheld.
     @State private var meshGapCensus: ScanCoach.MeshClassCensus?
     @State private var meshCensusLastAt = Date.distantPast
+    /// Free storage, sampled once per recording (not per coach evaluation).
+    @State var freeStorageBytes: Int64?
     @State var rigCalibrationManager = RigCalibrationManager.shared
     @State var saveMessage: String?
     /// Save-failure modal: the capture is still in `pendingScan` and retryable.
@@ -2184,6 +2186,15 @@ struct CaptureView: View {
     /// Evaluates ScanCoach rules engine with current scan state.
     /// Respects the Settings toggle: CRITICAL/WARNING always evaluate,
     /// GUIDANCE/INFO are suppressed when coaching is disabled.
+    /// One stat() per recording — feeds the coach's low-storage warning, and the
+    /// number lands in the log so a later save failure has context.
+    func sampleStorageHeadroom() {
+        freeStorageBytes = ScanFileManager.freeDiskBytes()
+        if let free = freeStorageBytes, free < AppConstants.lowStorageWarnBytes {
+            PerfDiag.log("[Storage] low headroom at record start: \(ScanFileManager.formattedFreeDisk()) free")
+        }
+    }
+
     private func evaluateScanCoach() {
         guard isRecording else { return }
         refreshMeshGapCensusIfDue()
@@ -2195,7 +2206,8 @@ struct CaptureView: View {
             isRecording: isRecording,
             coachingEnabled: scanCoachingEnabled,
             meshGapCensus: meshGapCensus,
-            rigMode: thetaManager.isConnected
+            rigMode: thetaManager.isConnected,
+            freeStorageBytes: freeStorageBytes
         )
     }
 

@@ -143,7 +143,8 @@ class ScanCoach {
         isRecording: Bool,
         coachingEnabled: Bool = true,
         meshGapCensus: MeshClassCensus? = nil,
-        rigMode: Bool = false
+        rigMode: Bool = false,
+        freeStorageBytes: Int64? = nil
     ) {
         guard isRecording else {
             if currentTip != nil {
@@ -236,6 +237,7 @@ class ScanCoach {
                 coachingEnabled: coachingEnabled,
                 meshGapCensus: meshGapCensus,
                 rigMode: rigMode,
+                freeStorageBytes: freeStorageBytes,
                 thermalState: thermalState,
                 fastMotionSustained: fastMotionSustained,
                 nearDepthSustained: nearDepthSustained
@@ -311,6 +313,7 @@ class ScanCoach {
         coachingEnabled: Bool,
         meshGapCensus: MeshClassCensus? = nil,
         rigMode: Bool = false,
+        freeStorageBytes: Int64? = nil,
         thermalState: ProcessInfo.ThermalState = .nominal,
         fastMotionSustained: TimeInterval = 0,
         nearDepthSustained: TimeInterval = 0
@@ -351,6 +354,17 @@ class ScanCoach {
         }
 
         // ── WARNING ──
+
+        // Storage headroom: a long scan writes 0.5-2 GB before save, and a save that
+        // fails for space takes the whole capture with it. Sampled once per recording
+        // by the caller (a stat() per evaluation would be wasteful).
+        if let freeBytes = freeStorageBytes, freeBytes < AppConstants.lowStorageWarnBytes {
+            let gigabytes = Double(freeBytes) / 1_000_000_000
+            if let lowTip = tip("warning.lowStorage",
+                                String(format: "💾 Only %.1f GB free — free space before a long scan", gigabytes),
+                                icon: "internaldrive",
+                                priority: .warning, now: now) { return lowTip }
+        }
 
         // Device hot: persistent while .serious — the one warning where persistence is
         // the point (crash imminent, action = end the scan). Everything chronic and
