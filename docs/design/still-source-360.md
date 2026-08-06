@@ -1219,9 +1219,23 @@ prerequisite: Bluetooth ON in the X's touchscreen menu.**
   a JSON object and lists `_defaultWifiPassword` as legal), so the probe now SPLITS
   the readback — `_networkType`/`_cameraPower` first, then the credential names —
   to isolate whether the X serves `_ssid`/`_password` over the bond at all.
+- **ROUND 7 (360ble7): PROBE PROGRAM COMPLETE — final verdicts.**
+  (1) **State readback WORKS**: `GetOptions → {"_cameraPower":"on","_networkType":
+  "AP"}`, delivered via the GetOptions NOTIFY (X-only per spec) — the clean JSON
+  arrived before our own write-ack. Production can verify wake state over BLE.
+  (2) **Credential readback REFUSED**: the `_ssid`/`_password` request produced no
+  response; subsequent direct reads returned the PREVIOUS response with its opening
+  `{` clobbered to 0x82 — which also retroactively explains round 6's lone 0x82
+  (stale-buffer read artifact). Verdict: the X withholds Wi-Fi credentials over
+  BLE — security-consistent (bond grants control, not secrets) — so the bootstrap
+  keeps stored SSID + serial-derived factory password.
+  (3) **Protocol note for production: treat the NOTIFY as the GetOptions response
+  channel; direct reads of request/response chars are unreliable** (0x82-clobbered
+  stale buffers, seen on GetState once too).
   Graduation plan (next session): production ThetaBLEManager — pairing in Add
-  Camera, BLE-first bootstrap (identity → wake → patient join), BLE trigger in
-  scans with NotifyState file-URL feeding the download queue, OSC fallback.
+  Camera, BLE-first bootstrap (identity → wake → verify via options notify →
+  patient join), BLE trigger in scans with NotifyState file-URL feeding the
+  download queue, OSC fallback.
 - **First-tap connect failure SOLVED (360ble5 → 8d2fe19):** the field pattern "first
   Connect always fails, second always succeeds" was DHCP lag, not SSID lead time —
   `NEHotspotConfiguration.apply` completes at ASSOCIATION, the camera's DHCP/route
