@@ -1302,6 +1302,43 @@ the solver.
   BLE file API exists).
 - **Already migrated:** shutter (this build) — the largest per-still win available.
 
+## Solver v8 prototype: photometric lobe disambiguation VALIDATED offline (2026-08-06)
+
+Numpy prototype (scratchpad `lobe_check.py`) against the rigcal_diag inputs (3
+cal-era stills + phone poses + mesh edge segments — solver-input data only, nothing
+extra): **cross-still color consistency** — sample each edge-segment midpoint's gray
+value in every still pair through the candidate rig geometry and score the mean
+absolute difference (near points < 6 m). Result: one clean minimum at yaw ≈ 357°,
+**the 180° alias scores 1.95× worse**, top-5 minima all within ±6° of the winner.
+The mechanism: a global yaw flip re-aims every camera 180° about its OWN position,
+so two stills at different positions sample different physical surfaces — colors
+decorrelate; only the true yaw keeps them sampling the same points.
+
+**v8 design (port after validating on the failing scan):** post-solve, evaluate
+consistency(yaw*) vs consistency(yaw*+180°) on the already-loaded working images +
+edge segments (two evaluations, milliseconds); if the alias wins by margin, re-run
+the local refine from the flipped lobe and stamp `yaw_lobe_flipped` provenance; if
+neither wins by ≥~1.15×, keep the geometric answer and log the ambiguity. Also fix
+while in there: the profile mechanical gate rejected pitch 2.2° while the solve
+envelope accepted −3.83° — reconcile the two bounds checks.
+
+**Validation gap:** the bundle's inputs/ folder held only the cal-era 3-still set —
+post-process solves save overlays, not inputs. Final validation needs the FAILING
+scan itself (equirect_stills + sidecars + mesh.obj): AirDrop the scan folder via the
+Files-app build, or a .scan4d export (contains all of it plus keyframes).
+
+**Theta Z1 (user wants a comparative run — better low-light optics, 6720×3360
+equirects):** Wi-Fi path is essentially ready (minFirmwareZ1 gate, THETAYL SSID map,
+leveling + 2:1 solver + face cut are resolution-agnostic). BLE differs by design:
+Z1 = Wi-Fi UUID registration (`camera._setBluetoothDevice` + `_bluetoothPower ON`)
+→ BLE auth write → v1 characteristics (Shooting Control 1D0F3602 exists there; CCv2
+requires ≥3.10.2). Probe bench extended (518d2d4): "Register (Wi-Fi, Z1)" + "Auth
+(BLE, Z1)" buttons, model-adaptive Take Picture / Wake AP (v2 when present, else v1
+write-0x01), v1 identity reads in the discovery sweep. Z1 probe protocol: connect
+its Wi-Fi manually (THETAYL<serial>.OSC / serial digits) → Register → Scan+tap in
+the BLE probe → Auth → standard buttons. Production ThetaBLEManager stays X-only
+until the Z1 probe run writes the facts.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
