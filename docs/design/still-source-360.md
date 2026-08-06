@@ -1196,6 +1196,20 @@ prerequisite: Bluetooth ON in the X's touchscreen menu.**
   needed. `SetNetworkType {"type":"AP"}` was ACCEPTED twice; whether the AP actually
   rose is the one unverified link — next micro-test: Wake AP → tap Connect on the
   Theta card → if it joins and probes, the ideal flow is proven END TO END.
+- **Round 5 field reframe (manual-wake test): the nap is POWER, not network.** With
+  the camera manually woken, the AP advertised AND the BLE shutter fired — then after
+  joining Wi-Fi, BOTH shutter channels worked simultaneously. So BLE and the AP
+  coexist fine; the napping state is the camera ASLEEP (Wi-Fi radio off, BLE alive,
+  networkType still "AP" — the accepted `{"type":"AP"}` write was a no-op, and its
+  payload is verified verbatim against the SDK). New probes (2976511): **Wake
+  Camera** = SetOptions `{"cameraPower":"on"}` (the real wake knob); **NetOpts** =
+  GetOptions readback of `_cameraPower`/`_networkType`/**`_ssid`/`_password`** — if
+  the bonded link serves the camera's own credentials, the production bootstrap
+  reads its exact join credentials over BLE and both the serial-derived password
+  and the .OSC/.ASC SSID guessing disappear; Wake+Drop BLE retained as fallback
+  test; WlanPasswordState (E522112A) added to auto-reads (security P2 indicator).
+  Test order when camera naps: Wake Camera → watch for SSID → Connect. Then NetOpts
+  regardless (credential readback matters even when awake).
 - **Round 4 (built, 34f8b5b):** probe rewired to the v2 paths — auto-reads
   GetInfo/GetState/GetState2/Wi-Fi info + notify streams on connect; Take Picture =
   v2 shutter command; Wake AP = v2 network type `{"type":"AP"}`. v1 auto-reads and
