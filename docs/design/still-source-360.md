@@ -1210,6 +1210,13 @@ prerequisite: Bluetooth ON in the X's touchscreen menu.**
   test; WlanPasswordState (E522112A) added to auto-reads (security P2 indicator).
   Test order when camera naps: Wake Camera → watch for SSID → Connect. Then NetOpts
   regardless (credential readback matters even when awake).
+- **First-tap connect failure SOLVED (360ble5 → 8d2fe19):** the field pattern "first
+  Connect always fails, second always succeeds" was DHCP lag, not SSID lead time —
+  `NEHotspotConfiguration.apply` completes at ASSOCIATION, the camera's DHCP/route
+  takes several more seconds, and the old single 1.5 s-settle probe landed in the
+  gap (the second tap inherited the ready link via alreadyAssociated). Connect now
+  retries the probe every 2 s for up to ~12 s, only for the can't-reach class;
+  firmware-gate/leveling refusals still fail immediately.
 - **Round 4 (built, 34f8b5b):** probe rewired to the v2 paths — auto-reads
   GetInfo/GetState/GetState2/Wi-Fi info + notify streams on connect; Take Picture =
   v2 shutter command; Wake AP = v2 network type `{"type":"AP"}`. v1 auto-reads and
