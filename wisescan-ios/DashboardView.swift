@@ -536,6 +536,10 @@ struct ThetaCameraCard: View {
     @State private var sheetPassAutoFill = ""
     @State private var bleAddBusy = false
     @State private var bleAddStatus: String?
+    /// The sheet edits the ACTIVE camera (prefilled) or adds a NEW one (blank) —
+    /// without this, a second camera could only overwrite the first (field: the Z1
+    /// probe run kept trying the X's SSID because no add-another path existed).
+    @State private var sheetIsAdding = false
 
     /// Wearables-style single action: what the primary button does right now.
     private enum PrimaryAction { case add, connectStored, disconnect }
@@ -635,9 +639,19 @@ struct ThetaCameraCard: View {
                 }
                 Section {
                     Button("Save & Connect") {
-                        manager.saveNetwork(ssid: sheetSSID, passphrase: sheetPassphrase)
+                        let ssid = sheetSSID.trimmingCharacters(in: .whitespaces)
+                        // Adding: register in the roster and ACTIVATE (which clears the
+                        // previous camera's BLE keys, so wake can't target the wrong body).
+                        manager.upsertProfile(model: nil,
+                                              serial: ThetaCameraManager.factoryPassphrase(fromSSID: ssid),
+                                              ssid: ssid, passphrase: sheetPassphrase, bleID: nil)
                         showNetworkSheet = false
-                        manager.connect()
+                        if sheetIsAdding, let added = manager.profiles.first(where: { $0.ssid == ssid }) {
+                            manager.activateProfile(added)
+                        } else {
+                            manager.saveNetwork(ssid: ssid, passphrase: sheetPassphrase)
+                            manager.connect()
+                        }
                     }
                     .disabled(sheetSSID.trimmingCharacters(in: .whitespaces).isEmpty || sheetPassphrase.isEmpty)
                 }
@@ -657,7 +671,7 @@ struct ThetaCameraCard: View {
                     }
                 }
             }
-            .navigationTitle("Add 360° Camera")
+            .navigationTitle(sheetIsAdding ? "Add 360° Camera" : "Camera Wi-Fi")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -774,8 +788,11 @@ struct ThetaCameraCard: View {
                 Button(action: {
                     switch primaryAction {
                     case .add:
-                        sheetSSID = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID) ?? ""
-                        sheetPassphrase = UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase) ?? ""
+                        sheetIsAdding = true
+                        sheetSSID = ""
+                        sheetPassphrase = ""
+                        sheetPassAutoFill = ""
+                        bleAddStatus = nil
                         showNetworkSheet = true
                     case .connectStored:
                         manager.connect()
@@ -911,10 +928,23 @@ struct ThetaCameraCard: View {
             }
 
             if manager.hasStoredNetwork, !manager.isConnected {
-                Button("Edit camera network…") {
-                    sheetSSID = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID) ?? ""
-                    sheetPassphrase = UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase) ?? ""
-                    showNetworkSheet = true
+                HStack(spacing: 14) {
+                    Button("Edit camera network…") {
+                        sheetIsAdding = false
+                        sheetSSID = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID) ?? ""
+                        sheetPassphrase = UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase) ?? ""
+                        sheetPassAutoFill = ""
+                        bleAddStatus = nil
+                        showNetworkSheet = true
+                    }
+                    Button("Add another camera…") {
+                        sheetIsAdding = true
+                        sheetSSID = ""
+                        sheetPassphrase = ""
+                        sheetPassAutoFill = ""
+                        bleAddStatus = nil
+                        showNetworkSheet = true
+                    }
                 }
                 .font(.caption2)
                 .foregroundColor(.white.opacity(0.6))

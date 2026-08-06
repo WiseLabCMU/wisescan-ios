@@ -295,7 +295,10 @@ final class ThetaCameraManager {
         ThetaBLEManager.shared.teardown()
         UserDefaults.standard.set(profile.ssid, forKey: AppConstants.Key.thetaSSID)
         UserDefaults.standard.set(profile.passphrase, forKey: AppConstants.Key.thetaPassphrase)
-        UserDefaults.standard.set(profile.serial, forKey: AppConstants.Key.thetaBLESerial)
+        // BLE identity is per-camera: nil REMOVES the previous camera's keys
+        // (set(nil:) removes), so wake never targets the wrong body.
+        UserDefaults.standard.set(profile.blePeripheralID != nil ? profile.serial : nil,
+                                  forKey: AppConstants.Key.thetaBLESerial)
         UserDefaults.standard.set(profile.blePeripheralID, forKey: AppConstants.Key.thetaBLEPeripheralID)
         log(.connection, "Switched camera → \(profile.displayName)")
         connect()
@@ -353,8 +356,17 @@ final class ThetaCameraManager {
         } catch let error as NSError where error.domain == NEHotspotConfigurationErrorDomain
                     && error.code == NEHotspotConfigurationError.alreadyAssociated.rawValue {
             log(.connection, "Already on camera Wi-Fi \(ssid)")
+        } catch let error as NSError where error.domain == NEHotspotConfigurationErrorDomain
+                    && error.code == NEHotspotConfigurationError.userDenied.rawValue {
+            // iOS reports userDenied both for a tapped Cancel AND when the SSID simply
+            // isn't in range (field: Z1 present, stored SSID was the X's) — name the
+            // network so the cause is obvious.
+            let hint = profiles.count > 1
+                ? " — if you meant another camera, switch it on the card"
+                : " — is that camera powered on with Wi-Fi enabled?"
+            log(.connection, "⚠️ Couldn't join \(ssid)\(hint)")
         } catch {
-            log(.connection, "⚠️ Wi-Fi join failed (\(Self.describe(error))) — trying camera anyway")
+            log(.connection, "⚠️ Wi-Fi join failed for \(ssid) (\(Self.describe(error))) — trying camera anyway")
         }
         // Known cosmetic (360post10, device-validated): iOS pops "Unable to join" for
         // the camera's internet-less AP even when the association is UP — the system's
