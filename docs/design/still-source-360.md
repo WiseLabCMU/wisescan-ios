@@ -1232,10 +1232,24 @@ prerequisite: Bluetooth ON in the X's touchscreen menu.**
   (3) **Protocol note for production: treat the NOTIFY as the GetOptions response
   channel; direct reads of request/response chars are unreliable** (0x82-clobbered
   stale buffers, seen on GetState once too).
-  Graduation plan (next session): production ThetaBLEManager — pairing in Add
-  Camera, BLE-first bootstrap (identity → wake → verify via options notify →
-  patient join), BLE trigger in scans with NotifyState file-URL feeding the
-  download queue, OSC fallback.
+- **GRADUATION SHIPPED (25e82ed): production ThetaBLEManager.** Encodes every
+  field rule (v2-only, GetInfo identity, cameraPower wake, shutter with NotifyState
+  file-URL push seeded from GetState, notify-as-response-channel, per-slot
+  watchdogs). Add Camera → "Find Camera via Bluetooth": scan (8-digit serial ad) →
+  connect → identity → one-time passkey bond (forced by the wake write, code on the
+  camera screen) → derived SSID + factory password saved → patient Wi-Fi connect;
+  unknown models fall back to prefilled manual entry. Connect is BLE-first (wake
+  then join, no-op without pairing). Scan captures ride the BLE shutter when the
+  link is ready — OSC fallback ONLY on a failed write (confirmation timeout
+  surfaces rather than double-triggering). Sheet gains "Forget This Camera"
+  (credentials + pairing state; iOS bond removal is in Settings → Bluetooth).
+  **TRUE-TEST SCRIPT (from-zero):** forget camera in sheet + forget the bond in iOS
+  Settings → Bluetooth + camera Bluetooth ON → Add Camera… → Find Camera via
+  Bluetooth → enter passkey from camera screen when iOS asks → expect: sheet
+  dismisses, card connects on its own (BLE wake → join → probe), "Bluetooth link
+  active" caption appears → record a scan: stills should log "Shutter via BLE —
+  file pushed" with sidecars carrying the pushed camera_file_url; downloads +
+  camera.delete sweep unchanged over Wi-Fi.
 - **First-tap connect failure SOLVED (360ble5 → 8d2fe19):** the field pattern "first
   Connect always fails, second always succeeds" was DHCP lag, not SSID lead time —
   `NEHotspotConfiguration.apply` completes at ASSOCIATION, the camera's DHCP/route
