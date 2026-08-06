@@ -57,6 +57,15 @@ final class ThetaBLEManager: NSObject {
         let firmware: String
     }
 
+    /// A camera seen advertising, shown to the user BEFORE any connection attempt —
+    /// auto-connecting to the first 8-digit name found is wrong the moment two bodies
+    /// are in the room (field: an X and a Z1 on the same bench).
+    struct Discovered: Identifiable, Equatable {
+        let id: UUID          // CBPeripheral.identifier
+        let serial: String    // the advertised name IS the serial on V/Z1/X
+        var rssi: Int
+    }
+
     // X-native v2 characteristics (see ThetaBLEProbe for the full discovery map).
     static let ccv2GetInfoChar = CBUUID(string: "A0452E2D-C7D8-4314-8CD6-7B8BBAB4D523")
     static let ccv2GetStateChar = CBUUID(string: "083D92B0-21E0-4FB2-9503-7D8B2C2BB1D1")
@@ -64,6 +73,10 @@ final class ThetaBLEManager: NSObject {
     static let ccv2SetOptionsChar = CBUUID(string: "F0BCD2F9-5862-4653-B50D-80DC51E8CB82")
     static let ccv2ShutterChar = CBUUID(string: "6E2DEEBE-88B0-42A5-829D-1B2C6ABCE750")
     static let ccv2GetOptionsChar = CBUUID(string: "7CFFAAE3-8467-4D0C-A9DD-7F70B4F52863")
+
+    /// Cameras currently advertising (discovery mode only, strongest signal first).
+    var discovered: [Discovered] = []
+    var isDiscovering = false
 
     /// `internal(set)` rather than `private(set)`: the delegate callbacks live in
     /// ThetaBLEManager+Delegates.swift and Swift's `private` does not cross files.
@@ -109,14 +122,33 @@ final class ThetaBLEManager: NSObject {
 
     // MARK: - Public flows
 
-    /// One-time pairing for the Add Camera flow: find ANY Theta (8-digit advertised
-    /// name), connect, read identity (open), then force the bond with the first
-    /// protected write — which is also the wake, so the AP starts rising while the
-    /// caller derives credentials. `onStep` narrates for the sheet UI.
-    func pairNewCamera(onStep: @escaping (String) -> Void) async throws -> Identity {
-        onStep("Scanning for the camera…")
-        let target = try await findCamera(serial: nil, timeout: 15)
-        onStep("Found \(target.name ?? "camera") — connecting…")
+    /// Begin listing nearby cameras. Runs until `stopDiscovery()`; results land in
+    /// `discovered` for the UI to present. Throws only if Bluetooth is unavailable.
+    func startDiscovery() async throws {
+        try await waitForPowerOn(timeout: 5)
+        guard let central else { throw BLEError.bluetoothOff }
+        discovered.removeAll()
+        isDiscovering = true
+        linkState = .scanning
+        central.scanForPeripherals(withServices: nil, options: nil)
+    }
+
+    func stopDiscovery() {
+        isDiscovering = false
+        central?.stopScan()
+        if linkState == .scanning { linkState = .idle }
+    }
+
+    /// Pair the camera the USER picked: connect, read identity (open on X and on a
+    /// Z1 ≥ 3.10.2), then force the bond with the first protected write — which is
+    /// also the wake, so the AP starts rising while the caller derives credentials.
+    /// `onStep` narrates for the sheet UI.
+    func pairCamera(id: UUID, onStep: @escaping (String) -> Void) async throws -> Identity {
+        stopDiscovery()
+        guard let central, let target = central.retrievePeripherals(withIdentifiers: [id]).first else {
+            throw BLEError.timeout("that camera is no longer reachable")
+        }
+        onStep("Connecting to \(target.name ?? "camera")…")
         try await establishLink(target, timeout: 12)
         let identity = try await readIdentity(timeout: 8)
         // Only the X takes the bond-and-wake path. Bail on anything else BEFORE the
@@ -234,85 +266,10 @@ final class ThetaBLEManager: NSObject {
         linkState = .idle
     }
 
-    // MARK: - Flow steps
-
-    private func waitForPowerOn(timeout: TimeInterval) async throws {
-        if central == nil { central = CBCentralManager(delegate: self, queue: .main) }
-        if central?.state == .poweredOn { return }
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            powerOnPending = cont
-            armWatchdog("powerOn", timeout) { [weak self] in
-                self?.powerOnPending?.resume(throwing: BLEError.bluetoothOff)
-                self?.powerOnPending = nil
-            }
-        }
-    }
-
-    /// Scan for a Theta: exact serial when given, else the first 8-digit-named ad.
-    private func findCamera(serial: String?, timeout: TimeInterval) async throws -> CBPeripheral {
-        try await waitForPowerOn(timeout: 5)
-        guard let central else { throw BLEError.bluetoothOff }
-        linkState = .scanning
-        scanTargetSerial = serial
-        defer { central.stopScan() }
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CBPeripheral, Error>) in
-            scanPending = cont
-            armWatchdog("scan", timeout) { [weak self] in
-                guard let self, let pending = self.scanPending else { return }
-                self.scanPending = nil
-                self.central?.stopScan()
-                self.linkState = .failed("camera not found")
-                pending.resume(throwing: BLEError.timeout("camera not advertising — is its Bluetooth on?"))
-            }
-            central.scanForPeripherals(withServices: nil, options: nil)
-        }
-    }
-
-    private func establishLink(_ target: CBPeripheral, timeout: TimeInterval) async throws {
-        linkState = .connecting
-        peripheral = target
-        target.delegate = self
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            linkPending = cont
-            armWatchdog("link", timeout) { [weak self] in
-                guard let self, let pending = self.linkPending else { return }
-                self.linkPending = nil
-                self.linkState = .failed("connect timed out")
-                if let peripheral = self.peripheral { self.central?.cancelPeripheralConnection(peripheral) }
-                pending.resume(throwing: BLEError.timeout("camera did not answer the connection"))
-            }
-            central?.connect(target)
-        }
-    }
-
-    private func readIdentity(timeout: TimeInterval) async throws -> Identity {
-        guard let peripheral, let info = chars[Self.ccv2GetInfoChar] else { throw BLEError.linkNotReady }
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Identity, Error>) in
-            infoPending = cont
-            armWatchdog("info", timeout) { [weak self] in
-                self?.infoPending?.resume(throwing: BLEError.timeout("identity read"))
-                self?.infoPending = nil
-            }
-            peripheral.readValue(for: info)
-        }
-    }
-
-    private func writeJSON(_ json: String, to uuid: CBUUID, timeout: TimeInterval) async throws {
-        guard let peripheral, let char = chars[uuid] else { throw BLEError.linkNotReady }
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            writePending[uuid] = cont
-            armWatchdog(uuid.uuidString, timeout) { [weak self] in
-                self?.writePending.removeValue(forKey: uuid)?
-                    .resume(throwing: BLEError.writeFailed("no acknowledgment"))
-            }
-            peripheral.writeValue(Data(json.utf8), for: char, type: .withResponse)
-        }
-    }
-
     // MARK: - Plumbing
 
-    private func armWatchdog(_ key: String, _ seconds: TimeInterval,
-                             _ fire: @escaping @MainActor () -> Void) {
+    func armWatchdog(_ key: String, _ seconds: TimeInterval,
+                     _ fire: @escaping @MainActor () -> Void) {
         watchdogs[key]?.cancel()
         watchdogs[key] = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))

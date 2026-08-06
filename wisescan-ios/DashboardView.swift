@@ -571,13 +571,22 @@ struct ThetaCameraCard: View {
         }
     }
 
-    /// The automatic add flow: BLE pair → identity → derived credentials → wake →
-    /// patient Wi-Fi connect. Unknown models fall back to prefilled manual entry.
-    private func addViaBluetooth() async {
+    private func signalLabel(_ rssi: Int) -> String {
+        switch rssi {
+        case ..<(-85): return "far"
+        case ..<(-70): return "good"
+        default: return "near"
+        }
+    }
+
+    /// The automatic add flow for the camera the USER picked: pair → identity →
+    /// derived credentials → wake → patient Wi-Fi connect. Non-X models fall back to
+    /// manual entry prefilled with the identity BLE just harvested.
+    private func pairDiscovered(_ cam: ThetaBLEManager.Discovered) async {
         bleAddBusy = true
         defer { bleAddBusy = false }
         do {
-            let identity = try await ThetaBLEManager.shared.pairNewCamera { step in
+            let identity = try await ThetaBLEManager.shared.pairCamera(id: cam.id) { step in
                 bleAddStatus = step
             }
             guard let ssid = ThetaCameraManager.factorySSID(model: identity.model, serial: identity.serial) else {
@@ -613,19 +622,56 @@ struct ThetaCameraCard: View {
         NavigationStack {
             Form {
                 Section {
-                    Button(action: { Task { await addViaBluetooth() } }, label: {
+                    let ble = ThetaBLEManager.shared
+                    Button(action: {
+                        if ble.isDiscovering {
+                            ble.stopDiscovery()
+                        } else {
+                            bleAddStatus = nil
+                            Task {
+                                do { try await ble.startDiscovery() } catch {
+                                    bleAddStatus = "Bluetooth unavailable: \(error.localizedDescription)"
+                                }
+                            }
+                        }
+                    }, label: {
                         HStack {
-                            if bleAddBusy { ProgressView().padding(.trailing, 4) } else {
+                            if ble.isDiscovering || bleAddBusy {
+                                ProgressView().padding(.trailing, 4)
+                            } else {
                                 Image(systemName: "dot.radiowaves.left.and.right")
                             }
-                            Text(bleAddBusy ? (bleAddStatus ?? "Working…") : "Find Camera via Bluetooth")
+                            Text(bleAddBusy ? (bleAddStatus ?? "Working…")
+                                 : ble.isDiscovering ? "Scanning — tap to stop"
+                                 : "Find Cameras via Bluetooth")
                         }
                     })
                     .disabled(bleAddBusy)
+
+                    // Always name what was found BEFORE connecting, and let the user
+                    // choose when more than one camera is in the room.
+                    ForEach(ble.discovered) { cam in
+                        Button(action: { Task { await pairDiscovered(cam) } }, label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "camera.aperture").foregroundColor(.cyan)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Theta \(cam.serial)")
+                                    if manager.profiles.contains(where: { $0.serial == cam.serial }) {
+                                        Text("already added").font(.caption2).foregroundColor(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                Text(signalLabel(cam.rssi)).font(.caption2).foregroundColor(.secondary)
+                            }
+                        })
+                        .disabled(bleAddBusy)
+                    }
+                    if ble.isDiscovering && ble.discovered.isEmpty {
+                        Text("Looking for cameras — make sure Bluetooth is ON in the camera's menu.")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
                     if bleAddBusy {
-                        Button("Cancel", role: .cancel) {
-                            ThetaBLEManager.shared.teardown()
-                        }
+                        Button("Cancel", role: .cancel) { ThetaBLEManager.shared.teardown() }
                     }
                     if !bleAddBusy, let status = bleAddStatus {
                         Text(status).font(.caption).foregroundColor(.orange)
@@ -633,7 +679,7 @@ struct ThetaCameraCard: View {
                 } header: {
                     Text("Automatic (Bluetooth)")
                 } footer: {
-                    Text("Turn Bluetooth ON in the camera's menu first. iOS asks for a pairing code once — read it from the camera's screen. Wi-Fi credentials, joining, and connecting are automatic from there.")
+                    Text("Turn Bluetooth ON in the camera's menu first, then pick it from the list — the name shown is the camera's serial, printed on its body. A THETA X asks for a pairing code once (read it from the camera's screen); Wi-Fi joining and connecting are automatic from there.")
                 }
 
                 Section {
@@ -1012,7 +1058,10 @@ struct ThetaCameraCard: View {
                 .foregroundColor(.white.opacity(0.6))
             }
         }
-        .sheet(isPresented: $showNetworkSheet) { networkSheet }
+        .sheet(isPresented: $showNetworkSheet,
+               // Never leave a scan running behind a closed sheet.
+               onDismiss: { ThetaBLEManager.shared.stopDiscovery() },
+               content: { networkSheet })
         .padding()
         .background(.ultraThinMaterial)
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))

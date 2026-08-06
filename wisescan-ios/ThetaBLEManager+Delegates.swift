@@ -21,9 +21,22 @@ extension ThetaBLEManager: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                         advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        guard scanPending != nil else { return }
         let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? ""
         let isTheta = name.count == 8 && name.allSatisfy(\.isNumber)
+
+        // Discovery mode: accumulate every Theta for the picker, never auto-connect.
+        if isDiscovering {
+            guard isTheta else { return }
+            if let idx = discovered.firstIndex(where: { $0.id == peripheral.identifier }) {
+                discovered[idx].rssi = RSSI.intValue
+            } else {
+                discovered.append(Discovered(id: peripheral.identifier, serial: name, rssi: RSSI.intValue))
+                discovered.sort { $0.rssi > $1.rssi }
+            }
+            return
+        }
+
+        guard scanPending != nil else { return }
         let matches = scanTargetSerial.map { name == $0 } ?? isTheta
         guard matches else { return }
         central.stopScan()
