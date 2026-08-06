@@ -1154,9 +1154,30 @@ prerequisite: Bluetooth ON in the X's touchscreen menu.**
   Theta rows float to top tagged in cyan, whole row tappable (round 1's dead taps =
   Spacer gap not hit-testable), and a 10 s connect watchdog logs when
   CBCentralManager.connect pends silently (it never times out on its own).
-- **Round-3 open questions:** does the X accept an unregistered auth UUID? Do handles
-  unlock after it (Get Info JSON readable, Network Type writable)? Does a shooting
-  service appear post-auth, or does Take Picture require the v2 command protocol?**
+- **Round 3 (360ble3) — DECISIVE:** the X REJECTED the self-generated auth UUID
+  (same handle-invalid), and `camera._setBluetoothDevice` is documented Z1/V-only ⇒
+  **the entire v1 GATT family is vestigial on X 2.92.0 — stop probing it.** And the
+  breakthrough: **Camera Control Command v2 Get Info returned the full identity JSON
+  unauthenticated** — `{"model":"RICOH THETA X","serialNumber":"14100112",
+  "firmwareVersion":"2.92.0","_wlanMacAddress":…,"uptime":…}` in ONE read. The
+  identity half of the bootstrap is solved.
+- **The X-native v2 map (from ricohapi/theta-ble-client source — used as REFERENCE,
+  deliberately not adopted as a dependency: our surface is five characteristics and
+  the KMP pod would drag a Kotlin runtime + CocoaPods into an SPM project):**
+  CCv2 service B6AC7A7E — GetInfo A0452E2D, GetState 083D92B0 (battery,
+  _captureStatus, _latestFileUrl!), GetState2 8881CE4E, NotifyState D32CE140,
+  GetOptions 7CFFAAE3, SetOptions F0BCD2F9, **REQUEST_SHUTTER_COMMAND 6E2DEEBE**
+  (UTF-8 `{"name":"camera.takePicture"}`); WLAN v2 — **WRITE_SET_NETWORK_TYPE
+  4B181146** (`{"type":"AP"}` = wake the camera's own AP), scanned-SSID/connected-
+  info notifies; CAMERA_POWER B58CE84C (R/W/N — wake-from-sleep candidate). Every
+  one of these appeared in the field discovery.
+- **Round 4 (built, 34f8b5b):** probe rewired to the v2 paths — auto-reads
+  GetInfo/GetState/GetState2/Wi-Fi info + notify streams on connect; Take Picture =
+  v2 shutter command; Wake AP = v2 network type `{"type":"AP"}`. v1 auto-reads and
+  the auth write removed. Expected log on success: `GetState(v2) = {...batteryLevel
+  ...}`, `✅ write Shutter(v2) accepted` + camera click, `✅ write SetNetworkType(v2)
+  accepted` + the AP appearing (then the Wi-Fi card's Connect completes the whole
+  ideal flow by hand).**
 
 ## Open questions
 
