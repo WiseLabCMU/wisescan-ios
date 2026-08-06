@@ -578,6 +578,9 @@ struct ThetaCameraCard: View {
                 return
             }
             manager.saveNetwork(ssid: ssid, passphrase: identity.serial)
+            manager.upsertProfile(model: identity.model, serial: identity.serial,
+                                  ssid: ssid, passphrase: identity.serial,
+                                  bleID: UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLEPeripheralID))
             bleAddStatus = nil
             showNetworkSheet = false
             manager.connect()
@@ -706,6 +709,29 @@ struct ThetaCameraCard: View {
                 }
                 .font(.caption2)
                 .foregroundColor(.cyan)
+            }
+
+            // Multi-camera switcher (X for texture, Z1 for low light — per collection).
+            if manager.profiles.count > 1 {
+                Menu {
+                    ForEach(manager.profiles) { profile in
+                        Button(action: { manager.activateProfile(profile) }, label: {
+                            if profile.id == manager.activeProfile?.id {
+                                Label(profile.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(profile.displayName)
+                            }
+                        })
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.triangle.2.circlepath.camera")
+                        Text(manager.activeProfile?.displayName ?? "Choose camera")
+                        Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                    }
+                    .font(.caption)
+                    .foregroundColor(.cyan)
+                }
             }
 
             if case .failed(let message) = manager.state {

@@ -138,6 +138,16 @@ final class ThetaCameraManager {
         ThetaBLEManager.shared.onLog = { [weak self] message in
             self?.log(.connection, message)
         }
+        // Roster migration: a pre-roster install has active keys but no profiles —
+        // seed the roster from them so the switcher sees the existing camera.
+        if profiles.isEmpty,
+           let ssid = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID), !ssid.isEmpty,
+           let pass = UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase) {
+            upsertProfile(model: nil,
+                          serial: UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial),
+                          ssid: ssid, passphrase: pass,
+                          bleID: UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLEPeripheralID))
+        }
     }
 
     var isConnected: Bool {
@@ -212,6 +222,83 @@ final class ThetaCameraManager {
     func saveNetwork(ssid: String, passphrase: String) {
         UserDefaults.standard.set(ssid.trimmingCharacters(in: .whitespaces), forKey: AppConstants.Key.thetaSSID)
         UserDefaults.standard.set(passphrase, forKey: AppConstants.Key.thetaPassphrase)
+        // Manual entry knows model/serial only by derivation; the roster entry
+        // upgrades in place when a BLE pair or probe fills the blanks.
+        upsertProfile(model: nil,
+                      serial: Self.factoryPassphrase(fromSSID: ssid),
+                      ssid: ssid.trimmingCharacters(in: .whitespaces),
+                      passphrase: passphrase, bleID: nil)
+    }
+
+    // MARK: - Camera roster (multi-camera: switch per collection use case —
+    // e.g. X for texture resolution, Z1 for low-light interiors)
+
+    struct CameraProfile: Codable, Identifiable, Equatable {
+        var model: String
+        var serial: String?
+        var ssid: String
+        var passphrase: String
+        var blePeripheralID: String?
+        var id: String { serial ?? ssid }
+        var displayName: String {
+            let shortModel = model.replacingOccurrences(of: "RICOH ", with: "")
+            return serial.map { "\(shortModel) · \($0)" } ?? shortModel
+        }
+    }
+
+    private(set) var profiles: [CameraProfile] = ThetaCameraManager.loadProfiles()
+
+    private static func loadProfiles() -> [CameraProfile] {
+        guard let data = UserDefaults.standard.data(forKey: AppConstants.Key.thetaCameraProfiles),
+              let list = try? JSONDecoder().decode([CameraProfile].self, from: data) else { return [] }
+        return list
+    }
+
+    private func persistProfiles() {
+        if let data = try? JSONEncoder().encode(profiles) {
+            UserDefaults.standard.set(data, forKey: AppConstants.Key.thetaCameraProfiles)
+        }
+    }
+
+    /// The roster entry matching the ACTIVE single-camera keys (which every existing
+    /// code path — join, wake, factory password — continues to read unchanged).
+    var activeProfile: CameraProfile? {
+        let activeSSID = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID)
+        let activeSerial = UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial)
+        return profiles.first { $0.serial != nil && $0.serial == activeSerial }
+            ?? profiles.first { $0.ssid == activeSSID }
+    }
+
+    /// Add or refresh a roster entry (keyed by serial, else SSID). nil fields keep
+    /// whatever the existing entry already knows.
+    func upsertProfile(model: String?, serial: String?, ssid: String, passphrase: String, bleID: String?) {
+        if let idx = profiles.firstIndex(where: { (serial != nil && $0.serial == serial) || $0.ssid == ssid }) {
+            var entry = profiles[idx]
+            if let model { entry.model = model }
+            if let serial { entry.serial = serial }
+            entry.ssid = ssid
+            entry.passphrase = passphrase
+            if let bleID { entry.blePeripheralID = bleID }
+            profiles[idx] = entry
+        } else {
+            profiles.append(CameraProfile(model: model ?? "RICOH THETA", serial: serial,
+                                          ssid: ssid, passphrase: passphrase, blePeripheralID: bleID))
+        }
+        persistProfiles()
+    }
+
+    /// Switch the active camera: load the profile into the single-camera keys every
+    /// existing path reads, then connect (switching expresses intent to use it).
+    func activateProfile(_ profile: CameraProfile) {
+        guard profile.id != activeProfile?.id else { return }
+        disconnect()
+        ThetaBLEManager.shared.teardown()
+        UserDefaults.standard.set(profile.ssid, forKey: AppConstants.Key.thetaSSID)
+        UserDefaults.standard.set(profile.passphrase, forKey: AppConstants.Key.thetaPassphrase)
+        UserDefaults.standard.set(profile.serial, forKey: AppConstants.Key.thetaBLESerial)
+        UserDefaults.standard.set(profile.blePeripheralID, forKey: AppConstants.Key.thetaBLEPeripheralID)
+        log(.connection, "Switched camera → \(profile.displayName)")
+        connect()
     }
 
     /// One-tap connect: join the stored camera Wi-Fi programmatically (no Settings
@@ -641,17 +728,30 @@ final class ThetaCameraManager {
         return nil
     }
 
-    /// Forget the camera entirely: Wi-Fi credentials, hotspot config, BLE pairing
-    /// state. The iOS-level Bluetooth BOND can only be removed by the user in
-    /// Settings → Bluetooth — say so in the card log.
+    /// Forget the ACTIVE camera: drop its roster entry and its Wi-Fi/hotspot/BLE
+    /// state. If another camera remains, its profile is loaded (not auto-connected).
+    /// The iOS-level Bluetooth BOND can only be removed in Settings → Bluetooth.
     func forgetCamera() {
+        let forgotten = activeProfile
         disconnect()
         ThetaBLEManager.shared.teardown()
-        UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaSSID)
-        UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaPassphrase)
-        UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaBLESerial)
-        UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaBLEPeripheralID)
-        log(.connection, "Camera forgotten — to fully reset, also remove it in iOS Settings → Bluetooth")
+        if let forgotten {
+            profiles.removeAll { $0.id == forgotten.id }
+            persistProfiles()
+        }
+        if let next = profiles.first {
+            UserDefaults.standard.set(next.ssid, forKey: AppConstants.Key.thetaSSID)
+            UserDefaults.standard.set(next.passphrase, forKey: AppConstants.Key.thetaPassphrase)
+            UserDefaults.standard.set(next.serial, forKey: AppConstants.Key.thetaBLESerial)
+            UserDefaults.standard.set(next.blePeripheralID, forKey: AppConstants.Key.thetaBLEPeripheralID)
+            log(.connection, "Camera forgotten — \(next.displayName) is now active")
+        } else {
+            UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaSSID)
+            UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaPassphrase)
+            UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaBLESerial)
+            UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaBLEPeripheralID)
+            log(.connection, "Camera forgotten — to fully reset, also remove it in iOS Settings → Bluetooth")
+        }
     }
 
     /// Distinct completion tone + success haptic when a 360° still finishes (audio
