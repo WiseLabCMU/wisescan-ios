@@ -1210,6 +1210,18 @@ prerequisite: Bluetooth ON in the X's touchscreen menu.**
   test; WlanPasswordState (E522112A) added to auto-reads (security P2 indicator).
   Test order when camera naps: Wake Camera → watch for SSID → Connect. Then NetOpts
   regardless (credential readback matters even when awake).
+- **ROUND 6 FIELD: THE IDEAL FLOW IS PROVEN END TO END.** Wake Camera
+  (`SetOptions {"cameraPower":"on"}`) woke the SLEEPING camera over BLE, the AP
+  rose, and Connect succeeded — scan → identity → wake → patient join → connected,
+  zero camera touches. The BLE probe program's core mission is complete; what
+  remains is an optimization: the combined five-name GetOptions request came back
+  as a single error byte (0x82 = request refused; spec shows the response should be
+  a JSON object and lists `_defaultWifiPassword` as legal), so the probe now SPLITS
+  the readback — `_networkType`/`_cameraPower` first, then the credential names —
+  to isolate whether the X serves `_ssid`/`_password` over the bond at all.
+  Graduation plan (next session): production ThetaBLEManager — pairing in Add
+  Camera, BLE-first bootstrap (identity → wake → patient join), BLE trigger in
+  scans with NotifyState file-URL feeding the download queue, OSC fallback.
 - **First-tap connect failure SOLVED (360ble5 → 8d2fe19):** the field pattern "first
   Connect always fails, second always succeeds" was DHCP lag, not SSID lead time —
   `NEHotspotConfiguration.apply` completes at ASSOCIATION, the camera's DHCP/route

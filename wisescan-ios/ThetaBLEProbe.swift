@@ -163,13 +163,24 @@ final class ThetaBLEProbe: NSObject {
               to: Self.ccv2SetOptionsChar, label: "setOptions cameraPower=on (v2)")
     }
 
-    /// Readback probe: current cameraPower + networkType (accepted ≠ applied), and
-    /// whether the bonded link serves the camera's own `_ssid`/`_password`. If it
-    /// does, the production bootstrap reads exact join credentials over BLE — no
-    /// serial-derived password, no .OSC/.ASC guessing.
+    /// Readback probe, SPLIT (the combined five-name request came back as one error
+    /// byte 0x82 — the camera refuses the whole batch when it dislikes a name, so
+    /// isolate which class: safe state names first, then the credential names. If
+    /// the credential read works, the production bootstrap reads exact join
+    /// credentials over BLE — no serial-derived password, no .OSC/.ASC guessing.
     func readNetworkOptions() {
-        write(Data("{\"optionNames\":[\"_networkType\",\"_cameraPower\",\"_ssid\",\"_password\",\"_defaultWifiPassword\"]}".utf8),
-              to: Self.ccv2GetOptionsChar, label: "getOptions power/network/_ssid/_password")
+        requestOptions("{\"optionNames\":[\"_networkType\",\"_cameraPower\"]}",
+                       label: "getOptions network/power")
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            self?.requestOptions("{\"optionNames\":[\"_ssid\",\"_password\",\"_defaultWifiPassword\"]}",
+                                 label: "getOptions _ssid/_password")
+        }
+    }
+
+    /// One GetOptions request/response cycle (write request → short settle → read).
+    private func requestOptions(_ json: String, label: String) {
+        write(Data(json.utf8), to: Self.ccv2GetOptionsChar, label: label)
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 800_000_000)
             guard let self, let peripheral = self.peripheral,
@@ -225,7 +236,8 @@ final class ThetaBLEProbe: NSObject {
         ccv2ShutterChar: "Shutter(v2)", wlanV2SetNetworkTypeChar: "SetNetworkType(v2)",
         wlanV2WifiInfoReadChar: "WifiInfo(v2)", wlanV2WifiInfoNotifyChar: "WifiInfo(v2)",
         wlanV2ScannedSSIDChar: "ScannedSSID(v2)", ccv2GetOptionsChar: "GetOptions(v2)",
-        cameraPowerChar: "CameraPower", wlanPasswordStateChar: "WlanPasswordState"
+        cameraPowerChar: "CameraPower", wlanPasswordStateChar: "WlanPasswordState",
+        ccv2SetOptionsChar: "SetOptions(v2)"
     ]
 
     /// Human name for the chars the probe knows; short UUID otherwise.
