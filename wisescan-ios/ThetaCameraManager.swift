@@ -135,6 +135,9 @@ final class ThetaCameraManager {
 
     private init() {
         startPathMonitoring()
+        ThetaBLEManager.shared.onLog = { [weak self] message in
+            self?.log(.connection, message)
+        }
     }
 
     var isConnected: Bool {
@@ -227,6 +230,9 @@ final class ThetaCameraManager {
         state = .connecting
         lastError = nil
         Task {
+            // BLE-first bootstrap: wake the paired camera so its AP exists to join.
+            // No-op without a stored pairing; never fatal — the patient probe decides.
+            await ThetaBLEManager.shared.wakeStoredCamera()
             await joinStoredNetworkIfNeeded()
             for attempt in 1...5 {
                 await probe()
@@ -551,7 +557,7 @@ final class ThetaCameraManager {
                 }
             }
             do {
-                let fileURL = try await triggerStill()
+                let fileURL = try await triggerStillPreferringBLE()
                 let triggerMs = Int(Date().timeIntervalSince(start) * 1000)
                 motionProbe?.cancel()
                 let motion: (m: Float, deg: Float)? = if let probe = motionProbe {
@@ -607,6 +613,45 @@ final class ThetaCameraManager {
             isCapturing = false
         }
         return true
+    }
+
+    /// Scan-capture shutter: BLE when the bonded link is ready (the file URL arrives
+    /// as a NotifyState push — no OSC round-trip), OSC otherwise. Fallback rule from
+    /// the probe rounds: only a failed WRITE falls back (the camera never fired); a
+    /// confirmation timeout must NOT double-trigger, so it surfaces as the error.
+    private func triggerStillPreferringBLE() async throws -> String {
+        guard ThetaBLEManager.shared.isLinkReady else { return try await triggerStill() }
+        do {
+            let url = try await ThetaBLEManager.shared.triggerShutter()
+            log(.capture, "Shutter via BLE — file pushed")
+            return url
+        } catch ThetaBLEManager.BLEError.writeFailed(let why) {
+            log(.capture, "BLE shutter write failed (\(why)) — falling back to OSC")
+            return try await triggerStill()
+        }
+    }
+
+    /// Factory AP SSID for a camera identity — the exact string NEHotspotConfiguration
+    /// needs. Model→prefix mapping is per Ricoh convention (field: X = "THETAYR");
+    /// unknown models return nil and the Add flow falls back to manual entry.
+    static func factorySSID(model: String, serial: String) -> String? {
+        guard serial.count == 8, serial.allSatisfy(\.isNumber) else { return nil }
+        if model.contains("THETA X") { return "THETAYR\(serial).OSC" }
+        if model.contains("Z1") { return "THETAYL\(serial).OSC" }
+        return nil
+    }
+
+    /// Forget the camera entirely: Wi-Fi credentials, hotspot config, BLE pairing
+    /// state. The iOS-level Bluetooth BOND can only be removed by the user in
+    /// Settings → Bluetooth — say so in the card log.
+    func forgetCamera() {
+        disconnect()
+        ThetaBLEManager.shared.teardown()
+        UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaSSID)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaPassphrase)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaBLESerial)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaBLEPeripheralID)
+        log(.connection, "Camera forgotten — to fully reset, also remove it in iOS Settings → Bluetooth")
     }
 
     /// Distinct completion tone + success haptic when a 360° still finishes (audio

@@ -527,6 +527,8 @@ struct ThetaCameraCard: View {
     /// SSID) — lets the prefill keep tracking SSID edits without ever overwriting a
     /// password the user typed themselves.
     @State private var sheetPassAutoFill = ""
+    @State private var bleAddBusy = false
+    @State private var bleAddStatus: String?
 
     /// Wearables-style single action: what the primary button does right now.
     private enum PrimaryAction { case add, connectStored, disconnect }
@@ -553,12 +555,55 @@ struct ThetaCameraCard: View {
         }
     }
 
+    /// The automatic add flow: BLE pair → identity → derived credentials → wake →
+    /// patient Wi-Fi connect. Unknown models fall back to prefilled manual entry.
+    private func addViaBluetooth() async {
+        bleAddBusy = true
+        defer { bleAddBusy = false }
+        do {
+            let identity = try await ThetaBLEManager.shared.pairNewCamera { step in
+                bleAddStatus = step
+            }
+            guard let ssid = ThetaCameraManager.factorySSID(model: identity.model, serial: identity.serial) else {
+                sheetSSID = ""
+                sheetPassphrase = identity.serial
+                bleAddStatus = "Paired \(identity.serial) — type the SSID shown on the camera's screen"
+                return
+            }
+            manager.saveNetwork(ssid: ssid, passphrase: identity.serial)
+            bleAddStatus = nil
+            showNetworkSheet = false
+            manager.connect()
+        } catch {
+            bleAddStatus = "Bluetooth setup failed: \(error.localizedDescription)"
+        }
+    }
+
     /// First-run "Add Camera" sheet: stores the camera's Wi-Fi so Connect is one tap
     /// (NEHotspotConfiguration join — no Settings round-trip). Mirrors the wearables
     /// add-device flow.
     private var networkSheet: some View {
         NavigationStack {
             Form {
+                Section {
+                    Button(action: { Task { await addViaBluetooth() } }, label: {
+                        HStack {
+                            if bleAddBusy { ProgressView().padding(.trailing, 4) } else {
+                                Image(systemName: "dot.radiowaves.left.and.right")
+                            }
+                            Text(bleAddBusy ? (bleAddStatus ?? "Working…") : "Find Camera via Bluetooth")
+                        }
+                    })
+                    .disabled(bleAddBusy)
+                    if !bleAddBusy, let status = bleAddStatus {
+                        Text(status).font(.caption).foregroundColor(.orange)
+                    }
+                } header: {
+                    Text("Automatic (Bluetooth)")
+                } footer: {
+                    Text("Turn Bluetooth ON in the camera's menu first. iOS asks for a pairing code once — read it from the camera's screen. Wi-Fi credentials, joining, and connecting are automatic from there.")
+                }
+
                 Section {
                     TextField("THETAYL12345678.OSC", text: $sheetSSID)
                         .autocapitalization(.none)
@@ -585,6 +630,21 @@ struct ThetaCameraCard: View {
                         manager.connect()
                     }
                     .disabled(sheetSSID.trimmingCharacters(in: .whitespaces).isEmpty || sheetPassphrase.isEmpty)
+                }
+
+                if manager.hasStoredNetwork {
+                    Section {
+                        Button("Forget This Camera", role: .destructive) {
+                            manager.forgetCamera()
+                            sheetSSID = ""
+                            sheetPassphrase = ""
+                            sheetPassAutoFill = ""
+                            bleAddStatus = nil
+                            showNetworkSheet = false
+                        }
+                    } footer: {
+                        Text("Clears the stored Wi-Fi credentials and Bluetooth pairing state. For a full reset, also remove the camera in iOS Settings → Bluetooth.")
+                    }
                 }
             }
             .navigationTitle("Add 360° Camera")
@@ -630,6 +690,15 @@ struct ThetaCameraCard: View {
                     .font(.caption2)
                     .foregroundColor(.white.opacity(0.7))
                     .textSelection(.enabled)
+            }
+
+            if ThetaBLEManager.shared.isLinkReady {
+                HStack(spacing: 4) {
+                    Image(systemName: "dot.radiowaves.left.and.right")
+                    Text("Bluetooth link active — shutter rides BLE")
+                }
+                .font(.caption2)
+                .foregroundColor(.cyan)
             }
 
             if case .failed(let message) = manager.state {
