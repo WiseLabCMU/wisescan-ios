@@ -76,6 +76,26 @@ extension ThetaCameraManager {
         }
     }
 
+    /// Z1/V only: register this app's BLE identity over Wi-Fi
+    /// (`camera._setBluetoothDevice`) — the prerequisite for BLE auth on those models.
+    /// The X does not support this command (its v1 BLE family is vestigial; bonding
+    /// replaced it). Returns the camera's BLE advertised deviceName (= serial digits).
+    func registerBluetoothDevice(uuid: String) async throws -> String? {
+        let body: [String: Any] = ["name": "camera._setBluetoothDevice",
+                                   "parameters": ["uuid": uuid]]
+        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCBluetoothDeviceResponse.self)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setBluetoothDevice failed") }
+        return response.results?.deviceName
+    }
+
+    /// Z1/V: switch the camera's Bluetooth module (option `_bluetoothPower`).
+    func setBluetoothPower(on enabled: Bool) async throws {
+        let body: [String: Any] = ["name": "camera.setOptions",
+                                   "parameters": ["options": ["_bluetoothPower": enabled ? "ON" : "OFF"]]]
+        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCCommandResponse.self)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setOptions failed for _bluetoothPower") }
+    }
+
     /// Fires `camera.takePicture` and resolves to the saved file URL (polls if async).
     func triggerStill() async throws -> String {
         switch try await execute(name: "camera.takePicture") {
@@ -222,6 +242,12 @@ private struct OSCStateResponse: Decodable {
 private struct OSCErrorBody: Decodable {
     let code: String?
     let message: String?
+}
+
+private struct OSCBluetoothDeviceResponse: Decodable {
+    struct Results: Decodable { let deviceName: String? }
+    let results: Results?
+    let error: OSCErrorBody?
 }
 
 private struct OSCCommandResponse: Decodable {

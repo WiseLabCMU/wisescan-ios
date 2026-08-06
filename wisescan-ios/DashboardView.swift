@@ -344,6 +344,13 @@ struct ThetaBLEProbeCard: View {
                 }
                 .font(.caption.bold())
                 .foregroundColor(.cyan)
+                // Z1/V path: register the probe UUID over Wi-Fi first, then auth over BLE.
+                HStack(spacing: 14) {
+                    Button("Register (Wi-Fi, Z1)", action: { probe.registerOverWiFi() })
+                    Button("Auth (BLE, Z1)", action: { probe.writeAuth() })
+                }
+                .font(.caption.bold())
+                .foregroundColor(.cyan)
             } else {
                 ForEach(probe.found) { item in
                     Button(action: { probe.connect(item.id) }, label: {

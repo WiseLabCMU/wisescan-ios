@@ -76,6 +76,40 @@ final class ThetaBLEProbe: NSObject {
     private var knownChars: [CBUUID: CBCharacteristic] = [:]
     private var wantsScan = false
     private var connectWatchdog: Task<Void, Never>?
+
+    /// Persisted BLE identity for the Z1/V auth path (registered over Wi-Fi via
+    /// camera._setBluetoothDevice, then written to the auth char over BLE). The X
+    /// ignores this entire path (vestigial there — bonding replaced it).
+    var authUUID: String {
+        if let stored = UserDefaults.standard.string(forKey: "bleProbeAuthUUID") { return stored }
+        let fresh = UUID().uuidString
+        UserDefaults.standard.set(fresh, forKey: "bleProbeAuthUUID")
+        return fresh
+    }
+
+    /// Z1/V step 1 (over Wi-Fi — connect the camera's Wi-Fi first): register the
+    /// probe's UUID + force Bluetooth power on. Logs the camera's BLE deviceName.
+    func registerOverWiFi() {
+        Task {
+            guard ThetaCameraManager.shared.isConnected else {
+                log("⚠️ register: connect the camera's Wi-Fi first (Z1/V registration rides OSC)")
+                return
+            }
+            do {
+                let name = try await ThetaCameraManager.shared.registerBluetoothDevice(uuid: authUUID)
+                try? await ThetaCameraManager.shared.setBluetoothPower(on: true)
+                log("✅ registered UUID \(authUUID) — BLE deviceName \(name ?? "?"), Bluetooth powered on")
+            } catch {
+                log("❌ register: \(error.localizedDescription) (expected on X — vestigial path)")
+            }
+        }
+    }
+
+    /// Z1/V step 2 (over BLE, after registration): write the registered UUID to the
+    /// auth char. On X this answers handle-invalid (vestigial) — also useful data.
+    func writeAuth() {
+        write(Data(authUUID.utf8), to: Self.authChar, label: "auth \(authUUID)")
+    }
     private static let oslog = Logger(subsystem: "org.arenaxr.scan4d", category: "bleprobe")
 
     // MARK: - Actions
@@ -127,18 +161,26 @@ final class ThetaBLEProbe: NSObject {
         knownChars.removeAll()
     }
 
-    /// Shutter over the v2 command channel — OSC-shaped command as UTF-8 JSON
-    /// (payload format from theta-ble-client requestShutterCommand).
+    /// Shutter, model-adaptive: the X's v2 command channel when present, else the
+    /// V/Z1 v1 Take Picture char (write 0x01; requires auth first on those models).
     func takePicture() {
-        write(Data("{\"name\":\"camera.takePicture\"}".utf8),
-              to: Self.ccv2ShutterChar, label: "shutter camera.takePicture (v2)")
+        if knownChars[Self.ccv2ShutterChar] != nil {
+            write(Data("{\"name\":\"camera.takePicture\"}".utf8),
+                  to: Self.ccv2ShutterChar, label: "shutter camera.takePicture (v2)")
+        } else {
+            write(Data([0x01]), to: Self.takePictureCharV1, label: "TakePicture=1 (v1)")
+        }
     }
 
-    /// Wake the camera's own AP over the v2 WLAN char — `{"type":"AP"}`
-    /// (verified verbatim against theta-ble-client: NetworkType.DIRECT serializes "AP").
+    /// Wake the camera's own AP, model-adaptive: v2 JSON when present, else the
+    /// V/Z1 v1 Network Type char (1 = Direct/AP mode; requires auth on those models).
     func wakeAP() {
-        write(Data("{\"type\":\"AP\"}".utf8),
-              to: Self.wlanV2SetNetworkTypeChar, label: "networkType AP (v2)")
+        if knownChars[Self.wlanV2SetNetworkTypeChar] != nil {
+            write(Data("{\"type\":\"AP\"}".utf8),
+                  to: Self.wlanV2SetNetworkTypeChar, label: "networkType AP (v2)")
+        } else {
+            write(Data([0x01]), to: Self.networkTypeCharV1, label: "NetworkType=1 (v1)")
+        }
     }
 
     /// Radio-handover test: round 4's first session dropped BLE right after an
@@ -237,7 +279,10 @@ final class ThetaBLEProbe: NSObject {
         wlanV2WifiInfoReadChar: "WifiInfo(v2)", wlanV2WifiInfoNotifyChar: "WifiInfo(v2)",
         wlanV2ScannedSSIDChar: "ScannedSSID(v2)", ccv2GetOptionsChar: "GetOptions(v2)",
         cameraPowerChar: "CameraPower", wlanPasswordStateChar: "WlanPasswordState",
-        ccv2SetOptionsChar: "SetOptions(v2)"
+        ccv2SetOptionsChar: "SetOptions(v2)", authChar: "Auth(v1)",
+        modelNumberChar: "Model(v1)", serialNumberChar: "Serial(v1)",
+        firmwareChar: "Firmware(v1)", takePictureCharV1: "TakePicture(v1)",
+        networkTypeCharV1: "NetworkType(v1)"
     ]
 
     /// Human name for the chars the probe knows; short UUID otherwise.
@@ -311,13 +356,17 @@ extension ThetaBLEProbe: CBPeripheralDelegate {
     }
 
     /// Auto-actions on discovery: read the open v2 data chars, subscribe the notify
-    /// streams. v1 chars are vestigial on X — touching them just logs noise.
+    /// streams. v1 chars are vestigial on X — but on V/Z1 they are the REAL surface,
+    /// so v1 identity reads and the v1 shutter notify join the sweep (they error
+    /// harmlessly on X, one log line each).
     private func autoProbe(_ char: CBCharacteristic, on peripheral: CBPeripheral) {
         let autoRead: Set<CBUUID> = [Self.ccv2GetInfoChar, Self.ccv2GetStateChar,
                                      Self.ccv2GetState2Char, Self.wlanV2WifiInfoReadChar,
-                                     Self.cameraPowerChar, Self.wlanPasswordStateChar]
+                                     Self.cameraPowerChar, Self.wlanPasswordStateChar,
+                                     Self.modelNumberChar, Self.serialNumberChar, Self.firmwareChar]
         let autoNotify: Set<CBUUID> = [Self.ccv2NotifyStateChar, Self.wlanV2WifiInfoNotifyChar,
-                                       Self.wlanV2ScannedSSIDChar, Self.ccv2GetOptionsChar]
+                                       Self.wlanV2ScannedSSIDChar, Self.ccv2GetOptionsChar,
+                                       Self.takePictureCharV1]
         if autoRead.contains(char.uuid), char.properties.contains(.read) {
             peripheral.readValue(for: char)
         }
