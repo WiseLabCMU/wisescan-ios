@@ -179,6 +179,22 @@ final class ThetaBLEProbe: NSObject {
         let str = uuid.uuidString
         return str.count > 8 ? String(str.prefix(8)) : str
     }
+
+    /// Human name for the chars the probe knows; short UUID otherwise.
+    private static func charName(_ uuid: CBUUID) -> String {
+        switch uuid {
+        case ccv2GetInfoChar: return "GetInfo(v2)"
+        case ccv2GetStateChar: return "GetState(v2)"
+        case ccv2GetState2Char: return "GetState2(v2)"
+        case ccv2NotifyStateChar: return "NotifyState(v2)"
+        case ccv2ShutterChar: return "Shutter(v2)"
+        case wlanV2SetNetworkTypeChar: return "SetNetworkType(v2)"
+        case wlanV2WifiInfoReadChar, wlanV2WifiInfoNotifyChar: return "WifiInfo(v2)"
+        case wlanV2ScannedSSIDChar: return "ScannedSSID(v2)"
+        case cameraPowerChar: return "CameraPower"
+        default: return shortUUID(uuid)
+        }
+    }
 }
 
 // MARK: - CBCentralManagerDelegate
@@ -254,18 +270,7 @@ extension ThetaBLEProbe: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        let name: String = switch characteristic.uuid {
-        case Self.ccv2GetInfoChar: "GetInfo(v2)"
-        case Self.ccv2GetStateChar: "GetState(v2)"
-        case Self.ccv2GetState2Char: "GetState2(v2)"
-        case Self.ccv2NotifyStateChar: "NotifyState(v2)"
-        case Self.ccv2ShutterChar: "Shutter(v2)"
-        case Self.wlanV2SetNetworkTypeChar: "SetNetworkType(v2)"
-        case Self.wlanV2WifiInfoReadChar, Self.wlanV2WifiInfoNotifyChar: "WifiInfo(v2)"
-        case Self.wlanV2ScannedSSIDChar: "ScannedSSID(v2)"
-        case Self.cameraPowerChar: "CameraPower"
-        default: Self.shortUUID(characteristic.uuid)
-        }
+        let name = Self.charName(characteristic.uuid)
         if let error {
             // "Insufficient authentication/encryption" here = this char needs pairing —
             // exactly the kind of ground truth the probe exists to capture.
@@ -282,11 +287,7 @@ extension ThetaBLEProbe: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        let name: String = switch characteristic.uuid {
-        case Self.ccv2ShutterChar: "Shutter(v2)"
-        case Self.wlanV2SetNetworkTypeChar: "SetNetworkType(v2)"
-        default: Self.shortUUID(characteristic.uuid)
-        }
+        let name = Self.charName(characteristic.uuid)
         log(error.map { "❌ write \(name): \($0.localizedDescription)" } ?? "✅ write \(name) accepted")
     }
 }
