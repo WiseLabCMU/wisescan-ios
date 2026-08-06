@@ -1171,6 +1171,17 @@ prerequisite: Bluetooth ON in the X's touchscreen menu.**
   4B181146** (`{"type":"AP"}` = wake the camera's own AP), scanned-SSID/connected-
   info notifies; CAMERA_POWER B58CE84C (R/W/N — wake-from-sleep candidate). Every
   one of these appeared in the field discovery.
+- **Round 4 field note: the v2 CONTROL surface is gated by standard BLE bonding.**
+  First protected operation triggers the iOS pairing dialog asking for a code — the
+  6-digit passkey displays on the X's own screen (LE passkey-entry; open the camera's
+  Bluetooth screen if it isn't visible). One-time: iOS and the camera both persist
+  the bond; subsequent connections need no code. THIS is what replaced the vestigial
+  v1 auth char on X — identity (GetInfo) reads openly, control requires a
+  user-confirmed bond, i.e. proof of physical possession of the camera. That's a
+  better security posture than V/Z1's UUID scheme and slots straight into the
+  production Add Camera flow as its one-time pairing step (and complements the P2
+  default-credential story: the Wi-Fi password can be weak-by-default, but BLE
+  control was never open).
 - **Round 4 (built, 34f8b5b):** probe rewired to the v2 paths — auto-reads
   GetInfo/GetState/GetState2/Wi-Fi info + notify streams on connect; Take Picture =
   v2 shutter command; Wake AP = v2 network type `{"type":"AP"}`. v1 auto-reads and
