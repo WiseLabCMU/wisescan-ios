@@ -571,6 +571,20 @@ struct ThetaCameraCard: View {
         }
     }
 
+    /// Open the network sheet in add or edit mode, optionally forgetting the current
+    /// camera first (the "swap cameras" path).
+    private func openSheet(adding: Bool, forgetFirst: Bool = false) {
+        if forgetFirst { manager.forgetCamera() }
+        sheetIsAdding = adding || forgetFirst
+        let stored = forgetFirst ? nil : UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID)
+        sheetSSID = adding || forgetFirst ? "" : (stored ?? "")
+        sheetPassphrase = adding || forgetFirst ? ""
+            : (UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase) ?? "")
+        sheetPassAutoFill = ""
+        bleAddStatus = nil
+        showNetworkSheet = true
+    }
+
     private func signalLabel(_ rssi: Int) -> String {
         switch rssi {
         case ..<(-85): return "far"
@@ -728,10 +742,12 @@ struct ThetaCameraCard: View {
                             sheetPassphrase = ""
                             sheetPassAutoFill = ""
                             bleAddStatus = nil
-                            showNetworkSheet = false
+                            // Stay put in ADD mode: "forget it" almost always means
+                            // "so I can set up a different one".
+                            sheetIsAdding = true
                         }
                     } footer: {
-                        Text("Clears the stored Wi-Fi credentials and Bluetooth pairing state. For a full reset, also remove the camera in iOS Settings → Bluetooth.")
+                        Text("Clears the stored Wi-Fi credentials and Bluetooth pairing state, then leaves this sheet ready to add another camera. For a full reset, also remove the camera in iOS Settings → Bluetooth.")
                     }
                 }
             }
@@ -1035,27 +1051,28 @@ struct ThetaCameraCard: View {
                 }
             }
 
-            if manager.hasStoredNetwork, !manager.isConnected {
-                HStack(spacing: 14) {
-                    Button("Edit camera network…") {
-                        sheetIsAdding = false
-                        sheetSSID = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID) ?? ""
-                        sheetPassphrase = UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase) ?? ""
-                        sheetPassAutoFill = ""
-                        bleAddStatus = nil
-                        showNetworkSheet = true
+            // Camera management, reachable in EVERY state — these used to be hidden
+            // whenever the camera was connected, which left no way to forget a stored
+            // camera or add a second one without disconnecting first.
+            if manager.hasStoredNetwork {
+                Menu {
+                    Button(action: { openSheet(adding: true) }, label: {
+                        Label("Add Another Camera…", systemImage: "plus")
+                    })
+                    Button(action: { openSheet(adding: false) }, label: {
+                        Label("Edit Camera Wi-Fi…", systemImage: "wifi")
+                    })
+                    Button(role: .destructive, action: { openSheet(adding: true, forgetFirst: true) }, label: {
+                        Label("Forget This Camera", systemImage: "trash")
+                    })
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "ellipsis.circle")
+                        Text("Manage cameras")
                     }
-                    Button("Add another camera…") {
-                        sheetIsAdding = true
-                        sheetSSID = ""
-                        sheetPassphrase = ""
-                        sheetPassAutoFill = ""
-                        bleAddStatus = nil
-                        showNetworkSheet = true
-                    }
+                    .font(.caption2)
+                    .foregroundColor(.white.opacity(0.6))
                 }
-                .font(.caption2)
-                .foregroundColor(.white.opacity(0.6))
             }
         }
         .sheet(isPresented: $showNetworkSheet,

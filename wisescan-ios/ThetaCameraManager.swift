@@ -795,7 +795,10 @@ final class ThetaCameraManager {
             profiles.removeAll { $0.id == forgotten.id }
             persistProfiles()
         }
-        if let next = profiles.first {
+        // Adopt the next camera ONLY if we actually removed the active one — with no
+        // match (roster/keys out of sync) adopting profiles.first would silently
+        // re-store a camera the user just asked to forget.
+        if forgotten != nil, let next = profiles.first {
             UserDefaults.standard.set(next.ssid, forKey: AppConstants.Key.thetaSSID)
             UserDefaults.standard.set(next.passphrase, forKey: AppConstants.Key.thetaPassphrase)
             UserDefaults.standard.set(next.serial, forKey: AppConstants.Key.thetaBLESerial)
