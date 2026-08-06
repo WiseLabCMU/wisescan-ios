@@ -54,6 +54,8 @@ final class ThetaBLEProbe: NSObject {
     static let wlanV2ScannedSSIDChar = CBUUID(string: "60EEDCCC-426A-49CF-9AE1-F602284703D7")
     // Camera power (SDK: CAMERA_POWER) — R/W/N in the field discovery; format unprobed.
     static let cameraPowerChar = CBUUID(string: "B58CE84C-0666-4DE9-BEC8-2D27B27B3211")
+    // WLAN password state (X ≥2.80.1): default-credential indicator, feeds security P2.
+    static let wlanPasswordStateChar = CBUUID(string: "E522112A-5689-4901-0803-0520637DC895")
 
     struct Found: Identifiable {
         let id: UUID          // CBPeripheral.identifier
@@ -133,10 +135,47 @@ final class ThetaBLEProbe: NSObject {
     }
 
     /// Wake the camera's own AP over the v2 WLAN char — `{"type":"AP"}`
-    /// (payload format from theta-ble-client setNetworkType).
+    /// (verified verbatim against theta-ble-client: NetworkType.DIRECT serializes "AP").
     func wakeAP() {
         write(Data("{\"type\":\"AP\"}".utf8),
               to: Self.wlanV2SetNetworkTypeChar, label: "networkType AP (v2)")
+    }
+
+    /// Radio-handover test: round 4's first session dropped BLE right after an
+    /// accepted networkType write, and 360ble5's in-session wake never raised the
+    /// AP — hypothesis: the X holds Wi-Fi down while a BLE central is connected.
+    func wakeAPAndDropBLE() {
+        wakeAP()
+        log("…dropping BLE in 1.5 s so the radio can switch")
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            self?.disconnect()
+        }
+    }
+
+    /// Field insight (manual-wake test): with the AP already up, BLE and Wi-Fi
+    /// COEXIST — both shutter channels worked simultaneously. So the napping state is
+    /// the camera ASLEEP (Wi-Fi radio off, BLE alive, networkType still "AP" — our
+    /// wake write was a no-op, not a failure). The real wake knob should be camera
+    /// POWER: SetOptions cameraPower=on over the v2 channel.
+    func wakeCamera() {
+        write(Data("{\"cameraPower\":\"on\"}".utf8),
+              to: Self.ccv2SetOptionsChar, label: "setOptions cameraPower=on (v2)")
+    }
+
+    /// Readback probe: current cameraPower + networkType (accepted ≠ applied), and
+    /// whether the bonded link serves the camera's own `_ssid`/`_password`. If it
+    /// does, the production bootstrap reads exact join credentials over BLE — no
+    /// serial-derived password, no .OSC/.ASC guessing.
+    func readNetworkOptions() {
+        write(Data("{\"optionNames\":[\"_networkType\",\"_cameraPower\",\"_ssid\",\"_password\",\"_defaultWifiPassword\"]}".utf8),
+              to: Self.ccv2GetOptionsChar, label: "getOptions power/network/_ssid/_password")
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let self, let peripheral = self.peripheral,
+                  let char = self.knownChars[Self.ccv2GetOptionsChar] else { return }
+            peripheral.readValue(for: char)
+        }
     }
 
     // MARK: - Internals
@@ -191,7 +230,9 @@ final class ThetaBLEProbe: NSObject {
         case wlanV2SetNetworkTypeChar: return "SetNetworkType(v2)"
         case wlanV2WifiInfoReadChar, wlanV2WifiInfoNotifyChar: return "WifiInfo(v2)"
         case wlanV2ScannedSSIDChar: return "ScannedSSID(v2)"
+        case ccv2GetOptionsChar: return "GetOptions(v2)"
         case cameraPowerChar: return "CameraPower"
+        case wlanPasswordStateChar: return "WlanPasswordState"
         default: return shortUUID(uuid)
         }
     }
@@ -257,15 +298,23 @@ extension ThetaBLEProbe: CBPeripheralDelegate {
         for char in service.characteristics ?? [] {
             log("  char \(Self.shortUUID(char.uuid)) [\(Self.describeProps(char.properties))]")
             knownChars[char.uuid] = char
-            switch char.uuid {
-            case Self.ccv2GetInfoChar, Self.ccv2GetStateChar, Self.ccv2GetState2Char,
-                 Self.wlanV2WifiInfoReadChar, Self.cameraPowerChar:
-                if char.properties.contains(.read) { peripheral.readValue(for: char) }
-            case Self.ccv2NotifyStateChar, Self.wlanV2WifiInfoNotifyChar, Self.wlanV2ScannedSSIDChar:
-                if char.properties.contains(.notify) { peripheral.setNotifyValue(true, for: char) }
-            default:
-                break   // v1 chars are vestigial on X — reading them just logs noise
-            }
+            autoProbe(char, on: peripheral)
+        }
+    }
+
+    /// Auto-actions on discovery: read the open v2 data chars, subscribe the notify
+    /// streams. v1 chars are vestigial on X — touching them just logs noise.
+    private func autoProbe(_ char: CBCharacteristic, on peripheral: CBPeripheral) {
+        let autoRead: Set<CBUUID> = [Self.ccv2GetInfoChar, Self.ccv2GetStateChar,
+                                     Self.ccv2GetState2Char, Self.wlanV2WifiInfoReadChar,
+                                     Self.cameraPowerChar, Self.wlanPasswordStateChar]
+        let autoNotify: Set<CBUUID> = [Self.ccv2NotifyStateChar, Self.wlanV2WifiInfoNotifyChar,
+                                       Self.wlanV2ScannedSSIDChar, Self.ccv2GetOptionsChar]
+        if autoRead.contains(char.uuid), char.properties.contains(.read) {
+            peripheral.readValue(for: char)
+        }
+        if autoNotify.contains(char.uuid), char.properties.contains(.notify) {
+            peripheral.setNotifyValue(true, for: char)
         }
     }
 

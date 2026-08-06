@@ -337,6 +337,13 @@ struct ThetaBLEProbeCard: View {
                 }
                 .font(.caption.bold())
                 .foregroundColor(.cyan)
+                HStack(spacing: 14) {
+                    Button("Wake Camera", action: { probe.wakeCamera() })
+                    Button("NetOpts", action: { probe.readNetworkOptions() })
+                    Button("Wake+Drop BLE", action: { probe.wakeAPAndDropBLE() })
+                }
+                .font(.caption.bold())
+                .foregroundColor(.cyan)
             } else {
                 ForEach(probe.found) { item in
                     Button(action: { probe.connect(item.id) }, label: {
