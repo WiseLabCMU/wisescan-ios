@@ -1375,6 +1375,29 @@ solverVersion to 8 — the alias scan then re-solves and self-heals its coloring
 the next Process.** Also reconcile the profile-gate vs solve-envelope bounds
 disagreement (pitch 2.2° rejected / −3.83° accepted) in the same pass.
 
+## Z1 probe attempt 1 (360ble9): blocked by a roster gap — fixed (9054134)
+
+The Z1 run never reached its BLE questions: with the X already stored, the card's
+only sheet path was EDIT, so `connect()` kept applying the X's SSID while the Z1 sat
+in front of the operator. iOS answered `userDenied` ("failed to get user's
+approval") — which it returns both for a tapped Cancel AND for an SSID not in range,
+so the log read as a permissions problem rather than a wrong-network one. The BLE
+wake also fired at the X's stored serial first (harmless, but 8 s of nothing).
+
+Fixed: "Add another camera…" beside "Edit camera network…"; the sheet is mode-aware
+(adding starts blank, creates a NEW roster entry, activates it — which clears the
+other camera's BLE keys); join failures name the SSID and point at the switcher when
+more than one camera is known.
+
+**Z1 protocol, retry:** Add another camera… → either "Find Camera via Bluetooth"
+(the Z1 advertises only after its BLE is enabled AND — per spec — after Wi-Fi-side
+UUID registration; expect this to fail first time, which is itself the finding) or
+manual entry `THETAYL<serial>.OSC` + serial digits → Save & Connect → once OSC is
+up, BLE probe → "Register (Wi-Fi, Z1)" → Scan/tap → "Auth (BLE, Z1)" → standard
+buttons. Watch for: does the Z1 advertise pre-registration? does auth unlock the v1
+chars (Camera Information reads, TakePicture 0x01, NetworkType 1)? is CCv2 present
+(needs ≥3.10.2)?
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
