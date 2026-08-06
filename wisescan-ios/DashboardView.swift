@@ -588,6 +588,14 @@ struct ThetaCameraCard: View {
             bleAddStatus = nil
             showNetworkSheet = false
             manager.connect()
+        } catch ThetaBLEManager.BLEError.needsWiFiSetup(let model, let serial) {
+            // Not a failure: BLE identified the camera for free. Hand off to manual
+            // setup prefilled with what we learned (SSID form is derived — the user
+            // should confirm it against the camera's own Wi-Fi screen).
+            sheetSSID = ThetaCameraManager.factorySSID(model: model, serial: serial) ?? ""
+            sheetPassphrase = serial
+            sheetPassAutoFill = serial
+            bleAddStatus = "Found \(model) · \(serial). Bluetooth setup is THETA X only for now — check the SSID against the camera's Wi-Fi screen, then Save & Connect."
         } catch {
             bleAddStatus = "Bluetooth setup failed: \(error.localizedDescription)"
         }
@@ -609,6 +617,11 @@ struct ThetaCameraCard: View {
                         }
                     })
                     .disabled(bleAddBusy)
+                    if bleAddBusy {
+                        Button("Cancel", role: .cancel) {
+                            ThetaBLEManager.shared.teardown()
+                        }
+                    }
                     if !bleAddBusy, let status = bleAddStatus {
                         Text(status).font(.caption).foregroundColor(.orange)
                     }

@@ -33,12 +33,20 @@ final class ThetaBLEManager: NSObject {
         case timeout(String)
         case writeFailed(String)
         case linkNotReady
+        case unsupportedCamera(String)
+        /// A V/Z1: identity read fine, but its CONTROL characteristics sit behind the
+        /// v1 auth scheme (UUID registered over Wi-Fi first) and it never shows a
+        /// pairing code — spec: "the camera does not use pairing". Carries the
+        /// harvested identity so the caller can prefill manual setup.
+        case needsWiFiSetup(model: String, serial: String)
         var errorDescription: String? {
             switch self {
             case .bluetoothOff: return "Bluetooth is off"
             case .timeout(let what): return "Timed out: \(what)"
             case .writeFailed(let what): return "Write failed: \(what)"
             case .linkNotReady: return "BLE link not ready"
+            case .unsupportedCamera(let why): return why
+            case .needsWiFiSetup(let model, _): return "\(model) needs Wi-Fi setup first"
             }
         }
     }
@@ -56,30 +64,46 @@ final class ThetaBLEManager: NSObject {
     static let ccv2SetOptionsChar = CBUUID(string: "F0BCD2F9-5862-4653-B50D-80DC51E8CB82")
     static let ccv2ShutterChar = CBUUID(string: "6E2DEEBE-88B0-42A5-829D-1B2C6ABCE750")
 
-    private(set) var linkState: LinkState = .idle
+    /// `internal(set)` rather than `private(set)`: the delegate callbacks live in
+    /// ThetaBLEManager+Delegates.swift and Swift's `private` does not cross files.
+    var linkState: LinkState = .idle
     var isLinkReady: Bool { linkState == .ready }
+
+    /// A ready link is NOT automatically a controllable one. The X exposes the CCv2
+    /// control characteristics openly; a Z1 (fw ≥ 3.10.2) exposes only the read-only
+    /// CCv2 subset — its control surface is the v1 family, gated behind the auth
+    /// write that requires `camera._setBluetoothDevice` over Wi-Fi (field: 360ble9,
+    /// Z1 fw 3.60.3 — GetInfo/GetState read fine unregistered, every v1 char and the
+    /// auth char itself answered handle-invalid).
+    var canWakeOverBLE: Bool { isLinkReady && chars[Self.ccv2SetOptionsChar] != nil }
+    var canShutterOverBLE: Bool { isLinkReady && chars[Self.ccv2ShutterChar] != nil }
     /// Mirrors key events into ThetaCameraManager's card log (wired at its init).
     var onLog: ((String) -> Void)?
 
-    private var central: CBCentralManager?
-    private var peripheral: CBPeripheral?
-    private var chars: [CBUUID: CBCharacteristic] = [:]
-    private var lastFileUrl = ""
-    private static let log = Logger(subsystem: "org.arenaxr.scan4d", category: "thetaBLE")
+    var central: CBCentralManager?
+    var peripheral: CBPeripheral?
+    var chars: [CBUUID: CBCharacteristic] = [:]
+    /// Outstanding per-service characteristic discoveries — lets us tell "still
+    /// enumerating" from "enumeration finished and the working set never appeared",
+    /// so an unsupported camera fails with the TRUTH instead of eating the link
+    /// watchdog and reporting "camera did not answer" (which it plainly did).
+    var pendingCharDiscoveries = 0
+    var lastFileUrl = ""
+    static let log = Logger(subsystem: "org.arenaxr.scan4d", category: "thetaBLE")
 
     // Pending single-flight continuations, each with a watchdog (BLE delegate calls
     // never time out on their own — a sleeping camera pends connect() forever).
-    private var powerOnPending: CheckedContinuation<Void, Error>?
-    private var scanPending: CheckedContinuation<CBPeripheral, Error>?
-    private var scanTargetSerial: String?
-    private var linkPending: CheckedContinuation<Void, Error>?
-    private var infoPending: CheckedContinuation<Identity, Error>?
-    private var writePending: [CBUUID: CheckedContinuation<Void, Error>] = [:]
-    private var shutterPending: CheckedContinuation<String, Error>?
+    var powerOnPending: CheckedContinuation<Void, Error>?
+    var scanPending: CheckedContinuation<CBPeripheral, Error>?
+    var scanTargetSerial: String?
+    var linkPending: CheckedContinuation<Void, Error>?
+    var infoPending: CheckedContinuation<Identity, Error>?
+    var writePending: [CBUUID: CheckedContinuation<Void, Error>] = [:]
+    var shutterPending: CheckedContinuation<String, Error>?
     /// One watchdog per slot key ("scan", "link", …, or a char UUID string), cancelled
     /// the moment its slot resumes — a stale long watchdog (pairing's 60 s) must never
     /// fire into a LATER pending operation on the same slot.
-    private var watchdogs: [String: Task<Void, Never>] = [:]
+    var watchdogs: [String: Task<Void, Never>] = [:]
 
     // MARK: - Public flows
 
@@ -93,6 +117,15 @@ final class ThetaBLEManager: NSObject {
         onStep("Found \(target.name ?? "camera") — connecting…")
         try await establishLink(target, timeout: 12)
         let identity = try await readIdentity(timeout: 8)
+        // Only the X takes the bond-and-wake path. Bail on anything else BEFORE the
+        // 60 s protected write — on a V/Z1 that write can never succeed and no code
+        // ever appears on the camera, so the old flow showed a false "enter the code"
+        // prompt for a minute (360ble10). The identity we just harvested rides along
+        // so the caller can prefill manual setup.
+        guard chars[Self.ccv2SetOptionsChar] != nil else {
+            teardown()
+            throw BLEError.needsWiFiSetup(model: identity.model, serial: identity.serial)
+        }
         onStep("Pairing — enter the code shown on the camera's screen")
         // Protected write: triggers the one-time iOS passkey dialog, generous timeout
         // for code entry. Bonded thereafter; also wakes the camera's AP.
@@ -112,6 +145,10 @@ final class ThetaBLEManager: NSObject {
         guard UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial) != nil else { return false }
         do {
             try await ensureLinkReady()
+            guard canWakeOverBLE else {
+                onLog?("BLE wake not available on this camera — using Wi-Fi directly")
+                return false
+            }
             try await writeJSON("{\"cameraPower\":\"on\"}", to: Self.ccv2SetOptionsChar, timeout: 8)
             onLog?("BLE wake sent — waiting for the camera's Wi-Fi")
             try? await Task.sleep(nanoseconds: 3_000_000_000)   // AP rise headstart
@@ -172,6 +209,7 @@ final class ThetaBLEManager: NSObject {
         if let peripheral { central?.cancelPeripheralConnection(peripheral) }
         peripheral = nil
         chars.removeAll()
+        pendingCharDiscoveries = 0
         linkState = .idle
     }
 
@@ -262,11 +300,11 @@ final class ThetaBLEManager: NSObject {
         }
     }
 
-    private func clearWatchdog(_ key: String) {
+    func clearWatchdog(_ key: String) {
         watchdogs.removeValue(forKey: key)?.cancel()
     }
 
-    private func failAllPending(_ error: Error) {
+    func failAllPending(_ error: Error) {
         watchdogs.values.forEach { $0.cancel() }
         watchdogs.removeAll()
         powerOnPending?.resume(throwing: error); powerOnPending = nil
@@ -276,117 +314,5 @@ final class ThetaBLEManager: NSObject {
         shutterPending?.resume(throwing: error); shutterPending = nil
         for (_, cont) in writePending { cont.resume(throwing: error) }
         writePending.removeAll()
-    }
-}
-
-// MARK: - CBCentralManagerDelegate
-
-extension ThetaBLEManager: CBCentralManagerDelegate {
-    func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        if central.state == .poweredOn {
-            clearWatchdog("powerOn")
-            powerOnPending?.resume(); powerOnPending = nil
-        } else if central.state == .poweredOff || central.state == .unauthorized {
-            failAllPending(BLEError.bluetoothOff)
-            linkState = .failed("Bluetooth unavailable")
-        }
-    }
-
-    func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
-                        advertisementData: [String: Any], rssi RSSI: NSNumber) {
-        guard scanPending != nil else { return }
-        let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? ""
-        let isTheta = name.count == 8 && name.allSatisfy(\.isNumber)
-        let matches = scanTargetSerial.map { name == $0 } ?? isTheta
-        guard matches else { return }
-        central.stopScan()
-        clearWatchdog("scan")
-        scanPending?.resume(returning: peripheral)
-        scanPending = nil
-    }
-
-    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        peripheral.discoverServices(nil)
-    }
-
-    func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-        linkState = .failed(error?.localizedDescription ?? "connect failed")
-        linkPending?.resume(throwing: BLEError.timeout(error?.localizedDescription ?? "connect failed"))
-        linkPending = nil
-    }
-
-    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        Self.log.info("link dropped\(error.map { " (\($0.localizedDescription))" } ?? "", privacy: .public)")
-        chars.removeAll()
-        linkState = .idle
-        failAllPending(BLEError.linkNotReady)
-    }
-}
-
-// MARK: - CBPeripheralDelegate
-
-extension ThetaBLEManager: CBPeripheralDelegate {
-    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        for service in peripheral.services ?? [] {
-            peripheral.discoverCharacteristics(nil, for: service)
-        }
-    }
-
-    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        for char in service.characteristics ?? [] {
-            chars[char.uuid] = char
-            if char.uuid == Self.ccv2NotifyStateChar { peripheral.setNotifyValue(true, for: char) }
-        }
-        // Ready once the working set is present (services arrive per-service; the
-        // needed four live across two services).
-        let needed = [Self.ccv2GetInfoChar, Self.ccv2SetOptionsChar, Self.ccv2ShutterChar, Self.ccv2NotifyStateChar]
-        if linkPending != nil, needed.allSatisfy({ chars[$0] != nil }) {
-            clearWatchdog("link")
-            linkState = .ready
-            // Seed lastFileUrl so the first shutter can't match a stale URL
-            // (NotifyState only pushes CHANGES).
-            if let state = chars[Self.ccv2GetStateChar] { peripheral.readValue(for: state) }
-            linkPending?.resume()
-            linkPending = nil
-        }
-    }
-
-    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard error == nil, let data = characteristic.value,
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
-        switch characteristic.uuid {
-        case Self.ccv2GetInfoChar:
-            if let pending = infoPending {
-                clearWatchdog("info")
-                infoPending = nil
-                pending.resume(returning: Identity(
-                    model: obj["model"] as? String ?? "RICOH THETA",
-                    serial: obj["serialNumber"] as? String ?? "",
-                    firmware: obj["firmwareVersion"] as? String ?? ""))
-            }
-        case Self.ccv2GetStateChar:
-            if let url = obj["_latestFileUrl"] as? String { lastFileUrl = url }
-        case Self.ccv2NotifyStateChar:
-            if let url = obj["_latestFileUrl"] as? String, !url.isEmpty, url != lastFileUrl {
-                lastFileUrl = url
-                if let pending = shutterPending {
-                    clearWatchdog("shutter")
-                    shutterPending = nil
-                    pending.resume(returning: url)
-                }
-            }
-        default:
-            break
-        }
-    }
-
-    func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        guard let pending = writePending.removeValue(forKey: characteristic.uuid) else { return }
-        clearWatchdog(characteristic.uuid.uuidString)
-        if let error {
-            pending.resume(throwing: BLEError.writeFailed(error.localizedDescription))
-        } else {
-            pending.resume()
-        }
     }
 }

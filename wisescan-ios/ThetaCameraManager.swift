@@ -719,7 +719,10 @@ final class ThetaCameraManager {
     /// the probe rounds: only a failed WRITE falls back (the camera never fired); a
     /// confirmation timeout must NOT double-trigger, so it surfaces as the error.
     private func triggerStillPreferringBLE() async throws -> String {
-        guard ThetaBLEManager.shared.isLinkReady else { return try await triggerStill() }
+        // Capability, not just link readiness: a Z1 link is ready for identity/state
+        // but has no CCv2 shutter characteristic — asking anyway threw linkNotReady,
+        // which the fallback below does not catch, failing the still outright.
+        guard ThetaBLEManager.shared.canShutterOverBLE else { return try await triggerStill() }
         do {
             let url = try await ThetaBLEManager.shared.triggerShutter()
             log(.capture, "Shutter via BLE — file pushed")
@@ -735,8 +738,10 @@ final class ThetaCameraManager {
     /// unknown models return nil and the Add flow falls back to manual entry.
     static func factorySSID(model: String, serial: String) -> String? {
         guard serial.count == 8, serial.allSatisfy(\.isNumber) else { return nil }
+        // Prefixes verbatim from the official SDK (theta-ble-client ThetaModel.kt:
+        // Z1 = "YN", X = "YR"); the X form is field-confirmed as THETAYR….OSC.
         if model.contains("THETA X") { return "THETAYR\(serial).OSC" }
-        if model.contains("Z1") { return "THETAYL\(serial).OSC" }
+        if model.contains("Z1") { return "THETAYN\(serial).OSC" }
         return nil
     }
 
