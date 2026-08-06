@@ -1182,6 +1182,20 @@ prerequisite: Bluetooth ON in the X's touchscreen menu.**
   production Add Camera flow as its one-time pairing step (and complements the P2
   default-credential story: the Wi-Fi password can be weak-by-default, but BLE
   control was never open).
+- **Round 4 RESULTS (360ble4) — the BLE trigger is PROVEN.** Two `camera.takePicture`
+  shutter writes accepted across two sessions, each answered by
+  `NotifyState(v2) = {"_latestFileUrl":"http://192.168.1.1/files/100RICOH/R00102xx.JPG"}`
+  — the camera pushes the NEW FILE URL over BLE the moment capture completes. That's
+  strictly better than the OSC path's poll: the production still pipeline can take
+  its StillTicket (camera_file_url) from the BLE notify with no HTTP round-trip at
+  all. GetState works bonded (battery, _captureStatus, temps, _latestFileUrl;
+  camera reports ELECTRONIC_COMPASS_CALIBRATION advisory), GetState2/WifiInfo read
+  clean, notify stream ticks live (board temps). Bonding held across reconnects —
+  no further codes. CAMERA_POWER (B58CE84C) is handle-invalid = vestigial like the
+  rest of v1; X wake-from-sleep would go via SetOptions `_cameraPower` if ever
+  needed. `SetNetworkType {"type":"AP"}` was ACCEPTED twice; whether the AP actually
+  rose is the one unverified link — next micro-test: Wake AP → tap Connect on the
+  Theta card → if it joins and probes, the ideal flow is proven END TO END.
 - **Round 4 (built, 34f8b5b):** probe rewired to the v2 paths — auto-reads
   GetInfo/GetState/GetState2/Wi-Fi info + notify streams on connect; Take Picture =
   v2 shutter command; Wake AP = v2 network type `{"type":"AP"}`. v1 auto-reads and
