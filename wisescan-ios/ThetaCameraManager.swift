@@ -446,6 +446,8 @@ final class ThetaCameraManager {
                 return
             }
 
+            await normalizeShootingStateLogged()
+
             state = .connected(model: info.model, firmware: info.firmware)
             serialNumber = info.serial
             batteryLevel = try? await fetchBatteryLevel()
@@ -744,6 +746,22 @@ final class ThetaCameraManager {
         if model.contains("THETA X") { return "THETAYR\(serial).OSC" }
         if model.contains("Z1") { return "THETAYN\(serial).OSC" }
         return nil
+    }
+
+    /// Shooting-state hygiene at connect: a self-timer or video mode left on the
+    /// camera silently ruins scan stills (see normalizeShootingState), and a capture
+    /// still running collides with our shutter. Non-fatal — log and continue.
+    private func normalizeShootingStateLogged() async {
+        do {
+            if let changed = try await normalizeShootingState() {
+                log(.config, "Camera shooting settings normalized — \(changed)")
+            }
+            if let interrupted = try await stopRunningCapture() {
+                log(.config, "Camera was busy (\(interrupted)) — capture stopped")
+            }
+        } catch {
+            log(.config, "⚠️ Could not normalize shooting settings: \(Self.describe(error))")
+        }
     }
 
     // MARK: - Camera storage + WLAN mode

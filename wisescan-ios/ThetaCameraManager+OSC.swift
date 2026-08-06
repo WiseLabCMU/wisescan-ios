@@ -96,6 +96,57 @@ extension ThetaCameraManager {
         if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setOptions failed for _bluetoothPower") }
     }
 
+    /// Normalize the camera's shooting state for scan stills. Two settings left on
+    /// the camera would quietly corrupt a scan:
+    ///   • `exposureDelay` (self-timer) — `camera.takePicture` honours it, so the
+    ///     shutter would fire seconds AFTER we stamped the phone pose and measured the
+    ///     trigger window; every still would carry a pose that isn't where it was shot.
+    ///   • `captureMode: "video"` — stills aren't possible at all.
+    /// Interval shooting itself does NOT hijack takePicture (that needs
+    /// `camera.startCapture` with `_mode: "interval"`), but a capture already RUNNING
+    /// does — see `stopRunningCapture`.
+    /// Returns a description of what had to change (nil = nothing).
+    func normalizeShootingState() async throws -> String? {
+        let body: [String: Any] = ["name": "camera.getOptions",
+                                   "parameters": ["optionNames": ["captureMode", "exposureDelay"]]]
+        let current = try await postJSON("/osc/commands/execute", body: body, as: OSCOptionsResponse.self)
+        let mode = current.results?.options.captureMode
+        let delay = current.results?.options.exposureDelay ?? 0
+        var options: [String: Any] = [:]
+        var changed: [String] = []
+        if let mode, mode != "image" {
+            options["captureMode"] = "image"
+            changed.append("captureMode \(mode)→image")
+        }
+        if delay != 0 {
+            options["exposureDelay"] = 0
+            changed.append("self-timer \(delay)s→off")
+        }
+        guard !options.isEmpty else { return nil }
+        let setBody: [String: Any] = ["name": "camera.setOptions", "parameters": ["options": options]]
+        let response = try await postJSON("/osc/commands/execute", body: setBody, as: OSCCommandResponse.self)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setOptions failed") }
+        return changed.joined(separator: ", ")
+    }
+
+    /// Current capture status from `/osc/state` ("idle" when the camera is free).
+    func fetchCaptureStatus() async throws -> String? {
+        try await postJSON("/osc/state", body: [:], as: OSCStateResponse.self).state._captureStatus
+    }
+
+    /// If the camera is mid-capture (interval/continuous/bracket/self-timer countdown),
+    /// stop it — otherwise our shutter requests collide with a sequence the operator
+    /// probably forgot was running. Returns the status it interrupted, if any.
+    @discardableResult
+    func stopRunningCapture() async throws -> String? {
+        guard let status = try await fetchCaptureStatus(), status != "idle" else { return nil }
+        // "converting" is the camera finishing a file — transient, not ours to stop.
+        guard status != "converting" else { return status }
+        let body: [String: Any] = ["name": "camera.stopCapture"]
+        _ = try? await postJSON("/osc/commands/execute", body: body, as: OSCCommandResponse.self)
+        return status
+    }
+
     /// Total files on the camera (`camera.listFiles` with entryCount 0 returns just
     /// the count — no entries, no thumbnails). fileType: "all" | "image" | "video".
     func fetchFileCount(fileType: String = "all") async throws -> Int {
@@ -266,7 +317,10 @@ private struct OSCInfo: Decodable {
 }
 
 private struct OSCStateResponse: Decodable {
-    struct State: Decodable { let batteryLevel: Double? }
+    struct State: Decodable {
+        let batteryLevel: Double?
+        let _captureStatus: String?   // swiftlint:disable:this identifier_name
+    }
     let state: State
 }
 
@@ -302,9 +356,11 @@ private struct OSCOptionsResponse: Decodable {
         let fileFormatSupport: [FileFormat]?
         let topBottomCorrection: String?
         let networkType: String?
+        let captureMode: String?
+        let exposureDelay: Int?
         // RICOH's extension options are underscore-prefixed on the wire.
         enum CodingKeys: String, CodingKey {
-            case fileFormat, fileFormatSupport
+            case fileFormat, fileFormatSupport, captureMode, exposureDelay
             case topBottomCorrection = "_topBottomCorrection"
             case networkType = "_networkType"
         }
