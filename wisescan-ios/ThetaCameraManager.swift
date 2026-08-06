@@ -212,16 +212,35 @@ final class ThetaCameraManager {
     }
 
     /// One-tap connect: join the stored camera Wi-Fi programmatically (no Settings
-    /// round-trip), give the interface a beat to settle, then probe. Join outcomes that
-    /// mean "already there" count as success; other join failures still probe — the
-    /// user may be joined manually.
+    /// round-trip), then probe with PATIENCE. Join outcomes that mean "already there"
+    /// count as success; other join failures still probe — the user may be joined
+    /// manually.
+    ///
+    /// The patience matters (360ble5, three first-taps failed / second taps always
+    /// worked): NEHotspotConfiguration.apply completes when the ASSOCIATION is
+    /// accepted, but the camera's DHCP/route takes several more seconds — a single
+    /// 1.5 s-settle probe lands in that gap and fails, while the retry inherits the
+    /// now-ready link. So: probe, and on failure keep retrying every 2 s for up to
+    /// ~12 s before letting the failure stand.
     func connect() {
         guard state != .connecting else { return }
         state = .connecting
         lastError = nil
         Task {
             await joinStoredNetworkIfNeeded()
-            await probe()
+            for attempt in 1...5 {
+                await probe()
+                if isConnected { return }
+                // Retry only the can't-reach class — a firmware gate or leveling
+                // refusal is deterministic and its message should stand immediately.
+                guard attempt < 5,
+                      case .failed(let message) = state, message.hasPrefix("Can't reach") else { break }
+                log(.connection, "Probe \(attempt) failed — link may still be settling, retrying…")
+                state = .connecting
+                lastError = nil
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            // Final state (.failed with its message) was set by the last probe.
         }
     }
 
