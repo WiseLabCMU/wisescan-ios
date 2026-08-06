@@ -1216,7 +1216,9 @@ prerequisite: Bluetooth ON in the X's touchscreen menu.**
   takes several more seconds, and the old single 1.5 s-settle probe landed in the
   gap (the second tap inherited the ready link via alreadyAssociated). Connect now
   retries the probe every 2 s for up to ~12 s, only for the can't-reach class;
-  firmware-gate/leveling refusals still fail immediately.
+  firmware-gate/leveling refusals still fail immediately. **Validated (360ble6):**
+  one tap → probe 1 misses the gap → one 2 s retry → Connected. Single-tap connect
+  confirmed; the DHCP settle on this X is ~2-4 s.
 - **Round 4 (built, 34f8b5b):** probe rewired to the v2 paths — auto-reads
   GetInfo/GetState/GetState2/Wi-Fi info + notify streams on connect; Take Picture =
   v2 shutter command; Wake AP = v2 network type `{"type":"AP"}`. v1 auto-reads and
