@@ -1267,6 +1267,41 @@ prerequisite: Bluetooth ON in the X's touchscreen menu.**
   accepted` + the AP appearing (then the Wi-Fi card's Connect completes the whole
   ideal flow by hand).**
 
+## BLE graduation: from-zero TRUE TEST PASSED + first yaw-alias bite (2026-08-06, 360ble8)
+
+**True test end to end from zero:** pair (passkey) → BLE wake → auto-join
+THETAYR14100112.OSC → one settling retry → Connected — then SIX scan stills all
+"Shutter via BLE — file pushed", tap→file-listed 3.3-3.6 s (OSC field baseline was
+4.4-5.0 s: **~1.2-1.5 s faster per still**), keep-awake cycled correctly.
+
+**First field yaw-alias:** the scan's face coloring came out 180° off around Y. The
+camera's session yaw reference genuinely reset (power cycling during the from-zero
+test — the exact run14 behavior the per-scan solve exists to absorb), the solve ran
+and converged (yaw=-151.5°, 8.69 px, 5 inputs, 8 s Release) — but onto the 180°
+ALIAS lobe (rooms alias ~90/180°; the residual was competitive, so scene symmetry
+won). This risk was documented from run13 ("still1 preferred a +50° alias") and this
+is its first bite. Fix direction (solver v8): photometric lobe disambiguation —
+score the top global-scan lobes by image-content correlation against one or two
+PHONE KEYFRAMES (rigidly co-mounted, so the right lobe's rendered view matches the
+keyframe; the wrong lobe shows the opposite wall). Prototype OFFLINE first against
+this run's rigcal_diag bundle per the established workflow. Note also: this run's
+log shows the persisted profile rejected by the mechanical gate while the fresh
+solve accepted a LARGER pitch — the two bounds checks disagree; audit when touching
+the solver.
+
+**Wi-Fi → BLE migration assessment (what else can ride BLE for speed):**
+- **Battery → BLE (BUILD-WORTHY):** GetState carries batteryLevel/_batteryState and
+  NotifyState PUSHES battery changes — replaces the HTTP battery fetches and gives
+  the card live battery even mid-transfer or pre-join.
+- **Keep-awake (sleepDelay) → BLE SetOptions (CANDIDATE):** option-key over BLE
+  unverified; value is marginal (keep-awake matters during capture, when Wi-Fi is
+  joined anyway) — verify opportunistically, don't chase.
+- **Stays on Wi-Fi, correctly:** /osc/info probe (it IS the Wi-Fi-link validation),
+  leveling gate + still-format options (rare, always in joined contexts), JPEG
+  downloads (bulk bytes; BLE would take ~minutes/still), camera.delete sweep (no
+  BLE file API exists).
+- **Already migrated:** shutter (this build) — the largest per-still win available.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
