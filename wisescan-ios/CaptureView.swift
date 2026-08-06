@@ -32,6 +32,9 @@ struct CaptureView: View {
     @State private var meshCensusLastAt = Date.distantPast
     @State var rigCalibrationManager = RigCalibrationManager.shared
     @State var saveMessage: String?
+    /// Save-failure modal: the capture is still in `pendingScan` and retryable.
+    @State var showSaveFailedAlert = false
+    @State var saveFailedReason = ""
     /// Mesh vertex count captured at record-start. The "move to start the live mesh" cue is shown
     /// until enough NEW vertices appear; a baseline makes it fire in relocalized ghost/stitch flows
     /// where `totalVertices` already starts high (would otherwise never cross an absolute threshold).
@@ -1864,6 +1867,14 @@ struct CaptureView: View {
             onDiscardLive: { discardInProgressScan(isExtendFlow: false, completion: nil) },
             onDiscardPending: { discardPendingScan() }
         ))
+        .alert("Save Failed — Scan Not Lost", isPresented: $showSaveFailedAlert) {
+            Button("Try Again") { savePendingScan() }
+            Button("Not Now", role: .cancel) {}
+        } message: {
+            Text("The scan could not be written to storage, so nothing was saved — but the "
+                 + "capture is still held in memory and Try Again will re-attempt it. Free up "
+                 + "space first if storage is low.\n\n\(saveFailedReason)")
+        }
         .alert("Insufficient Tracking", isPresented: $showInsufficientTrackingAlert) {
             // A scan without a usable world map can't be relocalized or extended, so we don't offer
             // "Save Anyway". Recording is still live here (stopRecording returned early without

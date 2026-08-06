@@ -941,6 +941,27 @@ class ScanStats {
 class ScanFileManager {
     static let shared = ScanFileManager()
 
+    private static let log = Logger(subsystem: "org.arenaxr.scan4d", category: "save")
+
+    /// Why the last `saveScan` returned nil — the caller shows it, because "Save
+    /// failed" alone left a real field loss undiagnosable (2026-08-06: a save aborted,
+    /// rolled back cleanly, and the only record of WHY was a print() that the log
+    /// capture had already stopped covering).
+    private(set) var lastSaveFailureReason: String?
+
+    /// Free space on the Documents volume, in bytes ("important usage" = what iOS will
+    /// actually let an app consume, after purgeable reclamation).
+    static func freeDiskBytes() -> Int64? {
+        guard let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+              let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        else { return nil }
+        return values.volumeAvailableCapacityForImportantUsage
+    }
+
+    static func formattedFreeDisk() -> String {
+        freeDiskBytes().map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "unknown"
+    }
+
     private init() {}
 
     // swiftlint:disable:next function_parameter_count
@@ -959,6 +980,7 @@ class ScanFileManager {
         scanCase: ScanCase = .rescanSpace,
         worldMapSuspect: Bool = false
     ) -> CapturedScan? {
+        lastSaveFailureReason = nil
         let targetLocation: ScanLocation
         // Track a location we create here so we can roll it back if the required mesh write fails
         // (otherwise a failed save would leave behind an empty, undeletable location).
@@ -1019,9 +1041,14 @@ class ScanFileManager {
         // never reached disk (blank preview, every export fails).
         do {
             try FileManager.default.createDirectory(at: newScan.scanDirectory, withIntermediateDirectories: true)
-            try meshData.write(to: newScan.meshFileURL)
+            try meshData.write(to: newScan.meshFileURL, options: .atomic)
         } catch {
-            print("[ScanFileManager] Failed to create scan directory or write mesh; aborting save: \(error)")
+            // Rollback is intentional (no orphan record with no mesh) — but it also
+            // erases the evidence, so record WHY before deleting, on Logger (survives
+            // Release, unlike print) and in lastSaveFailureReason for the UI.
+            let reason = "\(error.localizedDescription) — \(Self.formattedFreeDisk()) free, mesh \(ByteCountFormatter.string(fromByteCount: Int64(meshData.count), countStyle: .file))"
+            lastSaveFailureReason = reason
+            Self.log.error("saveScan ABORTED writing \(newScan.meshFileURL.path, privacy: .public): \(reason, privacy: .public)")
             context.delete(newScan)
             if let created = createdLocation { context.delete(created) }
             return nil
