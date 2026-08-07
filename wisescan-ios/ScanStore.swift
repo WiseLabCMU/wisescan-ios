@@ -1039,6 +1039,12 @@ class ScanFileManager {
         // Create scan directory and write mesh (required). If this fails, roll back the inserted
         // record (and any location we just created) so we never persist an orphan whose mesh.obj
         // never reached disk (blank preview, every export fails).
+        // BLOCKING BY DESIGN — the durability gate. The caller clears `pendingScan`
+        // (losing the only in-memory copy) solely on a non-nil return, so the mesh
+        // must be on disk before this function answers. The ORDERING is sacred; the
+        // thread is negotiable (a future async saveScan may move the I/O off-main so
+        // long as the SwiftData insert/rollback and pendingScan clear stay ordered
+        // after it).
         do {
             try FileManager.default.createDirectory(at: newScan.scanDirectory, withIntermediateDirectories: true)
             try meshData.write(to: newScan.meshFileURL, options: .atomic)
@@ -1099,11 +1105,21 @@ class ScanFileManager {
             }
         }
 
-        // Generate 2D model preview if pose is available or default
-        if let img = MeshPreviewView.generateSnapshot(meshURL: newScan.meshFileURL, colorsURL: newScan.colorsFileURL, poseMatrix: targetLocation.imagingPoseMatrix,
-                                                      frameCenter: MeshPreviewView.canonicalFrameCenter(for: targetLocation)),
-           let data = img.jpegData(compressionQuality: 0.8) {
-            try? data.write(to: newScan.modelPreviewURL)
+        // 2D model preview — OFF-MAIN. It re-reads and re-parses the mesh we just
+        // wrote, builds geometry, renders offscreen and JPEG-encodes it (0.3-1 s on a
+        // large scan), and NOTHING gates on it: the card reloads the thumbnail on the
+        // location's updatedAt. Every other call site already runs it on a utility
+        // queue; this was the last main-thread one, sitting in the save path where a
+        // freeze is most visible.
+        let previewInputs = (mesh: newScan.meshFileURL, colors: newScan.colorsFileURL,
+                             out: newScan.modelPreviewURL, pose: targetLocation.imagingPoseMatrix,
+                             center: MeshPreviewView.canonicalFrameCenter(for: targetLocation))
+        Task.detached(priority: .utility) {
+            guard let img = MeshPreviewView.generateSnapshot(
+                meshURL: previewInputs.mesh, colorsURL: previewInputs.colors,
+                poseMatrix: previewInputs.pose, frameCenter: previewInputs.center),
+                  let data = img.jpegData(compressionQuality: 0.8) else { return }
+            try? data.write(to: previewInputs.out)
         }
 
         try? context.save()
@@ -1112,9 +1128,17 @@ class ScanFileManager {
     }
 
     func deleteScan(_ scan: CapturedScan, context: ModelContext) {
-        try? FileManager.default.removeItem(at: scan.scanDirectory)
+        // Record first, files after: a recursive unlink of raw_data is thousands of
+        // files and GBs (0.5-5 s on a big scan) and the UI must not wait for it. The
+        // bulk location-delete path already worked this way; this is the single-scan
+        // path catching up. Orphaned files after a crash mid-delete are harmless —
+        // the record is already gone, so nothing references them.
+        let directory = scan.scanDirectory
         context.delete(scan)
         try? context.save()
+        DispatchQueue.global(qos: .utility).async {
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 
     func addLocation(name: String, context: ModelContext) -> ScanLocation {

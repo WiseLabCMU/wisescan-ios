@@ -556,7 +556,7 @@ final class ThetaCameraManager {
 
     /// ImageIO thumbnail decode — bounds peak memory to the preview size regardless of the
     /// source resolution (a full-res equirect decode would be hundreds of MB).
-    private static func downsampledImage(from data: Data, maxPixel: CGFloat) -> UIImage? {
+    nonisolated private static func downsampledImage(from data: Data, maxPixel: CGFloat) -> UIImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -879,11 +879,18 @@ final class ThetaCameraManager {
                     let ms = Int(Date().timeIntervalSince(dlStart) * 1000)
                     let stillsDir = item.dir.appendingPathComponent("equirect_stills")
                     if FileManager.default.fileExists(atPath: stillsDir.path) {
-                        try? data.write(to: stillsDir.appendingPathComponent(
-                            String(format: "still_%04d.JPG", item.sequence)))
+                        // OFF-MAIN: this drain deliberately runs DURING a scan, and an
+                        // 8 MB write plus an 11K-equirect decode is 40-200 ms — landing
+                        // on main it would jank live ARKit at exactly the wrong moment.
+                        let dst = stillsDir.appendingPathComponent(
+                            String(format: "still_%04d.JPG", item.sequence))
+                        let preview = await Task.detached(priority: .utility) {
+                            try? data.write(to: dst)
+                            return Self.downsampledImage(from: data, maxPixel: 1200)
+                        }.value
                         drainedDirs.insert(item.dir)
                         lastDownload = DownloadOutcome(bytes: data.count, elapsedMs: ms)
-                        previewImage = Self.downsampledImage(from: data, maxPixel: 1200)
+                        previewImage = preview
                         log(.transfer, String(format: "Still #%d downloaded — %.1f MB in %d ms (%d queued)",
                                               item.sequence, Double(data.count) / 1_000_000, ms,
                                               pendingStillDownloads.count - 1))
