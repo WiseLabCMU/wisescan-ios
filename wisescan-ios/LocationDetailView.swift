@@ -372,7 +372,7 @@ struct LocationDetailView: View {
             isPresented: $showBulkColorMixedPrompt,
             uncolored: selectedColorSplit.uncolored,
             colored: selectedColorSplit.colored,
-            colorize: { bulkColorize(scans: $0) }
+            colorize: { bulkPostprocess(scans: $0, colorize: true) }
         ))
         .modifier(BulkUploadMixedDialog(
             isPresented: $showBulkUploadMixedPrompt,
@@ -776,7 +776,13 @@ struct LocationDetailView: View {
         let anyPending = selected.contains {
             !ScanPostprocessor.pendingSteps(for: $0, includeColorize: false).isEmpty
         }
-        if anyPending { bulkPostprocess(scans: selected) }
+        guard anyPending else {
+            // Structural only, and say so when there's nothing to do (the card and
+            // the Scans list behave identically).
+            bulkColoringMessages.removeAll()
+            return
+        }
+        bulkPostprocess(scans: selected)
     }
 
     /// Post-process pivot: processing is AUTOMATED — landing on a location kicks off every
@@ -792,12 +798,13 @@ struct LocationDetailView: View {
     /// Run the postprocessor over `scans` (it re-sorts oldest-first internally). Reuses the bulk
     /// coloring UI plumbing: per-card progress via `bulkColoringMessages`, `isBulkColoring` as the
     /// in-flight flag.
-    private func bulkPostprocess(scans: [CapturedScan]) {
+    private func bulkPostprocess(scans: [CapturedScan], colorize: Bool = false) {
         guard !isBulkColoring else { return }    // re-entrancy: the engine's claims make a 2nd batch a no-op, but don't churn the UI
         guard !scans.isEmpty else { return }
         isBulkColoring = true
         ScanPostprocessor.run(
             scans: scans,
+            colorize: colorize,
             modelContext: modelContext,
             progress: { scan, msg in bulkColoringMessages[scan.id] = msg },
             completion: {
@@ -816,108 +823,12 @@ struct LocationDetailView: View {
         let selected = split.uncolored + split.colored
         guard !selected.isEmpty else { return }
         if split.uncolored.isEmpty || split.colored.isEmpty {
-            bulkColorize(scans: selected)   // uniform selection — no need to ask
+            bulkPostprocess(scans: selected, colorize: true)   // uniform — no need to ask
         } else {
             showBulkColorMixedPrompt = true
         }
     }
 
-    private func bulkColorize(scans: [CapturedScan]) {
-        guard !isBulkColoring else { return }    // re-entrancy (see bulkPostprocess)
-        guard !scans.isEmpty else { return }
-        isBulkColoring = true
-
-        // Snapshot every @Model-derived value on main before dispatching — SwiftData models and
-        // their faulted relationships aren't thread-safe off the main actor (mirrors ScansListView's
-        // ScanColorizeInfo). The background loop below reads only the snapshot + the filesystem.
-        struct ColorizeInfo {
-            let scan: CapturedScan   // touched only on main (progress key + writeback)
-            let id: UUID
-            let meshURL: URL
-            let rawDataDir: URL
-            let colorsURL: URL
-            let previewURL: URL
-            let pose: [Float]?
-            let frameCenter: SIMD3<Float>?
-        }
-        // Claim each scan against the postprocess in-flight set — a Process batch may be baking a
-        // registration into this scan's mesh.obj right now, and colorizing mid-bake would
-        // misproject every frame. Already-claimed scans are skipped this pass.
-        let infos: [ColorizeInfo] = scans.compactMap { scan in
-            guard ScanPostprocessor.claimInFlight(scan.id) else { return nil }
-            return ColorizeInfo(
-                scan: scan,
-                id: scan.id,
-                meshURL: scan.meshFileURL,
-                rawDataDir: scan.rawDataPath,
-                colorsURL: scan.colorsFileURL,
-                previewURL: scan.modelPreviewURL,
-                pose: scan.location?.imagingPoseMatrix,
-                frameCenter: MeshPreviewView.canonicalFrameCenter(for: scan.location)
-            )
-        }
-
-        DispatchQueue.global(qos: .utility).async {
-            for info in infos {
-                // Per-card progress: each card shows its own "Coloring NN%" as the batch reaches it
-                // (mirrors how per-card upload status is shown). Same model property the single-card
-                // Color button uses, so only one card animates at a time as the loop advances.
-                DispatchQueue.main.async { self.bulkColoringMessages[info.scan.id] = "Coloring…" }
-                guard let meshData = try? Data(contentsOf: info.meshURL) else {
-                    DispatchQueue.main.async {
-                        self.bulkColoringMessages[info.scan.id] = nil
-                        ScanPostprocessor.releaseInFlight(info.id)
-                    }
-                    continue
-                }
-
-                var lastPct = -1
-                let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
-                    objData: meshData,
-                    rawDataDir: info.rawDataDir,
-                    progress: { p in
-                        let pct = Int(p * 100)
-                        guard pct != lastPct else { return } // throttle to whole-percent changes
-                        lastPct = pct
-                        DispatchQueue.main.async { self.bulkColoringMessages[info.scan.id] = "Coloring \(pct)%" }
-                    },
-                    phase: { step in
-                        DispatchQueue.main.async { self.bulkColoringMessages[info.scan.id] = step }
-                    }
-                )
-
-                if let colors = vertexColors {
-                    try? colors.write(to: info.colorsURL)
-                }
-
-                if let img = MeshPreviewView.generateSnapshot(
-                    meshURL: info.meshURL, colorsURL: info.colorsURL,
-                    poseMatrix: info.pose, frameCenter: info.frameCenter
-                ),
-                   let data = img.jpegData(compressionQuality: 0.8) {
-                    try? data.write(to: info.previewURL)
-                }
-
-                DispatchQueue.main.async {
-                    // Only mark colored when colors were actually produced — matches processOne's
-                    // didColorize gate. An unconditional flag would leave a scan claiming colors it
-                    // has no colors.bin for, and the auto-Process path (gated on !isColored) would
-                    // then skip it forever.
-                    if vertexColors != nil { info.scan.isColored = true }
-                    info.scan.location?.updatedAt = Date()
-                    self.bulkColoringMessages[info.scan.id] = nil
-                    try? self.modelContext.save()
-                    ScanPostprocessor.releaseInFlight(info.id)   // after the writeback, on main
-                }
-            }
-
-            DispatchQueue.main.async {
-                self.isBulkColoring = false
-                self.isEditing = false
-                self.selectedScans.removeAll()
-            }
-        }
-    }
 }
 
 // MARK: - Post-process Gate Alerts (DECISION 3)

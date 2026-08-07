@@ -29,8 +29,8 @@ import UIKit   // jpegData for the regenerated model preview
 ///                     relocated from the save pipeline — same math, same artifacts)
 ///   2. PROXY        — ghost proxy (walls→RoomPlan quads, content→lumpy mesh) from mesh.obj +
 ///                     the face-aligned classification sidecar
-///   3. COLORIZE     — photo-based vertex colors from the saved frames (governed by the
-///                     "Colorize during post-process" setting; cosmetic — never gates)
+///   3. COLORIZE     — photo-based vertex colors from the saved frames, run only when the
+///                     caller asks (the "Color" verb); cosmetic — never gates
 ///
 /// Ordering contract: process a location's scans OLDEST-FIRST — the original's room must exist on
 /// disk before later generations can register against it.
@@ -182,7 +182,11 @@ enum ScanPostprocessor {
             steps.append(.proxy)
         }
 
-        if includeColorize, !scan.isColored,
+        // When colorize is explicitly requested it always RE-colors: "Color" is a
+        // user verb meaning "make this colored now", not "color it if it never was"
+        // (an isColored guard here made re-color impossible through the engine and
+        // forced every view to hand-roll its own colorize loop).
+        if includeColorize,
            fm.fileExists(atPath: scan.rawDataPath.appendingPathComponent("images").path) {
             steps.append(.colorize)
         }

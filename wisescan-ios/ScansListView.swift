@@ -220,10 +220,10 @@ struct ScansListView: View {
             ) {
                 let split = targetColorSplit
                 Button("Color \(split.uncolored.count) Uncolored Only") {
-                    bulkColorize(scans: split.uncolored)
+                    bulkPostprocess(scans: split.uncolored, colorize: true)
                 }
                 Button("Recolor All \(split.uncolored.count + split.colored.count)") {
-                    bulkColorize(scans: split.uncolored + split.colored)
+                    bulkPostprocess(scans: split.uncolored + split.colored, colorize: true)
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
@@ -682,16 +682,23 @@ struct ScansListView: View {
         let anyPending = selected.contains {
             !ScanPostprocessor.pendingSteps(for: $0, includeColorize: false).isEmpty
         }
-        if anyPending {
-            bulkPostprocess(scans: selected)
-        } else {
-            requestBulkColorize()   // fully-processed selection: Process degrades to re-color prompt
+        guard anyPending else {
+            // Never degrade into coloring: one tap silently re-colouring a whole
+            // selection is minutes of GPU work nobody asked for. Process means
+            // structural, always — Color is its own button.
+            bulkProgressMessage = "Nothing to process"
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                if bulkProgressMessage == "Nothing to process" { bulkProgressMessage = nil }
+            }
+            return
         }
+        bulkPostprocess(scans: selected)
     }
 
     /// Run the postprocessor over `scans` (oldest-first internally; prerequisite originals are
     /// pulled in automatically for registration). Reuses the bulk banner + coloring flag.
-    private func bulkPostprocess(scans: [CapturedScan]) {
+    private func bulkPostprocess(scans: [CapturedScan], colorize: Bool = false) {
         guard !isBulkColoring else { return }    // re-entrancy: the engine's claims make a 2nd batch a no-op, but don't churn the UI
         guard !scans.isEmpty else { return }
         isBulkColoring = true
@@ -699,6 +706,7 @@ struct ScansListView: View {
         var done = 0
         ScanPostprocessor.run(
             scans: scans,
+            colorize: colorize,
             modelContext: modelContext,
             progress: { scan, msg in
                 // Tile overlay: show the step on the scan's location while it works; clear when
@@ -734,104 +742,12 @@ struct ScansListView: View {
         let selected = split.uncolored + split.colored
         guard !selected.isEmpty else { return }
         if split.uncolored.isEmpty || split.colored.isEmpty {
-            bulkColorize(scans: selected)   // uniform selection — no need to ask
+            bulkPostprocess(scans: selected, colorize: true)   // uniform — no need to ask
         } else {
             showBulkColorMixedPrompt = true
         }
     }
 
-    /// Serial colorize of the given scans on a utility queue.
-    /// Progress is throttled to whole-percent updates to avoid flooding the main thread.
-    private func bulkColorize(scans: [CapturedScan]) {
-        guard !isBulkColoring else { return }    // re-entrancy (see bulkPostprocess)
-        guard !scans.isEmpty else { return }
-        isBulkColoring = true
-
-        // Capture all needed properties on main before dispatching (SwiftData models aren't
-        // thread-safe). Each tuple carries the values needed for the background colorize loop.
-        struct ScanColorizeInfo {
-            let id: UUID
-            let meshURL: URL
-            let rawDataDir: URL
-            let colorsURL: URL
-            let previewURL: URL
-            let pose: [Float]?
-            let frameCenter: SIMD3<Float>?
-        }
-        // Claim each scan against the postprocess in-flight set — a Process batch may be baking a
-        // registration into this scan's mesh.obj right now, and colorizing mid-bake would
-        // misproject every frame. Already-claimed scans are skipped this pass.
-        let infos: [(scan: CapturedScan, info: ScanColorizeInfo)] = scans.compactMap { scan in
-            guard ScanPostprocessor.claimInFlight(scan.id) else { return nil }
-            return (scan, ScanColorizeInfo(
-                id: scan.id,
-                meshURL: scan.meshFileURL,
-                rawDataDir: scan.rawDataPath,
-                colorsURL: scan.colorsFileURL,
-                previewURL: scan.modelPreviewURL,
-                pose: scan.location?.imagingPoseMatrix,
-                frameCenter: MeshPreviewView.canonicalFrameCenter(for: scan.location)
-            ))
-        }
-        let totalScans = infos.count
-
-        DispatchQueue.global(qos: .utility).async {
-            for (idx, entry) in infos.enumerated() {
-                let scanName = "Scan \(idx + 1)"
-                DispatchQueue.main.async {
-                    self.bulkProgressMessage = "Coloring \(idx + 1)/\(totalScans) — \(scanName)"
-                }
-
-                guard let meshData = try? Data(contentsOf: entry.info.meshURL) else {
-                    ScanPostprocessor.releaseInFlight(entry.info.id)
-                    continue
-                }
-
-                var lastPct = -1
-                let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
-                    objData: meshData,
-                    rawDataDir: entry.info.rawDataDir,
-                    progress: { progress in
-                        let pct = Int(progress * 100)
-                        guard pct != lastPct else { return } // throttle to whole-percent changes
-                        lastPct = pct
-                        DispatchQueue.main.async {
-                            self.bulkProgressMessage = "Coloring \(idx + 1)/\(totalScans) — \(scanName): \(pct)%"
-                        }
-                    },
-                    phase: { step in
-                        DispatchQueue.main.async {
-                            self.bulkProgressMessage = "Coloring \(idx + 1)/\(totalScans) — \(scanName): \(step)"
-                        }
-                    }
-                )
-
-                if let colors = vertexColors {
-                    try? colors.write(to: entry.info.colorsURL)
-                }
-
-                if let img = MeshPreviewView.generateSnapshot(
-                    meshURL: entry.info.meshURL, colorsURL: entry.info.colorsURL,
-                    poseMatrix: entry.info.pose, frameCenter: entry.info.frameCenter
-                ),
-                   let data = img.jpegData(compressionQuality: 0.8) {
-                    try? data.write(to: entry.info.previewURL)
-                }
-
-                DispatchQueue.main.async {
-                    if vertexColors != nil { entry.scan.isColored = true }   // only when colors were produced (matches processOne)
-                    entry.scan.location?.updatedAt = Date()
-                    try? self.modelContext.save()
-                    ScanPostprocessor.releaseInFlight(entry.info.id)   // after the writeback, on main
-                }
-            }
-
-            DispatchQueue.main.async {
-                self.isBulkColoring = false
-                self.exitEditModeWithBanner("✓ Colored \(totalScans) scan\(totalScans == 1 ? "" : "s")")
-            }
-        }
-    }
 
     // MARK: - Edit Mode Exit with Banner
 
@@ -1532,19 +1448,16 @@ struct ScanCard: View {
     /// The COLOR button: one tap makes the scan colored, whatever that takes — any
     /// pending structural steps run first (registration/proxy that became achievable
     /// after auto-process, calibration re-opened by a solver bump), then the (re)color.
+    /// ONE path: the engine does both, exactly as the bulk Color buttons do.
     private func colorScan() {
-        guard !ScanPostprocessor.pendingSteps(for: scan, includeColorize: false).isEmpty else {
-            colorizeScan()
-            return
-        }
         coloringMessage = "Processing…"
         ScanPostprocessor.run(
             scans: [scan],
+            colorize: true,
             modelContext: modelContext,
             progress: { _, msg in coloringMessage = msg ?? coloringMessage },
             completion: {
-                // Structural work done — now the color the user actually asked for.
-                colorizeScan()
+                coloringMessage = nil
                 onUpdate(scan)
             }
         )
@@ -1782,70 +1695,6 @@ struct ScanCard: View {
                     self.onUpdate(self.scan)
                     self.showExportError = true
                 }
-            }
-        }
-    }
-
-    private func colorizeScan() {
-        // Claim against the postprocess in-flight set — colorizing while a Process batch bakes a
-        // registration into this mesh.obj would misproject every frame. Claimed scans no-op.
-        guard ScanPostprocessor.claimInFlight(scan.id) else { return }
-        coloringMessage = "Coloring…"
-
-        let scanId = scan.id
-        let meshURL = scan.meshFileURL
-        let rawDataDir = scan.rawDataPath
-        let colorsURL = scan.colorsFileURL
-        let previewURL = scan.modelPreviewURL
-        let pose = scan.location?.imagingPoseMatrix
-        let frameCenter = MeshPreviewView.canonicalFrameCenter(for: scan.location)
-
-        DispatchQueue.global(qos: .utility).async {
-            guard let meshData = try? Data(contentsOf: meshURL) else {
-                DispatchQueue.main.async {
-                    self.coloringMessage = nil
-                    ScanPostprocessor.releaseInFlight(scanId)
-                }
-                return
-            }
-
-            var lastPct = -1
-            let vertexColors = VertexColorAccumulator.colorizeFromSavedFrames(
-                objData: meshData,
-                rawDataDir: rawDataDir,
-                progress: { p in
-                    let pct = Int(p * 100)
-                    guard pct != lastPct else { return } // throttle to whole-percent changes
-                    lastPct = pct
-                    DispatchQueue.main.async { self.coloringMessage = "Coloring \(pct)%" }
-                },
-                phase: { step in
-                    DispatchQueue.main.async { self.coloringMessage = step }
-                }
-            )
-
-            DispatchQueue.main.async {
-                self.coloringMessage = "Updating preview…"
-            }
-
-            // Write updated colors
-            if let colors = vertexColors {
-                try? colors.write(to: colorsURL)
-            }
-
-            // Regenerate 3D model preview
-            if let img = MeshPreviewView.generateSnapshot(meshURL: meshURL, colorsURL: colorsURL,
-                                                          poseMatrix: pose, frameCenter: frameCenter),
-               let data = img.jpegData(compressionQuality: 0.8) {
-                try? data.write(to: previewURL)
-            }
-
-            DispatchQueue.main.async {
-                if vertexColors != nil { self.scan.isColored = true }   // only when colors were produced (matches processOne)
-                self.scan.location?.updatedAt = Date() // Trigger preview image reload
-                try? self.modelContext.save()
-                self.coloringMessage = nil
-                ScanPostprocessor.releaseInFlight(scanId)   // after the writeback, on main
             }
         }
     }
