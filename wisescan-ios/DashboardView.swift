@@ -532,10 +532,13 @@ struct WearableCard: View {
     }
 }
 
-/// Dashboard card for the 360° still-source spike: shows Theta connection state and a
-/// "Test Shutter" trigger. Wi‑Fi is joined manually (iOS Settings) for now, so connecting
-/// is an explicit "Check Connection" tap rather than automatic on appear (keeps the iOS
-/// Local Network permission prompt tied to a deliberate action). See ThetaCameraManager.
+/// Dashboard card for the 360° still source. A state machine, not a panel: with no
+/// camera saved it is a single "Add Ricoh Theta 360° Camera" button; once saved it
+/// shows the camera's identity with Connect (BLE wake → programmatic Wi-Fi join →
+/// patient probe); Connection Events appear only after the first Connect tap and
+/// collapse when it succeeds; Test Shutter and the storage row appear only while
+/// connected. Camera management (add another / edit Wi-Fi / forget) is always
+/// reachable via the Manage menu. See ThetaCameraManager.
 struct ThetaCameraCard: View {
     @Bindable var manager: ThetaCameraManager
     @State private var calibrationManager = RigCalibrationManager.shared
