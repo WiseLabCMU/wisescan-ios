@@ -130,6 +130,13 @@ final class ThetaBLEProbe: NSObject {
         central?.stopScan()
     }
 
+    /// Reset the bench display — found list and log. A live link survives; this is
+    /// "clean slate for the next experiment", not a disconnect.
+    func clear() {
+        found.removeAll()
+        logLines.removeAll()
+    }
+
     func connect(_ id: UUID) {
         guard let central, let target = central.retrievePeripherals(withIdentifiers: [id]).first else {
             log("⚠️ peripheral \(id) not retrievable")
@@ -180,23 +187,9 @@ final class ThetaBLEProbe: NSObject {
         }
     }
 
-    /// Radio-handover test: round 4's first session dropped BLE right after an
-    /// accepted networkType write, and 360ble5's in-session wake never raised the
-    /// AP — hypothesis: the X holds Wi-Fi down while a BLE central is connected.
-    func wakeAPAndDropBLE() {
-        wakeAP()
-        log("…dropping BLE in 1.5 s so the radio can switch")
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            self?.disconnect()
-        }
-    }
-
     /// Field insight (manual-wake test): with the AP already up, BLE and Wi-Fi
-    /// COEXIST — both shutter channels worked simultaneously. So the napping state is
-    /// the camera ASLEEP (Wi-Fi radio off, BLE alive, networkType still "AP" — our
-    /// wake write was a no-op, not a failure). The real wake knob should be camera
-    /// POWER: SetOptions cameraPower=on over the v2 channel.
+    /// COEXIST — the napping state is the camera ASLEEP (Wi-Fi radio off, BLE alive,
+    /// networkType still "AP"). The real wake knob is camera POWER via SetOptions.
     func wakeCamera() {
         write(Data("{\"cameraPower\":\"on\"}".utf8),
               to: Self.ccv2SetOptionsChar, label: "setOptions cameraPower=on (v2)")

@@ -318,7 +318,14 @@ struct ThetaBLEProbeCard: View {
                     .font(.headline)
                     .foregroundColor(.white)
                 Spacer()
-                Button(probe.isScanning ? "Stop" : "Scan", action: {
+                // One context-aware control: Scan → Stop → Rescan (rescan clears and
+                // starts fresh); Clear appears whenever there is anything to wipe.
+                if !probe.isScanning, !(probe.found.isEmpty && probe.logLines.isEmpty) {
+                    Button("Clear", action: { probe.clear() })
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.6))
+                }
+                Button(probe.isScanning ? "Stop" : (probe.found.isEmpty ? "Scan" : "Rescan"), action: {
                     probe.isScanning ? probe.stopScan() : probe.startScan()
                 })
                 .font(.subheadline).bold()
@@ -326,22 +333,22 @@ struct ThetaBLEProbeCard: View {
             }
 
             if let connected = probe.connectedName {
-                Text(connected)
-                    .font(.caption.bold())
-                    .foregroundColor(.green)
+                HStack {
+                    Text(connected)
+                        .font(.caption.bold())
+                        .foregroundColor(.green)
+                    Spacer()
+                    Button("Disconnect", action: { probe.disconnect() })
+                        .font(.caption.bold())
+                        .foregroundColor(.orange)
+                }
                 // Commands grouped by which device family answers them — the probe
                 // core (scan/connect/discover/log) is device-agnostic; these rows are
                 // the Theta command set. Adaptive buttons fall back v2→v1 by presence.
                 HStack(spacing: 14) {
-                    Text("Any:").foregroundColor(.white.opacity(0.5))
-                    Button("Disconnect", action: { probe.disconnect() })
-                        .foregroundColor(.orange)
-                }
-                .font(.caption.bold())
-                HStack(spacing: 14) {
                     Text("X · Z1≥3.10:").foregroundColor(.white.opacity(0.5))
                     Button("Take Picture", action: { probe.takePicture() })
-                    Button("Wake AP", action: { probe.wakeAP() })
+                    Button("AP Mode", action: { probe.wakeAP() })
                     Button("NetOpts", action: { probe.readNetworkOptions() })
                 }
                 .font(.caption.bold())
@@ -349,16 +356,10 @@ struct ThetaBLEProbeCard: View {
                 HStack(spacing: 14) {
                     Text("X only:").foregroundColor(.white.opacity(0.5))
                     Button("Wake Camera", action: { probe.wakeCamera() })
-                    Button("Wake+Drop BLE", action: { probe.wakeAPAndDropBLE() })
-                }
-                .font(.caption.bold())
-                .foregroundColor(.cyan)
-                // Z1/V: register the probe UUID over Wi-Fi first, then auth over BLE
-                // (per-session; the X ignores this scheme entirely).
-                HStack(spacing: 14) {
+                    // Z1/V need Wi-Fi registration then per-session auth; X ignores both.
                     Text("Z1/V:").foregroundColor(.white.opacity(0.5))
-                    Button("Register (Wi-Fi)", action: { probe.registerOverWiFi() })
-                    Button("Auth (BLE)", action: { probe.writeAuth() })
+                    Button("Register", action: { probe.registerOverWiFi() })
+                    Button("Auth", action: { probe.writeAuth() })
                 }
                 .font(.caption.bold())
                 .foregroundColor(.cyan)
@@ -580,7 +581,9 @@ struct ThetaCameraCard: View {
         case .disconnected:
             return manager.hasStoredNetwork ? "Saved — tap Connect" : "Not set up"
         case .connecting: return "Checking…"
-        case .connected(let model, let firmware): return "\(model) · \(firmware)"
+        // The header already names the camera (model · serial) — repeating the model
+        // here was redundant; the status line carries what the header doesn't.
+        case .connected(_, let firmware): return "Connected · v\(firmware)"
         case .failed: return "Connection failed"
         }
     }
@@ -600,6 +603,12 @@ struct ThetaCameraCard: View {
         // scan pended forever) — every sheet opening starts with a fresh scan's truth.
         ThetaBLEManager.shared.discovered.removeAll()
         showNetworkSheet = true
+    }
+
+    private func refreshFileCount() async {
+        storageBusy = true
+        cameraFileCount = await manager.cameraFileCount()
+        storageBusy = false
     }
 
     private func signalLabel(_ rssi: Int) -> String {
@@ -840,13 +849,9 @@ struct ThetaCameraCard: View {
                     if storageBusy {
                         ProgressView()
                     } else {
-                        Button("Count") {
-                            Task {
-                                storageBusy = true
-                                cameraFileCount = await manager.cameraFileCount()
-                                storageBusy = false
-                            }
-                        }
+                        Button(action: { Task { await refreshFileCount() } }, label: {
+                            Image(systemName: "arrow.clockwise")
+                        })
                         if (cameraFileCount ?? 0) > 0 {
                             Button("Erase All", role: .destructive) { showEraseConfirm = true }
                                 .foregroundColor(.red)
@@ -860,8 +865,8 @@ struct ThetaCameraCard: View {
                         Task {
                             storageBusy = true
                             _ = await manager.deleteAllCameraFiles()
-                            cameraFileCount = await manager.cameraFileCount()
                             storageBusy = false
+                            await refreshFileCount()
                         }
                     }
                     Button("Cancel", role: .cancel) {}
@@ -1082,6 +1087,7 @@ struct ThetaCameraCard: View {
                     case .connecting, .failed: eventsExpanded = true
                     case .connected, .disconnected: eventsExpanded = false
                     }
+                    if case .connected = newState { Task { await refreshFileCount() } }
                 }
             }
 
