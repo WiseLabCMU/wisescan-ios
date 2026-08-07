@@ -662,7 +662,7 @@ sequenceDiagram
     end
     PP->>D: registration · proxy
     PP-->>LDV: per-step phase pill → isProcessed=true (frees rescan/link/save/upload/color)
-    Note over LDV: the card's primary button is COLOR (finishes stragglers, then colors); the long-press menu holds "Re-run Processing" + "Redo 360° Calibration" (recovery tools)
+    Note over LDV: the card's primary button is COLOR (finishes stragglers, then colors) — the long-press menu holds Re-run Processing and Redo 360° Calibration (recovery tools)
 ```
 
 ##### Color (primary per-scan action)
