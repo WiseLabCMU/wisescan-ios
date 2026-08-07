@@ -557,6 +557,9 @@ struct ThetaCameraCard: View {
     @State private var cameraFileCount: Int?
     /// Connection Events disclosure — auto-driven by connection state, user-overridable.
     @State private var eventsExpanded = false
+    /// Events stay hidden until the user first tries to connect (field spec: the
+    /// saved card is quiet; detail appears with the first Connect tap).
+    @State private var hasAttemptedConnect = false
     @State private var storageBusy = false
     @State private var showEraseConfirm = false
 
@@ -791,6 +794,31 @@ struct ThetaCameraCard: View {
     }
 
     var body: some View {
+        // State machine per field spec: (1) not set up → a single Meta-style add
+        // button; (2) saved → identity + connect; (3) events appear only once
+        // Connect has been attempted; (4) Test Shutter appears once Wi-Fi completes.
+        if !manager.hasStoredNetwork {
+            Button(action: { openSheet(adding: true) }, label: {
+                HStack {
+                    Image(systemName: "plus")
+                    Text("Add Ricoh Theta 360° Camera")
+                }
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(.ultraThinMaterial)
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                .cornerRadius(16)
+                .foregroundColor(.white)
+            })
+            .sheet(isPresented: $showNetworkSheet,
+                   onDismiss: { ThetaBLEManager.shared.stopDiscovery() },
+                   content: { networkSheet })
+        } else {
+            storedCardBody
+        }
+    }
+
+    private var storedCardBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 10) {
                 Image(systemName: "camera.aperture")
@@ -969,23 +997,27 @@ struct ThetaCameraCard: View {
                 })
                 .disabled(manager.state == .connecting)
 
-                Button(action: { manager.takePicture() }, label: {
-                    HStack {
-                        if manager.isCapturing {
-                            ProgressView().tint(.black).padding(.trailing, 2)
-                        } else {
-                            Image(systemName: "camera.fill")
+                // Rendered only once the Wi-Fi connection completes (field spec) —
+                // a permanently disabled gray button earned its keep never.
+                if manager.isConnected {
+                    Button(action: { manager.takePicture() }, label: {
+                        HStack {
+                            if manager.isCapturing {
+                                ProgressView().tint(.black).padding(.trailing, 2)
+                            } else {
+                                Image(systemName: "camera.fill")
+                            }
+                            Text("Test Shutter")
+                                .font(.subheadline).bold()
                         }
-                        Text("Test Shutter")
-                            .font(.subheadline).bold()
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(manager.isConnected ? Color.cyan.opacity(0.85) : Color.gray.opacity(0.3))
-                    .cornerRadius(10)
-                    .foregroundColor(manager.isConnected ? .black : .gray)
-                })
-                .disabled(!manager.isConnected || manager.isCapturing)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Color.cyan.opacity(0.85))
+                        .cornerRadius(10)
+                        .foregroundColor(.black)
+                    })
+                    .disabled(manager.isCapturing)
+                }
             }
 
             // Last trigger result — the P2 spike's headline number (round-trip latency).
@@ -1061,7 +1093,7 @@ struct ThetaCameraCard: View {
             // auto-expands while connecting/failed and auto-collapses once a Wi-Fi
             // connection completes (or on disconnect/forget), so the settled card
             // stays lean. Manually expandable anytime; the underlying log never stops.
-            if !manager.events.isEmpty {
+            if !manager.events.isEmpty, hasAttemptedConnect {
                 Divider().background(Color.white.opacity(0.1))
                 DisclosureGroup(isExpanded: $eventsExpanded) {
                     ForEach(Array(manager.events.prefix(6))) { event in
@@ -1082,13 +1114,6 @@ struct ThetaCameraCard: View {
                         .foregroundColor(.white.opacity(0.7))
                 }
                 .tint(.white.opacity(0.5))
-                .onChange(of: manager.state) { _, newState in
-                    switch newState {
-                    case .connecting, .failed: eventsExpanded = true
-                    case .connected, .disconnected: eventsExpanded = false
-                    }
-                    if case .connected = newState { Task { await refreshFileCount() } }
-                }
             }
 
             // Camera management, reachable in EVERY state — these used to be hidden
@@ -1119,6 +1144,20 @@ struct ThetaCameraCard: View {
                // Never leave a scan running behind a closed sheet.
                onDismiss: { ThetaBLEManager.shared.stopDiscovery() },
                content: { networkSheet })
+        .onChange(of: manager.state) { _, newState in
+            switch newState {
+            case .connecting:
+                hasAttemptedConnect = true
+                eventsExpanded = true
+            case .failed:
+                eventsExpanded = true
+            case .connected:
+                eventsExpanded = false
+                Task { await refreshFileCount() }
+            case .disconnected:
+                eventsExpanded = false
+            }
+        }
         .padding()
         .background(.ultraThinMaterial)
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.white.opacity(0.1), lineWidth: 1))

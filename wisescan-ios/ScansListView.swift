@@ -1462,33 +1462,33 @@ struct ScanCard: View {
                 .disabled(uploadButtonDisabled)
             }
 
-            // Post-process (né Color — DECISION 3): room build + registration + proxy + colorize
-            // per setting; when nothing is pending it re-colors (overwrites colors.bin).
-            // 360° scans get a long-press menu — the designed manual "Redo Processing"
-            // for steps whose provenance stamps already say done.
+            // COLOR is the user's verb (field redesign 2026-08-06): post-processing is
+            // AUTOMATED (save + landing), so the primary button just makes the scan
+            // colored — silently finishing any structural stragglers first (the
+            // deferred RoomBuilder often lands roomplan.json after auto-process ran,
+            // leaving registration/proxy pending; that used to cost a mystery first
+            // click). Manual re-runs live in the long-press menu for recovery cases.
             do {
                 let processDisabled = isEditing || activeColoringMessage != nil
-                if (itemCounts?.equirect ?? 0) > 0 {
-                    Menu {
+                Menu {
+                    Button(action: { reRunProcessing() }, label: {
+                        Label("Re-run Processing", systemImage: "wand.and.stars")
+                    })
+                    if (itemCounts?.equirect ?? 0) > 0 {
                         Button(action: { redoCalibration() }, label: {
                             Label("Redo 360° Calibration", systemImage: "arrow.triangle.2.circlepath")
                         })
-                    } label: {
-                        processButtonLabel(disabled: processDisabled)
-                    } primaryAction: {
-                        postprocessScan()
                     }
-                    .disabled(processDisabled)
-                } else {
-                    Button(action: { postprocessScan() }, label: {
-                        processButtonLabel(disabled: processDisabled)
-                    })
-                    .disabled(processDisabled)
+                } label: {
+                    processButtonLabel(disabled: processDisabled)
+                } primaryAction: {
+                    colorScan()
                 }
+                .disabled(processDisabled)
             }
         }
         .alert("Post-process Required", isPresented: $showPostprocessAlert) {
-            Button("Post-process Now") { postprocessScan() }
+            Button("Post-process Now") { reRunProcessing() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("You haven't post-processed this scan — do it now. Uploading and exporting " +
@@ -1498,8 +1498,8 @@ struct ScanCard: View {
 
     private func processButtonLabel(disabled: Bool) -> some View {
         HStack {
-            Image(systemName: "wand.and.stars")
-            Text("Process")
+            Image(systemName: "paintbrush.fill")
+            Text("Color")
                 .font(.subheadline).bold()
         }
         .frame(maxWidth: .infinity)
@@ -1523,18 +1523,42 @@ struct ScanCard: View {
                 ScanPostprocessor.releaseInFlight(scan.id)
                 coloringMessage = nil
                 if cleared > 0 || !ScanPostprocessor.pendingSteps(for: scan, includeColorize: false).isEmpty {
-                    postprocessScan()
+                    reRunProcessing()
                 }
             }
         }
     }
 
-    /// DECISION 3: run every achievable pending step for this scan (room / registration / proxy,
-    /// + colorize per the "Colorize during post-process" setting); when nothing is pending, fall
-    /// back to a plain re-color.
-    private func postprocessScan() {
+    /// The COLOR button: one tap makes the scan colored, whatever that takes — any
+    /// pending structural steps run first (registration/proxy that became achievable
+    /// after auto-process, calibration re-opened by a solver bump), then the (re)color.
+    private func colorScan() {
         guard !ScanPostprocessor.pendingSteps(for: scan, includeColorize: false).isEmpty else {
             colorizeScan()
+            return
+        }
+        coloringMessage = "Processing…"
+        ScanPostprocessor.run(
+            scans: [scan],
+            modelContext: modelContext,
+            progress: { _, msg in coloringMessage = msg ?? coloringMessage },
+            completion: {
+                // Structural work done — now the color the user actually asked for.
+                colorizeScan()
+                onUpdate(scan)
+            }
+        )
+    }
+
+    /// Long-press menu: STRUCTURAL re-run only, no coloring — the recovery tool for
+    /// camera-gone downloads, late roomplans, and pipeline upgrades.
+    private func reRunProcessing() {
+        guard !ScanPostprocessor.pendingSteps(for: scan, includeColorize: false).isEmpty else {
+            coloringMessage = "Nothing to process"
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                if coloringMessage == "Nothing to process" { coloringMessage = nil }
+            }
             return
         }
         coloringMessage = "Processing…"
