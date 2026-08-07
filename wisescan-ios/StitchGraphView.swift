@@ -24,6 +24,9 @@ struct StitchGraphView: View {
     /// Per-location status while a bulk Post-process runs (locationId → step message), from
     /// ScansListView. Non-empty entries put a progress capsule on that location's tile.
     var processingByLocation: [UUID: String] = [:]
+    /// Cluster-level Color: hands the cluster's scans to the parent's shared bulk-color
+    /// path (mixed-color prompt included). Per-scan Color stays on the location's cards.
+    var onColorScans: ([CapturedScan]) -> Void = { _ in }
 
     @State private var graph: StitchGraph?
 
@@ -47,7 +50,8 @@ struct StitchGraphView: View {
                                     isEditing: isEditing,
                                     selectedLocations: $selectedLocations,
                                     processingByLocation: processingByLocation,
-                                    onRender: { presentRender(for: component) }
+                                    onRender: { presentRender(for: component) },
+                                    onColor: { colorCluster(component) }
                                 )
                             }
                         }
@@ -88,6 +92,13 @@ struct StitchGraphView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.vertical, 60)
+    }
+
+    /// All scans across the cluster's locations, handed to the parent's bulk-color path.
+    private func colorCluster(_ component: [UUID]) {
+        guard let graph else { return }
+        let scans = component.compactMap { graph.nodesById[$0]?.location }.flatMap(\.scans)
+        onColorScans(scans)
     }
 
     private func presentRender(for component: [UUID]) {
@@ -131,6 +142,7 @@ private struct ClusterView: View {
     @Binding var selectedLocations: Set<PersistentIdentifier>
     var processingByLocation: [UUID: String] = [:]
     let onRender: () -> Void
+    let onColor: () -> Void
 
     // Layout metrics
     private let nodeWidth: CGFloat = 150
@@ -217,6 +229,25 @@ private struct ClusterView: View {
                     .accessibilityHint("Shows all connected maps in a single combined view")
                     .accessibilityAddTraits(.isButton)
                     .accessibilityAction { onRender() }
+
+                    // Cluster Color — same gesture treatment, orange like every Color surface.
+                    HStack(spacing: 8) {
+                        Image(systemName: "paintbrush.fill")
+                        Text("Color")
+                    }
+                    .font(.headline)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 11)
+                    .foregroundColor(.orange)
+                    .background(Color.orange.opacity(0.2))
+                    .clipShape(Capsule())
+                    .contentShape(Capsule())
+                    .simultaneousGesture(TapGesture().onEnded { onColor() })
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Color")
+                    .accessibilityHint("Colors every scan in this cluster")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { onColor() }
                 }
 
                 Spacer(minLength: 0)

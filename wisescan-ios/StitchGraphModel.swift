@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import simd
+import UIKit
 
 // MARK: - Stitch Graph Model
 //
@@ -271,4 +272,31 @@ enum StitchGraphBuilder {
             return PlacedScan(locationId: locId, scanId: scanId, transform: t)
         }
     }
+}
+
+// MARK: - Combined-render item
+
+/// One mesh to compose into the shared combined-render scene — the data contract
+/// between graph placement (`StitchGraphBuilder.placeScans`) and `CombinedMeshScreen`.
+struct CombinedMeshItem: Identifiable {
+    let id: UUID            // scanId
+    let name: String
+    let meshURL: URL
+    let colorsURL: URL?
+    let scanDirectoryURL: URL?
+    let transform: simd_float4x4
+    /// Distinct hue used when "color by map" is enabled.
+    let tint: UIColor
+}
+
+extension CombinedMeshItem {
+    /// A small palette of high-contrast hues to assign per map.
+    static let palette: [UIColor] = [
+        UIColor(red: 0.40, green: 0.78, blue: 1.00, alpha: 1.0), // cyan
+        UIColor(red: 1.00, green: 0.62, blue: 0.40, alpha: 1.0), // orange
+        UIColor(red: 0.62, green: 1.00, blue: 0.55, alpha: 1.0), // green
+        UIColor(red: 1.00, green: 0.55, blue: 0.85, alpha: 1.0), // pink
+        UIColor(red: 0.85, green: 0.78, blue: 0.45, alpha: 1.0), // gold
+        UIColor(red: 0.70, green: 0.60, blue: 1.00, alpha: 1.0) // violet
+    ]
 }

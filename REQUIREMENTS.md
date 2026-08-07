@@ -677,6 +677,7 @@ sequenceDiagram
     participant D as raw_data
 
     U->>LDV: Color
+    Note over U,LDV: same path serves every Color surface — the card, both bulk toolbars, a graph cluster's Color capsule, and the combined-render screen (mixed sets prompt: uncolored-only or recolor all)
     opt structural steps pending (late roomplan, solver bump)
         LDV->>PP: run structural steps first — then continue
     end

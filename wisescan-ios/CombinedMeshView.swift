@@ -8,23 +8,15 @@ import simd
 // frame using the per-location transforms from `StitchGraphBuilder.placeScans`. Reuses
 // `MeshPreviewView.buildGeometry` for colored geometry, mirroring its lighting/camera rig.
 
-/// One mesh to compose into the shared scene.
-struct CombinedMeshItem: Identifiable {
-    let id: UUID            // scanId
-    let name: String
-    let meshURL: URL
-    let colorsURL: URL?
-    let scanDirectoryURL: URL?
-    let transform: simd_float4x4
-    /// Distinct hue used when "color by map" is enabled.
-    let tint: UIColor
-}
-
 // MARK: - Container (presented modally)
 
 struct CombinedMeshScreen: View {
     let title: String
     let items: [CombinedMeshItem]
+    /// Colorize request for the shown scans (ids). Provided by the presenter, which owns
+    /// the models and the shared bulk-color path; nil hides the option. The screen
+    /// dismisses on selection so the per-tile progress is visible.
+    var onColor: (([UUID]) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @State private var colorByMap = false
@@ -117,6 +109,38 @@ struct CombinedMeshScreen: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     HStack(spacing: 12) {
+                        if let onColor {
+                            // Single map → direct action; several → all-maps + per-map menu.
+                            if presentItems.count == 1 {
+                                Button {
+                                    onColor(presentItems.map(\.id))
+                                    dismiss()
+                                } label: {
+                                    Image(systemName: "paintbrush")
+                                }
+                            } else if !presentItems.isEmpty {
+                                Menu {
+                                    Button {
+                                        onColor(presentItems.map(\.id))
+                                        dismiss()
+                                    } label: {
+                                        Label("Color All \(presentItems.count) Maps", systemImage: "paintbrush.fill")
+                                    }
+                                    Divider()
+                                    ForEach(presentItems) { item in
+                                        Button {
+                                            onColor([item.id])
+                                            dismiss()
+                                        } label: {
+                                            Text("Color \(item.name)")
+                                        }
+                                    }
+                                } label: {
+                                    Image(systemName: "paintbrush")
+                                }
+                            }
+                        }
+
                         Button {
                             semanticViewMode = semanticViewMode.next
                         } label: {
@@ -361,21 +385,6 @@ struct CombinedMeshView: UIViewRepresentable {
         }
     }
 }
-
-// MARK: - Distinct tints
-
-extension CombinedMeshItem {
-    /// A small palette of high-contrast hues to assign per map.
-    static let palette: [UIColor] = [
-        UIColor(red: 0.40, green: 0.78, blue: 1.00, alpha: 1.0), // cyan
-        UIColor(red: 1.00, green: 0.62, blue: 0.40, alpha: 1.0), // orange
-        UIColor(red: 0.62, green: 1.00, blue: 0.55, alpha: 1.0), // green
-        UIColor(red: 1.00, green: 0.55, blue: 0.85, alpha: 1.0), // pink
-        UIColor(red: 0.85, green: 0.78, blue: 0.45, alpha: 1.0), // gold
-        UIColor(red: 0.70, green: 0.60, blue: 1.00, alpha: 1.0) // violet
-    ]
-}
-
 #Preview {
     // Empty state: no on-disk meshes, so the screen shows its "nothing to combine"
     // path. A populated preview would need real mesh files on disk.

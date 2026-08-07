@@ -27,6 +27,9 @@ struct ScansListView: View {
     @State private var isEditing = false
     @State private var viewMode: LibraryViewMode = .grid
     @State private var renderRequest: ComponentRenderRequest?
+    /// The scan set the mixed-color prompt is deciding about (selection, graph cluster,
+    /// or combined-render screen — whichever surface asked).
+    @State private var pendingColorScans: [CapturedScan] = []
     @State private var graphVisibleLocationIds: Set<PersistentIdentifier> = []
     @State private var bulkScope: BulkScope = .latest
     @State private var isBulkColoring = false
@@ -82,7 +85,8 @@ struct ScansListView: View {
                         .padding(.vertical, 60)
                     }
                 } else if viewMode == .graph {
-                    StitchGraphView(locations: locations, renderRequest: $renderRequest, isEditing: $isEditing, selectedLocations: $selectedLocations, visibleLocationIds: $graphVisibleLocationIds, processingByLocation: bulkProcessingByLocation)
+                    StitchGraphView(locations: locations, renderRequest: $renderRequest, isEditing: $isEditing, selectedLocations: $selectedLocations, visibleLocationIds: $graphVisibleLocationIds, processingByLocation: bulkProcessingByLocation,
+                                    onColorScans: { requestBulkColorize(scans: $0) })
                 } else {
                     ScrollView {
                         LazyVGrid(columns: columns, spacing: 16) {
@@ -194,7 +198,13 @@ struct ScansListView: View {
                 }
             }
             .fullScreenCover(item: $renderRequest) { req in
-                CombinedMeshScreen(title: req.title, items: req.items)
+                // Color from the render view: resolve item ids back to scans and run the
+                // shared bulk path. The cover dismisses so the tile progress is visible.
+                CombinedMeshScreen(title: req.title, items: req.items, onColor: { ids in
+                    let idSet = Set(ids)
+                    let scans = locations.flatMap(\.scans).filter { idSet.contains($0.id) }
+                    requestBulkColorize(scans: scans)
+                })
             }
             .confirmationDialog(
                 "Delete \(bulkScope == .allScans ? "Locations" : "Scans")",
@@ -218,7 +228,7 @@ struct ScansListView: View {
                 isPresented: $showBulkColorMixedPrompt,
                 titleVisibility: .visible
             ) {
-                let split = targetColorSplit
+                let split = pendingColorSplit
                 Button("Color \(split.uncolored.count) Uncolored Only") {
                     bulkPostprocess(scans: split.uncolored, colorize: true)
                 }
@@ -227,8 +237,8 @@ struct ScansListView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                let split = targetColorSplit
-                Text("\(split.colored.count) of the selected scans are already colored. " +
+                let split = pendingColorSplit
+                Text("\(split.colored.count) of these scans are already colored. " +
                      "Color only the uncolored scans, or recolor everything?")
             }
             .confirmationDialog(
@@ -310,7 +320,7 @@ struct ScansListView: View {
                 .transition(.opacity)
             }
 
-            // Action buttons: [Trash] [Upload] [Save] [Color]
+            // Action buttons: [Trash] [Upload] [Save] [Process] [Color]
             HStack(spacing: 20) {
                 // Delete
                 Button(action: {
@@ -352,8 +362,7 @@ struct ScansListView: View {
                 }
                 .disabled(selectedLocations.isEmpty || isBulkExporting)
 
-                // Post-process (né Color — DECISION 3: room build + registration + proxy +
-                // colorize-per-setting; falls back to the re-color prompt when nothing is pending)
+                // Post-process: structural steps only (room build + registration + proxy).
                 Button(action: { requestBulkPostprocess() }) {
                     HStack(spacing: 4) {
                         Image(systemName: "wand.and.stars")
@@ -362,11 +371,26 @@ struct ScansListView: View {
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
-                    .background(colorDisabled ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
-                    .foregroundColor(colorDisabled ? .gray : .white)
+                    .background(bulkRunDisabled ? Color.gray.opacity(0.3) : Color.purple.opacity(0.8))
+                    .foregroundColor(bulkRunDisabled ? .gray : .white)
                     .cornerRadius(10)
                 }
-                .disabled(colorDisabled)
+                .disabled(bulkRunDisabled)
+
+                // Color — orange paintbrush everywhere the verb appears (same as the card).
+                Button(action: { requestBulkColorize(scans: resolveTargetScans()) }, label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "paintbrush.fill")
+                        Text("Color")
+                    }
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(bulkRunDisabled ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
+                    .foregroundColor(bulkRunDisabled ? .gray : .white)
+                    .cornerRadius(10)
+                })
+                .disabled(bulkRunDisabled)
             }
             .padding(.horizontal)
             .padding(.bottom, 10)
@@ -378,7 +402,7 @@ struct ScansListView: View {
         selectedLocations.isEmpty || uploadURL.isEmpty
     }
 
-    private var colorDisabled: Bool {
+    private var bulkRunDisabled: Bool {
         // Enabled whenever there are target scans — already-colored scans can be recolored.
         resolveTargetScans().isEmpty || isBulkColoring
     }
@@ -638,10 +662,10 @@ struct ScansListView: View {
         exitEditModeWithBanner("✓ Uploaded \(total) scan\(total == 1 ? "" : "s")")
     }
 
-    /// Target scans split into already-colored and not-yet-colored.
-    private var targetColorSplit: (uncolored: [CapturedScan], colored: [CapturedScan]) {
-        let selected = resolveTargetScans()
-        return (selected.filter { !$0.isColored }, selected.filter { $0.isColored })
+    /// The scan set a Color request is acting on (selection, cluster, or render view),
+    /// split into not-yet-colored and already-colored.
+    private var pendingColorSplit: (uncolored: [CapturedScan], colored: [CapturedScan]) {
+        (pendingColorScans.filter { !$0.isColored }, pendingColorScans.filter { $0.isColored })
     }
 
     /// Target scans split into already-uploaded and not-yet-uploaded.
@@ -671,11 +695,9 @@ struct ScansListView: View {
 
     // MARK: - Post-process (DECISION 3)
 
-    /// Entry point for the bulk Process button: run every achievable pending step (room /
-    /// registration / proxy, + colorize per the "Colorize during post-process" setting) over the
-    /// scope-resolved scans ("Latest" = newest per selected location, "All Scans" = everything).
-    /// When the whole selection is already processed, falls through to the legacy re-color prompt
-    /// (the one deliberately re-runnable step).
+    /// Entry point for the bulk Process button: run every achievable pending STRUCTURAL step
+    /// (room / registration / proxy) over the scope-resolved scans ("Latest" = newest per
+    /// selected location, "All Scans" = everything). Never colors — Color is its own button.
     private func requestBulkPostprocess() {
         let selected = resolveTargetScans()
         guard !selected.isEmpty else { return }
@@ -723,26 +745,27 @@ struct ScansListView: View {
                     bulkProgressMessage = "\(scan.name): \(msg)"
                 } else {
                     done += 1
-                    bulkProgressMessage = "Processed \(done)/\(total)…"
+                    bulkProgressMessage = "\(colorize ? "Colored" : "Processed") \(done)/\(total)…"
                 }
             },
             completion: {
                 isBulkColoring = false
                 bulkProcessingByLocation.removeAll()
-                exitEditModeWithBanner("✓ Processed \(total) scan\(total == 1 ? "" : "s")")
+                exitEditModeWithBanner("✓ \(colorize ? "Colored" : "Processed") \(total) scan\(total == 1 ? "" : "s")")
             }
         )
     }
 
-    /// Entry point for the bulk Color button. Colors directly when the selection is
-    /// uniform (all colored or all uncolored); when it's mixed, prompts the user to
-    /// choose between coloring only the uncolored scans or recoloring everything.
-    private func requestBulkColorize() {
-        let split = targetColorSplit
-        let selected = split.uncolored + split.colored
-        guard !selected.isEmpty else { return }
+    /// Entry point for every bulk Color surface — the toolbar button (selection), a
+    /// graph cluster's Color capsule, and the combined-render screen. Colors directly
+    /// when the set is uniform (all colored or all uncolored); when it's mixed, prompts
+    /// to color only the uncolored scans or recolor everything.
+    private func requestBulkColorize(scans: [CapturedScan]) {
+        guard !scans.isEmpty else { return }
+        pendingColorScans = scans
+        let split = pendingColorSplit
         if split.uncolored.isEmpty || split.colored.isEmpty {
-            bulkPostprocess(scans: selected, colorize: true)   // uniform — no need to ask
+            bulkPostprocess(scans: scans, colorize: true)   // uniform — no need to ask
         } else {
             showBulkColorMixedPrompt = true
         }

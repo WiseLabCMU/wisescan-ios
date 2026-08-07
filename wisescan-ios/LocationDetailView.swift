@@ -612,6 +612,21 @@ struct LocationDetailView: View {
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
+                    .background(bulkColorDisabled ? Color.gray.opacity(0.3) : Color.purple.opacity(0.8))
+                    .foregroundColor(bulkColorDisabled ? .gray : .white)
+                    .cornerRadius(10)
+            })
+            .disabled(bulkColorDisabled)
+
+            // Color — orange paintbrush, matching the scan card's primary action.
+            Button(action: { requestBulkColorize() }, label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "paintbrush.fill")
+                    Text("Color")
+                }
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
                     .background(bulkColorDisabled ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
                     .foregroundColor(bulkColorDisabled ? .gray : .white)
                     .cornerRadius(10)
