@@ -48,6 +48,19 @@ final class StitchLink {
     // Creation provenance only (Pin A / pre-existing map = endpoint A when true).
     var sourceIsA: Bool = true
 
+    // Manual fine-tune of THIS join (Step 2c) — the user's remedy in place of "rescan" for a
+    // *placement* error: the residual after Op-2 auto-correct, or a stitch Op-2 gated off. A
+    // gravity-locked yaw about the pin + a 3-axis translation, expressed in the SOURCE scan's
+    // canonical frame (same frame/pivot family as the auto yaw), composed into the stitch edge as
+    // `r' = nudge · C_auto · r` so it rides both BFS traversal directions like the auto correction.
+    // Stored as 4 scalars (not a matrix) so they round-trip to the adjuster's sliders and can't
+    // encode a non-conforming transform. Additive with defaults ⇒ lightweight SwiftData migration
+    // (mirrors the compass-heading adds).
+    var manualYawDeg: Double = 0
+    var manualDX: Double = 0
+    var manualDY: Double = 0
+    var manualDZ: Double = 0
+
     var linkedAt: Date = Date()
     var linkTypeStr: String = StitchingLink.LinkType.midSession.rawValue
 
@@ -100,6 +113,48 @@ extension StitchLink {
     }
 }
 
+// MARK: - Manual nudge (Step 2c adjuster)
+
+/// A user's manual fine-tune of one stitch join: a gravity-locked yaw about the pin + a 3-axis
+/// translation, in the source scan's canonical frame. Backs the adjuster's sliders (the values ARE
+/// the slider positions) and composes into the stitch edge as `r' = matrix · C_auto · r` — the same
+/// frame and pivot family as the Op-2 auto yaw, so a manual tweak layers cleanly on the auto seat.
+struct ManualNudge: Equatable {
+    var yawDeg: Float = 0
+    var dx: Float = 0      // source-canonical X (m)
+    var dy: Float = 0      // vertical (m)
+    var dz: Float = 0      // source-canonical Z (m)
+
+    static let zero = ManualNudge()
+    var isZero: Bool { yawDeg == 0 && dx == 0 && dy == 0 && dz == 0 }
+
+    /// Correction matrix: yaw about `pivot` (world-up Y), then translate. `pivot` is the join's pin
+    /// (in source-canonical, after the auto correction) so a manual rotation spins the piece about
+    /// the doorway rather than about a far origin.
+    func matrix(pivot: SIMD3<Float>) -> simd_float4x4 {
+        let a = yawDeg * Float.pi / 180, c = cos(a), s = sin(a)
+        let R = simd_float4x4(SIMD4<Float>(c, 0, -s, 0), SIMD4<Float>(0, 1, 0, 0),
+                              SIMD4<Float>(s, 0, c, 0), SIMD4<Float>(0, 0, 0, 1))
+        var tp = matrix_identity_float4x4; tp.columns.3 = SIMD4<Float>(pivot, 1)
+        var tn = matrix_identity_float4x4; tn.columns.3 = SIMD4<Float>(-pivot, 1)
+        var tt = matrix_identity_float4x4; tt.columns.3 = SIMD4<Float>(dx, dy, dz, 1)
+        return tt * (tp * R * tn)
+    }
+}
+
+// MARK: - Stitch UX preferences
+
+/// App-wide stitch-correction preferences (UserDefaults-backed). When `alwaysAutocorrect` is on, an
+/// untouched join's correction is seeded from the solver's auto fix (transferred INTO its single
+/// nudge) at render-open and honored at export. The key is shared with the render's `@AppStorage`.
+enum StitchPrefs {
+    static let alwaysAutocorrectKey = "stitchAlwaysAutocorrect"
+    static var alwaysAutocorrect: Bool {
+        get { UserDefaults.standard.bool(forKey: alwaysAutocorrectKey) }
+        set { UserDefaults.standard.set(newValue, forKey: alwaysAutocorrectKey) }
+    }
+}
+
 // MARK: - Provenance-resolved accessors
 
 extension StitchLink {
@@ -116,6 +171,14 @@ extension StitchLink {
     var sourceAnchorCompassHeading: Double? { sourceIsA ? anchorACompassHeading : anchorBCompassHeading }
     var targetAnchorCompassHeading: Double? { sourceIsA ? anchorBCompassHeading : anchorACompassHeading }
 
+    /// The user's manual fine-tune for this join (Step 2c). Get/set proxies the 4 stored scalars.
+    var manualNudge: ManualNudge {
+        get { ManualNudge(yawDeg: Float(manualYawDeg), dx: Float(manualDX), dy: Float(manualDY), dz: Float(manualDZ)) }
+        set { manualYawDeg = Double(newValue.yawDeg); manualDX = Double(newValue.dx)
+              manualDY = Double(newValue.dy); manualDZ = Double(newValue.dz) }
+    }
+    var hasManualCorrection: Bool { !manualNudge.isZero }
+
     /// The endpoint anchor pose expressed in `scan`'s own world frame, plus the *other*
     /// endpoint, for in-scan connector rendering. Returns nil if `scan` is not an endpoint.
     func localAnchor(for scan: CapturedScan) -> (transform: simd_float4x4, otherScan: CapturedScan?)? {
@@ -126,15 +189,22 @@ extension StitchLink {
 
     /// Maps this link back to the on-the-wire `StitchingLink` DTO (export / schema format).
     /// Returns nil if an endpoint scan or its location no longer exists.
+    ///
+    /// The exported SOURCE anchor carries the effective Op-2 + manual correction baked in (see
+    /// `StitchGraphBuilder.bakedSourceAnchor`) so the wire edge reproduces the corrected
+    /// combined-render placement — the correction is authoritative downstream, not render-only. The
+    /// model's stored anchors stay raw/as-measured (non-destructive); only this exported copy moves.
+    @MainActor
     func asDTO() -> StitchingLink? {
         guard let src = sourceScan, let tgt = targetScan,
               let srcLoc = src.location, let tgtLoc = tgt.location else { return nil }
+        let bakedSource = StitchGraphBuilder.bakedSourceAnchor(for: self)
         return StitchingLink(
             id: id,
             sourceLocationId: srcLoc.id,
             sourceScanId: src.id,
             sourceAnchorId: sourceAnchorId,
-            sourceAnchorTransform: CodableMatrix4x4(sourceAnchorMatrix),
+            sourceAnchorTransform: CodableMatrix4x4(bakedSource),
             sourceAnchorCompassHeading: sourceAnchorCompassHeading,
             targetLocationId: tgtLoc.id,
             targetScanId: tgt.id,
@@ -274,6 +344,51 @@ enum StitchLinkStore {
         return StitchingManifest(links: dtos)
     }
 
+    // MARK: Generation churn (preserve stitches across a scan deletion)
+
+    /// Before deleting `deleteSet` scans, preserve any stitch whose endpoint scan is going away but
+    /// whose ROOM survives (another generation remains): re-point that endpoint onto a surviving scan
+    /// of the same location — preferring the canonical owner (gen-0) — and re-express the pin.
+    ///
+    /// The pin is a fixed point in the location's canonical frame, so the re-expression is EXACT and
+    /// moves the rendered/exported geometry not at all:
+    ///   `canonicalPin = appliedT(old)·anchor`, `newAnchor = inverse(appliedT(new))·canonicalPin`.
+    /// (`appliedT(new)·newAnchor == canonicalPin`, so `mSrc`/the edge are unchanged.)
+    ///
+    /// A link whose endpoint location is being FULLY deleted has no survivor here, so it is left for
+    /// the cascade to remove — correctly BISECTING the graph (that is a room deletion, per design).
+    /// Must run BEFORE the caller deletes the scans; saves so the re-point beats the delete cascade.
+    static func repointIncidentLinks(beforeDeleting deleteSet: [CapturedScan], in context: ModelContext) {
+        let doomed = Set(deleteSet.map(\.id))
+        var changed = false
+        for scan in deleteSet {
+            guard let location = scan.location,
+                  let target = location.scans.filter({ !doomed.contains($0.id) }).min(by: CapturedScan.canonicalOrder)
+            else { continue }   // no surviving generation in this room → cascade bisects, as intended
+            let tOld = SaveRegistration.appliedTransform(scanDirectory: scan.scanDirectory) ?? matrix_identity_float4x4
+            let tNewInv = simd_inverse(SaveRegistration.appliedTransform(scanDirectory: target.scanDirectory) ?? matrix_identity_float4x4)
+            for link in incidentLinks(for: scan) {
+                if link.endpointAScan?.id == scan.id {
+                    link.anchorAMatrix = StitchLink.flatten(tNewInv * (tOld * StitchLink.unflatten(link.anchorAMatrix)))
+                    link.endpointAScan = target
+                    changed = true
+                }
+                if link.endpointBScan?.id == scan.id {
+                    link.anchorBMatrix = StitchLink.flatten(tNewInv * (tOld * StitchLink.unflatten(link.anchorBMatrix)))
+                    link.endpointBScan = target
+                    changed = true
+                }
+            }
+        }
+        guard changed else { return }
+        do {
+            try context.save()   // persist the re-point BEFORE the caller's delete so the cascade can't take these links
+            stitchLog.info("repoint: preserved stitch link(s) across \(deleteSet.count) scan deletion(s)")
+        } catch {
+            stitchLog.error("repoint save FAILED: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     // MARK: Migration
 
     /// One-time import of legacy per-location `stitching.json` files into SwiftData.
@@ -368,6 +483,35 @@ enum StitchLinkStore {
                 """)
         } catch {
             stitchLog.error("migration save FAILED; will retry next launch: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    // MARK: Orphan cleanup
+
+    /// Sweep orphaned adjacent-space locations. The mid-session (`pinAndExtend`) and cross-session
+    /// (`confirmAlignment`) extend flows create the "Adjacent to …" `ScanLocation` and persist it
+    /// BEFORE the new scan records (recording resolves `activeLocationForScan`, so the location must
+    /// already exist). Their abort `defer`s only cover the stabilization task; a freeze or crash
+    /// during the subsequent record→save leaves the location behind with **zero scans** — and it has
+    /// no UI affordance to delete. A `.linkAdjacent` location with no scans can never become useful
+    /// (0 scans ⇒ no incident links either, since links reference scans), so delete it.
+    ///
+    /// Runs once at launch, after migration — no capture is in flight then, so `scans.isEmpty` can't
+    /// be a legitimate mid-recording transient. Scoped to `.linkAdjacent` so a user-created normal
+    /// location that's simply not scanned yet is never touched.
+    static func reconcileOrphanedAdjacentLocations(context: ModelContext) {
+        guard let locations = try? context.fetch(FetchDescriptor<ScanLocation>()) else { return }
+        let orphans = locations.filter { $0.scanCase == .linkAdjacent && $0.scans.isEmpty }
+        guard !orphans.isEmpty else { return }
+        for loc in orphans {
+            stitchLog.info("reconcile: deleting orphaned adjacent location '\(loc.name, privacy: .public)' (0 scans)")
+            context.delete(loc)
+        }
+        do {
+            try context.save()
+            stitchLog.info("reconcile: swept \(orphans.count) orphaned adjacent location(s)")
+        } catch {
+            stitchLog.error("reconcile: save failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 }

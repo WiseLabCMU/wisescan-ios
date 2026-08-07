@@ -57,6 +57,9 @@ enum AppConstants {
         static let rigMeasuredDyMeters = "rigMeasuredDyMeters"        // user's tape-measured iPad-camera→360°-lens distance — ALWAYS persisted in METERS (UI may display/accept imperial); 0 = unmeasured
         static let rigHeightUnitImperial = "rigHeightUnitImperial"    // display/entry unit preference for the rig height field (false = metric)
         static let colorizeFrom360Faces = "colorizeFrom360Faces"      // Developer Mode: color the preview mesh from 360° cube faces instead of keyframes (pose-accuracy probe)
+        static let gpuColorize = "gpuColorize"                        // Developer Mode: GPU vertex-color projection (A/B vs CPU path)
+        static let keyframeWeightBonus = "keyframeWeightBonus"        // Developer Mode: keyframe weight bonus in colorization (A/B vs equal still/sweep weighting)
+        static let robustColorMedian = "robustColorMedian"            // Developer Mode: consensus vector-median color reduce (A/B vs legacy per-channel median)
         static let keepCameraOriginals = "keepCameraOriginals"        // Developer Mode: skip the security-P1 sweep that deletes each 360° still from the camera after verified transfer
         static let thetaBLESerial = "thetaBLESerial"                  // 8-digit serial of the paired camera (BLE identity + factory password)
         static let thetaBLEPeripheralID = "thetaBLEPeripheralID"      // CBPeripheral identifier for scan-free reconnects
@@ -134,6 +137,35 @@ enum AppConstants {
     /// bystanders in every direction, and the camera (open AP, factory password = serial
     /// digits, unauthenticated OSC API) is the weakest place to leave them.
     static let keepCameraOriginals: Bool = false
+    /// Developer Mode A/B toggle for the GPU vertex-color projection path (default ON —
+    /// production uses the GPU). OFF forces the CPU reference implementation so a suspected
+    /// GPU-path artifact (occlusion bleed-through, mask misses) can be isolated on the SAME
+    /// scan in the SAME viewer: recolor once per setting and compare. The depth/occlusion
+    /// semantics of the two paths are meant to be identical — a visual difference here is a
+    /// GPU-path bug by definition.
+    static let gpuColorize: Bool = true
+    /// Developer Mode A/B toggle for the keyframe weight bonus in colorization (default ON —
+    /// production gives sharp stillness keyframes a ×colorizationKeyframeWeight vote in the
+    /// weighted median). OFF weights stills and sweep frames EQUALLY: recolor the same scan
+    /// once per setting to see whether the bonus amplifies edge bleed (a close keyframe's
+    /// silhouette-straddling samples get the bonus AND the 1/d² boost) or, conversely,
+    /// whether equal weighting lets blurry sweep colors mush crisp keyframe surfaces.
+    static let keyframeWeightBonus: Bool = true
+    /// Developer Mode A/B toggle for the colorize REDUCE step (default ON — production
+    /// candidate). ON resolves each vertex by weighted vector consensus: pick the stored
+    /// observation most agreeing with the others, then average only its color cluster, so
+    /// minority bleed colors are EXCLUDED from the result instead of merely out-voted —
+    /// and the answer is always a color that was actually seen (per-channel medians can
+    /// mix channels from different observations into a color nobody observed). OFF = the
+    /// legacy per-channel weighted median. Unlike projection-side rejection this cannot
+    /// lose coverage: every vertex keeps all its observations. Recolor the same scan once
+    /// per setting to compare.
+    static let robustColorMedian: Bool = true
+    /// L1 RGB distance (0–765) within which observations count as agreeing with the
+    /// consensus winner and join the trimmed average. Distinct-surface bleed colors sit
+    /// far above this; raising it toward 765 degrades to a plain weighted mean, 0 = the
+    /// winner observation alone (max rejection, may speckle).
+    static let colorizationConsensusTrimL1: Int32 = 60
 
     // MARK: - Pipeline Constants
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
@@ -195,7 +227,19 @@ enum AppConstants {
     static let privacyBlurVisionScale: CGFloat = 0.5         // downscale factor for the Vision person-seg FALLBACK input (saved-frame privacy blur). Smaller = faster but coarser mask; raise toward 1.0 if person coverage leaks at edges. Only the (rare) fallback uses Vision — ARKit's stencil path is unaffected.
     static let colorizationMaxObservations: Int = 12         // max per-vertex observations kept (top-N by quality) for the weighted-median colorizer
     static let colorizationMinDistanceM: Float = 0.3         // distance floor (m) for the inverse-square distance weight, so very close frames don't dominate
-    static let colorizationOcclusionToleranceMM: Float = 50.0 // tighter mm tolerance used during colorization to cull backface/occluded samples (lower = more aggressive culling, but ARKit mesh noise can reject valid samples)
+    // ── Colorization anti-bleed projection knobs — ALL DISABLED by default ──────
+    // Device verdict 2026-07-29 (M2, three large scans): shipping these ON together
+    // (25 mm floor + 3% frac + 0.15 edge guard + 0.0 backface) was decisively WORSE —
+    // widespread gray (= vertices with ZERO surviving observations) and wilder bleed.
+    // Mechanism: the smoothed mesh and the upsampled 256×192 depth routinely disagree
+    // by ±20–40 mm on perfectly valid front surfaces, so aggressive rejection guts the
+    // GOOD observation population; the junk that survives then wins the median.
+    // Anti-bleed now lives in the REDUCE step (robustColorMedian), which can't lose
+    // coverage. If revisiting these, change ONE knob per recolor.
+    static let colorizationOcclusionToleranceMM: Float = 50.0 // FLOOR (mm) of the depth-occlusion tolerance; effective tol = max(floor, frac × depth). 25 mm starved inliers (see above)
+    static let colorizationOcclusionToleranceFrac: Float = 0  // distance-proportional tolerance part (LiDAR error grows with range). 0 = fixed floor only (legacy)
+    static let colorizationDepthEdgeMaxSpreadFrac: Float = 0  // reject observations whose 3×3 depth neighborhood spans > frac × depth (silhouette-straddle guard). 0 = disabled (legacy); 0.15 killed too much near ALL edges
+    static let colorizationBackfaceDotMin: Float = -1          // reject observations with signed n·v below this (seen-through-own-surface guard). -1 = disabled (legacy abs() weighting); 0.0 also zeroed noisy-normal grazing coverage
     static let thumbnailMaxWidth: CGFloat = 800              // max width for scan thumbnails
     static let thumbnailJpegQuality: CGFloat = 0.6           // JPEG quality for thumbnails
     static let stabilizationPollIntervalMs: Int = 200         // ms between tracking-state polls after session reset
@@ -346,6 +390,82 @@ enum KeyframeMarkerMode: String, CaseIterable {
     var showMotion: Bool { self == .motion || self == .all }
     var showEquirectFaces: Bool { self == .equirectFaces || self == .all }
 }
+
+/// Which GEOMETRY the mesh preview draws — an axis ORTHOGONAL to `SemanticViewMode` (which
+/// picks the overlay composition over whatever geometry is showing). Kept separate rather than
+/// folded in as a 4th `SemanticViewMode` case for three reasons: `SemanticViewMode` is shared
+/// with `CombinedMeshView`, which has no proxy (it draws N scans' mesh.obj) and would gain a
+/// dead cycle stop; `showMesh`/`showOutlines`/`showFills` answer "what overlay", so a source
+/// case would have to hardcode one arbitrary overlay combination; and proxy availability is
+/// runtime-conditional, which a pure `next` cycle can't express. As separate axes you get the
+/// product (source × overlay) rather than one hardcoded combination.
+///
+/// NOTE the source axis only bites in the two mesh-showing modes (`.meshOnly`,
+/// `.meshWithOutlines`) — `.semanticOnly` has `showMesh == false`, so both geometries are hidden
+/// and the toggle is a no-op there. `showFills` is true ONLY in that mode, so fills can never
+/// coexist with either mesh; drawing RoomPlan's floor quad OVER the proxy geometry (the direct
+/// way to see how far a floor quad overruns the mesh faces it stands in for) would need a
+/// mesh+fills mode, which `SemanticViewMode` does not currently have.
+///
+/// Used by BOTH the single-scan previewer and `CombinedMeshView` — each holds its own source state
+/// (they're independent views), and in both it stays a separate axis rather than a
+/// `SemanticViewMode` case, for the reasons above. In the combined render the proxy's clean
+/// RoomPlan wall quads are what make a join's coplanarity judgable, where lumpy mesh can't be
+/// eyeballed; there, maps lacking a proxy fall back to their full mesh (see `ProxyAvailability`).
+enum MeshSourceMode: String, CaseIterable {
+    /// The full captured mesh (`mesh.obj`) — the untouched save/export artifact.
+    case full
+    /// The ghost proxy (`mesh_proxy.obj`) — RoomPlan quads standing in for covered walls/floors,
+    /// lumpy mesh kept for content. The artifact the rescan ghost actually aligns against, which
+    /// otherwise has no inspection surface outside a live rescan session.
+    case proxy
+    /// The dynamic/content mesh (`mesh_dynamic.obj`) — content faces only, no walls, floors,
+    /// ceilings, or RoomPlan quads. The "4D" artifact: everything that isn't fixed room
+    /// infrastructure, so scrubbing across rescans shows only what changed between visits.
+    case dynamic
+
+    /// SF Symbol name for the toolbar button. Deliberately NOT a cube/layers glyph: it sits next
+    /// to `SemanticViewMode`'s `cube`/`cube.fill`/`square.3.layers.3d` cycle, and a same-family
+    /// silhouette read as another overlay control. A pyramid stays in "geometry" semantics (this
+    /// button is about the model) while being unmistakable at toolbar size. The dynamic mode uses
+    /// a shippingbox to convey "contents/movable stuff" — visually distinct from the pyramid pair.
+    var iconName: String {
+        switch self {
+        case .full:    return "pyramid"
+        case .proxy:   return "pyramid.fill"
+        case .dynamic: return "shippingbox"
+        }
+    }
+
+    /// Advance to the next mode in the cycle: full → proxy → dynamic → full.
+    var next: MeshSourceMode {
+        switch self {
+        case .full:    return .proxy
+        case .proxy:   return .dynamic
+        case .dynamic: return .full
+        }
+    }
+
+    /// Short tag for the preview title note — the proxy looks legitimately holey (floor/ceiling
+    /// faces are dropped by design), so viewing it must never be mistaken for a broken scan.
+    var titleTag: String? {
+        switch self {
+        case .full:    return nil
+        case .proxy:   return "proxy"
+        case .dynamic: return "dynamic"
+        }
+    }
+
+    /// VoiceOver label for the toolbar toggle — describes the NEXT mode it will switch to.
+    var accessibilityLabel: String {
+        switch self {
+        case .full:    return "Show ghost proxy mesh"
+        case .proxy:   return "Show dynamic content mesh"
+        case .dynamic: return "Show full mesh"
+        }
+    }
+}
+
 
 // MARK: - Semantic Classification
 

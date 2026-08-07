@@ -180,6 +180,13 @@ enum PlaneRegistration {
         /// large signed offset while the rest sit at noise). Indices are into the caller's ORIGINAL
         /// source/target arrays (stable under `excludingSource`), so trim logging stays coherent.
         let pairs: [PairStat]
+        /// Signed vertical gap (m) of the accepted floor correspondence measured at the INITIAL
+        /// transform — i.e. the quantity `matchFloorOffsetM` actually gates on, which is the number
+        /// needed to tune it from device sessions. Deliberately PRE-fit: ty is constrained solely by
+        /// this one pair, so post-fit the solve has absorbed the whole gap and `pairs`' floor
+        /// `centerOffsetM` reads ~0 — hiding a level mismatch rather than exposing it. nil when no
+        /// floor matched (⇒ ty unobserved). Largest-magnitude pair when several matched.
+        let floorPreFitYDeltaM: Float?
         /// λ_min/λ_max ∈ [0,1] — the observability conditioning. Square room → ~1; bare corridor
         /// (parallel walls only) → ~0. THE gate quantity (a wall count misfires; this can't).
         var weakAxisFrac: Float { horizEigMax > 1e-6 ? horizEigMin / horizEigMax : 0 }
@@ -242,6 +249,15 @@ enum PlaneRegistration {
     /// side, re-matched every iteration for the cost of a few hundred dot products).
     static let matchAngleDeg: Float = 25      // undirected normal agreement (ε yaw is sub-2°; generous)
     static let matchOffsetM: Float = 0.6      // perpendicular plane-to-plane gap (covers maxTransM + noise)
+    /// Floor-specific perpendicular offset gate — much tighter than `matchOffsetM` because floor
+    /// normals are near-vertical, so `perp` is effectively the **Y gap** between two floor planes.
+    /// RoomPlan emits exactly one floor plane per room spanning its full footprint, so lateral
+    /// discrimination is nil; a loose gate here silently accepts a wrong vertical snap whenever two
+    /// scans cover slightly different physical levels (sunken area, riser, split-level threshold).
+    /// 0.15 m covers same-level noise while rejecting the 0.15–0.5 m band of plausible level
+    /// changes that the wall-tuned 0.6 m was passing unchecked.
+    /// PROVISIONAL — pending real-scan tuning (see `Gate` comments at line ~205).
+    static let matchFloorOffsetM: Float = 0.15
     static let lateralSlackM: Float = 1.0     // extra allowance on in-plane center separation
     /// Whitening up-weight ceiling (the plan's capped up-weight — the bias/variance knee).
     static let whitenCap: Float = 4.0
@@ -361,6 +377,15 @@ enum PlaneRegistration {
                                     matches: finalSet, transform: transform)
         let (eigMin, eigMax, _) = eig2x2(block)
 
+        // Floor gap at the INITIAL transform (see `Report.floorPreFitYDeltaM`) — measured here from
+        // the final correspondence rather than logged inside `match()`, which runs every ICP
+        // iteration AND once per trim candidate (this file is pure math on the save path: no
+        // logging, no PerfDiag gate — see the header).
+        let floorPreFitY: Float? = finalSet
+            .filter { source[$0.s].category == .floor }
+            .map { simd_dot(apply(initial, source[$0.s].center) - target[$0.t].center, target[$0.t].normal) }
+            .max(by: { abs($0) < abs($1) })
+
         let t = transform.columns.3
         return Report(initialRMS: initialRMS, finalRMS: finalRMS, transform: transform,
                       yawDeg: abs(atan2(transform.columns.2.x, transform.columns.2.z)) * 180 / .pi,
@@ -369,7 +394,8 @@ enum PlaneRegistration {
                       matchedFloors: finalSet.filter { source[$0.s].category == .floor }.count,
                       sourceWalls: sourceWalls, targetWalls: targetWalls,
                       horizEigMin: eigMin, horizEigMax: eigMax,
-                      iterations: iterations, converged: converged, pairs: pairs)
+                      iterations: iterations, converged: converged, pairs: pairs,
+                      floorPreFitYDeltaM: floorPreFitY)
     }
 
     // MARK: - Trim rescue
@@ -419,7 +445,8 @@ enum PlaneRegistration {
     private struct MatchPair { let s: Int; let t: Int }
 
     /// Nearest compatible plane, per source plane: same category, undirected normal agreement
-    /// within `matchAngleDeg`, perpendicular gap within `matchOffsetM`, in-plane center
+    /// within `matchAngleDeg`, perpendicular gap within `matchOffsetM` (walls) or
+    /// `matchFloorOffsetM` (floors — tighter; see the tunable's doc comment), in-plane center
     /// separation within the rectangles' reach + slack (keeps a wall from matching a distant
     /// collinear segment across the room). Many-to-one is allowed — two source segments of one
     /// physical wall legitimately share a target.
@@ -435,11 +462,12 @@ enum PlaneRegistration {
             let sReach = 0.5 * sqrt(sp.width * sp.width + sp.height * sp.height)
             var best = -1
             var bestScore = Float.greatestFiniteMagnitude
+            let perpGate = sp.category == .floor ? matchFloorOffsetM : matchOffsetM
             for (ti, tp) in target.enumerated() where tp.category == sp.category {
                 guard abs(simd_dot(n, tp.normal)) >= cosGate else { continue }
                 let d = c - tp.center
                 let perp = abs(simd_dot(d, tp.normal))
-                guard perp <= matchOffsetM else { continue }
+                guard perp <= perpGate else { continue }
                 let lateral = simd_length(d - simd_dot(d, tp.normal) * tp.normal)
                 let tReach = 0.5 * sqrt(tp.width * tp.width + tp.height * tp.height)
                 guard lateral <= sReach + tReach + lateralSlackM else { continue }

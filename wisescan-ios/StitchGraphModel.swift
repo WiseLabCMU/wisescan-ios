@@ -36,6 +36,24 @@ struct PlacedScan {
     let scanId: UUID
     /// Transform mapping this scan's world-frame vertices into the component's shared frame.
     let transform: simd_float4x4
+    /// The spanning-tree edge (link id) that placed this map — i.e. the join the manual adjuster
+    /// edits to move THIS piece. `nil` for the root/base map, which defines the shared frame.
+    let parentLinkId: UUID?
+}
+
+/// A stitch pin (the shared boundary point of one link) expressed in the component's shared frame,
+/// so the combined render can drop a visible marker at each join.
+struct StitchPoint: Identifiable {
+    let id: UUID            // link id
+    let position: SIMD3<Float>
+    let sourceName: String
+    let targetName: String
+}
+
+/// The full result of placing a component: per-map transforms plus the stitch-pin markers.
+struct ComponentPlacement {
+    var scans: [PlacedScan] = []
+    var stitchPoints: [StitchPoint] = []
 }
 
 /// The assembled graph plus connected-component grouping and layout.
@@ -107,7 +125,17 @@ enum StitchGraphBuilder {
             nodes[srcLocId]?.scanIds.insert(srcScan.id)
             nodes[tgtLocId]?.scanIds.insert(tgtScan.id)
             edges.append(StitchGraphEdge(from: srcLocId, to: tgtLocId, link: link))
+            // NOTE: the Op-2 residual/correction diag is intentionally NOT logged here. This runs on
+            // the all-scans graph list (every rebuild); the diag belongs to the full combined render
+            // only (StitchGraphView.presentRender), where the correction is actually applied and a
+            // user is looking at the result. Kept PerfDiag-gated there.
         }
+
+        // Sort edges deterministically: placeScans' spanning-tree BFS walks adjacency in edge order,
+        // so an unstable `edges` order (it follows Dictionary/link discovery order) would make the
+        // combined-render placements — and each map's chosen `parentLinkId` for the adjuster — vary
+        // across runs, especially in cyclic graphs. Key on the stable link id.
+        edges.sort { $0.link.id.uuidString < $1.link.id.uuidString }
 
         // Sort node ids/list deterministically — Dictionary iteration order is unstable
         // across runs, which would otherwise leak into component membership order and
@@ -118,6 +146,31 @@ enum StitchGraphBuilder {
         layout(nodes: &nodeList, edges: edges, components: components)
 
         return StitchGraph(nodes: nodeList, edges: edges, components: components)
+    }
+
+    /// PerfDiag per-link log of the Op-2 decision — pure diagnostic, no mutation. Takes the
+    /// PRE-COMPUTED correction (from `computeAutoCorrections`, so the render path solves once) and
+    /// prints, by location name, what it decided: the measured yaw / ⊥, whether each was applied or
+    /// held, the compass reading, and the wall / near-∥ counts. So a link that WASN'T corrected says
+    /// why (untrusted vs. gated). Caller gates on `PerfDiag.enabled` and fires only from the full
+    /// combined render (never the all-scans list).
+    @MainActor
+    static func logResidual(link: StitchLink, correction: StitchCorrection?) {
+        #if canImport(RoomPlan)
+        let src = link.sourceScan?.location?.name ?? "?", tgt = link.targetScan?.location?.name ?? "?"
+        guard let c = correction else {
+            print("[StitchResidual] \(src) ↔ \(tgt): skip — missing scan or canonical roomplan")
+            return
+        }
+        let compass = c.compassDeg.map { String(format: "%.1f°", $0) } ?? "n/a"
+        // When applied, report the SIGNED yaw actually baked in; when held, report the measured value
+        // so the log says what was considered. (These now agree — the raw atan2 sign is used directly
+        // — but they stay distinct so a future re-sign can't silently mislabel the log.)
+        let yaw = String(format: "yaw %+.1f°→%@", c.appliedYaw ? c.yawSigned : c.yawDeg, c.appliedYaw ? "applied" : "held")
+        let perp = c.appliedPerp ? String(format: "⊥ %.0fcm→applied", c.perpCm)
+                                 : (c.doorwayPerpCm.map { String(format: "⊥ %.0fcm→held", $0) } ?? "⊥ n/a")
+        print("[StitchResidual] \(src) ↔ \(tgt): \(yaw), \(perp) | compass \(compass) | walls \(c.srcWalls)/\(c.tgtWalls) near-∥ \(c.nearParallel)")
+        #endif
     }
 
     // MARK: Connected components (union-find)
@@ -212,20 +265,273 @@ enum StitchGraphBuilder {
         }
     }
 
+    // MARK: - Op-2: plane-derived edge correction
+
+    /// The Op-2 decision for one link: the edge-correction transform plus the diagnostics behind it
+    /// (so `logResidual` can report it without recomputing). `applied*` false ⇒ that DOF kept the pivot.
+    struct StitchCorrection {
+        var transform = matrix_identity_float4x4   // C: r_corrected = C · (mSrc·inv(mTgt))
+        var yawDeg: Float = 0                       // measured pivot yaw error
+        var appliedYaw = false
+        var perpCm: Float = 0                        // applied through-doorway ⊥ correction magnitude (cm)
+        var appliedPerp = false
+        var compassDeg: Float?                       // |C_A − C_B|
+        var srcWalls = 0
+        var tgtWalls = 0
+        var nearParallel = 0                         // # near-∥ wall pairs
+        var doorwayPerpCm: Float?                    // de-yawed doorway-wall gap before correction (cm)
+        var yawSigned: Float = 0                     // signed yaw ACTUALLY applied about the pin (0 if not)
+        var transVec: SIMD3<Float> = .zero           // translation ACTUALLY applied, source-canonical (zero if not)
+
+        /// The applied correction expressed as a `ManualNudge` (yaw about the pin + translation), so
+        /// "Autocorrect" can transfer the solver's fix INTO the single manual correction rather than
+        /// layering a separate transform under it. Reproduces `transform` exactly when the nudge is
+        /// applied about the T-composed CANONICAL pin (`mSrc.columns.3`, i.e. `tSrc·sourceAnchor`) —
+        /// the same pivot placeScans/effectiveCorrection use. (Not the true raw `sourceAnchor` pin;
+        /// all three paths agree only because each pivots about this canonical point.)
+        var asNudge: ManualNudge { ManualNudge(yawDeg: yawSigned, dx: transVec.x, dy: transVec.y, dz: transVec.z) }
+    }
+
+    /// The scan whose canonical roomplan/mesh REPRESENTS a location: its canonical owner (gen-0,
+    /// `canonicalOrder` first) — the registration reference whose frame *is* the location's canonical
+    /// frame. Reading walls/mesh from here (not from whichever generation was current at stitch time)
+    /// keeps the stitch room-to-room and rescan-stable: every generation's `mesh.obj`/`roomplan.json`
+    /// already lives in this shared canonical frame, and gen-0 carries zero registration error (it
+    /// defines the frame). Falls back to `scan` when the location/scan set is unavailable.
+    @MainActor
+    static func canonicalScan(for scan: CapturedScan) -> CapturedScan {
+        scan.location?.scans.min(by: CapturedScan.canonicalOrder) ?? scan
+    }
+
+    /// Plane-derived correction to the T-composed pivot edge for one link (Op-2). Compose as
+    /// `r_corrected = transform · (mSrc·inv(mTgt))`.
+    /// - **Yaw** is *correspondence-free* — every near-∥ wall pair sees the same pivot yaw error, so
+    ///   the median orientation delta IS the global fix — applied only within the compass window (a
+    ///   plane yaw far from `|C_A−C_B|` is a bad fit / relocalization flip → reject).
+    /// - **Through-doorway ⊥ translation** is the de-yawed **doorway wall**'s residual gap. The doorway
+    ///   wall is the coplanar OPPOSITE-face pair with the **minimum** ⊥ (the genuinely-shared wall,
+    ///   *not* the pin-nearest side wall), gated to a sane, well-separated magnitude. Room B is placed
+    ///   on the side of the wall OPPOSITE the pin (room A) at a nominal thickness — the pin fixes the
+    ///   side, so no reliance on a RoomPlan normal convention.
+    /// `nil` only when a scan / canonical roomplan is missing; otherwise a struct whose `applied*`
+    /// flags say what (if anything) was corrected — never-worse-than-the-pivot.
+    @MainActor
+    static func stitchCorrection(link: StitchLink) -> StitchCorrection? {
+        #if canImport(RoomPlan)
+        guard let src = link.sourceScan, let tgt = link.targetScan else { return nil }
+        let tSrc = SaveRegistration.appliedTransform(scanDirectory: src.scanDirectory) ?? matrix_identity_float4x4
+        let tTgt = SaveRegistration.appliedTransform(scanDirectory: tgt.scanDirectory) ?? matrix_identity_float4x4
+        let mSrc = tSrc * link.sourceAnchorMatrix
+        let r = mSrc * simd_inverse(tTgt * link.targetAnchorMatrix)
+        let anchor = SIMD3<Float>(mSrc.columns.3.x, mSrc.columns.3.y, mSrc.columns.3.z)
+        // Walls come from each LOCATION's canonical (gen-0) scan — the registration reference, in the
+        // same canonical frame the pin was lifted into — NOT the stitch-time generation. Room-to-room
+        // and rescan-stable. Falls back to the link's own scan if the canonical owner has no roomplan,
+        // so we never lose auto availability a rescan happens to provide.
+        func canonicalWalls(preferOwnerOf scan: CapturedScan) -> [PlaneRegistration.Plane] {
+            let ownerDir = canonicalScan(for: scan).scanDirectory
+            let owner = SaveRegistration.canonicalFramePlanes(scanDirectory: ownerDir).filter { $0.category == .wall }
+            return owner.isEmpty
+                ? SaveRegistration.canonicalFramePlanes(scanDirectory: scan.scanDirectory).filter { $0.category == .wall }
+                : owner
+        }
+        let sW = canonicalWalls(preferOwnerOf: src)
+        let tW = canonicalWalls(preferOwnerOf: tgt).map { PlaneRegistration.applying(r, to: $0) }
+        guard !sW.isEmpty, !tW.isEmpty else { return nil }
+
+        var out = StitchCorrection()
+        out.srcWalls = sW.count; out.tgtWalls = tW.count
+        // Compass certificate |C_A − C_B|.
+        if let ca = link.sourceAnchorCompassHeading, let cb = link.targetAnchorCompassHeading {
+            var d = abs(Float(ca) - Float(cb)).truncatingRemainder(dividingBy: 360); if d > 180 { d = 360 - d }
+            out.compassDeg = d
+        }
+
+        // Global yaw = median near-∥ orientation delta (correspondence-free).
+        var yaws: [Float] = []
+        for s in sW { for t in tW {
+            let nDot = simd_dot(s.normal, t.normal)
+            guard acos(min(abs(nDot), 1)) * 180 / Float.pi < PlaneRegistration.matchAngleDeg else { continue }
+            let nt = nDot < 0 ? -t.normal : t.normal
+            yaws.append(atan2(s.normal.x * nt.z - s.normal.z * nt.x, s.normal.x * nt.x + s.normal.z * nt.z) * 180 / Float.pi)
+        }}
+        out.nearParallel = yaws.count
+        guard !yaws.isEmpty else { return out }
+        let yawFix = yaws.sorted()[yaws.count / 2]
+        out.yawDeg = yawFix
+
+        // Compass guardrail — the plane yaw must agree with |C_A−C_B| (≤15°, coarse) or the whole fit
+        // is untrusted (a flip): touch nothing.
+        let trustworthy = out.compassDeg.map { abs(abs(yawFix) - $0) <= 15 } ?? false
+        guard trustworthy else { return out }
+
+        // De-yaw spinner, reused for the yaw matrix and the ⊥ doorway measurement.
+        func spinner(_ deg: Float) -> (SIMD3<Float>) -> SIMD3<Float> {
+            let a = deg * Float.pi / 180, cA = cos(a), sA = sin(a)
+            return { v in SIMD3(cA * v.x + sA * v.z, v.y, -sA * v.x + cA * v.z) }
+        }
+        // `yawFix` is ALREADY correctly signed: each pair's target normal is first flipped into
+        // agreement with the source (`nt`, above), so the atan2 is the signed rotation carrying the
+        // source orientation onto the target — sign included.
+        //
+        // This previously ran through an `alignScore` "tiebreak" that re-derived the sign by counting
+        // opposite-facing pairs, on the belief the sign was convention-ambiguous. That was a bug, not
+        // a safeguard: it selected `-yawFix` on `alignScore(-yawFix) >= alignScore(yawFix)`, so when
+        // NEITHER sign found any opposite-facing pair — two rooms that don't physically overlap, e.g.
+        // the cubicle join — the comparison was 0 >= 0 and it flipped a perfectly good sign
+        // unconditionally. Device-confirmed: that join reported +1.5° and had -2.0° applied.
+        let signedYaw = yawFix
+        let spin = spinner(signedYaw)
+
+        // C_yaw about the pin — applied only when the yaw is beyond noise (>1°).
+        var C = matrix_identity_float4x4
+        if abs(yawFix) > 1 {
+            let a = signedYaw * Float.pi / 180, cA = cos(a), sA = sin(a)
+            let R = simd_float4x4(SIMD4<Float>(cA, 0, -sA, 0), SIMD4<Float>(0, 1, 0, 0),
+                                  SIMD4<Float>(sA, 0, cA, 0), SIMD4<Float>(0, 0, 0, 1))
+            var Tp = matrix_identity_float4x4; Tp.columns.3 = SIMD4<Float>(anchor, 1)
+            var Tn = matrix_identity_float4x4; Tn.columns.3 = SIMD4<Float>(-anchor, 1)
+            C = Tp * R * Tn
+            out.appliedYaw = true
+            out.yawSigned = signedYaw
+        }
+
+        // ⊥ translation: doorway wall = de-yawed coplanar OPPOSITE pair with the MIN gap (not the
+        // pin-nearest side wall). Gate: sane (<1 m) and clearly separated from the next.
+        var opp: [(perp: Float, sp: Float, n: SIMD3<Float>, sc: SIMD3<Float>)] = []
+        for s in sW { for t in tW {
+            let tn = spin(t.normal); let nDot = simd_dot(s.normal, tn)
+            guard acos(min(abs(nDot), 1)) * 180 / Float.pi < 10, nDot < 0 else { continue }
+            let tc = anchor + spin(t.center - anchor)
+            let signed = simd_dot(s.normal, tc - s.center)
+            opp.append((abs(signed), signed, s.normal, s.center))
+        }}
+        opp.sort { $0.perp < $1.perp }
+        if let d = opp.first { out.doorwayPerpCm = d.perp * 100 }
+        if let d = opp.first, d.perp < 1.0, (opp.count < 2 || d.perp < 0.5 * opp[1].perp) {
+            let thick: Float = 0.10
+            // Room B belongs on the side of the doorway wall OPPOSITE the pin (room A), a nominal
+            // thickness away. The pin fixes the side → convention-independent.
+            let pinSide: Float = simd_dot(d.n, anchor - d.sc) >= 0 ? 1 : -1
+            let delta = (-pinSide * thick) - d.sp        // scalar shift along the wall normal
+            if abs(delta) < 1.0 {                          // sane correction magnitude
+                var Tperp = matrix_identity_float4x4
+                Tperp.columns.3 = SIMD4<Float>(delta * d.n, 1)
+                C = Tperp * C                              // after the yaw (both source-canonical)
+                out.perpCm = abs(delta) * 100
+                out.appliedPerp = true
+                out.transVec = delta * d.n
+            }
+        }
+        out.transform = C
+        return out
+        #else
+        return nil
+        #endif
+    }
+
+    /// Solve the Op-2 auto correction for every edge in a component ONCE (this is the only part that
+    /// reads canonical roomplans off disk). Pass the result into `placeScans` so live manual re-nudges
+    /// recompose transforms purely in memory. Keyed by link id; a link absent from the map had no
+    /// trusted correction (its edge keeps the raw pivot).
+    @MainActor
+    static func computeAutoCorrections(for edges: [StitchGraphEdge]) -> [UUID: StitchCorrection] {
+        var out: [UUID: StitchCorrection] = [:]
+        for e in edges { if let c = stitchCorrection(link: e.link) { out[e.link.id] = c } }
+        return out
+    }
+
+    // MARK: - Export bake (make the correction authoritative, non-destructively)
+
+    /// The SINGLE correction on a join as a `ManualNudge`: the stored nudge if set; else the solver's
+    /// auto fix when "always autocorrect" is on and the join is untouched; else none. ("Autocorrect"
+    /// / always-seeding in the UI transfers the auto fix INTO the stored nudge — this is the fallback
+    /// so an as-yet-unopened render or an export still honors "always".) Reads disk only for the
+    /// fallback (unset nudge + always on) — pass `precomputedAuto` (from `computeAutoCorrections`) to
+    /// reuse an already-solved correction and avoid re-reading the canonical roomplans off disk.
+    @MainActor
+    static func effectiveNudge(for link: StitchLink, precomputedAuto: StitchCorrection? = nil) -> ManualNudge {
+        if !link.manualNudge.isZero { return link.manualNudge }
+        guard StitchPrefs.alwaysAutocorrect else { return .zero }
+        if let precomputedAuto { return precomputedAuto.asNudge }
+        #if canImport(RoomPlan)
+        return stitchCorrection(link: link)?.asNudge ?? .zero
+        #else
+        return .zero
+        #endif
+    }
+
+    /// The effective correction transform in the SOURCE scan's canonical frame — the single nudge
+    /// applied about the T-composed canonical pin (`tSrc·sourceAnchor`), matching exactly what
+    /// `placeScans` renders. Identity when none.
+    @MainActor
+    static func effectiveCorrection(for link: StitchLink) -> simd_float4x4 {
+        let nudge = effectiveNudge(for: link)
+        guard !nudge.isZero else { return matrix_identity_float4x4 }
+        let tSrc = (link.sourceScan?.scanDirectory).flatMap { SaveRegistration.appliedTransform(scanDirectory: $0) } ?? matrix_identity_float4x4
+        let pin = (tSrc * link.sourceAnchorMatrix).columns.3
+        return nudge.matrix(pivot: SIMD3<Float>(pin.x, pin.y, pin.z))
+    }
+
+    /// The link's SOURCE anchor pose (raw frame, as stored) with the effective correction folded in,
+    /// for EXPORT — so the serialized edge `bakedSource · inverse(target)` reproduces the corrected
+    /// placement the combined render shows. Returns the untouched raw anchor when nothing applies.
+    /// The correction lives in the source scan's CANONICAL frame, so it is conjugated by the source
+    /// registration `T` back into the raw frame the DTO/world-map convention uses: `A' = inv(T)·C·T·A`.
+    /// **Non-destructive** — the model's stored anchor matrices are never mutated; only the exported
+    /// copy carries the correction.
+    @MainActor
+    static func bakedSourceAnchor(for link: StitchLink) -> simd_float4x4 {
+        let cTotal = effectiveCorrection(for: link)
+        guard cTotal != matrix_identity_float4x4 else { return link.sourceAnchorMatrix }
+        let tSrc = (link.sourceScan?.scanDirectory).flatMap { SaveRegistration.appliedTransform(scanDirectory: $0) } ?? matrix_identity_float4x4
+        return simd_inverse(tSrc) * cTotal * tSrc * link.sourceAnchorMatrix
+    }
+
     // MARK: - Transform accumulation (for combined render)
 
     /// Computes, for one connected component, a placement transform per location that maps
     /// each scan's world-frame vertices into a single shared frame (the root's frame).
     ///
-    /// For a link, a point in the **target** scan's frame maps into the **source** frame by
-    /// `R = sourceAnchorTransform · inverse(targetAnchorTransform)` (the anchors are the same
-    /// physical pin). A spanning-tree BFS propagates transforms from the root outward.
+    /// For a link, a point in the **target** scan's *canonical* frame maps into the **source**
+    /// scan's *canonical* frame by `R = (T_src·srcAnchor) · inverse(T_tgt·tgtAnchor)` — the anchors
+    /// are the same physical pin, and each endpoint's raw→canonical registration `T` (identity when
+    /// the scan saved raw / isn't processed) lifts its raw-frame anchor into the frame its baked
+    /// `mesh.obj` now lives in (PR #28 moved geometry to the canonical frame but left anchor poses
+    /// raw). Without the `T` composition the combined render seams by ~`T` (11–27 cm) on any stitch
+    /// touching a registered or legacy scan. A spanning-tree BFS propagates transforms from the root
+    /// outward; the root's identity thus *defines* the shared frame as its own canonical frame.
+    /// - Parameter manualOverrides: in-progress adjuster values by link id — the SINGLE correction on
+    ///   a join. The solver's "Autocorrect" seeds these values too, so there is NO separate auto
+    ///   layer. Falls back to `effectiveNudge(for:)` (the link's stored nudge, or the auto fix when
+    ///   "always autocorrect" is on and the join is untouched). Applied about the canonical pin: `r' = nudge · r`.
+    /// - Parameter autoCorrections: pre-solved Op-2 corrections by link id (from
+    ///   `computeAutoCorrections`). Passing them keeps the render path's disk read to that single
+    ///   solve — the "always autocorrect" fallback reuses these instead of re-solving off disk.
     @MainActor
-    static func placeScans(in component: [UUID], edges componentEdges: [StitchGraphEdge]) -> [PlacedScan] {
+    static func placeScans(in component: [UUID],
+                           edges componentEdges: [StitchGraphEdge],
+                           manualOverrides: [UUID: ManualNudge] = [:],
+                           autoCorrections: [UUID: StitchCorrection] = [:]) -> ComponentPlacement {
         // Pick a deterministic root (smallest UUID) so combined-render placements are
         // stable across runs — component element order comes from non-deterministic
         // Dictionary iteration and must not drive the accumulated transform frame.
-        guard let root = component.min(by: { $0.uuidString < $1.uuidString }) else { return [] }
+        guard let root = component.min(by: { $0.uuidString < $1.uuidString }) else { return ComponentPlacement() }
+
+        // Each endpoint's raw→canonical registration (PR #28): anchor poses are stored in the raw
+        // capture frame, but the baked mesh.obj / roomplan the render draws are in the location's
+        // canonical frame. Lift the anchors by `T` so every edge is canonical→canonical; identity
+        // when a scan saved raw or isn't processed (self-heals mixed/legacy state — an unprocessed
+        // endpoint has raw anchor + raw mesh, still consistent). Memoized: a scan can sit on several
+        // incident edges, and this reads the on-disk sidecar.
+        var tCache: [UUID: simd_float4x4] = [:]
+        func appliedT(_ scan: CapturedScan?) -> simd_float4x4 {
+            guard let scan else { return matrix_identity_float4x4 }
+            if let cached = tCache[scan.id] { return cached }
+            let t = SaveRegistration.appliedTransform(scanDirectory: scan.scanDirectory) ?? matrix_identity_float4x4
+            tCache[scan.id] = t
+            return t
+        }
 
         // Undirected adjacency carrying the link and traversal direction.
         var adj: [UUID: [(neighbor: UUID, link: StitchLink, forward: Bool)]] = [:]
@@ -236,11 +542,31 @@ enum StitchGraphBuilder {
 
         var world: [UUID: simd_float4x4] = [root: matrix_identity_float4x4]
         var scanForLocation: [UUID: UUID] = [:]
+        var parentLink: [UUID: UUID] = [:]   // locationId → the edge that placed it (root has none)
 
         // Seed the root's representative scan from any incident edge.
         if let first = adj[root]?.first,
-           let seedScanId = (first.forward ? first.link.sourceScan?.id : first.link.targetScan?.id) {
-            scanForLocation[root] = seedScanId
+           let seedScan = (first.forward ? first.link.sourceScan : first.link.targetScan) {
+            scanForLocation[root] = canonicalScan(for: seedScan).id
+        }
+
+        // The relative edge target-canonical → source-canonical, with the Op-2 auto correction and
+        // then the user's manual nudge composed IN (before the direction branch) so both BFS
+        // directions inherit them and the child's whole subtree rides along. No disk / no prints.
+        func correctedEdge(_ link: StitchLink) -> simd_float4x4 {
+            let mSrc = appliedT(link.sourceScan) * link.sourceAnchorMatrix
+            let mTgt = appliedT(link.targetScan) * link.targetAnchorMatrix
+            var r = mSrc * simd_inverse(mTgt)
+            // ONE correction: the join's nudge (the solver's "Autocorrect" seeds this same value —
+            // no separate auto layer), pivoted about the canonical pin `mSrc.columns.3` (= tSrc·anchor,
+            // the SAME pivot bakedSourceAnchor uses). In-flight overrides win; otherwise
+            // the stored nudge, or the auto fix when "always autocorrect" seeds an untouched join.
+            let nudge = manualOverrides[link.id] ?? effectiveNudge(for: link, precomputedAuto: autoCorrections[link.id])
+            if !nudge.isZero {
+                let pin = mSrc.columns.3
+                r = nudge.matrix(pivot: SIMD3<Float>(pin.x, pin.y, pin.z)) * r
+            }
+            return r
         }
 
         var queue: [UUID] = [root]
@@ -251,52 +577,40 @@ enum StitchGraphBuilder {
             let worldU = world[u] ?? matrix_identity_float4x4
             for step in adj[u] ?? [] where !visited.contains(step.neighbor) {
                 visited.insert(step.neighbor)
-                let mSrc = step.link.sourceAnchorMatrix
-                let mTgt = step.link.targetAnchorMatrix
-                let r = mSrc * simd_inverse(mTgt)   // maps target-frame → source-frame
+                let r = correctedEdge(step.link)
                 if step.forward {
                     // u is the source, neighbor is the target.
                     world[step.neighbor] = worldU * r
-                    if let sid = step.link.targetScan?.id { scanForLocation[step.neighbor] = sid }
+                    if let s = step.link.targetScan { scanForLocation[step.neighbor] = canonicalScan(for: s).id }
                 } else {
                     // u is the target, neighbor is the source.
                     world[step.neighbor] = worldU * simd_inverse(r)
-                    if let sid = step.link.sourceScan?.id { scanForLocation[step.neighbor] = sid }
+                    if let s = step.link.sourceScan { scanForLocation[step.neighbor] = canonicalScan(for: s).id }
                 }
+                parentLink[step.neighbor] = step.link.id
                 queue.append(step.neighbor)
             }
         }
 
-        return component.compactMap { locId in
+        let scans: [PlacedScan] = component.compactMap { locId in
             guard let t = world[locId], let scanId = scanForLocation[locId] else { return nil }
-            return PlacedScan(locationId: locId, scanId: scanId, transform: t)
+            return PlacedScan(locationId: locId, scanId: scanId, transform: t, parentLinkId: parentLink[locId])
         }
+
+        // Stitch-pin markers: every edge's shared pin, taken on the SOURCE side and mapped into the
+        // shared frame. Corrections move the TARGET geometry to meet this point, so the source-side
+        // pin is the stable "join" location to mark.
+        var stitchPoints: [StitchPoint] = []
+        for e in componentEdges {
+            guard let srcLocId = e.link.sourceScan?.location?.id, let wS = world[srcLocId] else { continue }
+            let mSrc = appliedT(e.link.sourceScan) * e.link.sourceAnchorMatrix
+            let p = wS * mSrc.columns.3
+            stitchPoints.append(StitchPoint(
+                id: e.link.id, position: SIMD3<Float>(p.x, p.y, p.z),
+                sourceName: e.link.sourceScan?.location?.name ?? "?",
+                targetName: e.link.targetScan?.location?.name ?? "?"))
+        }
+
+        return ComponentPlacement(scans: scans, stitchPoints: stitchPoints)
     }
-}
-
-// MARK: - Combined-render item
-
-/// One mesh to compose into the shared combined-render scene — the data contract
-/// between graph placement (`StitchGraphBuilder.placeScans`) and `CombinedMeshScreen`.
-struct CombinedMeshItem: Identifiable {
-    let id: UUID            // scanId
-    let name: String
-    let meshURL: URL
-    let colorsURL: URL?
-    let scanDirectoryURL: URL?
-    let transform: simd_float4x4
-    /// Distinct hue used when "color by map" is enabled.
-    let tint: UIColor
-}
-
-extension CombinedMeshItem {
-    /// A small palette of high-contrast hues to assign per map.
-    static let palette: [UIColor] = [
-        UIColor(red: 0.40, green: 0.78, blue: 1.00, alpha: 1.0), // cyan
-        UIColor(red: 1.00, green: 0.62, blue: 0.40, alpha: 1.0), // orange
-        UIColor(red: 0.62, green: 1.00, blue: 0.55, alpha: 1.0), // green
-        UIColor(red: 1.00, green: 0.55, blue: 0.85, alpha: 1.0), // pink
-        UIColor(red: 0.85, green: 0.78, blue: 0.45, alpha: 1.0), // gold
-        UIColor(red: 0.70, green: 0.60, blue: 1.00, alpha: 1.0) // violet
-    ]
 }

@@ -138,6 +138,14 @@ enum SaveRegistration {
                            report.matchedWalls, report.matchedFloors, report.weakAxisFrac,
                            report.converged ? "yes" : "NO")
         if let w = trimmedWall { stats += " trimmed=wall[\(w)]" }
+        // Pre-fit floor gap paired with the gate it cleared — the two numbers that tune
+        // matchFloorOffsetM. A gap near the gate together with a large applied trans is the
+        // level-mismatch signature (RoomPlan gives one floor plane per room, at whichever level
+        // that scan covered lowest, so two generations can seat on different physical levels).
+        if let dy = report.floorPreFitYDeltaM {
+            stats += String(format: " floorΔy=%+.1fcm/gate%.0fcm",
+                            dy * 100, PlaneRegistration.matchFloorOffsetM * 100)
+        }
 
         let applied: Bool
         let reason: String
@@ -295,6 +303,16 @@ enum SaveRegistration {
         return t.inverse
     }
 
+    /// The forward transform baked into this scan's mesh/roomplan — its RAW capture frame → the
+    /// location's canonical (original-scan) frame. The inverse of `inverseForGhost` (both read the
+    /// same sidecar). nil when the scan saved raw (nothing applied), which callers treat as identity.
+    /// Used by the stitch graph to lift raw-frame anchor poses into the canonical frame the baked
+    /// mesh now lives in (see `StitchGraphBuilder.placeScans`).
+    static func appliedTransform(scanDirectory: URL) -> simd_float4x4? {
+        guard let sidecar = loadSidecar(scanDirectory: scanDirectory), sidecar.applied else { return nil }
+        return sidecar.transformMatrix
+    }
+
     #if canImport(RoomPlan)
     /// The ghost scan's room planes in its RAW capture frame — the frame the de-registered ghost
     /// mesh, the world map, and hence the relocalized live session all share. Reference side of
@@ -319,6 +337,25 @@ enum SaveRegistration {
                 planes = planes.map { PlaneRegistration.applying(undo, to: $0) }
             }
             return planes
+        }
+        return []
+    }
+
+    /// The scan's room planes in its CANONICAL frame (the frame `mesh.obj` / `roomplan.json` are
+    /// baked to) — the sibling of `rawFramePlanes` WITHOUT the raw-frame undo. Feeds the stitch
+    /// residual diagnostic (and, ahead, Op-2 cross-room refinement), which plane-fits two canonical
+    /// roomplans against each other. Candidate order gives the transformed (canonical) roomplan for
+    /// registered scans; unregistered scans have no applied `T`, so their roomplan is already
+    /// canonical (== raw). [] when unavailable.
+    static func canonicalFramePlanes(scanDirectory: URL) -> [PlaneRegistration.Plane] {
+        let candidates = [
+            scanDirectory.appendingPathComponent("roomplan.json"),
+            scanDirectory.appendingPathComponent("raw_data").appendingPathComponent("roomplan.json")
+        ]
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url),
+                  let decoded = try? JSONDecoder().decode(RoomPlanExportData.self, from: data) else { continue }
+            return PlaneRegistration.planes(fromExportSurfaces: decoded.surfaces)
         }
         return []
     }

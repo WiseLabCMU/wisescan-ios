@@ -200,7 +200,7 @@ struct ScansListView: View {
             .fullScreenCover(item: $renderRequest) { req in
                 // Color from the render view: resolve item ids back to scans and run the
                 // shared bulk path. The cover dismisses so the tile progress is visible.
-                CombinedMeshScreen(title: req.title, items: req.items, onColor: { ids in
+                CombinedMeshScreen(request: req, onColor: { ids in
                     let idSet = Set(ids)
                     let scans = locations.flatMap(\.scans).filter { idSet.contains($0.id) }
                     requestBulkColorize(scans: scans)
@@ -486,6 +486,10 @@ struct ScansListView: View {
         case .latest:
             // Delete only the latest scan per location; auto-delete location if empty
             var dirsToRemove: [URL] = []
+            // Preserve stitches for rooms that keep an older generation (re-point off the latest);
+            // a room whose latest IS its only scan has no survivor here → cascade bisects below.
+            let latestScans = selectedLocs.compactMap { $0.scans.max(by: { $0.capturedAt < $1.capturedAt }) }
+            StitchLinkStore.repointIncidentLinks(beforeDeleting: latestScans, in: modelContext)
             for loc in selectedLocs {
                 guard let latest = loc.scans.max(by: { $0.capturedAt < $1.capturedAt }) else { continue }
                 dirsToRemove.append(latest.scanDirectory)

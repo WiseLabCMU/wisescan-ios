@@ -1005,6 +1005,13 @@ struct ARCoverageView: UIViewRepresentable {
         // relocalization ε is stationary once settled; a handful of seats total is the contract).
         private var ghostAutoAlignStableCount = 0
         private var ghostAutoAlignConverged = false
+        // Lowest finalRMS among trusted seats this session. The ANCHOR fit (`ghostAutoAlignFit`,
+        // composed into Pin A at Confirm) is BEST-not-latest: unlike a rescan — which re-bakes the
+        // alignment at save, so its live seat is only visual — the adjacent stitch bakes this fit
+        // into the link at Confirm with NO post-save correction. So a later looser / wandering seat
+        // (boundary correspondence noise, a relocalization snap) must not overwrite a tighter one.
+        // Delegate-queue-owned (set in maybeRunGhostAutoAlign, reset in resetGhostAutoAlign).
+        private var ghostAutoAlignBestRMS: Float = .greatestFiniteMagnitude
         let manualNudgeActive = Atomic<Bool>(false)
 
         /// Ghost (re)load reset — main thread; the session was just re-run with
@@ -1013,12 +1020,14 @@ struct ARCoverageView: UIViewRepresentable {
             ghostAutoAlign = matrix_identity_float4x4
             ghostReferencePlanes = referencePlanes
             scanStore?.icpAlignReady = nil // stale chip from a prior ghost/alignment
+            scanStore?.ghostAutoAlignFit = nil // stale pinA correction from a prior connect/ghost
             sessionDelegateQueue.async { [weak self] in
                 self?.livePlaneAnchors.removeAll()
                 self?.ghostAutoAlignApplied = matrix_identity_float4x4
                 self?.lastGhostAutoAlignAt = 0
                 self?.ghostAutoAlignStableCount = 0
                 self?.ghostAutoAlignConverged = false
+                self?.ghostAutoAlignBestRMS = .greatestFiniteMagnitude
             }
         }
 
@@ -1108,16 +1117,30 @@ struct ARCoverageView: UIViewRepresentable {
             ghostAutoAlignStableCount = 0
             ghostAutoAlignApplied = fit
 
-            print(String(format: "[PlaneReg] ghost auto-align: trans=%.1fcm yaw=%.2f° (RMS=%.1fmm walls=%d weakFrac=%.2f livePlanes=%d)",
-                         report.transM * 100, report.yawDeg, report.finalRMS * 1000,
-                         report.matchedWalls, report.weakAxisFrac, live.count))
             let transCm = report.transM * 100
             let yawDeg = report.yawDeg
+            // Anchor fit is BEST-not-latest (see ghostAutoAlignBestRMS): rank by finalRMS — how well
+            // the walls actually line up. The adjacent Pin-A composition bakes the winner with no
+            // post-save correction, so a later looser seat must not replace a tighter one. The visual
+            // seat + green chip below still track the LATEST fit (a rescan re-bakes at save anyway).
+            let isBestAnchorFit = report.finalRMS < ghostAutoAlignBestRMS
+            if isBestAnchorFit { ghostAutoAlignBestRMS = report.finalRMS }
+            // "★anchor←best" marks the seat composed into Pin A on the adjacent connect (tightest so
+            // far) — device validation reads which fit the stitch used, not just the latest.
+            print(String(format: "[PlaneReg] ghost auto-align: trans=%.1fcm yaw=%.2f° (RMS=%.1fmm walls=%d weakFrac=%.2f livePlanes=%d)%@",
+                         report.transM * 100, report.yawDeg, report.finalRMS * 1000,
+                         report.matchedWalls, report.weakAxisFrac, live.count,
+                         isBestAnchorFit ? " ★anchor←best" : ""))
             DispatchQueue.main.async { [weak self] in
                 guard let self, !self.isRecording.load(ordering: .relaxed),
                       !self.manualNudgeActive.load(ordering: .relaxed) else { return }
                 self.ghostAutoAlign = fit
                 self.ghostAnchorEntity?.transform = Transform(matrix: fit)
+                // Publish the fit so the adjacent-connect can compose it into pinA at Confirm — the
+                // stitch anchor then lands in the ghost's raw frame, not the raw relocalization pose.
+                // Best-not-latest: only a tighter-RMS seat replaces the published fit (pinA has no
+                // post-save bake, so the tightest trusted seat wins, not whatever's latest at Confirm).
+                if isBestAnchorFit { self.scanStore?.ghostAutoAlignFit = fit }
                 // A trusted plane fit IS the alignment-ready signal — drive the green chip from it
                 // (successor to the mesh-ICP refine's chip; that path is quiet for proxy ghosts).
                 self.scanStore?.icpAlignReady = ScanStore.ICPAlignReady(transCm: transCm, yawDeg: yawDeg)
@@ -3156,6 +3179,17 @@ struct ARCoverageView: UIViewRepresentable {
         }
     }
 
+    /// Combined result of the ghost-proxy builder — both the full proxy (content mesh + RoomPlan
+    /// quads standing in for walls/floors) AND the dynamic mesh (content faces only, no
+    /// infrastructure). The dynamic mesh is the "4D" artifact: everything that isn't fixed room
+    /// structure, so scrubbing across rescans shows only what changed between visits.
+    struct GhostProxyBuildResult {
+        /// `mesh_proxy.obj` — content mesh + RoomPlan wall/floor grid quads.
+        let proxy: MeshExportResult
+        /// `mesh_dynamic.obj` — content mesh only (no walls, floors, ceilings, or RoomPlan quads).
+        let dynamic: MeshExportResult
+    }
+
     /// Raw, co-framed buffer snapshot taken on the main/AR thread the instant recording stops.
     /// Holds *copies* (by value) of the live ARFrame's mesh vertex/face buffers, the segmentation
     /// pixels, and the camera matrices — so nothing here references recycled ARKit memory and the
@@ -3410,7 +3444,7 @@ struct ARCoverageView: UIViewRepresentable {
     /// mis-subtract) or when no RoomPlan walls exist to stand in — callers then skip the artifact
     /// and the rescan ghost falls back to the full mesh.
     static func buildGhostProxyOBJ(objData meshOBJ: Data, faceClasses: Data,
-                                   roomPlanPlanes: [PlaneRegistration.Plane]) -> MeshExportResult? {
+                                   roomPlanPlanes: [PlaneRegistration.Plane]) -> GhostProxyBuildResult? {
         let roomPlanWalls = roomPlanPlanes.filter { $0.category == .wall }
         guard !roomPlanWalls.isEmpty else { return nil }
 
@@ -3531,6 +3565,18 @@ struct ARCoverageView: UIViewRepresentable {
             totalFaces += 1
         }
 
+        // ── Snapshot the dynamic mesh (content only, no infrastructure) ──
+        // This is the intermediate BEFORE RoomPlan quads are appended — the "4D" artifact that
+        // strips walls/floors/ceilings so temporal comparisons across rescans show only changes.
+        // objData starts with the proxy version header line; strip it so the dynamic artifact
+        // carries only its own header + the vertex/face content.
+        let proxyHeaderLine = "\(ghostProxyVersionHeader) quadFaces=\(quadFaceCount)\n"
+        let contentStart = proxyHeaderLine.utf8.count
+        var dynamicOBJData = Data("\(dynamicMeshVersionHeader)\n".utf8)
+        dynamicOBJData.append(objData[objData.startIndex.advanced(by: contentStart)...])
+        let dynamicVertexCount = totalVertices
+        let dynamicFaceCount = totalFaces
+
         // Bake the RoomPlan wall + floor quads into the same OBJ (the clean stand-ins for the
         // subtracted architectural faces). Tessellated into ~1 m grid cells rather than one big
         // 2-triangle quad: the ghost renders as WIREFRAME, and a bare quad is just its outline +
@@ -3572,7 +3618,9 @@ struct ARCoverageView: UIViewRepresentable {
             .map { String(format: "%@ %.1f×%.1fm", $0.category == .wall ? "wall" : "floor", $0.width, $0.height) }
             .joined(separator: ", ")
         print("[GhostProxy] quads baked: \(quadDesc) | mesh faces kept=\(keptFaces.count) dropped: floorCeil=\(droppedFloorCeil) coveredWall=\(droppedCoveredWall)")
-        return MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces)
+        let proxyResult = MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces)
+        let dynamicResult = MeshExportResult(data: dynamicOBJData, vertexCount: dynamicVertexCount, faceCount: dynamicFaceCount)
+        return GhostProxyBuildResult(proxy: proxyResult, dynamic: dynamicResult)
     }
 
     /// Ghost-proxy artifact version header (start of mesh_proxy.obj line 1; the full line carries
@@ -3584,6 +3632,11 @@ struct ARCoverageView: UIViewRepresentable {
     /// with THICK lines (1 mm lines are sub-pixel beyond ~1.5 m — the "wall lattice only reaches
     /// 1 m up" illusion was thickness falloff, not geometry).
     static let ghostProxyVersionHeader = "# ghostproxy v4"
+    /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
+    /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
+    /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/
+    /// ceilings, no RoomPlan quads).
+    static let dynamicMeshVersionHeader = "# dynamicmesh v1"
     /// Target grid cell size for the tessellated RoomPlan quads.
     static let ghostProxyQuadCellMeters: Float = 1.0
     /// Wireframe line thickness for the proxy's RoomPlan lattice (the mesh remainder keeps the

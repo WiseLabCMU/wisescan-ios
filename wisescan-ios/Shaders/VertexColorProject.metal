@@ -33,6 +33,9 @@ struct VertexColorParams {
     int      downscaleFactor;    // image downsample factor
     uint     hasDepth;           // 1 if depth texture is valid, 0 otherwise
     uint     hasMask;            // 1 if mask texture is valid, 0 otherwise
+    float    occlusionFrac;      // distance-proportional occlusion tolerance (0 = fixed occlusionMM only)
+    float    edgeSpreadFrac;     // reject if 3×3 depth spread > frac × depth (0 disables)
+    float    backfaceDotMin;     // reject if signed n·v below this (-1 disables)
 };
 
 // Per-vertex output: packed (r, g, b, _) + weight
@@ -92,8 +95,30 @@ kernel void vertexColorProject(
             // depth == 0 → no valid depth / privacy mask
             if (depthMM == 0.0) return;
 
-            // Occluded if expected distance exceeds stored depth + tolerance
-            if (expectedMM > depthMM + params.occlusionMM) return;
+            // Occluded if expected distance exceeds stored depth + tolerance.
+            // Tolerance scales with range (LiDAR error grows with distance) with a
+            // near-field floor, so close occluders no longer bleed through 50 mm.
+            float tolMM = max(params.occlusionMM, params.occlusionFrac * depthMM);
+            if (expectedMM > depthMM + tolMM) return;
+
+            // Silhouette guard: near a depth discontinuity the coarse depth raster and
+            // the color raster disagree about which side of the edge a pixel is on, so
+            // foreground color bakes onto background vertices. Reject observations whose
+            // 3×3 depth neighborhood spans more than edgeSpreadFrac × depth.
+            if (params.edgeSpreadFrac > 0.0) {
+                float dMin = depthMM, dMax = depthMM;
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int sx = dpx + dx, sy = dpy + dy;
+                        if (sx < 0 || sx >= params.depthW || sy < 0 || sy >= params.depthH) continue;
+                        float dn = float(depthTex.read(uint2(sx, sy)).r);
+                        if (dn == 0.0) continue;   // no-data neighbors are not a discontinuity
+                        dMin = min(dMin, dn);
+                        dMax = max(dMax, dn);
+                    }
+                }
+                if (dMax - dMin > params.edgeSpreadFrac * depthMM) return;
+            }
         }
     }
 
@@ -120,7 +145,12 @@ kernel void vertexColorProject(
 
     float3 viewDir = toCam / dist;
     float3 normal = normals[tid].xyz;
-    float angleWeight = abs(dot(normal, viewDir));        // 1 = head-on, 0 = grazing
+    // Back-face rejection: a vertex whose normal points away from the camera is being
+    // seen THROUGH its own surface (e.g. a tabletop's color landing on the underside) —
+    // and abs() used to give it full head-on weight. backfaceDotMin = -1 restores that.
+    float dotNV = dot(normal, viewDir);
+    if (dotNV < params.backfaceDotMin) return;
+    float angleWeight = abs(dotNV);                       // 1 = head-on, 0 = grazing
     float clampedDist = max(dist, params.distFloor);
     float distWeight = 1.0 / (clampedDist * clampedDist); // inverse-square
     float w = angleWeight * distWeight * params.frameWeight;

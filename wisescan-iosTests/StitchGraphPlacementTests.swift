@@ -44,7 +44,7 @@ final class StitchGraphPlacementTests: XCTestCase {
 
         let graph = await StitchGraphBuilder.build(from: [a.location, b.location])
         let component = try XCTUnwrap(graph.components.first)
-        let placed = StitchGraphBuilder.placeScans(in: component, edges: graph.edges(in: component))
+        let placed = StitchGraphBuilder.placeScans(in: component, edges: graph.edges(in: component)).scans
 
         let placedA = try XCTUnwrap(placed.first { $0.locationId == locAId })
         let placedB = try XCTUnwrap(placed.first { $0.locationId == locBId })
@@ -79,7 +79,7 @@ final class StitchGraphPlacementTests: XCTestCase {
 
         let graph = await StitchGraphBuilder.build(from: [a.location, b.location])
         let component = try XCTUnwrap(graph.components.first)
-        let placed = StitchGraphBuilder.placeScans(in: component, edges: graph.edges(in: component))
+        let placed = StitchGraphBuilder.placeScans(in: component, edges: graph.edges(in: component)).scans
 
         let placedA = try XCTUnwrap(placed.first { $0.locationId == locAId })
         let placedB = try XCTUnwrap(placed.first { $0.locationId == locBId })

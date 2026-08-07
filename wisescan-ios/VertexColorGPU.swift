@@ -70,6 +70,9 @@ enum VertexColorGPU {
         var downscaleFactor: Int32
         var hasDepth: UInt32
         var hasMask: UInt32
+        var occlusionFrac: Float
+        var edgeSpreadFrac: Float
+        var backfaceDotMin: Float
     }
 
     // MARK: - Upload (once per colorize call)
@@ -174,7 +177,12 @@ enum VertexColorGPU {
             vertexCount: UInt32(vertexCount),
             downscaleFactor: Int32(downscaleFactor),
             hasDepth: hasDepth ? 1 : 0,
-            hasMask: hasMask ? 1 : 0
+            hasMask: hasMask ? 1 : 0,
+            // Anti-bleed knobs read straight from AppConstants (compile-time constants;
+            // keeps this already-long signature from growing further).
+            occlusionFrac: AppConstants.colorizationOcclusionToleranceFrac,
+            edgeSpreadFrac: AppConstants.colorizationDepthEdgeMaxSpreadFrac,
+            backfaceDotMin: AppConstants.colorizationBackfaceDotMin
         )
 
         // Output buffer

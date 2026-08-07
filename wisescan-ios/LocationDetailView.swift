@@ -427,6 +427,9 @@ struct LocationDetailView: View {
         // relationship array isn't updated until save(), so checking .isEmpty after delete()
         // would incorrectly report non-empty.
         let willBeEmpty = scansToDelete.count >= location.scans.count
+        // Preserve stitches when the room survives (partial delete); when it will be emptied, the
+        // links cascade away with it (bisect) — no re-point possible or wanted.
+        if !willBeEmpty { StitchLinkStore.repointIncidentLinks(beforeDeleting: scansToDelete, in: modelContext) }
         // Capture file URLs on main (SwiftData model access must stay on the context's thread).
         // Delete the records + save once on main (fast, in-memory), then remove the scan
         // directories (images/depth/cameras — the slow part) OFF main so bulk delete of many
@@ -561,7 +564,10 @@ struct LocationDetailView: View {
     private func bottomActionToolbar(sortedScans: [CapturedScan]) -> some View {
         HStack(spacing: 20) {
             Button(action: {
-                bulkDeleteLinkedMapCount = linkedOtherMapCount(for: selectedScans)
+                // Only warn about lost connections when the whole map goes: a partial delete now
+                // re-points its stitches onto a surviving generation instead of severing them.
+                let willEmpty = selectedScans.count >= location.scans.count
+                bulkDeleteLinkedMapCount = willEmpty ? linkedOtherMapCount(for: selectedScans) : 0
                 showBulkDeleteConfirm = true
             }, label: {
                 Image(systemName: "trash")

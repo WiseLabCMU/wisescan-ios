@@ -24,6 +24,9 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
     @AppStorage(AppConstants.Key.colorizeFrom360Faces) private var colorizeFrom360Faces: Bool = AppConstants.colorizeFrom360Faces
     @AppStorage(AppConstants.Key.keepCameraOriginals) private var keepCameraOriginals: Bool = AppConstants.keepCameraOriginals
+    @AppStorage(AppConstants.Key.gpuColorize) private var gpuColorize: Bool = AppConstants.gpuColorize
+    @AppStorage(AppConstants.Key.keyframeWeightBonus) private var keyframeWeightBonus: Bool = AppConstants.keyframeWeightBonus
+    @AppStorage(AppConstants.Key.robustColorMedian) private var robustColorMedian: Bool = AppConstants.robustColorMedian
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     // 0 = Auto (no override); N = force format index N-1 of supportedVideoFormats.
     @AppStorage(AppConstants.Key.videoFormatIndex) private var videoFormatIndex: Int = 0
@@ -330,6 +333,11 @@ struct SettingsView: View {
                                     // production, where it would silently drop per-face classification
                                     // (the wall/non-wall labels plane registration depends on).
                                     self.meshClassifier = AppConstants.meshClassifier
+                                    // Default-TRUE dev toggle: same leak rule as meshClassifier —
+                                    // a bench-OFF value must not survive dev-mode exit.
+                                    self.gpuColorize = AppConstants.gpuColorize
+                                    self.keyframeWeightBonus = AppConstants.keyframeWeightBonus
+                                    self.robustColorMedian = AppConstants.robustColorMedian
                                     // Diagnostics toggles gate on their own keys (not developerMode),
                                     // so a bench-ON value would keep costing after dev-mode exit.
                                     self.hideLivePoints = AppConstants.hideLivePoints
@@ -422,6 +430,42 @@ struct SettingsView: View {
                                     Text("Keep 360° Originals on Camera")
                                         .foregroundColor(.white)
                                     Text("Debugging only: skips the security sweep that deletes each 360° still from the camera once its bytes are verified on the device. Raw equirects capture bystanders in every direction, and the camera's open access point with factory password is the weakest place to leave them — keep this OFF except when comparing against camera-side originals.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $gpuColorize) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("GPU Colorize")
+                                        .foregroundColor(.white)
+                                    Text("Uses the Metal compute path for vertex-color projection (default). Turn OFF to force the CPU reference implementation — recolor the same scan once per setting to isolate suspected GPU artifacts (occlusion bleed-through, mask misses). The two paths must produce the same result; a difference is a GPU bug.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $keyframeWeightBonus) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Keyframe Weight Bonus")
+                                        .foregroundColor(.white)
+                                    Text("Gives sharp stillness keyframes a 3× vote in the vertex-color weighted median (default). Turn OFF to weight stills and motion frames equally — recolor the same scan once per setting to see whether the bonus amplifies edge bleed or, conversely, equal weighting lets blurry sweep colors mush crisp surfaces.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $robustColorMedian) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Robust Color Median")
+                                        .foregroundColor(.white)
+                                    Text("Resolves each vertex color by consensus: picks the observation that most agrees with the others and averages only its cluster, so minority bleed colors are excluded outright and the result is always a color that was actually seen (default). Turn OFF for the legacy per-channel weighted median — recolor the same scan once per setting to compare.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

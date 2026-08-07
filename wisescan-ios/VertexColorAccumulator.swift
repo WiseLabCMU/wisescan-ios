@@ -1,12 +1,11 @@
 import Foundation
-import ARKit
 import os
+import ARKit
 import UIKit
 
 /// Post-processing utilities for vertex coloring and ARWorldMap export.
 /// Extracted from ARCoverageView for clearer separation of concerns.
 enum VertexColorAccumulator {
-
     /// Result-class lines log through the unified system log so RELEASE-build captures
     /// keep them — print() output is invisible to Console/log-collect off Release
     /// (360post8: the whole colorize outcome vanished from the log). Per-frame perf
@@ -333,7 +332,16 @@ enum VertexColorAccumulator {
         let downscaleFactor = 2
 
         // Upload vertices + normals to GPU once (reused for all frames).
+        // Dev A/B: the GPU projection is default-ON; the Developer-Mode "GPU Colorize" toggle
+        // forces the CPU reference path to isolate suspected GPU artifacts on the same scan.
         let useGPU = VertexColorGPU.isAvailable
+            && UserDefaults.standard.bool(forKey: AppConstants.Key.gpuColorize)
+        // Dev A/B: OFF weights stills and sweep frames equally, to test whether the 3×
+        // keyframe bonus amplifies bleed (a close keyframe's silhouette-straddling samples
+        // get the bonus AND the 1/d² boost, which can flip the weighted median).
+        let keyframeBonus: Float = UserDefaults.standard.bool(forKey: AppConstants.Key.keyframeWeightBonus)
+            ? AppConstants.colorizationKeyframeWeight : 1.0
+        PerfDiag.log("[VertexColor] projection path: \(useGPU ? "GPU" : "CPU"), keyframe bonus ×\(keyframeBonus)")
         if useGPU {
             VertexColorGPU.uploadVertices(vertices, normals: normals)
         }
@@ -387,7 +395,7 @@ enum VertexColorAccumulator {
             // observations get a weight bonus — where a keyframe saw a surface, its
             // crisp samples dominate the weighted median over blur-prone sweep samples.
             let frameWeight: Float = (json["is_keyframe"] as? Bool) == true
-                ? AppConstants.colorizationKeyframeWeight : 1.0
+                ? keyframeBonus : 1.0
 
             // Load corresponding image
             guard let imagePath = json["image_path"] as? String else { return }
@@ -455,6 +463,11 @@ enum VertexColorAccumulator {
                     isDepthLittleEndian = (info & CGBitmapInfo.byteOrder16Little.rawValue) != 0 || (info & CGBitmapInfo.byteOrder32Little.rawValue) != 0
                 }
             }
+            if depthPtr == nil {
+                // Without depth this frame paints EVERY vertex in its frustum — occluded or
+                // not — so a single such frame can smear bleed across the whole scan.
+                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count): no usable depth — occlusion test OFF for this frame")
+            }
 
             // Load this frame's person mask (deferred-blur era only). No mask ⇒ the stencil hadn't
             // warmed up on this frame → skip the whole frame rather than risk baking an unmasked
@@ -495,9 +508,11 @@ enum VertexColorAccumulator {
                 occlusionToleranceMM: AppConstants.colorizationOcclusionToleranceMM
             ) {
                 // GPU path: accumulate observations from GPU results into top-K buffers (CPU).
+                var visibleCount = 0
                 for i in 0..<vertexCount {
                     let obs = gpuResults[i]
                     guard obs.weight > 0 else { continue }
+                    visibleCount += 1
 
                     let base = i * K
                     let cnt = Int(obsCount[i])
@@ -517,9 +532,10 @@ enum VertexColorAccumulator {
                         }
                     }
                 }
-                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project_gpu \(vertices.count) verts \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
+                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project_gpu \(vertices.count) verts, \(visibleCount) visible, \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
             } else {
                 // CPU fallback path
+                var visibleCount = 0
                 for (i, vertex) in vertices.enumerated() {
                     let worldPos = SIMD4<Float>(vertex.x, vertex.y, vertex.z, 1.0)
                     let camPos = world2Cam * worldPos
@@ -535,24 +551,46 @@ enum VertexColorAccumulator {
                     guard px >= 0 && px < scaledW && py >= 0 && py < scaledH else { continue }
                     guard px < width && py < height else { continue }
 
-                    // Depth Occlusion Test
+                    // Depth Occlusion Test (mirrors the GPU kernel exactly — keep in lockstep)
                     if let dPtr = depthPtr {
                         let dpx = px * downscaleFactor * depthWidth / max(imgW, 1)
                         let dpy = py * downscaleFactor * depthHeight / max(imgH, 1)
                         if dpx >= 0 && dpx < depthWidth && dpy >= 0 && dpy < depthHeight {
-                            let dOffset = dpy * depthBytesPerRow + dpx * 2
-                            let b0 = UInt16(dPtr[dOffset])
-                            let b1 = UInt16(dPtr[dOffset + 1])
-                            let depthValue = isDepthLittleEndian ? (b1 << 8) | b0 : (b0 << 8) | b1
-
-                            let depthMM = Float(depthValue)
+                            // Byte-order-aware 16-bit read, shared by the center sample and the edge scan.
+                            func depthAt(_ sx: Int, _ sy: Int) -> Float {
+                                let o = sy * depthBytesPerRow + sx * 2
+                                let b0 = UInt16(dPtr[o]), b1 = UInt16(dPtr[o + 1])
+                                return Float(isDepthLittleEndian ? (b1 << 8) | b0 : (b0 << 8) | b1)
+                            }
+                            let depthMM = depthAt(dpx, dpy)
                             let expectedMM = -camPos.z * 1000.0
 
                             // If depth pixel is 0, it means no valid depth or privacy mask. Skip coloring.
                             if depthMM == 0 { continue }
 
-                            // If expected distance is > tolerance farther than what the depth sensor saw, we are occluded
-                            if expectedMM > depthMM + AppConstants.colorizationOcclusionToleranceMM { continue }
+                            // Occluded if expected distance exceeds stored depth + tolerance; the
+                            // tolerance scales with range (LiDAR error grows) over a near-field floor.
+                            let tolMM = max(AppConstants.colorizationOcclusionToleranceMM,
+                                            AppConstants.colorizationOcclusionToleranceFrac * depthMM)
+                            if expectedMM > depthMM + tolMM { continue }
+
+                            // Silhouette guard: reject observations straddling a depth discontinuity,
+                            // where the coarse depth raster and the color raster disagree about which
+                            // side of the edge a pixel is on (the main occlusion-bleed source).
+                            let edgeFrac = AppConstants.colorizationDepthEdgeMaxSpreadFrac
+                            if edgeFrac > 0 {
+                                var dMin = depthMM, dMax = depthMM
+                                for ddy in -1...1 {
+                                    for ddx in -1...1 {
+                                        let sx = dpx + ddx, sy = dpy + ddy
+                                        guard sx >= 0, sx < depthWidth, sy >= 0, sy < depthHeight else { continue }
+                                        let dn = depthAt(sx, sy)
+                                        if dn == 0 { continue }   // no-data neighbors are not a discontinuity
+                                        dMin = min(dMin, dn); dMax = max(dMax, dn)
+                                    }
+                                }
+                                if dMax - dMin > edgeFrac * depthMM { continue }
+                            }
                         }
                     }
 
@@ -579,7 +617,11 @@ enum VertexColorAccumulator {
                     let dist = simd_length(toCam)
                     guard dist > 0 else { continue }
                     let viewDir = toCam / dist
-                    let angleWeight = abs(simd_dot(normals[i], viewDir))   // 1 = head-on, 0 = grazing
+                    // Back-face rejection: a vertex whose normal points away from the camera is
+                    // being seen THROUGH its own surface — abs() used to give it full weight.
+                    let dotNV = simd_dot(normals[i], viewDir)
+                    guard dotNV >= AppConstants.colorizationBackfaceDotMin else { continue }
+                    let angleWeight = abs(dotNV)                           // 1 = head-on, 0 = grazing
                     let clampedDist = max(dist, distFloor)
                     let distWeight = 1.0 / (clampedDist * clampedDist)     // inverse-square, floored
                     let weight = angleWeight * distWeight * frameWeight    // keyframes get a sharpness bonus
@@ -589,6 +631,7 @@ enum VertexColorAccumulator {
                     let r = ptr[offset]
                     let g = ptr[offset + 1]
                     let b = ptr[offset + 2]
+                    visibleCount += 1
 
                     // Keep the top-K observations by weight for this vertex.
                     let base = i * K
@@ -610,7 +653,7 @@ enum VertexColorAccumulator {
                         }
                     }
                 }
-                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project_cpu \(vertices.count) verts \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
+                PerfDiag.log("[VertexColor] frame \(frameIdx + 1)/\(sampledFiles.count) project_cpu \(vertices.count) verts, \(visibleCount) visible, \(Int((CACurrentMediaTime() - projStart) * 1000))ms")
             }
             _ = depthPixelDataBuffer // Silence compiler warning while ensuring CFData buffer outlives the pointer
             _ = maskDataBuffer       // ditto — keep the mask CFData alive for the vertex loop
@@ -621,12 +664,17 @@ enum VertexColorAccumulator {
         // Release GPU buffers now that all frames are processed.
         if useGPU { VertexColorGPU.releaseBuffers() }
 
-        // Reduce each vertex's observations to a per-channel weighted median.
-        // Unsampled vertices keep a neutral gray so they read as "no data".
+        // Reduce each vertex's observations to a single color. Dev A/B: consensus
+        // vector median (default; excludes minority bleed colors outright) vs the
+        // legacy per-channel weighted median. Both consume the same top-K buffers,
+        // so this is independent of the GPU/CPU projection choice and cannot lose
+        // coverage. Unsampled vertices keep a neutral gray so they read as "no data".
+        let robustReduce = UserDefaults.standard.bool(forKey: AppConstants.Key.robustColorMedian)
         var coloredCount = 0
         // Scratch buffers reused across vertices (sized K) to avoid per-vertex allocations.
         var sV = [Float](repeating: 0, count: K)
         var sW = [Float](repeating: 0, count: K)
+        let obs = ObsBuffers(r: obsR, g: obsG, b: obsB, w: obsW)
         phase?("Blending colors…")
         let medianStart = CACurrentMediaTime()
 
@@ -640,46 +688,88 @@ enum VertexColorAccumulator {
                     continue
                 }
                 let base = i * K
-                let r = Self.weightedMedian(values: obsR, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
-                let g = Self.weightedMedian(values: obsG, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
-                let b = Self.weightedMedian(values: obsB, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
-                out[i] = SIMD4<Float>(r / 255.0, g / 255.0, b / 255.0, 1.0)
+                if robustReduce {
+                    let c = Self.consensusColor(obs: obs, base: base, count: cnt)
+                    out[i] = SIMD4<Float>(c.x / 255.0, c.y / 255.0, c.z / 255.0, 1.0)
+                } else {
+                    let r = Self.weightedMedian(values: obsR, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
+                    let g = Self.weightedMedian(values: obsG, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
+                    let b = Self.weightedMedian(values: obsB, weights: obsW, base: base, count: cnt, sV: &sV, sW: &sW)
+                    out[i] = SIMD4<Float>(r / 255.0, g / 255.0, b / 255.0, 1.0)
+                }
                 coloredCount += 1
             }
         }
-        PerfDiag.log("[VertexColor] median resolve \(vertexCount) verts \(Int((CACurrentMediaTime() - medianStart) * 1000))ms")
+        let reducerName = robustReduce ? "consensus median" : "per-channel median"
+        PerfDiag.log("[VertexColor] \(reducerName) resolve \(vertexCount) verts \(Int((CACurrentMediaTime() - medianStart) * 1000))ms")
         let elapsed = CACurrentMediaTime() - startTime
-        Self.log.info("Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (weighted median, K=\(K)) in \(String(format: "%.1f", elapsed))s")
+        Self.log.info("Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (\(reducerName), K=\(K)) in \(String(format: "%.1f", elapsed))s")
         return data
     }
 
-    /// Whether deferred-blur privacy mask mode applies to this scan (per-frame person
-    /// masks required; maskless frames are SKIPPED). Shared by the colorize path and the
-    /// faces-probe upfront gate so the two derivations can't drift.
+    /// The flat top-K observation buffers, bundled so the consensus reducer stays
+    /// under the parameter-count lint (arrays are COW references — no copies).
+    private struct ObsBuffers {
+        let r: [UInt8]
+        let g: [UInt8]
+        let b: [UInt8]
+        let w: [Float]
+    }
+
+    /// Weighted vector median + trimmed mean over one vertex's observations
+    /// (`base..<base+count` in the flat buffers).
     ///
-    /// Deferred-blur era (RAW depth, needs per-frame masks) vs legacy (depth already
-    /// person-zeroed at capture, so the depth==0 skip protects). masks/ (created
-    /// unconditionally at session start) is the primary signal. If it was lost (partial
-    /// restore / manual cleanup), the metadata `privacy_filter` KEY marks the era —
-    /// every deferred capture stamps it (FrameCaptureSession), legacy metadata predates
-    /// it. UNREADABLE metadata (missing/corrupt — abnormal, since it's written for every
-    /// scan) fails CLOSED into the deferred era so a lost-masks deferred scan can't
+    /// Picks the observation minimizing the weighted sum of L1 RGB distances to the
+    /// others — a consensus color that was actually SEEN (per-channel medians can mix
+    /// channels from different observations into a color nobody observed) — then
+    /// returns the weighted mean of just its cluster (observations within
+    /// `colorizationConsensusTrimL1`). Minority outlier colors, e.g. a foreground
+    /// surface bled through a marginal occlusion pass, are excluded entirely instead
+    /// of merely being out-voted channel by channel.
+    private static func consensusColor(obs: ObsBuffers, base: Int, count: Int) -> SIMD3<Float> {
+        if count == 1 {
+            return SIMD3<Float>(Float(obs.r[base]), Float(obs.g[base]), Float(obs.b[base]))
+        }
+        var bestIdx = base
+        var bestCost = Float.greatestFiniteMagnitude
+        for i in base..<(base + count) {
+            let ri = Int32(obs.r[i]), gi = Int32(obs.g[i]), bi = Int32(obs.b[i])
+            var cost: Float = 0
+            for j in base..<(base + count) where j != i {
+                let d = abs(ri - Int32(obs.r[j])) + abs(gi - Int32(obs.g[j])) + abs(bi - Int32(obs.b[j]))
+                cost += obs.w[j] * Float(d)
+            }
+            if cost < bestCost { bestCost = cost; bestIdx = i }
+        }
+        let rb = Int32(obs.r[bestIdx]), gb = Int32(obs.g[bestIdx]), bb = Int32(obs.b[bestIdx])
+        var sr: Float = 0, sg: Float = 0, sb: Float = 0, sw: Float = 0
+        for j in base..<(base + count) {
+            let d = abs(rb - Int32(obs.r[j])) + abs(gb - Int32(obs.g[j])) + abs(bb - Int32(obs.b[j]))
+            guard d <= AppConstants.colorizationConsensusTrimL1 else { continue }
+            let w = obs.w[j]
+            sr += w * Float(obs.r[j]); sg += w * Float(obs.g[j]); sb += w * Float(obs.b[j])
+            sw += w
+        }
+        guard sw > 0 else { return SIMD3<Float>(Float(rb), Float(gb), Float(bb)) }
+        return SIMD3<Float>(sr / sw, sg / sw, sb / sw)
+    }
+
     /// silently colorize raw depth. Only READABLE metadata WITHOUT the key is genuine
     /// legacy. Mirrors ScanExportManager's gate.
     static func privacyMaskModeWouldApply(rawDir: URL) -> Bool {
-        let fm = FileManager.default
+        let fileManager = FileManager.default
         let masksDir = rawDir.appendingPathComponent("masks")
         let meta: [String: Any]? = {
             guard let metaData = try? Data(contentsOf: rawDir.appendingPathComponent("scan4d_metadata.json")),
                   let obj = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] else { return nil }
             return obj
         }()
-        let masksDirExists = fm.fileExists(atPath: masksDir.path)
+        let masksDirExists = fileManager.fileExists(atPath: masksDir.path)
         let hasPrivacyKey = meta?.keys.contains("privacy_filter") ?? false
         let deferredBlurEra = masksDirExists || hasPrivacyKey || meta == nil
         guard deferredBlurEra else { return false }
         let maskCount = !masksDirExists ? 0
-            : ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
+            : ((try? fileManager.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
                 .filter { $0.pathExtension == "png" }.count
         if maskCount > 0 { return true }
         // No surviving masks: honor an explicit Bool; a present-but-garbage flag or

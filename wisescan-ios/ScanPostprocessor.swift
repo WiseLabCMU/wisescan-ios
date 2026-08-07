@@ -177,7 +177,8 @@ enum ScanPostprocessor {
         // (no/stale version header) regenerates on the next Process (e.g. v1's untessellated
         // quads, invisible as wireframe).
         let proxyCurrent = artifactURL("mesh_proxy.obj", in: scan).map(proxyIsCurrent) ?? false
-        if !proxyCurrent, roomDone,
+        let dynamicCurrent = artifactURL("mesh_dynamic.obj", in: scan).map(dynamicIsCurrent) ?? false
+        if (!proxyCurrent || !dynamicCurrent), roomDone,
            artifactURL("face_classes.bin", in: scan) != nil {
             steps.append(.proxy)
         }
@@ -654,11 +655,12 @@ enum ScanPostprocessor {
                let classes = try? Data(contentsOf: classesURL),
                let mesh = try? Data(contentsOf: dir.appendingPathComponent("mesh.obj")),
                let planes = currentFramePlanes(scanDirectory: dir), !planes.isEmpty {
-                if let proxy = ARCoverageView.buildGhostProxyOBJ(objData: mesh, faceClasses: classes,
+                if let result = ARCoverageView.buildGhostProxyOBJ(objData: mesh, faceClasses: classes,
                                                                  roomPlanPlanes: planes) {
-                    writeBoth(proxy.data, "mesh_proxy.obj")
+                    writeBoth(result.proxy.data, "mesh_proxy.obj")
+                    writeBoth(result.dynamic.data, "mesh_dynamic.obj")
                     outcome.didStructural = true
-                    log.info("[GhostProxy] built at postprocess: \(proxy.faceCount) faces, \(proxy.data.count / 1024) KB")
+                    log.info("[GhostProxy] built at postprocess: proxy \(result.proxy.faceCount) faces (\(result.proxy.data.count / 1024) KB), dynamic \(result.dynamic.faceCount) faces (\(result.dynamic.data.count / 1024) KB)")
                 } else {
                     log.warning("[GhostProxy] skipped at postprocess: no RoomPlan walls or face/class mismatch")
                 }
@@ -699,6 +701,17 @@ enum ScanPostprocessor {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
         defer { try? handle.close() }
         let expected = ARCoverageView.ghostProxyVersionHeader
+        guard let head = try? handle.read(upToCount: expected.utf8.count),
+              let str = String(data: head, encoding: .utf8) else { return false }
+        return str == expected
+    }
+
+    /// Whether a dynamic-mesh artifact was written by the CURRENT builder (same staleness pattern
+    /// as `proxyIsCurrent`). Reads only the first bytes.
+    private static func dynamicIsCurrent(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        let expected = ARCoverageView.dynamicMeshVersionHeader
         guard let head = try? handle.read(upToCount: expected.utf8.count),
               let str = String(data: head, encoding: .utf8) else { return false }
         return str == expected

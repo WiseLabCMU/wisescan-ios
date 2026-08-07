@@ -563,7 +563,7 @@ struct CaptureView: View {
         }
         // Snapshot everything the background pass needs on MAIN — SwiftData models and their
         // relationships are not thread-safe off the main actor.
-        let isRescan = scanStore.activeScanCase == .rescanSpace
+        let activeScanCase = scanStore.activeScanCase
         let scanDirectory = targetScan.scanDirectory
         let proxyCandidates = [
             targetScan.scanDirectory.appendingPathComponent("mesh_proxy.obj"),
@@ -578,7 +578,7 @@ struct CaptureView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             let (ghostData, isProxy, planes) = Self.readGhostArtifacts(
-                isRescan: isRescan, scanDirectory: scanDirectory,
+                activeScanCase: activeScanCase, scanDirectory: scanDirectory,
                 proxyCandidates: proxyCandidates, meshFileURL: meshFileURL, scanId: scanId)
 
             DispatchQueue.main.async {
@@ -602,23 +602,26 @@ struct CaptureView: View {
 
     /// Background half of `loadGhostMeshData` — file reads + de-registration + plane decode
     /// (no SwiftData, no @State; everything arrives as plain values snapshotted on main).
-    private static func readGhostArtifacts(isRescan: Bool, scanDirectory: URL,
+    private static func readGhostArtifacts(activeScanCase: ScanCase, scanDirectory: URL,
                                            proxyCandidates: [URL], meshFileURL: URL, scanId: UUID)
         -> (data: Data?, isProxy: Bool, planes: [PlaneRegistration.Plane]) {
-        // DECISION 2: rescans load the light proxy (walls/floor/ceiling subtracted, RoomPlan
+        // DECISION 2: rescans AND adjacent-connects load the light proxy (walls/floor/ceiling subtracted, RoomPlan
         // quads baked in) instead of the full 10⁵–10⁶-face mesh — killing the 2× mesh-
         // coexistence memory and most of the ghost render/parse cost. A proxy ghost also
         // retires the mesh-ICP path for the session (plane auto-align drives the green chip;
         // save-time registration is the correction authority) — the dense-ICP machinery only
         // engages for legacy scans with no proxy artifact.
+        // A connect's pre-pinA phase is same-room (relocalized into the ghost's own room), so it
+        // takes the same proxy + plane path as a rescan.
+        let loadsGhost = activeScanCase == .rescanSpace || activeScanCase == .linkAdjacent
         var ghostData: Data?
         var isProxy = false
-        if isRescan {
+        if loadsGhost {
             for url in proxyCandidates {
                 if let data = try? Data(contentsOf: url) {
                     ghostData = data
                     isProxy = true
-                    print("[GhostProxy] rescan ghost using proxy (\(data.count / 1024)KB)")
+                    print("[GhostProxy] \(activeScanCase == .linkAdjacent ? "adjacent-connect" : "rescan") ghost using proxy (\(data.count / 1024)KB)")
                     break
                 }
             }
@@ -637,12 +640,14 @@ struct CaptureView: View {
             print("[PlaneReg] ghost mesh de-registered back to its raw capture frame for relocalization overlay")
         }
         // Ghost auto-align reference: the ghost room's planes in the SAME raw frame as the
-        // (de-registered) mesh + world map. Rescan only — a link-adjacent capture is a
-        // different physical room; auto-fitting its walls to the ghost's would be a false lock.
-        let planes = isRescan ? SaveRegistration.rawFramePlanes(scanDirectory: scanDirectory) : []
+        // (de-registered) mesh + world map. Enabled for rescan AND adjacent-connect: a connect's
+        // pre-pinA phase is same-room (relocalized into the ghost's own room), so fitting live walls
+        // to the ghost seats it and corrects pinA into map A's frame at Confirm. The different-room
+        // false-lock risk is room B (a fresh session after the reset, no ghost), never this phase.
+        let planes = loadsGhost ? SaveRegistration.rawFramePlanes(scanDirectory: scanDirectory) : []
         if !planes.isEmpty {
             print("[PlaneReg] ghost auto-align reference loaded: \(planes.count) planes")
-        } else if isRescan {
+        } else if loadsGhost {
             // Loud, not silent: without reference planes there is NO auto-align, NO plane
             // detection, and no [PlaneReg] output at all — this line is the only breadcrumb.
             print("[PlaneReg] auto-align DISABLED: no reference planes — roomplan.json missing/undecodable for scan \(scanId) (was a room built at its save?)")

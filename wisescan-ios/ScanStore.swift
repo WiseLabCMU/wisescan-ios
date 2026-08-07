@@ -157,6 +157,8 @@ class CapturedScan {
     @Transient var faceClassesURL: URL { scanDirectory.appendingPathComponent("face_classes.bin") }
     /// Ghost proxy (walls→RoomPlan quads, content→lumpy mesh) — the rescan overlay LOD.
     @Transient var meshProxyFileURL: URL { scanDirectory.appendingPathComponent("mesh_proxy.obj") }
+    /// Dynamic mesh (content faces only, no infrastructure) — the "4D" artifact.
+    @Transient var meshDynamicFileURL: URL { scanDirectory.appendingPathComponent("mesh_dynamic.obj") }
     /// Plane-registration sidecar (applied-or-not record; the ghost loader's de-registration input).
     @Transient var registrationFileURL: URL { scanDirectory.appendingPathComponent("registration.json") }
 
@@ -406,6 +408,14 @@ class ScanStore {
         let yawDeg: Float
     }
 
+    /// The latest gate-trusted ghost auto-align fit (maps the ghost's raw frame → the live /
+    /// relocalized frame), published by the plane auto-align during a map-load alignment phase.
+    /// The adjacent connect composes its inverse into pinA so the stitch anchor lands in the ghost
+    /// location's (canonical owner's) raw frame — the frame `placeScans` lifts via `T` — instead of
+    /// the coarse raw relocalization pose. nil until a trusted fit forms; callers treat nil as
+    /// identity (no correction).
+    var ghostAutoAlignFit: simd_float4x4?
+
     // MARK: Post-process (DECISION 3)
 
     /// Set (to the scan's name) by `ScanPostprocessor.scheduleBadScanCheck` when a saved scan turns
@@ -496,6 +506,7 @@ class ScanStore {
         distanceToBoundaryAnchor = nil
         pendingStitchLink = nil
         icpAlignReady = nil
+        ghostAutoAlignFit = nil
         trackingUnreliable = nil
         // Clear the map-load failure latch too — otherwise a reset via a path that bypasses
         // CaptureView's onChange self-reset (onDisappear / cancelAlignment) leaves it true, and a
@@ -1096,7 +1107,7 @@ class ScanFileManager {
             // _raw are written directly to the scan dir by the deferred post-save RoomBuilder now,
             // but stay in the list for legacy save-time-pipeline scans.
             for rpFile in ["roomplan.json", "roomplan_raw.json", "registration.json", "mesh_proxy.obj",
-                           "face_classes.bin"] {
+                           "mesh_dynamic.obj", "face_classes.bin"] {
                 let src = newScan.rawDataPath.appendingPathComponent(rpFile)
                 let dst = newScan.scanDirectory.appendingPathComponent(rpFile)
                 if FileManager.default.fileExists(atPath: src.path) {
@@ -1128,6 +1139,9 @@ class ScanFileManager {
     }
 
     func deleteScan(_ scan: CapturedScan, context: ModelContext) {
+        // Preserve stitches if this room keeps another generation (re-point off the doomed scan);
+        // if this is the room's last scan, the link cascades away (bisect) as intended.
+        StitchLinkStore.repointIncidentLinks(beforeDeleting: [scan], in: context)
         // Record first, files after: a recursive unlink of raw_data is thousands of
         // files and GBs (0.5-5 s on a big scan) and the UI must not wait for it. The
         // bulk location-delete path already worked this way; this is the single-scan
