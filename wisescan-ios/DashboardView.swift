@@ -846,14 +846,6 @@ struct ThetaCameraCard: View {
                 Spacer()
             }
 
-            // Device id (serial) — shown once connected.
-            if let serial = manager.serialNumber {
-                Text("Device ID: \(serial)")
-                    .font(.caption2)
-                    .foregroundColor(.white.opacity(0.7))
-                    .textSelection(.enabled)
-            }
-
             if ThetaBLEManager.shared.isLinkReady {
                 HStack(spacing: 4) {
                     Image(systemName: "dot.radiowaves.left.and.right")

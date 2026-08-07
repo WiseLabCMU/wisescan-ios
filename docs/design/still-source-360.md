@@ -666,7 +666,7 @@ run-to-run drift guard, per design.
 4. Keep: bounds on dy/dLat/pitch, coverage + edge-count + stillness gates, spot-check.
 
 > **Flows & sequence diagrams for the implemented architecture:
-> [360-flows.md](360-flows.md)** — overview + detailed diagrams for startup/start
+> [REQUIREMENTS.md → REQ-033 Flows](../../REQUIREMENTS.md)** — overview + detailed diagrams for startup/start
 > capture, AR/VR capture, stop/save, auto post-process, colorize, export/upload.
 
 ## PIVOT IMPLEMENTED (2026-07-30 EOD): post-process calibration
