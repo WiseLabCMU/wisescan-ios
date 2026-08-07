@@ -20,6 +20,7 @@ Our native format. Includes relocalization data plus the full Polycam raw import
 - `depth/`: Time-aligned 16-bit depth maps (e.g., `frame_00000.png`).
 - `confidence/`: Time-aligned 8-bit confidence maps for depth (e.g., `frame_00000.png`).
 - `cameras/`: Per-frame Polycam JSON configurations (e.g., `frame_00000.json`).
+- `equirect_stills/`: Time-aligned 360° equirectangular panoramas (`still_0001.JPG`) and sidecar metadata (`still_0001.json`). Present when external 360° camera integration was active during capture.
 - `mesh_info.json`: Summary JSON describing image dimensions and frame counts.
 
 ### Polycam (`.zip`)
@@ -275,3 +276,43 @@ Summarizes the batch of Polycam frames.
 - **`num_frames`** *(Integer)*: Total count of frames captured in the session.
 - **`image_width`, `image_height`** *(Integer)*: Frame sizes.
 - **`coordinate_system`** *(String)*: The tracking coordinate system used (e.g., `"arkit"`, `"arcore"`).
+
+### `equirect_stills/still_XXXX.json` (360° Equirectangular Sidecar Format)
+**Schema definition:** [`equirect_still.schema.json`](./equirect_still.schema.json)
+
+Written alongside each 360° equirectangular still capture under `raw_data/equirect_stills/`.
+
+```json
+{
+  "sequence": 1,
+  "timestamp": 1774980000.0,
+  "still_source": "RICOH THETA X",
+  "camera_model": "equirectangular",
+  "width": 11008,
+  "height": 5504,
+  "phone_transform": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0.4,0,-1.2,1],
+  "cam_transform": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0.4,0.75,-1.2,1],
+  "camera_file_url": "http://192.168.1.1/files/100RICOH/R0000001.JPG",
+  "trigger_ms": 120,
+  "transfer_ms": 1450,
+  "bytes": 8500000,
+  "rig_calibration_source": "solved",
+  "rig_calibration_residual_cm": 1.2
+}
+```
+
+#### Fields:
+- **`sequence`** *(Integer)*: 1-based index of the still capture in this session.
+- **`timestamp`** *(Double)*: Unix epoch time (UTC) when capture was triggered.
+- **`still_source`** *(String)*: Camera model or capture device identifier (e.g. `"RICOH THETA X"`, `"RICOH THETA Z1"`).
+- **`camera_model`** *(String)*: Projection type (`"equirectangular"`).
+- **`width`, `height`** *(Integer, optional)*: Resolution of the equirectangular image.
+- **`phone_transform`** *(Array of 16 Floats)*: 4×4 column-major phone-to-world transform at trigger time.
+- **`cam_transform`** *(Array of 16 Floats, optional)*: 4×4 column-major 360° camera-to-world transform, composed from phone pose + baked rig profile at capture time. Prevents global rig calibration changes from corrupting past scans.
+- **`camera_file_url`** *(String)*: Source URI or path on the camera device.
+- **`trigger_ms`** *(Integer)*: Shutter trigger latency in milliseconds.
+- **`transfer_ms`** *(Integer)*: Download latency in milliseconds.
+- **`bytes`** *(Integer)*: Image file size in bytes.
+- **`rig_calibration_source`** *(String, optional)*: `"solved"` (calibrated via Nelder-Mead solver) or `"mechanical_prior"` (default hardware offsets).
+- **`rig_calibration_residual_cm`** *(Float, optional)*: Residual error of the rig calibration in centimeters.
+

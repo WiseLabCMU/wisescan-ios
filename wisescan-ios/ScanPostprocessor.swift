@@ -29,8 +29,8 @@ import UIKit   // jpegData for the regenerated model preview
 ///                     relocated from the save pipeline — same math, same artifacts)
 ///   2. PROXY        — ghost proxy (walls→RoomPlan quads, content→lumpy mesh) from mesh.obj +
 ///                     the face-aligned classification sidecar
-///   3. COLORIZE     — photo-based vertex colors from the saved frames (governed by the
-///                     "Colorize during post-process" setting; cosmetic — never gates)
+///   3. COLORIZE     — photo-based vertex colors from the saved frames, run only when the
+///                     caller asks (the "Color" verb); cosmetic — never gates
 ///
 /// Ordering contract: process a location's scans OLDEST-FIRST — the original's room must exist on
 /// disk before later generations can register against it.
@@ -54,7 +54,7 @@ enum ScanPostprocessor {
     // MARK: - Steps + per-artifact status
 
     enum Step: String {
-        case registration, proxy, colorize
+        case equirectDownloads, equirectCalibration, registration, proxy, colorize
     }
 
     /// Find an artifact at the scan dir top level or in raw_data/ — late-arriving sidecars
@@ -134,6 +134,22 @@ enum ScanPostprocessor {
         let fm = FileManager.default
         let roomDone = artifactURL("roomplan.json", in: scan) != nil
 
+        // Equirect JPGs the capture-time queue didn't finish (post-process pivot: download
+        // state is derived from disk — sidecar present + JPG missing). Pending downloads
+        // gate save/upload via needsPostprocess: exports need the bytes for the privacy
+        // pass, and the calibration solve needs them for poses.
+        if !pendingEquirectDownloads(rawDataPath: scan.rawDataPath).isEmpty {
+            steps.append(.equirectDownloads)
+        }
+
+        // Rig calibration + pose baking, pending until every sidecar carries provenance
+        // (rig_calibration_source). Solved OR prior-stamped both count as done — a
+        // failed solve must not gate the scan forever; the sweep step above keeps this
+        // one waiting while JPGs are still on the camera.
+        if equirectCalibrationPending(rawDataPath: scan.rawDataPath) {
+            steps.append(.equirectCalibration)
+        }
+
         // Registration is pending when never attempted, or when a REFUSED attempt predates the
         // current solver (`SaveRegistration.sidecarVersion` bump ⇒ refused scans retry with the
         // upgraded solver — e.g. v2's trim rescue). APPLIED sidecars are final regardless of
@@ -167,7 +183,11 @@ enum ScanPostprocessor {
             steps.append(.proxy)
         }
 
-        if includeColorize, !scan.isColored,
+        // When colorize is explicitly requested it always RE-colors: "Color" is a
+        // user verb meaning "make this colored now", not "color it if it never was"
+        // (an isColored guard here made re-color impossible through the engine and
+        // forced every view to hand-roll its own colorize loop).
+        if includeColorize,
            fm.fileExists(atPath: scan.rawDataPath.appendingPathComponent("images").path) {
             steps.append(.colorize)
         }
@@ -192,11 +212,167 @@ enum ScanPostprocessor {
             .filter { needsPostprocess($0) }
     }
 
-    /// The user's "Colorize during post-process" setting (production, default ON).
-    static var colorizeEnabled: Bool {
-        UserDefaults.standard.object(forKey: AppConstants.Key.colorizeOnPostprocess) == nil
-            ? AppConstants.colorizeOnPostprocess
-            : UserDefaults.standard.bool(forKey: AppConstants.Key.colorizeOnPostprocess)
+    /// Sidecar-present / JPG-missing stills under raw_data/equirect_stills, in sequence
+    /// order — the shared definition of "download pending" (the live capture queue and
+    /// this sweep both derive state from disk, never from memory).
+    nonisolated static func pendingEquirectDownloads(rawDataPath: URL) -> [(sequence: Int, url: String)] {
+        let dir = rawDataPath.appendingPathComponent("equirect_stills")
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
+        var out: [(sequence: Int, url: String)] = []
+        for file in files where file.hasPrefix("still_") && file.hasSuffix(".json") {
+            let base = String(file.dropLast(5))
+            guard !FileManager.default.fileExists(atPath: dir.appendingPathComponent(base + ".JPG").path),
+                  let data = try? Data(contentsOf: dir.appendingPathComponent(file)),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let urlStr = obj["camera_file_url"] as? String,
+                  let seq = obj["sequence"] as? Int else { continue }
+            out.append((seq, urlStr))
+        }
+        return out.sorted { $0.sequence < $1.sequence }
+    }
+
+    /// True while any still sidecar lacks `rig_calibration_source` — or carries a stamp
+    /// from an older solver version (bumps force a re-solve on the next Process; this is
+    /// how the poisoned-anchor scans from 360post1, including pre-pivot capture-baked
+    /// ones, heal themselves).
+    nonisolated static func equirectCalibrationPending(rawDataPath: URL) -> Bool {
+        let dir = rawDataPath.appendingPathComponent("equirect_stills")
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return false }
+        for file in files where file.hasPrefix("still_") && file.hasSuffix(".json") {
+            guard let data = try? Data(contentsOf: dir.appendingPathComponent(file)),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else { continue }
+            if obj["rig_calibration_source"] == nil { return true }
+            if (obj["rig_calibration_solver_version"] as? Int ?? 0) < EquirectPostCalibration.solverVersion {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Manual "Redo 360° Calibration" (ScanCard long-press menu): strip the calibration
+    /// provenance stamps from every still sidecar so `equirectCalibrationPending` turns
+    /// true and the next Process re-runs the solve — the user-initiated redo the
+    /// solver-version bump can't cover (remeasured rig height, remounted camera, solver
+    /// doubts). `cam_transform` and the rest of the baked pose stay in place: the scan
+    /// remains fully usable if the redo never runs, and the solve rewrites them
+    /// wholesale when it does. Returns the number of sidecars stripped.
+    nonisolated static func resetEquirectCalibration(rawDataPath: URL) -> Int {
+        let dir = rawDataPath.appendingPathComponent("equirect_stills")
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return 0 }
+        var cleared = 0
+        for file in files where file.hasPrefix("still_") && file.hasSuffix(".json") {
+            let url = dir.appendingPathComponent(file)
+            guard let data = try? Data(contentsOf: url),
+                  var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  obj["rig_calibration_source"] != nil else { continue }
+            obj.removeValue(forKey: "rig_calibration_source")
+            obj.removeValue(forKey: "rig_calibration_solver_version")
+            guard let out = try? JSONSerialization.data(withJSONObject: obj,
+                                                        options: [.prettyPrinted, .sortedKeys]),
+                  (try? out.write(to: url, options: .atomic)) != nil else { continue }
+            cleared += 1
+        }
+        return cleared
+    }
+
+    /// Security P1 (post-transfer auto-delete): remove camera-side originals whose bytes
+    /// are VERIFIED on disk — sidecar carries `camera_file_url`, the JPG sits next to it,
+    /// and no `camera_file_deleted` stamp yet. Stamps each sidecar after the camera
+    /// confirms, so the sweep is disk-derived and crash-safe like the download queue; a
+    /// bad-fileUrl OSC error also stamps (the file is already gone — retrying forever
+    /// would be worse). A transport failure aborts the sweep (camera unreachable — every
+    /// later call would just eat its timeout). Never gates anything: pure hygiene,
+    /// re-attempted on every drain/Process pass. The Developer Mode "Keep 360° Originals
+    /// on Camera" toggle turns it off for debugging.
+    nonisolated static func sweepCameraOriginals(rawDataPath: URL) -> Int {
+        guard !UserDefaults.standard.bool(forKey: AppConstants.Key.keepCameraOriginals) else { return 0 }
+        let dir = rawDataPath.appendingPathComponent("equirect_stills")
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return 0 }
+        var deleted = 0
+        for file in files.sorted() where file.hasPrefix("still_") && file.hasSuffix(".json") {
+            let sidecarURL = dir.appendingPathComponent(file)
+            let jpgPath = dir.appendingPathComponent(String(file.dropLast(5)) + ".JPG").path
+            guard let data = try? Data(contentsOf: sidecarURL),
+                  var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let fileUrl = obj["camera_file_url"] as? String,
+                  obj["camera_file_deleted"] == nil,
+                  FileManager.default.fileExists(atPath: jpgPath)
+            else { continue }
+            switch syncCameraDelete(fileUrl: fileUrl) {
+            case .unreachable:
+                log.info("camera delete sweep: camera unreachable — \(deleted) deleted, rest deferred")
+                return deleted
+            case .kept:
+                continue   // camera answered but refused (e.g. busy mid-trigger) — next sweep retries
+            case .deleted, .alreadyGone:
+                obj["camera_file_deleted"] = true
+                if let out = try? JSONSerialization.data(withJSONObject: obj,
+                                                         options: [.prettyPrinted, .sortedKeys]) {
+                    try? out.write(to: sidecarURL, options: .atomic)
+                }
+                deleted += 1
+            }
+        }
+        return deleted
+    }
+
+    private enum CameraDeleteResult { case deleted, alreadyGone, kept, unreachable }
+
+    /// One synchronous `camera.delete` POST against the camera that owns `fileUrl` (base
+    /// URL derived from the file URL itself — no manager state, callable from any queue).
+    /// Short timeout: the sweep runs on utility queues where a vanished camera must fail
+    /// fast, and per-file calls keep the stamps exact.
+    private nonisolated static func syncCameraDelete(fileUrl: String,
+                                                     timeout: TimeInterval = 5) -> CameraDeleteResult {
+        guard let url = URL(string: fileUrl), let host = url.host,
+              var comps = URLComponents(string: "http://\(host)/osc/commands/execute")
+        else { return .kept }
+        if let port = url.port { comps.port = port }
+        guard let endpoint = comps.url,
+              let body = try? JSONSerialization.data(withJSONObject: [
+                  "name": "camera.delete", "parameters": ["fileUrls": [fileUrl]]
+              ])
+        else { return .kept }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json;charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+        request.timeoutInterval = timeout
+        var outcome = CameraDeleteResult.unreachable
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            defer { sem.signal() }
+            guard let http = response as? HTTPURLResponse else { return }   // transport failure
+            let obj = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+            let state = obj?["state"] as? String
+            if (200...299).contains(http.statusCode), state == "done" || state == "inProgress" {
+                outcome = .deleted
+                return
+            }
+            // Camera answered but refused. A rejected fileUrl means the file is already
+            // gone (manual delete, SD swap) — stamp it; anything else retries next sweep.
+            let code = (obj?["error"] as? [String: Any])?["code"] as? String ?? ""
+            outcome = code == "invalidParameterValue" ? .alreadyGone : .kept
+        }.resume()
+        _ = sem.wait(timeout: .now() + timeout + 5)
+        return outcome
+    }
+
+    /// Synchronous GET against the camera's HTTP server (processOne runs on a background
+    /// queue, not in an async context). nil on any failure — the step stays pending and
+    /// the next Process retries.
+    private nonisolated static func syncDownload(_ url: URL, timeout: TimeInterval = 30) -> Data? {
+        var result: Data?
+        let sem = DispatchSemaphore(value: 0)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = timeout
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            if let http = response as? HTTPURLResponse, http.statusCode == 200 { result = data }
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + timeout + 5)
+        return result
     }
 
     // MARK: - The engine
@@ -217,6 +393,7 @@ enum ScanPostprocessor {
         let origId: UUID?
         let pose: [Float]?
         let frameCenter: SIMD3<Float>?
+        let thetaReachable: Bool
     }
 
     /// Guards two Process/Color passes from touching the SAME scan concurrently. Registration
@@ -244,7 +421,7 @@ enum ScanPostprocessor {
     /// on disk first). `progress` fires on main with a short per-scan status line (nil = done with
     /// that scan); `completion` fires on main after the whole batch.
     static func run(scans: [CapturedScan],
-                    colorize: Bool = colorizeEnabled,
+                    colorize: Bool = false,
                     modelContext: ModelContext,
                     progress: ((CapturedScan, String?) -> Void)? = nil,
                     completion: (() -> Void)? = nil) {
@@ -296,7 +473,8 @@ enum ScanPostprocessor {
                 origRoomPlanURL: orig.flatMap { artifactURL("roomplan.json", in: $0) },
                 origId: orig?.id,
                 pose: scan.location?.imagingPoseMatrix,
-                frameCenter: frameCenter
+                frameCenter: frameCenter,
+                thetaReachable: ThetaCameraManager.shared.isConnected
             )
         }
 
@@ -357,6 +535,49 @@ enum ScanPostprocessor {
         func artifact(_ name: String) -> URL? {
             [dir.appendingPathComponent(name), raw.appendingPathComponent(name)]
                 .first { fm.fileExists(atPath: $0.path) }
+        }
+
+        // ── 0. EQUIRECT DOWNLOADS ──
+        // Finish whatever the live capture queue didn't: the camera must be reachable
+        // (its Wi-Fi joined). Per-still failures leave the step pending — gates hold and
+        // the next Process retries; the scan itself is never failed by absent bytes.
+        if steps.contains(.equirectDownloads) {
+            let pending = pendingEquirectDownloads(rawDataPath: raw)
+            let stillsDir = raw.appendingPathComponent("equirect_stills")
+            var fetched = 0
+            for (idx, item) in pending.enumerated() {
+                report("360° still \(idx + 1)/\(pending.count)…")
+                guard let url = URL(string: item.url), let data = syncDownload(url) else { continue }
+                let dst = stillsDir.appendingPathComponent(String(format: "still_%04d.JPG", item.sequence))
+                if (try? data.write(to: dst, options: .atomic)) != nil { fetched += 1 }
+            }
+            log.info("postprocess \(w.name, privacy: .public): equirect sweep \(fetched)/\(pending.count) downloaded")
+            if fetched < pending.count {
+                report("360° camera needed for \(pending.count - fetched) still(s)")
+            }
+        }
+
+        // ── 0.5 CAMERA-SIDE DELETE (security P1) ── best-effort, never gates: originals
+        // whose bytes are verified on disk come off the weakly-secured camera. Gated on
+        // the connection snapshot so a disconnected pass doesn't eat the HTTP timeout,
+        // and ordered BEFORE calibration so the sidecar stamps can't race its pose bake.
+        if w.thetaReachable {
+            let swept = sweepCameraOriginals(rawDataPath: raw)
+            if swept > 0 {
+                log.info("postprocess \(w.name, privacy: .public): deleted \(swept) transferred still(s) from camera")
+            }
+        }
+
+        // ── 0.6 EQUIRECT CALIBRATION ── (RAW frame: must precede registration's bake;
+        // waits for a complete still set — the sweep above may have just finished it.)
+        if steps.contains(.equirectCalibration) {
+            if pendingEquirectDownloads(rawDataPath: raw).isEmpty {
+                report("Calibrating 360° rig…")
+                let status = EquirectPostCalibration.run(scanDir: dir, rawDataDir: raw, report: report)
+                log.info("postprocess \(w.name, privacy: .public): equirect calibration — \(status, privacy: .public)")
+            } else {
+                log.info("postprocess \(w.name, privacy: .public): equirect calibration deferred — downloads incomplete")
+            }
         }
 
         // ── 1. REGISTRATION ──
@@ -452,7 +673,8 @@ enum ScanPostprocessor {
             if let mesh = try? Data(contentsOf: dir.appendingPathComponent("mesh.obj")),
                let colors = VertexColorAccumulator.colorizeFromSavedFrames(
                    objData: mesh, rawDataDir: raw,
-                   progress: { p in report("Coloring \(Int(p * 100))%") }) {
+                   progress: { p in report("Coloring \(Int(p * 100))%") },
+                   phase: { step in report(step) }) {
                 try? colors.write(to: dir.appendingPathComponent("colors.bin"), options: .atomic)
                 outcome.didColorize = true
             }

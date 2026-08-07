@@ -437,6 +437,7 @@ sequenceDiagram
 | REQ-030 | Space Staging Analyzer | ✅ **Implemented** — see REQ-030 below | — |
 | REQ-031 | Capture Quality (Hi-Res Stillness Keyframes) | ✅ **Implemented** — see REQ-031 below | — |
 | REQ-032 | Post-Save Processing & Plane Registration | ✅ **Implemented** — see REQ-032 below | — |
+| REQ-033 | 360° Still Source (Ricoh Theta) | ✅ **Implemented** — see REQ-033 below | — |
 
 ---
 
@@ -483,6 +484,240 @@ sequenceDiagram
 | **Description** | Split of the save pipeline into RAW-persist vs derived-artifact stages so heavy work never races a live AR session ("★ DECISION 3" in [fix-localization-plan.md](docs/design/fix-localization-plan.md)). **Save persists raw artifacts only** (mesh.obj, world map, frames/depth, face-classification sidecar). **Room layout builds post-save:** `CapturedRoomData` cannot be persisted (Codable in signature only), so RoomBuilder runs as a fire-and-forget post-save continuation (`DeferredRoomBuild`, armed only after `saveScan` so it can't perturb the world-map export), writing `roomplan.json`/`roomplan_raw.json` seconds after save. **Everything else finishes in the user-triggered Process step** (`ScanPostprocessor`, per-card button or bulk "Process All" with per-tile progress), run oldest-first so the location's original scan — the **canonical-frame owner** — is processed before later generations register against it: **(1) REGISTRATION** — `PlaneRegistration` solves a gravity-locked 4-DOF (yaw + XYZ) Gauss–Newton fit matching the rescan's walls/floor to the original's, with an eigenvalue **observability gate** (an unobservable solve — e.g. one wall — is refused, not guessed) and a trim-rescue pass for partial overlap. A trusted fit is **baked transactionally** into mesh.obj + roomplan.json via `SaveRegistration` (atomic mesh write → roomplan retransform with mesh rollback → `registration.json` sidecar last), so an I/O failure is always retriable; refusals are recorded in the sidecar with a version-gated retry. Rescans register; the original *is* the frame; link-adjacent scans never register (a similar adjacent room is a false-lock risk). Legacy pre-registration scans are skipped by default (dev-gated "Register Legacy Scans" re-enables). **(2) PROXY** — a lightweight ghost proxy (`mesh_proxy.obj`: walls → RoomPlan quads, content → decimated mesh) for future rescan overlays; ghost artifacts load off-main with a staleness guard. **(3) COLORIZE** — photo-based vertex coloring (setting-governed, cosmetic, never gates). **Terminal states** per scan: COMPLETE / LEGACY-CAPPED (raw input never persisted; gates pass) / ROOM PENDING (deferred build in flight; gates hold) / BAD (no room and none coming). **Hard gates:** rescan, connect-adjacent, upload, and export are blocked until processing completes (`needsPostprocess`), with re-entrancy guards on all bulk and per-card process/upload/save workers. **Bad-scan warning:** `scheduleBadScanCheck` fires shortly after save and warns the user to redo the capture while they are still in the room. **Live ghost auto-align:** during a rescan, the ghost auto-seats against live detected planes (status chip turns green on lock). |
 | **Source** | [ScanPostprocessor.swift](wisescan-ios/ScanPostprocessor.swift) — pipeline, gates, bad-scan check · [PlaneRegistration.swift](wisescan-ios/PlaneRegistration.swift) — 4-DOF solver + observability gate · [SaveRegistration.swift](wisescan-ios/SaveRegistration.swift) — transactional bake + `registration.json` sidecar · [RoomPlanExporter.swift](wisescan-ios/RoomPlanExporter.swift) — roomplan sidecar writers · [CaptureView+Recording.swift](wisescan-ios/CaptureView+Recording.swift) + [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `DeferredRoomBuild` · [CaptureView.swift](wisescan-ios/CaptureView.swift) — off-main ghost load, live auto-align · [ScansListView.swift](wisescan-ios/ScansListView.swift) — Process buttons, per-tile bulk progress, gate UI |
 | **Design Doc** | [fix-localization-plan.md](docs/design/fix-localization-plan.md) |
+
+---
+
+### REQ-033: 360° Still Source (Ricoh Theta)
+| | |
+|:--|:--|
+| **Status** | ✅ Complete (Theta X full; Z1 Wi-Fi-only) |
+| **Description** | A rig-mounted Ricoh Theta rides above the phone and captures a full-sphere still at every stillness pause, giving downstream reconstruction all-direction imagery the phone's frustum can't. **Connect is BLE-first** (Theta X): pick the camera from a named Bluetooth list (advertised name = serial), one-time passkey bond, identity read → derived Wi-Fi credentials, wake-from-sleep over BLE (`cameraPower=on`), then a patient Wi-Fi join/probe (retries absorb the AP's 5–15 s rise and DHCP settle). A **multi-camera roster** switches bodies per collection (X for texture, Z1 for low light); Z1 connects Wi-Fi-only pending its BLE increment (its v1 GATT needs per-session UUID auth registered over Wi-Fi). At connect the camera's shooting state is **normalized** (image mode, self-timer off, running captures stopped) and zenith correction is enforced (leveling invariant). **The shutter rides BLE when the link is up** (~1.2–1.5 s faster per still; the new file's URL arrives as a NotifyState push — the download ticket with zero polling) with OSC fallback. Capture writes a **sidecar only** (phone pose + timestamps, no camera pose); JPGs drain through a queue that yields to triggers; download state is **disk-derived** (sidecar without JPG = pending). **Rig calibration solves per scan at Process time** (EquirectPostCalibration, solver v7) against the completed mesh: yaw and elevation-offset are per-scan nuisances, dy anchors to the user-measured rig height, poses bake into every sidecar with provenance + solver version (bumps self-heal old scans). Security: camera-side originals are deleted after verified transfer (P1), Wi-Fi credentials derive from the serial with a default-password warning planned (P2). Coloring can optionally draw exclusively from cube faces cut at baked poses (dev probe for pose quality). |
+| **Source** | [ThetaCameraManager.swift](wisescan-ios/ThetaCameraManager.swift) (+[+OSC](wisescan-ios/ThetaCameraManager+OSC.swift), [+ScanCapture](wisescan-ios/ThetaCameraManager+ScanCapture.swift)) — connect/roster/shutter/downloads · [ThetaBLEManager.swift](wisescan-ios/ThetaBLEManager.swift) (+[Link](wisescan-ios/ThetaBLEManager+Link.swift)/[Delegates](wisescan-ios/ThetaBLEManager+Delegates.swift)) — production BLE · [ThetaBLEProbe.swift](wisescan-ios/ThetaBLEProbe.swift) — dev GATT bench · [EquirectPostCalibration.swift](wisescan-ios/EquirectPostCalibration.swift) + [RigCalibrationSolver.swift](wisescan-ios/RigCalibrationSolver.swift) — per-scan solve · [EquirectFaceExport.swift](wisescan-ios/EquirectFaceExport.swift) + [EquirectGPU.swift](wisescan-ios/EquirectGPU.swift) — cube faces · [DashboardView.swift](wisescan-ios/DashboardView.swift) — camera card/sheet |
+| **Design Doc** | [still-source-360.md](docs/design/still-source-360.md) — full decision journal (BLE probe rounds, solver history v2–v7, security plan) |
+
+#### REQ-033 Flows
+
+Cross-cutting invariants (every flow below preserves these):
+
+- **Privacy fail-closed**: raw `equirect_stills/` and face frames derived from them stay
+  inside `raw_data/` (commit-blocked by the privacy guard) and only exit via the export
+  privacy passes.
+- **Sidecar-derived state**: download/bake state lives ON DISK (sidecar + missing JPG =
+  pending; `rig_calibration_source` + `_solver_version` stamp = baked). No queue store
+  to desync; version bumps self-heal old scans.
+- **Poses bake at Process time** from the scan's own stills against the complete mesh;
+  capture records only phone pose + timestamps (boot-relative `frame_timestamp`
+  labeled, wall-clock `captured_at_epoch_ms`; metric everywhere).
+- **Yaw and elevation-offset are per-scan nuisances**; dy anchors to the measured rig
+  height; dLat/pitch solve free inside mechanical bounds.
+
+##### Overview
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Operator
+    participant CV as CaptureView
+    participant BLE as ThetaBLEManager
+    participant TCM as ThetaCameraManager
+    participant PP as ScanPostprocessor
+    participant CAL as EquirectPostCalibration
+    participant COL as VertexColorAccumulator
+    participant EXP as ScanExportManager
+
+    U->>TCM: Connect (Dashboard card)
+    TCM->>BLE: wake stored camera (cameraPower=on)
+    TCM->>TCM: patient join/probe · firmware gate · leveling · shooting-state normalize
+    U->>CV: start recording
+    loop each stillness pause
+        CV->>CV: keyframe (hi-res + depth)
+        CV->>BLE: shutter (file URL via NotifyState push, OSC fallback)
+        TCM-->>TCM: download queue drains between triggers
+    end
+    U->>CV: stop → save scan bundle (auto post-process at save + landing)
+    PP->>TCM: finish pending equirect downloads
+    PP->>CAL: calibrate rig from scan stills + mesh.obj
+    CAL->>CAL: bake cam_transform + provenance into every sidecar
+    PP->>PP: registration · proxy → isProcessed (frees buttons)
+    U->>COL: Color (finishes structural stragglers, then colors)
+    COL->>COL: project frames → consensus median → colors.bin → isColored
+    U->>EXP: Save / Upload
+    EXP->>EXP: privacy passes → stage equirects → cut cube faces (baked poses) → zip
+```
+
+##### Connect / startup
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Operator
+    participant DB as Dashboard (ThetaCameraCard)
+    participant BLE as ThetaBLEManager
+    participant TCM as ThetaCameraManager
+    participant X as Theta X (OSC)
+    participant CV as CaptureView
+
+    U->>DB: Add camera (first run) — pick from named BLE list (serial shown BEFORE connect)
+    DB->>BLE: pairCamera(id) — one-time passkey bond (code on camera screen)
+    BLE-->>DB: identity → derived SSID + factory password saved to roster
+    U->>DB: Connect
+    DB->>TCM: connect()
+    TCM->>BLE: wakeStoredCamera() — cameraPower=on, AP rise headstart
+    TCM->>TCM: join stored Wi-Fi (retries — AP takes 5-15 s after wake)
+    TCM->>X: /osc/info probe (patient — DHCP settle retries)
+    alt firmware below minimum
+        TCM-->>DB: state=.failed("Firmware too old") — connection BLOCKED
+    end
+    TCM->>X: setOptions _topBottomCorrection=Apply (BLOCKING — leveling invariant)
+    TCM->>X: normalize shooting state (image mode, self-timer off, stop running capture)
+    Note over TCM: keep-awake (sleepDelay 65535) is CAPTURE-TAB-driven, not connect-time — idle restores the camera's 180 s nap
+    U->>CV: Capture tab
+    CV-->>U: 360° chip — rig prior state · rig height (orange until measured) · sufficiency (while recording)
+    U->>CV: Record
+    CV->>TCM: beginScanStillSession(rawDataDir) — seq counter seeded FROM DISK
+```
+
+##### AR/VR capture (per stillness pause)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Operator
+    participant FCS as FrameCaptureSession
+    participant CV as CaptureView
+    participant TCM as ThetaCameraManager
+    participant BLE as ThetaBLEManager
+    participant X as Theta X
+    participant D as raw_data/equirect_stills
+
+    U->>FCS: pause (device settles — rig mode tightens the angular gate by lever arm)
+    FCS-->>U: stillness chime (cue 1)
+    U->>FCS: shutter tap → requestStillCapture() arms
+    FCS->>FCS: keyframe fires while stillness holds (hi-res + LiDAR depth + mask)
+    FCS-->>U: shutter click (cue 2)
+    CV->>TCM: captureStillForScan(phonePose, frameTimestamp, samplePose)
+    Note over TCM: epoch-ms stamped at entry — motion probe samples pose each 250 ms
+    alt BLE link ready (canShutterOverBLE)
+        TCM->>BLE: triggerShutter() — NotifyState pushes the NEW file URL (no polling)
+    else
+        TCM->>X: triggerStill() (OSC)
+    end
+    CV-->>U: chip: "📸 exposing — hold still…" (orange)
+    TCM->>D: still_NNNN.json — phone_transform, frame_timestamp, captured_at_epoch_ms, trigger_motion_m/deg, camera_file_url — NO cam_transform
+    TCM-->>U: done tone + success haptic (cue 3 — walk now)
+    TCM->>TCM: enqueue JPG download
+    loop while NOT capturing (yields to triggers)
+        TCM->>X: download next queued equirect → still_NNNN.JPG
+    end
+    Note over TCM: queue drained → camera-side originals deleted after verified transfer (security P1)
+    CV-->>U: chip: N stills · spread X.X m · ↓pending
+```
+
+##### Stop / save
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Operator
+    participant CV as CaptureView(+Recording)
+    participant TCM as ThetaCameraManager
+    participant FS as Scan bundle (disk)
+
+    U->>CV: Stop
+    CV->>FS: mesh.obj · transforms.json · worldmap · roomdata sidecar
+    Note over TCM: in-flight still crossing Stop: LOUD DROP if rawDataDir moved (stop-race guard)
+    CV->>FS: scan record persisted (SwiftData) — failure raises "Save Failed — Scan Not Lost" (retryable)
+    Note over TCM,FS: undownloaded JPGs remain ON CAMERA — state derivable from disk (sidecar w/o JPG) — Process finishes them
+    CV->>CV: deferred RoomBuilder continues post-save (roomplan.json when ready)
+```
+
+##### Auto post-process (at save + on landing at Location Detail)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant LDV as LocationDetailView
+    participant PP as ScanPostprocessor
+    participant TCM as ThetaCameraManager
+    participant CAL as EquirectPostCalibration
+    participant SOL as RigCalibrationSolver
+    participant D as scan bundle
+
+    LDV->>LDV: onAppear → autoProcessPending()
+    LDV->>PP: enqueue scans where pendingSteps ≠ [] (FIFO, background — colorize EXCLUDED)
+    PP->>D: pendingSteps: downloads? calibration (stamp missing OR solver_version < current)? registration? proxy?
+    opt equirectDownloads
+        PP->>TCM: download missing JPGs (camera gone → card "needs the 360° camera" — queue persists)
+        Note over TCM: camera.delete after verified download (security plan)
+    end
+    opt equirectCalibration
+        CAL->>D: loadStills (sidecars + JPGs) · parse mesh.obj
+        CAL->>CAL: selectBySpread(≤5) · ONE-pass mesh-edge extract · per-still edge maps
+        CAL->>SOL: solve — coarse yaw circle (24, stride 3) → elevation sweep (±16 rows) → NM ≤2 lobes
+        Note over SOL: dy anchored to measured rig height ±0.05 (else mech envelope ±0.3), dLat/pitch free, v7 unmirrored frame
+        SOL-->>CAL: dy dLat yaw pitch elev + residual
+        CAL->>D: bake cam_transform + rig_calibration_source + solver_version + elevation_offset_deg into EVERY sidecar
+        CAL->>CAL: persist rolling profile (sanity-gated) · diagnostics PNGs
+        Note over CAL: less-than-3 stills → yaw-only w/ persisted geometry, failure → prior stamp (scan never lost, provenance honest)
+    end
+    PP->>D: registration · proxy
+    PP-->>LDV: per-step phase pill → isProcessed=true (frees rescan/link/save/upload/color)
+    Note over LDV: the card's primary button is COLOR (finishes stragglers, then colors) — the long-press menu holds Re-run Processing and Redo 360° Calibration (recovery tools)
+```
+
+##### Color (primary per-scan action)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Operator
+    participant LDV as Scan card
+    participant PP as ScanPostprocessor
+    participant COL as VertexColorAccumulator
+    participant D as raw_data
+
+    U->>LDV: Color
+    Note over U,LDV: same path serves every Color surface — the card, both bulk toolbars, a graph cluster's Color capsule, and the combined-render screen (mixed sets prompt: uncolored-only or recolor all)
+    opt structural steps pending (late roomplan, solver bump)
+        LDV->>PP: run structural steps first — then continue
+    end
+    LDV->>COL: colorizeFromSavedFrames(rawDir) — phase labels: Reading mesh… → normals → frames → N% → Blending
+    alt Dev switch "Color from 360° faces" OFF (default)
+        COL->>D: cameras/*.json + images/ (keyframes ×3 weight, motion ×1, per-frame LiDAR depth occlusion + person masks)
+    else Switch ON (cube-face accuracy probe)
+        COL->>D: (re)generate face_frames/{cameras,images} from equirect_stills + BAKED poses (EquirectFaceExport)
+        COL->>D: color from face frames ONLY (is_keyframe=true, NO depth ⇒ no occlusion — expect bleed, that is the point)
+    end
+    COL->>COL: project per frame (GPU w/ CPU fallback) → top-K accumulate → consensus median
+    COL->>D: colors.bin → isColored=true
+    Note over COL,D: face_frames/ lives INSIDE raw_data (unblurred) — never staged for export
+```
+
+##### Export / save / upload
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Operator
+    participant LDV as Scan card / LocationDetailView
+    participant EXP as ScanExportManager
+    participant FACE as EquirectFaceExport
+    participant Z as staging → zip
+
+    U->>LDV: Save / Upload (gated on isProcessed)
+    LDV->>EXP: prepareExport(scanDir, format, phase:)
+    EXP->>Z: stagePolycamPayload (mesh, cameras, images, depth, masks)
+    EXP->>Z: privacy passes — masks → pixelate person regions, FAIL CLOSED (unverifiable frames excluded)
+    EXP->>Z: stageEquirectStills — per-still privacy (filter ON ⇒ blur-or-exclude, OFF ⇒ consent logged, privacy_filter=false in metadata)
+    EXP->>FACE: emitCubeFaces — poses from SIDECAR cam_transform ONLY (capture-provenance, v7 convention shared with the solver)
+    FACE->>Z: 5 faces/still + Polycam camera JSONs (camera_pose_source, still_source, elevation_offset_deg applied in sampling)
+    EXP->>Z: zip with phase labels (Privacy blur i/n → Cube faces i/n → Zipping…)
+    LDV-->>U: card pill shows phase + meter — upload posts to the configured server
+```
+
+Diagram maintenance: these are hand-drawn against the code (solver v7, BLE graduation
+era). When a flow changes, update the diagram in the same PR — the review checklist
+item is "does the mermaid still tell the truth?". Names are grep-able anchors.
 
 ---
 

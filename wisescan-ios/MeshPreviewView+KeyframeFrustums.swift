@@ -20,11 +20,13 @@ private nonisolated struct FrustumGeometry {
 
 extension MeshPreviewView {
 
-    /// The two capture-pose marker groups, each a container node ready to attach (nil if empty).
+    /// Capture-pose marker groups, each a container node ready to attach (nil if empty).
     struct KeyframeMarkerNodes {
         let stills: SCNNode?
         let motion: SCNNode?
-        var hasAny: Bool { stills != nil || motion != nil }
+        let equirectFaces: SCNNode?
+        var hasAny: Bool { stills != nil || motion != nil || equirectFaces != nil }
+        var hasEquirects: Bool { equirectFaces != nil }
     }
 
     /// Attaches the marker groups to the mesh container, applies the mesh-centering offset
@@ -35,6 +37,7 @@ extension MeshPreviewView {
         _ nodes: KeyframeMarkerNodes, to container: SCNNode, coordinator: Coordinator, center: SCNVector3
     ) {
         hasKeyframeMarkers = nodes.hasAny
+        hasEquirects = (nodes.equirectFaces != nil)
         let offset = SCNVector3(-center.x, -center.y, -center.z)
         if let stills = nodes.stills {
             stills.position = offset
@@ -48,6 +51,12 @@ extension MeshPreviewView {
             container.addChildNode(motion)
             coordinator.keyframeMotionNode = motion
         }
+        if let equirect = nodes.equirectFaces {
+            equirect.position = offset
+            equirect.isHidden = !keyframeMarkerMode.showEquirectFaces
+            container.addChildNode(equirect)
+            coordinator.equirectFacesNode = equirect
+        }
     }
 
     /// Builds the still + motion frustum marker groups from the saved `transforms.json` poses.
@@ -57,8 +66,8 @@ extension MeshPreviewView {
     /// world frame. Runs OFF-main on the preview-load queue (detached SCNNode trees are legal
     /// to build on any thread): a long scan parses a multi-MB transforms.json and assembles
     /// hundreds of wedge nodes, which would be a visible hitch stacked onto the main-thread attach.
-    nonisolated static func buildKeyframeMarkerNodes(scanDirectoryURL: URL?) -> KeyframeMarkerNodes {
-        guard let scanDir = scanDirectoryURL else { return KeyframeMarkerNodes(stills: nil, motion: nil) }
+    nonisolated static func buildKeyframeMarkerNodes(scanDirectoryURL: URL?, rigProfile: RigProfile?) -> KeyframeMarkerNodes {
+        guard let scanDir = scanDirectoryURL else { return KeyframeMarkerNodes(stills: nil, motion: nil, equirectFaces: nil) }
         let candidates = [
             scanDir.appendingPathComponent("raw_data").appendingPathComponent("transforms.json"),
             scanDir.appendingPathComponent("transforms.json")
@@ -72,7 +81,7 @@ extension MeshPreviewView {
             }
         }
         guard let root = root, let frames = root["frames"] as? [[String: Any]] else {
-            return KeyframeMarkerNodes(stills: nil, motion: nil)
+            return KeyframeMarkerNodes(stills: nil, motion: nil, equirectFaces: nil)
         }
 
         // Session-global intrinsics/dimensions (video stream); keyframes may override per-frame.
@@ -113,9 +122,13 @@ extension MeshPreviewView {
             if isStill { stillNodes.append(node) } else { motionNodes.append(node) }
         }
 
+        // Build equirect face frustums from sidecar JSONs (pure pose math, no pixel data).
+        let equirectNodes = buildEquirectFaceNodes(scanDirectoryURL: scanDir, rigProfile: rigProfile)
+
         return KeyframeMarkerNodes(
             stills: container(named: "keyframeStills", nodes: stillNodes),
-            motion: container(named: "keyframeMotion", nodes: motionNodes)
+            motion: container(named: "keyframeMotion", nodes: motionNodes),
+            equirectFaces: equirectNodes
         )
     }
 
@@ -200,7 +213,7 @@ extension MeshPreviewView {
     /// Assembles one marker node around a (shared) geometry set. Geometry lives on an inner node
     /// carrying the face rotation, so the caller can set the outer node's simdTransform = capture
     /// pose without clobbering the rotation. World placement is then pose × faceRotation ×
-    /// geometry (identity faceRotation for a pinhole still; the future 360° cube-face case
+    /// geometry (identity faceRotation for a pinhole still; the 360° cube-face case
     /// passes one rotation per face).
     private nonisolated static func makeFrustumNode(
         geometry: FrustumGeometry,
@@ -214,5 +227,123 @@ extension MeshPreviewView {
         let node = SCNNode()
         node.addChildNode(inner)
         return node
+    }
+
+    // MARK: - Equirect Face Frustums
+
+    /// Shared geometry for the 360° still sphere marker.
+    private nonisolated struct EquirectSphereGeometry {
+        let sphere: SCNSphere
+        let ring: SCNTorus
+        let box: SCNBox
+        let arrow: SCNCone
+    }
+
+    private nonisolated static func makeEquirectSphereGeometry() -> EquirectSphereGeometry {
+        let radius = CGFloat(AppConstants.equirectMarkerRadius)
+        let accent = AppConstants.equirectFrontColor
+        let accentColor = UIColor(red: CGFloat(accent.x), green: CGFloat(accent.y),
+                                  blue: CGFloat(accent.z), alpha: 1.0)
+
+        let sphere = SCNSphere(radius: radius)
+        sphere.segmentCount = 24
+        let sphereMat = SCNMaterial()
+        sphereMat.lightingModel = .constant
+        sphereMat.diffuse.contents = UIColor.white
+        sphereMat.transparency = 0.15
+        sphereMat.isDoubleSided = true
+        sphere.materials = [sphereMat]
+
+        let solid = SCNMaterial()
+        solid.lightingModel = .constant
+        solid.diffuse.contents = accentColor
+
+        let ring = SCNTorus(ringRadius: radius, pipeRadius: radius * 0.035)
+        ring.materials = [solid]
+        let box = SCNBox(width: 0.02, height: 0.02, length: 0.02, chamferRadius: 0)
+        box.materials = [solid]
+        let arrow = SCNCone(topRadius: 0, bottomRadius: radius * 0.18, height: radius * 0.5)
+        arrow.materials = [solid]
+        return EquirectSphereGeometry(sphere: sphere, ring: ring, box: box, arrow: arrow)
+    }
+
+    /// Assemble one marker node (geometry shared across stills; nodes own transforms).
+    private nonisolated static func makeEquirectSphereNode(marker: EquirectSphereGeometry) -> SCNNode {
+        let node = SCNNode()
+        node.addChildNode(SCNNode(geometry: marker.sphere))
+        node.addChildNode(SCNNode(geometry: marker.ring))       // equator rim (XZ plane)
+        node.addChildNode(SCNNode(geometry: marker.box))        // origin cube
+
+        // Forward arrow: cone apex pointing along −Z (camera forward = equirect front).
+        // SCNCone points +Y; rotate −90° about X so +Y → −Z, park it just outside the rim.
+        let arrowNode = SCNNode(geometry: marker.arrow)
+        arrowNode.eulerAngles.x = -.pi / 2
+        arrowNode.position = SCNVector3(0, 0, -Float(AppConstants.equirectMarkerRadius) * 1.3)
+        node.addChildNode(arrowNode)
+        return node
+    }
+
+    /// One sphere marker per 360° still: a translucent sphere (the full capture volume)
+    /// with an equator rim ring, a small origin cube, and a forward arrow along the
+    /// camera's −Z (the equirect's front/identity direction). Replaced the 5-frustum
+    /// rendering, which was too busy to read at a glance. Poses come from the sidecar's
+    /// baked `cam_transform` (Process-step calibration) or the prior. Runs off-main.
+    private nonisolated static func buildEquirectFaceNodes(scanDirectoryURL: URL, rigProfile: RigProfile?) -> SCNNode? {
+        let fileMgr = FileManager.default
+        let equirectDir = scanDirectoryURL
+            .appendingPathComponent("raw_data")
+            .appendingPathComponent("equirect_stills")
+        guard fileMgr.fileExists(atPath: equirectDir.path) else { return nil }
+
+        let sidecars = ((try? fileMgr.contentsOfDirectory(at: equirectDir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension.lowercased() == "json" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !sidecars.isEmpty else { return nil }
+
+        // Shared marker geometry (one set across all stills).
+        let marker = makeEquirectSphereGeometry()
+
+        var allNodes: [SCNNode] = []
+        for sidecarURL in sidecars {
+            guard let data = try? Data(contentsOf: sidecarURL),
+                  let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let flat = dict["phone_transform"] as? [Double], flat.count == 16
+            else { continue }
+
+            let phoneToWorld = simd_float4x4(columns: (
+                SIMD4<Float>(Float(flat[0]), Float(flat[1]), Float(flat[2]), Float(flat[3])),
+                SIMD4<Float>(Float(flat[4]), Float(flat[5]), Float(flat[6]), Float(flat[7])),
+                SIMD4<Float>(Float(flat[8]), Float(flat[9]), Float(flat[10]), Float(flat[11])),
+                SIMD4<Float>(Float(flat[12]), Float(flat[13]), Float(flat[14]), Float(flat[15]))
+            ))
+
+            let camTransform: simd_float4x4
+            if let flatCam = dict["cam_transform"] as? [Double], flatCam.count == 16 {
+                camTransform = simd_float4x4(columns: (
+                    SIMD4<Float>(Float(flatCam[0]), Float(flatCam[1]), Float(flatCam[2]), Float(flatCam[3])),
+                    SIMD4<Float>(Float(flatCam[4]), Float(flatCam[5]), Float(flatCam[6]), Float(flatCam[7])),
+                    SIMD4<Float>(Float(flatCam[8]), Float(flatCam[9]), Float(flatCam[10]), Float(flatCam[11])),
+                    SIMD4<Float>(Float(flatCam[12]), Float(flatCam[13]), Float(flatCam[14]), Float(flatCam[15]))
+                ))
+            } else if let profile = rigProfile, profile.isSolved {
+                camTransform = RigCalibrationSolver.composeRigTransform(
+                    phoneToWorld: phoneToWorld,
+                    dy: profile.dy, dLateral: profile.dLateral,
+                    yaw: profile.yaw, pitchResidual: profile.pitchResidual
+                )
+            } else {
+                camTransform = RigCalibrationSolver.composeRigTransform(
+                    phoneToWorld: phoneToWorld,
+                    dy: AppConstants.rigRodHeightMeters, dLateral: 0,
+                    yaw: AppConstants.rigYawOffsetDegrees * .pi / 180, pitchResidual: 0
+                )
+            }
+
+            let node = makeEquirectSphereNode(marker: marker)
+            node.simdTransform = camTransform
+            allNodes.append(node)
+        }
+
+        return container(named: "equirectFaces", nodes: allNodes)
     }
 }

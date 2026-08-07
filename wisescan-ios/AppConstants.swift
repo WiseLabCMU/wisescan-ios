@@ -19,7 +19,11 @@ enum AppConstants {
         static let pipCornerRadius: CGFloat = 12
         static let pipBorderWidth: CGFloat = 2
         static let pipPaddingX: CGFloat = 16
-        static let pipPaddingY: CGFloat = 80 // To clear the REC indicator safely
+    }
+
+    enum Theta {
+        static let minFirmwareZ1 = "3.00.1"
+        static let minFirmwareX = "2.92.0"
     }
 
     // MARK: - AppStorage Keys
@@ -47,13 +51,21 @@ enum AppConstants {
         static let memDiagForceReclaim = "memDiagForceReclaim"
         static let meshClassifier = "meshClassifier"
         static let scanCoachingEnabled = "scanCoachingEnabled"
-        static let colorizeOnPostprocess = "colorizeOnPostprocess"
         static let registerLegacyScans = "registerLegacyScans"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
+        static let rigMeasuredDyMeters = "rigMeasuredDyMeters"        // user's tape-measured iPad-camera→360°-lens distance — ALWAYS persisted in METERS (UI may display/accept imperial); 0 = unmeasured
+        static let rigHeightUnitImperial = "rigHeightUnitImperial"    // display/entry unit preference for the rig height field (false = metric)
+        static let colorizeFrom360Faces = "colorizeFrom360Faces"      // Developer Mode: color the preview mesh from 360° cube faces instead of keyframes (pose-accuracy probe)
         static let gpuColorize = "gpuColorize"                        // Developer Mode: GPU vertex-color projection (A/B vs CPU path)
         static let keyframeWeightBonus = "keyframeWeightBonus"        // Developer Mode: keyframe weight bonus in colorization (A/B vs equal still/sweep weighting)
         static let robustColorMedian = "robustColorMedian"            // Developer Mode: consensus vector-median color reduce (A/B vs legacy per-channel median)
+        static let keepCameraOriginals = "keepCameraOriginals"        // Developer Mode: skip the security-P1 sweep that deletes each 360° still from the camera after verified transfer
+        static let thetaBLESerial = "thetaBLESerial"                  // 8-digit serial of the paired camera (BLE identity + factory password)
+        static let thetaBLEPeripheralID = "thetaBLEPeripheralID"      // CBPeripheral identifier for scan-free reconnects
+        static let thetaCameraProfiles = "thetaCameraProfiles"        // JSON roster of known cameras (multi-camera: X for texture, Z1 for low light — switch per collection)
+        static let thetaSSID = "thetaSSID"                            // stored camera Wi-Fi SSID for one-tap join (NEHotspotConfiguration)
+        static let thetaPassphrase = "thetaPassphrase"                // stored camera Wi-Fi passphrase. TODO(security P2): move to Keychain + default-credential warning — see design doc Security section
     }
 
     // MARK: - Default Values
@@ -108,15 +120,23 @@ enum AppConstants {
     /// so the bad-scan check just needs to wait out the realistic tail before warning the user to
     /// redo the scan (while they're still standing in the room).
     static let roomDataBadScanGraceSeconds: TimeInterval = 30
-    /// Colorize as part of Post-process (production setting, default ON). Off = structural-only
-    /// postprocess (room/registration/proxy — fast); coloring can still be run later (re-running
-    /// Post-process picks up whatever is pending).
-    static let colorizeOnPostprocess: Bool = true
     /// Dev-gated: let legacy scans (saved before scanCaseRaw was persisted) enter retroactive
     /// registration at postprocess. OFF by default — on an existing install every non-oldest
     /// legacy scan would light up "needs postprocess" (gating every old location at update),
     /// and a legacy adjacent-link is indistinguishable from a legacy rescan (false-lock risk).
     static let registerLegacyScans: Bool = false
+    /// Developer Mode A/B (default OFF — production coloring). ON colors the preview
+    /// mesh EXCLUSIVELY from cube faces cut from the scan's 360° stills at their BAKED
+    /// poses (keyframe/motion frames excluded), turning the colorizer into a
+    /// measurement instrument for cube-face pose quality: misplaced color on the mesh
+    /// reads back pose error directly. Face frames carry no depth, so occlusion is off
+    /// in this mode — bleed-through is expected and not the signal being judged.
+    static let colorizeFrom360Faces: Bool = false
+    /// Developer Mode, debugging only: keep 360° originals on the camera after verified
+    /// transfer. Default OFF = the security-P1 sweep deletes them — raw equirects capture
+    /// bystanders in every direction, and the camera (open AP, factory password = serial
+    /// digits, unauthenticated OSC API) is the weakest place to leave them.
+    static let keepCameraOriginals: Bool = false
     /// Developer Mode A/B toggle for the GPU vertex-color projection path (default ON —
     /// production uses the GPU). OFF forces the CPU reference implementation so a suspected
     /// GPU-path artifact (occlusion bleed-through, mask misses) can be isolated on the SAME
@@ -153,7 +173,43 @@ enum AppConstants {
     static let maxFramesInFlight: Int = 2                    // cap on concurrent frame-save encodes; excess frames are dropped to keep retained CVPixelBuffers from starving ARKit's frame pool (VIO loss corrupts the scan)
     static let vioFrameGapTripSeconds: TimeInterval = 1.5    // VIO guard: an ARKit frame-delivery gap this large mid-scan = the session stalled and VIO diverged → halt
     static let vioHardFrameGapTripSeconds: TimeInterval = 4.0 // VIO guard belt: a gap this large trips REGARDLESS of how tracking presents on the recovery frame — covers OS actions (Control Center on iPadOS) that stall delivery without firing sessionWasInterrupted and resume via benign-looking .initializing (7.9s gap → silent SLAM reinit, 2026-07-24 M2 runs). Compute stalls on the marginal iPad top out well under 2s, so 4s is clear of false trips.
-    static let meshStartWatchdogSeconds: TimeInterval = 10   // Recording on a LiDAR device with zero ARMeshAnchors for this long = Recon3D is dead for this scan (60fps default-format fallback after RoomPlan's internal reconfigure; Fig err storm, 2026-07-24 runs) → halt via the VIO guard. NOT a live rebuild: re-running the session under active RoomPlan crashed ObjectUnderstanding at save (run 4).
+    static let meshStartWatchdogSeconds: TimeInterval = 10   // Recording on a LiDAR device with zero ARMeshAnchors for this long AFTER tracking settled = Recon3D is dead for this scan (60fps default-format fallback after RoomPlan's internal reconfigure; Fig err storm, 2026-07-24 runs) → halt via the VIO guard. NOT a live rebuild: re-running the session under active RoomPlan crashed ObjectUnderstanding at save (run 4).
+    static let trackingSettleWatchdogSeconds: TimeInterval = 20 // Recording whose tracking NEVER reaches .normal (e.g. started mid-relocalization chase after an idle interruption) has both graduated guards unarmed — if it hasn't settled in this budget the capture is unusable → halt (2026-07-28 A12Z: indefinite degraded limbo, faces=0, no stillness settle).
+
+    // MARK: - 360° Rig (mechanical-prior extrinsic — calibration plan step 1; the solved
+    // hand–eye refinement replaces these per rig profile later)
+    static let rigRodHeightMeters: Float = 1.0     // 360° camera height above the phone along WORLD up (ARKit is gravity-aligned; Theta zenith correction keeps the pano level, so the prior needs only position + yaw)
+    static let rigYawOffsetDegrees: Float = 0      // pano-center (camera-body forward) yaw relative to the phone's horizontal forward; 0 = lenses aligned with the phone
+    static let equirectFaceSizeMax = 2048          // cube-face edge cap (native density is equirectWidth/4; 11K Theta X stills would yield 2752 — capped for JPEG size/memory)
+    static let equirectFaceDecodeMax = 8192        // staged-equirect decode cap for face sampling (8192×4096 RGBA ≈ 134 MB transient, per-still pooled; width/4 already saturates the face cap)
+
+    // MARK: - 360° Rig Calibration (markerless mesh-edge solver — see docs/design/still-source-360.md)
+    static let calibrationStillCount = 3                               // stills captured at distinct positions before the solver runs
+    static let calibrationMeshRadiusMeters: Float = 3.0                // radius around each phone position for mesh edge extraction
+    static let calibrationMeshVertexMinimum = 500                      // minimum vertex count within radius for a reliable solve (environment quality gate)
+    static let calibrationMinMeshEdges = 500                           // HARD gate at capture: fewer extracted mesh edges than this → reject the position (run6: three 0-edge stills sailed through to a guaranteed-failed solve)
+    static let calibrationMinCoverageDeg: Float = 90                   // HARD gate at capture: yaw span of mesh edges around the position. run9 diagnostics: mesh confined to one ~60° wedge → 4-DOF solve is ambiguous (yaw slides along the wedge, dy/pitch trade off) no matter how many edges the wedge holds
+    static let lowStorageWarnBytes: Int64 = 5_000_000_000   // warn below ~5 GB free: a long LiDAR scan writes 0.5-2 GB of frames/depth before save, and a save that fails for space loses the whole capture
+    static let coachRigGapSeconds: TimeInterval = 25                   // mesh-gap coach (all scans): seconds of recording before the ceiling/floor prompts can fire (gives the sweep a fair chance first)
+    static let coachFloorMinFaces = 1500                               // mesh-gap coach: fewer floor-classified mesh faces than this late in a scan → floor prompt (WARNING — nadir face is dropped downstream, so LiDAR is the only floor source). Tune from [Coach] census log lines.
+    static let coachCeilingMinFaces = 500                              // mesh-gap coach: fewer ceiling-classified faces → ceiling prompt (guidance — up-faces give it image coverage; mesh matters for the solver + mesh product). Tune from [Coach] census log lines.
+    static let calibrationElevationCutoffDeg: Float = -45              // calibration cost (solve AND spot-check) ignores everything below this elevation: the bottom band holds the rod/tripod and usually the operator — the only content that moves WITH the rig, i.e. systematic attractors (runs 8-10 pulled params toward it). -90 disables
+    static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry
+    static let calibrationMinSpreadMeters: Float = 1.0                 // live sufficiency meter: max pairwise still-position distance below this = weak baseline for the Process-step solve
+    static let calibrationResidualGreenPx: Float = 1.4                 // RMS reprojection error (equirect px, 512-wide) ≤ this → green. Behavior-preserving √ of the old mean-squared 2.0
+    static let calibrationResidualYellowPx: Float = 2.2                // ≤ this → yellow (marginal); above → red (suggest re-do). √5.0
+    static let calibrationMaxIterations = 150                          // Nelder-Mead iteration cap (device solves converge in 57-97; 500 let Debug-build postprocess solves run 60-70 s)
+    // Physical solve bounds, anchored to the MECHANICAL prior (the rig's ground truth).
+    // run8 (2026-07-30): with a near-flat chamfer cost surface in cluttered rooms, the
+    // unbounded solver accepted dy=4.4 m / yaw=−240° at residuals indistinguishable
+    // from plausible poses. A monopod rig cannot physically be outside these ranges.
+    static let calibrationBoundDyM: Float = 0.3                        // rod height half-range (m) around the anchor when the user hasn't MEASURED the rig. The chamfer cost has a systematic +dy pull (dense image-edge band above the elevation cut attracts the sparse projected mesh downward → camera up; 360post4: solved 1.299 vs tape-measured 0.787), so an unmeasured box stays tight to limit the damage — a measured rig uses ±calibrationMeasuredDyHalfM instead
+    static let calibrationMeasuredDyHalfM: Float = 0.05                // dy half-range around the USER-MEASURED rig height. The cost's +dy pull ALWAYS rides this window's upper wall (360post5: measured 0.79 → solved 0.94 at the +0.15 wall), so the in-window solve adds no information — the window is sized to tape/clamp uncertainty only
+    static let calibrationBoundLateralM: Float = 0.3                   // lateral offset half-range (m) around 0
+    static let calibrationBoundYawDeg: Float = 45                      // yaw half-range (deg) around EACH coarse-scan start (yaw is solved globally: the 360° cam screws onto the rod at an arbitrary rotation, so a full-circle coarse scan picks the basin and local bounds keep Nelder-Mead inside it)
+    static let calibrationBoundPitchDeg: Float = 10                    // pitch-residual half-range (deg) around 0 (zenith correction should leave only small error)
+    static let calibrationConvergenceTolerance: Float = 1e-5           // cost-range convergence threshold
+    static let calibrationMaxEdgesPerInput = 1200                      // subsample mesh edges per input to cap solver time (2000 → 1200 after 360post1: per-eval cost dominates the postprocess solve)
     static let vioDegradedTripSeconds: TimeInterval = 2.5    // VIO guard: tracking continuously degraded (limited/relocalizing/unavailable) this long mid-scan → halt
     static let voxelDecayInterval: TimeInterval = 0.5        // VR: min seconds between 350K-voxel confidence-decay passes; throttled off every-integration so the voxelQueue can't back up (drove multi-second stalls)
     static let arIdleTeardownSeconds: TimeInterval = 60      // battery: seconds on a non-capture tab before pausing the AR session (camera/sensors off); resumed on return. Long enough that rapid successive scans stay warm.
@@ -169,7 +225,6 @@ enum AppConstants {
     static let consecutiveBlurThreshold: Int = 5             // blurred frames before warning triggers
     static let motionBlurVelocity: Float = 0.5               // m/s threshold for motion blur detection
     static let privacyBlurVisionScale: CGFloat = 0.5         // downscale factor for the Vision person-seg FALLBACK input (saved-frame privacy blur). Smaller = faster but coarser mask; raise toward 1.0 if person coverage leaks at edges. Only the (rare) fallback uses Vision — ARKit's stencil path is unaffected.
-    static let depthOcclusionToleranceMM: Float = 150.0      // mm tolerance for depth occlusion test
     static let colorizationMaxObservations: Int = 12         // max per-vertex observations kept (top-N by quality) for the weighted-median colorizer
     static let colorizationMinDistanceM: Float = 0.3         // distance floor (m) for the inverse-square distance weight, so very close frames don't dominate
     // ── Colorization anti-bleed projection knobs — ALL DISABLED by default ──────
@@ -190,7 +245,6 @@ enum AppConstants {
     static let stabilizationPollIntervalMs: Int = 200         // ms between tracking-state polls after session reset
     static let stabilizationMaxPolls: Int = 25                // max polls before timeout (total = interval × polls)
     static let semanticThrottleInterval: TimeInterval = 0.5   // min seconds between classification outline rebuilds per anchor
-    static let surfaceOutlineLiftDistance: Float = 0.06       // meters surface outlines are lifted toward the camera to draw on top of the co-planar scan mesh (must clear ARKit mesh noise)
 
     // MARK: - ScanCoach Constants
     static let coachEvaluationInterval: TimeInterval = 1.0    // seconds between ScanCoach rule evaluations (~1Hz)
@@ -201,6 +255,11 @@ enum AppConstants {
     static let infoAutoDismissSeconds: TimeInterval = 5.0      // INFO tips auto-dismiss after this duration
     static let earlyScanThresholdSeconds: TimeInterval = 30.0  // first N seconds considered "early scan" for pattern tips
     static let coachMaxDismissCount: Int = 2                   // after this many manual dismissals, tip won't re-show for the session
+    static let coachFastMotionSustainSeconds: TimeInterval = 3 // fastMotion hint (guidance) needs the blur condition SUSTAINED this long — spikes during normal walking must not fire it
+    static let coachFastMotionMaxShows: Int = 3                // per-session cap on the fastMotion hint — after this many the user knows the depth-vs-photos tradeoff
+    static let nearDepthObstructionMeters: Float = 0.2         // LiDAR returns closer than this are rig hardware / fingers, not scene (sensor min range ≈ 0.25 m — field case: rig tension knob glancing the frame edge, 2026-08-05)
+    static let nearDepthObstructionMinFraction: Float = 0.01   // fraction of valid depth samples under nearDepthObstructionMeters that counts as an obstruction (a knob sliver at the frame edge is ~1-5%)
+    static let coachNearDepthSustainSeconds: TimeInterval = 4  // obstruction must persist this long before the coach warns — a hand passing the lens must not fire it
     static let scanCoachingEnabled: Bool = true                // default for the scan coaching toggle
     static let captureAudioEnabled: Bool = true                // default for shutter-click + chime sounds
 
@@ -238,6 +297,9 @@ enum AppConstants {
     static let keyframeApexSize: Float = 0.04                 // m — solid cube marking the exact still-capture position
     static let keyframeMotionScale: Float = 0.6              // motion-frame wedges drawn smaller than stills (many of them; reduce clutter)
     static let colorizationKeyframeWeight: Float = 3.0         // vertex-color weight bonus for sharp stillness keyframes vs sweep frames
+    // Equirect cube-map face direction colors (mesh preview frustum markers)
+    static let equirectMarkerRadius: Float = 0.12                      // m — 360° still sphere marker radius in the mesh preview
+    static let equirectFrontColor  = SIMD4<Float>(0.2, 0.85, 1.0, 1.0) // cyan  — forward face
 
     // MARK: - Space Analysis Constants
     static let analysisAmbientLightAlertThreshold: CGFloat = 250  // lux below which lighting is "Very Low" (alert tier — RGB nearly useless)
@@ -245,6 +307,10 @@ enum AppConstants {
     static let analysisTimeoutSeconds: TimeInterval = 30          // fallback timeout if 360° not reached
     static let analysisYawCompletionDeg: Float = 330              // yaw coverage (degrees) to count as "360°" (allow slight gap)
     static let analysisYawMaxFillDeg = 45                         // max per-frame yaw delta credited as swept rotation (beyond = tracking snap, credit nothing)
+
+    // MARK: - 360° Still Source (Theta OSC spike — feat/still-source-360)
+    static let thetaCaptureTimeout: TimeInterval = 20            // max wait for a takePicture command to reach "done"
+    static let thetaStatusPollInterval: TimeInterval = 0.4       // /osc/commands/status poll cadence while a capture is inProgress
 }
 
 // MARK: - Semantic View Mode
@@ -282,37 +348,47 @@ enum SemanticViewMode: String, CaseIterable {
     var showFills: Bool { self == .semanticOnly }
 }
 
-/// Three-tier toggle for still/motion capture-pose frustum markers in the mesh preview.
+/// Four-tier toggle for capture-pose frustum markers in the mesh preview.
 /// Mirrors `SemanticViewMode`'s cycle-button pattern; defaults to hidden so the preview
-/// stays clean until the user opts in.
+/// stays clean until the user opts in. The `.equirectFaces` tier is skipped for scans
+/// without 360° stills (controlled by `next(hasEquirects:)`).
 enum KeyframeMarkerMode: String, CaseIterable {
     /// No capture markers.
     case none
     /// Sharp still (keyframe) capture poses only.
     case stills
-    /// Still + motion (sweep) frame capture poses.
-    case stillsAndMotion
+    /// 360° equirect sphere markers (one translucent sphere + forward arrow per still).
+    case equirectFaces
+    /// Motion (sweep) frame capture poses only.
+    case motion
+    /// Everything at once.
+    case all
 
     /// SF Symbol name for the toolbar button.
     var iconName: String {
         switch self {
-        case .none:            return "camera.metering.none"
-        case .stills:          return "camera.metering.partial"
-        case .stillsAndMotion: return "camera.metering.matrix"
+        case .none:          return "camera.metering.none"
+        case .stills:        return "camera.metering.partial"
+        case .equirectFaces: return "pano"
+        case .motion:        return "camera.metering.center.weighted"
+        case .all:           return "camera.metering.matrix"
         }
     }
 
-    /// Advance to the next mode in the cycle.
-    var next: KeyframeMarkerMode {
+    /// Advance to the next mode, skipping `.equirectFaces` if no equirect data exists.
+    func next(hasEquirects: Bool) -> KeyframeMarkerMode {
         switch self {
-        case .none:            return .stills
-        case .stills:          return .stillsAndMotion
-        case .stillsAndMotion: return .none
+        case .none:          return .stills
+        case .stills:        return hasEquirects ? .equirectFaces : .motion
+        case .equirectFaces: return .motion
+        case .motion:        return .all
+        case .all:           return .none
         }
     }
 
-    var showStills: Bool { self != .none }
-    var showMotion: Bool { self == .stillsAndMotion }
+    var showStills: Bool { self == .stills || self == .all }
+    var showMotion: Bool { self == .motion || self == .all }
+    var showEquirectFaces: Bool { self == .equirectFaces || self == .all }
 }
 
 /// Which GEOMETRY the mesh preview draws — an axis ORTHOGONAL to `SemanticViewMode` (which

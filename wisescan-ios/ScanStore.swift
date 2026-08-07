@@ -952,6 +952,27 @@ class ScanStats {
 class ScanFileManager {
     static let shared = ScanFileManager()
 
+    private static let log = Logger(subsystem: "org.arenaxr.scan4d", category: "save")
+
+    /// Why the last `saveScan` returned nil — the caller shows it, because "Save
+    /// failed" alone left a real field loss undiagnosable (2026-08-06: a save aborted,
+    /// rolled back cleanly, and the only record of WHY was a print() that the log
+    /// capture had already stopped covering).
+    private(set) var lastSaveFailureReason: String?
+
+    /// Free space on the Documents volume, in bytes ("important usage" = what iOS will
+    /// actually let an app consume, after purgeable reclamation).
+    static func freeDiskBytes() -> Int64? {
+        guard let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+              let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        else { return nil }
+        return values.volumeAvailableCapacityForImportantUsage
+    }
+
+    static func formattedFreeDisk() -> String {
+        freeDiskBytes().map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "unknown"
+    }
+
     private init() {}
 
     // swiftlint:disable:next function_parameter_count
@@ -970,6 +991,7 @@ class ScanFileManager {
         scanCase: ScanCase = .rescanSpace,
         worldMapSuspect: Bool = false
     ) -> CapturedScan? {
+        lastSaveFailureReason = nil
         let targetLocation: ScanLocation
         // Track a location we create here so we can roll it back if the required mesh write fails
         // (otherwise a failed save would leave behind an empty, undeletable location).
@@ -1028,11 +1050,22 @@ class ScanFileManager {
         // Create scan directory and write mesh (required). If this fails, roll back the inserted
         // record (and any location we just created) so we never persist an orphan whose mesh.obj
         // never reached disk (blank preview, every export fails).
+        // BLOCKING BY DESIGN — the durability gate. The caller clears `pendingScan`
+        // (losing the only in-memory copy) solely on a non-nil return, so the mesh
+        // must be on disk before this function answers. The ORDERING is sacred; the
+        // thread is negotiable (a future async saveScan may move the I/O off-main so
+        // long as the SwiftData insert/rollback and pendingScan clear stay ordered
+        // after it).
         do {
             try FileManager.default.createDirectory(at: newScan.scanDirectory, withIntermediateDirectories: true)
-            try meshData.write(to: newScan.meshFileURL)
+            try meshData.write(to: newScan.meshFileURL, options: .atomic)
         } catch {
-            print("[ScanFileManager] Failed to create scan directory or write mesh; aborting save: \(error)")
+            // Rollback is intentional (no orphan record with no mesh) — but it also
+            // erases the evidence, so record WHY before deleting, on Logger (survives
+            // Release, unlike print) and in lastSaveFailureReason for the UI.
+            let reason = "\(error.localizedDescription) — \(Self.formattedFreeDisk()) free, mesh \(ByteCountFormatter.string(fromByteCount: Int64(meshData.count), countStyle: .file))"
+            lastSaveFailureReason = reason
+            Self.log.error("saveScan ABORTED writing \(newScan.meshFileURL.path, privacy: .public): \(reason, privacy: .public)")
             context.delete(newScan)
             if let created = createdLocation { context.delete(created) }
             return nil
@@ -1083,11 +1116,21 @@ class ScanFileManager {
             }
         }
 
-        // Generate 2D model preview if pose is available or default
-        if let img = MeshPreviewView.generateSnapshot(meshURL: newScan.meshFileURL, colorsURL: newScan.colorsFileURL, poseMatrix: targetLocation.imagingPoseMatrix,
-                                                      frameCenter: MeshPreviewView.canonicalFrameCenter(for: targetLocation)),
-           let data = img.jpegData(compressionQuality: 0.8) {
-            try? data.write(to: newScan.modelPreviewURL)
+        // 2D model preview — OFF-MAIN. It re-reads and re-parses the mesh we just
+        // wrote, builds geometry, renders offscreen and JPEG-encodes it (0.3-1 s on a
+        // large scan), and NOTHING gates on it: the card reloads the thumbnail on the
+        // location's updatedAt. Every other call site already runs it on a utility
+        // queue; this was the last main-thread one, sitting in the save path where a
+        // freeze is most visible.
+        let previewInputs = (mesh: newScan.meshFileURL, colors: newScan.colorsFileURL,
+                             out: newScan.modelPreviewURL, pose: targetLocation.imagingPoseMatrix,
+                             center: MeshPreviewView.canonicalFrameCenter(for: targetLocation))
+        Task.detached(priority: .utility) {
+            guard let img = MeshPreviewView.generateSnapshot(
+                meshURL: previewInputs.mesh, colorsURL: previewInputs.colors,
+                poseMatrix: previewInputs.pose, frameCenter: previewInputs.center),
+                  let data = img.jpegData(compressionQuality: 0.8) else { return }
+            try? data.write(to: previewInputs.out)
         }
 
         try? context.save()
@@ -1099,9 +1142,17 @@ class ScanFileManager {
         // Preserve stitches if this room keeps another generation (re-point off the doomed scan);
         // if this is the room's last scan, the link cascades away (bisect) as intended.
         StitchLinkStore.repointIncidentLinks(beforeDeleting: [scan], in: context)
-        try? FileManager.default.removeItem(at: scan.scanDirectory)
+        // Record first, files after: a recursive unlink of raw_data is thousands of
+        // files and GBs (0.5-5 s on a big scan) and the UI must not wait for it. The
+        // bulk location-delete path already worked this way; this is the single-scan
+        // path catching up. Orphaned files after a crash mid-delete are harmless —
+        // the record is already gone, so nothing references them.
+        let directory = scan.scanDirectory
         context.delete(scan)
         try? context.save()
+        DispatchQueue.global(qos: .utility).async {
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 
     func addLocation(name: String, context: ModelContext) -> ScanLocation {

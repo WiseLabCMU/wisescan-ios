@@ -34,8 +34,8 @@ struct Scan4DApp: App {
         UserDefaults.standard.register(defaults: [
             AppConstants.Key.semanticLabeling: AppConstants.semanticLabeling,
             AppConstants.Key.meshClassifier: AppConstants.meshClassifier,
-            AppConstants.Key.colorizeOnPostprocess: AppConstants.colorizeOnPostprocess,
             AppConstants.Key.registerLegacyScans: AppConstants.registerLegacyScans,
+            AppConstants.Key.colorizeFrom360Faces: AppConstants.colorizeFrom360Faces,
             AppConstants.Key.gpuColorize: AppConstants.gpuColorize,
             AppConstants.Key.keyframeWeightBonus: AppConstants.keyframeWeightBonus,
             AppConstants.Key.robustColorMedian: AppConstants.robustColorMedian

@@ -1,10 +1,16 @@
 import Foundation
+import os
 import ARKit
 import UIKit
 
 /// Post-processing utilities for vertex coloring and ARWorldMap export.
 /// Extracted from ARCoverageView for clearer separation of concerns.
 enum VertexColorAccumulator {
+    /// Result-class lines log through the unified system log so RELEASE-build captures
+    /// keep them — print() output is invisible to Console/log-collect off Release
+    /// (360post8: the whole colorize outcome vanished from the log). Per-frame perf
+    /// chatter stays on PerfDiag/print.
+    private static let log = Logger(subsystem: "org.arenaxr.scan4d", category: "colorize")
 
     // MARK: - Export Helpers
 
@@ -202,12 +208,19 @@ enum VertexColorAccumulator {
         return stems
     }
 
-    static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?, progress: ((Double) -> Void)? = nil) -> Data? {
+    /// `phase` names the step currently running; `progress` reports the per-frame
+    /// fraction once projection starts. The setup work before the first frame is not
+    /// instant on a large scan — mesh parse, normals, and (faces probe) a ~20 s cube-face
+    /// cut — so a bare "Coloring…" looked stalled. Callers show whichever arrives last.
+    static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?,
+                                        progress: ((Double) -> Void)? = nil,
+                                        phase: ((String) -> Void)? = nil) -> Data? {
         guard let rawDir = rawDataDir else { return nil }
         let startTime = CACurrentMediaTime()
         let fm = FileManager.default
 
         // Parse OBJ vertices using shared parser
+        phase?("Reading mesh…")
         let parsed: MeshParser.OBJData? = PerfDiag.timed("vc_obj_parse") { MeshParser.parseOBJ(from: objData) }
         guard let parsed else { return nil }
         var vertices = parsed.vertices
@@ -233,6 +246,7 @@ enum VertexColorAccumulator {
         // Per-vertex surface normals (area-weighted face normals) drive the
         // view-angle weight. Sign/winding may be inconsistent across the mesh,
         // so the weight uses |normal · viewDir| and is sign-agnostic.
+        phase?("Computing surface normals…")
         var normals = PerfDiag.timed("vc_normals") {
             MeshParser.accumulateVertexNormals(vertices: vertices, faces: parsed.faces)
         }
@@ -240,9 +254,39 @@ enum VertexColorAccumulator {
             normals[i] = simd_length(normals[i]) > 0 ? simd_normalize(normals[i]) : SIMD3<Float>(0, 0, 1)
         }
 
-        // Find saved camera JSONs
-        let camerasDir = rawDir.appendingPathComponent("cameras")
-        let imagesDir = rawDir.appendingPathComponent("images")
+        // Frame source. Dev A/B "Color from 360° Faces": color EXCLUSIVELY from cube
+        // faces cut from the scan's own 360° stills at their BAKED poses — a measurement
+        // tool for cube-face pose quality (misplaced color = pose error). Faces carry
+        // is_keyframe=true and NO depth (occlusion off in that mode). face_frames/ is
+        // regenerated per run so re-solved poses always apply, and it lives inside
+        // raw_data so it can never leak into an export.
+        let useFaces = UserDefaults.standard.bool(forKey: AppConstants.Key.colorizeFrom360Faces)
+        let camerasDir: URL
+        let imagesDir: URL
+        if useFaces {
+            // Privacy gate FIRST, before the (expensive) face generation: on a
+            // privacy-ON deferred-blur scan, mask mode skips every maskless frame —
+            // face frames have no masks, so the run would burn ~20 s generating faces
+            // and then paint the whole model gray (360post7). Bail loudly and KEEP the
+            // existing colors instead. (colors.bin ships in exports, and faces are cut
+            // from raw unblurred equirects — the fail-closed skip is correct; the probe
+            // needs a filter-OFF/consent or people-free scan.)
+            if Self.privacyMaskModeWouldApply(rawDir: rawDir) {
+                Self.log.warning("Color-from-360°-faces requires a privacy-filter-OFF (consent) or people-free scan — deferred-blur masks don't exist for face frames. Keeping existing colors.")
+                return nil
+            }
+            phase?("Cutting 360° cube faces…")
+            guard let dirs = EquirectFaceExport.generateFaceFramesForColorize(rawDataDir: rawDir) else {
+                Self.log.warning("Color-from-360°-faces is ON but no faces could be generated (no stills / no baked poses) — aborting colorize")
+                return nil
+            }
+            camerasDir = dirs.cameras
+            imagesDir = dirs.images
+            PerfDiag.log("[VertexColor] frame source: 360° cube faces (dev probe)")
+        } else {
+            camerasDir = rawDir.appendingPathComponent("cameras")
+            imagesDir = rawDir.appendingPathComponent("images")
+        }
         guard fm.fileExists(atPath: camerasDir.path),
               fm.fileExists(atPath: imagesDir.path) else { return nil }
 
@@ -253,6 +297,7 @@ enum VertexColorAccumulator {
         guard !cameraFiles.isEmpty else { return nil }
 
         // Sample up to maxColorizationFrames, preferring sharp keyframes (see helper).
+        phase?("Selecting frames…")
         let sampledFiles = Self.selectColorizationFrames(
             from: cameraFiles, max: AppConstants.maxColorizationFrames,
             keyframeStems: Self.keyframeStems(rawDir: rawDir)
@@ -269,36 +314,8 @@ enum VertexColorAccumulator {
         // pixel is ever baked. Legacy captures have no masks/ dir → this stays dormant and the
         // depth==0 skip keeps protecting them; privacy-off captures have an empty masks/ → no-op.
         let masksDir = rawDir.appendingPathComponent("masks")
-        // Deferred-blur era (RAW depth, needs per-frame masks) vs legacy (depth already person-zeroed
-        // at capture, so the depth==0 skip protects). masks/ (created unconditionally at session
-        // start) is the primary signal. If it was lost (partial restore / manual cleanup), the
-        // metadata `privacy_filter` KEY marks the era — every deferred capture stamps it
-        // (FrameCaptureSession), legacy metadata predates it. UNREADABLE metadata (missing/corrupt —
-        // abnormal, since it's written for every scan) fails CLOSED into the deferred era so a
-        // lost-masks deferred scan can't silently colorize raw depth. Only READABLE metadata WITHOUT
-        // the key is genuine legacy. Mirrors ScanExportManager's gate.
-        let meta: [String: Any]? = {
-            guard let metaData = try? Data(contentsOf: rawDir.appendingPathComponent("scan4d_metadata.json")),
-                  let obj = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] else { return nil }
-            return obj
-        }()
-        let masksDirExists = fm.fileExists(atPath: masksDir.path)
-        let hasPrivacyKey = meta?.keys.contains("privacy_filter") ?? false
-        let deferredBlurEra = masksDirExists || hasPrivacyKey || meta == nil
-        var privacyWasOn = false
-        if deferredBlurEra {
-            let maskCount = !masksDirExists ? 0
-                : ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
-                    .filter { $0.pathExtension == "png" }.count
-            privacyWasOn = maskCount > 0
-            if !privacyWasOn {
-                // No surviving masks: honor an explicit Bool; a present-but-garbage flag or
-                // unreadable metadata fails CLOSED (assume privacy was on — never bake a person).
-                privacyWasOn = (meta?["privacy_filter"] as? Bool) ?? true
-            }
-        }
-        let maskMode = deferredBlurEra && privacyWasOn   // sample per-frame masks + skip unmasked frames
-        if maskMode { print("[VertexColor] privacy mask mode ON (deferred-blur capture) — masking person regions") }
+        let maskMode = Self.privacyMaskModeWouldApply(rawDir: rawDir)   // sample per-frame masks + skip unmasked frames
+        if maskMode { Self.log.info("privacy mask mode ON (deferred-blur capture) — masking person regions") }
 
         // Per-vertex top-N observation buffers (flat, row = K entries per vertex).
         // Colors are kept as 8-bit (the source precision) to bound memory.
@@ -658,6 +675,7 @@ enum VertexColorAccumulator {
         var sV = [Float](repeating: 0, count: K)
         var sW = [Float](repeating: 0, count: K)
         let obs = ObsBuffers(r: obsR, g: obsG, b: obsB, w: obsW)
+        phase?("Blending colors…")
         let medianStart = CACurrentMediaTime()
 
         var data = Data(count: vertexCount * MemoryLayout<SIMD4<Float>>.stride)
@@ -685,7 +703,7 @@ enum VertexColorAccumulator {
         let reducerName = robustReduce ? "consensus median" : "per-channel median"
         PerfDiag.log("[VertexColor] \(reducerName) resolve \(vertexCount) verts \(Int((CACurrentMediaTime() - medianStart) * 1000))ms")
         let elapsed = CACurrentMediaTime() - startTime
-        print("[VertexColor] Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (\(reducerName), K=\(K)) in \(String(format: "%.1f", elapsed))s")
+        Self.log.info("Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (\(reducerName), K=\(K)) in \(String(format: "%.1f", elapsed))s")
         return data
     }
 
@@ -734,6 +752,29 @@ enum VertexColorAccumulator {
         }
         guard sw > 0 else { return SIMD3<Float>(Float(rb), Float(gb), Float(bb)) }
         return SIMD3<Float>(sr / sw, sg / sw, sb / sw)
+    }
+
+    /// silently colorize raw depth. Only READABLE metadata WITHOUT the key is genuine
+    /// legacy. Mirrors ScanExportManager's gate.
+    static func privacyMaskModeWouldApply(rawDir: URL) -> Bool {
+        let fileManager = FileManager.default
+        let masksDir = rawDir.appendingPathComponent("masks")
+        let meta: [String: Any]? = {
+            guard let metaData = try? Data(contentsOf: rawDir.appendingPathComponent("scan4d_metadata.json")),
+                  let obj = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] else { return nil }
+            return obj
+        }()
+        let masksDirExists = fileManager.fileExists(atPath: masksDir.path)
+        let hasPrivacyKey = meta?.keys.contains("privacy_filter") ?? false
+        let deferredBlurEra = masksDirExists || hasPrivacyKey || meta == nil
+        guard deferredBlurEra else { return false }
+        let maskCount = !masksDirExists ? 0
+            : ((try? fileManager.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "png" }.count
+        if maskCount > 0 { return true }
+        // No surviving masks: honor an explicit Bool; a present-but-garbage flag or
+        // unreadable metadata fails CLOSED (assume privacy was on — never bake a person).
+        return (meta?["privacy_filter"] as? Bool) ?? true
     }
 
     /// Weighted median of one color channel over a vertex's observations.

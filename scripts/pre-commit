@@ -47,6 +47,18 @@ while IFS= read -r -d '' f; do
             FAIL=1
         fi
         ;;
+    *.pbxproj)
+        # Same leak via build settings: INFOPLIST_KEY_ passthroughs write these keys
+        # into the generated Info.plist without any .plist file ever being staged.
+        hits=$(pg_pbxproj_violations "$(git show ":$f" 2>/dev/null)")
+        if [ -n "$hits" ]; then
+            echo ""
+            echo "❌ ERROR: debug-only file-sharing key(s) staged in $f:$hits"
+            echo "   INFOPLIST_KEY_ build settings generate the same Info.plist keys at build time."
+            echo "   Keep file sharing as a LOCAL edit — do not commit it."
+            FAIL=1
+        fi
+        ;;
     esac
 
     # 2b. Raw capture artifacts must never be committed.

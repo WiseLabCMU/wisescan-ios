@@ -133,9 +133,10 @@ Temporary Items
 .apdisk
 .derivedData/
 
-# Raw capture artifacts — contain UNBLURRED imagery of people (no export blur for
-# 360° yet). Never commit. Enforced by the privacy guard in scripts/pre-commit.
+# Raw capture artifacts — contain UNBLURRED imagery of people. Never commit.
+# Enforced by the privacy guard in scripts/pre-commit.
+# (equirect_stills/ is the camera-agnostic 360° stills dir.)
 # See CONTRIBUTING.md -> Privacy Filtering Patterns.
 **/raw_data/
-**/theta_stills/
+**/equirect_stills/
 *.xcappdata

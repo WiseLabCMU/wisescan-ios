@@ -178,35 +178,40 @@ struct ScanExportManager {
     /// was off by choice. Only genuinely indeterminate scans (metadata missing/corrupt, or a
     /// present-but-garbage flag) fail CLOSED into the Vision pass, which re-encodes frames
     /// visually unchanged when no person is detected.
-    private static func applyExportPrivacyPasses(rawDataDir: URL, stagedDir: URL,
-                                                 phase: ((ExportPhase) -> Void)? = nil) {
-        let fm = FileManager.default
+    /// Frame names that have a capture-time segmentation mask (drives the mask-based pass,
+    /// and doubles as the strongest "privacy was ON" signal — masks only exist when it was).
+    private static func maskedFrameNames(rawDataDir: URL) -> Set<String> {
         let masksDir = rawDataDir.appendingPathComponent("masks")
-        let maskedFrames: Set<String> = ((try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
+        return ((try? FileManager.default.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.pathExtension == "png" }
             .reduce(into: Set()) { $0.insert($1.deletingPathExtension().lastPathComponent) }
+    }
 
-        var privacyWasOn = !maskedFrames.isEmpty
-        if !privacyWasOn {   // no masks staged — resolve from metadata
-            if let metaData = try? Data(contentsOf: rawDataDir.appendingPathComponent("scan4d_metadata.json")),
-               let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] {
-                if let flag = meta["privacy_filter"] {
-                    privacyWasOn = (flag as? Bool) ?? true   // deferred-era: honor the flag; a garbage value fails CLOSED
-                } else {
-                    // Key absent from readable metadata ⇒ legacy-era scan (predates the flag):
-                    // already blurred at capture or privacy off by choice — skip the passes
-                    // rather than paying a per-frame Vision pass on every legacy export.
-                    privacyWasOn = false
-                }
-            } else {
-                privacyWasOn = true   // metadata missing/corrupt → fail CLOSED (Vision blur is a no-op on people-free frames)
-            }
+    /// Resolves whether the privacy filter was ON for this capture — the ONE source of truth
+    /// shared by the phone/proxy passes and the 360° still pass, so every export path reasons
+    /// from the same state. Masks present ⇒ ON. Otherwise the metadata `privacy_filter` flag
+    /// decides (a garbage value fails CLOSED to ON); readable metadata that PREDATES the flag
+    /// ⇒ legacy scan, OFF (already blurred at capture or off by choice); unreadable metadata
+    /// ⇒ ON (fail closed — the blur passes are no-ops on people-free frames).
+    private static func privacyFilterWasOn(rawDataDir: URL, maskedFrames: Set<String>) -> Bool {
+        if !maskedFrames.isEmpty { return true }
+        guard let metaData = try? Data(contentsOf: rawDataDir.appendingPathComponent("scan4d_metadata.json")),
+              let meta = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] else {
+            return true
         }
+        guard let flag = meta["privacy_filter"] else { return false }
+        return (flag as? Bool) ?? true
+    }
+
+    private static func applyExportPrivacyPasses(rawDataDir: URL, stagedDir: URL,
+                                                 phase: ((ExportPhase) -> Void)? = nil) {
+        let maskedFrames = maskedFrameNames(rawDataDir: rawDataDir)
+        let privacyWasOn = privacyFilterWasOn(rawDataDir: rawDataDir, maskedFrames: maskedFrames)
         guard privacyWasOn else { return }
 
         if !maskedFrames.isEmpty {
             applyPrivacyBlurAtExport(
-                masksDir: masksDir,
+                masksDir: rawDataDir.appendingPathComponent("masks"),
                 imagesDir: stagedDir.appendingPathComponent("images"),
                 depthDir: stagedDir.appendingPathComponent("depth"),
                 phase: phase
@@ -250,6 +255,138 @@ struct ScanExportManager {
             }
         }
         print("[prepareExport] ✓ vision-blurred \(written)/\(files.count) images in \(imagesDir.lastPathComponent)/")
+    }
+
+    // MARK: - 360° Still Staging (hard privacy invariant)
+
+    /// Stages `raw_data/equirect_stills/` (equirect JPG + pose sidecar JSON pairs — any 360°
+    /// camera source) into the export
+    /// and enforces the still-source-360 HARD privacy invariant on every equirect: cube-face
+    /// Vision person verification, pixelation where persons are found
+    /// (`EquirectPrivacyBlur`, docs/design/still-source-360.md → Privacy).
+    ///
+    /// Toggle-governed like every other capture source (`privacyFilterWasOn` — one privacy
+    /// state rules the whole scan): with the filter ON, every still is verified/blurred and
+    /// the pass is fail-CLOSED per still — a still whose verification fails is EXCLUDED from
+    /// the export (JPG and sidecar both), never shipped raw. With the filter OFF the stills
+    /// stage unblurred by the user's informed, per-scan consent (the capture UI warns that a
+    /// 360° camera captures ALL directions — including people behind the operator — and the
+    /// scan's `privacy_filter` metadata records the choice for downstream consumers).
+    private static func stageEquirectStills(rawDataDir: URL, stagingDir: URL,
+                                            phase: ((ExportPhase) -> Void)? = nil) {
+        let fileMgr = FileManager.default
+        let srcDir = rawDataDir.appendingPathComponent("equirect_stills")
+        guard fileMgr.fileExists(atPath: srcDir.path) else { return }
+        let dstDir = stagingDir.appendingPathComponent("equirect_stills")
+        do {
+            try fileMgr.copyItem(at: srcDir, to: dstDir)
+        } catch {
+            print("[prepareExport] ✗ failed to stage equirect_stills: \(error.localizedDescription)")
+            return
+        }
+
+        let stills = ((try? fileMgr.contentsOfDirectory(at: dstDir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension.lowercased() == "jpg" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !stills.isEmpty else { return }
+        if privacyFilterWasOn(rawDataDir: rawDataDir, maskedFrames: maskedFrameNames(rawDataDir: rawDataDir)) {
+            runEquirectPrivacyPass(on: stills, phase: phase)
+        } else {
+            print("[prepareExport] 360° stills staged UNBLURRED (\(stills.count)) — privacy filter was OFF "
+                + "for this scan (informed per-scan consent; recorded as privacy_filter in scan4d_metadata)")
+        }
+
+        // Cube-face emission AFTER the privacy pass — faces sample the staged (blurred or
+        // consented) pixels, so they inherit the scan's privacy state by construction.
+        emitCubeFaces(stagingDir: stagingDir, dstDir: dstDir, phase: phase)
+    }
+
+    /// Runs the fail-closed per-still verification/blur over the staged equirects (filter-ON path).
+    private static func runEquirectPrivacyPass(on stills: [URL], phase: ((ExportPhase) -> Void)? = nil) {
+        print("[prepareExport] 360° privacy pass on \(stills.count) equirect still(s)...")
+        let passStart = CFAbsoluteTimeGetCurrent()
+
+        var cleanCount = 0, blurredCount = 0, excludedCount = 0
+        for (index, url) in stills.enumerated() {
+            phase?(.counted("360° privacy", index + 1, of: stills.count))
+            // Per-still pool: each pass decodes a working copy + renders a full-res composite
+            // through autoreleased CF/CI transients (same OOM lesson as the frame blur loops).
+            autoreleasepool {
+                let stillStart = CFAbsoluteTimeGetCurrent()
+                let outcome: EquirectPrivacyBlur.Outcome
+                if let data = try? Data(contentsOf: url) {
+                    outcome = EquirectPrivacyBlur.process(equirectJPEG: data)
+                } else {
+                    outcome = .failed("could not read staged still")
+                }
+                let label: String
+                switch outcome {
+                case .clean:
+                    cleanCount += 1
+                    label = "clean"
+                case .blurred(let blurredData):
+                    do {
+                        try blurredData.write(to: url, options: .atomic)
+                        blurredCount += 1
+                        label = "blurred"
+                    } catch {
+                        excludeStill(url)   // couldn't persist the blurred version → never ship raw
+                        excludedCount += 1
+                        label = "excluded"
+                    }
+                case .failed(let reason):
+                    print("[prepareExport] ✗ 360° still \(url.lastPathComponent) failed verification (\(reason)) — excluding from export")
+                    excludeStill(url)
+                    excludedCount += 1
+                    label = "excluded"
+                }
+                let stillMs = Int((CFAbsoluteTimeGetCurrent() - stillStart) * 1000)
+                PerfDiag.log("[ExportDiag] still \(index + 1)/\(stills.count): \(label) — \(stillMs) ms")
+            }
+        }
+        let passMs = Int((CFAbsoluteTimeGetCurrent() - passStart) * 1000)
+        print("[prepareExport] ✓ 360° privacy pass: \(cleanCount) clean, \(blurredCount) blurred, \(excludedCount) excluded — \(passMs) ms total")
+    }
+
+    /// Reprojects every surviving staged equirect into 5 pinhole cube faces (bottom face —
+    /// operator/rod — dropped by construction) written as ordinary keyframe images into
+    /// `images/` with Polycam camera JSONs in `cameras/`, poses from the mechanical-prior
+    /// rig extrinsic (EquirectFaceExport). Non-fatal per still: a face-emission failure
+    /// just leaves the archived equirect as the only carrier for that still.
+    private static func emitCubeFaces(stagingDir: URL, dstDir: URL,
+                                      phase: ((ExportPhase) -> Void)? = nil) {
+        let fileMgr = FileManager.default
+        let imagesDir = stagingDir.appendingPathComponent("images")
+        let camerasDir = stagingDir.appendingPathComponent("cameras")
+        guard fileMgr.fileExists(atPath: imagesDir.path), fileMgr.fileExists(atPath: camerasDir.path) else {
+            print("[prepareExport] ✗ cube faces skipped — images/ or cameras/ not staged")
+            return
+        }
+        let survivors = ((try? fileMgr.contentsOfDirectory(at: dstDir, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension.lowercased() == "jpg" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !survivors.isEmpty else { return }
+        let faceStart = CFAbsoluteTimeGetCurrent()
+        var facesWritten = 0
+        for (index, url) in survivors.enumerated() {
+            phase?(.counted("Cube faces", index + 1, of: survivors.count))
+            autoreleasepool {
+                let sidecar = url.deletingPathExtension().appendingPathExtension("json")
+                facesWritten += EquirectFaceExport.emitFaces(
+                    equirectURL: url, sidecarURL: sidecar,
+                    imagesDir: imagesDir, camerasDir: camerasDir)
+            }
+        }
+        let faceMs = Int((CFAbsoluteTimeGetCurrent() - faceStart) * 1000)
+        print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) — \(faceMs) ms (poses from capture-baked cam_transform; per-face provenance in camera_pose_source)")
+    }
+
+    /// Fail-closed removal of one staged 360° still: the equirect AND its pose sidecar (an
+    /// orphan sidecar would advertise a still the bundle doesn't contain).
+    private static func excludeStill(_ jpgURL: URL) {
+        let fileMgr = FileManager.default
+        try? fileMgr.removeItem(at: jpgURL)
+        try? fileMgr.removeItem(at: jpgURL.deletingPathExtension().appendingPathExtension("json"))
     }
 
     /// Applies person pixelation to staged images and zeros person regions in staged depth maps
@@ -612,6 +749,11 @@ struct ScanExportManager {
                         }
                     }
                 }
+
+                // 360° stills (any equirect camera): staged through the toggle-governed privacy
+                // pass — stageEquirectStills enforces the invariant internally (filter ON ⇒
+                // blur or exclude; OFF ⇒ informed per-scan consent).
+                stageEquirectStills(rawDataDir: rawDataDir, stagingDir: stagingDir, phase: phase)
 
                 return zipStaging(stagingDir)
             }

@@ -25,7 +25,9 @@ struct MeshPreviewContainer: View {
     @State private var hasPrivacyMarkers = false
     @State private var isMeshLoaded = false
     @State private var keyframeMarkerMode: KeyframeMarkerMode = .none
+    @State private var sceneBox = SceneViewBox()
     @State private var hasKeyframeMarkers = false
+    @State private var hasEquirects = false
     @State private var showSetPoseConfirm = false
     /// Which geometry is drawn (full mesh vs ghost proxy) — orthogonal to `semanticViewMode`.
     @State private var meshSourceMode: MeshSourceMode = .full
@@ -62,6 +64,8 @@ struct MeshPreviewContainer: View {
                         hasPrivacyMarkers: $hasPrivacyMarkers,
                         keyframeMarkerMode: $keyframeMarkerMode,
                         hasKeyframeMarkers: $hasKeyframeMarkers,
+                        hasEquirects: $hasEquirects,
+                        sceneBox: sceneBox,
                         meshSourceMode: $meshSourceMode,
                         hasProxyMesh: $hasProxyMesh,
                         hasDynamicMesh: $hasDynamicMesh
@@ -84,10 +88,11 @@ struct MeshPreviewContainer: View {
                 .ignoresSafeArea()
 
                 // Bottom-left legend (semantic classes + privacy + capture markers)
-                let showSemanticLegend = semanticViewMode.showOutlines && !detectedClasses.isEmpty
-                let showPrivacyLegend = showPrivacyMarkers && hasPrivacyMarkers
+                let showSemanticLegend = detectedClasses.count > 0 && semanticViewMode != .meshOnly
+                let showPrivacyLegend = hasPrivacyMarkers && showPrivacyMarkers
                 let showStillsLegend = keyframeMarkerMode.showStills && hasKeyframeMarkers
-                if showSemanticLegend || showPrivacyLegend || showStillsLegend {
+                let showEquirectLegend = keyframeMarkerMode.showEquirectFaces && hasEquirects
+                if showSemanticLegend || showPrivacyLegend || showStillsLegend || showEquirectLegend {
                     VStack(alignment: .leading, spacing: 4) {
                         if showSemanticLegend {
                             ForEach(detectedClasses, id: \.rawValue) { cls in
@@ -117,6 +122,9 @@ struct MeshPreviewContainer: View {
                                 captureLegendRow(color: AppConstants.keyframeMotionColor, label: "Motion")
                             }
                         }
+                        if showEquirectLegend {
+                            equirectLegendRow
+                        }
                     }
                     .padding(8)
                     .background(.ultraThinMaterial)
@@ -133,11 +141,11 @@ struct MeshPreviewContainer: View {
             if !isMeshLoaded {
                 VStack(spacing: 16) {
                     ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .gray))
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white.opacity(0.7)))
                         .scaleEffect(1.5)
                     Text("Loading Mesh...")
                         .font(.headline)
-                        .foregroundColor(.gray)
+                        .foregroundColor(.white.opacity(0.7))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color(white: 0.15))
@@ -193,7 +201,7 @@ struct MeshPreviewContainer: View {
             if hasKeyframeMarkers {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        keyframeMarkerMode = keyframeMarkerMode.next
+                        keyframeMarkerMode = keyframeMarkerMode.next(hasEquirects: hasEquirects)
                     } label: {
                         Image(systemName: keyframeMarkerMode.iconName)
                             .foregroundColor(keyframeMarkerMode == .none ? .gray : .cyan)
@@ -210,6 +218,14 @@ struct MeshPreviewContainer: View {
                     }
                     .accessibilityLabel(meshSourceMode.accessibilityLabel)
                 }
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                // Pinch zoom-out is capped by the default camera controller; this steps
+                // the camera back 40% per tap so tall marker spheres etc. stay reachable.
+                Button { sceneBox.zoomOut() } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .disabled(!isMeshLoaded)
             }
             if location != nil {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -285,6 +301,16 @@ struct MeshPreviewContainer: View {
         .cornerRadius(10)
         .shadow(color: .black.opacity(0.3), radius: 2)
         .padding(.horizontal, 60) // keep clear of leading/trailing toolbar buttons
+    }
+
+    private var equirectLegendRow: some View {
+        HStack(spacing: 6) {
+            let accent = AppConstants.equirectFrontColor
+            Circle()
+                .fill(Color(red: Double(accent.x), green: Double(accent.y), blue: Double(accent.z)))
+                .frame(width: 8, height: 8)
+            Text("360° stills (arrow = front)").font(.caption2).foregroundColor(.white)
+        }
     }
 
     /// One legend row for a capture-marker group (colored square + label).
@@ -390,6 +416,22 @@ class MarkerProjectionState: ObservableObject {
 }
 
 /// Renders a 3D preview of captured OBJ mesh data using SceneKit.
+/// Bridges the SwiftUI toolbar to the live SCNView for programmatic camera moves:
+/// the default camera controller caps pinch zoom-out (widening the scene bounds did
+/// NOT lift it — device-tested), so the toolbar offers an explicit step-back instead.
+final class SceneViewBox {
+    weak var view: SCNView?
+
+    /// Dolly the point of view 40% farther from the origin-centered model. Works on the
+    /// interactive camera clone too (allowsCameraControl), so it composes with gestures.
+    func zoomOut() {
+        guard let pov = view?.pointOfView else { return }
+        pov.position = SCNVector3(pov.position.x * 1.4,
+                                  pov.position.y * 1.4,
+                                  pov.position.z * 1.4)
+    }
+}
+
 struct MeshPreviewView: UIViewRepresentable {
     var meshFileURL: URL?
     var colorsFileURL: URL?
@@ -414,6 +456,8 @@ struct MeshPreviewView: UIViewRepresentable {
     @Binding var hasPrivacyMarkers: Bool
     @Binding var keyframeMarkerMode: KeyframeMarkerMode
     @Binding var hasKeyframeMarkers: Bool
+    @Binding var hasEquirects: Bool
+    let sceneBox: SceneViewBox
     @Binding var meshSourceMode: MeshSourceMode
     @Binding var hasProxyMesh: Bool
     @Binding var hasDynamicMesh: Bool
@@ -460,6 +504,7 @@ struct MeshPreviewView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> SCNView {
         let scnView = SCNView()
+        sceneBox.view = scnView
         scnView.backgroundColor = UIColor(white: 0.15, alpha: 1.0) // charcoal background
         scnView.allowsCameraControl = true // user can rotate/zoom
         scnView.antialiasingMode = .multisampling4X
@@ -490,8 +535,10 @@ struct MeshPreviewView: UIViewRepresentable {
         fillLight.eulerAngles = SCNVector3(Float.pi / 4, -Float.pi / 3, 0)
         scene.rootNode.addChildNode(fillLight)
 
+        let rigProfile = RigProfile.load()
+
         // Dispatch to background queue for loading files and parsing OBJ
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [rigProfile] in
             var meshData: Data?
             var colorsData: Data?
 
@@ -554,7 +601,7 @@ struct MeshPreviewView: UIViewRepresentable {
                 // (transforms.json). Derived entirely from existing raw data — no capture-time
                 // cost, and built here off-main (JSON parse + node flattening) so the one-time
                 // preview attach on main stays cheap. The three-tier mode toggles visibility.
-                let markerNodes = Self.buildKeyframeMarkerNodes(scanDirectoryURL: self.scanDirectoryURL)
+                let markerNodes = Self.buildKeyframeMarkerNodes(scanDirectoryURL: self.scanDirectoryURL, rigProfile: rigProfile)
 
                 DispatchQueue.main.async {
                     let node = SCNNode(geometry: geometry)
@@ -691,6 +738,7 @@ struct MeshPreviewView: UIViewRepresentable {
         context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
         context.coordinator.keyframeStillsNode?.isHidden = !keyframeMarkerMode.showStills
         context.coordinator.keyframeMotionNode?.isHidden = !keyframeMarkerMode.showMotion
+        context.coordinator.equirectFacesNode?.isHidden = !keyframeMarkerMode.showEquirectFaces
     }
 
     func makeCoordinator() -> Coordinator {
@@ -713,6 +761,8 @@ struct MeshPreviewView: UIViewRepresentable {
         weak var keyframeStillsNode: SCNNode?
         /// Reference to the motion (sweep) capture-marker container for toggling visibility.
         weak var keyframeMotionNode: SCNNode?
+        /// Reference to the equirect cube-face frustum container for toggling visibility.
+        weak var equirectFacesNode: SCNNode?
 
         init(markerState: MarkerProjectionState) {
             self.markerState = markerState

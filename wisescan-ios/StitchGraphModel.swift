@@ -1,6 +1,7 @@
 import Foundation
 import SwiftData
 import simd
+import UIKit
 
 // MARK: - Stitch Graph Model
 //

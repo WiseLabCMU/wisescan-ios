@@ -22,7 +22,21 @@ struct CaptureView: View {
     // NOTE: capture/recording state is `internal` (not private) because the recording, alignment,
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession?
+    @State private var thetaManager = ThetaCameraManager.shared
+    @AppStorage(AppConstants.Key.rigMeasuredDyMeters) private var rigMeasuredDyMeters: Double = 0
+    /// Calibration capture is settle-gated: true while waiting for rig stillness after a tap.
+    @State private var isSettlingCalibration = false
+    /// Mesh-gap coach input: throttled classification census over the live mesh
+    /// (nil = not yet computed this scan). All scans — rig or handheld.
+    @State private var meshGapCensus: ScanCoach.MeshClassCensus?
+    @State private var meshCensusLastAt = Date.distantPast
+    /// Free storage, sampled once per recording (not per coach evaluation).
+    @State var freeStorageBytes: Int64?
+    @State var rigCalibrationManager = RigCalibrationManager.shared
     @State var saveMessage: String?
+    /// Save-failure modal: the capture is still in `pendingScan` and retryable.
+    @State var showSaveFailedAlert = false
+    @State var saveFailedReason = ""
     /// Mesh vertex count captured at record-start. The "move to start the live mesh" cue is shown
     /// until enough NEW vertices appear; a baseline makes it fire in relocalized ghost/stitch flows
     /// where `totalVertices` already starts high (would otherwise never cross an absolute threshold).
@@ -144,6 +158,378 @@ struct CaptureView: View {
         // e.g. an OS interruption with motion) — persisted so rescan/link can warn (default lets
         // the VIO-recovery construction sites, which save no map, omit it).
         var worldMapSuspect = false
+    }
+
+    /// Companion 360° still for an ACCEPTED shutter tap: capture a Theta equirect into the
+    /// active scan, tagged with the phone's ARKit world pose + timestamp at tap time. Called
+    /// from the shutter-tap handler only when `requestStillCapture()` accepts, so the Theta
+    /// inherits the phone still's one-per-stillness-pause gate — every pause yields a co-timed
+    /// phone-hi-res + 360° pair, the raw material for the deferred rig hand–eye calibration.
+    /// Inert unless a Theta is connected and a raw-data dir is open; the pose is snapshotted
+    /// here (synchronously) before the ~seconds-long trigger/download.
+    private func captureThetaStill() {
+        guard isRecording, thetaManager.isConnected,
+              !rigCalibrationManager.showsCalibrationOverlay,
+              let frame = currentARSession?.currentFrame,
+              let rawDataDir = frameCaptureSession.captureDir else { return }
+        // Toast only when the capture actually started — the manager refuses while the
+        // previous still's ~7s pipeline is in flight, and a phantom "still #N…" for a
+        // refused capture would overcount (the phone keyframe of this pause still fires;
+        // that pair is simply phone-only).
+
+        let phonePose = frame.camera.transform
+
+        let session = currentARSession
+        if thetaManager.captureStillForScan(
+            phoneTransform: phonePose,
+            timestamp: frame.timestamp,
+            into: rawDataDir,
+            samplePose: { session?.currentFrame?.camera.transform }
+        ) {
+            let stillNumber = thetaManager.scanStillCount + 1
+            showTransientMessage("📸 360° still #\(stillNumber)…", duration: 2)
+            if stillNumber == 1, rigMeasuredDyMeters <= 0.1 {
+                // First 360° still of the scan on an unmeasured rig: one actionable
+                // heads-up (the chip shows the persistent orange state).
+                showTransientMessage("⚠️ Rig height not set — poses will be estimated. Settings → 360° Rig Height.", duration: 5)
+            }
+            // Post-process pivot: no first-still spot-check / session-yaw solve here —
+            // calibration runs in the Process step against the completed scan's own
+            // stills and mesh, where the yaw reference and the poses share a session
+            // by construction.
+        }
+    }
+
+    /// Rig-geometry state line for the 360° source chip. Post-pivot the profile is only
+    /// the per-scan Process solve's warm prior, so the chip reports STATE (prior ready /
+    /// other camera / none) — not residual-colored quality: absolute px thresholds went
+    /// stale with every solver change (square-format fix, elevation cut, camera-frame
+    /// lookup, mirror fix) and the residual is scene-dependent. It stays a logged +
+    /// sidecar-stamped diagnostic; parameter repeatability is the quality metric.
+    @ViewBuilder
+    private var thetaCalibrationChip: some View {
+        let status: (color: Color, label: String) = {
+            if let profile = rigCalibrationManager.activeProfile, profile.isSolved {
+                return (.green, "Rig prior ready — refines at Process")
+            }
+            if rigCalibrationManager.currentProfile?.isSolved == true {
+                return (.yellow, "New camera — fresh solve at Process")
+            }
+            return (.gray, "No rig prior — solves at Process")
+        }()
+        HStack(spacing: 5) {
+            Circle().fill(status.color).frame(width: 7, height: 7)
+            Text(status.label)
+        }
+        .font(.caption2).bold()
+        .foregroundColor(.white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial)
+        .cornerRadius(6)
+    }
+
+    /// Rig-height state on the 360° chip: the tape-measured value when set (the solve's
+    /// bootstrap anchor), or an orange call-to-action when unset — an unmeasured rig
+    /// falls back to the mechanical envelope, where the solve's known +dy pull operates
+    /// unchecked (360post4: solved 1.30 m vs measured 0.79 m).
+    @ViewBuilder
+    private var thetaRigHeightChip: some View {
+        let measured = rigMeasuredDyMeters > 0.1
+        HStack(spacing: 5) {
+            Circle()
+                .fill(measured ? Color.cyan : Color.orange)
+                .frame(width: 7, height: 7)
+            Text(measured
+                 ? String(format: "Rig height %.2f m", rigMeasuredDyMeters)
+                 : "Rig height unset — Settings")
+        }
+        .font(.caption2).bold()
+        .foregroundColor(measured ? .white : .orange)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial)
+        .cornerRadius(6)
+    }
+
+    /// Live calibration-sufficiency meter while recording: still count, baseline
+    /// spread, and queued downloads — what the Process-step solve will have to work
+    /// with. Green when count and spread clear the floors. No solving happens live.
+    @ViewBuilder
+    private var thetaSufficiencyChip: some View {
+        let count = thetaManager.scanStillCount
+        let spread = thetaManager.scanStillSpreadMeters
+        let pending = thetaManager.pendingStillDownloads.count
+        let sufficient = count >= AppConstants.calibrationMinStillsForSolve
+            && spread >= AppConstants.calibrationMinSpreadMeters
+        HStack(spacing: 5) {
+            Circle()
+                .fill(thetaManager.isCapturing ? Color.orange
+                      : count == 0 ? Color.gray : sufficient ? Color.green : Color.yellow)
+                .frame(width: 7, height: 7)
+            Text(thetaManager.isCapturing
+                 ? "📸 exposing — hold still…"
+                 : count == 0
+                 ? "No 360° stills yet"
+                 : String(format: "%d still%@ · spread %.1f m%@",
+                          count, count == 1 ? "" : "s", spread,
+                          pending > 0 ? " · ↓\(pending)" : ""))
+        }
+        .font(.caption2).bold()
+        .foregroundColor(.white)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial)
+        .cornerRadius(6)
+    }
+
+    /// Triggers a calibration capture using the current AR frame and mesh — but only
+    /// once the rig is confirmed STILL. The phone pose is sampled at trigger time, so a
+    /// rod still swaying from the walk bakes cm-level pose error straight into the
+    /// solve (the scan flow arms keyframes on the same stillness rule; calibration had
+    /// no gate at all). Tap → settle-wait (≤2 s) → trigger; if it never settles, a
+    /// transient message asks for a re-tap.
+    private func captureCalibrationStill() {
+        guard let session = currentARSession, !isSettlingCalibration else { return }
+        isSettlingCalibration = true
+        Task { @MainActor in
+            defer { isSettlingCalibration = false }
+            var lastTransform = session.currentFrame?.camera.transform
+            var lastTime = session.currentFrame?.timestamp ?? 0
+            let deadline = Date().addingTimeInterval(2.0)
+            var settled = false
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                guard let frame = session.currentFrame, let prev = lastTransform else { break }
+                let dt = Float(frame.timestamp - lastTime)
+                let cur = frame.camera.transform
+                lastTransform = cur
+                lastTime = frame.timestamp
+                guard dt > 0 else { continue }
+                let dPos = simd_distance(
+                    SIMD3<Float>(prev.columns.3.x, prev.columns.3.y, prev.columns.3.z),
+                    SIMD3<Float>(cur.columns.3.x, cur.columns.3.y, cur.columns.3.z))
+                let dRot = simd_quatf(from: simd_quatf(prev).act(SIMD3<Float>(0, 0, 1)),
+                                      to: simd_quatf(cur).act(SIMD3<Float>(0, 0, 1))).angle
+                if dPos / dt < AppConstants.stillnessTranslationalThreshold,
+                   dRot / dt < AppConstants.stillnessAngularThreshold {
+                    settled = true
+                    break
+                }
+            }
+            guard settled, let frame = session.currentFrame else {
+                showTransientMessage("Hold the rig still, then tap Capture again.", duration: 3)
+                return
+            }
+            let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+            rigCalibrationManager.captureCalibrationStill(
+                phoneTransform: frame.camera.transform,
+                timestamp: frame.timestamp,
+                meshAnchors: meshAnchors
+            )
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
+    }
+
+    /// Ensure the AR session has mesh reconstruction enabled for calibration.
+    /// Normally mesh is only enabled at record-start (to save battery/thermals);
+    /// calibration needs it pre-record so the solver has geometry to align against.
+    /// Called when the calibration overlay appears.
+    private func ensureCalibrationMesh() {
+        guard let session = currentARSession,
+              ARCoverageView.supportsLiDAR,
+              let currentConfig = session.configuration as? ARWorldTrackingConfiguration,
+              currentConfig.sceneReconstruction == [] else { return }
+
+        let config = ARCoverageView.makeConfiguration(enableMeshReconstruction: true)
+        // Preserve existing frame semantics (depth, person segmentation, etc.)
+        config.frameSemantics = currentConfig.frameSemantics
+        session.run(config, options: []) // no reset — keep coordinate frame
+        PerfDiag.log("Enabled mesh reconstruction for rig calibration")
+    }
+
+    /// Disable mesh reconstruction after calibration is done (returns to pre-record config
+    /// to save battery/thermals).
+    private func disableCalibrationMesh() {
+        guard let session = currentARSession,
+              !isRecording, // don't disable during recording — recording needs mesh
+              ARCoverageView.supportsLiDAR,
+              let currentConfig = session.configuration as? ARWorldTrackingConfiguration,
+              currentConfig.sceneReconstruction != [] else { return }
+
+        let config = ARCoverageView.makeConfiguration(enableMeshReconstruction: false)
+        config.frameSemantics = currentConfig.frameSemantics
+        session.run(config, options: [])
+        PerfDiag.log("Disabled mesh reconstruction after calibration")
+    }
+
+    /// Pre-record calibration banner — appears over the AR view when the user starts
+    /// calibration from the Dashboard card and switches to the Capture tab.
+    /// Granular label for the calibration capture button, reflecting the pipeline stage.
+    private var calibrationButtonLabel: String {
+        if isSettlingCalibration { return "Settling — hold still…" }
+        if thetaManager.isCapturing { return "Capturing — hold steady…" }
+        if rigCalibrationManager.isCapturingCalibrationStill { return "Saving position…" }
+        return "Capture Calibration Still"
+    }
+
+    @ViewBuilder
+    private var calibrationOverlay: some View {
+        VStack(spacing: 8) {
+            if case .capturing(let count) = rigCalibrationManager.state {
+                HStack(spacing: 8) {
+                    Image(systemName: "scope")
+                        .foregroundColor(.cyan)
+                    Text("Calibration: still \(count)/\(AppConstants.calibrationStillCount)")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                }
+                Text("Walk to a position, sweep the iPad in a full circle to mesh the room, then pause and tap Capture.")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.85))
+
+                if !rigCalibrationManager.isEnvironmentSufficient {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundColor(.yellow)
+                        Text("Low mesh density — move to an area with more surfaces.")
+                            .font(.caption)
+                            .foregroundColor(.yellow)
+                    }
+                }
+
+                if let captureError = rigCalibrationManager.captureErrorMessage {
+                    HStack(alignment: .top, spacing: 4) {
+                        Image(systemName: "xmark.octagon.fill")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                        Text(captureError)
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+
+                Button(action: captureCalibrationStill) {
+                    HStack {
+                        if thetaManager.isCapturing || thetaManager.isDownloading
+                            || rigCalibrationManager.isCapturingCalibrationStill {
+                            ProgressView().tint(.black).padding(.trailing, 2)
+                        } else {
+                            Image(systemName: "camera.fill")
+                        }
+                        Text(calibrationButtonLabel)
+                            .font(.subheadline.bold())
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.cyan.opacity(0.85))
+                    .cornerRadius(10)
+                    .foregroundColor(.black)
+                }
+                .disabled(isSettlingCalibration || thetaManager.isCapturing
+                          || thetaManager.isDownloading
+                          || rigCalibrationManager.isCapturingCalibrationStill
+                          || !thetaManager.isConnected)
+
+                Button("Cancel Calibration") { rigCalibrationManager.cancelCalibration() }
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.7))
+            }
+
+            if case .solving = rigCalibrationManager.state {
+                HStack(spacing: 8) {
+                    ProgressView().tint(.cyan)
+                    Text("Solving rig calibration…")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                }
+                Text(rigCalibrationManager.solvingStatusMessage ?? "Aligning mesh edges to 360° images.")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.85))
+            }
+
+            if case .review(let residualPx, _) = rigCalibrationManager.state {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(residualPx <= AppConstants.calibrationResidualGreenPx ? .green
+                              : residualPx <= AppConstants.calibrationResidualYellowPx ? .yellow
+                              : .red)
+                        .frame(width: 8, height: 8)
+                    Text(String(format: "Calibration residual: %.1f px", residualPx))
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                }
+
+                if residualPx > AppConstants.calibrationResidualYellowPx {
+                    Text("High residual — consider re-adjusting the rig and re-calibrating.")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                        .multilineTextAlignment(.center)
+                }
+
+                HStack(spacing: 12) {
+                    Button(action: { rigCalibrationManager.acceptCalibration() }) {
+                        Text("Accept")
+                            .font(.subheadline.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.green.opacity(0.3))
+                            .cornerRadius(8)
+                            .foregroundColor(.green)
+                    }
+                    Button(action: { rigCalibrationManager.redoCalibration() }) {
+                        Text("Redo")
+                            .font(.subheadline.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.gray.opacity(0.3))
+                            .cornerRadius(8)
+                            .foregroundColor(.white)
+                    }
+                    // Third choice: discard this result WITHOUT starting over — the
+                    // previously saved calibration (if any) stays in force.
+                    Button(action: { rigCalibrationManager.cancelCalibration() }) {
+                        Text("Cancel")
+                            .font(.subheadline.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.gray.opacity(0.15))
+                            .cornerRadius(8)
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                }
+            }
+
+            if case .failed(let reason) = rigCalibrationManager.state {
+                HStack(spacing: 8) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.red)
+                    Text("Calibration failed")
+                        .font(.subheadline.bold())
+                        .foregroundColor(.white)
+                }
+                Text(reason)
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.75))
+                    .multilineTextAlignment(.center)
+
+                Button("Retry") { rigCalibrationManager.beginCalibration() }
+                    .font(.subheadline.bold())
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 20)
+                    .background(Color.cyan.opacity(0.85))
+                    .cornerRadius(8)
+                    .foregroundColor(.black)
+            }
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .cornerRadius(16)
+        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .padding(.bottom, 120)
     }
 
     /// Loads ghost mesh data from the scan to extend, caching it in @State. SwiftData reads stay
@@ -419,10 +805,17 @@ struct CaptureView: View {
                 // taps; fires nothing unless recording. A warning haptic answers taps
                 // while moving ("hold still first"); capture feedback (shutter click +
                 // flash) comes from the accepted save itself.
+                //
+                // MERGE FUSION (still-source-360 × capture-quality): an ACCEPTED tap also
+                // fires the Theta 360° still (inert when no camera is connected), so each
+                // stillness pause yields a co-timed phone-hi-res + 360° pair with a shared
+                // phone pose — the calibration raw material this branch exists for. A
+                // refused tap fires neither, keeping the pair invariant.
                 .onTapGesture {
                     guard isRecording else { return }
                     if frameCaptureSession.requestStillCapture() {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        captureThetaStill()
                     } else {
                         UINotificationFeedbackGenerator().notificationOccurred(.warning)
                     }
@@ -439,6 +832,15 @@ struct CaptureView: View {
                 // Main's VIO-loss guard: halt + prompt save/rescan when tracking is lost mid-scan.
                 .onChange(of: vioCompromised) { _, lost in
                     if lost { handleVIOCompromised() }
+                }
+                // Rig calibration: enable mesh reconstruction when calibration starts,
+                // disable when it ends (pre-record only — recording enables mesh itself).
+                .onChange(of: rigCalibrationManager.isCalibrating) { _, calibrating in
+                    if calibrating {
+                        ensureCalibrationMesh()
+                    } else {
+                        disableCalibrationMesh()
+                    }
                 }
 
             // Loading overlay while AR session initializes (camera + privacy models + depth pipeline)
@@ -470,6 +872,13 @@ struct CaptureView: View {
             // Permissions Overlay (Preempts user if not authorized)
             PermissionsOverlay(locationManager: locationManager)
                 .ignoresSafeArea()
+
+            // Rig calibration overlay — pre-record only, when calibration is active.
+            // Shows capture progress + solver spinner. Review/accept and failure/retry
+            // display on the Dashboard card (auto-navigated by ContentView).
+            if !isRecording && isARSessionReady && rigCalibrationManager.showsCalibrationOverlay {
+                calibrationOverlay
+            }
 
             // Stillness reticle — the hold-still-then-tap affordance. The ring fills as
             // the device settles, locks green when a shutter tap will capture, and shows
@@ -542,19 +951,9 @@ struct CaptureView: View {
 
                 // Top Controls
                 HStack {
-                    // Privacy Filter Toggle
-                    HStack {
-                        Text("Privacy Filter")
-                            .font(.subheadline)
-                            .foregroundColor(.white)
-                        Toggle("", isOn: $isPrivacyFilterOn)
-                            .labelsHidden()
-                            .tint(.green)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(20)
+                    PrivacyFilterPill(isOn: $isPrivacyFilterOn,
+                                      locked: isRecording,
+                                      show360Note: thetaManager.isConnected)
 
                     Spacer()
 
@@ -709,6 +1108,33 @@ struct CaptureView: View {
                             }
                         }
                     }
+                } else if thetaManager.isConnected {
+                    // 360° source chip — same corner as the wearable PiP (the two capture
+                    // sources are mutually exclusive): which camera feeds this scan, and
+                    // whether its rig pose is calibrated. Turns orange for the rest of the
+                    // scan if the first-still spot-check flags drift (the transient toast
+                    // alone was easy to miss).
+                    HStack {
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 6) {
+                            Text("\(thetaManager.model ?? "360° camera")\(thetaManager.serialNumber.map { " · \($0)" } ?? "")")
+                                .font(.caption2).bold()
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(.ultraThinMaterial)
+                                .cornerRadius(6)
+
+                            thetaCalibrationChip
+
+                            thetaRigHeightChip
+
+                            if isRecording {
+                                thetaSufficiencyChip
+                            }
+                        }
+                        .padding(.trailing, AppConstants.UI.pipPaddingX)
+                    }
                 }
 
                 Spacer()
@@ -785,7 +1211,7 @@ struct CaptureView: View {
                                                 .foregroundColor(.green)
                                             Text("sharp")
                                                 .font(.caption2)
-                                                .foregroundColor(.gray)
+                                                .foregroundColor(.white.opacity(0.6))
                                         }
                                         HStack(spacing: 4) {
                                             Image(systemName: "photo.on.rectangle")
@@ -796,7 +1222,7 @@ struct CaptureView: View {
                                                 .foregroundColor(.white.opacity(0.6))
                                             Text("total")
                                                 .font(.caption2)
-                                                .foregroundColor(.gray)
+                                                .foregroundColor(.white.opacity(0.6))
                                         }
                                         Spacer()
                                         // Stillness indicator
@@ -817,7 +1243,7 @@ struct CaptureView: View {
                                     HStack {
                                         Text("Session Capacity")
                                             .font(.caption2)
-                                            .foregroundColor(.gray)
+                                            .foregroundColor(.white.opacity(0.7))
                                         Spacer()
                                         Text("\(scanStats.capacityPercent)%")
                                             .font(.caption2).bold()
@@ -876,8 +1302,9 @@ struct CaptureView: View {
                                             .foregroundColor(.white.opacity(0.7))
                                     }
                                 })
-                                .disabled(isAnalyzing || isProcessingMesh || isWaitingToSave)
-                                .opacity(isAnalyzing ? 0.4 : 1.0)
+                                .disabled(isAnalyzing || isProcessingMesh || isWaitingToSave
+                                          || rigCalibrationManager.showsCalibrationOverlay)
+                                .opacity(isAnalyzing || rigCalibrationManager.showsCalibrationOverlay ? 0.4 : 1.0)
                             }
 
                             // Record button
@@ -925,7 +1352,11 @@ struct CaptureView: View {
                             // pre-recording window so a tap can't race ahead of the alignment overlay
                             // and start an un-aligned scan (the ~90°/offset ghost-jump race).
                             // activeScanCase is set synchronously at the trigger; cleared on save.
+                            // Also block during rig calibration overlay (capturing / solving /
+                            // review / failed) — the calibration mesh-reconstruction mode and the
+                            // still-capture pipeline conflict with scan recording.
                             .disabled(isProcessingMesh || isWaitingToSave || isStabilizingBeforeSave || isAnalyzing || showAnalysisReport
+                                      || rigCalibrationManager.showsCalibrationOverlay
                                       || (scanStore.activeScanCase == .linkAdjacent && !isRecording))
                             .offset(y: isRecording ? -20 : 0)
                         }
@@ -1246,6 +1677,10 @@ struct CaptureView: View {
             idleTeardownTimer?.invalidate()
             idleTeardownTimer = nil
             pauseARSession = false
+            // Camera power kindness: entering the capture tab keeps the Theta awake
+            // (yaw-reference stability + instant still triggers) — the idle teardown
+            // below restores its auto-sleep, mirroring the AR session's own ethos.
+            thetaManager.setKeepAwake(true)
 
             if let locId = scanStore.activeLocationForScan {
                 let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
@@ -1344,6 +1779,8 @@ struct CaptureView: View {
                 let processing = isProcessingMesh || pendingScan != nil
                 if selectedTab != 1 && !isRecording && !processing && !scanStore.isProcessingScan {
                     pauseARSession = true
+                    // Same idle moment: let the camera nap too (sleepDelay restored).
+                    Task { @MainActor in ThetaCameraManager.shared.setKeepAwake(false) }
                 }
             }
 
@@ -1437,6 +1874,14 @@ struct CaptureView: View {
             onDiscardLive: { discardInProgressScan(isExtendFlow: false, completion: nil) },
             onDiscardPending: { discardPendingScan() }
         ))
+        .alert("Save Failed — Scan Not Lost", isPresented: $showSaveFailedAlert) {
+            Button("Try Again") { savePendingScan() }
+            Button("Not Now", role: .cancel) {}
+        } message: {
+            Text("The scan could not be written to storage, so nothing was saved — but the "
+                 + "capture is still held in memory and Try Again will re-attempt it. Free up "
+                 + "space first if storage is low.\n\n\(saveFailedReason)")
+        }
         .alert("Insufficient Tracking", isPresented: $showInsufficientTrackingAlert) {
             // A scan without a usable world map can't be relocalized or extended, so we don't offer
             // "Save Anyway". Recording is still live here (stopRecording returned early without
@@ -1746,16 +2191,60 @@ struct CaptureView: View {
     /// Evaluates ScanCoach rules engine with current scan state.
     /// Respects the Settings toggle: CRITICAL/WARNING always evaluate,
     /// GUIDANCE/INFO are suppressed when coaching is disabled.
+    /// One stat() per recording — feeds the coach's low-storage warning, and the
+    /// number lands in the log so a later save failure has context.
+    func sampleStorageHeadroom() {
+        freeStorageBytes = ScanFileManager.freeDiskBytes()
+        if let free = freeStorageBytes, free < AppConstants.lowStorageWarnBytes {
+            PerfDiag.log("[Storage] low headroom at record start: \(ScanFileManager.formattedFreeDisk()) free")
+        }
+    }
+
     private func evaluateScanCoach() {
         guard isRecording else { return }
+        refreshMeshGapCensusIfDue()
         scanCoach.evaluate(
             scanStats: scanStats,
             frameCaptureSession: frameCaptureSession,
             capturedRoom: finalCapturedRoom,
             semanticLabelingEnabled: semanticLabeling,
             isRecording: isRecording,
-            coachingEnabled: scanCoachingEnabled
+            coachingEnabled: scanCoachingEnabled,
+            meshGapCensus: meshGapCensus,
+            rigMode: thetaManager.isConnected,
+            freeStorageBytes: freeStorageBytes
         )
+    }
+
+    /// Throttled (5 s) classification census over the live mesh anchors — the mesh-gap
+    /// coach input for every scan (rig or handheld; field verdict 2026-08-05). Runs
+    /// off-main; ~ms for 300k faces. Each refresh logs the counts ([Coach] census) so
+    /// the floor/ceiling thresholds can be tuned from real runs — 360post11's floor
+    /// prompt staying quiet was count-correct but left us blind on the margin.
+    private func refreshMeshGapCensusIfDue() {
+        guard Date().timeIntervalSince(meshCensusLastAt) > 5,
+              let anchors = currentARSession?.currentFrame?.anchors.compactMap({ $0 as? ARMeshAnchor }),
+              !anchors.isEmpty else { return }
+        meshCensusLastAt = Date()
+        Task.detached(priority: .utility) {
+            var ceiling = 0
+            var floor = 0
+            var wall = 0
+            var total = 0
+            for anchor in anchors {
+                let geometry = anchor.geometry
+                guard let cls = geometry.classification, cls.count == geometry.faces.count else { continue }
+                let base = cls.buffer.contents().advanced(by: cls.offset)
+                total += cls.count
+                for faceIdx in 0..<cls.count {
+                    let raw = base.advanced(by: faceIdx * cls.stride).assumingMemoryBound(to: UInt8.self).pointee
+                    if raw == UInt8(ARMeshClassification.ceiling.rawValue) { ceiling += 1 } else if raw == UInt8(ARMeshClassification.floor.rawValue) { floor += 1 } else if raw == UInt8(ARMeshClassification.wall.rawValue) { wall += 1 }
+                }
+            }
+            let census = ScanCoach.MeshClassCensus(ceiling: ceiling, floor: floor, wall: wall, total: total)
+            PerfDiag.log("[Coach] census: floor=\(census.floor) ceiling=\(census.ceiling) wall=\(census.wall) total=\(census.total)")
+            await MainActor.run { meshGapCensus = census }
+        }
     }
 
     // MARK: - Space Analysis
@@ -1785,7 +2274,7 @@ struct CaptureView: View {
     }
 
     // Recording / save / stitching methods are organized into extension files:
-    // CaptureView+Recording.swift  — toggleRecording, startRecording, stopRecording, 
+    // CaptureView+Recording.swift  — toggleRecording, startRecording, stopRecording,
     // performStopRecording, savePendingScan, etc.
     //   CaptureView+Extend.swift     — pinAndExtend (Flow A: mid-session extend)
     //   CaptureView+Alignment.swift  — confirmAlignment, cancelAlignment (Flow B: cross-session alignment)
@@ -1886,6 +2375,65 @@ struct CaptureView: View {
         while let presented = top.presentedViewController { top = presented }
         top.present(alert, animated: true)
         return true
+    }
+}
+
+/// Privacy Filter toggle pill. Expands with an informed-consent warning while OFF — capturing
+/// people is a supported, deliberate choice (e.g. a group-photo 3D model), and with a 360°
+/// camera connected that choice includes everyone around the operator, not just who the phone
+/// sees. LOCKED while recording: the setting must describe the whole scan as one binary state —
+/// a mid-scan flip half-masks the capture (segmentation masks exist only for the ON portion)
+/// while the exported `privacy_filter` flag records just the stop-time value, so the export
+/// blur gate would mis-reason about the unmasked half.
+private struct PrivacyFilterPill: View {
+    @Binding var isOn: Bool
+    let locked: Bool
+    let show360Note: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Privacy Filter")
+                    .font(.subheadline)
+                    .foregroundColor(.white)
+                Toggle("", isOn: $isOn)
+                    .labelsHidden()
+                    .tint(.green)
+                    .disabled(locked)
+            }
+            if !isOn {
+                Text(warningText)
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+        .cornerRadius(16)
+        .frame(maxWidth: 260, alignment: .leading)
+        .opacity(locked ? 0.5 : 1)
+        .animation(.easeInOut(duration: 0.2), value: isOn)
+    }
+
+    private var warningText: String {
+        var text = "People in view will be captured unblurred — moving people will corrupt texture maps."
+        if show360Note {
+            text += " The connected 360° camera captures ALL directions, including people behind you."
+        }
+        return text
+    }
+}
+
+#Preview("Privacy pill (off, 360)") {
+    ZStack {
+        Color.black.ignoresSafeArea()
+        VStack(spacing: 12) {
+            PrivacyFilterPill(isOn: .constant(true), locked: false, show360Note: false)
+            PrivacyFilterPill(isOn: .constant(false), locked: false, show360Note: false)
+            PrivacyFilterPill(isOn: .constant(false), locked: true, show360Note: true)
+        }
     }
 }
 

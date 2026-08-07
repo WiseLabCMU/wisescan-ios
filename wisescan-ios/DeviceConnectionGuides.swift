@@ -52,7 +52,7 @@ private struct GuideNoteRow: View {
     }
 }
 
-/// Shared background + list chrome so the guides match the main User Guide.
+/// Shared background + list chrome so both guides match the main User Guide.
 private struct ConnectionGuideScaffold<Content: View>: View {
     let title: String
     @ViewBuilder let content: Content
@@ -122,6 +122,65 @@ struct MetaConnectionGuideView: View {
     }
 }
 
+// MARK: - Ricoh Theta
+
+struct ThetaConnectionGuideView: View {
+    var body: some View {
+        ConnectionGuideScaffold(title: "Connect Ricoh Theta") {
+            Section {
+                GuideStepRow(number: 1, title: "Power on & enable Wi‑Fi",
+                             text: "Turn on the Theta and press its Wi‑Fi button to enter wireless (direct) mode. "
+                                 + "The Wi‑Fi lamp lights up when the camera is broadcasting its own network.")
+                GuideStepRow(number: 2, title: "Find the camera's network",
+                             text: "The Wi‑Fi name (SSID) starts with \"THETA\". The default password is the camera's serial "
+                                 + "number digits, printed on the label on the underside of the camera.")
+                GuideStepRow(number: 3, title: "Join it in iOS Settings",
+                             text: "Open Settings → Wi‑Fi and join the THETA… network. While connected, your phone uses the "
+                                 + "camera's network instead of your usual Wi‑Fi (that's expected).")
+                GuideStepRow(number: 4, title: "Check Connection",
+                             text: "In Scan4D → Dashboard → 360° Camera, tap \"Check Connection\". Approve the Local Network "
+                                 + "prompt the first time. The card then shows the camera model, firmware, and battery level.")
+                GuideStepRow(number: 5, title: "Test Shutter",
+                             text: "Tap \"Test Shutter\" to fire a photo. The card reports the round-trip time and the file the "
+                                 + "camera saved — confirming Scan4D can trigger the camera.")
+            } header: {
+                Text("STEPS")
+            } footer: {
+                Text("Supported over the Open Spherical Camera (OSC) Web API — Ricoh Theta X and other OSC-compatible Theta models.")
+                    .font(.caption2).foregroundColor(.gray)
+            }
+            .listRowBackground(Color.white.opacity(0.05))
+
+            Section {
+                GuideNoteRow(icon: "wrench.and.screwdriver.fill",
+                             text: "Early access: this version connects over the camera's direct Wi‑Fi and triggers a still to validate the link. "
+                                 + "Automatic Wi‑Fi join, Bluetooth trigger, image download, and 360° rig calibration are coming later.",
+                             color: .cyan)
+            } header: {
+                Text("WHAT WORKS TODAY")
+            }
+            .listRowBackground(Color.white.opacity(0.05))
+
+            Section {
+                GuideNoteRow(icon: "wifi.exclamationmark",
+                             text: "\"Can't reach the camera\"? Re-join the THETA Wi‑Fi in Settings — iOS may auto-switch back to a known "
+                                 + "network — make sure the camera is awake, then tap Check Connection again.",
+                             color: .orange)
+                GuideNoteRow(icon: "battery.25",
+                             text: "The camera sleeps its Wi‑Fi to save power. Wake the camera (press a button) before reconnecting.",
+                             color: .orange)
+            } header: {
+                Text("TROUBLESHOOTING")
+            }
+            .listRowBackground(Color.white.opacity(0.05))
+        }
+    }
+}
+
 #Preview("Meta") {
     NavigationStack { MetaConnectionGuideView() }
+}
+
+#Preview("Theta") {
+    NavigationStack { ThetaConnectionGuideView() }
 }

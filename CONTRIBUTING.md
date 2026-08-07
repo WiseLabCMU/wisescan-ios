@@ -13,15 +13,30 @@ Use `@AppStorage` for persistent user preferences and UI toggles.
 - Battery is reclaimed by an **idle timer** (`AppConstants.arIdleTeardownSeconds`) that pauses the session **only after the user has left the capture tab and stayed away**; returning resumes in the nominal config with no main-thread stall. Rapid successive scans return before it fires and stay hot.
 - Leaving the capture **tab** abandons an in-progress Extend (its ghost/world-map state is cleared in `CaptureView.onDisappear`); the user re-taps Extend to restore it. A modal sheet *over* the capture screen (e.g. Settings) does **not** leave the tab, so it stays hot — that's intentional (user may be flipping AR↔VR before recording).
 
+### 1.5 Units & time conventions
+
+- **Persist metric, always.** Anything written to disk, sidecars, exports, UserDefaults,
+  or sent across systems is SI (meters, radians noted where used). UI may *display and
+  accept* imperial, converting at the UI edge only (see the 360° Rig Height field in
+  SettingsView for the pattern). Never store a value whose unit depends on a user
+  preference.
+- **Wall-clock time is UTC epoch milliseconds**, internally and across systems —
+  sidecars, telemetry, filenames that encode time, anything another machine will parse.
+  No local-timezone strings, no seconds-resolution truncation when ordering matters.
+- **Monotonic timestamps stay monotonic.** ARKit frame timestamps (and anything else
+  boot-relative) are valid for intra-session deltas only — never let one masquerade as
+  wall-clock time in persisted data; if both are needed, store both, labeled.
+
 ### 2. Privacy Filtering Patterns
 
 Privacy has two distinct paths — **do not conflate them**:
 
 - **Live on-screen indicator:** a cheap **red-eye marker** per person, driven entirely by ARKit's already-computed `.personSegmentationWithDepth` stencil (`ARFrame.segmentationBuffer`) — **no per-frame Vision pass and no CoreImage render**. Running a per-frame `VNGeneratePersonSegmentationRequest` for a live overlay starves VIO (see Performance). The indicator uses a small retained confidence grid (`PrivacyEyeTracker`) so markers don't flicker.
-- **Saved data (deferred blur):** during capture, raw (unblurred) frames are saved alongside ARKit's person segmentation masks (`masks/` directory, ~5-15KB grayscale PNGs at 256×192). Privacy blur is applied at **export time** in `ScanExportManager.applyPrivacyBlurAtExport()` — pixelating person regions in images and zeroing them in depth maps using the saved masks. This deferred approach eliminates 50-200ms/frame of privacy encode from the capture ioQueue, preventing ARFrame retention backpressure and VIO tracking loss. Raw images exist only in the app's sandboxed container; **no unblurred image or unmasked depth ever leaves the device**.
+- **Saved data (deferred blur):** during capture, raw (unblurred) frames are saved alongside ARKit's person segmentation masks (`masks/` directory, ~5-15KB grayscale PNGs at 256×192). Privacy blur is applied at **export time** in `ScanExportManager.applyPrivacyBlurAtExport()` — pixelating person regions in images and zeroing them in depth maps using the saved masks. This deferred approach eliminates 50-200ms/frame of privacy encode from the capture ioQueue, preventing ARFrame retention backpressure and VIO tracking loss. Raw images exist only in the app's sandboxed container.
+- **THE INVARIANT — with Privacy Filter ON, no unblurred person imagery ever leaves the device.** Every path that stages captured imagery for export or upload (phone frames, proxy/glasses frames, 360° equirect stills — and any capture source you add) MUST route through the export-time privacy passes in `ScanExportManager`, and must **fail CLOSED**: imagery that cannot be verified/blurred is excluded from the export, never shipped raw. The toggle is one binary state per scan (locked during recording) and is recorded in exports as `privacy_filter`; toggle OFF is the user's informed choice to capture people (consent warning UX: see the revisit note in [docs/design/still-source-360.md](docs/design/still-source-360.md)).
 - **Mesh exports:** person geometry is excluded from the exported mesh/point cloud.
 - **3D anchors:** re-source `face_anchors` from the **stencil**, not a second Vision pass — one confidence-weighted, observation-gated body-center centroid **per person** (not per grid cell, or they fragment across the body). Accumulated at capture time via `PrivacyBlurUtil.personCentroids(in:)` (cheap — just a few depth reads per centroid).
-- **360° stills are NOT blurred yet:** the Theta/equirect still source ([docs/design/still-source-360.md](docs/design/still-source-360.md)) writes raw equirectangular JPEGs to `raw_data/theta_stills/`. A 360° frame sees the whole room — including people behind the operator that the phone's forward-facing stencil never captured — and **per-face equirect blur is a deferred P3 invariant that is not yet implemented**. Until it lands, a scan exported with 360° stills contains unblurred imagery of bystanders. Treat these as device-only: do not export, share, or commit them.
+- **360° stills:** `raw_data/equirect_stills/` (camera-agnostic — any equirectangular source writes here) holds raw equirects on-device; they only leave via `ScanExportManager.stageEquirectStills`, which runs the per-cube-face person pass (`EquirectPrivacyBlur` — detection on raw equirect is unreliable near the poles, so faces are resampled to pinhole views first). A 360° frame sees the whole room — including people behind the operator the phone stencil never saw — so this path is fail-closed per still (verification failure excludes the JPG + pose sidecar). Note: currently blurs regardless of the toggle; converging on toggle-governed-with-consent-warning before merge (see the design doc's revisit note). The raw stills remain commit-blocked by the privacy guard either way.
 
 #### Debug-only file sharing (never commit)
 
@@ -36,13 +51,15 @@ To inspect saved scans (`Documents/Scans/…/raw_data/`) on-device via the **Fil
 
 They expose the app's entire Documents folder — including the raw, unblurred 360° stills above — so they are **debug-only and must never be committed or shipped in a production build**. Keep them as a local working-tree edit; when you need to commit *other* `Custom-Info.plist` changes, stage them selectively with `git add -p` so the debug keys stay out.
 
+The same keys can also leak via **Xcode build settings**: `INFOPLIST_KEY_UIFileSharingEnabled = YES` in `project.pbxproj` writes the identical key into the generated Info.plist at build time. The hooks scan `.pbxproj` files for the key names too (verified 2026-07-30 — the plist-only check originally missed this spelling).
+
 **Enforcement (install once after cloning):**
 
 ```bash
 ./scripts/install-hooks.sh
 ```
 
-- `scripts/pre-commit` blocks committing those keys (checked against the *staged* plist blob, so a `git add -p` that omits the debug hunk passes) and blocks staging raw capture artifacts (`raw_data/`, `theta_stills/`, `R#######.JPG`, `*.xcappdata`).
+- `scripts/pre-commit` blocks committing those keys (checked against the *staged* plist blob, so a `git add -p` that omits the debug hunk passes) and blocks staging raw capture artifacts (`raw_data/`, `equirect_stills/`, `R#######.JPG`, `still_####.JPG`, `*.xcappdata`).
 - `scripts/pre-push` re-checks the pushed branch tip as a backstop against `git commit --no-verify`.
 - The same paths are also `.gitignore`d as defense-in-depth.
 

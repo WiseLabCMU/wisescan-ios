@@ -66,6 +66,10 @@ private struct StitchRoomRow: Identifiable {
 
 struct CombinedMeshScreen: View {
     let request: ComponentRenderRequest
+    /// Colorize request for the shown scans (ids). Provided by the presenter, which owns
+    /// the models and the shared bulk-color path; nil hides the option. The screen
+    /// dismisses on selection so the per-tile progress is visible.
+    var onColor: (([UUID]) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
@@ -313,6 +317,40 @@ struct CombinedMeshScreen: View {
         }
     }
 
+    /// Color the shown scans through the presenter's shared bulk path: direct when one
+    /// map is shown, all-maps + per-map menu when several. Dismisses so tile progress shows.
+    @ViewBuilder
+    private func colorButton(present: [CombinedMeshItem], onColor: @escaping ([UUID]) -> Void) -> some View {
+        if present.count == 1 {
+            Button {
+                onColor(present.map(\.id))
+                dismiss()
+            } label: {
+                Image(systemName: "paintbrush")
+            }
+        } else {
+            Menu {
+                Button {
+                    onColor(present.map(\.id))
+                    dismiss()
+                } label: {
+                    Label("Color All \(present.count) Maps", systemImage: "paintbrush.fill")
+                }
+                Divider()
+                ForEach(present) { item in
+                    Button {
+                        onColor([item.id])
+                        dismiss()
+                    } label: {
+                        Text("Color \(item.name)")
+                    }
+                }
+            } label: {
+                Image(systemName: "paintbrush")
+            }
+        }
+    }
+
     @ToolbarContentBuilder
     private func toolbarContent(present: [CombinedMeshItem]) -> some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
@@ -325,6 +363,10 @@ struct CombinedMeshScreen: View {
                         Image(systemName: showLegend ? "list.bullet.rectangle.fill" : "list.bullet.rectangle")
                     }
                 }
+                if let onColor, !present.isEmpty {
+                    colorButton(present: present, onColor: onColor)
+                }
+
                 Button { semanticViewMode = semanticViewMode.next } label: {
                     Image(systemName: semanticViewMode.iconName)
                 }

@@ -112,6 +112,19 @@ extension CaptureView {
         recordingSeconds = 0
         saveMessage = nil
         scanCoach.reset()
+        sampleStorageHeadroom()
+        // Reset the per-scan 360° still counter so equirect_stills/ numbering starts at 1.
+        ThetaCameraManager.shared.beginScanStillSession(rawDataDir: frameCaptureSession.captureDir)
+
+        // Rod-stillness rig mode: with the 360° camera riding above the phone, tighten
+        // the angular stillness gate by the lever arm (measured rig height when set,
+        // mechanical prior otherwise). Phone-only scans keep the base thresholds.
+        if ThetaCameraManager.shared.isConnected {
+            let measured = Float(UserDefaults.standard.double(forKey: AppConstants.Key.rigMeasuredDyMeters))
+            frameCaptureSession.rigLeverArmMeters = measured > 0.1 ? measured : AppConstants.rigRodHeightMeters
+        } else {
+            frameCaptureSession.rigLeverArmMeters = nil
+        }
 
         // Start frame capture for raw data export
         if let session = currentARSession {
@@ -836,9 +849,14 @@ extension CaptureView {
         )
 
         guard let savedScan else {
-            // Required mesh write failed — nothing was persisted. Keep pendingScan intact so the
-            // user can retry rather than silently losing the capture, and surface the failure.
-            saveMessage = "Save failed — please try again"
+            // Required mesh write failed — nothing was persisted, and the rollback also
+            // removes the location, so the user sees NO trace of the scan anywhere
+            // (field 2026-08-06: read as "the scan vanished"). pendingScan is kept, so
+            // the capture is still retryable — say so in a modal the user cannot miss,
+            // with the actual reason (a caption under the record button was missed).
+            saveFailedReason = ScanFileManager.shared.lastSaveFailureReason ?? "unknown error"
+            saveMessage = nil
+            showSaveFailedAlert = true
             isWaitingToSave = false
             return
         }

@@ -36,6 +36,23 @@ struct ContentView: View {
                     .tag(2)
             }
             .environment(scanStore)
+            // Auto-navigate tabs for the rig calibration flow:
+            //   Dashboard "Calibrate" → Capture tab (AR mesh + stills) → Dashboard (review results)
+            // The calibration overlay and AR session (mesh) live on the capture tab;
+            // the review/accept UI lives on the Dashboard card.
+            .onChange(of: RigCalibrationManager.shared.state) { _, newState in
+                switch newState {
+                case .capturing, .solving:
+                    // Stills + solver run on the Capture tab (needs AR session)
+                    if selectedTab != 1 { selectedTab = 1 }
+                case .review, .failed:
+                    // Review and failure UI are now integrated directly into the Capture tab
+                    // so the user can immediately begin a scan without switching tabs.
+                    if selectedTab != 1 { selectedTab = 1 }
+                case .idle:
+                    break // stay wherever the user is
+                }
+            }
         }
         .preferredColorScheme(.dark)
         .onAppear {

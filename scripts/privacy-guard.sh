@@ -19,7 +19,7 @@
 PG_FORBIDDEN_PLIST_KEYS="UIFileSharingEnabled LSSupportsOpeningDocumentsInPlace"
 
 # Path patterns for raw capture artifacts that must never be committed.
-PG_FORBIDDEN_PATH_REGEX='(^|/)(raw_data|theta_stills)/|(^|/)R[0-9]{7}\.JPG$|\.xcappdata(/|$)'
+PG_FORBIDDEN_PATH_REGEX='(^|/)(raw_data|equirect_stills)/|(^|/)R[0-9]{7}\.JPG$|(^|/)still_[0-9]{4}\.JPG$|\.xcappdata(/|$)'
 
 # pg_plist_violations <plist-content>
 # Echoes a space-separated list of any forbidden keys found. Empty output => clean.
@@ -27,6 +27,21 @@ pg_plist_violations() {
     local content="$1" key hits=""
     for key in $PG_FORBIDDEN_PLIST_KEYS; do
         if printf '%s\n' "$content" | grep -q "<key>$key</key>"; then
+            hits="$hits $key"
+        fi
+    done
+    printf '%s' "$hits"
+}
+
+# pg_pbxproj_violations <pbxproj-content>
+# Echoes forbidden keys reachable via Xcode build settings. INFOPLIST_KEY_ passthroughs
+# (e.g. `INFOPLIST_KEY_UIFileSharingEnabled = YES`) generate the same Info.plist keys at
+# build time — the identical leak in a different spelling, which the *.plist check never
+# sees. Matching the bare key name also catches INFOPLIST_FILE-style indirection labels.
+pg_pbxproj_violations() {
+    local content="$1" key hits=""
+    for key in $PG_FORBIDDEN_PLIST_KEYS; do
+        if printf '%s\n' "$content" | grep -q "$key"; then
             hits="$hits $key"
         fi
     done

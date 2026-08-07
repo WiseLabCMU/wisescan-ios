@@ -207,6 +207,10 @@ struct UserGuideView: View {
                         guideRow(icon: "eyeglasses", title: "Connect Meta Ray-Ban",
                                  text: "Pair in Meta AI, grant camera access, and stream proxy frames during a scan.")
                     }
+                    NavigationLink(destination: ThetaConnectionGuideView()) {
+                        guideRow(icon: "camera.aperture", title: "Connect Ricoh Theta",
+                                 text: "Join the 360° camera's Wi‑Fi and trigger stills from the Dashboard.")
+                    }
                 } header: {
                     Text("DEVICE CONNECTION")
                 } footer: {
@@ -255,6 +259,7 @@ struct UserGuideView: View {
 }
 
 // MARK: - Helper Views
+// In a private extension so the main struct body stays under the type_body_length limit.
 
 private extension UserGuideView {
     @ViewBuilder
