@@ -1445,6 +1445,26 @@ NotifyState? Without (2), a BLE shutter still needs an OSC round-trip for the fi
 URL, which erases most of the win; without (1), the increment isn't worth a
 per-connection auth state machine at all.
 
+## Processing/coloring flow model (field redesign, 2026-08-06 — 5e35144)
+
+One mental model everywhere:
+- **Automated:** structural post-processing (download sweep → calibration →
+  registration → proxy) runs at SAVE and on LANDING at a location. Users never think
+  about it. Late-arriving inputs (the deferred RoomBuilder's roomplan.json) simply
+  make more steps achievable for the next automated pass — or for Color.
+- **Color (the primary per-scan button):** "make this scan colored, whatever that
+  takes" — finishes any pending structural stragglers, then (re)colors. This absorbs
+  the two-click mystery (auto-process froze its step list before roomplan.json
+  landed; the first Process click was silently finishing registration/proxy).
+- **Long-press menu = recovery tools:** "Re-run Processing" (structural only, says
+  "Nothing to process" when clean) and "Redo 360° Calibration" (strips provenance,
+  re-solves). For camera-gone downloads, late roomplans, pipeline upgrades.
+- **Gates stay structural:** upload/save-to-files still require post-processing
+  complete and offer "Post-process Now" (structural, no color).
+- Bulk edit-mode Process/Color buttons unchanged for now (power tools); if the
+  single-scan model proves out, bulk Color should adopt the same
+  structural-first-then-color semantics.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
