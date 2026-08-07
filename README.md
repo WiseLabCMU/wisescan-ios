@@ -3,7 +3,8 @@
 Scan4D is the time-series reality capture application for the WiSEScan platform. It acts as an advanced sensor client designed to bridge high-fidelity device data with backend reconstruction servers.
 
 **Requires:** iOS 17.0+ · ARKit-capable iPhone or iPad · Xcode 15+  
-**Recommended:** LiDAR-equipped device (iPhone/iPad Pro) for full mesh + depth capture
+**Recommended:** LiDAR-equipped device (iPhone/iPad Pro) for full mesh + depth capture  
+**Optional:** rig-mounted Ricoh Theta (X fully supported; Z1 Wi-Fi-only) as a 360° still source
 
 **Backend Integration:** Receivers: [wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload) (testing fallback) and [wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion) (production Prefect pipeline).
 
@@ -49,10 +50,11 @@ To check a device: the `[ARConfig]` launch log lists every supported format with
 - **Space Staging Analyzer:** Optional pre-scan analysis phase that checks room conditions before recording. Tap "Analyze" to start a 360° sweep — the app measures ambient lighting, detects doors/screens via RoomPlan, and checks for people in the scene. A report modal summarizes findings with actionable tips (privacy-filter-aware people messaging).
 - **Lite Mode:** Non-LiDAR devices capture images + camera poses for server-side photogrammetry. A persistent banner indicates lite mode. *(Note: Lite mode is only available in local debug builds for testing. TestFlight and App Store releases strictly require LiDAR-equipped devices.)*
 - **Scan4D (Rescan & Link Adjacent):** Group scans by Location and set the workflow intent when saving. The two intents capture different dimensions of a space: **Rescan Space** is *temporal* — re-capture the same physical area at a later time so the backend can diff or merge versions; **Link Adjacent Space** is *spatial* — capture a neighboring area and stitch the chunks into one larger model. Both relocalize against the previous scan's `ARWorldMap` and show a configurable ghost-mesh overlay (default: magenta) of that prior capture. Adjacent chunks join at a shared boundary anchor: drop one mid-scan with **Pin & Extend**, or relocalize back to it in a later session through a guided alignment overlay.
-- **Post-Scan Processing & Plane Registration:** The save path persists raw artifacts only; the room layout (RoomPlan) builds automatically seconds after save, and everything else derived finishes via an explicit **Process** step (per-card button or bulk "Process All" with per-tile progress): **plane registration** aligns each rescan into its location's **canonical coordinate frame** (gravity-locked 4-DOF wall/floor matching with an observability gate, so unobservable solves are refused rather than guessed), a lightweight **ghost proxy** is generated for future rescan overlays, and camera-based vertex coloring is applied. A trusted registration is baked transactionally (mesh + room layout + `registration.json` sidecar move together, with rollback on failure) and bundled in exports. Upload, export, rescan, and connect are **gated until processing completes**, and a bad-scan check warns right after save when a capture produced no usable room data (so you can redo it while still in the room). During a rescan, the live ghost auto-seats against detected planes.
+- **Post-Scan Processing & Plane Registration:** The save path persists raw artifacts only; the room layout (RoomPlan) builds automatically seconds after save, and everything else derived finishes via an explicit **Process** step (per-card button or bulk "Process All" with per-tile progress): **plane registration** aligns each rescan into its location's **canonical coordinate frame** (gravity-locked 4-DOF wall/floor matching with an observability gate, so unobservable solves are refused rather than guessed), and a lightweight **ghost proxy** is generated for future rescan overlays. Post-processing also runs automatically after save and when landing on a location, so the explicit button is mostly recovery. **Coloring is its own verb**: the scan card's primary **Color** button (and bulk Color in both list toolbars, on stitch-graph clusters, and in the combined render) finishes any pending structural steps, then applies camera-based vertex coloring — Metal GPU projection with per-frame LiDAR depth occlusion and a consensus-median reduce; 360° scans can optionally color from cube faces as a pose-quality probe. A trusted registration is baked transactionally (mesh + room layout + `registration.json` sidecar move together, with rollback on failure) and bundled in exports. Upload, export, rescan, and connect are **gated until processing completes**, and a bad-scan check warns right after save when a capture produced no usable room data (so you can redo it while still in the room). During a rescan, the live ghost auto-seats against detected planes.
 - **Linked-Scan Graph & Combined Mesh:** Each boundary link is recorded in a per-location `stitching.json` manifest (paired anchor transforms + compass headings) and bundled in every Scan4D export. The Scans tab visualizes chained scans as a node graph and can render all linked scans together in one combined-mesh viewer.
 - **Privacy Filtering:** A live red-eye indicator marks detected people on-screen, and person regions are pixelated in exported frames and zeroed out of depth maps. All three are driven by ARKit's person-segmentation stencil (no per-frame Vision pass); one body-center 3D anchor per person is unprojected from depth for red privacy markers on mesh previews.
 - **Capture Quality (Hi-Res Stillness Keyframes):** When the device is held still, the app captures a native-resolution still photo (`ARSession.captureHighResolutionFrame`, up to ~12MP) as a sharp keyframe alongside the video-stream frames — the AR stream stays on a mesh-friendly format. A center reticle fills as the device settles, and a shutter flash/click/haptic confirms each keyframe. In AR mode, the coverage overlay shows three states: green (unscanned), amber (depth captured, no photo), and clear camera feed (photo-grade). Photo coverage is tracked on a world-space voxel grid stamped from each keyframe's depth map (so surfaces behind walls are never falsely marked), and the coach nudges you to pause on the amber areas when photo coverage falls behind the mesh. Keyframes are flagged in exports (`is_keyframe`) and weighted higher during vertex coloring; `scan4d_metadata.json` records a `photo_coverage` fraction so backends can triage datasets.
+- **360° Still Source (Ricoh Theta):** A rig-mounted Theta captures a full-sphere still at every stillness keyframe, giving reconstruction all-direction imagery the phone's frustum can't see. Connect is BLE-first: pick the camera from a named Bluetooth list, one-time passkey bond, wake-from-sleep over BLE, then an automatic Wi-Fi join; the shutter rides BLE when the link is up (the new file's URL arrives as a push — no polling). Camera poses are solved **per scan at Process time** against the completed mesh (yaw and mount sag are per-scan nuisances; the measured rig height anchors the solve) and baked into each still's sidecar with provenance. A multi-camera roster switches bodies per collection. Camera-side originals are deleted after verified transfer — raw equirects capture bystanders in every direction — and stills leave the device only through the export privacy passes. See REQ-033 in [REQUIREMENTS.md](REQUIREMENTS.md).
 - **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
 - **Developer Mode:** Toggleable debugging tools — synthetic IMU/camera/depth injection for Simulator testing and performance diagnostics — with a persistent banner across all views.
 - **Export & Scan Capture Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses governed by motion-blur rejection and overlapping metrics.
@@ -69,7 +71,7 @@ wisescan-ios/
 ├── AppDelegate.swift            # App lifecycle, orientation locking
 ├── AppConstants.swift           # Centralized UI constants, app defaults, pipeline tuning
 ├── ContentView.swift            # Tab bar (Dashboard, Capture, Scans) + LiDAR check
-├── DashboardView.swift          # Upload server status card, wearable glasses connect
+├── DashboardView.swift          # Upload server status, wearable glasses connect, 360° camera card
 ├── CaptureView.swift            # Live capture UI, recording controls, scan HUD, capacity metrics
 ├── CaptureView+Recording.swift  # Record start/stop, stop decision menu, save flow, deferred naming
 ├── CaptureView+Extend.swift     # Pin & Extend: mid-session boundary link + session reset
@@ -83,7 +85,16 @@ wisescan-ios/
 ├── FrameCaptureSession.swift    # RAW data capture (RGB, depth, poses), stillness detection, hi-res keyframes
 ├── StillnessReticle.swift       # Capture-quality reticle: ring fills as device settles for a keyframe
 ├── PhotoCoverageGrid.swift      # World-space voxel grid tracking photo coverage (amber overlay source)
-├── ScanPostprocessor.swift      # Process step: registration bake, ghost proxy, colorize + bad-scan check
+├── ThetaCameraManager.swift     # 360° camera: connect, roster, shutter, still downloads (+OSC/+ScanCapture/+StillFormat)
+├── ThetaBLEManager.swift        # Production BLE: pair, wake-from-nap, shutter with file-URL push (+Link/+Delegates)
+├── ThetaBLEProbe.swift          # Developer Mode GATT bench for exploring BLE devices
+├── EquirectPostCalibration.swift # Per-scan 360° rig solve at Process time (bakes cam_transform + provenance)
+├── RigCalibrationSolver.swift   # Rig geometry solver: yaw circle, elevation sweep, bounded refine
+├── RigCalibrationManager.swift  # Developer Mode calibration bench
+├── EquirectFaceExport.swift     # Cube faces cut from equirects at baked poses (export + colorize probe)
+├── EquirectGPU.swift            # Metal equirect sampling/reprojection
+├── EquirectPrivacyBlur.swift    # Per-still person blur for exported equirects
+├── ScanPostprocessor.swift      # Process step: downloads, calibration, registration bake, ghost proxy + bad-scan check
 ├── PlaneRegistration.swift      # Gravity-locked 4-DOF plane registration solver (canonical frame)
 ├── SaveRegistration.swift       # registration.json sidecar + transactional mesh/roomplan bake
 ├── RoomPlanExporter.swift       # roomplan.json / roomplan_raw.json sidecar writers
@@ -101,7 +112,8 @@ wisescan-ios/
 ├── ScanExportManager.swift      # Export packaging (Scan4D, Polycam, RAW, OBJ, PLY, USDZ)
 ├── MeshConverter.swift          # OBJ→PLY and OBJ→USDZ mesh conversion
 ├── MeshParser.swift             # Wavefront OBJ parser for RealityKit MeshResource
-├── VertexColorAccumulator.swift # Normals-based default coloring, on-demand vertex coloring, ARWorldMap export
+├── VertexColorAccumulator.swift # Vertex coloring: frame selection, top-K observations, consensus-median reduce
+├── VertexColorGPU.swift         # Metal compute path for per-frame vertex projection (CPU fallback stays in lockstep)
 ├── MetaWearableManager.swift    # Meta Ray-Ban DAT SDK lifecycle, streaming, proxy frames
 ├── LocationManager.swift        # GPS/heading updates for scan metadata
 ├── PermissionsOverlay.swift     # Camera/AR permission request UI
@@ -121,7 +133,9 @@ wisescan-ios/
 └── Shaders/
     ├── PointCloud.metal         # VR point cloud vertex/fragment shaders
     ├── Bloom.metal              # Bloom post-processing shader
-    └── Wireframe.metal          # AR wireframe rendering shaders
+    ├── Wireframe.metal          # AR wireframe rendering shaders
+    ├── VertexColorProject.metal # GPU vertex-color projection kernel (occlusion + anti-bleed guards)
+    └── EquirectReproject.metal  # Equirect sampling kernels (cube faces, calibration)
 ```
 
 ## Export Formats & Backend Ingestion
@@ -131,7 +145,7 @@ Each export format includes **only** the data relevant to that format. The filen
 
 | Format | Extension | Contents | Viewer |
 | :--- | :--- | :--- | :--- |
-| **Scan4D** | `.zip` | `scan4d_metadata.json`, `relocalization.worldmap`, + full Polycam payload | Scan4D server workflows |
+| **Scan4D** | `.zip` | `scan4d_metadata.json`, `relocalization.worldmap`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
 | **Polycam** | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
 | **RAW** | `.zip` | `images/`, `depth/`, `confidence/`, `transforms.json` | Nerfstudio, COLMAP |
 | **OBJ** | `.obj` | Single mesh file (no vertex colors) | MeshLab, Blender |
@@ -154,6 +168,10 @@ scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
 │   └── ...
 ├── cameras/                # Per-frame Polycam JSON configs
 │   ├── frame_00000.json
+│   └── ...
+├── equirect_stills/        # 360° scans only: privacy-passed equirects + pose sidecars
+│   ├── still_0000.JPG
+│   ├── still_0000.json
 │   └── ...
 └── mesh_info.json          # Frame counts and image dimensions
 ```
@@ -178,10 +196,11 @@ When enabled (toggle on Capture screen):
 2. Set your development team signing in the target settings
 3. Build and deploy to an ARKit-capable device (LiDAR recommended for full mesh + depth capture)
 4. Configure the upload URL in Settings (gear icon)
-5. Go to Capture → tap record → scan → tap stop and choose **Save & End** (or **Save & Scan Adjacent** to continue into the next room)
-6. Once the save pipeline finishes, name your space and select its workflow intent — **Rescan** (the same space over time) or **Link Adjacent** (a neighboring space). You will be routed to the Scans tab with a progress overlay while mesh export and data extraction finishes in the background.
-7. Tap **Process** on the scan card (or **Process All** on the location) to finish the scan on-device — plane registration into the location's canonical frame, ghost-proxy generation, and camera-based vertex coloring. Upload, export, rescan, and connect unlock when processing completes.
-8. In the Scans tab, continue a Location with **Rescan Space** (re-capture the same area over time — the temporal dimension) or **Link Adjacent Space** (capture and stitch a neighboring area — the spatial dimension). Either way a colored ghost-mesh overlay (default: magenta, configurable in Settings) shows the previous scan for alignment — rescans auto-align into the location's canonical frame — and you can drop a boundary link mid-scan with **Pin & Extend**.
+5. *(Optional 360°)* On the Dashboard, tap **+ Add Ricoh Theta 360° Camera** — pick it from the Bluetooth list and confirm the pairing code on the camera screen once. After that, **Connect** wakes and joins it automatically, and a full-sphere still fires with every keyframe pause.
+6. Go to Capture → tap record → scan → tap stop and choose **Save & End** (or **Save & Scan Adjacent** to continue into the next room)
+7. Once the save pipeline finishes, name your space and select its workflow intent — **Rescan** (the same space over time) or **Link Adjacent** (a neighboring space). You will be routed to the Scans tab with a progress overlay while mesh export and data extraction finishes in the background.
+8. Post-processing (pending 360° downloads, rig calibration, plane registration into the location's canonical frame, ghost proxy) runs automatically after save and when you open the location; upload, export, rescan, and connect unlock when it completes. Tap the card's **Color** button to vertex-color the mesh — it finishes any remaining structural steps first, so one tap always ends colored.
+9. In the Scans tab, continue a Location with **Rescan Space** (re-capture the same area over time — the temporal dimension) or **Link Adjacent Space** (capture and stitch a neighboring area — the spatial dimension). Either way a colored ghost-mesh overlay (default: magenta, configurable in Settings) shows the previous scan for alignment — rescans auto-align into the location's canonical frame — and you can drop a boundary link mid-scan with **Pin & Extend**.
 
 ## Testing Guidelines (Meta Wearables)
 
