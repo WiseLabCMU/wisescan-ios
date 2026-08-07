@@ -173,8 +173,8 @@ final class ThetaCameraManager {
     }
 
     /// Logs Wi‑Fi/network reachability transitions — the literal "Wi‑Fi connect/disconnect"
-    /// events (joining/leaving the camera AP flips this). No SSID (that needs location
-    /// permission); interface type is enough for the spike.
+    /// events (joining/leaving the camera AP flips this) — and drives the self-heal
+    /// probe, gated on the CURRENT SSID being the camera's own (see currentSSID()).
     private func startPathMonitoring() {
         pathMonitor.pathUpdateHandler = { [weak self] path in
             let satisfied = path.status == .satisfied
@@ -192,7 +192,17 @@ final class ThetaCameraManager {
                     self.log(.connection, "Camera network lost — disconnected")
                 } else if satisfied, self.state == .disconnected, self.hasStoredNetwork {
                     try? await Task.sleep(nanoseconds: 2_000_000_000)   // let the interface settle
-                    if self.state == .disconnected { await self.probe() }
+                    guard self.state == .disconnected else { return }
+                    // Probe ONLY when iOS confirms we're on the camera's own SSID. Any
+                    // Wi-Fi coming up lands here — including home networks whose router
+                    // typically shares the Theta's fixed 192.168.1.1, which a blind GET
+                    // would interrogate on every roam. fetchCurrent answers for networks
+                    // WE joined (NEHotspotConfiguration one-tap) — precisely the camera
+                    // AP — and nil for foreign ones. A manual Settings join also reads
+                    // nil and skips self-heal; the explicit Connect tap still probes.
+                    let stored = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID)
+                    guard let ssid = await self.currentSSID(), ssid == stored else { return }
+                    await self.probe(quiet: true)
                 }
             }
         }
@@ -212,6 +222,29 @@ final class ThetaCameraManager {
     /// (e.g. "THETAYR14100112.ASC" → "14100112"; suffix varies by model/firmware).
     /// nil when the SSID doesn't look like a Theta AP. Prefills the Add Camera sheet;
     /// the security plan's P2 warning fires when the live password still equals this.
+    /// SSID the phone is on right now, when iOS will say. Needs the Access Wi-Fi
+    /// Information entitlement plus one of: this app joined the network via
+    /// NEHotspotConfiguration, location permission, or a VPN. Foreign networks
+    /// (home Wi-Fi) return nil — exactly the gate the self-heal probe needs.
+    private func currentSSID() async -> String? {
+        await withCheckedContinuation { continuation in
+            NEHotspotNetwork.fetchCurrent { network in
+                continuation.resume(returning: network?.ssid)
+            }
+        }
+    }
+
+    /// Serial of the ACTIVE stored camera when known: the BLE pairing's, else the
+    /// 8-digit run in the factory SSID (the Theta's factory passphrase IS the serial).
+    private var storedSerial: String? {
+        if let serial = UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial),
+           !serial.isEmpty {
+            return serial
+        }
+        guard let ssid = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID) else { return nil }
+        return Self.factoryPassphrase(fromSSID: ssid)
+    }
+
     static func factoryPassphrase(fromSSID ssid: String) -> String? {
         let trimmed = ssid.trimmingCharacters(in: .whitespaces).uppercased()
         guard trimmed.hasPrefix("THETA") else { return nil }
@@ -437,17 +470,51 @@ final class ThetaCameraManager {
         }
     }
 
-    private func probe() async {
+    /// Leveling gate: the 360° face-pose export assumes zenith-corrected (level) panos.
+    /// Surface the support tier at connect time so an unvalidated/unsupported camera is
+    /// known BEFORE a scan, not at export (the event mirrors into the Dashboard card).
+    private func logLevelingSupport(model: String) {
+        switch EquirectFaceExport.levelingSupport(forModel: model) {
+        case .validated:
+            break
+        case .assumedLevel:
+            log(.connection, "⚠️ \(model): pano leveling not yet device-validated — "
+                + "360° face poses will be marked unvalidated in exports")
+        case .unsupported:
+            log(.connection, "⚠️ \(model): unknown leveling behavior — stills capture "
+                + "and archive, but pose-bearing 360° faces are not exported for this camera yet")
+        }
+    }
+
+    /// `quiet` marks the background self-heal probe: it must never flip the card to
+    /// .failed on its own (the user did nothing — a roam did), and it adopts the
+    /// connection only for the SAVED camera's serial. The user's explicit Connect
+    /// stays loud and unconditional.
+    private func probe(quiet: Bool = false) async {
         do {
             let info = try await fetchInfo()
+
+            // With the roster, a different body must not silently occupy a card the
+            // user left pointed at another camera.
+            if quiet, let expected = storedSerial?.suffix(8),
+               let got = info.serial?.filter(\.isNumber).suffix(8),
+               !got.isEmpty, got != expected {
+                log(.connection, "Auto-reconnect reached \(info.model) (\(got)) — "
+                    + "not the saved camera (\(expected)); staying disconnected")
+                return
+            }
 
             // Firmware Gate
             let isZ1 = info.model.contains("Z1")
             let isX = info.model.contains("X")
             let minFirmware = isZ1 ? AppConstants.Theta.minFirmwareZ1 : (isX ? AppConstants.Theta.minFirmwareX : "0")
             if info.firmware.compare(minFirmware, options: .numeric) == .orderedAscending {
-                state = .failed("Firmware too old. Update via Ricoh app")
                 lastError = "Unsupported firmware \(info.firmware) (min: \(minFirmware))"
+                if quiet {
+                    log(.connection, "Auto-reconnect skipped: unsupported firmware \(info.firmware)")
+                } else {
+                    state = .failed("Firmware too old. Update via Ricoh app")
+                }
                 return
             }
 
@@ -456,9 +523,9 @@ final class ThetaCameraManager {
                 try await setTopBottomCorrection(to: "Apply")
             } catch {
                 let errorMsg = Self.describe(error)
-                state = .failed("Auto-leveling failed to apply")
                 lastError = "Could not enforce zenith correction: \(errorMsg)"
                 log(.connection, "⚠️ Failed to enable auto-leveling: \(errorMsg). Connection blocked.")
+                if !quiet { state = .failed("Auto-leveling failed to apply") }
                 return
             }
 
@@ -469,27 +536,19 @@ final class ThetaCameraManager {
             batteryLevel = try? await fetchBatteryLevel()
             log(.connection, "Connected: \(info.model) \(info.firmware)"
                 + (info.serial.map { " · \($0)" } ?? ""))
-            // Leveling gate: the 360° face-pose export assumes zenith-corrected (level) panos.
-            // Surface the support tier at connect time so an unvalidated/unsupported camera is
-            // known BEFORE a scan, not at export (the event mirrors into the Dashboard card).
-            switch EquirectFaceExport.levelingSupport(forModel: info.model) {
-            case .validated:
-                break
-            case .assumedLevel:
-                log(.connection, "⚠️ \(info.model): pano leveling not yet device-validated — "
-                    + "360° face poses will be marked unvalidated in exports")
-            case .unsupported:
-                log(.connection, "⚠️ \(info.model): unknown leveling behavior — stills capture "
-                    + "and archive, but pose-bearing 360° faces are not exported for this camera yet")
-            }
+            logLevelingSupport(model: info.model)
             currentStillFormat = try? await fetchStillResolution()
             await refreshSupportedStillFormats()
         } catch {
             batteryLevel = nil
             serialNumber = nil
             let message = Self.describe(error)
-            state = .failed(message)
-            log(.connection, "Connection failed: \(message)")
+            if quiet {
+                log(.connection, "Auto-reconnect probe failed: \(message) — staying disconnected")
+            } else {
+                state = .failed(message)
+                log(.connection, "Connection failed: \(message)")
+            }
         }
     }
 

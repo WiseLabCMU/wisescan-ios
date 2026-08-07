@@ -6,5 +6,10 @@
 	     the Theta's AP programmatically instead of a Settings round-trip. -->
 	<key>com.apple.developer.networking.HotspotConfiguration</key>
 	<true/>
+	<!-- Read the CURRENT SSID (NEHotspotNetwork.fetchCurrent) so the background
+	     self-heal probe runs only on the camera's own network — never against a
+	     home router that shares the Theta's fixed 192.168.1.1 address. -->
+	<key>com.apple.developer.networking.wifi-info</key>
+	<true/>
 </dict>
 </plist>
