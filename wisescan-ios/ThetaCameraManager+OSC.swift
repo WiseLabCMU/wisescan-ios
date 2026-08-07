@@ -290,6 +290,12 @@ extension ThetaCameraManager {
             }
         }
         switch error {
+        case ThetaError.badResponse(404):
+            // A 404 from 192.168.1.1 means we reached a WEB SERVER that isn't the
+            // camera — i.e. the phone is on some other network whose router answered
+            // (field: home router, 360ble12). The camera join never happened.
+            return "Reached a different device at the camera's address — you're on another "
+                + "Wi-Fi network. Wake the camera and retry, or join its Wi-Fi in Settings."
         case ThetaError.badResponse(let code): return "Camera returned HTTP \(code)."
         case ThetaError.osc(let message): return "Camera error: \(message)."
         case ThetaError.noFileURL: return "Capture finished but no file URL was returned."

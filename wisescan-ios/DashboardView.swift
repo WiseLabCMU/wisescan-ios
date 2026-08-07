@@ -564,7 +564,8 @@ struct ThetaCameraCard: View {
 
     private var statusLabel: String {
         switch manager.state {
-        case .disconnected: return "Not connected"
+        case .disconnected:
+            return manager.hasStoredNetwork ? "Saved — tap Connect" : "Not set up"
         case .connecting: return "Checking…"
         case .connected(let model, let firmware): return "\(model) · \(firmware)"
         case .failed: return "Connection failed"
@@ -582,6 +583,9 @@ struct ThetaCameraCard: View {
             : (UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase) ?? "")
         sheetPassAutoFill = ""
         bleAddStatus = nil
+        // A list from a previous session goes stale (field: a Z1 row from an earlier
+        // scan pended forever) — every sheet opening starts with a fresh scan's truth.
+        ThetaBLEManager.shared.discovered.removeAll()
         showNetworkSheet = true
     }
 
@@ -623,7 +627,9 @@ struct ThetaCameraCard: View {
             sheetSSID = ThetaCameraManager.factorySSID(model: model, serial: serial) ?? ""
             sheetPassphrase = serial
             sheetPassAutoFill = serial
-            bleAddStatus = "Found \(model) · \(serial). Bluetooth setup is THETA X only for now — check the SSID against the camera's Wi-Fi screen, then Save & Connect."
+            bleAddStatus = "Found \(model) · \(serial). Bluetooth setup is THETA X only for now — "
+                + "press the camera's power button so its Wi-Fi is awake, check the SSID against "
+                + "the camera's screen, then Save & Connect."
         } catch {
             bleAddStatus = "Bluetooth setup failed: \(error.localizedDescription)"
         }
@@ -769,7 +775,9 @@ struct ThetaCameraCard: View {
                     .font(.title2)
                     .foregroundColor(manager.isConnected ? .green : .gray)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Ricoh Theta")
+                    // Named like the Meta card: the stored camera's identity, not a
+                    // generic label (field ask: "if it has stored creds, say so").
+                    Text(manager.activeProfile?.displayName ?? "Ricoh Theta")
                         .font(.headline)
                         .foregroundColor(.white)
                     HStack(spacing: 6) {
@@ -1031,8 +1039,9 @@ struct ThetaCameraCard: View {
                 }
             }
 
-            // Recent spike events (connect/disconnect, captures, transfer metrics).
-            if !manager.events.isEmpty {
+            // Recent spike events (connect/disconnect, captures, transfer metrics) —
+            // diagnostics, Developer Mode only, so the everyday card stays lean.
+            if !manager.events.isEmpty, UserDefaults.standard.bool(forKey: AppConstants.Key.developerMode) {
                 Divider().background(Color.white.opacity(0.1))
                 Text("RECENT EVENTS")
                     .font(.caption2).bold()

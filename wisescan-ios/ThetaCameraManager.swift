@@ -322,8 +322,19 @@ final class ThetaCameraManager {
         Task {
             // BLE-first bootstrap: wake the paired camera so its AP exists to join.
             // No-op without a stored pairing; never fatal — the patient probe decides.
-            await ThetaBLEManager.shared.wakeStoredCamera()
-            await joinStoredNetworkIfNeeded()
+            let wokeOverBLE = await ThetaBLEManager.shared.wakeStoredCamera()
+            var joined = await joinStoredNetworkIfNeeded()
+            // A woken camera's AP takes 5-15 s to appear; a join issued too early gets
+            // userDenied (SSID not in the air), and probing then talks to whatever
+            // network the phone is still on — a home router 404s. Field pattern
+            // "first tap fails, second succeeds" (360ble12) = exactly this window.
+            var joinRetries = 0
+            while !joined, wokeOverBLE, joinRetries < 3 {
+                joinRetries += 1
+                log(.connection, "Waiting for the camera's Wi-Fi to come up (retry \(joinRetries))…")
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                joined = await joinStoredNetworkIfNeeded()
+            }
             for attempt in 1...5 {
                 await probe()
                 if isConnected { return }
@@ -340,10 +351,13 @@ final class ThetaCameraManager {
         }
     }
 
-    private func joinStoredNetworkIfNeeded() async {
+    /// Returns whether the join is believed up (applied or already associated) —
+    /// false lets the caller retry after a wake instead of probing a wrong network.
+    @discardableResult
+    private func joinStoredNetworkIfNeeded() async -> Bool {
         guard let ssid = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID), !ssid.isEmpty,
               let pass = UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase), !pass.isEmpty
-        else { return }
+        else { return false }
         let config = NEHotspotConfiguration(ssid: ssid, passphrase: pass, isWEP: false)
         config.joinOnce = false
         do {
@@ -366,6 +380,7 @@ final class ThetaCameraManager {
                 : " — is that camera powered on with Wi-Fi enabled?"
             log(.connection, "⚠️ Couldn't join \(ssid)\(hint)")
             await warnIfClientMode()
+            return false
         } catch {
             log(.connection, "⚠️ Wi-Fi join failed for \(ssid) (\(Self.describe(error))) — trying camera anyway")
         }
@@ -375,6 +390,7 @@ final class ThetaCameraManager {
         // below is the truth; the card state reflects it, never the OS alert.
         // Interface settle: HTTP to the camera flaps for a moment after association.
         try? await Task.sleep(nanoseconds: 1_500_000_000)
+        return true
     }
 
     /// Manual disconnect: kindly restore the camera's auto-sleep, release the phone from
