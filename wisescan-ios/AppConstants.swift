@@ -19,7 +19,6 @@ enum AppConstants {
         static let pipCornerRadius: CGFloat = 12
         static let pipBorderWidth: CGFloat = 2
         static let pipPaddingX: CGFloat = 16
-        static let pipPaddingY: CGFloat = 80 // To clear the REC indicator safely
     }
 
     enum Theta {
@@ -58,10 +57,10 @@ enum AppConstants {
         static let rigMeasuredDyMeters = "rigMeasuredDyMeters"        // user's tape-measured iPad-camera→360°-lens distance — ALWAYS persisted in METERS (UI may display/accept imperial); 0 = unmeasured
         static let rigHeightUnitImperial = "rigHeightUnitImperial"    // display/entry unit preference for the rig height field (false = metric)
         static let colorizeFrom360Faces = "colorizeFrom360Faces"      // Developer Mode: color the preview mesh from 360° cube faces instead of keyframes (pose-accuracy probe)
-        static let keepCameraOriginals = "keepCameraOriginals"
+        static let keepCameraOriginals = "keepCameraOriginals"        // Developer Mode: skip the security-P1 sweep that deletes each 360° still from the camera after verified transfer
         static let thetaBLESerial = "thetaBLESerial"                  // 8-digit serial of the paired camera (BLE identity + factory password)
         static let thetaBLEPeripheralID = "thetaBLEPeripheralID"      // CBPeripheral identifier for scan-free reconnects
-        static let thetaCameraProfiles = "thetaCameraProfiles"        // JSON roster of known cameras (multi-camera: X for texture, Z1 for low light — switch per collection)        // Developer Mode: skip the security-P1 sweep that deletes each 360° still from the camera after verified transfer
+        static let thetaCameraProfiles = "thetaCameraProfiles"        // JSON roster of known cameras (multi-camera: X for texture, Z1 for low light — switch per collection)
         static let thetaSSID = "thetaSSID"                            // stored camera Wi-Fi SSID for one-tap join (NEHotspotConfiguration)
         static let thetaPassphrase = "thetaPassphrase"                // stored camera Wi-Fi passphrase. TODO(security P2): move to Keychain + default-credential warning — see design doc Security section
     }
@@ -178,9 +177,6 @@ enum AppConstants {
     static let calibrationBoundYawDeg: Float = 45                      // yaw half-range (deg) around EACH coarse-scan start (yaw is solved globally: the 360° cam screws onto the rod at an arbitrary rotation, so a full-circle coarse scan picks the basin and local bounds keep Nelder-Mead inside it)
     static let calibrationBoundPitchDeg: Float = 10                    // pitch-residual half-range (deg) around 0 (zenith correction should leave only small error)
     static let calibrationConvergenceTolerance: Float = 1e-5           // cost-range convergence threshold
-    static let calibrationEdgeDetectionWidth = 512                     // downsampled equirect width for Sobel edge detection
-    static let calibrationDriftWarnMultiplier: Float = 1.4             // first-still spot-check: warn if live residual > stored × this. RMS space — ≡ the old 2.0× on squared values (√2)
-    static let calibrationDriftWarnFloorPx: Float = 1.7                // don't warn if the absolute live residual is below this (avoids noise on tight calibrations). √3.0
     static let calibrationMaxEdgesPerInput = 1200                      // subsample mesh edges per input to cap solver time (2000 → 1200 after 360post1: per-eval cost dominates the postprocess solve)
     static let vioDegradedTripSeconds: TimeInterval = 2.5    // VIO guard: tracking continuously degraded (limited/relocalizing/unavailable) this long mid-scan → halt
     static let voxelDecayInterval: TimeInterval = 0.5        // VR: min seconds between 350K-voxel confidence-decay passes; throttled off every-integration so the voxelQueue can't back up (drove multi-second stalls)
@@ -197,7 +193,6 @@ enum AppConstants {
     static let consecutiveBlurThreshold: Int = 5             // blurred frames before warning triggers
     static let motionBlurVelocity: Float = 0.5               // m/s threshold for motion blur detection
     static let privacyBlurVisionScale: CGFloat = 0.5         // downscale factor for the Vision person-seg FALLBACK input (saved-frame privacy blur). Smaller = faster but coarser mask; raise toward 1.0 if person coverage leaks at edges. Only the (rare) fallback uses Vision — ARKit's stencil path is unaffected.
-    static let depthOcclusionToleranceMM: Float = 150.0      // mm tolerance for depth occlusion test
     static let colorizationMaxObservations: Int = 12         // max per-vertex observations kept (top-N by quality) for the weighted-median colorizer
     static let colorizationMinDistanceM: Float = 0.3         // distance floor (m) for the inverse-square distance weight, so very close frames don't dominate
     static let colorizationOcclusionToleranceMM: Float = 50.0 // tighter mm tolerance used during colorization to cull backface/occluded samples (lower = more aggressive culling, but ARKit mesh noise can reject valid samples)
@@ -206,7 +201,6 @@ enum AppConstants {
     static let stabilizationPollIntervalMs: Int = 200         // ms between tracking-state polls after session reset
     static let stabilizationMaxPolls: Int = 25                // max polls before timeout (total = interval × polls)
     static let semanticThrottleInterval: TimeInterval = 0.5   // min seconds between classification outline rebuilds per anchor
-    static let surfaceOutlineLiftDistance: Float = 0.06       // meters surface outlines are lifted toward the camera to draw on top of the co-planar scan mesh (must clear ARKit mesh noise)
 
     // MARK: - ScanCoach Constants
     static let coachEvaluationInterval: TimeInterval = 1.0    // seconds between ScanCoach rule evaluations (~1Hz)
@@ -262,10 +256,6 @@ enum AppConstants {
     // Equirect cube-map face direction colors (mesh preview frustum markers)
     static let equirectMarkerRadius: Float = 0.12                      // m — 360° still sphere marker radius in the mesh preview
     static let equirectFrontColor  = SIMD4<Float>(0.2, 0.85, 1.0, 1.0) // cyan  — forward face
-    static let equirectRightColor  = SIMD4<Float>(0.3, 0.9, 0.4, 1.0)  // green — right face
-    static let equirectBackColor   = SIMD4<Float>(1.0, 0.6, 0.15, 1.0) // orange — back face
-    static let equirectLeftColor   = SIMD4<Float>(0.85, 0.3, 0.85, 1.0) // magenta — left face
-    static let equirectUpColor     = SIMD4<Float>(0.95, 0.95, 0.95, 1.0) // white — up face
 
     // MARK: - Space Analysis Constants
     static let analysisAmbientLightAlertThreshold: CGFloat = 250  // lux below which lighting is "Very Low" (alert tier — RGB nearly useless)

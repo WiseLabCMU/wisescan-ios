@@ -348,24 +348,7 @@ enum RigCalibrationSolver {
         return (normalizeAngle(best.yaw), best.cost)
     }
 
-    /// Quick validation: evaluate the cost function at the stored calibration parameters
-    /// against a single new capture. Returns the current residual — if significantly worse
-    /// than the stored calibration residual, the rig may have shifted.
-    ///
-    /// This is the "first-still spot-check": no optimization (O(1) — one cost evaluation),
-    /// runs in milliseconds. Called automatically on the first 360° still of each scan.
-    static func validateCalibration(input: CalibrationInput, profile: RigProfile) -> Float {
-        let params = SIMD4<Float>(profile.dy, profile.dLateral, profile.yaw, profile.pitchResidual)
-        // Same anchor-frozen inclusion as the solve, so residuals are comparable.
-        let anchor = RigProfile.mechanicalPrior
-        let rig = composeRigTransform(phoneToWorld: input.phoneToWorld,
-                                      dy: anchor.dy, dLateral: 0, yaw: 0, pitchResidual: 0)
-        let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
-        let mask = anchorInclusionMask(edges: input.meshEdges, camPos: camPos)
-        return totalCost(params: params, inputs: [input], masks: [mask])
-    }
-
-    // MARK: - Cost function
+        // MARK: - Cost function
 
     /// Smallest signed difference between two angles (radians).
     private static func angleDelta(_ a: Float, _ b: Float) -> Float {
@@ -785,7 +768,7 @@ enum RigCalibrationSolver {
         // Exclude the bottom elevation band: it holds the rig hardware (rod/tripod) and
         // usually the operator — the only scene content that moves WITH the rig, i.e.
         // systematic attractors for the solve (runs 8-10). Symmetric with edgeCost's
-        // per-sample skip; the spot-check shares this path automatically.
+        // per-sample skip; the post-process solve shares this path.
         let maskStart = maskStartRow(height: height)
         if maskStart < height {
             for row in maskStart..<height {

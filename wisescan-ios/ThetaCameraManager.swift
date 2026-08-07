@@ -8,20 +8,28 @@ import Network
 import os
 import simd
 
-/// Connection + shutter-trigger + still-download manager for a Ricoh Theta 360° camera,
-/// driving the **still-source spike** on `feat/still-source-360`
-/// (see docs/design/still-source-360.md).
+/// Connection + shutter-trigger + still-download manager for the Ricoh Theta 360°
+/// still source (REQUIREMENTS → REQ-033; decision journal in
+/// docs/design/still-source-360.md).
 ///
-/// SPIKE SCOPE — deliberately minimal:
-/// - Transport is **Wi‑Fi + raw OSC HTTP** (OSC Web API v2.1), no external dependencies.
-///   The OSC/HTTP layer lives in `ThetaCameraManager+OSC.swift`; this file owns published
-///   state, user actions, the event log, and Wi‑Fi reachability monitoring.
-/// - The user joins the camera's Wi‑Fi AP **manually** (iOS Settings); connecting is an
-///   explicit tap, so the Local Network prompt is tied to a deliberate action.
-/// - Still resolution is read/set via OSC options; each capture and transfer is timed
-///   (the P2 viability numbers) and appended to the event log.
-/// - No BLE trigger, no `NEHotspotConfiguration` auto-join, no `theta-client` SDK, no rig
-///   calibration / cube-map export — the design doc's P3/P4 work, out of scope here.
+/// - **Connect is BLE-first**: wake the paired camera over Bluetooth
+///   (`ThetaBLEManager`), then join its AP programmatically via
+///   `NEHotspotConfiguration` and probe with patience — the AP takes 5-15 s to rise
+///   after a wake and DHCP a few seconds more, and a probe issued too early talks to
+///   whatever network the phone is still on.
+/// - **A camera ROSTER** (`CameraProfile`) holds every known body; the active one
+///   occupies the single-camera defaults keys every path here reads.
+/// - **Connect enforces the capture invariants**: firmware gate, zenith correction
+///   (blocking — the face-export/solver convention depends on level panos), and
+///   shooting-state normalization (image mode, self-timer off, running capture
+///   stopped).
+/// - **The shutter prefers BLE** when the link is up: the new file's URL arrives as a
+///   NotifyState push, so there is no OSC round-trip; OSC is the fallback. Capture
+///   writes the sidecar (phone pose + timestamps); JPGs drain through a queue that
+///   yields to triggers, and download state is derived from disk.
+/// - **Keep-awake is capture-tab-driven**, not connect-time: an idle camera returns to
+///   its 180 s nap (a sleep/wake cycle re-derives the equirect yaw reference, which
+///   the per-scan solve absorbs by design).
 ///
 /// Theta X speaks OSC API level 2.1, so still capture needs no explicit `camera.startSession`.
 @Observable
@@ -192,14 +200,6 @@ final class ThetaCameraManager {
     }
 
     // MARK: - Connection
-
-    /// Probes the camera (explicit Dashboard tap) to confirm the phone is on its network.
-    func refreshConnection() {
-        guard state != .connecting else { return }
-        state = .connecting
-        lastError = nil
-        Task { await probe() }
-    }
 
     // MARK: - One-tap connect / disconnect (wearables-style flow)
 
@@ -572,19 +572,7 @@ final class ThetaCameraManager {
     // MARK: - Still resolution
 
     /// Re-reads the current resolution and the supported list (e.g. after connecting).
-    func fetchStillFormat() {
-        guard isConnected else { return }
-        Task {
-            do {
-                currentStillFormat = try await fetchStillResolution()
-            } catch {
-                log(.config, "Couldn't read resolution: \(Self.describe(error))")
-            }
-            await refreshSupportedStillFormats()
-        }
-    }
-
-    /// Refreshes `supportedStillFormats` from the camera; logs whether the camera
+        /// Refreshes `supportedStillFormats` from the camera; logs whether the camera
     /// reported a list (dynamic) or we'll fall back to the model presets.
     private func refreshSupportedStillFormats() async {
         do {

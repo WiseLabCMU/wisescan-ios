@@ -170,15 +170,7 @@ extension ThetaCameraManager {
     /// Current WLAN mode as the camera reports it — "AP" (its own access point) or
     /// "CL" (joined someone else's network). CL is the field gotcha: the camera looks
     /// on and healthy but never advertises its SSID, so joining silently can't work.
-    func fetchNetworkType() async throws -> String? {
-        let body: [String: Any] = ["name": "camera.getOptions",
-                                   "parameters": ["optionNames": ["_networkType"]]]
-        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCOptionsResponse.self)
-        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "getOptions failed") }
-        return response.results?.options.networkType
-    }
-
-    /// Fires `camera.takePicture` and resolves to the saved file URL (polls if async).
+        /// Fires `camera.takePicture` and resolves to the saved file URL (polls if async).
     func triggerStill() async throws -> String {
         switch try await execute(name: "camera.takePicture") {
         case .done(let url): return url
