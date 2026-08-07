@@ -314,7 +314,7 @@ struct ThetaBLEProbeCard: View {
             HStack {
                 Image(systemName: "dot.radiowaves.left.and.right")
                     .foregroundColor(probe.connectedName != nil ? .green : .white.opacity(0.7))
-                Text("360° BLE Probe")
+                Text("BLE Probe")
                     .font(.headline)
                     .foregroundColor(.white)
                 Spacer()
@@ -329,25 +329,36 @@ struct ThetaBLEProbeCard: View {
                 Text(connected)
                     .font(.caption.bold())
                     .foregroundColor(.green)
+                // Commands grouped by which device family answers them — the probe
+                // core (scan/connect/discover/log) is device-agnostic; these rows are
+                // the Theta command set. Adaptive buttons fall back v2→v1 by presence.
                 HStack(spacing: 14) {
-                    Button("Take Picture", action: { probe.takePicture() })
-                    Button("Wake AP", action: { probe.wakeAP() })
+                    Text("Any:").foregroundColor(.white.opacity(0.5))
                     Button("Disconnect", action: { probe.disconnect() })
                         .foregroundColor(.orange)
                 }
                 .font(.caption.bold())
+                HStack(spacing: 14) {
+                    Text("X · Z1≥3.10:").foregroundColor(.white.opacity(0.5))
+                    Button("Take Picture", action: { probe.takePicture() })
+                    Button("Wake AP", action: { probe.wakeAP() })
+                    Button("NetOpts", action: { probe.readNetworkOptions() })
+                }
+                .font(.caption.bold())
                 .foregroundColor(.cyan)
                 HStack(spacing: 14) {
+                    Text("X only:").foregroundColor(.white.opacity(0.5))
                     Button("Wake Camera", action: { probe.wakeCamera() })
-                    Button("NetOpts", action: { probe.readNetworkOptions() })
                     Button("Wake+Drop BLE", action: { probe.wakeAPAndDropBLE() })
                 }
                 .font(.caption.bold())
                 .foregroundColor(.cyan)
-                // Z1/V path: register the probe UUID over Wi-Fi first, then auth over BLE.
+                // Z1/V: register the probe UUID over Wi-Fi first, then auth over BLE
+                // (per-session; the X ignores this scheme entirely).
                 HStack(spacing: 14) {
-                    Button("Register (Wi-Fi, Z1)", action: { probe.registerOverWiFi() })
-                    Button("Auth (BLE, Z1)", action: { probe.writeAuth() })
+                    Text("Z1/V:").foregroundColor(.white.opacity(0.5))
+                    Button("Register (Wi-Fi)", action: { probe.registerOverWiFi() })
+                    Button("Auth (BLE)", action: { probe.writeAuth() })
                 }
                 .font(.caption.bold())
                 .foregroundColor(.cyan)
@@ -543,6 +554,8 @@ struct ThetaCameraCard: View {
     /// Camera storage panel: file count + bulk erase (the vendor apps make this
     /// painful, and a rig session leaves hundreds of stills behind).
     @State private var cameraFileCount: Int?
+    /// Connection Events disclosure — auto-driven by connection state, user-overridable.
+    @State private var eventsExpanded = false
     @State private var storageBusy = false
     @State private var showEraseConfirm = false
 
@@ -1039,23 +1052,35 @@ struct ThetaCameraCard: View {
                 }
             }
 
-            // Recent spike events (connect/disconnect, captures, transfer metrics) —
-            // diagnostics, Developer Mode only, so the everyday card stays lean.
-            if !manager.events.isEmpty, UserDefaults.standard.bool(forKey: AppConstants.Key.developerMode) {
+            // Connection Events: the detailed feed matters DURING setup — it
+            // auto-expands while connecting/failed and auto-collapses once a Wi-Fi
+            // connection completes (or on disconnect/forget), so the settled card
+            // stays lean. Manually expandable anytime; the underlying log never stops.
+            if !manager.events.isEmpty {
                 Divider().background(Color.white.opacity(0.1))
-                Text("RECENT EVENTS")
-                    .font(.caption2).bold()
-                    .foregroundColor(.white.opacity(0.7))
-                ForEach(Array(manager.events.prefix(6))) { event in
-                    HStack(alignment: .top, spacing: 6) {
-                        Text(event.date, format: .dateTime.hour().minute().second())
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.5))
-                        Text(event.message)
-                            .font(.caption2)
-                            .foregroundColor(.white.opacity(0.7))
-                            .lineLimit(2)
-                        Spacer(minLength: 0)
+                DisclosureGroup(isExpanded: $eventsExpanded) {
+                    ForEach(Array(manager.events.prefix(6))) { event in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text(event.date, format: .dateTime.hour().minute().second())
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.5))
+                            Text(event.message)
+                                .font(.caption2)
+                                .foregroundColor(.white.opacity(0.7))
+                                .lineLimit(2)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                } label: {
+                    Text("CONNECTION EVENTS")
+                        .font(.caption2).bold()
+                        .foregroundColor(.white.opacity(0.7))
+                }
+                .tint(.white.opacity(0.5))
+                .onChange(of: manager.state) { _, newState in
+                    switch newState {
+                    case .connecting, .failed: eventsExpanded = true
+                    case .connected, .disconnected: eventsExpanded = false
                     }
                 }
             }

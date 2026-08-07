@@ -2,25 +2,22 @@ import Foundation
 import CoreBluetooth
 import os
 
-/// Developer-mode BLE probe bench for the Theta (BLE session, 2026-08-05/06).
+/// Developer-mode BLE probe bench — a GENERAL-PURPOSE GATT explorer with a Theta
+/// command set layered on top.
 ///
-/// ROUNDS 1-3 ANSWERED (360ble1/-R2/3): the X advertises its bare 8-digit serial;
-/// the full GATT (10 services) enumerates unauthenticated; **the entire v1 family is
-/// VESTIGIAL on X 2.92.0** — Camera Information reads, WLAN v1 Network Type, and the
-/// Auth char all answer "handle is invalid", and `camera._setBluetoothDevice` (the
-/// V/Z1 registration the auth write would need) is unsupported on X. The live paths
-/// are the X-native v2 services, OPEN with no auth: Camera Control Command v2 Get
-/// Info returned the full identity JSON (model/serial/firmware/MACs/uptime) in one
-/// unauthenticated read.
+/// The core is device-agnostic and reusable for any future camera or sensor: scan
+/// every advertiser, connect on tap, dump the full service/characteristic map with
+/// properties, auto-read/subscribe known characteristics, log every byte both
+/// on-card and to the unified log (category `bleprobe`). Only the command buttons
+/// and the UUID tables below are Theta-specific; probing a new device class means
+/// adding its UUIDs and buttons, nothing else.
 ///
-/// ROUND 4 (this build) probes the v2 write paths, payload formats lifted from the
-/// official SDK source (ricohapi/theta-ble-client): shutter = UTF-8
-/// `{"name":"camera.takePicture"}`; wake AP = `{"type":"AP"}` to WRITE_SET_NETWORK_TYPE;
-/// plus Get State / Get State2 / connected-Wi-Fi reads and the notify streams.
-/// Findings feed the decided ideal connect flow: BLE scan → identity → wake AP →
-/// derived SSID + factory password → NEHotspotConfiguration join → probe
-/// (design doc → still-source-360.md, BLE section).
-///
+/// Theta findings baked in (full journal: docs/design/still-source-360.md, BLE
+/// sections): X = bonded v2 command set (passkey on camera screen), v1 family
+/// vestigial; Z1/V = v1 family behind per-session UUID auth registered over Wi-Fi,
+/// CCv2 read-only subset open on Z1 ≥ 3.10.2; request/response chars answer on
+/// NOTIFY (direct reads can return 0x82-clobbered stale buffers); credentials are
+/// never served over BLE.
 /// Camera-side prerequisite: Bluetooth turned ON on the X's touchscreen.
 @Observable
 @MainActor
