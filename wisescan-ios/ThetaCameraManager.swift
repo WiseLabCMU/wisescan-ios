@@ -87,6 +87,10 @@ final class ThetaCameraManager {
     private(set) var events: [ThetaEvent] = []
     /// Count of 360° stills captured into the current scan (reset at record start).
     private(set) var scanStillCount = 0
+    /// Stills this scan whose phone moved beyond the sway bounds during the exposure
+    /// window — their recorded pose may not match what the camera saw. Drives the
+    /// capture-time warning + chip count; the Process-step solve prefers clean stills.
+    private(set) var swayedStillCount = 0
 
     /// One queued equirect transfer: the sidecar is already on disk; only the JPG bytes
     /// are outstanding on the camera.
@@ -665,6 +669,7 @@ final class ThetaCameraManager {
     /// Resets the per-scan still counter. Call at record start.
     func beginScanStillSession(rawDataDir: URL? = nil) {
         scanStillCount = 0
+        swayedStillCount = 0
         scanStillPositions.removeAll()
         if let dir = rawDataDir?.appendingPathComponent("equirect_stills"),
            let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
@@ -702,37 +707,27 @@ final class ThetaCameraManager {
             // sample the phone pose every 250 ms until the camera reports the file and
             // record the worst translation/rotation vs the tap pose. Measurement first —
             // sidecar fields decide whether exposure-time pose compensation is warranted.
-            let motionProbe: Task<(Float, Float), Never>? = samplePose.map { sample in
-                Task { @MainActor in
-                    let tapPos = SIMD3<Float>(phoneTransform.columns.3.x,
-                                              phoneTransform.columns.3.y,
-                                              phoneTransform.columns.3.z)
-                    let tapRot = simd_quatf(phoneTransform)
-                    var maxM: Float = 0
-                    var maxDeg: Float = 0
-                    while !Task.isCancelled {
-                        try? await Task.sleep(nanoseconds: 250_000_000)
-                        guard let pose = sample() else { continue }
-                        let pos = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
-                        maxM = max(maxM, simd_distance(tapPos, pos))
-                        let delta = (tapRot.inverse * simd_quatf(pose)).angle * 180 / .pi
-                        maxDeg = max(maxDeg, min(delta, 360 - delta))
-                    }
-                    return (maxM, maxDeg)
-                }
-            }
+            let motionProbe = samplePose.map { makeStillMotionProbe(tapTransform: phoneTransform, sample: $0) }
             do {
                 let fileURL = try await triggerStillPreferringBLE()
                 let triggerMs = Int(Date().timeIntervalSince(start) * 1000)
                 motionProbe?.cancel()
-                let motion: (m: Float, deg: Float)? = if let probe = motionProbe {
+                let motion: StillMotion? = if let probe = motionProbe {
                     await probe.value
                 } else { nil }
                 if let motion {
-                    PerfDiag.log(String(format: "[360Still] trigger-window motion: %.3f m / %.1f° over %d ms",
-                                        motion.m, motion.deg, triggerMs))
+                    PerfDiag.log(String(format: "[360Still] motion: exposure %.3f m / %.1f° · total %.3f m / %.1f° over %d ms",
+                                        motion.exposureM, motion.exposureDeg,
+                                        motion.totalM, motion.totalDeg, triggerMs))
                 }
                 let seq = scanStillCount + 1
+                if let motion, motion.swayed {
+                    swayedStillCount += 1
+                    playThetaSwayWarnCue()
+                    log(.capture, String(format: "⚠️ Still #%d: moved %.0f cm / %.1f° during the exposure "
+                        + "window — its pose may not match the pano. Hold still until the done tone.",
+                        seq, motion.exposureM * 100, motion.exposureDeg))
+                }
                 // STOP-RACE GUARD: the trigger can still cross the scan's Stop — saveScan
                 // MOVES the capture dir, and a sidecar written to the stale path creates an
                 // orphaned equirect_stills/ the saved bundle never sees. Loud drop.
@@ -747,7 +742,8 @@ final class ThetaCameraManager {
                     frameTimestamp: timestamp, capturedAtEpochMs: capturedAtEpochMs,
                     sourceURL: fileURL, sourceModel: connectedModel, format: currentStillFormat,
                     triggerMs: triggerMs,
-                    triggerMotionM: motion?.m, triggerMotionDeg: motion?.deg)
+                    triggerMotionM: motion?.totalM, triggerMotionDeg: motion?.totalDeg,
+                    exposureMotionM: motion?.exposureM, exposureMotionDeg: motion?.exposureDeg)
                 // Sidecar NOW (phone pose can't be reconstructed later); JPG via the queue;
                 // cam_transform is baked by the Process step's calibration solve.
                 try Self.writeScanStillSidecar(input: input, into: rawDataDir)
@@ -897,6 +893,57 @@ final class ThetaCameraManager {
     /// Distinct completion tone + success haptic when a 360° still finishes (audio
     /// gated by the same capture-audio setting as the shutter click; haptic always —
     /// people scan with the ringer off).
+    /// Samples the phone pose every 250 ms until cancelled (cancel = camera listed the
+    /// file), recording the worst motion vs the tap pose.
+    private func makeStillMotionProbe(tapTransform: simd_float4x4,
+                                      sample: @escaping () -> simd_float4x4?) -> Task<StillMotion, Never> {
+        Task { @MainActor in
+            let tapPos = SIMD3<Float>(tapTransform.columns.3.x,
+                                      tapTransform.columns.3.y,
+                                      tapTransform.columns.3.z)
+            let tapRot = simd_quatf(tapTransform)
+            var motion = StillMotion()
+            let probeStart = Date()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard let pose = sample() else { continue }
+                let pos = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
+                let stepM = simd_distance(tapPos, pos)
+                let delta = (tapRot.inverse * simd_quatf(pose)).angle * 180 / .pi
+                let stepDeg = min(delta, 360 - delta)
+                motion.totalM = max(motion.totalM, stepM)
+                motion.totalDeg = max(motion.totalDeg, stepDeg)
+                // Only sway inside the exposure window corrupts the pose — the
+                // camera is done exposing well before stitch/transfer finish.
+                if Date().timeIntervalSince(probeStart) <= AppConstants.thetaExposureWindowSeconds {
+                    motion.exposureM = max(motion.exposureM, stepM)
+                    motion.exposureDeg = max(motion.exposureDeg, stepDeg)
+                }
+            }
+            return motion
+        }
+    }
+
+    /// Max phone motion vs the tap pose, split into the exposure window (pose-corrupting)
+    /// and the whole trigger window (context — includes harmless stitch/transfer time).
+    struct StillMotion {
+        var exposureM: Float = 0
+        var exposureDeg: Float = 0
+        var totalM: Float = 0
+        var totalDeg: Float = 0
+        var swayed: Bool {
+            exposureM > AppConstants.thetaSwayWarnMeters || exposureDeg > AppConstants.thetaSwayWarnDegrees
+        }
+    }
+
+    /// Warning cue for a swayed still — distinct from the done tone so the operator
+    /// learns the difference between "finished clean" and "finished but you moved".
+    private func playThetaSwayWarnCue() {
+        let audioOn = (UserDefaults.standard.object(forKey: AppConstants.Key.captureAudioEnabled) as? Bool) ?? true
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        if audioOn { AudioServicesPlaySystemSound(1073) }
+    }
+
     private func playThetaDoneCue() {
         let audioOn = (UserDefaults.standard.object(forKey: AppConstants.Key.captureAudioEnabled) as? Bool) ?? true
         UINotificationFeedbackGenerator().notificationOccurred(.success)

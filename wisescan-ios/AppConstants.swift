@@ -194,6 +194,16 @@ enum AppConstants {
     static let coachFloorMinFaces = 1500                               // mesh-gap coach: fewer floor-classified mesh faces than this late in a scan → floor prompt (WARNING — nadir face is dropped downstream, so LiDAR is the only floor source). Tune from [Coach] census log lines.
     static let coachCeilingMinFaces = 500                              // mesh-gap coach: fewer ceiling-classified faces → ceiling prompt (guidance — up-faces give it image coverage; mesh matters for the solver + mesh product). Tune from [Coach] census log lines.
     static let calibrationElevationCutoffDeg: Float = -45              // calibration cost (solve AND spot-check) ignores everything below this elevation: the bottom band holds the rod/tripod and usually the operator — the only content that moves WITH the rig, i.e. systematic attractors (runs 8-10 pulled params toward it). -90 disables
+    /// 360° exposure-sway guard. The camera exposes ~0.3-1 s after the trigger, so
+    /// phone motion inside this window means blur AND a recorded pose that doesn't
+    /// match the exposure; motion after it (stitch/transfer) is harmless. Sway above
+    /// either bound marks the still SWAYED: warning cue + chip count at capture, and
+    /// the calibration solve prefers clean stills (swayed ones join only to reach the
+    /// minimum). 0.03 m matches the dy anchor's half-width; 2° at a ~2 m rig lever arm
+    /// is ~7 cm of lens travel.
+    static let thetaExposureWindowSeconds: TimeInterval = 1.5
+    static let thetaSwayWarnMeters: Float = 0.03
+    static let thetaSwayWarnDegrees: Float = 2.0
     static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry
     static let calibrationMinSpreadMeters: Float = 1.0                 // live sufficiency meter: max pairwise still-position distance below this = weak baseline for the Process-step solve
     static let calibrationResidualGreenPx: Float = 1.4                 // RMS reprojection error (equirect px, 512-wide) ≤ this → green. Behavior-preserving √ of the old mean-squared 2.0

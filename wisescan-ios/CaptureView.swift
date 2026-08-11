@@ -188,6 +188,19 @@ struct CaptureView: View {
         ) {
             let stillNumber = thetaManager.scanStillCount + 1
             showTransientMessage("📸 360° still #\(stillNumber)…", duration: 2)
+            let swayedBefore = thetaManager.swayedStillCount
+            Task { @MainActor in
+                // The sway verdict lands when the camera lists the file (seconds after
+                // the tap) — watch the counter briefly and coach the fix, not just the
+                // failure. The manager already played the warning cue.
+                for _ in 0..<24 where thetaManager.swayedStillCount == swayedBefore {
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+                if thetaManager.swayedStillCount > swayedBefore {
+                    showTransientMessage("⚠️ Moved during the 360° exposure — still #\(stillNumber)'s "
+                        + "pose may be off. Hold still until the done tone.", duration: 4)
+                }
+            }
             if stillNumber == 1, rigMeasuredDyMeters <= 0.1 {
                 // First 360° still of the scan on an unmeasured rig: one actionable
                 // heads-up (the chip shows the persistent orange state).
@@ -271,9 +284,11 @@ struct CaptureView: View {
                  ? "📸 exposing — hold still…"
                  : count == 0
                  ? "No 360° stills yet"
-                 : String(format: "%d still%@ · spread %.1f m%@",
+                 : String(format: "%d still%@ · spread %.1f m%@%@",
                           count, count == 1 ? "" : "s", spread,
-                          pending > 0 ? " · ↓\(pending)" : ""))
+                          pending > 0 ? " · ↓\(pending)" : "",
+                          thetaManager.swayedStillCount > 0
+                          ? " · ⚠️\(thetaManager.swayedStillCount) swayed" : ""))
         }
         .font(.caption2).bold()
         .foregroundColor(.white)

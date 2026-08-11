@@ -32,6 +32,10 @@ extension ThetaCameraManager {
         /// that window means blur AND a baked pose that doesn't match the exposure.
         let triggerMotionM: Float?
         let triggerMotionDeg: Float?
+        /// Same measurement restricted to the exposure window (first
+        /// `thetaExposureWindowSeconds`) — the sway that actually corrupts the pose.
+        let exposureMotionM: Float?
+        let exposureMotionDeg: Float?
     }
 
     /// Writes the equirect + sidecar to `<rawDataDir>/equirect_stills/still_NNNN.{JPG,json}`
@@ -69,7 +73,9 @@ extension ThetaCameraManager {
             rigCalibrationSource: nil,
             rigCalibrationResidualPx: nil,
             triggerMotionM: input.triggerMotionM,
-            triggerMotionDeg: input.triggerMotionDeg
+            triggerMotionDeg: input.triggerMotionDeg,
+            exposureMotionM: input.exposureMotionM,
+            exposureMotionDeg: input.exposureMotionDeg
         )
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
@@ -101,6 +107,8 @@ private struct EquirectStillMetadata: Encodable {
     let rigCalibrationResidualPx: Float?
     let triggerMotionM: Float?
     let triggerMotionDeg: Float?
+    let exposureMotionM: Float?
+    let exposureMotionDeg: Float?
 
     enum CodingKeys: String, CodingKey {
         case sequence
@@ -120,5 +128,7 @@ private struct EquirectStillMetadata: Encodable {
         case rigCalibrationResidualPx = "rig_calibration_residual_px_rms"
         case triggerMotionM = "trigger_motion_m"
         case triggerMotionDeg = "trigger_motion_deg"
+        case exposureMotionM = "exposure_motion_m"
+        case exposureMotionDeg = "exposure_motion_deg"
     }
 }

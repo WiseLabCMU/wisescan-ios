@@ -52,6 +52,15 @@ enum EquirectPostCalibration {
         let jpgURL: URL
         let phoneToWorld: simd_float4x4
         let phonePos: SIMD3<Float>
+        /// Exposure-window sway from the capture-time motion probe (fallback: whole
+        /// trigger window for pre-guard sidecars). nil = no probe ran.
+        let swayM: Float?
+        let swayDeg: Float?
+
+        var swayed: Bool {
+            (swayM ?? 0) > AppConstants.thetaSwayWarnMeters
+                || (swayDeg ?? 0) > AppConstants.thetaSwayWarnDegrees
+        }
     }
 
     /// Entry point from the postprocessor. Returns a short human status for the log.
@@ -81,11 +90,13 @@ enum EquirectPostCalibration {
         }
         let parseMs = ms(tParse)
 
+        let solveSet = swayFiltered(stills, report: report)
+
         // Build solver inputs from the best-spread subset (aliasing shrinks and the
         // solve sharpens with baseline; cost grows linearly with inputs). Mesh edges for
         // ALL positions extract in one face pass; the edge maps decode per still.
         let tPrep = Date()
-        let selected = selectBySpread(stills, cap: 5)
+        let selected = selectBySpread(solveSet, cap: 5)
         let edgesPerStill = RigCalibrationSolver.extractMeshEdges(
             mesh: mesh, nearAll: selected.map(\.phonePos),
             radius: AppConstants.calibrationMeshRadiusMeters)
@@ -188,11 +199,35 @@ enum EquirectPostCalibration {
                              Float(flat[c * 4 + 2]), Float(flat[c * 4 + 3]))
             }
             let m = simd_float4x4(columns: (cols[0], cols[1], cols[2], cols[3]))
+            let swayM = (obj["exposure_motion_m"] as? Double) ?? (obj["trigger_motion_m"] as? Double)
+            let swayDeg = (obj["exposure_motion_deg"] as? Double) ?? (obj["trigger_motion_deg"] as? Double)
             out.append(StillRecord(
                 sequence: seq, sidecarURL: sidecarURL, jpgURL: jpgURL, phoneToWorld: m,
-                phonePos: SIMD3<Float>(m.columns.3.x, m.columns.3.y, m.columns.3.z)))
+                phonePos: SIMD3<Float>(m.columns.3.x, m.columns.3.y, m.columns.3.z),
+                swayM: swayM.map(Float.init), swayDeg: swayDeg.map(Float.init)))
         }
         return out.sorted { $0.sequence < $1.sequence }
+    }
+
+    /// SWAY GUARD: a still whose phone moved during the exposure window carries a
+    /// pose that doesn't match its pano — feeding it to the solve poisons yaw/dy for
+    /// the whole scan. Prefer clean stills; fall back to the least-swayed only when
+    /// there aren't enough clean ones to reach the solve floor.
+    private nonisolated static func swayFiltered(_ stills: [StillRecord],
+                                                 report: (String) -> Void) -> [StillRecord] {
+        let clean = stills.filter { !$0.swayed }
+        if clean.count >= AppConstants.calibrationMinStillsForSolve {
+            if clean.count < stills.count {
+                report("Excluding \(stills.count - clean.count) swayed still(s) from the solve")
+            }
+            return clean
+        }
+        let bySway = stills.sorted { ($0.swayM ?? 0) < ($1.swayM ?? 0) }
+        if stills.contains(where: \.swayed) {
+            report("Too few clean stills — least-swayed retained for the solve")
+        }
+        return Array(bySway.prefix(max(AppConstants.calibrationMinStillsForSolve, clean.count)))
+            .sorted { $0.sequence < $1.sequence }
     }
 
     /// Greedy farthest-point selection: keep up to `cap` stills maximizing baseline spread.
