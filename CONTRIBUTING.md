@@ -75,6 +75,8 @@ The same keys can also leak via **Xcode build settings**: `INFOPLIST_KEY_UIFileS
 
 **All dependencies must use exact, pegged versions** (no `^`, `~`, or `*` ranges). This prevents version drift across environments and ensures reproducible builds for security.
 
+All GitHub Action references in `.github/workflows/` **must** be pinned to the exact commit SHA of the official release tag, with a version comment (e.g., `uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0`). This ensures supply-chain integrity and enables Dependabot to generate human-readable SemVer PR titles.
+
 ### 5. Magic Numbers & Constants
 
 **No magic numbers allowed inline.** Any numerical layout properties, structural modifiers (like opacities, heights, constraints), and complex configurations (duration bounds, bitrates) must be formally extracted and organized into the `AppConstants.swift` structure. This guarantees centralized governance of our UI aesthetics and networking policies.

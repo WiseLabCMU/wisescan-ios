@@ -591,6 +591,7 @@ sequenceDiagram
     participant D as raw_data/equirect_stills
 
     U->>FCS: pause (device settles — rig mode tightens the angular gate by lever arm)
+    Note over FCS,TCM: sway guard — motion in the exposure window beyond 3 cm / 2° marks the still SWAYED (warning cue + chip count) and the Process solve prefers clean stills
     FCS-->>U: stillness chime (cue 1)
     U->>FCS: shutter tap → requestStillCapture() arms
     FCS->>FCS: keyframe fires while stillness holds (hi-res + LiDAR depth + mask)
@@ -603,7 +604,7 @@ sequenceDiagram
         TCM->>X: triggerStill() (OSC)
     end
     CV-->>U: chip: "📸 exposing — hold still…" (orange)
-    TCM->>D: still_NNNN.json — phone_transform, frame_timestamp, captured_at_epoch_ms, trigger_motion_m/deg, camera_file_url — NO cam_transform
+    TCM->>D: still_NNNN.json — phone_transform, frame_timestamp, captured_at_epoch_ms, trigger+exposure motion m/deg, camera_file_url — NO cam_transform
     TCM-->>U: done tone + success haptic (cue 3 — walk now)
     TCM->>TCM: enqueue JPG download
     loop while NOT capturing (yields to triggers)
