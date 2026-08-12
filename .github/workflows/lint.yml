@@ -8,7 +8,7 @@ jobs:
     name: Verify release-please version markers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Check x-release-please-version markers in project.pbxproj
         run: |
@@ -27,7 +27,7 @@ jobs:
     name: Verify no committed privacy leaks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       # Same patterns as the local git hooks (scripts/privacy-guard.sh), so a
       # missed hook install or a `--no-verify` commit can't leak into main.
