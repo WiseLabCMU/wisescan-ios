@@ -1152,10 +1152,26 @@ struct MeshPreviewView: UIViewRepresentable {
         var outlineNodes: [SemanticOutlineResult.OutlineNode] = []
         var detectedSet = Set<SemanticClass>()
 
+        // Levels and ramps recovered from the classified mesh at post-process. RoomPlan gives exactly
+        // one floor plane per room, spanning the whole plan-view footprint, so without these a
+        // stairwell draws as a single orange slab across the entire staircase.
+        let derived = DerivedSurfacesData.load(scanDirectory: scanDir)
+
         // Build outlines for surfaces
         for surface in roomData.surfaces {
             let cls = SemanticClass.fromSurfaceCategory(surface.category)
             guard cls != .none else { continue }
+            // A derived level at the same height is the same physical surface measured better: its
+            // extent comes from where floor faces actually are, not from the room footprint. Prefer it
+            // and skip RoomPlan's, or the two draw on top of each other.
+            if cls == .floor, let derived,
+               let floorY = surface.transform.count == 16 ? surface.transform[13] : nil,
+               derived.surfaces.contains(where: {
+                   $0.category == DerivedSurfacesData.levelCategory
+                       && abs(($0.centerY ?? .infinity) - floorY) <= ARCoverageView.ghostProxyQuadCoverageMeters
+               }) {
+                continue
+            }
             detectedSet.insert(cls)
 
             let dims = SIMD3<Float>(surface.dimensions.width, surface.dimensions.height, surface.dimensions.depth)
@@ -1184,6 +1200,21 @@ struct MeshPreviewView: UIViewRepresentable {
             )
             let fill = buildOrientedBoxFillGeometry(
                 dimensions: dims, transform: transform, color: cls.color, opacity: 0.75
+            )
+            outlineNodes.append(SemanticOutlineResult.OutlineNode(geometry: wireframe, fillGeometry: fill))
+        }
+
+        // Derived levels and ramps draw as flat quads in the floor class — they ARE floor surfaces, and
+        // reusing the class keeps the legend and its palette untouched.
+        for surface in derived?.surfaces ?? [] {
+            guard let transform = surface.matrix else { continue }
+            detectedSet.insert(.floor)
+            let dims = SIMD3<Float>(surface.dimensions.width, surface.dimensions.height, 0)
+            let wireframe = buildOrientedBoxLineGeometry(
+                dimensions: dims, transform: transform, color: SemanticClass.floor.color
+            )
+            let fill = buildOrientedBoxFillGeometry(
+                dimensions: dims, transform: transform, color: SemanticClass.floor.color, opacity: 0.75
             )
             outlineNodes.append(SemanticOutlineResult.OutlineNode(geometry: wireframe, fillGeometry: fill))
         }

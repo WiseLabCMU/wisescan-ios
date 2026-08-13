@@ -1107,7 +1107,7 @@ class ScanFileManager {
             // _raw are written directly to the scan dir by the deferred post-save RoomBuilder now,
             // but stay in the list for legacy save-time-pipeline scans.
             for rpFile in ["roomplan.json", "roomplan_raw.json", "registration.json", "mesh_proxy.obj",
-                           "mesh_dynamic.obj", "face_classes.bin"] {
+                           "mesh_dynamic.obj", "face_classes.bin", DerivedSurfacesData.filename] {
                 let src = newScan.rawDataPath.appendingPathComponent(rpFile)
                 let dst = newScan.scanDirectory.appendingPathComponent(rpFile)
                 if FileManager.default.fileExists(atPath: src.path) {

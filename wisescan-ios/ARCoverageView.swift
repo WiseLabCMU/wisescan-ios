@@ -3188,6 +3188,12 @@ struct ARCoverageView: UIViewRepresentable {
         let proxy: MeshExportResult
         /// `mesh_dynamic.obj` — content mesh only (no walls, floors, ceilings, or RoomPlan quads).
         let dynamic: MeshExportResult
+        /// Walkable levels recovered from the classified mesh, for `derived_surfaces.json`. NOT
+        /// deduped against RoomPlan's floor: dropping the one that duplicates it is a baking concern
+        /// (two quads at one height), whereas the sidecar wants the complete set of levels in the scan.
+        let levels: [PlaneRegistration.Plane]
+        /// Sloped walkable planes recovered from the same mesh, same purpose.
+        let ramps: [PlaneRegistration.Plane]
     }
 
     /// Raw, co-framed buffer snapshot taken on the main/AR thread the instant recording stops.
@@ -3513,11 +3519,11 @@ struct ARCoverageView: UIViewRepresentable {
         // a landing arrives as a clean quad instead of a lump. A flat single-level room derives one
         // level that the RoomPlan floor already represents, so it dedupes away to nothing and the
         // output is identical to not running this at all.
-        let derivedLevels = deriveLevelPlanes(verts: verts, faces: faces, faceClasses: faceClasses,
-                                              reference: roomPlanFloors.first)
-            .filter { lvl in
-                !roomPlanFloors.contains { abs($0.center.y - lvl.center.y) <= ghostProxyQuadCoverageMeters }
-            }
+        let allLevels = deriveLevelPlanes(verts: verts, faces: faces, faceClasses: faceClasses,
+                                         reference: roomPlanFloors.first)
+        let derivedLevels = allLevels.filter { lvl in
+            !roomPlanFloors.contains { abs($0.center.y - lvl.center.y) <= ghostProxyQuadCoverageMeters }
+        }
         // A ramp is fitted to whatever the levels leave unexplained — see `deriveRampPlanes`. It joins
         // the same two lists, so a ramp that fits coherently gets a clean tilted lattice and stops
         // being a lump, and one that does not just stays mesh.
@@ -3675,7 +3681,8 @@ struct ARCoverageView: UIViewRepresentable {
         print("[GhostProxy] quads baked: \(quadDesc) | mesh faces kept=\(keptFaces.count) (dynamic \(dynamicFaces.count)) dropped: ceiling=\(droppedCeiling) coveredFloor=\(droppedCoveredFloor) coveredWall=\(droppedCoveredWall) | floorKept=\(keptUncoveredFloor)")
         let proxyResult = MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces)
         let dynamicResult = MeshExportResult(data: dynamicOBJData, vertexCount: dynamicVertexCount, faceCount: dynamicFaceCount)
-        return GhostProxyBuildResult(proxy: proxyResult, dynamic: dynamicResult)
+        return GhostProxyBuildResult(proxy: proxyResult, dynamic: dynamicResult,
+                                     levels: allLevels, ramps: derivedRamps)
     }
 
     /// Whether any of `planes` genuinely stands in for the point `p`: within

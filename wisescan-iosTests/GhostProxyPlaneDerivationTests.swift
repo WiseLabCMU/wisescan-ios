@@ -291,5 +291,52 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
 
         // Neither the floor nor the landing is content, so the change-detection artifact stays empty.
         XCTAssertEqual(built.dynamic.faceCount, 0)
+
+        // The sidecar gets BOTH levels, including the one RoomPlan already models: skipping that one
+        // is a baking concern (two quads at one height), not a description of the scan.
+        XCTAssertEqual(built.levels.count, 2)
+        XCTAssertEqual(built.levels.map { ($0.center.y * 10).rounded() / 10 }, [0, 1.5])
+    }
+
+    /// The sidecar has to survive the round trip with its frame intact — a consumer reading it back
+    /// draws quads or feeds a fit, and a transposed or mis-ordered transform would be silently wrong
+    /// rather than obviously broken.
+    func testDerivedSurfacesSidecar_roundTripsFrameAndCategory() throws {
+        let level = PlaneRegistration.Plane(
+            center: SIMD3(1, 1.5, -2), normal: SIMD3(0, 1, 0),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, 0, 1),
+            width: 2, height: 3, category: .floor)
+        let tilt = Float.pi / 36   // 5°
+        let ramp = PlaneRegistration.Plane(
+            center: SIMD3(0, 0.25, 4), normal: SIMD3(0, cos(tilt), -sin(tilt)),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, sin(tilt), cos(tilt)),
+            width: 1.5, height: 6, category: .floor)
+
+        let encoded = try JSONEncoder().encode(DerivedSurfacesData(levels: [level], ramps: [ramp]))
+        let decoded = try JSONDecoder().decode(DerivedSurfacesData.self, from: encoded)
+
+        XCTAssertEqual(decoded.surfaces.map(\.category),
+                       [DerivedSurfacesData.levelCategory, DerivedSurfacesData.rampCategory])
+        XCTAssertEqual(decoded.surfaces[0].centerY, 1.5)
+        XCTAssertEqual(decoded.surfaces[0].dimensions.width, 2)
+        XCTAssertEqual(decoded.surfaces[0].dimensions.depth, 0, "these are planes, not volumes")
+
+        let m = try XCTUnwrap(decoded.surfaces[1].matrix)
+        // col0 = xAxis, col1 = yAxis, col2 = normal, col3 = center.
+        XCTAssertEqual(m.columns.2.y, cos(tilt), accuracy: 1e-6)
+        XCTAssertEqual(m.columns.2.z, -sin(tilt), accuracy: 1e-6)
+        XCTAssertEqual(m.columns.3.z, 4, accuracy: 1e-6)
+    }
+
+    /// A ramp must not be readable as a `floor` by the registration decoder. The plane matcher there
+    /// admits pairs up to 25° apart, so a shallow ramp would correspond to a flat floor and drag the
+    /// vertical solution with it — anything wiring these in has to opt in per category.
+    func testDerivedCategories_areNotAcceptedByThePlaneRegistrationDecoder() {
+        for category in [DerivedSurfacesData.levelCategory, DerivedSurfacesData.rampCategory] {
+            XCTAssertNil(PlaneRegistration.plane(category: category, width: 2, height: 2,
+                                                 transform: [1, 0, 0, 0, 0, 1, 0, 0,
+                                                             0, 0, 1, 0, 0, 0, 0, 1]),
+                         "\(category) leaked into the registration plane decoder")
+        }
     }
 }

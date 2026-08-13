@@ -523,6 +523,10 @@ enum ScanPostprocessor {
             try? data.write(to: dir.appendingPathComponent(name), options: .atomic)
             try? data.write(to: raw.appendingPathComponent(name), options: .atomic)
         }
+        func removeBoth(_ name: String) {
+            try? fm.removeItem(at: dir.appendingPathComponent(name))
+            try? fm.removeItem(at: raw.appendingPathComponent(name))
+        }
         func mirrorToRaw(_ name: String) {
             let src = dir.appendingPathComponent(name)
             let dst = raw.appendingPathComponent(name)
@@ -659,6 +663,18 @@ enum ScanPostprocessor {
                                                                  roomPlanPlanes: planes) {
                     writeBoth(result.proxy.data, "mesh_proxy.obj")
                     writeBoth(result.dynamic.data, "mesh_dynamic.obj")
+                    // The levels/ramps the proxy just recovered, as data for the consumers that need
+                    // the plane list without re-parsing the mesh. A rebuild that finds NOTHING must
+                    // clear the file rather than leave the previous run's answer standing: coverage
+                    // changes between generations, so a level found once can legitimately disappear.
+                    if !result.levels.isEmpty || !result.ramps.isEmpty,
+                       let json = try? JSONEncoder().encode(
+                           DerivedSurfacesData(levels: result.levels, ramps: result.ramps)) {
+                        writeBoth(json, DerivedSurfacesData.filename)
+                        log.info("[GhostProxy] derived surfaces: \(result.levels.count) level(s), \(result.ramps.count) ramp(s)")
+                    } else {
+                        removeBoth(DerivedSurfacesData.filename)
+                    }
                     outcome.didStructural = true
                     log.info("[GhostProxy] built at postprocess: proxy \(result.proxy.faceCount) faces (\(result.proxy.data.count / 1024) KB), dynamic \(result.dynamic.faceCount) faces (\(result.dynamic.data.count / 1024) KB)")
                 } else {
