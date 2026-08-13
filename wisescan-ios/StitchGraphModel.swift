@@ -169,7 +169,15 @@ enum StitchGraphBuilder {
         let yaw = String(format: "yaw %+.1f°→%@", c.appliedYaw ? c.yawSigned : c.yawDeg, c.appliedYaw ? "applied" : "held")
         let perp = c.appliedPerp ? String(format: "⊥ %.0fcm→applied", c.perpCm)
                                  : (c.doorwayPerpCm.map { String(format: "⊥ %.0fcm→held", $0) } ?? "⊥ n/a")
-        print("[StitchResidual] \(src) ↔ \(tgt): \(yaw), \(perp) | compass \(compass) | walls \(c.srcWalls)/\(c.tgtWalls) near-∥ \(c.nearParallel)")
+        // Vote span alongside MAD: a wide span with a small MAD is outliers, a wide span with a large
+        // MAD is a split sample (two wall families). `far` counts pairs the angle gate accepted and
+        // the proximity gate rejected — if that dominates, maxPairGapM is starving the sample.
+        // The reported yaw/MAD are AREA-WEIGHTED (what's applied); `plain` is the unweighted median,
+        // kept so the weighting's effect stays visible on device.
+        let votes = String(format: "near-∥ %d(far %d) span %+.1f…%+.1f° MAD %.2f° | plain %+.2f°",
+                           c.nearParallel, c.nearParallelFar,
+                           c.yawVoteMinDeg, c.yawVoteMaxDeg, c.yawMADDeg, c.yawPlainDeg)
+        print("[StitchResidual] \(src) ↔ \(tgt): \(yaw), \(perp) | compass \(compass) | walls \(c.srcWalls)/\(c.tgtWalls) \(votes)")
         #endif
     }
 
@@ -282,6 +290,18 @@ enum StitchGraphBuilder {
         var doorwayPerpCm: Float?                    // de-yawed doorway-wall gap before correction (cm)
         var yawSigned: Float = 0                     // signed yaw ACTUALLY applied about the pin (0 if not)
         var transVec: SIMD3<Float> = .zero           // translation ACTUALLY applied, source-canonical (zero if not)
+        var yawMADDeg: Float = 0                     // MAD of the yaw sample (dispersion diagnostic)
+        var nearParallelFar = 0                      // pairs passing the ANGLE gate but dropped as too far apart
+        /// Full span of the yaw votes. With the median and MAD this separates the two failures MAD
+        /// alone conflates: a wide span with a small MAD is a few outliers, while a wide span with a
+        /// large MAD is a genuinely split sample (two orientation families) — recoverable by picking
+        /// the dominant mode, where a median just lands between them.
+        var yawVoteMinDeg: Float = 0
+        var yawVoteMaxDeg: Float = 0
+        /// The UNWEIGHTED median, log-only. `yawDeg` carries the area-weighted value that is actually
+        /// applied; keeping the plain one visible makes the weighting's effect auditable on device
+        /// rather than something to take on trust.
+        var yawPlainDeg: Float = 0
 
         /// The applied correction expressed as a `ManualNudge` (yaw about the pin + translation), so
         /// "Autocorrect" can transfer the solver's fix INTO the single manual correction rather than
@@ -290,6 +310,86 @@ enum StitchGraphBuilder {
         /// the same pivot placeScans/effectiveCorrection use. (Not the true raw `sourceAnchor` pin;
         /// all three paths agree only because each pivots about this canonical point.)
         var asNudge: ManualNudge { ManualNudge(yawDeg: yawSigned, dx: transVec.x, dy: transVec.y, dz: transVec.z) }
+    }
+
+    // MARK: - Op-2 yaw tunables
+
+    /// Weighted median: the value at which cumulative weight first reaches half the total. Falls back
+    /// to the plain middle element for an empty/zero-weight set. (Not interpolated — the estimate is
+    /// one of the observed angles, matching the unweighted median it's compared against.)
+    static func weightedMedian(_ samples: [(deg: Float, w: Float)]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        let sorted = samples.sorted { $0.deg < $1.deg }
+        let total = sorted.reduce(Float(0)) { $0 + $1.w }
+        guard total > 0 else { return sorted[sorted.count / 2].deg }
+        var acc: Float = 0
+        for s in sorted {
+            acc += s.w
+            if acc >= total / 2 { return s.deg }
+        }
+        return sorted[sorted.count - 1].deg
+    }
+
+    /// PROVISIONAL values pending real-scan tuning (same convention as `PlaneRegistration.Gate`).
+    enum YawGate {
+        /// Yaw noise floor. Kept at a small EPSILON rather than 0: sub-degree yaw is worth applying
+        /// (0.5° across a 10 m wall is ~9 cm of lever-arm gap), but `ManualNudge.isZero` is exact
+        /// equality, so a literal 0 floor makes every clean join carry a nudge — the legend's
+        /// uncorrected "Aligned" state becomes unreachable and `nudgesApproxEqual`'s 0.05° tolerance
+        /// ends up comparing against 0.02° auto values. This keeps "no meaningful correction"
+        /// representable while still applying everything that actually shows.
+        static let minApplyDeg: Float = 0.05
+        /// ABSOLUTE ceiling on the yaw sample's MAD (median absolute deviation) — past this the
+        /// sample is junk whatever the estimate. PROVISIONAL: 3° is generous for a well-sampled
+        /// join (MAD < 1° typical) but catches the stairwell-class thin/fragmented scenario.
+        static let maxYawMADDeg: Float = 3.0
+        /// RELATIVE dispersion gate: the estimate must clear `minMADRatio × MAD` to be applied.
+        ///
+        /// An absolute MAD ceiling alone does not scale down with the signal, and all three of the
+        /// other guards are simultaneously blind in the small-yaw regime: at yaw 0.3° / MAD 2.8°
+        /// the apply floor passes, `maxYawMADDeg` passes, and the compass window (±15°) is vacuous
+        /// — applying a point estimate ~10× smaller than its own dispersion. Signal-to-noise is
+        /// what separates "small and clean" (apply) from "small and noisy" (decline).
+        /// PROVISIONAL — calibrate from the device MAD on a join known to be bad.
+        static let minMADRatio: Float = 2.0
+        /// Noise floor clamped onto the MAD before the ratio test. Necessary because the MAD is now
+        /// area-weighted: on a clean join the large walls agree to within hundredths of a degree
+        /// (device: 0.00°, 0.00°, 0.06°), which would make `|yaw| ≥ ratio × MAD` vacuous and let any
+        /// yaw above `minApplyDeg` through — including a spurious one. Clamping asserts we cannot
+        /// claim precision finer than plane-fit noise, so the effective minimum applied yaw is
+        /// `minMADRatio × madFloorDeg` (0.30°) and rises from there as real dispersion appears.
+        /// PROVISIONAL.
+        static let madFloorDeg: Float = 0.15
+        /// Minimum near-∥ pair count before the dispersion gate means anything. At n = 1 the MAD is
+        /// identically 0, which would satisfy ANY signal-to-noise test — so without this the
+        /// relative gate above is trivially passable by the thinnest possible sample.
+        /// PROVISIONAL — tune from the `near-∥` counts in `[StitchResidual]`.
+        static let minNearParallel = 3
+        /// Near-∥ admission angle for the YAW sample. Deliberately NOT
+        /// `PlaneRegistration.matchAngleDeg` (25°), which was tuned for correspondence MATCHING in a
+        /// solver that also uses plane position; here it is the sole admission test, and at 25° it
+        /// cannot separate "same wall family, a few degrees of drift" from "different wall family,
+        /// ~20° apart by design" — non-orthogonal architecture (angled wings, splayed corners,
+        /// cubicle runs off the building grid) is common enough that this silently poisons the median.
+        ///
+        /// The gate has to sit inside (max expected yaw error, min architectural angle deviation):
+        /// yaw errors run ~2° typical / 5.5° observed, and the smallest deliberate non-orthogonal
+        /// feature seen on site is ~15°, so the usable window is roughly 6–14°. Note the corollary:
+        /// a yaw error exceeding the smallest architectural angle is genuinely ambiguous and no gate
+        /// recovers it.
+        static let nearParallelDeg: Float = 10.0
+        /// Max gap (m) at CLOSEST APPROACH between two walls that can still plausibly share an
+        /// orientation family. Budgeted from the mechanics, not guessed: up to ~2 m of stitch-pin
+        /// error (a user drifts that far at the pin despite the hold-still prompt) plus up to ~2 m of
+        /// genuine separation between walls that are co-visible but not overlapping.
+        ///
+        /// Rationale: buildings are LOCALLY Manhattan even when globally they aren't, so proximity is
+        /// a proxy for same-grid membership. It also bounds intra-scan ARKit drift — a room is not
+        /// perfectly rigid, so a far wall can be slightly rotated relative to a near one *within one
+        /// scan*, which breaks the "a yaw error rotates the room uniformly" premise independently of
+        /// architecture. Measured extent-aware (bounding-sphere closest approach), so a long wall
+        /// paired with a short one near its end still counts as adjacent.
+        static let maxPairGapM: Float = 4.0
     }
 
     /// The scan whose canonical roomplan/mesh REPRESENTS a location: its canonical owner (gen-0,
@@ -347,21 +447,88 @@ enum StitchGraphBuilder {
             out.compassDeg = d
         }
 
-        // Global yaw = median near-∥ orientation delta (correspondence-free).
+        // Global yaw = UNWEIGHTED median near-∥ orientation delta (correspondence-free).
+        //
+        // Area weighting was tried and measured worse (1.1° → 1.9° on the stairwell join), so this
+        // stays unweighted and the dispersion gates below carry the safety. Two caveats on that
+        // result, in case it's revisited: cross-pairs of PARALLEL walls give ~the same yaw by
+        // design (that's the correspondence-free premise above), so amplifying them shouldn't bias
+        // the estimate — the likelier culprit is that `matchAngleDeg` (25°, borrowed from
+        // PlaneRegistration where it was tuned for correspondence MATCHING, not yaw ESTIMATION)
+        // admits splayed wall families up to 25° off, whose garbage yaw area weighting then
+        // amplifies. And the A/B was run before the `alignScore` sign bug was fixed, so it was
+        // confounded. A retry would want a tighter Op-2-specific near-∥ gate (~10°, as the
+        // ⊥ opposite-face test already uses) on top of the corrected sign.
         var yaws: [Float] = []
+        var weighted: [(deg: Float, w: Float)] = []
+        var farRejects = 0
         for s in sW { for t in tW {
             let nDot = simd_dot(s.normal, t.normal)
-            guard acos(min(abs(nDot), 1)) * 180 / Float.pi < PlaneRegistration.matchAngleDeg else { continue }
+            guard acos(min(abs(nDot), 1)) * 180 / Float.pi < YawGate.nearParallelDeg else { continue }
+            // Proximity gate (see `maxPairGapM`): closest approach of the two patches' bounding
+            // spheres, so extent counts — a long wall paired near a short one's end reads as adjacent
+            // rather than being judged on centre distance alone.
+            let reachS = 0.5 * sqrt(s.width * s.width + s.height * s.height)
+            let reachT = 0.5 * sqrt(t.width * t.width + t.height * t.height)
+            guard max(0, simd_distance(s.center, t.center) - (reachS + reachT)) <= YawGate.maxPairGapM else {
+                farRejects += 1
+                continue
+            }
             let nt = nDot < 0 ? -t.normal : t.normal
-            yaws.append(atan2(s.normal.x * nt.z - s.normal.z * nt.x, s.normal.x * nt.x + s.normal.z * nt.z) * 180 / Float.pi)
+            let deg = atan2(s.normal.x * nt.z - s.normal.z * nt.x,
+                            s.normal.x * nt.x + s.normal.z * nt.z) * 180 / Float.pi
+            yaws.append(deg)
+            // Area weight for the A/B below: min of the two, since a pair is only as trustworthy as
+            // its WORSE normal — a large wall paired with a sliver is limited by the sliver. (Product
+            // would double-count and over-amplify big×big pairs.)
+            weighted.append((deg: deg, w: min(s.area, t.area)))
         }}
         out.nearParallel = yaws.count
+        out.nearParallelFar = farRejects
         guard !yaws.isEmpty else { return out }
-        let yawFix = yaws.sorted()[yaws.count / 2]
+        yaws.sort()
+        let plainYaw = yaws[yaws.count / 2]
+
+        // AREA-WEIGHTED is the applied estimate; the plain median is kept for the log only.
+        //
+        // The first weighting attempt measured worse and was reverted, but that A/B was confounded: it
+        // ran with the `alignScore` sign bug live and with the 25° near-∥ gate. With both fixed, a
+        // device A/B over three joins was decisive — on the staircase join (truth −1.7°, hand-aligned
+        // by making the TALL stairwell walls coplanar) the plain median read −1.1° with MAD 0.85°
+        // while weighted read −1.87° with MAD 0.06°: error 0.6° → 0.17°, and the scatter collapsed,
+        // i.e. the large walls agree tightly and every bit of the ±6° spread came from small
+        // fragments. On the two already-good joins weighting moved the answer by 0.01° and 0.05°, so
+        // there was no trade. (The original "1.9° wrong direction" reading was the right magnitude all
+        // along — the sign bug made it look wrong.)
+        let yawFix = Self.weightedMedian(weighted)
+        out.yawPlainDeg = plainYaw
+
+        // MAD (median absolute deviation) of the APPLIED estimate — dispersion diagnostic and gate.
+        // Area-weighted to match the estimate it measures.
+        let mad = Self.weightedMedian(weighted.map { (deg: abs($0.deg - yawFix), w: $0.w) })
+        out.yawMADDeg = mad
         out.yawDeg = yawFix
+        out.yawVoteMinDeg = yaws[0]                  // yaws is sorted
+        out.yawVoteMaxDeg = yaws[yaws.count - 1]
+
+        // Dispersion gate, three parts:
+        //   1. enough pairs for a MAD to mean anything,
+        //   2. an absolute ceiling on the spread,
+        //   3. signal-to-noise — the estimate must stand clear of its own dispersion.
+        //
+        // Scoped to the YAW only — deliberately NOT an early return. ⊥ is an independent DOF: a join
+        // can have an untrustworthy yaw and a perfectly good doorway gap, and at ~1° the de-yaw barely
+        // moves the ⊥ measurement anyway. Returning here also silently disabled ⊥ (device-observed as
+        // "⊥ n/a" on the staircase join, whose yaw was declined), which was a regression — before
+        // these gates existed, ⊥ ran whenever the compass guardrail passed.
+        let yawTrusted = yaws.count >= YawGate.minNearParallel
+            && mad <= YawGate.maxYawMADDeg
+            && abs(yawFix) >= YawGate.minMADRatio * max(mad, YawGate.madFloorDeg)
 
         // Compass guardrail — the plane yaw must agree with |C_A−C_B| (≤15°, coarse) or the whole fit
-        // is untrusted (a flip): touch nothing.
+        // is untrusted (a flip): touch nothing. This one DOES bail outright, including ⊥ — a
+        // relocalization flip invalidates the entire composed edge, not just its yaw. Fails closed
+        // when no heading was recorded (compassDeg nil).
         let trustworthy = out.compassDeg.map { abs(abs(yawFix) - $0) <= 15 } ?? false
         guard trustworthy else { return out }
 
@@ -380,12 +547,15 @@ enum StitchGraphBuilder {
         // NEITHER sign found any opposite-facing pair — two rooms that don't physically overlap, e.g.
         // the cubicle join — the comparison was 0 >= 0 and it flipped a perfectly good sign
         // unconditionally. Device-confirmed: that join reported +1.5° and had -2.0° applied.
-        let signedYaw = yawFix
+        //
+        // Held at 0 when the dispersion gates distrust it, so the ⊥ measurement below proceeds in the
+        // raw composed orientation rather than being skipped.
+        let signedYaw = yawTrusted ? yawFix : 0
         let spin = spinner(signedYaw)
 
-        // C_yaw about the pin — applied only when the yaw is beyond noise (>1°).
+        // C_yaw about the pin — applied only when trusted AND clear of the noise floor.
         var C = matrix_identity_float4x4
-        if abs(yawFix) > 1 {
+        if yawTrusted, abs(yawFix) > YawGate.minApplyDeg {
             let a = signedYaw * Float.pi / 180, cA = cos(a), sA = sin(a)
             let R = simd_float4x4(SIMD4<Float>(cA, 0, -sA, 0), SIMD4<Float>(0, 1, 0, 0),
                                   SIMD4<Float>(sA, 0, cA, 0), SIMD4<Float>(0, 0, 0, 1))
