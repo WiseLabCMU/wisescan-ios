@@ -194,14 +194,18 @@ enum AppConstants {
     static let coachFloorMinFaces = 1500                               // mesh-gap coach: fewer floor-classified mesh faces than this late in a scan → floor prompt (WARNING — nadir face is dropped downstream, so LiDAR is the only floor source). Tune from [Coach] census log lines.
     static let coachCeilingMinFaces = 500                              // mesh-gap coach: fewer ceiling-classified faces → ceiling prompt (guidance — up-faces give it image coverage; mesh matters for the solver + mesh product). Tune from [Coach] census log lines.
     static let calibrationElevationCutoffDeg: Float = -45              // calibration cost (solve AND spot-check) ignores everything below this elevation: the bottom band holds the rod/tripod and usually the operator — the only content that moves WITH the rig, i.e. systematic attractors (runs 8-10 pulled params toward it). -90 disables
-    /// 360° exposure-sway guard. The camera exposes ~0.3-1 s after the trigger, so
-    /// phone motion inside this window means blur AND a recorded pose that doesn't
-    /// match the exposure; motion after it (stitch/transfer) is harmless. Sway above
-    /// either bound marks the still SWAYED: warning cue + chip count at capture, and
-    /// the calibration solve prefers clean stills (swayed ones join only to reach the
-    /// minimum). 0.03 m matches the dy anchor's half-width; 2° at a ~2 m rig lever arm
+    /// 360° exposure-sway guard. The window that corrupts the pose runs from the
+    /// camera ACCEPTING the shutter command (BLE write-ack / OSC response — recorded
+    /// as shutter_ack_ms) to shutter close; motion during stitch/transfer is harmless.
+    /// Per-model window lengths are conservative seeds pending a bench measurement
+    /// (photograph a millisecond clock, read command→shutter latency in the pano);
+    /// every downloaded still retro-annotates its sidecar with the EXIF exposure time
+    /// so field scans tune these. Sway above either bound marks the still SWAYED:
+    /// warning cue + chip count at capture, and the calibration solve prefers clean
+    /// stills. 0.03 m matches the dy anchor's half-width; 2° at a ~2 m rig lever arm
     /// is ~7 cm of lens travel.
-    static let thetaExposureWindowSeconds: TimeInterval = 1.5
+    static let thetaExposureWindowSecondsX: TimeInterval = 1.0      // BLE ack → shutter is fast
+    static let thetaExposureWindowSecondsZ1: TimeInterval = 1.5     // OSC ack over Wi-Fi, slower body
     static let thetaSwayWarnMeters: Float = 0.03
     static let thetaSwayWarnDegrees: Float = 2.0
     static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry

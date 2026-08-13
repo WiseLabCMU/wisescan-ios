@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import simd
 
 // Persistence for live-scan 360° stills: writes the equirect JPEG + a metadata sidecar
@@ -32,10 +33,18 @@ extension ThetaCameraManager {
         /// that window means blur AND a baked pose that doesn't match the exposure.
         let triggerMotionM: Float?
         let triggerMotionDeg: Float?
-        /// Same measurement restricted to the exposure window (first
-        /// `thetaExposureWindowSeconds`) — the sway that actually corrupts the pose.
+        /// Same measurement restricted to the exposure window (shutter-ack anchored,
+        /// per-model length) — the sway that actually corrupts the pose.
         let exposureMotionM: Float?
         let exposureMotionDeg: Float?
+        /// When the camera acknowledged the shutter command, ms after the tap — the
+        /// exposure window's anchor (BLE write-ack on the X, OSC response on the Z1).
+        let shutterAckMs: Int?
+        /// Window length applied for the sway verdict, ms.
+        let exposureWindowMs: Int?
+        /// Raw probe samples (t vs tap, displacement) — lets the window be re-derived
+        /// offline once the bench latency + EXIF exposure numbers land per model.
+        let motionSamples: [MotionSample]?
     }
 
     /// Writes the equirect + sidecar to `<rawDataDir>/equirect_stills/still_NNNN.{JPG,json}`
@@ -47,6 +56,26 @@ extension ThetaCameraManager {
     /// are baked by the Process step's calibration solve, and the equirect bytes drain
     /// through the download queue / Process sweep). Download state is derived from disk:
     /// sidecar present + JPG missing ⇒ pending.
+    /// Retro-annotates a still's sidecar with the EXIF exposure time parsed from the
+    /// downloaded equirect bytes — ground truth for tuning the per-model sway window
+    /// (the live verdict uses a seeded window; this is the calibration data). Both
+    /// download paths call it: the live drain and the Process sweep.
+    nonisolated static func annotateExifExposure(jpegData: Data, sidecarURL: URL) {
+        guard let src = CGImageSourceCreateWithData(jpegData as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any],
+              let exposure = exif[kCGImagePropertyExifExposureTime] as? Double,
+              let data = try? Data(contentsOf: sidecarURL),
+              var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              obj["exif_exposure_time_s"] == nil
+        else { return }
+        obj["exif_exposure_time_s"] = exposure
+        if let out = try? JSONSerialization.data(withJSONObject: obj,
+                                                 options: [.prettyPrinted, .sortedKeys]) {
+            try? out.write(to: sidecarURL, options: .atomic)
+        }
+    }
+
     nonisolated static func writeScanStillSidecar(input: ScanStillInput, into rawDataDir: URL) throws {
         let dir = rawDataDir.appendingPathComponent("equirect_stills")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -75,7 +104,12 @@ extension ThetaCameraManager {
             triggerMotionM: input.triggerMotionM,
             triggerMotionDeg: input.triggerMotionDeg,
             exposureMotionM: input.exposureMotionM,
-            exposureMotionDeg: input.exposureMotionDeg
+            exposureMotionDeg: input.exposureMotionDeg,
+            shutterAckMs: input.shutterAckMs,
+            exposureWindowMs: input.exposureWindowMs,
+            motionSamples: input.motionSamples.map { samples in
+                samples.map { [Double(Int($0.sinceTap * 1000)), Double($0.meters), Double($0.deg)] }
+            }
         )
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
@@ -109,6 +143,10 @@ private struct EquirectStillMetadata: Encodable {
     let triggerMotionDeg: Float?
     let exposureMotionM: Float?
     let exposureMotionDeg: Float?
+    let shutterAckMs: Int?
+    let exposureWindowMs: Int?
+    /// [t_ms, m, deg] triples from the trigger-window motion probe.
+    let motionSamples: [[Double]]?
 
     enum CodingKeys: String, CodingKey {
         case sequence
@@ -130,5 +168,8 @@ private struct EquirectStillMetadata: Encodable {
         case triggerMotionDeg = "trigger_motion_deg"
         case exposureMotionM = "exposure_motion_m"
         case exposureMotionDeg = "exposure_motion_deg"
+        case shutterAckMs = "shutter_ack_ms"
+        case exposureWindowMs = "exposure_window_ms"
+        case motionSamples = "motion_samples"
     }
 }
