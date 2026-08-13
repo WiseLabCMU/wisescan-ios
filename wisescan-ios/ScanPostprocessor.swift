@@ -549,7 +549,12 @@ enum ScanPostprocessor {
                 report("360° still \(idx + 1)/\(pending.count)…")
                 guard let url = URL(string: item.url), let data = syncDownload(url) else { continue }
                 let dst = stillsDir.appendingPathComponent(String(format: "still_%04d.JPG", item.sequence))
-                if (try? data.write(to: dst, options: .atomic)) != nil { fetched += 1 }
+                if (try? data.write(to: dst, options: .atomic)) != nil {
+                    fetched += 1
+                    ThetaCameraManager.annotateExifExposure(
+                        jpegData: data,
+                        sidecarURL: stillsDir.appendingPathComponent(String(format: "still_%04d.json", item.sequence)))
+                }
             }
             log.info("postprocess \(w.name, privacy: .public): equirect sweep \(fetched)/\(pending.count) downloaded")
             if fetched < pending.count {

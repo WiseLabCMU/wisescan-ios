@@ -171,8 +171,10 @@ extension ThetaCameraManager {
     /// "CL" (joined someone else's network). CL is the field gotcha: the camera looks
     /// on and healthy but never advertises its SSID, so joining silently can't work.
         /// Fires `camera.takePicture` and resolves to the saved file URL (polls if async).
-    func triggerStill() async throws -> String {
-        switch try await execute(name: "camera.takePicture") {
+    func triggerStill(onAck: (() -> Void)? = nil) async throws -> String {
+        let result = try await execute(name: "camera.takePicture")
+        onAck?()   // command accepted — exposure starts about now (sway-window anchor)
+        switch result {
         case .done(let url): return url
         case .inProgress(let id): return try await pollUntilDone(commandID: id)
         }

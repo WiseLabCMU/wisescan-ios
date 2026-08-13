@@ -591,7 +591,7 @@ sequenceDiagram
     participant D as raw_data/equirect_stills
 
     U->>FCS: pause (device settles — rig mode tightens the angular gate by lever arm)
-    Note over FCS,TCM: sway guard — motion in the exposure window beyond 3 cm / 2° marks the still SWAYED (warning cue + chip count) and the Process solve prefers clean stills
+    Note over FCS,TCM: sway guard — motion in the shutter-ack-anchored exposure window beyond 3 cm / 2° marks the still SWAYED (warning cue + chip count) and the Process solve prefers clean stills — downloaded JPGs retro-annotate EXIF exposure time for window tuning
     FCS-->>U: stillness chime (cue 1)
     U->>FCS: shutter tap → requestStillCapture() arms
     FCS->>FCS: keyframe fires while stillness holds (hi-res + LiDAR depth + mask)

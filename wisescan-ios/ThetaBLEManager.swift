@@ -197,7 +197,10 @@ final class ThetaBLEManager: NSObject {
     /// `_latestFileUrl` — the returned URL is the download ticket, identical to what
     /// the OSC path returns. Throws on write failure (caller may fall back to OSC)
     /// or on confirmation timeout (caller must NOT double-trigger).
-    func triggerShutter(timeout: TimeInterval = 15) async throws -> String {
+    /// `onAck` fires the moment the camera ACKNOWLEDGES the write — within tens of
+    /// ms of shutter-open (the X fires immediately; fixed focus, no hunt). This is the
+    /// sway guard's exposure-window anchor.
+    func triggerShutter(timeout: TimeInterval = 15, onAck: (() -> Void)? = nil) async throws -> String {
         guard isLinkReady, let peripheral, let shutter = chars[Self.ccv2ShutterChar] else {
             throw BLEError.linkNotReady
         }
@@ -209,6 +212,7 @@ final class ThetaBLEManager: NSObject {
             }
             peripheral.writeValue(Data("{\"name\":\"camera.takePicture\"}".utf8), for: shutter, type: .withResponse)
         }
+        onAck?()
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
             shutterPending = cont
             armWatchdog("shutter", timeout) { [weak self] in
