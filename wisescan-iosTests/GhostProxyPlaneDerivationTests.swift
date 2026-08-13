@@ -2,15 +2,23 @@ import XCTest
 import simd
 @testable import wisescan_ios
 
-/// `ARCoverageView.deriveLevelPlanes` — recovering the walkable levels RoomPlan does not model.
+/// `ARCoverageView.deriveLevelPlanes` / `deriveRampPlanes` — recovering the walkable surfaces
+/// RoomPlan does not model.
 ///
 /// Why this is worth pinning: RoomPlan emits exactly ONE floor plane per captured room, seated at the
 /// lowest adequately-covered horizontal surface, so on a stairwell every other level is missing. The
 /// proxy builder used to drop all floor-class mesh faces on the assumption that quad stood in for
-/// them, which deleted the upper landings outright. These tests fix the two boundaries that decide
-/// whether the replacement is trustworthy: a LANDING must be found, and a stair TREAD must not — they
-/// differ only by area, since both are flat, horizontal and floor-classified.
-final class GhostProxyLevelTests: XCTestCase {
+/// them, which deleted the upper landings outright.
+///
+/// These tests fix the boundaries that decide whether the replacement is trustworthy, and each one is
+/// a pair of near-identical geometry that has to come out differently:
+/// - a LANDING is found, a stair TREAD is not — both flat, horizontal and floor-classified, differing
+///   only in area;
+/// - a shallow RAMP yields no level, a NOISY FLOOR still does — per-face tilt is larger on the noisy
+///   floor, so only the coherence of the slope separates them;
+/// - a RAMP fits a tilted plane, a stair FLIGHT does not — both are a climb made of floor-class faces,
+///   and only the residual to the fitted plane tells them apart.
+final class GhostProxyPlaneDerivationTests: XCTestCase {
 
     // MARK: - Synthetic classified mesh
 
@@ -82,6 +90,12 @@ final class GhostProxyLevelTests: XCTestCase {
                         reference: PlaneRegistration.Plane? = nil) -> [PlaneRegistration.Plane] {
         ARCoverageView.deriveLevelPlanes(verts: m.verts, faces: m.faces,
                                          faceClasses: m.classData, reference: reference)
+    }
+
+    /// Ramps are fitted to what the levels leave over, so the two always run in that order.
+    private func ramps(_ m: MeshBuilder) -> [PlaneRegistration.Plane] {
+        ARCoverageView.deriveRampPlanes(verts: m.verts, faces: m.faces, faceClasses: m.classData,
+                                        explainedBy: levels(m))
     }
 
     // MARK: - Levels
@@ -185,6 +199,63 @@ final class GhostProxyLevelTests: XCTestCase {
         guard let level = levels(m, reference: reference).first else { return XCTFail("no level") }
         XCTAssertEqual(level.xAxis.x, cos(yaw), accuracy: 1e-5)
         XCTAssertEqual(level.xAxis.z, sin(yaw), accuracy: 1e-5)
+    }
+
+    // MARK: - Ramps
+
+    /// The other half of the ramp story: it is not a level, but it is a real plane, so it should come
+    /// back as a tilted quad rather than staying a lump of mesh.
+    func testRamp_isFittedAsATiltedPlane() throws {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-0.75)...0.75, z: 0...6, pitchDeg: 4.8)
+
+        let out = ramps(m)
+        XCTAssertEqual(out.count, 1)
+        let ramp = try XCTUnwrap(out.first)
+        let tilt = acos(min(abs(ramp.normal.y), 1)) * 180 / .pi
+        XCTAssertEqual(tilt, 4.8, accuracy: 0.3)
+        // yAxis runs up the slope, so `height` spans the ramp's 6 m run (centroid-bounded).
+        XCTAssertEqual(ramp.height, 6.0, accuracy: 0.4)
+        XCTAssertEqual(ramp.width, 1.5, accuracy: 0.4)
+    }
+
+    /// A staircase must not be smoothed into a ramp. Its unexplained faces are the treads of the
+    /// flight — flat, floor-classified, and spread over a metre of climb, so they are nowhere near any
+    /// single plane. The residual gate is what has to catch this; the mean tilt of level treads is
+    /// near zero, so tilt alone would not.
+    func testStairFlight_isNotFittedAsARamp() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-1)...1, z: (-2)...0)
+        m.addFlight(baseY: 0, riser: 0.1875, tread: 0.28, count: 8,
+                    width: (-0.6)...0.6, startZ: 0)
+        m.addSurface(y: 1.5, x: (-1)...1, z: 2.24...4.24)
+
+        XCTAssertTrue(ramps(m).isEmpty, "the flight was smoothed into a ramp")
+    }
+
+    /// A flat room leaves only edge speckle unexplained, which must not fit anything.
+    func testFlatFloor_yieldsNoRamp() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-1.5)...1.5, z: (-1.5)...1.5, jitter: 0.01)
+
+        XCTAssertTrue(ramps(m).isEmpty)
+    }
+
+    /// A floor with a ramp leading off it: the flat part is a level, the slope is a ramp, and neither
+    /// claims the other's geometry.
+    func testFloorWithRamp_yieldsOneOfEach() throws {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-2)...2, z: (-4)...0)
+        m.addSurface(y: 0, x: (-0.75)...0.75, z: 0...6, pitchDeg: 8)
+
+        let lv = levels(m)
+        XCTAssertEqual(lv.count, 1)
+        XCTAssertEqual(lv[0].center.y, 0, accuracy: 0.05)
+
+        let rp = ramps(m)
+        XCTAssertEqual(rp.count, 1)
+        let tilt = acos(min(abs(try XCTUnwrap(rp.first).normal.y), 1)) * 180 / .pi
+        XCTAssertEqual(tilt, 8, accuracy: 1.0)
     }
 
     // MARK: - End to end through the proxy builder

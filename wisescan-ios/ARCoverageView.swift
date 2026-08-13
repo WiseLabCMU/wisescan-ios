@@ -3431,8 +3431,10 @@ struct ARCoverageView: UIViewRepresentable {
     ///   entire staircase). "Floor class ⇒ a quad stands in" therefore holds only for a flat
     ///   single-level room; an upper landing, a stair tread, a raised platform or the climbing part of
     ///   a ramp is KEPT as mesh rather than deleted in favour of a flat lie. The quad set floor faces
-    ///   are tested against is RoomPlan's floor plus the levels `deriveLevelPlanes` recovers from the
-    ///   same classified mesh, so a landing comes back as a clean quad rather than staying a lump;
+    ///   are tested against is RoomPlan's floor plus what the same classified mesh yields — the levels
+    ///   `deriveLevelPlanes` recovers and the slope `deriveRampPlanes` fits — so a landing or a ramp
+    ///   comes back as a clean quad rather than staying a lump, while a staircase flight, which is
+    ///   neither, stays mesh because that is the only honest thing to draw for it;
     /// - **wall/door/window faces dropped iff a RoomPlan wall covers them** — the reconciliation
     ///   rule: classifier-wall ≠ RoomPlan-wall (RoomPlan drops partial/low-texture walls), so a
     ///   wall face with no covering quad is KEPT in the lumpy proxy rather than leaving a hole;
@@ -3516,22 +3518,13 @@ struct ARCoverageView: UIViewRepresentable {
             .filter { lvl in
                 !roomPlanFloors.contains { abs($0.center.y - lvl.center.y) <= ghostProxyQuadCoverageMeters }
             }
-        let floorQuads = roomPlanFloors + derivedLevels
-        let bakedPlanes = roomPlanPlanes + derivedLevels
-
-        // Coverage test: within 15 cm of the plane and inside its rectangle (+20 cm margin for
-        // RoomPlan seating/extent error). Same predicate for both families — a mesh face is only
-        // subtracted where a quad genuinely sits on it.
-        func covered(by planes: [PlaneRegistration.Plane], _ p: SIMD3<Float>) -> Bool {
-            for q in planes {
-                let d = p - q.center
-                guard abs(simd_dot(d, q.normal)) <= ghostProxyQuadCoverageMeters,
-                      abs(simd_dot(d, q.xAxis)) <= q.width / 2 + 0.2,
-                      abs(simd_dot(d, q.yAxis)) <= q.height / 2 + 0.2 else { continue }
-                return true
-            }
-            return false
-        }
+        // A ramp is fitted to whatever the levels leave unexplained — see `deriveRampPlanes`. It joins
+        // the same two lists, so a ramp that fits coherently gets a clean tilted lattice and stops
+        // being a lump, and one that does not just stays mesh.
+        let derivedRamps = deriveRampPlanes(verts: verts, faces: faces, faceClasses: faceClasses,
+                                            explainedBy: roomPlanFloors + derivedLevels)
+        let floorQuads = roomPlanFloors + derivedLevels + derivedRamps
+        let bakedPlanes = roomPlanPlanes + derivedLevels + derivedRamps
 
         var objData = Data()
         objData.reserveCapacity(256 * 1024)
@@ -3572,7 +3565,7 @@ struct ARCoverageView: UIViewRepresentable {
                 // floor family — subtract only where a RoomPlan floor quad actually sits on it, so
                 // off-level geometry (landings, treads, ledges, the climbing part of a ramp)
                 // survives instead of being replaced by the single flat full-extent quad
-                if covered(by: floorQuads, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
+                if quadCovers(floorQuads, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
                     droppedCoveredFloor += 1
                     continue
                 }
@@ -3580,7 +3573,7 @@ struct ARCoverageView: UIViewRepresentable {
                 isFloorRemainder = true
             case 1, 6, 7:
                 // wall-plane family — subtract only where a RoomPlan quad replaces it
-                if covered(by: roomPlanWalls, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
+                if quadCovers(roomPlanWalls, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
                     droppedCoveredWall += 1
                     continue
                 }
@@ -3671,7 +3664,10 @@ struct ARCoverageView: UIViewRepresentable {
         let quadDesc = (roomPlanPlanes
             .map { String(format: "%@ %.1f×%.1fm", $0.category == .wall ? "wall" : "floor", $0.width, $0.height) }
             + derivedLevels
-            .map { String(format: "level y=%.2f %.1f×%.1fm", $0.center.y, $0.width, $0.height) })
+            .map { String(format: "level y=%.2f %.1f×%.1fm", $0.center.y, $0.width, $0.height) }
+            + derivedRamps
+            .map { String(format: "ramp %.1f° %.1f×%.1fm",
+                          acos(min(abs($0.normal.y), 1)) * 180 / .pi, $0.width, $0.height) })
             .joined(separator: ", ")
         // `floorKept` is the level-mismatch signal: a flat single-level room should read near zero
         // (only floor-edge speckle outside the quad), while a stairwell / ramp / raised platform
@@ -3680,6 +3676,21 @@ struct ARCoverageView: UIViewRepresentable {
         let proxyResult = MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces)
         let dynamicResult = MeshExportResult(data: dynamicOBJData, vertexCount: dynamicVertexCount, faceCount: dynamicFaceCount)
         return GhostProxyBuildResult(proxy: proxyResult, dynamic: dynamicResult)
+    }
+
+    /// Whether any of `planes` genuinely stands in for the point `p`: within
+    /// `ghostProxyQuadCoverageMeters` of the plane and inside its rectangle (+20 cm margin for
+    /// RoomPlan seating and extent error). Used both to subtract mesh faces a quad replaces and to
+    /// decide what the quads so far have left unexplained.
+    static func quadCovers(_ planes: [PlaneRegistration.Plane], _ p: SIMD3<Float>) -> Bool {
+        for q in planes {
+            let d = p - q.center
+            guard abs(simd_dot(d, q.normal)) <= ghostProxyQuadCoverageMeters,
+                  abs(simd_dot(d, q.xAxis)) <= q.width / 2 + 0.2,
+                  abs(simd_dot(d, q.yAxis)) <= q.height / 2 + 0.2 else { continue }
+            return true
+        }
+        return false
     }
 
     /// Derive LEVEL planes — walkable horizontal surfaces at distinct heights — from the classified
@@ -3819,6 +3830,101 @@ struct ARCoverageView: UIViewRepresentable {
         return out.sorted { $0.center.y < $1.center.y }
     }
 
+    /// Fit a RAMP — one coherent tilted walkable plane — to the floor-class faces the level planes
+    /// leave unexplained. Fitting the REMAINDER rather than a pitch band is what makes this safe: a
+    /// ramp's own faces are near-level (an ADA ramp is under 5°), so a pitch band would either miss it
+    /// or sweep in half of every real floor. What the levels could not account for is exactly the
+    /// candidate set, and on a flat room that remainder is edge speckle the area gate rejects.
+    ///
+    /// Accepted only if the fit is genuinely a plane and genuinely a slope:
+    /// - area-weighted RMS distance to the fitted plane within `rampMaxResidualMeters`. This is what
+    ///   rejects a STAIRCASE, whose unexplained faces are the treads of the flight: flat, floor-class,
+    ///   spread over a metre of climb, and nowhere near any single plane;
+    /// - mean tilt at least `levelMeanTiltMaxDeg` — the same number that stops a ramp being read as a
+    ///   level, so the two categories meet exactly, with no gap and no overlap — and at most
+    ///   `rampMaxTiltDeg`, comfortably under a staircase's 30–37° effective slope.
+    ///
+    /// One trimmed re-fit runs before those gates: unrelated speckle in the remainder would otherwise
+    /// drag both the normal and the residual of a real ramp.
+    ///
+    /// Returns at most ONE ramp. Two ramps facing different directions average into a normal that fits
+    /// neither, so the residual gate rejects both and they stay mesh — the honest failure, and rare
+    /// enough indoors not to justify a full multi-plane segmentation here.
+    static func deriveRampPlanes(verts: [SIMD3<Float>], faces: [(Int, Int, Int)], faceClasses: Data,
+                                 explainedBy explained: [PlaneRegistration.Plane]) -> [PlaneRegistration.Plane] {
+        typealias Patch = (c: SIMD3<Float>, area: Float, n: SIMD3<Float>)
+        let cosMaxPitch = cos(rampFaceMaxPitchDeg * .pi / 180)
+        var candidates: [Patch] = []
+        for (idx, f) in faces.enumerated() {
+            guard idx < faceClasses.count,
+                  faceClasses[faceClasses.startIndex + idx] == 2,
+                  f.0 >= 0, f.1 >= 0, f.2 >= 0,
+                  f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
+            let a = verts[f.0], b = verts[f.1], c = verts[f.2]
+            let cross = simd_cross(b - a, c - a)
+            let area = 0.5 * simd_length(cross)
+            // Upper bound only — near-level faces MUST be admitted, since that is what a ramp is made
+            // of. This just keeps near-vertical junk (a riser the classifier called floor) out.
+            guard area > 1e-6, abs(cross.y) / (2 * area) >= cosMaxPitch else { continue }
+            let ctr = (a + b + c) / 3
+            guard !quadCovers(explained, ctr) else { continue }
+            candidates.append((c: ctr, area: area, n: simd_normalize(cross.y < 0 ? -cross : cross)))
+        }
+
+        /// Area-weighted plane through a patch set, with the residual that says whether it IS a plane.
+        func fit(_ patches: [Patch]) -> (n: SIMD3<Float>, c: SIMD3<Float>, area: Float, rms: Float)? {
+            let area = patches.reduce(Float(0)) { $0 + $1.area }
+            guard area > 1e-6 else { return nil }
+            let centroid = patches.reduce(SIMD3<Float>.zero) { $0 + $1.c * $1.area } / area
+            let meanN = patches.reduce(SIMD3<Float>.zero) { $0 + $1.n * $1.area } / area
+            guard simd_length(meanN) > 1e-6 else { return nil }
+            let n = simd_normalize(meanN)
+            let variance = patches.reduce(Float(0)) { acc, p in
+                let d = simd_dot(p.c - centroid, n)
+                return acc + p.area * d * d
+            } / area
+            return (n: n, c: centroid, area: area, rms: sqrt(variance))
+        }
+
+        guard let rough = fit(candidates), rough.area >= rampMinAreaM2 else { return [] }
+        let trimmed = candidates.filter {
+            abs(simd_dot($0.c - rough.c, rough.n)) <= max(2 * rough.rms, rampTrimFloorMeters)
+        }
+        guard let f = fit(trimmed), f.area >= rampMinAreaM2, f.rms <= rampMaxResidualMeters else { return [] }
+        let tiltDeg = acos(min(abs(f.n.y), 1)) * 180 / .pi
+        guard tiltDeg >= levelMeanTiltMaxDeg, tiltDeg <= rampMaxTiltDeg else { return [] }
+
+        // In-plane frame: xAxis runs horizontally ACROSS the slope, yAxis UP it. Well-conditioned
+        // because the tilt gate above already guarantees the normal is off vertical.
+        let across = simd_cross(f.n, SIMD3<Float>(0, 1, 0))
+        guard simd_length(across) > 1e-3 else { return [] }
+        let xAxis = simd_normalize(across)
+        let yAxis = simd_normalize(simd_cross(xAxis, f.n))
+        let us = trimmed.map { simd_dot($0.c - f.c, xAxis) }
+        let vs = trimmed.map { simd_dot($0.c - f.c, yAxis) }
+        guard let uMin = us.min(), let uMax = us.max(), let vMin = vs.min(), let vMax = vs.max() else { return [] }
+        let width = uMax - uMin, height = vMax - vMin
+        guard width >= levelMinSpanMeters, height >= levelMinSpanMeters else { return [] }
+        return [PlaneRegistration.Plane(
+            center: f.c + xAxis * ((uMin + uMax) / 2) + yAxis * ((vMin + vMax) / 2),
+            normal: f.n, xAxis: xAxis, yAxis: yAxis,
+            width: width, height: height, category: .floor)]
+    }
+
+    /// Upper bound on a face's pitch for it to be a ramp candidate — keeps near-vertical geometry out
+    /// while still admitting the near-level faces a real ramp is built from.
+    static let rampFaceMaxPitchDeg: Float = 25
+    /// Minimum fitted area for a ramp to be real.
+    static let rampMinAreaM2: Float = 1.5
+    /// How far the candidate faces may sit from the fitted plane, area-weighted RMS. The staircase
+    /// test: treads scattered up a flight cannot be close to any single plane.
+    static let rampMaxResidualMeters: Float = 0.06
+    /// Trim band for the single robust re-fit, when 2×RMS would be tighter than mesh noise warrants.
+    static let rampTrimFloorMeters: Float = 0.08
+    /// Steepest mean tilt still considered a walkable ramp. Above generous built ramps (~10°) and well
+    /// below a staircase's 30–37° effective slope.
+    static let rampMaxTiltDeg: Float = 15
+
     /// How far off horizontal a floor-class face may be and still vote for a level. Generous, because
     /// per-face normals on a real floor are noisy — coherent slope is rejected by the mean-tilt gate
     /// below, not here.
@@ -3853,7 +3959,8 @@ struct ARCoverageView: UIViewRepresentable {
     /// where a floor quad actually covers them (was unconditional, which deleted stairs/landings/
     /// ramps and substituted the single flat full-extent quad). v6: levels RoomPlan never modelled
     /// (upper landings, platforms) are derived from the classified mesh and baked as their own quads.
-    static let ghostProxyVersionHeader = "# ghostproxy v6"
+    /// v7: a coherently sloped walkable surface is fitted as a tilted ramp quad.
+    static let ghostProxyVersionHeader = "# ghostproxy v7"
     /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
     /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/
