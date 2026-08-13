@@ -3422,8 +3422,15 @@ struct ARCoverageView: UIViewRepresentable {
     /// artifacts (mesh.obj + the face-aligned face_classes.bin sidecar), so it can run at
     /// POST-PROCESS, chained on the RoomBuilder room (mesh.obj itself stays the untouched
     /// save/export artifact):
-    /// - **floor/ceiling faces dropped unconditionally** (RoomPlan's floor quad stands in; ceilings
-    ///   have no quad and dropping them un-lids the overlay — a readability win, not a gap);
+    /// - **ceiling faces dropped unconditionally** — no quad exists for them, and dropping them
+    ///   un-lids the overlay (a readability win, not a gap);
+    /// - **floor faces dropped iff a RoomPlan floor quad covers them** — same reconciliation rule as
+    ///   walls, and load-bearing for a sharper reason: RoomPlan emits exactly ONE floor plane per
+    ///   room, seated at the lowest adequately-covered horizontal surface and spanning the room's
+    ///   whole plan-view footprint (device-observed on a stairwell: a mid-flight landing's quad
+    ///   stretched across the entire staircase). "Floor class ⇒ a quad stands in" therefore holds
+    ///   only for a flat single-level room; an upper landing, a stair tread, a raised platform or the
+    ///   climbing part of a ramp is KEPT as mesh rather than deleted in favour of a flat lie;
     /// - **wall/door/window faces dropped iff a RoomPlan wall covers them** — the reconciliation
     ///   rule: classifier-wall ≠ RoomPlan-wall (RoomPlan drops partial/low-texture walls), so a
     ///   wall face with no covering quad is KEPT in the lumpy proxy rather than leaving a hole;
@@ -3446,6 +3453,7 @@ struct ARCoverageView: UIViewRepresentable {
     static func buildGhostProxyOBJ(objData meshOBJ: Data, faceClasses: Data,
                                    roomPlanPlanes: [PlaneRegistration.Plane]) -> GhostProxyBuildResult? {
         let roomPlanWalls = roomPlanPlanes.filter { $0.category == .wall }
+        let roomPlanFloors = roomPlanPlanes.filter { $0.category == .floor }
         guard !roomPlanWalls.isEmpty else { return nil }
 
         // Parse the OBJ's v/f lines (buildMeshOBJ emits only those; transformOBJ may add comment
@@ -3494,14 +3502,15 @@ struct ARCoverageView: UIViewRepresentable {
             return nil
         }
 
-        // Wall coverage test: within 15 cm of the wall plane and inside its rectangle (+20 cm
-        // margin for RoomPlan seating/extent error).
-        func coveredByRoomPlanWall(_ p: SIMD3<Float>) -> Bool {
-            for w in roomPlanWalls {
-                let d = p - w.center
-                guard abs(simd_dot(d, w.normal)) <= 0.15,
-                      abs(simd_dot(d, w.xAxis)) <= w.width / 2 + 0.2,
-                      abs(simd_dot(d, w.yAxis)) <= w.height / 2 + 0.2 else { continue }
+        // Coverage test: within 15 cm of the plane and inside its rectangle (+20 cm margin for
+        // RoomPlan seating/extent error). Same predicate for both families — a mesh face is only
+        // subtracted where a quad genuinely sits on it.
+        func covered(by planes: [PlaneRegistration.Plane], _ p: SIMD3<Float>) -> Bool {
+            for q in planes {
+                let d = p - q.center
+                guard abs(simd_dot(d, q.normal)) <= ghostProxyQuadCoverageMeters,
+                      abs(simd_dot(d, q.xAxis)) <= q.width / 2 + 0.2,
+                      abs(simd_dot(d, q.yAxis)) <= q.height / 2 + 0.2 else { continue }
                 return true
             }
             return false
@@ -3520,27 +3529,41 @@ struct ARCoverageView: UIViewRepresentable {
             return acc + cols * rows * 2
         }
         objData.append(contentsOf: "\(ghostProxyVersionHeader) quadFaces=\(quadFaceCount)\n".utf8)
-        var vertexOffset = 1
-        var totalVertices = 0
-        var totalFaces = 0
 
-        // Pass 1: faces surviving the class filter; mark referenced vertices.
+        // Pass 1: faces surviving the class filter. Two sets come out of the one pass — the proxy's,
+        // and the dynamic mesh's, which is the proxy's minus the off-level floor faces (see below).
         var keptFaces: [(Int, Int, Int)] = []
         keptFaces.reserveCapacity(faces.count / 2)
-        var used = [Bool](repeating: false, count: verts.count)
-        var droppedFloorCeil = 0
+        var dynamicFaces: [(Int, Int, Int)] = []
+        dynamicFaces.reserveCapacity(faces.count / 4)
+        var droppedCeiling = 0
+        var droppedCoveredFloor = 0
+        var keptUncoveredFloor = 0
         var droppedCoveredWall = 0
         for (faceIdx, f) in faces.enumerated() {
             guard f.0 >= 0, f.1 >= 0, f.2 >= 0, f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
+            // Off-level floor geometry the proxy keeps but the dynamic mesh must not: it is
+            // architecture (a landing, a tread, a ramp), just architecture RoomPlan failed to model.
+            var isFloorRemainder = false
             // ARMeshClassification raw: 0 none, 1 wall, 2 floor, 3 ceiling, 4 table,
             // 5 seat, 6 window, 7 door.
             switch faceClasses[faceClasses.startIndex + faceIdx] {
-            case 2, 3:
-                droppedFloorCeil += 1
-                continue // floor/ceiling — quad stands in / deliberately open
+            case 3:
+                droppedCeiling += 1
+                continue // ceiling — no quad exists; dropping deliberately un-lids the overlay
+            case 2:
+                // floor family — subtract only where a RoomPlan floor quad actually sits on it, so
+                // off-level geometry (landings, treads, ledges, the climbing part of a ramp)
+                // survives instead of being replaced by the single flat full-extent quad
+                if covered(by: roomPlanFloors, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
+                    droppedCoveredFloor += 1
+                    continue
+                }
+                keptUncoveredFloor += 1
+                isFloorRemainder = true
             case 1, 6, 7:
                 // wall-plane family — subtract only where a RoomPlan quad replaces it
-                if coveredByRoomPlanWall((verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
+                if covered(by: roomPlanWalls, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
                     droppedCoveredWall += 1
                     continue
                 }
@@ -3548,34 +3571,46 @@ struct ARCoverageView: UIViewRepresentable {
                 break    // content — keep
             }
             keptFaces.append(f)
-            used[f.0] = true; used[f.1] = true; used[f.2] = true
+            if !isFloorRemainder { dynamicFaces.append(f) }
         }
 
-        // Pass 2: compact vertices + remap face indices.
-        var remap = [Int](repeating: 0, count: verts.count)
-        for idx in 0..<verts.count where used[idx] {
-            remap[idx] = vertexOffset
-            vertexOffset += 1
-            totalVertices += 1
-            let p = verts[idx]
-            objData.append(contentsOf: "v \(p.x) \(p.y) \(p.z)\n".utf8)
-        }
-        for f in keptFaces {
-            objData.append(contentsOf: "f \(remap[f.0]) \(remap[f.1]) \(remap[f.2])\n".utf8)
-            totalFaces += 1
+        // Pass 2: compact vertices (only referenced ones emitted, indices remapped 1-based) for a
+        // face subset. Runs once per artifact — the two sets differ, so they cannot share a body.
+        func compactedBody(_ faceList: [(Int, Int, Int)]) -> (data: Data, vertices: Int) {
+            var body = Data()
+            body.reserveCapacity(faceList.count * 48)
+            var used = [Bool](repeating: false, count: verts.count)
+            for f in faceList { used[f.0] = true; used[f.1] = true; used[f.2] = true }
+            var remap = [Int](repeating: 0, count: verts.count)
+            var next = 1
+            for idx in 0..<verts.count where used[idx] {
+                remap[idx] = next
+                next += 1
+                let p = verts[idx]
+                body.append(contentsOf: "v \(p.x) \(p.y) \(p.z)\n".utf8)
+            }
+            for f in faceList {
+                body.append(contentsOf: "f \(remap[f.0]) \(remap[f.1]) \(remap[f.2])\n".utf8)
+            }
+            return (body, next - 1)
         }
 
-        // ── Snapshot the dynamic mesh (content only, no infrastructure) ──
-        // This is the intermediate BEFORE RoomPlan quads are appended — the "4D" artifact that
-        // strips walls/floors/ceilings so temporal comparisons across rescans show only changes.
-        // objData starts with the proxy version header line; strip it so the dynamic artifact
-        // carries only its own header + the vertex/face content.
-        let proxyHeaderLine = "\(ghostProxyVersionHeader) quadFaces=\(quadFaceCount)\n"
-        let contentStart = proxyHeaderLine.utf8.count
+        let proxyBody = compactedBody(keptFaces)
+        objData.append(proxyBody.data)
+        var vertexOffset = proxyBody.vertices + 1
+        var totalVertices = proxyBody.vertices
+        var totalFaces = keptFaces.count
+
+        // ── The dynamic mesh (content only, no infrastructure) ──
+        // The "4D" artifact that strips walls/floors/ceilings so temporal comparisons across rescans
+        // show only changes. Compacted independently rather than sliced out of the proxy body: the
+        // proxy now KEEPS the floor faces no quad stands in, and those are architecture — a
+        // change-detection artifact that inherited a staircase would report the building as furniture.
+        let dynamicBody = compactedBody(dynamicFaces)
         var dynamicOBJData = Data("\(dynamicMeshVersionHeader)\n".utf8)
-        dynamicOBJData.append(objData[objData.startIndex.advanced(by: contentStart)...])
-        let dynamicVertexCount = totalVertices
-        let dynamicFaceCount = totalFaces
+        dynamicOBJData.append(dynamicBody.data)
+        let dynamicVertexCount = dynamicBody.vertices
+        let dynamicFaceCount = dynamicFaces.count
 
         // Bake the RoomPlan wall + floor quads into the same OBJ (the clean stand-ins for the
         // subtracted architectural faces). Tessellated into ~1 m grid cells rather than one big
@@ -3617,7 +3652,10 @@ struct ARCoverageView: UIViewRepresentable {
         let quadDesc = roomPlanPlanes
             .map { String(format: "%@ %.1f×%.1fm", $0.category == .wall ? "wall" : "floor", $0.width, $0.height) }
             .joined(separator: ", ")
-        print("[GhostProxy] quads baked: \(quadDesc) | mesh faces kept=\(keptFaces.count) dropped: floorCeil=\(droppedFloorCeil) coveredWall=\(droppedCoveredWall)")
+        // `floorKept` is the level-mismatch signal: a flat single-level room should read near zero
+        // (only floor-edge speckle outside the quad), while a stairwell / ramp / raised platform
+        // shows a real count — that is the geometry the old unconditional drop was deleting.
+        print("[GhostProxy] quads baked: \(quadDesc) | mesh faces kept=\(keptFaces.count) (dynamic \(dynamicFaces.count)) dropped: ceiling=\(droppedCeiling) coveredFloor=\(droppedCoveredFloor) coveredWall=\(droppedCoveredWall) | floorKept=\(keptUncoveredFloor)")
         let proxyResult = MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces)
         let dynamicResult = MeshExportResult(data: dynamicOBJData, vertexCount: dynamicVertexCount, faceCount: dynamicFaceCount)
         return GhostProxyBuildResult(proxy: proxyResult, dynamic: dynamicResult)
@@ -3630,15 +3668,23 @@ struct ARCoverageView: UIViewRepresentable {
     /// wireframe grid (v1 quads were invisible as wireframe). v3: quad-dims diagnostic. v4:
     /// header carries the trailing lattice face count so the renderer can draw the sparse lattice
     /// with THICK lines (1 mm lines are sub-pixel beyond ~1.5 m — the "wall lattice only reaches
-    /// 1 m up" illusion was thickness falloff, not geometry).
-    static let ghostProxyVersionHeader = "# ghostproxy v4"
+    /// 1 m up" illusion was thickness falloff, not geometry). v5: floor faces are subtracted only
+    /// where a floor quad actually covers them (was unconditional, which deleted stairs/landings/
+    /// ramps and substituted the single flat full-extent quad).
+    static let ghostProxyVersionHeader = "# ghostproxy v5"
     /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
     /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/
-    /// ceilings, no RoomPlan quads).
-    static let dynamicMeshVersionHeader = "# dynamicmesh v1"
+    /// ceilings, no RoomPlan quads). v2: compacted independently of the proxy, so the off-level
+    /// floor faces the proxy started keeping in v5 stay out of the change-detection artifact.
+    static let dynamicMeshVersionHeader = "# dynamicmesh v2"
     /// Target grid cell size for the tessellated RoomPlan quads.
     static let ghostProxyQuadCellMeters: Float = 1.0
+    /// How close a mesh face must be to a RoomPlan quad's PLANE for that quad to count as standing
+    /// in for it. Absorbs mesh noise and RoomPlan seating error; also sets the floor-family blind
+    /// spot, since a step/ledge shallower than this reads as coplanar and gets subtracted (a typical
+    /// stair riser is 17–18 cm, so treads clear it — but a low curb or threshold does not).
+    static let ghostProxyQuadCoverageMeters: Float = 0.15
     /// Wireframe line thickness for the proxy's RoomPlan lattice (the mesh remainder keeps the
     /// default 1 mm). Sparse 1 m grid lines need real thickness to survive viewing distance:
     /// 8 mm ≈ 6 px at 3 m — reads as architecture, not noise.
