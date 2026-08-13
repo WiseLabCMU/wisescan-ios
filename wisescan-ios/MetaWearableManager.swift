@@ -46,6 +46,8 @@ class MetaWearableManager {
                 Task {
                     self.streamSession?.stop()
                     self.streamSession = nil
+                    self.camera?.stop()
+                    self.camera = nil
                     self.deviceSession?.stop()
                     self.deviceSession = nil
                     self.setupStreamSession(for: firstDevice.id)
@@ -70,6 +72,9 @@ class MetaWearableManager {
     private var cancellables = Set<AnyCancellable>()
     private var deviceSession: DeviceSession?
     private var streamSession: MWDATCamera.Stream?
+    /// 0.9.0 wraps the stream in a Camera whose deinit tears the stream down — retain
+    /// it for exactly as long as `streamSession` so the stream can't die under us.
+    private var camera: MWDATCamera.Camera?
 
     // SDK Announcer subscription tokens. Held so the stream's state/frame listeners can be
     // cancelled on teardown — otherwise they keep firing into a torn-down (or freshly-recreated)
@@ -308,6 +313,8 @@ class MetaWearableManager {
                 Task {
                     self.streamSession?.stop()
                     self.streamSession = nil
+                    self.camera?.stop()
+                    self.camera = nil
                     self.deviceSession?.stop()
                     self.deviceSession = nil
                 }
@@ -359,8 +366,10 @@ class MetaWearableManager {
         cancelStreamListeners()
         // Capture references before clearing — clear synchronously to prevent races
         let stream = self.streamSession
+        let cam = self.camera
         let devSession = self.deviceSession
         self.streamSession = nil
+        self.camera = nil
         self.deviceSession = nil
         self.isStreaming = false
         self.latestProxyImage = nil
@@ -370,6 +379,7 @@ class MetaWearableManager {
             print("[MetaWearable] CaptureView dismissed — stopping stream")
             Task {
                 stream?.stop()
+                cam?.stop()
                 devSession?.stop()
             }
         }
@@ -406,6 +416,8 @@ class MetaWearableManager {
             // SDK handles disconnect implicitly; simply teardown our active stream
             self.streamSession?.stop()
             self.streamSession = nil
+            self.camera?.stop()
+            self.camera = nil
             self.deviceSession?.stop()
             self.deviceSession = nil
         }
@@ -417,6 +429,8 @@ class MetaWearableManager {
             // Drop stream and clear local devices list to ensure SDK fully releases
             self.streamSession?.stop()
             self.streamSession = nil
+            self.camera?.stop()
+            self.camera = nil
             self.deviceSession?.stop()
             self.deviceSession = nil
 
@@ -593,16 +607,18 @@ class MetaWearableManager {
 
             self.deviceSession = devSession
 
-            // Add camera stream to the DeviceSession
+            // Add camera stream to the DeviceSession (0.9.0: addStream() became
+            // addCamera(config:) returning a Camera that owns the stream)
             let session: MWDATCamera.Stream
             do {
-                guard let stream = try devSession.addStream() else {
-                    print("[MetaWearable] addStream returned nil")
+                guard let cam = try devSession.addCamera() else {
+                    print("[MetaWearable] addCamera returned nil")
                     return
                 }
-                session = stream
+                self.camera = cam
+                session = cam.stream
             } catch {
-                print("[MetaWearable] Failed to add stream: \(error)")
+                print("[MetaWearable] Failed to add camera: \(error)")
                 return
             }
             self.streamSession = session
@@ -626,6 +642,8 @@ class MetaWearableManager {
                     if stateStr.contains("stop") {
                         self.latestProxyImage = nil
                         self.streamSession = nil
+                        self.camera?.stop()
+                        self.camera = nil
                         self.deviceSession?.stop()
                         self.deviceSession = nil
                         // Stop our own listeners too, so this torn-down session's lingering events
