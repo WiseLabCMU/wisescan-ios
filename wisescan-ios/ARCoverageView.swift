@@ -3424,19 +3424,21 @@ struct ARCoverageView: UIViewRepresentable {
     /// save/export artifact):
     /// - **ceiling faces dropped unconditionally** — no quad exists for them, and dropping them
     ///   un-lids the overlay (a readability win, not a gap);
-    /// - **floor faces dropped iff a RoomPlan floor quad covers them** — same reconciliation rule as
-    ///   walls, and load-bearing for a sharper reason: RoomPlan emits exactly ONE floor plane per
-    ///   room, seated at the lowest adequately-covered horizontal surface and spanning the room's
-    ///   whole plan-view footprint (device-observed on a stairwell: a mid-flight landing's quad
-    ///   stretched across the entire staircase). "Floor class ⇒ a quad stands in" therefore holds
-    ///   only for a flat single-level room; an upper landing, a stair tread, a raised platform or the
-    ///   climbing part of a ramp is KEPT as mesh rather than deleted in favour of a flat lie;
+    /// - **floor faces dropped iff a floor quad covers them** — same reconciliation rule as walls, and
+    ///   load-bearing for a sharper reason: RoomPlan emits exactly ONE floor plane per room, seated at
+    ///   the lowest adequately-covered horizontal surface and spanning the room's whole plan-view
+    ///   footprint (device-observed on a stairwell: a mid-flight landing's quad stretched across the
+    ///   entire staircase). "Floor class ⇒ a quad stands in" therefore holds only for a flat
+    ///   single-level room; an upper landing, a stair tread, a raised platform or the climbing part of
+    ///   a ramp is KEPT as mesh rather than deleted in favour of a flat lie. The quad set floor faces
+    ///   are tested against is RoomPlan's floor plus the levels `deriveLevelPlanes` recovers from the
+    ///   same classified mesh, so a landing comes back as a clean quad rather than staying a lump;
     /// - **wall/door/window faces dropped iff a RoomPlan wall covers them** — the reconciliation
     ///   rule: classifier-wall ≠ RoomPlan-wall (RoomPlan drops partial/low-texture walls), so a
     ///   wall face with no covering quad is KEPT in the lumpy proxy rather than leaving a hole;
     /// - **content faces (none/table/seat) kept** — they're the honest coverage/change signal.
     /// Vertices are compacted (only referenced ones emitted, indices remapped) so the size win is
-    /// real. The RoomPlan wall/floor QUADS are baked INTO the artifact (4 corners + 2 triangles
+    /// real. The wall/floor/level QUADS are baked INTO the artifact (4 corners + 2 triangles
     /// each, appended last): one coherent, coordinate-locked OBJ — quads and mesh remainder ride
     /// the registration and the ghost de-registration together, so they can never drift apart
     /// across sessions, and the renderer needs no dynamic assembly.
@@ -3502,6 +3504,21 @@ struct ARCoverageView: UIViewRepresentable {
             return nil
         }
 
+        // Levels RoomPlan never modelled — upper landings, raised platforms, sunken areas — derived
+        // from this same classified mesh (see `deriveLevelPlanes`) and deduped against the one floor
+        // plane RoomPlan did give us. They are baked as quads AND fed to the coverage test below, so
+        // each one subtracts its own mesh faces exactly as the RoomPlan floor does for a flat room:
+        // a landing arrives as a clean quad instead of a lump. A flat single-level room derives one
+        // level that the RoomPlan floor already represents, so it dedupes away to nothing and the
+        // output is identical to not running this at all.
+        let derivedLevels = deriveLevelPlanes(verts: verts, faces: faces, faceClasses: faceClasses,
+                                              reference: roomPlanFloors.first)
+            .filter { lvl in
+                !roomPlanFloors.contains { abs($0.center.y - lvl.center.y) <= ghostProxyQuadCoverageMeters }
+            }
+        let floorQuads = roomPlanFloors + derivedLevels
+        let bakedPlanes = roomPlanPlanes + derivedLevels
+
         // Coverage test: within 15 cm of the plane and inside its rectangle (+20 cm margin for
         // RoomPlan seating/extent error). Same predicate for both families — a mesh face is only
         // subtracted where a quad genuinely sits on it.
@@ -3523,7 +3540,7 @@ struct ARCoverageView: UIViewRepresentable {
         // Process; `quadFaces` tells the ghost renderer how many TRAILING faces are the RoomPlan
         // lattice (they get thick wireframe lines — sparse 1 m grid lines at the default 1 mm
         // thickness are sub-pixel beyond ~1.5 m and visually vanish; 2026-07-16 device finding).
-        let quadFaceCount = roomPlanPlanes.reduce(0) { acc, p in
+        let quadFaceCount = bakedPlanes.reduce(0) { acc, p in
             let cols = max(1, Int((p.width / ghostProxyQuadCellMeters).rounded(.up)))
             let rows = max(1, Int((p.height / ghostProxyQuadCellMeters).rounded(.up)))
             return acc + cols * rows * 2
@@ -3555,7 +3572,7 @@ struct ARCoverageView: UIViewRepresentable {
                 // floor family — subtract only where a RoomPlan floor quad actually sits on it, so
                 // off-level geometry (landings, treads, ledges, the climbing part of a ramp)
                 // survives instead of being replaced by the single flat full-extent quad
-                if covered(by: roomPlanFloors, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
+                if covered(by: floorQuads, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
                     droppedCoveredFloor += 1
                     continue
                 }
@@ -3612,14 +3629,14 @@ struct ARCoverageView: UIViewRepresentable {
         let dynamicVertexCount = dynamicBody.vertices
         let dynamicFaceCount = dynamicFaces.count
 
-        // Bake the RoomPlan wall + floor quads into the same OBJ (the clean stand-ins for the
+        // Bake the wall + floor + derived-level quads into the same OBJ (the clean stand-ins for the
         // subtracted architectural faces). Tessellated into ~1 m grid cells rather than one big
         // 2-triangle quad: the ghost renders as WIREFRAME, and a bare quad is just its outline +
         // one diagonal — it reads as emptiness, not a wall (2026-07-16 device feedback: "I can't
         // visually tell what the walls are"). A 1 m grid draws as a visible lattice — reads as a
         // solid face — while still being massive decimation (a 5×3 m wall = 30 tris vs. the
         // thousands of mesh faces it replaced).
-        for p in roomPlanPlanes {
+        for p in bakedPlanes {
             let cols = max(1, Int((p.width / ghostProxyQuadCellMeters).rounded(.up)))
             let rows = max(1, Int((p.height / ghostProxyQuadCellMeters).rounded(.up)))
             let origin = p.center - p.xAxis * (p.width / 2) - p.yAxis * (p.height / 2)
@@ -3649,8 +3666,12 @@ struct ARCoverageView: UIViewRepresentable {
         // lattice looks "short" on device either really is short here (RoomPlan partial-wall
         // extent — the classifier-wall mesh above it is kept, no hole) or its upper mesh faces
         // were dropped by class (see the drop tally) — this line separates the two from console.
-        let quadDesc = roomPlanPlanes
+        // Derived levels are listed with their HEIGHT rather than just their size: on a stairwell the
+        // whole point is which levels came out and how far apart they sit.
+        let quadDesc = (roomPlanPlanes
             .map { String(format: "%@ %.1f×%.1fm", $0.category == .wall ? "wall" : "floor", $0.width, $0.height) }
+            + derivedLevels
+            .map { String(format: "level y=%.2f %.1f×%.1fm", $0.center.y, $0.width, $0.height) })
             .joined(separator: ", ")
         // `floorKept` is the level-mismatch signal: a flat single-level room should read near zero
         // (only floor-edge speckle outside the quad), while a stairwell / ramp / raised platform
@@ -3661,6 +3682,166 @@ struct ARCoverageView: UIViewRepresentable {
         return GhostProxyBuildResult(proxy: proxyResult, dynamic: dynamicResult)
     }
 
+    /// Derive LEVEL planes — walkable horizontal surfaces at distinct heights — from the classified
+    /// mesh. This is the landings a stairwell has and RoomPlan does not: RoomPlan emits exactly ONE
+    /// floor plane per `CapturedRoom`, seated at the lowest adequately-covered horizontal surface, so
+    /// every other level in the scan is unmodelled. Runs off the persisted `face_classes.bin`, which
+    /// makes it retroactive over saved scans and needs no live RoomPlan session.
+    ///
+    /// Area-weighted mode-seeking over the floor-class faces' world Y:
+    /// - only near-level faces vote (`levelFaceMaxPitchDeg`), so risers and the flight's tread/riser
+    ///   junction geometry cannot smear a peak;
+    /// - a candidate must gather `levelMinAreaM2` of face area INSIDE a thin
+    ///   ±`levelSlabHalfThicknessMeters` slab. This single test does two jobs: it is the
+    ///   tread-vs-landing discriminator (one 0.25 m-deep tread contributes ~0.25 m², a landing
+    ///   several m²), and it is the flatness guard, since geometry spread over a metre of climb never
+    ///   concentrates enough area in any one slab;
+    /// - accepted or not, each candidate is cleared with a `levelSeparationMeters` margin, so
+    ///   consecutive treads cannot each register as their own level;
+    /// - the slab's area-weighted MEAN normal must be near-vertical (`levelMeanTiltMaxDeg`), which is
+    ///   what stops a shallow ramp from being chopped into one level per 20 cm of rise — a thin slice
+    ///   of a ramp passes every test above, and only the coherence of its normals gives it away.
+    ///
+    /// Extent is the bounding rectangle of the CONTRIBUTING faces in the reference frame's horizontal
+    /// axes — tighter than RoomPlan's whole-footprint quad by construction, since only faces at that
+    /// height contribute (the observed pathology was a mid-flight landing's floor quad stretching
+    /// across the entire staircase).
+    ///
+    /// Deliberately class-2-only: admitting unclassified faces would let a table top or a stack of
+    /// boxes register as a level. That means a level the classifier missed is simply not found —
+    /// visible as a `floorKept` count with no matching level in the build log.
+    ///
+    /// Sloped surfaces are out of scope here: a ramp has no single Y and would need its own tilted
+    /// plane fit. Until that exists, a ramp's faces just fail the pitch gate and survive as mesh.
+    static func deriveLevelPlanes(verts: [SIMD3<Float>], faces: [(Int, Int, Int)], faceClasses: Data,
+                                  reference: PlaneRegistration.Plane?) -> [PlaneRegistration.Plane] {
+        // One horizontal frame shared by every derived level, so they read as storeys of one building
+        // rather than N independently-oriented slabs. RoomPlan's floor plane already carries the
+        // room's orientation; world axes when there is none.
+        var xAxis = SIMD3<Float>(1, 0, 0)
+        var yAxis = SIMD3<Float>(0, 0, 1)
+        if let r = reference {
+            let fx = SIMD3<Float>(r.xAxis.x, 0, r.xAxis.z)
+            let fy = SIMD3<Float>(r.yAxis.x, 0, r.yAxis.z)
+            if simd_length(fx) > 0.1, simd_length(fy) > 0.1 {
+                xAxis = simd_normalize(fx)
+                yAxis = simd_normalize(fy)
+            }
+        }
+
+        // One vote per near-level floor face: its height, area, position in the frame, and normal
+        // (sign-normalized upward, since face winding is not trusted — see the mean-tilt gate).
+        let cosMaxPitch = cos(levelFaceMaxPitchDeg * .pi / 180)
+        var votes: [(y: Float, area: Float, u: Float, v: Float, n: SIMD3<Float>)] = []
+        for (idx, f) in faces.enumerated() {
+            guard idx < faceClasses.count,
+                  faceClasses[faceClasses.startIndex + idx] == 2,
+                  f.0 >= 0, f.1 >= 0, f.2 >= 0,
+                  f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
+            let a = verts[f.0], b = verts[f.1], c = verts[f.2]
+            let cross = simd_cross(b - a, c - a)
+            let area = 0.5 * simd_length(cross)
+            // |cross| == 2·area, so |cross.y| / 2·area is |normal.y| without a normalize.
+            guard area > 1e-6, abs(cross.y) / (2 * area) >= cosMaxPitch else { continue }
+            let ctr = (a + b + c) / 3
+            let n = simd_normalize(cross.y < 0 ? -cross : cross)
+            votes.append((y: ctr.y, area: area, u: simd_dot(ctr, xAxis), v: simd_dot(ctr, yAxis), n: n))
+        }
+        guard let minY = votes.map(\.y).min(), let maxY = votes.map(\.y).max() else { return [] }
+
+        // Sorted votes + an area prefix sum turn "how much area lies within ±6 cm of this height?"
+        // into two binary searches, so the slab test can be exact rather than approximated by whole
+        // histogram bins (the histogram's 5 cm grid would not line up with the 6 cm slab).
+        let sorted = votes.sorted { $0.y < $1.y }
+        var prefix = [Float](repeating: 0, count: sorted.count + 1)
+        for (i, v) in sorted.enumerated() { prefix[i + 1] = prefix[i] + v.area }
+        /// First index whose height is >= `t`.
+        func lowerBound(_ t: Float) -> Int {
+            var lo = 0, hi = sorted.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if sorted[mid].y < t { lo = mid + 1 } else { hi = mid }
+            }
+            return lo
+        }
+
+        let bin = levelHistogramBinMeters
+        let binCount = max(1, Int(((maxY - minY) / bin).rounded(.up)) + 1)
+        var hist = [Float](repeating: 0, count: binCount)
+        for v in votes {
+            hist[min(binCount - 1, max(0, Int((v.y - minY) / bin)))] += v.area
+        }
+
+        // Greedy mode-seeking. The histogram only SELECTS candidate heights — coarse is fine, since
+        // the slab below recenters on the true distribution — and gets cleared as levels are taken so
+        // one surface cannot be found twice. Every iteration clears at least the separation window, so
+        // this terminates whether or not the candidate is accepted.
+        let clearBins = max(1, Int((levelSeparationMeters / bin).rounded(.up)))
+        var out: [PlaneRegistration.Plane] = []
+        while out.count < levelMaxCount {
+            guard let peak = hist.indices.max(by: { hist[$0] < hist[$1] }), hist[peak] > 0 else { break }
+            let peakY = minY + (Float(peak) + 0.5) * bin
+            for i in max(0, peak - clearBins)...min(binCount - 1, peak + clearBins) { hist[i] = 0 }
+
+            let lo = lowerBound(peakY - levelSlabHalfThicknessMeters)
+            let hi = lowerBound(peakY + levelSlabHalfThicknessMeters + 1e-6)
+            guard prefix[hi] - prefix[lo] >= levelMinAreaM2 else { continue }
+
+            let slab = sorted[lo..<hi]
+            let weight = prefix[hi] - prefix[lo]
+
+            // Slope gate. The slab test alone cannot tell a flat surface from a SLICE of a ramp: a
+            // 6 m ADA ramp at 4.8° is under the per-face pitch gate, and a 12 cm slice of it holds
+            // metres² of area, so a ramp would be chopped into a level every 20 cm of rise —
+            // stair-stepping flat quads up a continuous slope, worse than leaving it as mesh. The
+            // discriminator is the MEAN normal: per-face noise on a real floor cancels out, while a
+            // coherent slope survives averaging intact. Threshold sits below the ADA maximum, so a
+            // built ramp never reads as a level and no realistic floor is excluded.
+            let meanN = slab.reduce(SIMD3<Float>.zero) { $0 + $1.n * $1.area } / weight
+            let meanLen = simd_length(meanN)
+            guard meanLen > 1e-6,
+                  acos(min(abs(meanN.y) / meanLen, 1)) * 180 / .pi <= levelMeanTiltMaxDeg else { continue }
+
+            guard let uMin = slab.map(\.u).min(), let uMax = slab.map(\.u).max(),
+                  let vMin = slab.map(\.v).min(), let vMax = slab.map(\.v).max() else { continue }
+            let width = uMax - uMin, height = vMax - vMin
+            // A level thinner than this in plan view is a sliver along a wall or a mis-classified
+            // step nosing, not a surface anyone stands on.
+            guard width >= levelMinSpanMeters, height >= levelMinSpanMeters else { continue }
+            // Height is the area-weighted mean of the slab, not the peak bin's midpoint — the bin is
+            // 5 cm and the levels feed a 15 cm coverage test, so the extra precision is free accuracy.
+            let y = slab.reduce(Float(0)) { $0 + $1.y * $1.area } / weight
+            out.append(PlaneRegistration.Plane(
+                center: xAxis * ((uMin + uMax) / 2) + yAxis * ((vMin + vMax) / 2) + SIMD3<Float>(0, y, 0),
+                normal: SIMD3<Float>(0, 1, 0), xAxis: xAxis, yAxis: yAxis,
+                width: width, height: height, category: .floor))
+        }
+        return out.sorted { $0.center.y < $1.center.y }
+    }
+
+    /// How far off horizontal a floor-class face may be and still vote for a level. Generous, because
+    /// per-face normals on a real floor are noisy — coherent slope is rejected by the mean-tilt gate
+    /// below, not here.
+    static let levelFaceMaxPitchDeg: Float = 10
+    /// How far off horizontal a candidate level's AREA-WEIGHTED MEAN normal may be. This is the
+    /// flat-surface-vs-slice-of-a-ramp test, so it sits below the 4.76° ADA ramp maximum; floor
+    /// flatness tolerances are an order of magnitude tighter than this, so real floors are unaffected.
+    static let levelMeanTiltMaxDeg: Float = 2.5
+    /// Bin width of the height histogram levels are sought in.
+    static let levelHistogramBinMeters: Float = 0.05
+    /// Half-thickness of the slab a candidate level's area must fit inside — the flatness test.
+    static let levelSlabHalfThicknessMeters: Float = 0.06
+    /// Minimum face area within the slab for a level to be real. Doubles as the tread/landing
+    /// discriminator, and matches the `minArea` the plane-registration fit already uses.
+    static let levelMinAreaM2: Float = 1.0
+    /// Minimum height gap between two accepted levels. Above a typical 17–18 cm stair riser, so a
+    /// flight cannot register tread-by-tread even if the treads were wide enough to pass on area.
+    static let levelSeparationMeters: Float = 0.20
+    /// Minimum plan-view span of a derived level in either horizontal direction.
+    static let levelMinSpanMeters: Float = 0.6
+    /// Cap on derived levels per scan — a backstop against a pathological histogram, not a real limit.
+    static let levelMaxCount = 8
+
     /// Ghost-proxy artifact version header (start of mesh_proxy.obj line 1; the full line carries
     /// ` quadFaces=N` after it). Bump when the builder's output changes materially —
     /// ScanPostprocessor treats a proxy without the CURRENT version as not-yet-built, so older
@@ -3670,8 +3851,9 @@ struct ARCoverageView: UIViewRepresentable {
     /// with THICK lines (1 mm lines are sub-pixel beyond ~1.5 m — the "wall lattice only reaches
     /// 1 m up" illusion was thickness falloff, not geometry). v5: floor faces are subtracted only
     /// where a floor quad actually covers them (was unconditional, which deleted stairs/landings/
-    /// ramps and substituted the single flat full-extent quad).
-    static let ghostProxyVersionHeader = "# ghostproxy v5"
+    /// ramps and substituted the single flat full-extent quad). v6: levels RoomPlan never modelled
+    /// (upper landings, platforms) are derived from the classified mesh and baked as their own quads.
+    static let ghostProxyVersionHeader = "# ghostproxy v6"
     /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
     /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/
