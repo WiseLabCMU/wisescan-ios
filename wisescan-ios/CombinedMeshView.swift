@@ -89,7 +89,9 @@ struct CombinedMeshScreen: View {
     @State private var manualDrafts: [UUID: ManualNudge] = [:]
     @State private var editingLinkId: UUID?
     /// Global "always autocorrect" default (implicitly all joins, unless a per-join override wins).
-    @AppStorage(StitchPrefs.alwaysAutocorrectKey) private var alwaysAutocorrect = false
+    // Default MUST match `StitchPrefs.alwaysAutocorrect` (on) — see the reasoning there. If these
+    // disagree the toggle shows one state while render/export honour the other.
+    @AppStorage(StitchPrefs.alwaysAutocorrectKey) private var alwaysAutocorrect = true
 
     private var title: String { request.title }
     private var hasStitches: Bool { !request.edges.isEmpty && !request.component.isEmpty }

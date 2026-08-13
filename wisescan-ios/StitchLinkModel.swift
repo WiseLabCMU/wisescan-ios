@@ -149,8 +149,20 @@ struct ManualNudge: Equatable {
 /// nudge) at render-open and honored at export. The key is shared with the render's `@AppStorage`.
 enum StitchPrefs {
     static let alwaysAutocorrectKey = "stitchAlwaysAutocorrect"
+    /// Defaults to ON when the key has never been written. It shipped OFF while the solver was
+    /// unproven — the point being to judge its quality per-join before trusting it — and that has now
+    /// happened: the yaw-sign bug that could correct in the WRONG direction is fixed, area weighting
+    /// is device-validated, and the dispersion gates decline the joins whose estimates are known bad.
+    /// Left off, every ordinary join renders and exports misaligned until the user taps Autocorrect,
+    /// which is the wrong default for the common case; an auto fix is visible in the legend
+    /// ("Auto-corrected") and reversible in one tap, so on is the recoverable choice.
+    ///
+    /// `object(forKey:)` rather than `bool(forKey:)` so "never set" is distinguishable from "set to
+    /// false" — an install that deliberately turned this off keeps it off. `@AppStorage` at the
+    /// render's toggle must declare the SAME default or the switch would read off while the solver
+    /// behaves as on.
     static var alwaysAutocorrect: Bool {
-        get { UserDefaults.standard.bool(forKey: alwaysAutocorrectKey) }
+        get { (UserDefaults.standard.object(forKey: alwaysAutocorrectKey) as? Bool) ?? true }
         set { UserDefaults.standard.set(newValue, forKey: alwaysAutocorrectKey) }
     }
 }
