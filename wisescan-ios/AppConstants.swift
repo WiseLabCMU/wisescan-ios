@@ -66,7 +66,11 @@ enum AppConstants {
         static let thetaCameraProfiles = "thetaCameraProfiles"
         /// Longest EXIF exposure observed per camera model ("thetaObservedExposure.<model>"),
         /// learned from downloaded stills — widens the sway window in dim rooms.
-        static let thetaObservedExposurePrefix = "thetaObservedExposure"        // JSON roster of known cameras (multi-camera: X for texture, Z1 for low light — switch per collection)
+        static let thetaObservedExposurePrefix = "thetaObservedExposure"
+        /// Longest shutter-ack delay observed per camera model
+        /// ("thetaObservedAck.<model>"), learned per still — the visual cue's hold
+        /// length. The X answers over BLE in ~0.2 s, the Z1 over OSC in ~0.4 s.
+        static let thetaObservedAckPrefix = "thetaObservedAck"        // JSON roster of known cameras (multi-camera: X for texture, Z1 for low light — switch per collection)
         static let thetaSSID = "thetaSSID"                            // stored camera Wi-Fi SSID for one-tap join (NEHotspotConfiguration)
         static let thetaPassphrase = "thetaPassphrase"                // stored camera Wi-Fi passphrase. TODO(security P2): move to Keychain + default-credential warning — see design doc Security section
     }

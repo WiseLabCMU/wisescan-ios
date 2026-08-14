@@ -92,6 +92,19 @@ extension ThetaCameraManager {
         }
     }
 
+    /// How long the operator must actually hold still after tapping: the learned ack
+    /// for this camera, plus the shutter-latency allowance and the exposure. This is
+    /// the interval the visual cue's ring closes over — after it, movement lands on an
+    /// image already captured.
+    var expectedHoldSeconds: TimeInterval {
+        let model: String = if case .connected(let name, _) = state { name } else { "" }
+        let ack = UserDefaults.standard.double(
+            forKey: "\(AppConstants.Key.thetaObservedAckPrefix).\(model)")
+        let base = ack > 0 ? ack : AppConstants.thetaShutterLatencyAllowance * 2
+        return base + AppConstants.thetaShutterLatencyAllowance
+            + Self.expectedExposureSeconds(forModel: model)
+    }
+
     /// Exposure length to assume for this model's live verdict: the longest EXIF value
     /// its downloaded stills have reported, so a dim room widens the window on its own.
     /// Seeded with the daylight default until the first still lands.
@@ -123,6 +136,14 @@ extension ThetaCameraManager {
                             motion.exposureM, motion.exposureDeg,
                             Int((motion.ackOffset ?? 0) * 1000), Int(motion.window * 1000),
                             motion.totalM, motion.totalDeg, timing.triggerMs))
+        // Learn this model's ack so the cue's hold length matches the camera in hand
+        // (monotonic, clamped: a one-off slow ack shouldn't stretch the cue forever).
+        if let ack = motion.ackOffset, ack > 0, ack < 2 {
+            let key = "\(AppConstants.Key.thetaObservedAckPrefix).\(timing.model)"
+            if ack > UserDefaults.standard.double(forKey: key) {
+                UserDefaults.standard.set(ack, forKey: key)
+            }
+        }
         if motion.swayed {
             swayedStillCount += 1
             playThetaSwayWarnCue()

@@ -79,6 +79,19 @@ extension CaptureView {
         }
     }
 
+    /// Record-start work for the 360° source: warn if the audio cues will be inaudible,
+    /// open the still session, and confirm the camera is really reachable before the
+    /// operator walks off (the chip reports the verdict — CaptureView observes
+    /// `cameraUnresponsive`). Extracted to keep `startRecording` inside the body-length
+    /// limit.
+    private func armThetaForRecording() {
+        if let cueWarning = CaptureCueAudibility.warningIfInaudible() {
+            showTransientMessage(cueWarning, duration: 5)
+        }
+        ThetaCameraManager.shared.beginScanStillSession(rawDataDir: frameCaptureSession.captureDir)
+        Task { await ThetaCameraManager.shared.verifyReadyForCapture() }
+    }
+
     func startRecording() {
         // Bake the manual ghost-mesh offsets into the ARKit world origin right before recording
         // starts (restored from main). ARCoverageView consumes bakedGhostTransform via
@@ -114,10 +127,7 @@ extension CaptureView {
         scanCoach.reset()
         sampleStorageHeadroom()
         // Reset the per-scan 360° still counter so equirect_stills/ numbering starts at 1.
-        ThetaCameraManager.shared.beginScanStillSession(rawDataDir: frameCaptureSession.captureDir)
-        // Confirm the camera is really there before the operator walks off; the chip
-        // reports the verdict (CaptureView observes cameraUnresponsive).
-        Task { await ThetaCameraManager.shared.verifyReadyForCapture() }
+        armThetaForRecording()
 
         // Rod-stillness rig mode: with the 360° camera riding above the phone, tighten
         // the angular stillness gate by the lever arm (measured rig height when set,

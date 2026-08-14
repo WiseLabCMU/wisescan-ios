@@ -953,6 +953,13 @@ struct CaptureView: View {
                     .allowsHitTesting(false)
             }
 
+            // 360° capture cue: the visual half of the audio sequence, so a muted iPad
+            // (no haptics either) still shows when to hold and when it's safe to move.
+            // Hosted like the reticle so only its own body re-evaluates.
+            if isRecording, thetaManager.isConnected {
+                ThetaCaptureCueHost(manager: thetaManager)
+            }
+
             // Centered startup/tracking pills (kept separate from ScanCoach)
             centeredTrackingPills
 

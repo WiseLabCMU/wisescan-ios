@@ -605,7 +605,7 @@ sequenceDiagram
     else
         TCM->>X: triggerStill() (OSC)
     end
-    CV-->>U: chip: "📸 exposing — hold still…" (orange)
+    CV-->>U: chip: "📸 exposing — hold still…" (orange) + a ring that closes over the pose-critical hold (learned per model) then reads OK to move — the visual half of the cues, since a muted iPad has no haptics either
     TCM->>D: still_NNNN.json — phone_transform, frame_timestamp, captured_at_epoch_ms, trigger+exposure motion m/deg, camera_file_url — NO cam_transform
     TCM-->>U: done tone + success haptic (cue 3 — walk now)
     TCM->>TCM: enqueue JPG download
