@@ -41,33 +41,15 @@ struct SettingsView: View {
     /// and the first digit resurrects on delete (field report 2026-08-05, "26.5 in").
     /// The buffer is free text while editing; it parses and persists (metric, always)
     /// only on commit: focus loss, unit flip, or leaving Settings.
-    @State private var rigHeightText: String = ""
-    @FocusState private var rigHeightFocused: Bool
+    @State private var showRigHeightSheet = false
 
-    /// Stored metric value rendered in the current display unit, trailing zeros trimmed.
-    private func formattedRigHeight() -> String {
-        guard rigMeasuredDyMeters > 0 else { return "" }
+    /// Row value: the stored height in the user's display unit, or an unset marker.
+    private var rigHeightSummary: String {
+        guard rigMeasuredDyMeters > 0 else { return "Not set" }
         let display = rigHeightUnitImperial ? rigMeasuredDyMeters / 0.0254 : rigMeasuredDyMeters
-        var text = String(format: "%.3f", display)
-        while text.hasSuffix("0") { text.removeLast() }
-        if text.hasSuffix(".") { text.removeLast() }
-        return text
+        return String(format: rigHeightUnitImperial ? "%.1f in" : "%.2f m", display)
     }
 
-    /// Parse the edit buffer (decimal comma tolerated) and persist in METERS.
-    /// VALUE ONLY — never writes back to `rigHeightText`. Rewriting the bound text of
-    /// a focused field forces a layout pass, and when that happens while the sheet is
-    /// being torn down with the keyboard still up, UIKit tries to activate the
-    /// keyboard-avoidance constraint against a detached hierarchy and traps
-    /// ("no common ancestor", 360update1/2). Called on every keystroke, so there is
-    /// nothing left to commit at focus-loss or disappear.
-    private func persistRigHeight() {
-        let cleaned = rigHeightText
-            .replacingOccurrences(of: ",", with: ".")
-            .trimmingCharacters(in: .whitespaces)
-        guard let value = Double(cleaned), value >= 0, value.isFinite else { return }
-        rigMeasuredDyMeters = rigHeightUnitImperial ? value * 0.0254 : value
-    }
     @AppStorage(AppConstants.Key.registerLegacyScans) private var registerLegacyScans: Bool = AppConstants.registerLegacyScans
     @Environment(\.dismiss) private var dismiss
 
@@ -254,40 +236,28 @@ struct SettingsView: View {
                         .padding(.vertical, 4)
 
                         VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("360° Rig Height")
-                                    .foregroundColor(.white)
-                                Spacer()
-                                // Entry converts at the UI edge only — persisted value is
-                                // ALWAYS meters (see CONTRIBUTING → Units & time).
-                                // Free-text while editing; parsed on commit (see rigHeightText).
-                                TextField("0.00", text: $rigHeightText)
-                                    .keyboardType(.decimalPad)
-                                    .focused($rigHeightFocused)
-                                    .onChange(of: rigHeightText) { _, _ in persistRigHeight() }
-                                    .multilineTextAlignment(.trailing)
-                                    .frame(width: 80)
-                                    .foregroundColor(.cyan)
-                                Picker("", selection: Binding(
-                                    get: { rigHeightUnitImperial },
-                                    set: { imperial in
-                                        persistRigHeight()   // parse pending text under the OLD unit
-                                        rigHeightUnitImperial = imperial
-                                        rigHeightText = formattedRigHeight()
-                                    }
-                                )) {
-                                    Text("m").tag(false)
-                                    Text("in").tag(true)
+                            // Opens the shared keypad editor rather than hosting a text
+                            // field: the system decimal pad crashed this flow repeatedly
+                            // (see RigHeightSheet for the mechanism). One editor, no
+                            // keyboard anywhere in the rig-height path.
+                            Button(action: { showRigHeightSheet = true }, label: {
+                                HStack {
+                                    Text("360° Rig Height")
+                                        .foregroundColor(.white)
+                                    Spacer()
+                                    Text(rigHeightSummary)
+                                        .foregroundColor(rigMeasuredDyMeters > 0 ? .cyan : .orange)
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
                                 }
-                                .pickerStyle(.segmented)
-                                .frame(width: 90)
-                            }
+                            })
+                            .buttonStyle(.plain)
                             Text("Tape-measured distance from the iPad's camera cluster to the 360° camera's lens center. Used as the BOOTSTRAP anchor for each scan's calibration solve (the solve refines within a small window — the image-based solve has a known upward pull without an anchor). Stored in meters regardless of entry unit. 0 = unmeasured.")
                                 .font(.caption)
                                 .foregroundColor(.gray)
                         }
                         .padding(.vertical, 4)
-                        .onAppear { rigHeightText = formattedRigHeight() }
 
                     } header: {
                         Text("SCAN CAPTURE")
@@ -650,24 +620,12 @@ struct SettingsView: View {
                 } // ScrollViewReader
             }
             .scrollDismissesKeyboard(.interactively)
+            .sheet(isPresented: $showRigHeightSheet) { RigHeightSheet() }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") {
-                        rigHeightFocused = false   // never dismiss with the keyboard up
-                        dismiss()
-                    }
-                }
-                // The decimal pad has NO return key: without this the only way out of
-                // the rig-height field is to leave the screen, which is exactly the
-                // keyboard-up teardown that crashed (360update1/2).
-                ToolbarItemGroup(placement: .keyboard) {
-                    Spacer()
-                    Button("Done") {
-                        rigHeightFocused = false
-                        rigHeightText = formattedRigHeight()
-                    }
+                    Button("Done") { dismiss() }
                 }
             }
             .alert("Delete All Data?", isPresented: $showDeleteConfirmation) {
