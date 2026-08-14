@@ -118,7 +118,9 @@ extension ThetaBLEManager: CBPeripheralDelegate {
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
         switch characteristic.uuid {
         case Self.ccv2GetInfoChar: resolveIdentity(obj)
-        case Self.ccv2GetStateChar: lastFileUrl = (obj["_latestFileUrl"] as? String) ?? lastFileUrl
+        case Self.ccv2GetStateChar:
+            lastStateReadAt = Date()
+            lastFileUrl = (obj["_latestFileUrl"] as? String) ?? lastFileUrl
         case Self.ccv2GetOptionsChar: resolveOptions(obj)
         case Self.ccv2NotifyStateChar: resolveNotifyState(obj)
         default: break

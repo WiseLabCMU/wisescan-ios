@@ -70,6 +70,8 @@ final class ThetaBLEManager: NSObject {
     static let ccv2GetInfoChar = CBUUID(string: "A0452E2D-C7D8-4314-8CD6-7B8BBAB4D523")
     static let ccv2GetStateChar = CBUUID(string: "083D92B0-21E0-4FB2-9503-7D8B2C2BB1D1")
     static let ccv2NotifyStateChar = CBUUID(string: "D32CE140-B0C2-4C07-AF15-2301B5057B8C")
+    /// Stamped whenever a GetState value lands — the liveness probe watches it change.
+    var lastStateReadAt: Date?
     static let ccv2SetOptionsChar = CBUUID(string: "F0BCD2F9-5862-4653-B50D-80DC51E8CB82")
     static let ccv2ShutterChar = CBUUID(string: "6E2DEEBE-88B0-42A5-829D-1B2C6ABCE750")
     static let ccv2GetOptionsChar = CBUUID(string: "7CFFAAE3-8467-4D0C-A9DD-7F70B4F52863")
@@ -220,6 +222,21 @@ final class ThetaBLEManager: NSObject {
                 self?.shutterPending = nil
             }
         }
+    }
+
+    /// Is the camera answering RIGHT NOW? Reads GetState over the existing link — the
+    /// cheapest truth available, and the only one that works when the phone has left
+    /// the camera's Wi-Fi. Does not wake, join, or reconfigure anything.
+    func isCameraResponding(timeout: TimeInterval = 3) async -> Bool {
+        guard isLinkReady, let peripheral, let char = chars[Self.ccv2GetStateChar] else { return false }
+        peripheral.readValue(for: char)
+        let deadline = Date().addingTimeInterval(timeout)
+        let before = lastStateReadAt
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            if lastStateReadAt != before { return true }
+        }
+        return false
     }
 
     /// Ask the camera which WLAN mode it is in ("AP" / "CL") over BLE — the only

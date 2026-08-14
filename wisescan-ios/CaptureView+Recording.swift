@@ -115,6 +115,9 @@ extension CaptureView {
         sampleStorageHeadroom()
         // Reset the per-scan 360° still counter so equirect_stills/ numbering starts at 1.
         ThetaCameraManager.shared.beginScanStillSession(rawDataDir: frameCaptureSession.captureDir)
+        // Confirm the camera is really there before the operator walks off; the chip
+        // reports the verdict (CaptureView observes cameraUnresponsive).
+        Task { await ThetaCameraManager.shared.verifyReadyForCapture() }
 
         // Rod-stillness rig mode: with the 360° camera riding above the phone, tighten
         // the angular stillness gate by the lever arm (measured rig height when set,

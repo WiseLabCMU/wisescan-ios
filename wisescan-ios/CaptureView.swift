@@ -304,10 +304,13 @@ struct CaptureView: View {
             && spread >= AppConstants.calibrationMinSpreadMeters
         HStack(spacing: 5) {
             Circle()
-                .fill(thetaManager.isCapturing ? Color.orange
+                .fill(thetaManager.cameraUnresponsive ? Color.red
+                      : thetaManager.isCapturing ? Color.orange
                       : count == 0 ? Color.gray : sufficient ? Color.green : Color.yellow)
                 .frame(width: 7, height: 7)
-            Text(thetaManager.isCapturing
+            Text(thetaManager.cameraUnresponsive
+                 ? "360° camera lost — reconnect to resume"
+                 : thetaManager.isCapturing
                  ? "📸 exposing — hold still…"
                  : count == 0
                  ? "No 360° stills yet"
@@ -844,6 +847,15 @@ struct CaptureView: View {
                 pauseARSession: pauseARSession,
                 isAnalyzing: $isAnalyzing
             )
+        .onChange(of: thetaManager.cameraUnresponsive) { _, lost in
+            // One message when the camera drops — at record-start verification or the
+            // first failed still. The chip carries the persistent state; this makes sure
+            // a walking operator finds out now rather than at Process. Lives here, not
+            // in `body`: that modifier chain is already at the type checker's limit.
+            guard lost else { return }
+            showTransientMessage("⚠️ 360° camera unavailable — recording phone-only. "
+                + "Reconnect from the Dashboard to resume stills.", duration: 5)
+        }
     }
 
     var body: some View {

@@ -94,6 +94,10 @@ final class ThetaCameraManager {
     /// Setter is internal (not private) because the sway guard lives in the
     /// +StillMotion file split; treat as read-only outside the manager's own files.
     var swayedStillCount = 0
+    /// Set when the camera stops answering mid-scan. The chip goes amber and the still
+    /// path stops being attempted, so a dead camera taxes one keyframe rather than all
+    /// of them; cleared by a successful still or a reconnect.
+    private(set) var cameraUnresponsive = false
 
     /// One queued equirect transfer: the sidecar is already on disk; only the JPG bytes
     /// are outstanding on the camera.
@@ -229,6 +233,47 @@ final class ThetaCameraManager {
     /// (e.g. "THETAYR14100112.ASC" → "14100112"; suffix varies by model/firmware).
     /// nil when the SSID doesn't look like a Theta AP. Prefills the Add Camera sheet;
     /// the security plan's P2 warning fires when the live password still equals this.
+    /// Verify the camera is actually there before a scan starts, and recover if it
+    /// isn't. The card can show "connected" long after the truth changed: the camera
+    /// naps, or — more often — the phone roams off its AP, and nothing notices until a
+    /// still fails mid-scan with the operator already walking.
+    ///
+    /// Cheap checks first: the stored SSID against the one iOS reports (no round trip
+    /// at all), then a BLE state read, which works even when Wi-Fi has dropped. Only a
+    /// real failure escalates to the full wake + rejoin.
+    ///
+    /// Returns true when the camera is ready; false means the operator should be told
+    /// the scan will be phone-only.
+    @discardableResult
+    func verifyReadyForCapture() async -> Bool {
+        guard isConnected else { return false }
+        cameraUnresponsive = false
+
+        let stored = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID)
+        let onCameraNetwork = await currentSSID().map { $0 == stored } ?? true
+        if onCameraNetwork, await ThetaBLEManager.shared.isCameraResponding() { return true }
+        if onCameraNetwork, !ThetaBLEManager.shared.isLinkReady {
+            // No BLE link to ask over (Z1, or a dropped link) — trust the network check
+            // and let the first still surface any real failure.
+            return true
+        }
+
+        log(.connection, onCameraNetwork
+            ? "Camera didn't answer before recording — reconnecting…"
+            : "Phone left the camera's Wi-Fi — reconnecting…")
+        connect()
+        // connect() runs its own wake/join/probe budget; wait for it to settle rather
+        // than racing the scan's first still against it.
+        for _ in 0..<40 {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if isConnected { return true }
+            if case .failed = state { break }
+        }
+        cameraUnresponsive = true
+        log(.connection, "360° camera unavailable — this scan will be phone-only until it reconnects")
+        return false
+    }
+
     /// SSID the phone is on right now, when iOS will say. Needs the Access Wi-Fi
     /// Information entitlement plus one of: this app joined the network via
     /// NEHotspotConfiguration, location permission, or a VPN. Foreign networks
@@ -673,6 +718,7 @@ final class ThetaCameraManager {
     func beginScanStillSession(rawDataDir: URL? = nil) {
         scanStillCount = 0
         swayedStillCount = 0
+        cameraUnresponsive = false
         scanStillPositions.removeAll()
         if let dir = rawDataDir?.appendingPathComponent("equirect_stills"),
            let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
@@ -700,7 +746,9 @@ final class ThetaCameraManager {
     func captureStillForScan(phoneTransform: simd_float4x4, timestamp: TimeInterval,
                              into rawDataDir: URL,
                              samplePose: (() -> simd_float4x4?)? = nil) -> Bool {
-        guard isConnected, !isCapturing else { return false }
+        // Fail-soft: once the camera has gone, don't stall every keyframe waiting for a
+        // trigger that can't succeed. Recovery is a reconnect, not a retry per still.
+        guard isConnected, !isCapturing, !cameraUnresponsive else { return false }
         let capturedAtEpochMs = Int64(Date().timeIntervalSince1970 * 1000)
         isCapturing = true
         lastError = nil
@@ -752,6 +800,7 @@ final class ThetaCameraManager {
                 // camera lists the file, i.e. exposure + stitch are certainly over.
                 playThetaDoneCue()
                 scanStillCount = seq
+                cameraUnresponsive = false
                 scanStillPositions.append(SIMD3<Float>(phoneTransform.columns.3.x,
                                                        phoneTransform.columns.3.y,
                                                        phoneTransform.columns.3.z))
@@ -766,7 +815,11 @@ final class ThetaCameraManager {
                 let message = Self.describe(error)
                 lastError = message
                 log(.capture, "Scan still failed: \(message)")
-                if Self.isConnectivityError(error) { state = .failed(message) }
+                if Self.isConnectivityError(error) {
+                    state = .failed(message)
+                    cameraUnresponsive = true
+                    log(.capture, "360° stills paused — reconnect the camera to resume")
+                }
             }
             isCapturing = false
         }

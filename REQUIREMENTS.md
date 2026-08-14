@@ -575,6 +575,8 @@ sequenceDiagram
     CV-->>U: 360° chip — rig prior state · rig height (orange until measured) · sufficiency (while recording)
     U->>CV: Record
     CV->>TCM: beginScanStillSession(rawDataDir) — seq counter seeded FROM DISK
+    TCM->>TCM: verifyReadyForCapture — SSID check, then a BLE state read; reconnect if either fails, else the scan records phone-only and says so
+    Note over CV: each still drops a floor ring (radius = half the 2 m spacing target) and the chip reports distance to the nearest still
 ```
 
 ##### AR/VR capture (per stillness pause)
