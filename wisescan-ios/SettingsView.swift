@@ -54,18 +54,19 @@ struct SettingsView: View {
         return text
     }
 
-    /// Parse the edit buffer (decimal comma tolerated) and persist in METERS; on
-    /// unparseable input, revert the buffer to the stored value rather than guessing.
-    private func commitRigHeight() {
+    /// Parse the edit buffer (decimal comma tolerated) and persist in METERS.
+    /// VALUE ONLY — never writes back to `rigHeightText`. Rewriting the bound text of
+    /// a focused field forces a layout pass, and when that happens while the sheet is
+    /// being torn down with the keyboard still up, UIKit tries to activate the
+    /// keyboard-avoidance constraint against a detached hierarchy and traps
+    /// ("no common ancestor", 360update1/2). Called on every keystroke, so there is
+    /// nothing left to commit at focus-loss or disappear.
+    private func persistRigHeight() {
         let cleaned = rigHeightText
             .replacingOccurrences(of: ",", with: ".")
             .trimmingCharacters(in: .whitespaces)
-        guard let value = Double(cleaned), value >= 0, value.isFinite else {
-            rigHeightText = formattedRigHeight()
-            return
-        }
+        guard let value = Double(cleaned), value >= 0, value.isFinite else { return }
         rigMeasuredDyMeters = rigHeightUnitImperial ? value * 0.0254 : value
-        rigHeightText = formattedRigHeight()
     }
     @AppStorage(AppConstants.Key.registerLegacyScans) private var registerLegacyScans: Bool = AppConstants.registerLegacyScans
     @Environment(\.dismiss) private var dismiss
@@ -263,16 +264,14 @@ struct SettingsView: View {
                                 TextField("0.00", text: $rigHeightText)
                                     .keyboardType(.decimalPad)
                                     .focused($rigHeightFocused)
-                                    .onChange(of: rigHeightFocused) { _, focused in
-                                        if !focused { commitRigHeight() }
-                                    }
+                                    .onChange(of: rigHeightText) { _, _ in persistRigHeight() }
                                     .multilineTextAlignment(.trailing)
                                     .frame(width: 80)
                                     .foregroundColor(.cyan)
                                 Picker("", selection: Binding(
                                     get: { rigHeightUnitImperial },
                                     set: { imperial in
-                                        commitRigHeight()   // parse pending text under the OLD unit
+                                        persistRigHeight()   // parse pending text under the OLD unit
                                         rigHeightUnitImperial = imperial
                                         rigHeightText = formattedRigHeight()
                                     }
@@ -289,7 +288,6 @@ struct SettingsView: View {
                         }
                         .padding(.vertical, 4)
                         .onAppear { rigHeightText = formattedRigHeight() }
-                        .onDisappear { commitRigHeight() }
 
                     } header: {
                         Text("SCAN CAPTURE")
@@ -651,11 +649,25 @@ struct SettingsView: View {
                 }
                 } // ScrollViewReader
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") { dismiss() }
+                    Button("Done") {
+                        rigHeightFocused = false   // never dismiss with the keyboard up
+                        dismiss()
+                    }
+                }
+                // The decimal pad has NO return key: without this the only way out of
+                // the rig-height field is to leave the screen, which is exactly the
+                // keyboard-up teardown that crashed (360update1/2).
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        rigHeightFocused = false
+                        rigHeightText = formattedRigHeight()
+                    }
                 }
             }
             .alert("Delete All Data?", isPresented: $showDeleteConfirmation) {

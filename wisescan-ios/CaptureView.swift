@@ -113,6 +113,7 @@ struct CaptureView: View {
     @State var isAwaitingAlignment = false // Phase 2.1 (perfDiag): briefly holding record for the auto-align correction
 
     @State private var showSettings = false
+    @State private var showRigHeightSheet = false
     @State private var activeLocationName: String?
     // Ghost-mesh manual "nudger" (from main) — coexists with our anchor-based AlignmentOverlayView.
     // The sliders adjust the ghost overlay; startRecording bakes the offset into the ARKit world
@@ -247,22 +248,31 @@ struct CaptureView: View {
     /// falls back to the mechanical envelope, where the solve's known +dy pull operates
     /// unchecked (360post4: solved 1.30 m vs measured 0.79 m).
     @ViewBuilder
+    /// Tappable: swapping rigs is a capture-time task, so the chip opens a one-field
+    /// editor rather than sending the operator to full Settings (whose List + keyboard
+    /// layout competes with the live ARSession — see RigHeightSheet).
     private var thetaRigHeightChip: some View {
         let measured = rigMeasuredDyMeters > 0.1
-        HStack(spacing: 5) {
-            Circle()
-                .fill(measured ? Color.cyan : Color.orange)
-                .frame(width: 7, height: 7)
-            Text(measured
-                 ? String(format: "Rig height %.2f m", rigMeasuredDyMeters)
-                 : "Rig height unset — Settings")
-        }
-        .font(.caption2).bold()
-        .foregroundColor(measured ? .white : .orange)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.ultraThinMaterial)
-        .cornerRadius(6)
+        Button(action: { showRigHeightSheet = true }, label: {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(measured ? Color.cyan : Color.orange)
+                    .frame(width: 7, height: 7)
+                Text(measured
+                     ? String(format: "Rig height %.2f m", rigMeasuredDyMeters)
+                     : "Rig height unset — tap to set")
+                Image(systemName: "pencil")
+                    .font(.system(size: 8))
+                    .opacity(0.7)
+            }
+            .font(.caption2).bold()
+            .foregroundColor(measured ? .white : .orange)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.ultraThinMaterial)
+            .cornerRadius(6)
+        })
+        .buttonStyle(.plain)
     }
 
     /// Live calibration-sufficiency meter while recording: still count, baseline
@@ -1916,6 +1926,9 @@ struct CaptureView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Move the device around to map more of the environment before placing a connector.")
+        }
+        .sheet(isPresented: $showRigHeightSheet) {
+            RigHeightSheet()
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
