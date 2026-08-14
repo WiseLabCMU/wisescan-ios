@@ -607,7 +607,7 @@ sequenceDiagram
     end
     CV-->>U: chip: "📸 exposing — hold still…" (orange) + a ring that closes over the pose-critical hold (learned per model) then reads OK to move — the visual half of the cues, since a muted iPad has no haptics either
     TCM->>D: still_NNNN.json — phone_transform, frame_timestamp, captured_at_epoch_ms, trigger+exposure motion m/deg, camera_file_url — NO cam_transform
-    TCM-->>U: done tone + success haptic (cue 3 — walk now)
+    TCM-->>U: done tone + success haptic (cue 3 — walk now) — fires at EXPOSURE CLOSE (ack + latency + learned exposure), not at file landing; stitch/listing/download continue while the operator walks
     TCM->>TCM: enqueue JPG download
     loop while NOT capturing (yields to triggers)
         TCM->>X: download next queued equirect → still_NNNN.JPG

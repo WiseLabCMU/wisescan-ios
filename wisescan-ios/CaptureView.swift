@@ -305,12 +305,12 @@ struct CaptureView: View {
         HStack(spacing: 5) {
             Circle()
                 .fill(thetaManager.cameraUnresponsive ? Color.red
-                      : thetaManager.isCapturing ? Color.orange
+                      : thetaManager.isHoldingForExposure ? Color.orange
                       : count == 0 ? Color.gray : sufficient ? Color.green : Color.yellow)
                 .frame(width: 7, height: 7)
             Text(thetaManager.cameraUnresponsive
                  ? "360° camera lost — reconnect to resume"
-                 : thetaManager.isCapturing
+                 : thetaManager.isHoldingForExposure
                  ? "📸 exposing — hold still…"
                  : count == 0
                  ? "No 360° stills yet"

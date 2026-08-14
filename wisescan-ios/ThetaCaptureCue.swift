@@ -8,7 +8,8 @@ struct ThetaCaptureCueHost: View {
     var manager: ThetaCameraManager
 
     var body: some View {
-        ThetaCaptureCue(isCapturing: manager.isCapturing,
+        ThetaCaptureCue(isHolding: manager.isHoldingForExposure,
+                        isTransferring: manager.isCapturing,
                         holdSeconds: manager.expectedHoldSeconds,
                         stillCount: manager.scanStillCount)
     }
@@ -32,7 +33,10 @@ struct ThetaCaptureCueHost: View {
 /// COST: a small SwiftUI overlay with two implicit animations. It never touches the
 /// ARSession or RealityKit, so it adds nothing to the VIO path.
 struct ThetaCaptureCue: View {
-    let isCapturing: Bool
+    /// The operator must stand still: trigger → 360° exposure closed.
+    let isHolding: Bool
+    /// The still is stitching/downloading. NOT the operator's problem — they walk.
+    let isTransferring: Bool
     /// How long the pose-critical hold lasts for the connected camera.
     let holdSeconds: TimeInterval
     let stillCount: Int
@@ -59,7 +63,9 @@ struct ThetaCaptureCue: View {
             }
             .frame(width: 74, height: 74)
 
-            Text(holdComplete ? "OK to move" : "Hold still — exposing")
+            Text(holdComplete
+                 ? (isTransferring ? "OK to move · saving" : "OK to move")
+                 : "Hold still — exposing")
                 .font(.caption2).bold()
                 .foregroundColor(.white)
                 .padding(.horizontal, 8)
@@ -67,16 +73,19 @@ struct ThetaCaptureCue: View {
                 .background(.ultraThinMaterial)
                 .cornerRadius(6)
         }
-        .opacity(isCapturing || savedPulse ? 1 : 0)
+        .opacity(isHolding || isTransferring || savedPulse ? 1 : 0)
         // The saved flourish: the cue drifts down and fades as the still lands in the
         // bundle — the operator sees WHERE it went without reading anything.
         .offset(y: savedPulse ? 42 : 0)
         .scaleEffect(savedPulse ? 0.75 : 1)
         .animation(.easeOut(duration: 0.45), value: savedPulse)
-        .animation(.easeOut(duration: 0.2), value: isCapturing)
+        .animation(.easeOut(duration: 0.2), value: isHolding)
         .allowsHitTesting(false)
-        .onChange(of: isCapturing) { _, capturing in
-            if capturing { beginHold() } else { finishHold() }
+        .onChange(of: isHolding) { _, holding in
+            if holding { beginHold() } else { holdComplete = true }
+        }
+        .onChange(of: isTransferring) { _, transferring in
+            if !transferring { finishHold() }
         }
     }
 
@@ -87,7 +96,7 @@ struct ThetaCaptureCue: View {
         withAnimation(.linear(duration: holdSeconds)) { ringProgress = 1 }
         // Flip to "OK to move" when the pose-critical window has certainly passed.
         DispatchQueue.main.asyncAfter(deadline: .now() + holdSeconds) {
-            if isCapturing { holdComplete = true }
+            if isHolding { holdComplete = true }
         }
     }
 
@@ -107,7 +116,7 @@ struct ThetaCaptureCue: View {
 #Preview {
     ZStack {
         Color.black
-        ThetaCaptureCue(isCapturing: true, holdSeconds: 0.4, stillCount: 3)
+        ThetaCaptureCue(isHolding: true, isTransferring: true, holdSeconds: 0.4, stillCount: 3)
     }
 }
 

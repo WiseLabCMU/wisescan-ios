@@ -98,6 +98,10 @@ final class ThetaCameraManager {
     /// path stops being attempted, so a dead camera taxes one keyframe rather than all
     /// of them; cleared by a successful still or a reconnect.
     private(set) var cameraUnresponsive = false
+    /// True only while the operator must actually stand still: from the trigger until
+    /// the 360° exposure has certainly closed. `isCapturing` outlives it by seconds
+    /// (stitch + transfer), and waiting on THAT is what used to cost ~4 s per still.
+    private(set) var isHoldingForExposure = false
 
     /// One queued equirect transfer: the sidecar is already on disk; only the JPG bytes
     /// are outstanding on the camera.
@@ -772,7 +776,15 @@ final class ThetaCameraManager {
             let connectedModel: String = if case .connected(let model, _) = state { model } else { "unknown-360" }
             do {
                 var shutterAck: Date?
-                let fileURL = try await triggerStillPreferringBLE(onAck: { shutterAck = Date() })
+                isHoldingForExposure = true
+                let fileURL = try await triggerStillPreferringBLE(onAck: { [weak self] in
+                    shutterAck = Date()
+                    // The camera has taken the shot; the pose-critical hold ends one
+                    // shutter-latency + exposure later. Release the operator THERE, not
+                    // when the file lands — stitch and transfer are the camera's problem
+                    // and the download drains lazily in the background.
+                    self?.scheduleHoldRelease(model: connectedModel)
+                })
                 let triggerMs = Int(Date().timeIntervalSince(start) * 1000)
                 motionProbe?.cancel()
                 let seq = scanStillCount + 1
@@ -802,13 +814,10 @@ final class ThetaCameraManager {
                 // Sidecar NOW (phone pose can't be reconstructed later); JPG via the queue;
                 // cam_transform is baked by the Process step's calibration solve.
                 try Self.writeScanStillSidecar(input: input, into: rawDataDir)
-                // THIRD cue — "360° done, you can move." The cue sequence trains the
-                // operator: stillness chime → phone shutter click → (Theta exposes:
-                // chip shows hold) → THIS tone. Without it, the shutter click reads as
-                // "done" and the walk resumes mid-exposure (the trigger-motion probe
-                // exists to quantify exactly that). Conservative timing: fires when the
-                // camera lists the file, i.e. exposure + stitch are certainly over.
-                playThetaDoneCue()
+                // No cue here: "you can move" already fired at exposure close
+                // (scheduleHoldRelease). The file landing is bookkeeping — the operator
+                // should be walking by now.
+                releaseExposureHold(playCue: false)   // no-op unless the ack never came
                 scanStillCount = seq
                 cameraUnresponsive = false
                 scanStillPositions.append(SIMD3<Float>(phoneTransform.columns.3.x,
@@ -822,6 +831,7 @@ final class ThetaCameraManager {
                 drainStillDownloads()
                 return
             } catch {
+                releaseExposureHold(playCue: false)   // failed shot: release, but don't say "done"
                 let message = Self.describe(error)
                 lastError = message
                 log(.capture, "Scan still failed: \(message)")
@@ -948,6 +958,26 @@ final class ThetaCameraManager {
             UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaBLEPeripheralID)
             log(.connection, "Camera forgotten — to fully reset, also remove it in iOS Settings → Bluetooth")
         }
+    }
+
+    /// Ends the hold one shutter-latency + exposure after the camera acknowledged the
+    /// shutter — the measured moment the 360° exposure has certainly closed. Everything
+    /// after it (stitch, listing, download) happens while the operator walks.
+    private func scheduleHoldRelease(model: String) {
+        let remaining = AppConstants.thetaShutterLatencyAllowance
+            + Self.expectedExposureSeconds(forModel: model)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            self?.releaseExposureHold(playCue: true)
+        }
+    }
+
+    /// Idempotent: whichever of the ack timer, the completed still, or the failure path
+    /// arrives first ends the hold, and only the timer's path plays the tone.
+    private func releaseExposureHold(playCue: Bool) {
+        guard isHoldingForExposure else { return }
+        isHoldingForExposure = false
+        if playCue { playThetaDoneCue() }
     }
 
     /// Distinct completion tone + success haptic when a 360° still finishes (audio
