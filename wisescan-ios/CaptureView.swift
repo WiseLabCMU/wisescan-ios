@@ -243,6 +243,23 @@ struct CaptureView: View {
         .cornerRadius(6)
     }
 
+    /// Live spacing verdict against the rings already on the floor: how far the operator
+    /// is from the nearest still they've taken. Recomputed from the AR pose each time
+    /// the chip redraws — ≤20 points, so a distance test, not a grid lookup.
+    private var spacingSuffix: String {
+        guard isRecording, thetaManager.isConnected,
+              let pose = currentARSession?.currentFrame?.camera.transform else { return "" }
+        let here = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
+        switch StillSpacingRings.spacing(at: here, points: thetaManager.scanStillPositions) {
+        case .first:
+            return ""
+        case .tooClose(let distance):
+            return String(format: " · %.1f m from last — move on", distance)
+        case .good:
+            return " · ✓ spot"
+        }
+    }
+
     /// Rig-height state on the 360° chip: the tape-measured value when set (the solve's
     /// bootstrap anchor), or an orange call-to-action when unset — an unmeasured rig
     /// falls back to the mechanical envelope, where the solve's known +dy pull operates
@@ -294,8 +311,9 @@ struct CaptureView: View {
                  ? "📸 exposing — hold still…"
                  : count == 0
                  ? "No 360° stills yet"
-                 : String(format: "%d still%@ · spread %.1f m%@%@",
+                 : String(format: "%d still%@ · spread %.1f m%@%@%@",
                           count, count == 1 ? "" : "s", spread,
+                          spacingSuffix,
                           pending > 0 ? " · ↓\(pending)" : "",
                           thetaManager.swayedStillCount > 0
                           ? " · ⚠️\(thetaManager.swayedStillCount) swayed" : ""))
@@ -786,10 +804,11 @@ struct CaptureView: View {
         selectedTab = 2
     }
 
-    var body: some View {
-        ZStack {
-            // Live ARKit Scene Reconstruction View
-            ARCoverageView(
+    /// Extracted from `body`: with this inline, the body's modifier chain exceeded the
+    /// type checker's budget ("unable to type-check this expression in reasonable time").
+    /// Isolating the AR layer keeps inference local and the body cheap to compile.
+    private var arCoverageLayer: some View {
+        ARCoverageView(
                 arSession: $currentARSession,
                 isRecording: $isRecording,
                 isSessionReady: $isARSessionReady,
@@ -814,6 +833,7 @@ struct CaptureView: View {
                 ghostIsProxy: ghostIsProxy,
                 scanStore: scanStore,
                 connectorAnchors: connectorAnchors,
+                stillRingPositions: thetaManager.scanStillPositions as [SIMD3<Float>],
                 finalCapturedRoom: $finalCapturedRoom,
                 frameCaptureSession: frameCaptureSession,
                 ghostYRotation: ghostYRotation,
@@ -824,6 +844,12 @@ struct CaptureView: View {
                 pauseARSession: pauseARSession,
                 isAnalyzing: $isAnalyzing
             )
+    }
+
+    var body: some View {
+        ZStack {
+            // Live ARKit Scene Reconstruction View
+            arCoverageLayer
                 .ignoresSafeArea()
                 // Shutter tap — the deterministic still trigger, gated on stillness.
                 // Attached to the AR view (behind the HUD) so buttons keep their own

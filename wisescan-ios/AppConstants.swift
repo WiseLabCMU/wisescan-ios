@@ -221,6 +221,19 @@ enum AppConstants {
     /// Pose-probe sampling period. The real window is ~250 ms, so 250 ms sampling put
     /// exactly ONE sample in it; 50 ms gives ~5 and costs one transform read each.
     static let thetaMotionSampleSeconds: TimeInterval = 0.05
+
+    // MARK: - 360° still spacing guidance
+    /// Target distance between consecutive 360° stills. Rings render at HALF this, so
+    /// two rings that just touch are exactly this far apart — the operator reads the
+    /// spacing off the geometry rather than off a number. Baseline spread is what
+    /// sharpens the calibration solve and what gives a surface more than one viewpoint
+    /// (which is also how downstream rejects stitch-seam artifacts).
+    static let stillSpacingTargetMeters: Float = 2.0
+    static let stillRingBandWidthMeters: Float = 0.035
+    static let stillRingPipRadiusMeters: Float = 0.05
+    /// Used when no classified floor plane exists yet — roughly how far the capture
+    /// pose sits above the floor when the rig is carried.
+    static let stillRingFallbackDropMeters: Float = 1.3
     static let thetaSwayWarnMeters: Float = 0.03
     static let thetaSwayWarnDegrees: Float = 2.0
     static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry

@@ -44,6 +44,9 @@ struct ARCoverageView: UIViewRepresentable {
     var connectorAnchors: [ConnectorAnchor] = []
     /// RoomPlan: binding to receive the final CapturedRoom when recording stops.
     /// Written by the Coordinator in stopRoomPlanSession(); consumed by finishStopRecording for export.
+    /// World positions of the 360° stills taken this scan — one floor ring each, so
+    /// the operator can space the next one by eye (StillSpacingRings).
+    var stillRingPositions: [SIMD3<Float>] = []
     @Binding var finalCapturedRoom: CapturedRoom?
     /// Frame capture session, wired at record-start so sharp keyframe captures can mark
     /// mesh anchors as photo-covered in the coverage overlay (amber → clear).
@@ -189,6 +192,7 @@ struct ARCoverageView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.privacyFilter = privacyFilter
+        syncStillRings(uiView, coordinator: context.coordinator)
 
         // Battery: pause/resume the session when the capture tab goes idle / returns. ARKit keeps
         // the camera + sensors powered until paused. While paused, skip the rest of updateUIView
@@ -607,6 +611,49 @@ struct ARCoverageView: UIViewRepresentable {
         Coordinator()
     }
 
+    // MARK: - 360° Still Spacing Rings
+
+    /// Draws one floor ring per 360° still taken this scan. Append-only and diffed by
+    /// count, so a scan with N stills builds N rings total — no per-frame geometry work.
+    /// Cleared when the list empties (a new scan resets it).
+    ///
+    /// Opaque UnlitMaterial + procedural geometry, per the ghost-mesh rules below:
+    /// transparency and CustomMaterial are not viable in this ARView.
+    private func syncStillRings(_ uiView: ARView, coordinator: Coordinator) {
+        guard stillRingPositions.count != coordinator.renderedStillRings else { return }
+
+        // Scan reset (or stop): drop the anchor and start clean.
+        if stillRingPositions.count < coordinator.renderedStillRings {
+            coordinator.stillRingAnchor?.removeFromParent()
+            coordinator.stillRingAnchor = nil
+            coordinator.renderedStillRings = 0
+            if stillRingPositions.isEmpty { return }
+        }
+
+        let anchor: AnchorEntity
+        if let existing = coordinator.stillRingAnchor {
+            anchor = existing
+        } else {
+            anchor = AnchorEntity(world: .zero)
+            uiView.scene.addAnchor(anchor)
+            coordinator.stillRingAnchor = anchor
+        }
+
+        let planes = Array(coordinator.livePlaneAnchors.values)
+        let material = UnlitMaterial(rgb: SIMD4<Float>(0.30, 0.85, 1.0, 1))   // cyan, matches the 360° chip
+        for position in stillRingPositions[coordinator.renderedStillRings...] {
+            let point = StillSpacingRings.Point(position: position, source: .taken)
+            let floorY = StillSpacingRings.floorY(planes: planes, fallbackFrom: position)
+            // MeshResource generation must happen on main, one resource per descriptor
+            // (RealityKit's multi-part/background generation path crashes — see below).
+            for desc in StillSpacingRings.descriptors(for: point, floorY: floorY) {
+                guard let resource = try? MeshResource.generate(from: [desc]) else { continue }
+                anchor.addChild(ModelEntity(mesh: resource, materials: [material]))
+            }
+        }
+        coordinator.renderedStillRings = stillRingPositions.count
+    }
+
     // MARK: - Ghost Mesh Helper
 
     /// Loads ghost mesh OBJ data on a background queue, builds procedural wireframe geometry,
@@ -997,6 +1044,12 @@ struct ARCoverageView: UIViewRepresentable {
         var ghostReferencePlanes: [PlaneRegistration.Plane] = []
         var ghostIsProxy = false // mirrors the view flag; read at ghost build (main)
         var livePlaneAnchors: [UUID: ARPlaneAnchor] = [:]
+
+        /// Anchor holding the 360°-still floor rings, and how many are already drawn.
+        /// Rings are append-only within a scan, so a count is enough to diff — no
+        /// rebuild, no per-frame work.
+        var stillRingAnchor: AnchorEntity?
+        var renderedStillRings = 0
         var ghostAutoAlign: simd_float4x4 = matrix_identity_float4x4
         private var ghostAutoAlignApplied = matrix_identity_float4x4
         private var lastGhostAutoAlignAt: TimeInterval = 0
