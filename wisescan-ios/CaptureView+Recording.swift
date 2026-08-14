@@ -703,6 +703,7 @@ extension CaptureView {
     /// created for this flow, and resets state. For the extend flow it fires completion(nil) so the
     /// caller (pinAndExtend) can abort its session-restart sequence and clean up its new location.
     func discardInProgressScan(isExtendFlow: Bool, completion: ((CapturedScan?) -> Void)?) {
+        ThetaCameraManager.shared.endScanStillSession()   // drop the 360° floor markers with the scan
         isRecording = false
         recordingTimer?.invalidate()
         recordingTimer = nil
@@ -879,6 +880,7 @@ extension CaptureView {
                                                scanStore: scanStore)
 
         saveMessage = "Scan Saved!"
+        ThetaCameraManager.shared.endScanStillSession()   // the scan's floor markers retire with it
         pendingScan = nil
         // Release the processing/waiting claim now that the save is done — otherwise isWaitingToSave
         // (set in finishStopRecording's rescan branch / the name-prompt Save) leaks true and leaves the

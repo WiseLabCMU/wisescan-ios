@@ -640,7 +640,11 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         let planes = Array(coordinator.livePlaneAnchors.values)
-        let material = UnlitMaterial(rgb: SIMD4<Float>(0.30, 0.85, 1.0, 1))   // cyan, matches the 360° chip
+        // A CAPTURED spot wears the active mesh colour, so "done" reads the same here as
+        // it does on the live mesh. Suggested spots (future 360°/4D guidance) come in
+        // amber — the same before/after language the capture overlay already uses.
+        let takenMaterial = UnlitMaterial(rgb: activeMeshColor.toSIMD4Color)
+        let suggestedMaterial = UnlitMaterial(rgb: SIMD4<Float>(1.0, 0.72, 0.16, 1))
         for position in stillRingPositions[coordinator.renderedStillRings...] {
             let point = StillSpacingRings.Point(position: position, source: .taken)
             let floorY = StillSpacingRings.floorY(planes: planes, fallbackFrom: position)
@@ -648,7 +652,12 @@ struct ARCoverageView: UIViewRepresentable {
             // (RealityKit's multi-part/background generation path crashes — see below).
             for desc in StillSpacingRings.descriptors(for: point, floorY: floorY) {
                 guard let resource = try? MeshResource.generate(from: [desc]) else { continue }
-                anchor.addChild(ModelEntity(mesh: resource, materials: [material]))
+                let model = ModelEntity(mesh: resource,
+                                        materials: [point.source == .taken ? takenMaterial : suggestedMaterial])
+                // Draw after the scene mesh: with the lift above, the ring then survives
+                // the mesh sweeping across it instead of being painted over.
+                model.components.set(ModelSortGroupComponent(group: coordinator.stillRingSortGroup, order: 1))
+                anchor.addChild(model)
             }
         }
         coordinator.renderedStillRings = stillRingPositions.count
@@ -1050,6 +1059,9 @@ struct ARCoverageView: UIViewRepresentable {
         /// rebuild, no per-frame work.
         var stillRingAnchor: AnchorEntity?
         var renderedStillRings = 0
+        /// Shared sort group so every ring draws in the same late pass, after the live
+        /// scene mesh (which otherwise paints over them — field report 360update5).
+        let stillRingSortGroup = ModelSortGroup()
         var ghostAutoAlign: simd_float4x4 = matrix_identity_float4x4
         private var ghostAutoAlignApplied = matrix_identity_float4x4
         private var lastGhostAutoAlignAt: TimeInterval = 0

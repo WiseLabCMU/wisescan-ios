@@ -233,6 +233,16 @@ final class ThetaCameraManager {
     /// (e.g. "THETAYR14100112.ASC" → "14100112"; suffix varies by model/firmware).
     /// nil when the SSID doesn't look like a Theta AP. Prefills the Add Camera sheet;
     /// the security plan's P2 warning fires when the live password still equals this.
+    /// Ends the scan's still session: clears the per-scan counters and the ring
+    /// positions, so the AR floor markers are torn down with the scan they belonged to.
+    /// Called on every exit — save, discard, extend — because a discarded scan used to
+    /// leave its markers floating in the live scene (field report 360update5).
+    func endScanStillSession() {
+        scanStillPositions.removeAll()
+        scanStillCount = 0
+        swayedStillCount = 0
+    }
+
     /// Verify the camera is actually there before a scan starts, and recover if it
     /// isn't. The card can show "connected" long after the truth changed: the camera
     /// naps, or — more often — the phone roams off its AP, and nothing notices until a

@@ -67,6 +67,8 @@ enum StillSpacingRings {
     /// turn descriptors into resources on MAIN (RealityKit resource-generation rule).
     static func descriptors(for point: Point, floorY: Float) -> [MeshDescriptor] {
         let radius = AppConstants.stillSpacingTargetMeters * 0.5
+        // Lift clear of the floor mesh — see stillRingLiftMeters.
+        let floorY = floorY + AppConstants.stillRingLiftMeters
         var out: [MeshDescriptor] = []
         if let ring = bandMesh(center: point.position, height: floorY, radius: radius,
                                width: AppConstants.stillRingBandWidthMeters) {
