@@ -108,8 +108,14 @@ enum StillSpacingRings {
         let height = Double(capturePose.y - floorY)
         guard height > 0.4, height < 2.2 else { return }
         let known = UserDefaults.standard.double(forKey: AppConstants.Key.operatorCaptureHeight)
-        let blended = known > 0.2 ? known * 0.7 + height * 0.3 : height
-        UserDefaults.standard.set(blended, forKey: AppConstants.Key.operatorCaptureHeight)
+        // A LARGE mismatch is a different person, not drift — the rig gets handed from
+        // a tall operator to a seated one and the height changes by half a metre in one
+        // still. Smoothing through that would leave the new operator using the old
+        // one's height for most of their first scan, so a big jump is adopted outright
+        // and only small differences are smoothed.
+        let isNewOperator = known > 0.2 && abs(known - height) > 0.15
+        let learned = (known > 0.2 && !isNewOperator) ? known * 0.7 + height * 0.3 : height
+        UserDefaults.standard.set(learned, forKey: AppConstants.Key.operatorCaptureHeight)
     }
 
     /// How far the given position is from the nearest already-taken still.

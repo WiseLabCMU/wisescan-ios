@@ -619,7 +619,29 @@ struct ARCoverageView: UIViewRepresentable {
     ///
     /// Opaque UnlitMaterial + procedural geometry, per the ghost-mesh rules below:
     /// transparency and CustomMaterial are not viable in this ARView.
+    /// Clears rings whose floor was a guess when they were drawn, so the next sync
+    /// redraws them at the real floor. Early stills are placed before the mesh has
+    /// covered the spot, so without this a ring keeps a wrong height for the whole scan
+    /// — including a height guessed from the PREVIOUS operator, which is how a rig
+    /// handed to a seated user leaves buried rings behind.
+    /// Cheap: a dictionary lookup per ring, at most twice a second.
+    private func dropRingsPlacedOnAGuess(_ coordinator: Coordinator) {
+        guard stillRingPositions.count == coordinator.renderedStillRings,
+              Date().timeIntervalSince(coordinator.lastRingFloorCheck) > 0.5 else { return }
+        coordinator.lastRingFloorCheck = Date()
+        let stale = zip(stillRingPositions, coordinator.ringFloorUsed).contains { position, used in
+            guard let now = coordinator.estimatedFloorY(near: position) else { return false }
+            return abs(now + AppConstants.stillRingLiftMeters - used) > 0.05
+        }
+        guard stale else { return }
+        coordinator.stillRingAnchor?.removeFromParent()
+        coordinator.stillRingAnchor = nil
+        coordinator.renderedStillRings = 0
+        coordinator.ringFloorUsed.removeAll()
+    }
+
     private func syncStillRings(_ uiView: ARView, coordinator: Coordinator) {
+        dropRingsPlacedOnAGuess(coordinator)
         guard stillRingPositions.count != coordinator.renderedStillRings else { return }
 
         // Scan reset (or stop): drop the anchor and start clean.
@@ -627,6 +649,7 @@ struct ARCoverageView: UIViewRepresentable {
             coordinator.stillRingAnchor?.removeFromParent()
             coordinator.stillRingAnchor = nil
             coordinator.renderedStillRings = 0
+            coordinator.ringFloorUsed.removeAll()
             coordinator.floorYByCell.removeAll()
             if stillRingPositions.isEmpty { return }
         }
@@ -656,6 +679,7 @@ struct ARCoverageView: UIViewRepresentable {
             }
             let floorY = meshFloor
                 ?? StillSpacingRings.floorY(planes: planes, fallbackFrom: position)
+            coordinator.ringFloorUsed.append(floorY + AppConstants.stillRingLiftMeters)
             // MeshResource generation must happen on main, one resource per descriptor
             // (RealityKit's multi-part/background generation path crashes — see below).
             for desc in StillSpacingRings.descriptors(for: point, floorY: floorY) {
@@ -1074,6 +1098,10 @@ struct ARCoverageView: UIViewRepresentable {
         /// where the mesh correctly occluded it — the "painted over" report.
         /// Per-cell, not global: a room with a stairwell has more than one floor.
         var floorYByCell: [SIMD2<Int>: Float] = [:]
+        /// Floor height each drawn ring was placed at, so a ring placed on a guess can
+        /// be corrected once the mesh reveals the real floor under it.
+        var ringFloorUsed: [Float] = []
+        var lastRingFloorCheck = Date.distantPast
         /// Shared sort group so every ring draws in the same late pass, after the live
         /// scene mesh (which otherwise paints over them — field report 360update5).
         let stillRingSortGroup = ModelSortGroup()
