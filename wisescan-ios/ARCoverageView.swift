@@ -627,6 +627,7 @@ struct ARCoverageView: UIViewRepresentable {
             coordinator.stillRingAnchor?.removeFromParent()
             coordinator.stillRingAnchor = nil
             coordinator.renderedStillRings = 0
+            coordinator.floorYByCell.removeAll()
             if stillRingPositions.isEmpty { return }
         }
 
@@ -647,7 +648,14 @@ struct ARCoverageView: UIViewRepresentable {
         let suggestedMaterial = UnlitMaterial(rgb: SIMD4<Float>(1.0, 0.72, 0.16, 1))
         for position in stillRingPositions[coordinator.renderedStillRings...] {
             let point = StillSpacingRings.Point(position: position, source: .taken)
-            let floorY = StillSpacingRings.floorY(planes: planes, fallbackFrom: position)
+            let meshFloor = coordinator.estimatedFloorY(near: position)
+            if let meshFloor {
+                // A floor we actually observed also tells us how high THIS operator
+                // holds the device — the value that replaces the standing-height guess.
+                StillSpacingRings.learnCaptureHeight(capturePose: position, floorY: meshFloor)
+            }
+            let floorY = meshFloor
+                ?? StillSpacingRings.floorY(planes: planes, fallbackFrom: position)
             // MeshResource generation must happen on main, one resource per descriptor
             // (RealityKit's multi-part/background generation path crashes — see below).
             for desc in StillSpacingRings.descriptors(for: point, floorY: floorY) {
@@ -1059,6 +1067,13 @@ struct ARCoverageView: UIViewRepresentable {
         /// rebuild, no per-frame work.
         var stillRingAnchor: AnchorEntity?
         var renderedStillRings = 0
+        /// Lowest surface seen per 1 m XZ cell — a coarse floor field for the 360° rings.
+        /// Plane detection is OFF for a normal scan (it is only enabled for ghost
+        /// alignment), so ARPlaneAnchor floors do not exist here and the old fallback
+        /// (capture pose minus a constant) could place a ring UNDER the real floor,
+        /// where the mesh correctly occluded it — the "painted over" report.
+        /// Per-cell, not global: a room with a stairwell has more than one floor.
+        var floorYByCell: [SIMD2<Int>: Float] = [:]
         /// Shared sort group so every ring draws in the same late pass, after the live
         /// scene mesh (which otherwise paints over them — field report 360update5).
         let stillRingSortGroup = ModelSortGroup()
@@ -1432,6 +1447,50 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
+        /// Folds a mesh anchor's world-space vertices into the coarse floor field.
+        /// Strided sampling: this runs per anchor rebuild (already throttled) and only
+        /// needs a floor height good to a few centimetres.
+        func noteFloorSamples(_ positions: [SIMD3<Float>]) {
+            guard !positions.isEmpty else { return }
+            let stride = max(1, positions.count / 64)
+            for idx in Swift.stride(from: 0, to: positions.count, by: stride) {
+                let point = positions[idx]
+                let cell = SIMD2<Int>(Int(floor(point.x)), Int(floor(point.z)))
+                if let known = floorYByCell[cell] {
+                    if point.y < known { floorYByCell[cell] = point.y }
+                } else {
+                    floorYByCell[cell] = point.y
+                }
+            }
+        }
+
+        /// Floor height near a world position.
+        ///
+        /// The CELL THE POINT IS IN WINS OUTRIGHT, and neighbours are only consulted
+        /// when that cell has no samples yet. Taking the minimum across a
+        /// neighbourhood would break exactly where floors change height: on a
+        /// staircase or a ramp the lowest surface within 3 m can be most of a storey
+        /// below the tread the operator is standing on, and the ring would sink
+        /// through the floor again. Per-cell means the field follows level changes at
+        /// 1 m granularity.
+        ///
+        /// A flat ring still cannot follow a slope or a stair within its own radius —
+        /// on those it reads as a guide that clips the surface, which is acceptable
+        /// for spacing, and rare (few operators take a 360° still mid-staircase).
+        func estimatedFloorY(near position: SIMD3<Float>) -> Float? {
+            let cell = SIMD2<Int>(Int(floor(position.x)), Int(floor(position.z)))
+            if let exact = floorYByCell[cell] { return exact }
+            var best: Float?
+            for offsetX in -1...1 {
+                for offsetZ in -1...1 {
+                    let neighbour = SIMD2<Int>(cell.x + offsetX, cell.y + offsetZ)
+                    guard let value = floorYByCell[neighbour] else { continue }
+                    best = min(best ?? value, value)
+                }
+            }
+            return best
+        }
+
         /// Builds or updates the wireframe entity for a single ARMeshAnchor.
         /// Extracts geometry data synchronously to avoid retaining ARFrame references,
         /// then runs wireframe generation on a background queue.
@@ -1483,6 +1542,8 @@ struct ARCoverageView: UIViewRepresentable {
                 let worldPos = anchorTransform * SIMD4<Float>(xyz[0], xyz[1], xyz[2], 1.0)
                 worldPositions.append(SIMD3<Float>(worldPos.x, worldPos.y, worldPos.z))
             }
+
+            noteFloorSamples(worldPositions)
 
             let faceStride = faces.bytesPerIndex * faces.indexCountPerPrimitive
             let safeFaceCount = min(faces.count, faces.buffer.length / max(faceStride, 1))

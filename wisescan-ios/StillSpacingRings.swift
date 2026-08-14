@@ -85,15 +85,31 @@ enum StillSpacingRings {
         return out
     }
 
-    /// Floor height for the rings: the lowest classified floor plane wins; otherwise
-    /// drop a fixed distance below the capture pose. A wrong-by-20cm floor still reads
-    /// correctly as a spacing guide, so an estimate is preferable to drawing nothing.
+    /// Floor height for the rings when the mesh field has nothing yet: a classified
+    /// floor plane if one exists, else this operator's LEARNED capture height, else the
+    /// constant. Operators scan from wheelchairs and at very different statures, so the
+    /// learned offset matters — a standing 1.3 m assumption puts a seated user's rings
+    /// half a metre underground, where the mesh swallows them.
     static func floorY(planes: [ARPlaneAnchor], fallbackFrom capture: SIMD3<Float>) -> Float {
         let floors = planes.filter { $0.classification == .floor }
         if let lowest = floors.map({ $0.transform.columns.3.y }).min() {
             return lowest
         }
-        return capture.y - AppConstants.stillRingFallbackDropMeters
+        let learned = UserDefaults.standard.double(forKey: AppConstants.Key.operatorCaptureHeight)
+        let drop = learned > 0.2 ? Float(learned) : AppConstants.stillRingFallbackDropMeters
+        return capture.y - drop
+    }
+
+    /// Records how high this operator holds the device above a KNOWN floor, so later
+    /// stills (and later scans) can place rings without waiting for mesh coverage.
+    /// Smoothed, and sanity-bounded to plausible capture heights — seated operators sit
+    /// near the bottom of this range, tall standing ones near the top.
+    static func learnCaptureHeight(capturePose: SIMD3<Float>, floorY: Float) {
+        let height = Double(capturePose.y - floorY)
+        guard height > 0.4, height < 2.2 else { return }
+        let known = UserDefaults.standard.double(forKey: AppConstants.Key.operatorCaptureHeight)
+        let blended = known > 0.2 ? known * 0.7 + height * 0.3 : height
+        UserDefaults.standard.set(blended, forKey: AppConstants.Key.operatorCaptureHeight)
     }
 
     /// How far the given position is from the nearest already-taken still.

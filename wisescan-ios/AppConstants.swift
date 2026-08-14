@@ -70,7 +70,11 @@ enum AppConstants {
         /// Longest shutter-ack delay observed per camera model
         /// ("thetaObservedAck.<model>"), learned per still — the visual cue's hold
         /// length. The X answers over BLE in ~0.2 s, the Z1 over OSC in ~0.4 s.
-        static let thetaObservedAckPrefix = "thetaObservedAck"        // JSON roster of known cameras (multi-camera: X for texture, Z1 for low light — switch per collection)
+        static let thetaObservedAckPrefix = "thetaObservedAck"
+        /// This operator's observed capture height above the floor, in metres —
+        /// learned, because it differs by half a metre or more between a seated user
+        /// and a tall standing one, and a constant serves neither.
+        static let operatorCaptureHeight = "operatorCaptureHeight"        // JSON roster of known cameras (multi-camera: X for texture, Z1 for low light — switch per collection)
         static let thetaSSID = "thetaSSID"                            // stored camera Wi-Fi SSID for one-tap join (NEHotspotConfiguration)
         static let thetaPassphrase = "thetaPassphrase"                // stored camera Wi-Fi passphrase. TODO(security P2): move to Keychain + default-credential warning — see design doc Security section
     }
@@ -235,15 +239,21 @@ enum AppConstants {
     static let stillSpacingTargetMeters: Float = 2.0
     static let stillRingBandWidthMeters: Float = 0.035
     static let stillRingPipRadiusMeters: Float = 0.05
-    /// Used when no classified floor plane exists yet — roughly how far the capture
-    /// pose sits above the floor when the rig is carried.
+    /// LAST-RESORT drop below the capture pose, used only before any floor has been
+    /// observed AND before this operator's own height has been learned. It is a poor
+    /// assumption on purpose-built terms: operators scan from wheelchairs, and some are
+    /// very tall, so capture height varies by half a metre or more between people. The
+    /// learned value (operatorCaptureHeight) replaces it after the first still that
+    /// sees a floor, and persists across sessions.
     static let stillRingFallbackDropMeters: Float = 1.3
     /// Rings sit this far ABOVE the floor estimate. The live scene mesh lies on the
     /// floor, so a coplanar ring loses the depth test and the mesh paints over it as
     /// soon as it enters view (field report 360update5). Lifting the ring puts it
     /// nearer the camera than the floor it marks, which wins the test from any
     /// looking-down angle without disabling depth.
-    static let stillRingLiftMeters: Float = 0.04
+    /// Biased deliberately high: a ring slightly above the floor still reads as a
+    /// spacing guide, while one a centimetre BELOW it is swallowed by the mesh.
+    static let stillRingLiftMeters: Float = 0.08
     static let thetaSwayWarnMeters: Float = 0.03
     static let thetaSwayWarnDegrees: Float = 2.0
     static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry
