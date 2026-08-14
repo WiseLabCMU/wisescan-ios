@@ -34,7 +34,8 @@ extension ThetaCameraManager {
             var samples: [MotionSample] = []
             let probeStart = Date()
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 250_000_000)
+                try? await Task.sleep(nanoseconds:
+                    UInt64(AppConstants.thetaMotionSampleSeconds * 1_000_000_000))
                 guard let pose = sample() else { continue }
                 let pos = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
                 let delta = (tapRot.inverse * simd_quatf(pose)).angle * 180 / .pi
@@ -46,29 +47,40 @@ extension ThetaCameraManager {
         }
     }
 
-    /// Max phone motion vs the tap pose, split into the exposure window (pose-corrupting,
-    /// anchored at the shutter ack) and the whole trigger window (context — includes
-    /// harmless stitch/transfer time).
+    /// Max phone motion vs the tap pose over the window that can corrupt the baked
+    /// pose, plus the whole trigger window for context.
+    ///
+    /// THE WINDOW RUNS FROM THE TAP, NOT FROM THE ACK. The sidecar's pose is sampled at
+    /// the tap; the shutter fires ~ack + latency later. Whatever the phone drifts in
+    /// between is exactly how wrong that pose is by the time the pano is taken. Motion
+    /// afterwards — stitch, transfer — cannot affect an image already captured.
+    ///
+    /// Field data (360update4, Theta X over BLE): ack at 164-232 ms, EXIF exposure
+    /// 1/30 s, so the real window is ~250 ms. The first implementation measured
+    /// [ack, ack+1 s] and would have flagged operators for drift long after the shutter
+    /// closed — still #2 moved 8 mm inside the true window and 28 mm over the full
+    /// trigger, nearly tripping a guard it should never have been near.
     struct StillMotion {
         var exposureM: Float = 0
         var exposureDeg: Float = 0
         var totalM: Float = 0
         var totalDeg: Float = 0
         let ackOffset: TimeInterval?
+        /// End of the pose-corrupting window, seconds after the tap.
         let window: TimeInterval
         let samples: [MotionSample]
 
-        /// `ackOffset` nil (ack never observed) falls back to the tap instant — a wider,
-        /// conservative window rather than no guard.
-        init(samples: [MotionSample], ackOffset: TimeInterval?, window: TimeInterval) {
+        /// `ackOffset` nil (ack never observed) falls back to a conservative allowance
+        /// rather than no guard.
+        init(samples: [MotionSample], ackOffset: TimeInterval?, exposure: TimeInterval) {
             self.samples = samples
             self.ackOffset = ackOffset
-            self.window = window
-            let start = ackOffset ?? 0
+            let ack = ackOffset ?? AppConstants.thetaShutterLatencyAllowance
+            self.window = ack + AppConstants.thetaShutterLatencyAllowance + exposure
             for sample in samples {
                 totalM = max(totalM, sample.meters)
                 totalDeg = max(totalDeg, sample.deg)
-                if sample.sinceTap >= start, sample.sinceTap <= start + window {
+                if sample.sinceTap <= window {
                     exposureM = max(exposureM, sample.meters)
                     exposureDeg = max(exposureDeg, sample.deg)
                 }
@@ -80,11 +92,15 @@ extension ThetaCameraManager {
         }
     }
 
-    /// Exposure-window length for a camera model — conservative seeds; the bench
-    /// latency measurement + EXIF exposure annotations refine these per model.
-    static func exposureWindowSeconds(forModel model: String) -> TimeInterval {
-        model.contains("Z1") ? AppConstants.thetaExposureWindowSecondsZ1
-                             : AppConstants.thetaExposureWindowSecondsX
+    /// Exposure length to assume for this model's live verdict: the longest EXIF value
+    /// its downloaded stills have reported, so a dim room widens the window on its own.
+    /// Seeded with the daylight default until the first still lands.
+    static func expectedExposureSeconds(forModel model: String) -> TimeInterval {
+        let stored = UserDefaults.standard.double(
+            forKey: "\(AppConstants.Key.thetaObservedExposurePrefix).\(model)")
+        guard stored > 0 else { return AppConstants.thetaDefaultExposureSeconds }
+        return min(max(stored, AppConstants.thetaDefaultExposureSeconds),
+                   AppConstants.thetaMaxExposureSeconds)
     }
 
     /// Timing facts of one completed trigger, bundled for the motion verdict.
@@ -102,8 +118,8 @@ extension ThetaCameraManager {
         guard let probe else { return nil }
         let motion = StillMotion(samples: await probe.value,
                                  ackOffset: timing.shutterAck?.timeIntervalSince(timing.start),
-                                 window: Self.exposureWindowSeconds(forModel: timing.model))
-        PerfDiag.log(String(format: "[360Still] motion: exposure %.3f m / %.1f° (ack %+dms, window %dms) · total %.3f m / %.1f° over %d ms",
+                                 exposure: Self.expectedExposureSeconds(forModel: timing.model))
+        PerfDiag.log(String(format: "[360Still] motion: pose-window %.3f m / %.1f° (ack %+dms, window 0-%dms) · total %.3f m / %.1f° over %d ms",
                             motion.exposureM, motion.exposureDeg,
                             Int((motion.ackOffset ?? 0) * 1000), Int(motion.window * 1000),
                             motion.totalM, motion.totalDeg, timing.triggerMs))

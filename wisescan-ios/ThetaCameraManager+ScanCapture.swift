@@ -57,10 +57,12 @@ extension ThetaCameraManager {
     /// through the download queue / Process sweep). Download state is derived from disk:
     /// sidecar present + JPG missing ⇒ pending.
     /// Retro-annotates a still's sidecar with the EXIF exposure time parsed from the
-    /// downloaded equirect bytes — ground truth for tuning the per-model sway window
-    /// (the live verdict uses a seeded window; this is the calibration data). Both
-    /// download paths call it: the live drain and the Process sweep.
-    nonisolated static func annotateExifExposure(jpegData: Data, sidecarURL: URL) {
+    /// downloaded equirect bytes, and feeds the value back into the per-model estimate
+    /// the live sway window uses — so a dim room widens the guard by itself instead of
+    /// waiting on a constant. Both download paths call it: the live drain and the
+    /// Process sweep.
+    nonisolated static func annotateExifExposure(jpegData: Data, sidecarURL: URL,
+                                                 model: String? = nil) {
         guard let src = CGImageSourceCreateWithData(jpegData as CFData, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
               let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any],
@@ -70,6 +72,16 @@ extension ThetaCameraManager {
               obj["exif_exposure_time_s"] == nil
         else { return }
         obj["exif_exposure_time_s"] = exposure
+
+        // Learn the model's worst-case exposure (the sidecar names the source camera
+        // when the caller didn't). Monotonic: only ever widens, so one bright frame
+        // can't narrow the guard back under a dim room's real exposure.
+        if let model = model ?? (obj["still_source"] as? String) {
+            let key = "\(AppConstants.Key.thetaObservedExposurePrefix).\(model)"
+            let known = UserDefaults.standard.double(forKey: key)
+            if exposure > known { UserDefaults.standard.set(exposure, forKey: key) }
+        }
+
         if let out = try? JSONSerialization.data(withJSONObject: obj,
                                                  options: [.prettyPrinted, .sortedKeys]) {
             try? out.write(to: sidecarURL, options: .atomic)

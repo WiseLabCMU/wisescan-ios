@@ -591,7 +591,7 @@ sequenceDiagram
     participant D as raw_data/equirect_stills
 
     U->>FCS: pause (device settles — rig mode tightens the angular gate by lever arm)
-    Note over FCS,TCM: sway guard — motion in the shutter-ack-anchored exposure window beyond 3 cm / 2° marks the still SWAYED (warning cue + chip count) and the Process solve prefers clean stills — downloaded JPGs retro-annotate EXIF exposure time for window tuning
+    Note over FCS,TCM: sway guard — the sidecar pose is sampled at the TAP but the shutter fires ~ack+latency later, so drift over [tap, ack+latency+exposure] (~250 ms measured) is pose error; beyond 3 cm / 2° the still is SWAYED (warning cue + chip count) and the Process solve prefers clean stills. Downloaded JPGs report EXIF exposure, which widens the window per model in dim rooms
     FCS-->>U: stillness chime (cue 1)
     U->>FCS: shutter tap → requestStillCapture() arms
     FCS->>FCS: keyframe fires while stillness holds (hi-res + LiDAR depth + mask)

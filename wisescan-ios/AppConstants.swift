@@ -63,7 +63,10 @@ enum AppConstants {
         static let keepCameraOriginals = "keepCameraOriginals"        // Developer Mode: skip the security-P1 sweep that deletes each 360° still from the camera after verified transfer
         static let thetaBLESerial = "thetaBLESerial"                  // 8-digit serial of the paired camera (BLE identity + factory password)
         static let thetaBLEPeripheralID = "thetaBLEPeripheralID"      // CBPeripheral identifier for scan-free reconnects
-        static let thetaCameraProfiles = "thetaCameraProfiles"        // JSON roster of known cameras (multi-camera: X for texture, Z1 for low light — switch per collection)
+        static let thetaCameraProfiles = "thetaCameraProfiles"
+        /// Longest EXIF exposure observed per camera model ("thetaObservedExposure.<model>"),
+        /// learned from downloaded stills — widens the sway window in dim rooms.
+        static let thetaObservedExposurePrefix = "thetaObservedExposure"        // JSON roster of known cameras (multi-camera: X for texture, Z1 for low light — switch per collection)
         static let thetaSSID = "thetaSSID"                            // stored camera Wi-Fi SSID for one-tap join (NEHotspotConfiguration)
         static let thetaPassphrase = "thetaPassphrase"                // stored camera Wi-Fi passphrase. TODO(security P2): move to Keychain + default-credential warning — see design doc Security section
     }
@@ -204,8 +207,20 @@ enum AppConstants {
     /// warning cue + chip count at capture, and the calibration solve prefers clean
     /// stills. 0.03 m matches the dy anchor's half-width; 2° at a ~2 m rig lever arm
     /// is ~7 cm of lens travel.
-    static let thetaExposureWindowSecondsX: TimeInterval = 1.0      // BLE ack → shutter is fast
-    static let thetaExposureWindowSecondsZ1: TimeInterval = 1.5     // OSC ack over Wi-Fi, slower body
+    /// Ack → shutter-open uncertainty. The ack says the camera ACCEPTED the command;
+    /// it fires shortly after. Field data (360update4): ack lands 164-232 ms after the
+    /// tap on the X over BLE.
+    static let thetaShutterLatencyAllowance: TimeInterval = 0.12
+    /// Exposure length used before this camera has ever reported one. 1/30 s is what
+    /// the X returned in room light (360update4: EXIF 0.0333 on every still); the
+    /// observed value replaces it per model as soon as a still downloads.
+    static let thetaDefaultExposureSeconds: TimeInterval = 1.0 / 30
+    /// Clamp on the learned exposure so one absurd EXIF value can't widen the guard
+    /// into uselessness (a genuinely dark room still tops out well inside this).
+    static let thetaMaxExposureSeconds: TimeInterval = 0.5
+    /// Pose-probe sampling period. The real window is ~250 ms, so 250 ms sampling put
+    /// exactly ONE sample in it; 50 ms gives ~5 and costs one transform read each.
+    static let thetaMotionSampleSeconds: TimeInterval = 0.05
     static let thetaSwayWarnMeters: Float = 0.03
     static let thetaSwayWarnDegrees: Float = 2.0
     static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry
