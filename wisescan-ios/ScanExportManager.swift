@@ -391,6 +391,8 @@ struct ScanExportManager {
         let fileMgr = FileManager.default
         let imagesDir = stagingDir.appendingPathComponent("images")
         let camerasDir = stagingDir.appendingPathComponent("cameras")
+        let masksDir = stagingDir.appendingPathComponent("masks")
+        try? fileMgr.createDirectory(at: masksDir, withIntermediateDirectories: true)
         guard fileMgr.fileExists(atPath: imagesDir.path), fileMgr.fileExists(atPath: camerasDir.path) else {
             print("[prepareExport] ✗ cube faces skipped — images/ or cameras/ not staged")
             return
@@ -405,9 +407,16 @@ struct ScanExportManager {
             phase?(.counted("Cube faces", index + 1, of: survivors.count))
             autoreleasepool {
                 let sidecar = url.deletingPathExtension().appendingPathExtension("json")
+                // Reuse the equirect mask already written for this still rather than
+                // re-running six Vision passes per face.
+                let maskName = url.deletingPathExtension().lastPathComponent + ".png"
+                let equirectMask = OperatorRigMask.load(
+                    pngAt: dstDir.appendingPathComponent("../equirect_masks/\(maskName)")
+                        .standardizedFileURL)
                 facesWritten += EquirectFaceExport.emitFaces(
                     equirectURL: url, sidecarURL: sidecar,
-                    imagesDir: imagesDir, camerasDir: camerasDir)
+                    imagesDir: imagesDir, camerasDir: camerasDir,
+                    masksDir: masksDir, equirectMask: equirectMask)
             }
         }
         let faceMs = Int((CFAbsoluteTimeGetCurrent() - faceStart) * 1000)

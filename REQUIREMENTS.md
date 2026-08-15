@@ -713,7 +713,7 @@ sequenceDiagram
     EXP->>Z: privacy passes — masks → pixelate person regions, FAIL CLOSED (unverifiable frames excluded)
     EXP->>Z: stageEquirectStills — per-still privacy (filter ON ⇒ blur-or-exclude, OFF ⇒ consent logged, privacy_filter=false in metadata)
     EXP->>FACE: emitCubeFaces — poses from SIDECAR cam_transform ONLY (capture-provenance, v7 convention shared with the solver)
-    FACE->>Z: 5 faces/still + Polycam camera JSONs (camera_pose_source, still_source, elevation_offset_deg applied in sampling)
+    FACE->>Z: 6 faces/still (incl. DOWN) + per-face operator/rig masks + Polycam camera JSONs (camera_pose_source, still_source, elevation_offset_deg applied in sampling)
     EXP->>Z: zip with phase labels (Privacy blur i/n → Cube faces i/n → Zipping…)
     LDV-->>U: card pill shows phase + meter — upload posts to the configured server
 ```

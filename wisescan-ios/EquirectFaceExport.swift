@@ -4,9 +4,8 @@ import UIKit
 import simd
 
 /// Cube-face export for equirectangular 360° stills (docs/design/still-source-360.md →
-/// "Export: cube map, bottom face discarded"): each staged still reprojects into **5
-/// synthetic pinhole faces** — front/right/back/left/up; the bottom face is dominated by
-/// the operator, grip, and rod and is dropped by construction — emitted as ordinary
+/// "Export: cube map"): each staged still reprojects into **6 synthetic pinhole faces**
+/// — front/right/back/left/up/down — each shipping with an operator/rig mask, emitted as ordinary
 /// keyframe images + Polycam camera JSONs, so the equirectangular camera model disappears
 /// from the data contract entirely. Each face is an exact 90° FOV pinhole:
 /// `fx = fy = cx = cy = faceSize / 2`.
@@ -47,7 +46,7 @@ enum EquirectFaceExport {
     }
 
     /// One emitted cube face: name suffix + its rotation FROM the rig camera frame.
-    private struct Face {
+    fileprivate struct Face {
         let name: String
         let rotation: simd_float3x3
     }
@@ -62,7 +61,13 @@ enum EquirectFaceExport {
         Face(name: "right", rotation: yawRotation(-.pi / 2)),
         Face(name: "back", rotation: yawRotation(.pi)),
         Face(name: "left", rotation: yawRotation(.pi / 2)),
-        Face(name: "up", rotation: pitchRotation(.pi / 2))
+        Face(name: "up", rotation: pitchRotation(.pi / 2)),
+        // The down face ships now that a per-face mask ships with it. It was dropped by
+        // construction because it is dominated by the operator, grip and rod — but that
+        // also threw away the floor immediately under the camera, the closest and
+        // best-parallax geometry in the still. Masked precisely rather than discarded
+        // wholesale, the useful part survives and downstream keeps the choice.
+        Face(name: "down", rotation: pitchRotation(-.pi / 2))
     ]
 
     // MARK: - Colorize source (Developer Mode probe)
@@ -123,8 +128,12 @@ enum EquirectFaceExport {
     /// mechanical prior, composed at capture — where the profile↔camera serial binding is
     /// verified). A stored RigProfile is deliberately NOT applied here: export time cannot
     /// verify it belongs to the rig that captured a pre-contract still (review finding #9).
+    /// `masksDir` receives one operator/rig mask per face when supplied — required for
+    /// the down face to be usable downstream at all.
     static func emitFaces(equirectURL: URL, sidecarURL: URL,
-                          imagesDir: URL, camerasDir: URL) -> Int {
+                          imagesDir: URL, camerasDir: URL,
+                          masksDir: URL? = nil,
+                          equirectMask: OperatorRigMask.Mask? = nil) -> Int {
         guard let sidecarData = try? Data(contentsOf: sidecarURL),
               let sidecar = (try? JSONSerialization.jsonObject(with: sidecarData)) as? [String: Any],
               let flat = sidecar["phone_transform"] as? [Double], flat.count == 16 else { return 0 }
@@ -219,6 +228,8 @@ enum EquirectFaceExport {
                 } catch {
                     return
                 }
+                writeFaceMask(equirectMask, into: masksDir, face: face, baseName: baseName,
+                              faceSize: faceSize, vOffsetFrac: elevOffsetFrac)
                 writeCameraJSON(FaceCameraRecord(
                     name: "\(baseName)_\(face.name)",
                     imagePath: "images/\(imageName)",
@@ -234,11 +245,9 @@ enum EquirectFaceExport {
         return written
     }
 
-
     // NOTE: rigCameraRotation (mechanical-prior pose composition) has been superseded by
     // RigCalibrationSolver.composeRigTransform, which handles both the mechanical prior
     // and solved calibration paths. See docs/design/still-source-360.md (Calibration).
-
 
     private static func yawRotation(_ angle: Float) -> simd_float3x3 {
         simd_float3x3(simd_quatf(angle: angle, axis: SIMD3<Float>(0, 1, 0)))
@@ -384,5 +393,23 @@ enum EquirectFaceExport {
         let top = simd_mix(texel(col0, row0), texel(col0 + 1, row0), SIMD3(repeating: wgtX))
         let bot = simd_mix(texel(col0, row0 + 1), texel(col0 + 1, row0 + 1), SIMD3(repeating: wgtX))
         return simd_mix(top, bot, SIMD3(repeating: wgtY))
+    }
+}
+
+extension EquirectFaceExport {
+    /// Ships the face's operator/rig mask WITH the face. A face without its mask is
+    /// worse than no face — downstream would reconstruct the rig and the operator as
+    /// scene content, which is exactly why the down face used to be discarded outright.
+    /// Mask faces are coarse on purpose: they reject regions, they do not cut edges.
+    fileprivate static func writeFaceMask(_ equirectMask: OperatorRigMask.Mask?, into masksDir: URL?,
+                                          face: Face, baseName: String,
+                                          faceSize: Int, vOffsetFrac: Float) {
+        guard let equirectMask, let masksDir else { return }
+        let side = max(128, faceSize / 4)
+        let maskFace = OperatorRigMask.faceMask(from: equirectMask, rotation: face.rotation,
+                                                side: side, vOffsetFrac: vOffsetFrac)
+        guard let png = OperatorRigMask.encodePNG(maskFace) else { return }
+        try? png.write(to: masksDir.appendingPathComponent("\(baseName)_\(face.name).png"),
+                       options: .atomic)
     }
 }

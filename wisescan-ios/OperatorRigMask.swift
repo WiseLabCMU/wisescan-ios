@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
+import simd
 
 /// Per-still mask of everything that belongs to the CAPTURE APPARATUS rather than the
 /// space: the rod, mount and tripod under the camera, plus the operator and any other
@@ -141,5 +142,57 @@ extension OperatorRigMask {
         PerfDiag.log(String(format: "[EqPrivacy] face mask: %.1f%% over threshold, %.2f%% core → %@",
                             Double(masked) * 100 / denom, Double(core) * 100 / denom,
                             accepted ? "person" : "REJECTED (no confident core)"))
+    }
+}
+
+extension OperatorRigMask {
+    /// Reprojects an equirect mask into one cube face, matching
+    /// `EquirectFaceExport.renderFace`'s ray convention exactly — same NDC, same
+    /// `dir = (x, y, -z)` flip, same elevation offset — so a face's mask lines up with
+    /// its pixels. Rendered coarse (masks reject regions, they do not cut fine edges)
+    /// and consumers rescale anyway.
+    static func faceMask(from mask: Mask, rotation: simd_float3x3,
+                         side: Int, vOffsetFrac: Float = 0) -> Mask {
+        var out = Mask(bytes: [UInt8](repeating: 255, count: side * side),
+                       width: side, height: side)
+        for row in 0..<side {
+            let ndcV = 1 - 2 * (Float(row) + 0.5) / Float(side)
+            for col in 0..<side {
+                let ndcU = 2 * (Float(col) + 0.5) / Float(side) - 1
+                let camRay = simd_normalize(rotation * SIMD3<Float>(ndcU, ndcV, -1))
+                let dir = SIMD3<Float>(camRay.x, camRay.y, -camRay.z)
+                let lon = atan2(dir.x, dir.z)
+                let lat = asin(max(-1, min(1, dir.y)))
+                var vFrac = (0.5 - lat / .pi) + vOffsetFrac
+                vFrac = max(0, min(0.999, vFrac))
+                let srcCol = Int((lon / (2 * .pi) + 0.5) * Float(mask.width)) % max(1, mask.width)
+                let srcRow = Int(vFrac * Float(mask.height))
+                let column = srcCol < 0 ? srcCol + mask.width : srcCol
+                let clampedRow = max(0, min(mask.height - 1, srcRow))
+                out.bytes[row * side + col] = mask.bytes[clampedRow * mask.width + column]
+            }
+        }
+        return out
+    }
+}
+
+extension OperatorRigMask {
+    /// Reads back an emitted mask PNG so the face pass can reuse it instead of running
+    /// segmentation a second time per still.
+    static func load(pngAt url: URL) -> Mask? {
+        guard let data = try? Data(contentsOf: url),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        let width = image.width, height = image.height
+        var bytes = [UInt8](repeating: 255, count: width * height)
+        let drawn: Bool = bytes.withUnsafeMutableBytes { raw in
+            guard let ctx = CGContext(data: raw.baseAddress, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width,
+                                      space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return drawn ? Mask(bytes: bytes, width: width, height: height) : nil
     }
 }
