@@ -254,6 +254,14 @@ enum AppConstants {
     /// Biased deliberately high: a ring slightly above the floor still reads as a
     /// spacing guide, while one a centimetre BELOW it is swallowed by the mesh.
     static let stillRingLiftMeters: Float = 0.08
+
+    /// Half-angle of the nadir cone occupied by the capture hardware (rod, mount,
+    /// tripod), in degrees from straight down — everything below −(90 − this) is
+    /// masked. Field measurement (staging_0755126C, tripod-mounted) put the hardware
+    /// inside 17°; 20° carries margin without eating floor a neighbouring still at the
+    /// 2 m spacing target would have to make up. Compare the SOLVER's blunt −45°
+    /// (calibrationElevationCutoffDeg), which this mask is meant to replace.
+    static let rigNadirMaskDeg: Float = 20
     static let thetaSwayWarnMeters: Float = 0.03
     static let thetaSwayWarnDegrees: Float = 2.0
     static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry

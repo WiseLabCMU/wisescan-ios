@@ -68,12 +68,12 @@ enum EquirectPrivacyBlur {
 
     /// Verify/blur one equirectangular JPEG. Pure function of the data; call off-main
     /// (export queue) inside the caller's per-still autoreleasepool.
-    static func process(equirectJPEG data: Data) -> Outcome {
-        let working: Bitmap? = PerfDiag.timed("eq_decode") { decodeWorkingBitmap(from: data) }
-        guard let working else {
-            return .failed("equirect decode failed")
-        }
+    /// Runs person segmentation across the six cube faces. Shared by `process` (which
+    /// composites the blur) and `personMaskEquirect` (which wants the mask alone).
+    struct SegmentationFailure: Error { let reason: String }
 
+    static func segmentFaces(working: Bitmap)
+        -> Result<(masks: [FaceMask?], anyPerson: Bool), SegmentationFailure> {
         // Upload working bitmap to GPU texture once; reused for all 6 face dispatches.
         let gpuTexture = EquirectGPU.isAvailable
             ? EquirectGPU.makeTexture(from: working.pixels, width: working.width, height: working.height)
@@ -82,7 +82,7 @@ enum EquirectPrivacyBlur {
         var faceMasks: [FaceMask?] = []
         var anyPerson = false
         for faceIndex in 0..<faceBases.count {
-            var outcome: Outcome?
+            var failure: String?
             autoreleasepool {
                 let base = faceBases[faceIndex]
                 let face: CGImage?
@@ -96,7 +96,7 @@ enum EquirectPrivacyBlur {
                     face = PerfDiag.timed("eq_face_extract_cpu") { extractFace(faceIndex, from: working) }
                 }
                 guard let face else {
-                    outcome = .failed("face \(faceIndex) extraction failed")
+                    failure = "face \(faceIndex) extraction failed"
                     return
                 }
                 let segResult = PerfDiag.timed("eq_vision_segment") { personMask(for: face) }
@@ -105,14 +105,27 @@ enum EquirectPrivacyBlur {
                     faceMasks.append(mask)
                     if let mask { anyPerson = anyPerson || mask.hasPerson }
                 case .failure(let reason):
-                    outcome = .failed("face \(faceIndex): \(reason)")
+                    failure = "face \(faceIndex): \(reason)"
                 }
             }
-            if let outcome { return outcome }
+            if let failure { return .failure(SegmentationFailure(reason: failure)) }
         }
-        guard anyPerson else { return .clean }
+        return .success((faceMasks, anyPerson))
+    }
 
-        let eqMask = PerfDiag.timed("eq_mask_project") { buildEquirectMask(from: faceMasks) }
+    static func process(equirectJPEG data: Data) -> Outcome {
+        let working: Bitmap? = PerfDiag.timed("eq_decode") { decodeWorkingBitmap(from: data) }
+        guard let working else {
+            return .failed("equirect decode failed")
+        }
+        let segmented: (masks: [FaceMask?], anyPerson: Bool)
+        switch segmentFaces(working: working) {
+        case .success(let value): segmented = value
+        case .failure(let failure): return .failed(failure.reason)
+        }
+        guard segmented.anyPerson else { return .clean }
+
+        let eqMask = PerfDiag.timed("eq_mask_project") { buildEquirectMask(from: segmented.masks) }
         let composited: Data? = PerfDiag.timed("eq_pixelate") { composite(original: data, mask: eqMask) }
         guard let composited else {
             return .failed("composite/encode failed")
@@ -122,7 +135,7 @@ enum EquirectPrivacyBlur {
 
     // MARK: - Working decode
 
-    private struct Bitmap {
+    struct Bitmap {
         let pixels: [UInt8]   // RGBA8, premultiplied
         let width: Int
         let height: Int
@@ -131,7 +144,7 @@ enum EquirectPrivacyBlur {
 
     /// Decode the equirect once at ≤4K width for face extraction (ImageIO downsamples during
     /// decode, so the 61 MP original is never fully materialized here).
-    private static func decodeWorkingBitmap(from data: Data) -> Bitmap? {
+    static func decodeWorkingBitmap(from data: Data) -> Bitmap? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -212,7 +225,7 @@ enum EquirectPrivacyBlur {
 
     // MARK: - Equirect mask
 
-    private struct EquirectMask {
+    struct EquirectMask {
         var bytes: [UInt8]
         let width: Int
         let height: Int
@@ -220,7 +233,7 @@ enum EquirectPrivacyBlur {
 
     /// Project the per-face person masks back into a 1/`maskScale` equirect mask, then dilate
     /// for a safety margin. Faces with no person contribute nothing (nil entries).
-    private static func buildEquirectMask(from faceMasks: [FaceMask?]) -> EquirectMask {
+    static func buildEquirectMask(from faceMasks: [FaceMask?]) -> EquirectMask {
         // Mask dims derive from the DETECTION space; the composite rescales to the true full
         // res, so exact divisibility doesn't matter — only aspect (2:1 for equirects).
         let width = faceSize * 4 / maskScale       // ~512 for 1024 faces: plenty
@@ -298,7 +311,7 @@ enum EquirectPrivacyBlur {
 // MARK: - Vision + composite stages
 // (Separate extension keeps the enum body inside the type_body_length budget.)
 
-private extension EquirectPrivacyBlur {
+extension EquirectPrivacyBlur {
 
     // MARK: - Vision per face
 

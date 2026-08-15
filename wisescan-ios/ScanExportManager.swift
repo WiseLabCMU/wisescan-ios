@@ -272,6 +272,33 @@ struct ScanExportManager {
     /// stage unblurred by the user's informed, per-scan consent (the capture UI warns that a
     /// 360° camera captures ALL directions — including people behind the operator — and the
     /// scan's `privacy_filter` metadata records the choice for downstream consumers).
+    /// Writes one `equirect_masks/still_NNNN.png` per still: white where the pixel is
+    /// usable, black over the capture hardware and any person. See OperatorRigMask for
+    /// why this exists and why the convention is that way round (COLMAP ignores
+    /// zero-valued mask pixels; Nerfstudio treats 1 as keep).
+    private static func emitOperatorRigMasks(for stills: [URL], into stagingDir: URL,
+                                             phase: ((ExportPhase) -> Void)? = nil) {
+        let maskDir = stagingDir.appendingPathComponent("equirect_masks")
+        try? FileManager.default.createDirectory(at: maskDir, withIntermediateDirectories: true)
+        var written = 0
+        for (index, still) in stills.enumerated() {
+            phase?(.counted("360° masks", index + 1, of: stills.count))
+            // Per-still pool: each mask decodes a 60 MP equirect and runs six Vision
+            // passes through autoreleased CF transients — the same reason the privacy
+            // pass drains per frame.
+            autoreleasepool {
+                guard let data = try? Data(contentsOf: still) else { return }
+                let mask = OperatorRigMask.build(equirectJPEG: data)
+                guard let png = OperatorRigMask.encodePNG(mask) else { return }
+                let name = still.deletingPathExtension().lastPathComponent + ".png"
+                if (try? png.write(to: maskDir.appendingPathComponent(name), options: .atomic)) != nil {
+                    written += 1
+                }
+            }
+        }
+        print("[prepareExport] 360° operator/rig masks: \(written)/\(stills.count)")
+    }
+
     private static func stageEquirectStills(rawDataDir: URL, stagingDir: URL,
                                             phase: ((ExportPhase) -> Void)? = nil) {
         let fileMgr = FileManager.default
@@ -289,6 +316,12 @@ struct ScanExportManager {
             .filter { $0.pathExtension.lowercased() == "jpg" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !stills.isEmpty else { return }
+        // Operator/rig masks ship for EVERY scan, privacy filter or not: they are a
+        // reconstruction-quality artifact (exclude what moves with the camera, keep the
+        // floor), not a privacy one. Emitted BEFORE the privacy pass so detection runs
+        // on the original pixels rather than on pixelated blobs.
+        emitOperatorRigMasks(for: stills, into: dstDir, phase: phase)
+
         if privacyFilterWasOn(rawDataDir: rawDataDir, maskedFrames: maskedFrameNames(rawDataDir: rawDataDir)) {
             runEquirectPrivacyPass(on: stills, phase: phase)
         } else {
