@@ -10,8 +10,8 @@ import simd
 ///
 /// Person detection directly on an equirect is unreliable (distortion grows toward the poles
 /// and people wrap around the ±180° seam), so the still is resampled into 6 pinhole cube faces
-/// — ordinary perspective images Vision was trained on — person segmentation runs per face,
-/// the per-face masks are projected back into equirect space, and person regions are pixelated
+/// — ordinary perspective images Vision was trained on — segmentation runs per face,
+/// masks project back into equirect space, and person regions are pixelated
 /// on the FULL-resolution equirect. A person straddling a face seam is covered by the union of
 /// the partial masks on both faces; the pole regions are the up/down faces' centers where the
 /// pinhole projection is least distorted.
@@ -33,13 +33,21 @@ enum EquirectPrivacyBlur {
     // MARK: - Tuning
 
     /// Cube-face edge in pixels for detection. 1024 ≈ what Vision's person model resolves well;
-    /// faces render from the ≤4K working decode, so higher only costs CPU, not fidelity.
-    private static let faceSize = 1024
-    /// Equirect mask is built at 1/8 still resolution — plenty for pixelation blocks that are
-    /// themselves ~1% of image width, and it keeps the projection loop under a megapixel.
+    /// faces render from the ≤4K working decode, so higher costs CPU, not fidelity.
+    static let faceSize = 1024
+    /// Equirect mask is built at 1/8 still resolution — plenty for pixelation blocks
+    /// ~1% of image width, and it keeps the projection loop under a megapixel.
     private static let maskScale = 8
     /// Vision confidence (0–255) at which a mask pixel counts as person.
-    private static let maskThreshold: UInt8 = 128
+    static let maskThreshold: UInt8 = 128
+    /// Confidence a face must reach SOMEWHERE before its mask is trusted, and how many
+    /// such pixels are required. Vision has no "no subject here" output: on flat bright
+    /// surfaces it returns diffuse activation that clears 128 across a whole ceiling
+    /// (field run staging_C629FA75, stills 2/4/5). Real people have confident cores, so
+    /// the core is the discriminator. The bar is deliberately low — a person at 5 m
+    /// fills ~15 000 px of a 1024² face — which keeps the fail-closed posture.
+    static let coreThreshold: UInt8 = 210
+    static let minCorePixels = 250
     /// Binary dilation radius in mask-space pixels (~2×maskScale full-res px of safety margin).
     private static let dilateRadius = 2
     /// Working-decode cap for face extraction (full res is only used for the final composite).
@@ -231,11 +239,11 @@ enum EquirectPrivacyBlur {
         let height: Int
     }
 
-    /// Project the per-face person masks back into a 1/`maskScale` equirect mask, then dilate
-    /// for a safety margin. Faces with no person contribute nothing (nil entries).
+    /// Project the per-face person masks into a 1/`maskScale` equirect mask, then
+    /// dilate for margin. Faces with no person contribute nothing (nil entries).
     static func buildEquirectMask(from faceMasks: [FaceMask?]) -> EquirectMask {
-        // Mask dims derive from the DETECTION space; the composite rescales to the true full
-        // res, so exact divisibility doesn't matter — only aspect (2:1 for equirects).
+        // Dims derive from DETECTION space; the composite rescales to full res, so only
+        // the 2:1 equirect aspect matters.
         let width = faceSize * 4 / maskScale       // ~512 for 1024 faces: plenty
         let height = width / 2
         var mask = EquirectMask(bytes: [UInt8](repeating: 0, count: width * height),
@@ -310,54 +318,7 @@ enum EquirectPrivacyBlur {
 
 // MARK: - Vision + composite stages
 // (Separate extension keeps the enum body inside the type_body_length budget.)
-
 extension EquirectPrivacyBlur {
-
-    // MARK: - Vision per face
-
-    struct FaceMask {
-        let bytes: [UInt8]
-        let width: Int
-        let height: Int
-        let hasPerson: Bool
-    }
-
-    /// Run person segmentation on one pinhole face. `.success(nil)` = clean face.
-    static func personMask(for face: CGImage) -> Result<FaceMask?, StringError> {
-        let request = VNGeneratePersonSegmentationRequest()
-        request.qualityLevel = .balanced
-        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
-        let handler = VNImageRequestHandler(cgImage: face, options: [:])
-        do {
-            try handler.perform([request])
-        } catch {
-            return .failure(StringError("Vision segmentation failed: \(error.localizedDescription)"))
-        }
-        guard let buffer = request.results?.first?.pixelBuffer else {
-            return .failure(StringError("Vision returned no segmentation mask"))
-        }
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-        guard let baseAddr = CVPixelBufferGetBaseAddress(buffer) else {
-            return .failure(StringError("segmentation mask has no base address"))
-        }
-        let width = CVPixelBufferGetWidth(buffer)
-        let height = CVPixelBufferGetHeight(buffer)
-        let stride = CVPixelBufferGetBytesPerRow(buffer)
-        var bytes = [UInt8](repeating: 0, count: width * height)
-        var hasPerson = false
-        let src = baseAddr.assumingMemoryBound(to: UInt8.self)
-        for row in 0..<height {
-            for col in 0..<width {
-                let value = src[row * stride + col]
-                bytes[row * width + col] = value
-                if value >= maskThreshold { hasPerson = true }
-            }
-        }
-        return .success(hasPerson ? FaceMask(bytes: bytes, width: width, height: height, hasPerson: true) : nil)
-    }
-
-    struct StringError: Error { let message: String; init(_ msg: String) { message = msg } }
 
     // MARK: - Full-res composite
 

@@ -130,3 +130,16 @@ enum OperatorRigMask {
         return mask
     }
 }
+
+extension OperatorRigMask {
+    /// Per-face detection stats — the numbers that separate a real person (small area,
+    /// confident core) from the no-subject wash (large area, no core). Logged so the
+    /// thresholds can be tuned from field runs rather than guessed.
+    static func logFaceMask(masked: Int, core: Int, total: Int, accepted: Bool) {
+        guard masked > 0 else { return }
+        let denom = Double(max(1, total))
+        PerfDiag.log(String(format: "[EqPrivacy] face mask: %.1f%% over threshold, %.2f%% core → %@",
+                            Double(masked) * 100 / denom, Double(core) * 100 / denom,
+                            accepted ? "person" : "REJECTED (no confident core)"))
+    }
+}
