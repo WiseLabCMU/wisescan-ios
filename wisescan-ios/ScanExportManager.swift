@@ -320,7 +320,7 @@ struct ScanExportManager {
         // reconstruction-quality artifact (exclude what moves with the camera, keep the
         // floor), not a privacy one. Emitted BEFORE the privacy pass so detection runs
         // on the original pixels rather than on pixelated blobs.
-        emitOperatorRigMasks(for: stills, into: dstDir, phase: phase)
+        emitOperatorRigMasks(for: stills, into: stagingDir, phase: phase)
 
         if privacyFilterWasOn(rawDataDir: rawDataDir, maskedFrames: maskedFrameNames(rawDataDir: rawDataDir)) {
             runEquirectPrivacyPass(on: stills, phase: phase)
@@ -392,6 +392,7 @@ struct ScanExportManager {
         let imagesDir = stagingDir.appendingPathComponent("images")
         let camerasDir = stagingDir.appendingPathComponent("cameras")
         let masksDir = stagingDir.appendingPathComponent("masks")
+        let maskRoot = stagingDir.appendingPathComponent("equirect_masks")
         try? fileMgr.createDirectory(at: masksDir, withIntermediateDirectories: true)
         guard fileMgr.fileExists(atPath: imagesDir.path), fileMgr.fileExists(atPath: camerasDir.path) else {
             print("[prepareExport] ✗ cube faces skipped — images/ or cameras/ not staged")
@@ -410,9 +411,7 @@ struct ScanExportManager {
                 // Reuse the equirect mask already written for this still rather than
                 // re-running six Vision passes per face.
                 let maskName = url.deletingPathExtension().lastPathComponent + ".png"
-                let equirectMask = OperatorRigMask.load(
-                    pngAt: dstDir.appendingPathComponent("../equirect_masks/\(maskName)")
-                        .standardizedFileURL)
+                let equirectMask = OperatorRigMask.load(pngAt: maskRoot.appendingPathComponent(maskName))
                 facesWritten += EquirectFaceExport.emitFaces(
                     equirectURL: url, sidecarURL: sidecar,
                     imagesDir: imagesDir, camerasDir: camerasDir,

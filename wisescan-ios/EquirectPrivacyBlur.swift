@@ -262,8 +262,37 @@ enum EquirectPrivacyBlur {
                 }
             }
         }
+        rejectCeilingWash(&mask)
         dilate(&mask, radius: dilateRadius)
         return mask
+    }
+
+    /// Drops "person" that sits far ABOVE the lens, when it covers enough of the frame
+    /// to be the no-subject failure mode rather than a subject.
+    ///
+    /// The confidence-core test cannot catch this: on a blank ceiling Vision is not
+    /// hedging, it is confidently wrong (field run staging_37C87DBA logged a face at
+    /// 82% over threshold with 56% of it high-confidence). What the model cannot know is
+    /// the geometry — the lens rides a rod above the operator's head, so every person on
+    /// the floor is BELOW it.
+    ///
+    /// Applied only to large regions, so it stays fail-closed for the genuine exception:
+    /// somebody on stairs or a balcony IS above the lens, but they are small in frame,
+    /// while the wash covers a third of the sphere.
+    private static func rejectCeilingWash(_ mask: inout EquirectMask) {
+        let cutoffRow = Int(Float(mask.height) * (90 - AppConstants.personMaxElevationDeg) / 180)
+        guard cutoffRow > 0, cutoffRow < mask.height else { return }
+        var above = 0
+        for row in 0..<cutoffRow {
+            for col in 0..<mask.width where mask.bytes[row * mask.width + col] == 255 { above += 1 }
+        }
+        let fraction = Float(above) / Float(max(1, mask.width * mask.height))
+        guard fraction > AppConstants.personCeilingWashFraction else { return }
+        for row in 0..<cutoffRow {
+            for col in 0..<mask.width { mask.bytes[row * mask.width + col] = 0 }
+        }
+        PerfDiag.log(String(format: "[EqPrivacy] ceiling wash rejected: %.1f%% of frame above +%.0f°",
+                            fraction * 100, AppConstants.personMaxElevationDeg))
     }
 
     private struct FaceHit {
