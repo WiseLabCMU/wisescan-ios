@@ -1465,6 +1465,181 @@ One mental model everywhere:
   single-scan model proves out, bulk Color should adopt the same
   structural-first-then-color semantics.
 
+## PR #37 "360 updates": field-measured timing, guidance, masks (2026-08-07 → 08-15)
+
+Nine field runs (360update1-9) drove this arc. Findings worth not re-deriving:
+
+### Protocol timing is now MEASURED, per still, per model
+
+| | Theta X (BLE) | Theta Z1 (OSC) |
+|:--|:--|:--|
+| shutter ack after tap | 164-294 ms | 382-409 ms |
+| EXIF exposure (room light) | 1/30 s | 1/30 s |
+| file listed (trigger_ms) | 4.2-4.8 s | 4.3 s |
+
+Every still records `shutter_ack_ms`, `exposure_window_ms`, `exif_exposure_time_s` and
+the raw motion samples, so these are re-derivable offline rather than assumed.
+
+### The sway window ran from the wrong end, and was 30× too wide
+
+The first cut measured `[ack, ack+1 s]`. Both halves were wrong. The sidecar pose is
+sampled at the TAP and the shutter fires ~200 ms later, so **the pose error is the drift
+between tap and shutter** — motion afterwards is stitch and transfer, which cannot affect
+an image already captured. And the shutter is open for 33 ms, not a second.
+
+Cost of the error, from the data: a Z1 still whose operator moved **22 cm and 36°** across
+the full trigger had **2 mm** inside the true window. The old window would have flagged it.
+
+Window is now `[tap, ack + latency allowance + exposure]` ≈ 250 ms, and the probe samples
+at 50 ms (250 ms put exactly ONE sample inside the real window). Exposure is learned per
+model from EXIF, so a dim room widens the guard by itself.
+
+### "You can move" fires at exposure close, not at file landing
+
+~0.35 s (X) / ~0.56 s (Z1) against 4.3-4.8 s — about **4 seconds returned per still**.
+Holding and transferring are separate states so the UI cannot contradict the tone.
+Release is idempotent and only the ack timer plays the sound, so a FAILED shot releases
+the operator without claiming success.
+
+OPEN: the camera's own audible shutter is reported as landing noticeably later than our
+release. The ack proves the camera ACCEPTED the command, not that the shutter fired. Not
+resolved by residuals (this run solved at 4.81 px RMS) because the sway window is
+anchored the same way, so both would be consistently wrong. **The clean measurement is
+polling `_captureStatus` over BLE during a capture and watching shooting→idle** —
+NotifyState never pushes it (probe rounds 4-8), but a direct read can be polled.
+
+### Still-placement rings: no third voxel grid
+
+A 360° still sees every direction, so "is this a good spot" collapses to distance from
+the stills already taken — ≤20 points and a distance test, not a coverage volume.
+
+Two non-obvious dependencies:
+- **Plane detection is OFF in a normal scan** (only enabled for ghost alignment), so
+  ARPlaneAnchor floors do not exist. Floor comes from a 1 m XZ field of the lowest mesh
+  vertex per cell, sampled from vertices the wireframe pass already transforms. The cell
+  a point sits in WINS OUTRIGHT — a neighbourhood minimum sinks rings through the floor
+  on stairs and ramps.
+- **Capture height is learned per operator**, because a fixed drop is wrong for the people
+  using this: operators scan from wheelchairs and at very different statures. A >15 cm
+  mismatch is treated as a different person and adopted outright rather than smoothed, so
+  a rig handed from a tall operator to a seated one converges in one still, and rings
+  already drawn re-place themselves within half a second.
+
+### Vision is CONFIDENTLY wrong on blank ceilings
+
+Privacy-on runs pixelated the entire ceiling. The pipeline was correct: the projection
+thresholds at 128 and the composite paints only at 255, so those pixels legitimately
+cleared the bar.
+
+A confidence test does NOT catch this — one face logged **82.4% over threshold with 55.7%
+at high confidence**. `VNGeneratePersonSegmentationRequest` has no way to express "no
+subject here", and a flat bright surface is the ideal trigger.
+
+The fix is geometric, not statistical: the lens rides a rod ABOVE the operator's head, so
+everyone on the floor is BELOW it (a 1.9 m person half a metre from a low 1.82 m rig
+still only reaches ~+9°). "Person" above +25° is dropped when it covers >8% of the frame
+— the area condition keeps it fail-closed for someone genuinely above the lens on stairs,
+who is small in frame where the wash covers a third of the sphere.
+
+Validated: still-4 mask coverage 42% → 15.7%, ceiling pixelation gone.
+
+### Operator/rig masks, and all six cube faces
+
+The mask is the union of a GEOMETRIC nadir cone (rod/mount/tripod hang below the camera
+by construction — measured inside 17°, default 20°) and SEGMENTED people (the operator is
+NOT reliably under the camera: on a tripod or a rod they sit at −30° to −60° off to one
+side, which geometry cannot predict).
+
+Emitted for every scan **regardless of the privacy filter** — this is a reconstruction
+artifact, and a person is equally wrong to reconstruct whether or not their pixels ship.
+White = usable, black = ignore (COLMAP ignores zero-valued mask pixels; Nerfstudio treats
+1 as keep), so nothing downstream reinterprets it.
+
+The bottom face now ships, because a precise mask replaces the blunt "discard by
+construction". It is the closest geometry in the still and the best parallax available;
+masked, ~80% of it survives as usable floor. **A face MUST ship with its mask** — a bare
+face is worse than no face, since downstream would reconstruct the rig and operator as
+scene content.
+
+### Rig geometry: the model has no forward/back offset
+
+Decomposing the rod direction from a measured 28.5-inch rig across five stills: the rod
+tilts **11.6-14.2°** from vertical (the operator angles the iPad down to see the floor),
+putting the camera **14-17 cm FORWARD** of the phone, 3 cm lateral, and 70.5 cm up —
+against a 72.4 cm tape measure.
+
+The solve is 4-dimensional `(dy, dLateral, yaw, pitchResidual)` with `dy` along WORLD up
+and `dLateral` perpendicular to phone-forward. A forward offset is orthogonal to both and
+lives in the PHONE's frame, so it rotates as the operator turns and no global constant can
+absorb it — it leaks into residual and can bias yaw and dLateral.
+
+RECOMMENDED: re-parameterize the offset as a 3-vector in the PHONE frame (rod-axis,
+forward, lateral) rotated by the phone pose. That is physically what a rigid rig is, it
+makes the tape measure directly meaningful as the rod-axis component, and it handles tilt
+varying scan to scan for free.
+
+### Keyboard crash: the mechanism, not the trigger
+
+The rig-height field crashed with `_UIRemoteKeyboardPlaceholderView … no common ancestor`
+from Capture AND Dashboard. First fix removed the trigger (text rewritten during teardown)
+and it still crashed — and two things that fix ADDED are themselves triggers
+(`ToolbarItemGroup(placement: .keyboard)` creates an input accessory; focusing in
+`.onAppear` races the sheet presentation).
+
+Conclusion: that failure family has too many entry points to dodge. **The field no longer
+uses a system keyboard** — a twelve-button keypad has no first responder, no input
+accessory, no keyboard-avoidance constraints, nothing to tear down. Settings opens the
+same sheet, so there is ONE editor and no keyboard anywhere in this path.
+
+## Open items (consolidated 2026-08-16)
+
+Carried forward from the whole 360° arc, not just the last PR. Ordered by what blocks
+what.
+
+**Solver — the two known modelling gaps.** Neither is wired yet because both change the
+cost function, which is the critical path; both want an offline run against the known-good
+bundles (4.04 and 4.81 px RMS references).
+1. *Masks are not fed to calibration.* It still uses the blunt −45° elevation cutoff. The
+   larger win is not the floor it admits but the bias it removes: the operator sits at
+   −30° to −60°, so roughly HALF of them is currently inside the cost function as a
+   systematic attractor. Requires mask generation to move from export to Process time
+   (compute once, persist in raw_data, export reuses).
+2. *No forward/back rig offset* (14-17 cm measured). Re-parameterize in the phone frame —
+   see the PR #37 section.
+
+**Measurement still owed.**
+3. ack→shutter latency per model (poll `_captureStatus`, or the millisecond-clock shot).
+   Until then the release timing carries a 120 ms assumption.
+4. Sway thresholds are UNTUNED (30 mm / 2.0°). Rod-mounted maxima so far: 7 mm / 1.43°.
+   Do not tune from off-rod data — a 0.72 m rod amplifies angular sway into lens
+   translation, and 1.43° there is ~18 mm at the lens, larger than the translation term.
+   The honest single metric is combined lens displacement
+   `translation + rigHeight·tan(angle)`, which would read ~25 mm against a 30 mm gate.
+5. A HANDHELD pano to confirm whether the operator enters the nadir cone when the rig is
+   carried rather than tripod-mounted. Tripod runs put them at −30° to −60°, well clear.
+
+**Deferred by decision.**
+6. Destinations roster + upload queue (S3 SigV4 + multipart resume, password-required PUT,
+   Keychain, least-privilege IAM policy generator, camera-AP release before LAN upload).
+   Its own PR.
+7. Z1 BLE increment — gated on Camera-Power wake + `_latestFileUrl` push probe answers.
+   Z1 ships Wi-Fi-only.
+8. v8 keyframe-anchored yaw solver — design locked and validated offline, not yet ported.
+9. Mid-scan camera-delete exposure — TABLED; fix designed (save-completion sweep +
+   Process-sweep reachability + connect catch-up sweep).
+10. Silent save-failure paths (`guard let pending` returns silently; the
+    `isWaitingToSave` handoff) — identified in forensics, not closed.
+
+**Hygiene.**
+11. `CaptureView.body` is AT the Swift type-checker limit — adding one argument or one
+    modifier fails the build outright. It wants decomposition, not another workaround.
+12. Dev-mode calibration review UI is duplicated between the Dashboard card and the
+    Capture overlay.
+13. `ThetaBLEManager`'s header states credential readback over BLE is refused as settled;
+    `ThetaBLEProbe` still frames it as an open experiment. The journal says refused —
+    reconcile.
+14. Cube-face overlap for splat training (below) remains untested.
+
 ## Open questions
 
 - Insta360 SDK access: how long does the developer-agreement approval take, and does the
@@ -1476,8 +1651,11 @@ One mental model everywhere:
 - Where does dual-fisheye → equirect stitching run for Insta360 (on device, in the
   camera, or in wisescan-ingestion)?
   - The stitching of dual-fisheye images to create equirectangular panoramas for Insta360 cameras typically occurs during the image processing phase after the footage is ingested. This means that the stitching is not performed directly on the camera device itself.
-- Trigger→exposure latency variance per camera: constant enough to calibrate once, or
-  does it need per-still estimation from camera timestamps?
+- Trigger→exposure latency variance per camera: PARTIALLY ANSWERED — the ack is measured
+  per still (X 164-294 ms, Z1 382-409 ms) and exposure is learned per model from EXIF.
+  What remains unmeasured is ack→shutter itself; the camera's audible shutter suggests it
+  is later than the 120 ms allowance. Resolve by polling `_captureStatus` over BLE during
+  a capture (shooting→idle), or by photographing a millisecond clock.
 - How does the coverage overlay communicate "covered by 360° still pending transfer"
   (post-process mode) vs "confirmed on device" — a third visual state or optimistic
   clear with post-scan reconciliation report?
