@@ -777,6 +777,13 @@ final class ThetaCameraManager {
             do {
                 var shutterAck: Date?
                 isHoldingForExposure = true
+                // Dev probe: measure when the shutter ACTUALLY fires rather than
+                // assuming ack + allowance. Runs only under Performance Diagnostics
+                // because it adds BLE reads during the busiest moment of a capture.
+                let captureWindowProbe: Task<(startMs: Int, endMs: Int)?, Never>? =
+                    PerfDiag.enabled && ThetaBLEManager.shared.canShutterOverBLE
+                    ? Task { await ThetaBLEManager.shared.measureCaptureWindow(origin: start) }
+                    : nil
                 let fileURL = try await triggerStillPreferringBLE(onAck: { [weak self] in
                     shutterAck = Date()
                     // The camera has taken the shot; the pose-critical hold ends one
@@ -788,6 +795,17 @@ final class ThetaCameraManager {
                 let triggerMs = Int(Date().timeIntervalSince(start) * 1000)
                 motionProbe?.cancel()
                 let seq = scanStillCount + 1
+                if let captureWindowProbe {
+                    let measured = await captureWindowProbe.value
+                    if let measured {
+                        PerfDiag.log(String(format: "[360Still] MEASURED shutter: fired +%d ms, done +%d ms "
+                                            + "(ack was +%d ms, release assumed +%d ms)",
+                                            measured.startMs, measured.endMs,
+                                            Int((shutterAck?.timeIntervalSince(start) ?? 0) * 1000),
+                                            Int(((shutterAck?.timeIntervalSince(start) ?? 0)
+                                                 + AppConstants.thetaShutterLatencyAllowance) * 1000)))
+                    }
+                }
                 let motion = await resolveStillMotion(
                     probe: motionProbe,
                     timing: TriggerTiming(start: start, shutterAck: shutterAck,

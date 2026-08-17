@@ -72,6 +72,36 @@ final class ThetaBLEManager: NSObject {
     static let ccv2NotifyStateChar = CBUUID(string: "D32CE140-B0C2-4C07-AF15-2301B5057B8C")
     /// Stamped whenever a GetState value lands — the liveness probe watches it change.
     var lastStateReadAt: Date?
+    /// Latest `_captureStatus` seen on a GetState read. NotifyState never pushes this
+    /// (probe rounds 4-8 — it only pushes _latestFileUrl, battery and temps), so it is
+    /// only current if something is polling.
+    var lastCaptureStatus: String?
+
+    /// Polls GetState until `_captureStatus` leaves idle and returns again, timing both
+    /// edges from `origin`. This is the ONLY direct measurement of when the shutter
+    /// actually fires: the write-ack proves the camera ACCEPTED the command, and the
+    /// sway window and the "you can move" release are both anchored on that assumption
+    /// plus a fixed latency allowance. Field reports of the camera's own audible shutter
+    /// landing later than our release are what this exists to settle.
+    ///
+    /// Developer Mode only — it adds BLE traffic during a capture, which is exactly when
+    /// the link is busiest.
+    func measureCaptureWindow(origin: Date, timeout: TimeInterval = 10) async -> (startMs: Int, endMs: Int)? {
+        guard isLinkReady, let peripheral, let char = chars[Self.ccv2GetStateChar] else { return nil }
+        var startMs: Int?
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            peripheral.readValue(for: char)
+            try? await Task.sleep(nanoseconds: 60_000_000)   // ~16 Hz: finer than the effect we're measuring
+            let status = (lastCaptureStatus ?? "").lowercased()
+            if startMs == nil, !status.isEmpty, status != "idle" {
+                startMs = Int(Date().timeIntervalSince(origin) * 1000)
+            } else if let startMs, status == "idle" {
+                return (startMs, Int(Date().timeIntervalSince(origin) * 1000))
+            }
+        }
+        return startMs.map { ($0, -1) }
+    }
     static let ccv2SetOptionsChar = CBUUID(string: "F0BCD2F9-5862-4653-B50D-80DC51E8CB82")
     static let ccv2ShutterChar = CBUUID(string: "6E2DEEBE-88B0-42A5-829D-1B2C6ABCE750")
     static let ccv2GetOptionsChar = CBUUID(string: "7CFFAAE3-8467-4D0C-A9DD-7F70B4F52863")
