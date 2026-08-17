@@ -105,6 +105,32 @@ extension CaptureView {
     /// cancel. Nothing is blocked — Wi-Fi capture is legitimate — but it stops being the
     /// default that nobody noticed.
     func startRecordingCheckingShutterPath() {
+        // Rig height first: it is the one pre-flight whose failure cannot be recovered
+        // afterwards. The solve anchors dy to it within ±5 cm and has been seen riding
+        // both walls of that window, so an unset or mistyped height does not merely
+        // degrade the result — it produces confidently wrong poses, and the colour lands
+        // wrong with a healthy-looking residual. Warning at the FIRST STILL (where this
+        // used to live) is too late: the operator has already walked into the room.
+        if ThetaCameraManager.shared.isConnected, rigHeightImplausible {
+            showRigHeightPrompt = true
+            return
+        }
+        guard ThetaCameraManager.shared.isConnected,
+              !ThetaCameraManager.shared.shutterPathIsBLE else {
+            startRecording()
+            return
+        }
+        showBLEShutterPrompt = true
+    }
+
+    /// Unset, or outside what any real rig measures.
+    var rigHeightImplausible: Bool {
+        rigMeasuredDyMeters < AppConstants.rigHeightMinPlausibleMeters
+            || rigMeasuredDyMeters > AppConstants.rigHeightMaxPlausibleMeters
+    }
+
+    /// Prompt action: past the rig-height question, carry on with the shutter-path one.
+    func continueAfterRigHeightWarning() {
         guard ThetaCameraManager.shared.isConnected,
               !ThetaCameraManager.shared.shutterPathIsBLE else {
             startRecording()

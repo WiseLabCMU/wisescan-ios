@@ -54,7 +54,17 @@ struct RigHeightSheet: View {
     /// silently become the solve's anchor.
     private var outOfRange: Bool {
         guard let meters = previewMeters else { return false }
-        return meters > 3.0
+        return meters > AppConstants.rigHeightMaxPlausibleMeters
+            || meters < AppConstants.rigHeightMinPlausibleMeters
+    }
+
+    /// Names WHICH way it is wrong. "Out of range" on its own invites the user to retype
+    /// the same digits; a unit hint is what actually gets corrected.
+    private var rangeMessage: String {
+        guard let meters = previewMeters else { return "Set" }
+        if meters > AppConstants.rigHeightMaxPlausibleMeters { return "Too large — check the unit" }
+        if meters < AppConstants.rigHeightMinPlausibleMeters { return "Too small — check the unit" }
+        return "Set"
     }
 
     var body: some View {
@@ -143,7 +153,7 @@ struct RigHeightSheet: View {
     private var setButton: some View {
         let disabled = parsed == nil || outOfRange
         Button(action: commit, label: {
-            Text(outOfRange ? "Too large — check the unit" : "Set")
+            Text(rangeMessage)
                 .font(.headline)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 13)

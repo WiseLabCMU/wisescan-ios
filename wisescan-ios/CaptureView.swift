@@ -23,7 +23,8 @@ struct CaptureView: View {
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession?
     @State private var thetaManager = ThetaCameraManager.shared
-    @AppStorage(AppConstants.Key.rigMeasuredDyMeters) private var rigMeasuredDyMeters: Double = 0
+    // Internal: the record-start pre-flight lives in the +Recording split.
+    @AppStorage(AppConstants.Key.rigMeasuredDyMeters) var rigMeasuredDyMeters: Double = 0
     /// Calibration capture is settle-gated: true while waiting for rig stillness after a tap.
     @State private var isSettlingCalibration = false
     /// Mesh-gap coach input: throttled classification census over the live mesh
@@ -116,6 +117,7 @@ struct CaptureView: View {
     @State private var showRigHeightSheet = false
     // Internal, not private: the record-start gate lives in the +Recording split.
     @State var showBLEShutterPrompt = false
+    @State var showRigHeightPrompt = false
     @State var isReconnectingBLE = false
     @State private var activeLocationName: String?
     // Ghost-mesh manual "nudger" (from main) — coexists with our anchor-based AlignmentOverlayView.
@@ -204,11 +206,6 @@ struct CaptureView: View {
                     showTransientMessage("⚠️ Moved during the 360° exposure — still #\(stillNumber)'s "
                         + "pose may be off. Hold still until the done tone.", duration: 4)
                 }
-            }
-            if stillNumber == 1, rigMeasuredDyMeters <= 0.1 {
-                // First 360° still of the scan on an unmeasured rig: one actionable
-                // heads-up (the chip shows the persistent orange state).
-                showTransientMessage("⚠️ Rig height not set — poses will be estimated. Settings → 360° Rig Height.", duration: 5)
             }
             // Post-process pivot: no first-still spot-check / session-yaw solve here —
             // calibration runs in the Process step against the completed scan's own
@@ -852,6 +849,18 @@ struct CaptureView: View {
                 pauseARSession: pauseARSession,
                 isAnalyzing: $isAnalyzing
             )
+        .alert(rigMeasuredDyMeters < 0.01 ? "Rig height not set" : "Rig height looks wrong",
+               isPresented: $showRigHeightPrompt) {
+            Button("Set Rig Height") { showRigHeightSheet = true }
+            Button("Record Anyway") { continueAfterRigHeightWarning() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every 360° pose is anchored to this measurement, within a few centimetres. "
+                 + "If it is wrong the stills will still capture, but their poses — and the "
+                 + "colour and cube faces built from them — will be confidently wrong, and "
+                 + "nothing downstream can tell. Measure from the iPad's camera to the 360° "
+                 + "lens centre.")
+        }
         .alert("Bluetooth shutter is not connected", isPresented: $showBLEShutterPrompt) {
             Button("Reconnect Bluetooth") { reconnectBLEThenRecord() }
             Button("Continue on Wi-Fi") { startRecording() }

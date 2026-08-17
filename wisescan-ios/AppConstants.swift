@@ -255,6 +255,15 @@ enum AppConstants {
     /// spacing guide, while one a centimetre BELOW it is swallowed by the mesh.
     static let stillRingLiftMeters: Float = 0.08
 
+    /// Plausible rig heights. The lower bound matters more than it looks: the solve
+    /// anchors dy to this value within ±calibrationMeasuredDyHalfM and has been observed
+    /// riding BOTH walls of that window, so a fat-fingered entry (0.285 for 0.285 m when
+    /// 28.5 in was meant — a factor of ten) does not degrade the solve, it forces a wrong
+    /// answer and the colour lands wrong with a healthy-looking residual. Below this the
+    /// camera would be sitting on the phone, which no rig does.
+    static let rigHeightMinPlausibleMeters = 0.2
+    static let rigHeightMaxPlausibleMeters = 3.0
+
     /// Half-angle of the nadir cone occupied by the capture hardware (rod, mount,
     /// tripod), in degrees from straight down — everything below −(90 − this) is
     /// masked. Field measurement (staging_0755126C, tripod-mounted) put the hardware
