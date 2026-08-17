@@ -803,9 +803,28 @@ struct LocationDetailView: View {
     /// Post-process pivot: processing is AUTOMATED — landing on a location kicks off every
     /// achievable pending structural step (incl. the equirect download sweep). The engine's
     /// per-scan in-flight claims make overlapping kicks no-ops.
-    private func autoProcessPending() {
+    private func autoProcessPending(retriesLeft: Int = 6) {
         guard !isBulkColoring else { return }
         let pending = ScanPostprocessor.scansNeedingPostprocess(in: location)
+
+        // The room arrives LATE. RoomBuilder runs as a post-save continuation and writes
+        // roomplan.json seconds after the scan is saved, but registration and proxy are
+        // both gated on that file existing. Landing here before it does means this pass
+        // runs masks and calibration, finds no room, and stops — and nothing re-runs, so
+        // the proxy waits for whatever the user taps next. Field log 2026-08-17: auto
+        // pass at 11:28 did masks+calibration, and proxy only ran at 11:36 when Color
+        // was pressed, which is why "Building proxy…" showed up under a colour button.
+        //
+        // So: while any scan is still waiting on its room, check back. Bounded, and it
+        // stops as soon as nothing is room-pending.
+        let awaitingRoom = location.scans.contains { ScanPostprocessor.roomPending($0) }
+        if awaitingRoom, retriesLeft > 0 {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(5))
+                autoProcessPending(retriesLeft: retriesLeft - 1)
+            }
+        }
+
         guard !pending.isEmpty else { return }
         bulkPostprocess(scans: pending)
     }
