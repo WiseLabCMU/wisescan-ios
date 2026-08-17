@@ -1127,7 +1127,12 @@ struct ThetaCameraCard: View {
                 eventsExpanded = true
             case .connected:
                 eventsExpanded = false
-                Task { await refreshFileCount() }
+                // Detached and last: the count is a convenience row, and the connect
+                // chain is already several serial round trips deep before it starts.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(400))
+                    await refreshFileCount()
+                }
             case .disconnected:
                 eventsExpanded = false
             }

@@ -149,11 +149,23 @@ extension ThetaCameraManager {
 
     /// Total files on the camera (`camera.listFiles` with entryCount 0 returns just
     /// the count — no entries, no thumbnails). fileType: "all" | "image" | "video".
+    /// NOTE the short timeout. `camera.listFiles` makes the camera enumerate its
+    /// storage, which grows with the number of files on it, and this runs at the END of
+    /// an already serial connect chain (info → leveling → shooting state → battery →
+    /// resolution → formats → this). It is the only purely informational call in that
+    /// chain, so it gets the shortest leash: a missing file count is a blank row, while
+    /// eight seconds of it is a card that feels hung.
     func fetchFileCount(fileType: String = "all") async throws -> Int {
         let body: [String: Any] = ["name": "camera.listFiles",
                                    "parameters": ["fileType": fileType, "entryCount": 0,
                                                   "maxThumbSize": 0, "startPosition": 0]]
-        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCListFilesResponse.self)
+        let started = Date()
+        defer {
+            PerfDiag.log(String(format: "[Theta] listFiles took %d ms",
+                                Int(Date().timeIntervalSince(started) * 1000)))
+        }
+        let response = try await postJSON("/osc/commands/execute", body: body,
+                                          as: OSCListFilesResponse.self, timeout: 4)
         if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "listFiles failed") }
         return response.results?.totalEntries ?? 0
     }
@@ -246,11 +258,13 @@ extension ThetaCameraManager {
         return try await send(request, as: type)
     }
 
-    private func postJSON<T: Decodable>(_ path: String, body: [String: Any], as type: T.Type) async throws -> T {
+    private func postJSON<T: Decodable>(_ path: String, body: [String: Any], as type: T.Type,
+                                        timeout: TimeInterval? = nil) async throws -> T {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "POST"
         request.setValue("application/json;charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        if let timeout { request.timeoutInterval = timeout }
         return try await send(request, as: type)
     }
 
