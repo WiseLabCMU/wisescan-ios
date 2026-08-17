@@ -8,6 +8,24 @@ import simd
 /// Person-privacy blur for equirectangular 360° stills — the still-source-360 HARD invariant:
 /// no unblurred person leaves the device (docs/design/still-source-360.md → Privacy).
 ///
+/// POLICY — NO SECOND-GUESSING THE MODEL. Vision's answer is used as given. Two filters
+/// were tried and both removed: a confident-core requirement (which discarded a real
+/// person who was small on one cube face, leaving their head unmasked) and an
+/// above-horizon ceiling-wash rejection. Neither is coming back, and the reason is
+/// durability rather than the specific bugs: the segmentation model ships with iOS and
+/// changes without notice, so a heuristic fitted to today's failure mode becomes
+/// silently wrong on an OS update we do not control and cannot chase at release cadence.
+/// A stale privacy filter fails in the direction that ships someone's face.
+///
+/// The cost is accepted deliberately: Vision over-masks flat ceilings, so those stills
+/// lose ceiling texture. That loss is per-still and other stills of the same room
+/// recover it. Per-face statistics are still logged, as OBSERVATION — so a regression
+/// stays visible — but nothing branches on them.
+///
+/// Note what this does NOT cover: the nadir cone in OperatorRigMask is not second-
+/// guessing anything. The rod and mount hang below the lens by construction; that is
+/// measured geometry, not a judgement about the model's output.
+///
 /// Person detection directly on an equirect is unreliable (distortion grows toward the poles
 /// and people wrap around the ±180° seam), so the still is resampled into 6 pinhole cube faces
 /// — ordinary perspective images Vision was trained on — segmentation runs per face,
@@ -40,14 +58,10 @@ enum EquirectPrivacyBlur {
     private static let maskScale = 8
     /// Vision confidence (0–255) at which a mask pixel counts as person.
     static let maskThreshold: UInt8 = 128
-    /// Confidence a face must reach SOMEWHERE before its mask is trusted, and how many
-    /// such pixels are required. Vision has no "no subject here" output: on flat bright
-    /// surfaces it returns diffuse activation that clears 128 across a whole ceiling
-    /// (field run staging_C629FA75, stills 2/4/5). Real people have confident cores, so
-    /// the core is the discriminator. The bar is deliberately low — a person at 5 m
-    /// fills ~15 000 px of a 1024² face — which keeps the fail-closed posture.
+    /// OBSERVATION ONLY — nothing branches on this. Reported per face so a Vision
+    /// failure (a flat ceiling returning high-confidence "person") stays visible in the
+    /// logs, while the pipeline acts on none of it. See the type doc.
     static let coreThreshold: UInt8 = 210
-    static let minCorePixels = 250
     /// Binary dilation radius in mask-space pixels (~2×maskScale full-res px of safety margin).
     private static let dilateRadius = 2
     /// Working-decode cap for face extraction (full res is only used for the final composite).
@@ -241,13 +255,7 @@ enum EquirectPrivacyBlur {
 
     /// Project the per-face person masks into a 1/`maskScale` equirect mask, then
     /// dilate for margin. Faces with no person contribute nothing (nil entries).
-    /// `applyGeometricPrior` drops a large above-horizon region as a ceiling wash. It is
-    /// passed ONLY by the reconstruction mask, never by the privacy blur: there a mistake
-    /// costs some floor/ceiling coverage downstream, while the same mistake in the blur
-    /// path would unmask a person. Same evidence, different consequence, different
-    /// default.
-    static func buildEquirectMask(from faceMasks: [FaceMask?],
-                                  applyGeometricPrior: Bool = false) -> EquirectMask {
+    static func buildEquirectMask(from faceMasks: [FaceMask?]) -> EquirectMask {
         // Dims derive from DETECTION space; the composite rescales to full res, so only
         // the 2:1 equirect aspect matters.
         let width = faceSize * 4 / maskScale       // ~512 for 1024 faces: plenty
@@ -268,37 +276,8 @@ enum EquirectPrivacyBlur {
                 }
             }
         }
-        if applyGeometricPrior { rejectCeilingWash(&mask) }
         dilate(&mask, radius: dilateRadius)
         return mask
-    }
-
-    /// Drops "person" that sits far ABOVE the lens, when it covers enough of the frame
-    /// to be the no-subject failure mode rather than a subject.
-    ///
-    /// The confidence-core test cannot catch this: on a blank ceiling Vision is not
-    /// hedging, it is confidently wrong (field run staging_37C87DBA logged a face at
-    /// 82% over threshold with 56% of it high-confidence). What the model cannot know is
-    /// the geometry — the lens rides a rod above the operator's head, so every person on
-    /// the floor is BELOW it.
-    ///
-    /// Applied only to large regions, so it stays fail-closed for the genuine exception:
-    /// somebody on stairs or a balcony IS above the lens, but they are small in frame,
-    /// while the wash covers a third of the sphere.
-    private static func rejectCeilingWash(_ mask: inout EquirectMask) {
-        let cutoffRow = Int(Float(mask.height) * (90 - AppConstants.personMaxElevationDeg) / 180)
-        guard cutoffRow > 0, cutoffRow < mask.height else { return }
-        var above = 0
-        for row in 0..<cutoffRow {
-            for col in 0..<mask.width where mask.bytes[row * mask.width + col] == 255 { above += 1 }
-        }
-        let fraction = Float(above) / Float(max(1, mask.width * mask.height))
-        guard fraction > AppConstants.personCeilingWashFraction else { return }
-        for row in 0..<cutoffRow {
-            for col in 0..<mask.width { mask.bytes[row * mask.width + col] = 0 }
-        }
-        PerfDiag.log(String(format: "[EqPrivacy] ceiling wash rejected: %.1f%% of frame above +%.0f°",
-                            fraction * 100, AppConstants.personMaxElevationDeg))
     }
 
     private struct FaceHit {

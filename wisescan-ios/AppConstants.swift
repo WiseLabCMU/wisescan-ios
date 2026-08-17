@@ -263,16 +263,6 @@ enum AppConstants {
     /// (calibrationElevationCutoffDeg), which this mask is meant to replace.
     static let rigNadirMaskDeg: Float = 20
 
-    /// Elevation above which a person cannot plausibly be, for a 360° camera carried on
-    /// a rod ABOVE the operator's head. Everyone on the same floor is below the lens: a
-    /// 1.9 m person standing half a metre from a low-slung 1.82 m rig still only reaches
-    /// about +9°, so +25° carries real margin.
-    static let personMaxElevationDeg: Float = 25
-    /// Fraction of the whole equirect that above-horizon "person" has to exceed before
-    /// it is judged a ceiling wash rather than a subject. A person on stairs or a
-    /// balcony is small in frame; the Vision failure mode covers a third of the sphere
-    /// (field run staging_37C87DBA: 82% of a face at 56% high confidence).
-    static let personCeilingWashFraction: Float = 0.08
     static let thetaSwayWarnMeters: Float = 0.03
     static let thetaSwayWarnDegrees: Float = 2.0
     static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry

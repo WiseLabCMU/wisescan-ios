@@ -111,10 +111,7 @@ enum OperatorRigMask {
         guard let working = EquirectPrivacyBlur.decodeWorkingBitmap(from: data) else { return nil }
         guard case .success(let segmented) = EquirectPrivacyBlur.segmentFaces(working: working),
               segmented.anyPerson else { return nil }
-        // Reconstruction mask: the geometric prior is safe here — an error costs
-        // coverage, not privacy. The blur path deliberately does NOT use it.
-        return EquirectPrivacyBlur.buildEquirectMask(from: segmented.masks,
-                                                     applyGeometricPrior: true)
+        return EquirectPrivacyBlur.buildEquirectMask(from: segmented.masks)
     }
 
     /// Builds the full mask for one still: the geometric cone, plus whatever Vision
