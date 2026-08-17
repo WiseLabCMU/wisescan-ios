@@ -52,9 +52,17 @@ extension EquirectPrivacyBlur {
                 if value >= coreThreshold { corePixels += 1 }
             }
         }
-        // Trusted only if the model was CONFIDENT somewhere: a diffuse wash is the
-        // no-subject failure mode, and accepting it costs real static geometry.
-        let hasPerson = corePixels >= minCorePixels
+        // TRUST THE MODEL. A confident-core requirement used to gate this, and it
+        // leaked: field run 2026-08-17 logged a face at "0.1% over threshold, 0.00%
+        // core → REJECTED" — a real person, small on that face because they straddled a
+        // seam, discarded whole, leaving an unmasked hole in the operator's head.
+        //
+        // The asymmetry decides it. Over-masking costs ceiling texture in ONE still, and
+        // other stills of the same room recover it (in the run that prompted the core
+        // test, two of five stills were clean). Under-masking ships a person's face.
+        // Those are not comparable costs, so the model's own answer stands even when it
+        // is over-cautious.
+        let hasPerson = maskedPixels > 0
         OperatorRigMask.logFaceMask(masked: maskedPixels, core: corePixels,
                                     total: width * height, accepted: hasPerson)
         return .success(hasPerson ? FaceMask(bytes: bytes, width: width, height: height, hasPerson: true) : nil)

@@ -241,7 +241,13 @@ enum EquirectPrivacyBlur {
 
     /// Project the per-face person masks into a 1/`maskScale` equirect mask, then
     /// dilate for margin. Faces with no person contribute nothing (nil entries).
-    static func buildEquirectMask(from faceMasks: [FaceMask?]) -> EquirectMask {
+    /// `applyGeometricPrior` drops a large above-horizon region as a ceiling wash. It is
+    /// passed ONLY by the reconstruction mask, never by the privacy blur: there a mistake
+    /// costs some floor/ceiling coverage downstream, while the same mistake in the blur
+    /// path would unmask a person. Same evidence, different consequence, different
+    /// default.
+    static func buildEquirectMask(from faceMasks: [FaceMask?],
+                                  applyGeometricPrior: Bool = false) -> EquirectMask {
         // Dims derive from DETECTION space; the composite rescales to full res, so only
         // the 2:1 equirect aspect matters.
         let width = faceSize * 4 / maskScale       // ~512 for 1024 faces: plenty
@@ -262,7 +268,7 @@ enum EquirectPrivacyBlur {
                 }
             }
         }
-        rejectCeilingWash(&mask)
+        if applyGeometricPrior { rejectCeilingWash(&mask) }
         dilate(&mask, radius: dilateRadius)
         return mask
     }
