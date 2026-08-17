@@ -96,7 +96,7 @@ enum EquirectPostCalibration {
         // solve sharpens with baseline; cost grows linearly with inputs). Mesh edges for
         // ALL positions extract in one face pass; the edge maps decode per still.
         let tPrep = Date()
-        let selected = selectBySpread(solveSet, cap: 5)
+        let selected = selectForSolve(solveSet, cap: 5, report: report)
         let edgesPerStill = RigCalibrationSolver.extractMeshEdges(
             mesh: mesh, nearAll: selected.map(\.phonePos),
             radius: AppConstants.calibrationMeshRadiusMeters)
@@ -228,6 +228,36 @@ enum EquirectPostCalibration {
         }
         return Array(bySway.prefix(max(AppConstants.calibrationMinStillsForSolve, clean.count)))
             .sorted { $0.sequence < $1.sequence }
+    }
+
+    /// Picks the stills the solve runs on. Spread alone used to decide it, which threw
+    /// away the one thing extra stills are actually good for: CHOICE. A scan with six
+    /// stills does not need all six — it needs the steadiest few with enough baseline
+    /// between them, and a still whose phone drifted before the shutter carries a pose
+    /// that is simply wrong, so including it for its position is a bad trade.
+    ///
+    /// Steadiness first, then spread among the survivors: trim the shakiest down to a
+    /// shortlist a little larger than the cap, so the geometry still has room to choose,
+    /// then take the widest baseline from that shortlist. Below the cap nothing is
+    /// dropped — there is no choice to make.
+    ///
+    /// Note this is ranking, not thresholding. `swayFiltered` already removed anything
+    /// over the gate; this picks the best of what is left, which works even while the
+    /// gate itself is loose.
+    private nonisolated static func selectForSolve(_ stills: [StillRecord], cap: Int,
+                                                   report: (String) -> Void) -> [StillRecord] {
+        guard stills.count > cap else { return selectBySpread(stills, cap: cap) }
+        let shortlistSize = min(stills.count, cap + 2)
+        let steadiest = stills
+            .sorted { ($0.swayM ?? 0) < ($1.swayM ?? 0) }
+            .prefix(shortlistSize)
+            .sorted { $0.sequence < $1.sequence }
+        let chosen = selectBySpread(Array(steadiest), cap: cap)
+        report("Solving from \(chosen.count) of \(stills.count) stills (steadiest, best spread)")
+        PerfDiag.log("[RigCal] selected stills "
+            + chosen.map { "#\($0.sequence)(\(Int(($0.swayM ?? 0) * 1000))mm)" }.joined(separator: " ")
+            + " from " + stills.map { "#\($0.sequence)(\(Int(($0.swayM ?? 0) * 1000))mm)" }.joined(separator: " "))
+        return chosen
     }
 
     /// Greedy farthest-point selection: keep up to `cap` stills maximizing baseline spread.
