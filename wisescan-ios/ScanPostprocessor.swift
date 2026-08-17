@@ -54,7 +54,7 @@ enum ScanPostprocessor {
     // MARK: - Steps + per-artifact status
 
     enum Step: String {
-        case equirectDownloads, equirectCalibration, registration, proxy, colorize
+        case equirectDownloads, equirectMasks, equirectCalibration, registration, proxy, colorize
     }
 
     /// Find an artifact at the scan dir top level or in raw_data/ — late-arriving sidecars
@@ -140,6 +140,14 @@ enum ScanPostprocessor {
         // pass, and the calibration solve needs them for poses.
         if !pendingEquirectDownloads(rawDataPath: scan.rawDataPath).isEmpty {
             steps.append(.equirectDownloads)
+        }
+
+        // Operator/rig masks: one per still, on disk beside it. Generated HERE rather
+        // than at export because the solver is the other consumer — it currently masks
+        // everything below −45° to keep the rod and operator out of its cost function,
+        // and about half the operator sits ABOVE that line. Export reuses these.
+        if equirectMasksPending(rawDataPath: scan.rawDataPath) {
+            steps.append(.equirectMasks)
         }
 
         // Rig calibration + pose baking, pending until every sidecar carries provenance
@@ -235,6 +243,45 @@ enum ScanPostprocessor {
     /// from an older solver version (bumps force a re-solve on the next Process; this is
     /// how the poisoned-anchor scans from 360post1, including pre-pivot capture-baked
     /// ones, heal themselves).
+    /// Disk-derived, like every other step's state: a still with a JPG but no mask is
+    /// pending. No queue to desync, and a constants change plus a wipe of the mask
+    /// directory re-runs them.
+    nonisolated static func equirectMasksPending(rawDataPath: URL) -> Bool {
+        let dir = rawDataPath.appendingPathComponent("equirect_stills")
+        let masks = rawDataPath.appendingPathComponent("equirect_masks")
+        let fileManager = FileManager.default
+        guard let files = try? fileManager.contentsOfDirectory(atPath: dir.path) else { return false }
+        for file in files where file.hasSuffix(".JPG") {
+            let name = String(file.dropLast(4)) + ".png"
+            if !fileManager.fileExists(atPath: masks.appendingPathComponent(name).path) { return true }
+        }
+        return false
+    }
+
+    /// Builds and stores the operator/rig mask for every still that lacks one.
+    /// Returns how many were written.
+    nonisolated static func writeOperatorRigMasks(rawDataPath: URL) -> Int {
+        let dir = rawDataPath.appendingPathComponent("equirect_stills")
+        let masks = rawDataPath.appendingPathComponent("equirect_masks")
+        let fileManager = FileManager.default
+        try? fileManager.createDirectory(at: masks, withIntermediateDirectories: true)
+        guard let files = try? fileManager.contentsOfDirectory(atPath: dir.path) else { return 0 }
+        var written = 0
+        for file in files.sorted() where file.hasSuffix(".JPG") {
+            let target = masks.appendingPathComponent(String(file.dropLast(4)) + ".png")
+            guard !fileManager.fileExists(atPath: target.path) else { continue }
+            // Per-still pool: each mask decodes a 60 MP equirect and runs six Vision
+            // passes through autoreleased CF transients.
+            autoreleasepool {
+                guard let data = try? Data(contentsOf: dir.appendingPathComponent(file)) else { return }
+                let mask = OperatorRigMask.build(equirectJPEG: data)
+                guard let png = OperatorRigMask.encodePNG(mask) else { return }
+                if (try? png.write(to: target, options: .atomic)) != nil { written += 1 }
+            }
+        }
+        return written
+    }
+
     nonisolated static func equirectCalibrationPending(rawDataPath: URL) -> Bool {
         let dir = rawDataPath.appendingPathComponent("equirect_stills")
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return false }
@@ -571,6 +618,14 @@ enum ScanPostprocessor {
             if swept > 0 {
                 log.info("postprocess \(w.name, privacy: .public): deleted \(swept) transferred still(s) from camera")
             }
+        }
+
+        // ── 0.55 OPERATOR/RIG MASKS ── (before calibration, which is the point:
+        // the solver's blunt elevation cutoff is what these are meant to replace.)
+        if steps.contains(.equirectMasks) {
+            report("Masking operator and rig…")
+            let made = writeOperatorRigMasks(rawDataPath: raw)
+            log.info("postprocess \(w.name, privacy: .public): operator/rig masks — \(made, privacy: .public) written")
         }
 
         // ── 0.6 EQUIRECT CALIBRATION ── (RAW frame: must precede registration's bake;
