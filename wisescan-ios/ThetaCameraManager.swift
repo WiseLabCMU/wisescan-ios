@@ -781,7 +781,7 @@ final class ThetaCameraManager {
                 // Dev probe: measure when the shutter ACTUALLY fires rather than
                 // assuming ack + allowance. Runs only under Performance Diagnostics
                 // because it adds BLE reads during the busiest moment of a capture.
-                let captureWindowProbe: Task<(startMs: Int, endMs: Int)?, Never>? =
+                let captureWindowProbe: Task<Void, Never>? =
                     PerfDiag.enabled && ThetaBLEManager.shared.canShutterOverBLE
                     ? Task { await ThetaBLEManager.shared.measureCaptureWindow(origin: start) }
                     : nil
@@ -797,15 +797,11 @@ final class ThetaCameraManager {
                 motionProbe?.cancel()
                 let seq = scanStillCount + 1
                 if let captureWindowProbe {
-                    let measured = await captureWindowProbe.value
-                    if let measured {
-                        PerfDiag.log(String(format: "[360Still] MEASURED shutter: fired +%d ms, done +%d ms "
-                                            + "(ack was +%d ms, release assumed +%d ms)",
-                                            measured.startMs, measured.endMs,
-                                            Int((shutterAck?.timeIntervalSince(start) ?? 0) * 1000),
-                                            Int(((shutterAck?.timeIntervalSince(start) ?? 0)
-                                                 + AppConstants.thetaShutterLatencyAllowance) * 1000)))
-                    }
+                    await captureWindowProbe.value   // the probe logs its own trace
+                    PerfDiag.log(String(format: "[360Still] for comparison: ack +%d ms, release assumed +%d ms",
+                                        Int((shutterAck?.timeIntervalSince(start) ?? 0) * 1000),
+                                        Int(((shutterAck?.timeIntervalSince(start) ?? 0)
+                                             + AppConstants.thetaShutterLatencyAllowance) * 1000)))
                 }
                 let motion = await resolveStillMotion(
                     probe: motionProbe,

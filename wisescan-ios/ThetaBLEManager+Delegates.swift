@@ -121,6 +121,7 @@ extension ThetaBLEManager: CBPeripheralDelegate {
         case Self.ccv2GetStateChar:
             lastStateReadAt = Date()
             if let status = obj["_captureStatus"] as? String { lastCaptureStatus = status }
+            if let shots = obj["_capturedPictures"] as? Int { lastCapturedPictures = shots }
             lastFileUrl = (obj["_latestFileUrl"] as? String) ?? lastFileUrl
         case Self.ccv2GetOptionsChar: resolveOptions(obj)
         case Self.ccv2NotifyStateChar: resolveNotifyState(obj)
