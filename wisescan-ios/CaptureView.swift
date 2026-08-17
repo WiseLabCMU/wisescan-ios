@@ -114,6 +114,9 @@ struct CaptureView: View {
 
     @State private var showSettings = false
     @State private var showRigHeightSheet = false
+    // Internal, not private: the record-start gate lives in the +Recording split.
+    @State var showBLEShutterPrompt = false
+    @State var isReconnectingBLE = false
     @State private var activeLocationName: String?
     // Ghost-mesh manual "nudger" (from main) — coexists with our anchor-based AlignmentOverlayView.
     // The sliders adjust the ghost overlay; startRecording bakes the offset into the ARKit world
@@ -313,7 +316,9 @@ struct CaptureView: View {
                  : thetaManager.isHoldingForExposure
                  ? "📸 exposing — hold still…"
                  : count == 0
-                 ? "No 360° stills yet"
+                 ? (ThetaBLEManager.shared.canShutterOverBLE
+                    ? "No 360° stills yet · BLE"
+                    : "No 360° stills yet · Wi-Fi (slower)")
                  : String(format: "%d still%@ · spread %.1f m%@%@%@",
                           count, count == 1 ? "" : "s", spread,
                           spacingSuffix,
@@ -847,6 +852,16 @@ struct CaptureView: View {
                 pauseARSession: pauseARSession,
                 isAnalyzing: $isAnalyzing
             )
+        .alert("Bluetooth shutter is not connected", isPresented: $showBLEShutterPrompt) {
+            Button("Reconnect Bluetooth") { reconnectBLEThenRecord() }
+            Button("Continue on Wi-Fi") { startRecording() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Over Bluetooth each 360° still fires about 1.3 s sooner and the camera pushes "
+                 + "the file, so you wait less between shots. Wi-Fi works, but every trigger is an "
+                 + "HTTP round trip — slower, and on a busy device slow enough to blur the "
+                 + "hold-still timing.")
+        }
         .onChange(of: thetaManager.cameraUnresponsive) { _, lost in
             // One message when the camera drops — at record-start verification or the
             // first failed still. The chip carries the persistent state; this makes sure

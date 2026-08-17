@@ -64,7 +64,7 @@ extension CaptureView {
                 && scanStore.icpAlignReady == nil
                 && !isAwaitingAlignment
             guard shouldAwaitAlignment else {
-                startRecording()
+                startRecordingCheckingShutterPath()
                 return
             }
             isAwaitingAlignment = true
@@ -74,7 +74,7 @@ extension CaptureView {
                 while scanStore.icpAlignReady == nil, Date() < deadline {
                     try? await Task.sleep(nanoseconds: 150_000_000) // 150 ms
                 }
-                startRecording()
+                startRecordingCheckingShutterPath()
             }
         }
     }
@@ -90,6 +90,41 @@ extension CaptureView {
         }
         ThetaCameraManager.shared.beginScanStillSession(rawDataDir: frameCaptureSession.captureDir)
         Task { await ThetaCameraManager.shared.verifyReadyForCapture() }
+    }
+
+    /// Records only after the operator knows which shutter path they are getting.
+    ///
+    /// The OSC fallback is silent and capture still works, which is the problem: BLE
+    /// shuts the camera ~1.3 s faster per still and pushes the file URL instead of
+    /// polling, so a dropped link quietly turns a brisk scan into a slow one. Worse, the
+    /// sway window is anchored on the shutter ack, and an OSC ack is an HTTP round trip
+    /// — on a loaded device that measured up to 3.4 s, which makes the resulting sway
+    /// numbers meaningless rather than merely late.
+    ///
+    /// So it asks, rather than choosing for them: reconnect, continue on Wi-Fi, or
+    /// cancel. Nothing is blocked — Wi-Fi capture is legitimate — but it stops being the
+    /// default that nobody noticed.
+    func startRecordingCheckingShutterPath() {
+        guard ThetaCameraManager.shared.isConnected,
+              !ThetaBLEManager.shared.canShutterOverBLE else {
+            startRecording()
+            return
+        }
+        showBLEShutterPrompt = true
+    }
+
+    /// Prompt action: try to bring the BLE link back, then record either way — a failed
+    /// reconnect must not strand the operator standing in the room.
+    func reconnectBLEThenRecord() {
+        isReconnectingBLE = true
+        Task { @MainActor in
+            try? await ThetaBLEManager.shared.ensureLinkReady()
+            isReconnectingBLE = false
+            if !ThetaBLEManager.shared.canShutterOverBLE {
+                showTransientMessage("Bluetooth didn't come back — recording over Wi-Fi.", duration: 4)
+            }
+            startRecording()
+        }
     }
 
     func startRecording() {
