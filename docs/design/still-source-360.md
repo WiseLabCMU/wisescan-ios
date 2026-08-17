@@ -1501,12 +1501,23 @@ Holding and transferring are separate states so the UI cannot contradict the ton
 Release is idempotent and only the ack timer plays the sound, so a FAILED shot releases
 the operator without claiming success.
 
-OPEN: the camera's own audible shutter is reported as landing noticeably later than our
-release. The ack proves the camera ACCEPTED the command, not that the shutter fired. Not
-resolved by residuals (this run solved at 4.81 px RMS) because the sway window is
-anchored the same way, so both would be consistently wrong. **The clean measurement is
-polling `_captureStatus` over BLE during a capture and watching shooting→idle** —
-NotifyState never pushes it (probe rounds 4-8), but a direct read can be polled.
+ANSWERED (2026-08-17): the shutter instant is **not observable over BLE on the X**. A
+probe polling GetState at 40 ms through four captures logged 50-56 landed reads per
+still and saw only `_captureStatus: idle` / `_capturedPictures: 0` throughout — the
+camera does not report a single still's shutter at all. NotifyState never pushes it
+either (rounds 4-8). So ack + latency allowance is the only estimate available, and the
+probe was deleted rather than left in: it added BLE traffic during the busiest moment of
+a capture, which matters more than it first appeared (see below).
+
+**BLE writes can stop being acknowledged while the link stays CONNECTED.** Same run,
+suspected RF congestion from nearby work: still 1 fired over BLE with a 262 ms ack, then
+stills 2-4 logged "shutter write unacknowledged" and fell back to OSC with ~3.2 s
+"acks" — which are the 3 s write watchdog plus an HTTP round trip, not shutter times.
+`canShutterOverBLE` reported true throughout, because characteristics were discovered and
+the connection was alive; only the data path had degraded. Consequences now handled: the
+sidecar records `shutter_path` so tuning data can exclude fallback stills, two
+consecutive failures stop further BLE attempts for the scan (each was costing the full
+watchdog to reach the same fallback), and the capture chip names the path in use.
 
 ### Still-placement rings: no third voxel grid
 

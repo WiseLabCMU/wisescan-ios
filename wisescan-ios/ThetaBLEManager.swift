@@ -75,10 +75,11 @@ final class ThetaBLEManager: NSObject {
     /// Latest `_captureStatus` seen on a GetState read. NotifyState never pushes this
     /// (probe rounds 4-8 — it only pushes _latestFileUrl, battery and temps), so it is
     /// only current if something is polling.
+    /// Latest `_captureStatus` / `_capturedPictures` seen on a GetState read. NOTE: on
+    /// the X these do NOT move for a single still — a probe polling at 40 Hz through
+    /// four captures saw only "idle/0" (2026-08-17), so the shutter instant is not
+    /// observable over BLE and ack + allowance remains the only estimate.
     var lastCaptureStatus: String?
-    /// `_capturedPictures` from GetState — a second, independent signal for the probe:
-    /// if `_captureStatus` never leaves idle for a single still (which earlier probe
-    /// rounds suggest), the shot count incrementing still marks completion.
     var lastCapturedPictures: Int?
 
     /// Polls GetState until `_captureStatus` leaves idle and returns again, timing both
@@ -88,53 +89,6 @@ final class ThetaBLEManager: NSObject {
     /// plus a fixed latency allowance. Field reports of the camera's own audible shutter
     /// landing later than our release are what this exists to settle.
     ///
-    /// Developer Mode only — it adds BLE traffic during a capture, which is exactly when
-    /// the link is busiest.
-    func measureCaptureWindow(origin: Date, timeout: TimeInterval = 8) async {
-        guard isLinkReady, let peripheral, let char = chars[Self.ccv2GetStateChar] else {
-            PerfDiag.log("[360Still] shutter probe: no BLE link or GetState characteristic — skipped")
-            return
-        }
-        // Clear first: a value left over from a previous read would read as "already
-        // idle" and hide the transition we are looking for.
-        lastCaptureStatus = nil
-        lastCapturedPictures = nil
-
-        var reads = 0
-        var trace: [String] = []
-        var lastKey: String?
-        var sawChange = false
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            let before = lastStateReadAt
-            peripheral.readValue(for: char)
-            try? await Task.sleep(nanoseconds: 40_000_000)
-            if lastStateReadAt != before { reads += 1 } else { continue }
-
-            let key = "\(lastCaptureStatus ?? "?")/\(lastCapturedPictures.map(String.init) ?? "?")"
-            if key != lastKey {
-                trace.append(String(format: "+%dms %@", Int(Date().timeIntervalSince(origin) * 1000), key))
-                if lastKey != nil { sawChange = true }
-                lastKey = key
-            }
-            // Stop once the camera has moved and settled back to idle.
-            if sawChange, (lastCaptureStatus ?? "").lowercased() == "idle" { break }
-        }
-
-        // ALWAYS report. The previous version returned nil on every unhappy path, which
-        // is why three field runs produced no probe output at all and we could not tell
-        // a missed transition from a camera that never reports one.
-        if reads == 0 {
-            PerfDiag.log("[360Still] shutter probe: no GetState reads landed in \(Int(timeout))s "
-                + "— BLE reads are not completing during capture")
-        } else if !sawChange {
-            PerfDiag.log("[360Still] shutter probe: \(reads) reads, state never changed "
-                + "(\(lastKey ?? "?")) — this camera does not report a single still's shutter, "
-                + "so ack + allowance stays the only estimate")
-        } else {
-            PerfDiag.log("[360Still] shutter probe: \(reads) reads — \(trace.joined(separator: " | "))")
-        }
-    }
     static let ccv2SetOptionsChar = CBUUID(string: "F0BCD2F9-5862-4653-B50D-80DC51E8CB82")
     static let ccv2ShutterChar = CBUUID(string: "6E2DEEBE-88B0-42A5-829D-1B2C6ABCE750")
     static let ccv2GetOptionsChar = CBUUID(string: "7CFFAAE3-8467-4D0C-A9DD-7F70B4F52863")

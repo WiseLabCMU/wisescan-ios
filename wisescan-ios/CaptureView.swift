@@ -316,7 +316,7 @@ struct CaptureView: View {
                  : thetaManager.isHoldingForExposure
                  ? "📸 exposing — hold still…"
                  : count == 0
-                 ? (ThetaBLEManager.shared.canShutterOverBLE
+                 ? (thetaManager.shutterPathIsBLE
                     ? "No 360° stills yet · BLE"
                     : "No 360° stills yet · Wi-Fi (slower)")
                  : String(format: "%d still%@ · spread %.1f m%@%@%@",

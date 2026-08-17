@@ -106,7 +106,7 @@ extension CaptureView {
     /// default that nobody noticed.
     func startRecordingCheckingShutterPath() {
         guard ThetaCameraManager.shared.isConnected,
-              !ThetaBLEManager.shared.canShutterOverBLE else {
+              !ThetaCameraManager.shared.shutterPathIsBLE else {
             startRecording()
             return
         }

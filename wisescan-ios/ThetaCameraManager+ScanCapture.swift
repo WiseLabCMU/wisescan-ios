@@ -37,6 +37,10 @@ extension ThetaCameraManager {
         /// per-model length) — the sway that actually corrupts the pose.
         let exposureMotionM: Float?
         let exposureMotionDeg: Float?
+        /// "ble" or "osc". On an OSC fallback the ack below is a watchdog timeout plus
+        /// an HTTP round trip rather than a shutter time, so anything tuning the sway
+        /// window must filter on this.
+        let shutterPath: String
         /// When the camera acknowledged the shutter command, ms after the tap — the
         /// exposure window's anchor (BLE write-ack on the X, OSC response on the Z1).
         let shutterAckMs: Int?
@@ -117,6 +121,7 @@ extension ThetaCameraManager {
             triggerMotionDeg: input.triggerMotionDeg,
             exposureMotionM: input.exposureMotionM,
             exposureMotionDeg: input.exposureMotionDeg,
+            shutterPath: input.shutterPath,
             shutterAckMs: input.shutterAckMs,
             exposureWindowMs: input.exposureWindowMs,
             motionSamples: input.motionSamples.map { samples in
@@ -155,6 +160,7 @@ private struct EquirectStillMetadata: Encodable {
     let triggerMotionDeg: Float?
     let exposureMotionM: Float?
     let exposureMotionDeg: Float?
+    let shutterPath: String
     let shutterAckMs: Int?
     let exposureWindowMs: Int?
     /// [t_ms, m, deg] triples from the trigger-window motion probe.
@@ -180,6 +186,7 @@ private struct EquirectStillMetadata: Encodable {
         case triggerMotionDeg = "trigger_motion_deg"
         case exposureMotionM = "exposure_motion_m"
         case exposureMotionDeg = "exposure_motion_deg"
+        case shutterPath = "shutter_path"
         case shutterAckMs = "shutter_ack_ms"
         case exposureWindowMs = "exposure_window_ms"
         case motionSamples = "motion_samples"

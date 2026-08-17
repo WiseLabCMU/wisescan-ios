@@ -102,6 +102,21 @@ final class ThetaCameraManager {
     /// the 360° exposure has certainly closed. `isCapturing` outlives it by seconds
     /// (stitch + transfer), and waiting on THAT is what used to cost ~4 s per still.
     private(set) var isHoldingForExposure = false
+    /// Which path fired the last still. Recorded per still because an OSC fallback's
+    /// "ack" is a 3 s watchdog timeout plus an HTTP round trip, not a shutter time —
+    /// tuning data has to be able to exclude those.
+    private(set) var lastShutterPath = "unknown"
+    /// Consecutive unacknowledged BLE writes. The link can stay CONNECTED while its data
+    /// path degrades (RF congestion): characteristics are discovered, canShutterOverBLE
+    /// reports true, and writes simply go unanswered. Field run 2026-08-17: still 1 over
+    /// BLE at 262 ms, then three "write unacknowledged" fallbacks at ~3.2 s each.
+    private var bleWriteFailures = 0
+    /// Set after repeated write failures: BLE is skipped for the rest of the scan rather
+    /// than spending the 3 s watchdog on every still to reach the same fallback.
+    private(set) var bleShutterDegraded = false
+
+    /// The shutter path a still would take right now — what the chip reports.
+    var shutterPathIsBLE: Bool { ThetaBLEManager.shared.canShutterOverBLE && !bleShutterDegraded }
 
     /// One queued equirect transfer: the sidecar is already on disk; only the JPG bytes
     /// are outstanding on the camera.
@@ -263,6 +278,8 @@ final class ThetaCameraManager {
     func verifyReadyForCapture() async -> Bool {
         guard isConnected else { return false }
         cameraUnresponsive = false
+        bleWriteFailures = 0
+        bleShutterDegraded = false
 
         let stored = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID)
         let onCameraNetwork = await currentSSID().map { $0 == stored } ?? true
@@ -778,13 +795,6 @@ final class ThetaCameraManager {
             do {
                 var shutterAck: Date?
                 isHoldingForExposure = true
-                // Dev probe: measure when the shutter ACTUALLY fires rather than
-                // assuming ack + allowance. Runs only under Performance Diagnostics
-                // because it adds BLE reads during the busiest moment of a capture.
-                let captureWindowProbe: Task<Void, Never>? =
-                    PerfDiag.enabled && ThetaBLEManager.shared.canShutterOverBLE
-                    ? Task { await ThetaBLEManager.shared.measureCaptureWindow(origin: start) }
-                    : nil
                 let fileURL = try await triggerStillPreferringBLE(onAck: { [weak self] in
                     shutterAck = Date()
                     // The camera has taken the shot; the pose-critical hold ends one
@@ -796,13 +806,6 @@ final class ThetaCameraManager {
                 let triggerMs = Int(Date().timeIntervalSince(start) * 1000)
                 motionProbe?.cancel()
                 let seq = scanStillCount + 1
-                if let captureWindowProbe {
-                    await captureWindowProbe.value   // the probe logs its own trace
-                    PerfDiag.log(String(format: "[360Still] for comparison: ack +%d ms, release assumed +%d ms",
-                                        Int((shutterAck?.timeIntervalSince(start) ?? 0) * 1000),
-                                        Int(((shutterAck?.timeIntervalSince(start) ?? 0)
-                                             + AppConstants.thetaShutterLatencyAllowance) * 1000)))
-                }
                 let motion = await resolveStillMotion(
                     probe: motionProbe,
                     timing: TriggerTiming(start: start, shutterAck: shutterAck,
@@ -823,6 +826,7 @@ final class ThetaCameraManager {
                     triggerMs: triggerMs,
                     triggerMotionM: motion?.totalM, triggerMotionDeg: motion?.totalDeg,
                     exposureMotionM: motion?.exposureM, exposureMotionDeg: motion?.exposureDeg,
+                    shutterPath: lastShutterPath,
                     shutterAckMs: motion?.ackOffset.map { Int($0 * 1000) },
                     exposureWindowMs: motion.map { Int($0.window * 1000) },
                     motionSamples: motion?.samples)
@@ -869,13 +873,28 @@ final class ThetaCameraManager {
         // Capability, not just link readiness: a Z1 link is ready for identity/state
         // but has no CCv2 shutter characteristic — asking anyway threw linkNotReady,
         // which the fallback below does not catch, failing the still outright.
-        guard ThetaBLEManager.shared.canShutterOverBLE else { return try await triggerStill(onAck: onAck) }
+        guard shutterPathIsBLE else {
+            lastShutterPath = "osc"
+            return try await triggerStill(onAck: onAck)
+        }
         do {
             let url = try await ThetaBLEManager.shared.triggerShutter(onAck: onAck)
             log(.capture, "Shutter via BLE — file pushed")
+            lastShutterPath = "ble"
+            bleWriteFailures = 0
             return url
         } catch ThetaBLEManager.BLEError.writeFailed(let why) {
+            bleWriteFailures += 1
             log(.capture, "BLE shutter write failed (\(why)) — falling back to OSC")
+            // Two in a row means the link is up but its data path is not. Every further
+            // attempt costs the full watchdog before landing in the same place, so stop
+            // attempting and say so — 3 s per still is worth more than the hope.
+            if bleWriteFailures >= 2, !bleShutterDegraded {
+                bleShutterDegraded = true
+                log(.connection, "Bluetooth shutter unreliable (\(bleWriteFailures) unacknowledged writes) — "
+                    + "using Wi-Fi for the rest of this scan. Reconnect the camera to retry Bluetooth.")
+            }
+            lastShutterPath = "osc"
             return try await triggerStill(onAck: onAck)
         }
     }
