@@ -611,10 +611,7 @@ struct LocationDetailView: View {
             .disabled(selectedScans.isEmpty || isBulkExporting)
 
             Button(action: { requestBulkPostprocess() }, label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "wand.and.stars")
-                    Text("Process")
-                }
+                AdaptiveActionLabel(systemImage: "wand.and.stars", title: "Process")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -626,10 +623,7 @@ struct LocationDetailView: View {
 
             // Color — orange paintbrush, matching the scan card's primary action.
             Button(action: { requestBulkColorize() }, label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "paintbrush.fill")
-                    Text("Color")
-                }
+                AdaptiveActionLabel(systemImage: "paintbrush.fill", title: "Color")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)

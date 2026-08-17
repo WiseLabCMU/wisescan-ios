@@ -364,10 +364,7 @@ struct ScansListView: View {
 
                 // Post-process: structural steps only (room build + registration + proxy).
                 Button(action: { requestBulkPostprocess() }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "wand.and.stars")
-                        Text("Process")
-                    }
+                    AdaptiveActionLabel(systemImage: "wand.and.stars", title: "Process")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -379,10 +376,7 @@ struct ScansListView: View {
 
                 // Color — orange paintbrush everywhere the verb appears (same as the card).
                 Button(action: { requestBulkColorize(scans: resolveTargetScans()) }, label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "paintbrush.fill")
-                        Text("Color")
-                    }
+                    AdaptiveActionLabel(systemImage: "paintbrush.fill", title: "Color")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -1440,11 +1434,8 @@ struct ScanCard: View {
     }
 
     private func processButtonLabel(disabled: Bool) -> some View {
-        HStack {
-            Image(systemName: "paintbrush.fill")
-            Text("Color")
-                .font(.subheadline).bold()
-        }
+        AdaptiveActionLabel(systemImage: "paintbrush.fill", title: "Color")
+        .font(.subheadline).bold()
         .frame(maxWidth: .infinity)
         .padding(.vertical, 10)
         .background(disabled ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))

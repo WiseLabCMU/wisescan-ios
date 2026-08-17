@@ -1,10 +1,16 @@
 import Foundation
+import os
 import SwiftData
 import UIKit
 import CoreImage
 import CoreImage.CIFilterBuiltins
 
 struct ScanExportManager {
+    /// Outcome lines go through the unified log, not print(): print is invisible in
+    /// RELEASE and TestFlight builds, so anything needed to diagnose a field export has
+    /// to be Logger. Per-item chatter can stay on print/PerfDiag.
+    private static let log = Logger(subsystem: "org.arenaxr.scan4d", category: "export")
+
     // `prepareExport` runs off the main actor with no injected ModelContext, so it fetches through
     // the app's shared container on a @MainActor hop (creating its own background ModelContext).
     // Reuse the SINGLE app container rather than opening a second one over the same SQLite store —
@@ -296,7 +302,7 @@ struct ScanExportManager {
                 }
             }
         }
-        print("[prepareExport] 360° operator/rig masks: \(written)/\(stills.count)")
+        log.info("360° operator/rig masks: \(written, privacy: .public)/\(stills.count, privacy: .public)")
     }
 
     private static func stageEquirectStills(rawDataDir: URL, stagingDir: URL,
@@ -368,7 +374,7 @@ struct ScanExportManager {
                         label = "excluded"
                     }
                 case .failed(let reason):
-                    print("[prepareExport] ✗ 360° still \(url.lastPathComponent) failed verification (\(reason)) — excluding from export")
+                    log.error("360° still \(url.lastPathComponent, privacy: .public) failed verification (\(reason, privacy: .public)) — excluded from export")
                     excludeStill(url)
                     excludedCount += 1
                     label = "excluded"
@@ -378,7 +384,7 @@ struct ScanExportManager {
             }
         }
         let passMs = Int((CFAbsoluteTimeGetCurrent() - passStart) * 1000)
-        print("[prepareExport] ✓ 360° privacy pass: \(cleanCount) clean, \(blurredCount) blurred, \(excludedCount) excluded — \(passMs) ms total")
+        log.info("360° privacy pass: \(cleanCount, privacy: .public) clean, \(blurredCount, privacy: .public) blurred, \(excludedCount, privacy: .public) excluded — \(passMs, privacy: .public) ms")
     }
 
     /// Reprojects every surviving staged equirect into 5 pinhole cube faces (bottom face —
@@ -419,7 +425,7 @@ struct ScanExportManager {
             }
         }
         let faceMs = Int((CFAbsoluteTimeGetCurrent() - faceStart) * 1000)
-        print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) — \(faceMs) ms (poses from capture-baked cam_transform; per-face provenance in camera_pose_source)")
+        log.info("cube faces: \(facesWritten, privacy: .public) emitted from \(survivors.count, privacy: .public) still(s) — \(faceMs, privacy: .public) ms")
     }
 
     /// Fail-closed removal of one staged 360° still: the equirect AND its pose sidecar (an
