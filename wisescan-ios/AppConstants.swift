@@ -265,6 +265,17 @@ enum AppConstants {
 
     static let thetaSwayWarnMeters: Float = 0.03
     static let thetaSwayWarnDegrees: Float = 2.0
+    /// Solver v8 yaw anchor. The edge cost is precise inside a basin but its basin
+    /// CHOICE aliases in rectangular rooms, so the phone's keyframes — gravity-aligned
+    /// and absolute — pick the basin first. 8 keyframes at stride 8 gave a clear winner
+    /// offline (top-5 candidates within 12° of each other); 3° steps resolve far finer
+    /// than the ±35° window handed to the edge solve.
+    static let yawAnchorKeyframes = 8
+    static let yawAnchorPixelStride = 8
+    static let yawAnchorStepDeg: Float = 3
+    /// How far the edge-cost solve may roam from the anchor. Wide enough for the anchor
+    /// to be a few degrees out, far too narrow to reach the next alias (~90°).
+    static let yawAnchorWindowDeg: Float = 35
     static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry
     static let calibrationMinSpreadMeters: Float = 1.0                 // live sufficiency meter: max pairwise still-position distance below this = weak baseline for the Process-step solve
     static let calibrationResidualGreenPx: Float = 1.4                 // RMS reprojection error (equirect px, 512-wide) ≤ this → green. Behavior-preserving √ of the old mean-squared 2.0

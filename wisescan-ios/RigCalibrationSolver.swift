@@ -82,8 +82,11 @@ enum RigCalibrationSolver {
         }
     }
 
+    /// `yawAnchor` (radians) seeds the basin — see EquirectYawAnchor. nil keeps the
+    /// v7 behaviour of scanning the whole circle on edge cost alone.
     static func solve(inputs: [CalibrationInput], prior: RigProfile,
-                      bounds: SolveBounds = .mechanical) -> CalibrationResult {
+                      bounds: SolveBounds = .mechanical,
+                      yawAnchor: Float? = nil) -> CalibrationResult {
         // Guard: if no input has mesh edges, the solver has nothing to work with.
         let totalEdges = inputs.reduce(0) { $0 + $1.meshEdges.count }
         if totalEdges == 0 {
@@ -127,9 +130,19 @@ enum RigCalibrationSolver {
         // a real basin, but a rectangular room aliases every ~90°, so a single local
         // descent lands in the wrong lobe. 24 cheap evals pick the best starts; local
         // Nelder-Mead runs from each within ±calibrationBoundYawDeg.
+        // v8: when the keyframe anchor supplied a basin, the circle scan is replaced by
+        // a sweep INSIDE it. The edge cost still does the precise work; it just no longer
+        // gets to pick which quarter-turn it is precise about.
         var yawStarts: [(yaw: Float, cost: Float)] = []
+        let anchorYaw = yawAnchor
+        let windowRad = AppConstants.yawAnchorWindowDeg * .pi / 180
         for step in 0..<24 {
-            let yaw = -Float.pi + Float(step) * (2 * Float.pi / 24)
+            let yaw: Float
+            if let anchorYaw {
+                yaw = anchorYaw - windowRad + Float(step) * (2 * windowRad / 23)
+            } else {
+                yaw = -Float.pi + Float(step) * (2 * Float.pi / 24)
+            }
             let params = SIMD4<Float>(anchor.dy, 0, yaw, 0)
             yawStarts.append((yaw, totalCost(params: params, inputs: sampledInputs,
                                              masks: sampleMasks, stride: 3)))
@@ -532,7 +545,7 @@ enum RigCalibrationSolver {
 
     /// Convert a direction to equirect pixel coordinates.
     /// Convention: lon 0 = +Z (equirect center), lat +90° = +Y (north pole).
-    private static func dirToEquirect(dir: SIMD3<Float>, width: Int, height: Int) -> (Float, Float) {
+    static func dirToEquirect(dir: SIMD3<Float>, width: Int, height: Int) -> (Float, Float) {
         let lat = asin(max(-1, min(1, dir.y)))
         // atan2(x, −z): PROPER chirality (device-verified 2026-07-31 — the old
         // atan2(x, z) sampled the equirect MIRRORED: whiteboard text read backwards in

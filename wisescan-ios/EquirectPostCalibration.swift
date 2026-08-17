@@ -44,7 +44,9 @@ enum EquirectPostCalibration {
     /// stamped as elevation_offset_deg. v7: the equirect longitude mapping was MIRRORED
     /// (chirality-flipped) vs the real image — every prior solve matched flipped
     /// geometry; fixed to the face-export convention (atan2(x, −z)), all scans re-solve.
-    static let solverVersion = 7
+    /// 8: keyframe-anchored yaw basin selection. The bump is load-bearing — scans
+    /// solved by v7 re-solve on their next Process and self-heal their colouring.
+    static let solverVersion = 8
 
     struct StillRecord {
         let sequence: Int
@@ -150,7 +152,13 @@ enum EquirectPostCalibration {
                 latHalf: AppConstants.calibrationBoundLateralM,
                 pitchHalfDeg: AppConstants.calibrationBoundPitchDeg)
             : .mechanical
-        let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds)
+        // v8: let the phone's keyframes choose the yaw basin before the edge cost
+        // refines inside it. Uses the first selected still — any of them anchors the
+        // same rig, and one is enough to break the room's rotational symmetry.
+        let anchorYaw = anchorYawIfPossible(selected: selected, rawDataDir: rawDataDir,
+                                            rodHeight: stored.dy, report: report)
+        let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds,
+                                                yawAnchor: anchorYaw)
         let solveMs = ms(tSolve)
         let p = result.profile
         // Run-to-run accuracy record — internal only, never surfaced to the operator.
@@ -374,5 +382,16 @@ enum EquirectPostCalibration {
             try? png.write(to: dir.appendingPathComponent("post_\(stamp)_still\(idx + 1).png"))
         }
         PerfDiag.log("[RigCal] postprocess diagnostics (\(Int(Date().timeIntervalSince(renderStart) * 1000)) ms) → Documents/rigcal_diag/post_*.png")
+    }
+}
+
+extension EquirectPostCalibration {
+    /// v8 basin selection — see EquirectYawAnchor. Uses the first selected still: any of
+    /// them anchors the same rig, and one is enough to break the room's symmetry.
+    fileprivate static func anchorYawIfPossible(selected: [StillRecord], rawDataDir: URL,
+                                                rodHeight: Float, report: (String) -> Void) -> Float? {
+        guard let still = selected.first else { return nil }
+        return EquirectYawAnchor.solve(rawDataDir: rawDataDir, stillJPG: still.jpgURL,
+                                       phoneToWorld: still.phoneToWorld, rodHeight: rodHeight, report: report)
     }
 }
