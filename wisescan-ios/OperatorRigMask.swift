@@ -109,9 +109,7 @@ enum OperatorRigMask {
     /// filter: this feeds reconstruction masking, not the blur.
     static func personMaskEquirect(equirectJPEG data: Data) -> EquirectPrivacyBlur.EquirectMask? {
         guard let working = EquirectPrivacyBlur.decodeWorkingBitmap(from: data) else { return nil }
-        guard case .success(let segmented) = EquirectPrivacyBlur.segmentFaces(working: working),
-              segmented.anyPerson else { return nil }
-        return EquirectPrivacyBlur.buildEquirectMask(from: segmented.masks)
+        return EquirectPrivacyBlur.personMaskUnion(working: working)
     }
 
     /// Builds the full mask for one still: the geometric cone, plus whatever Vision
