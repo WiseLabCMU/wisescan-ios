@@ -37,7 +37,12 @@ enum PerfDiag {
     static func log(_ message: @autoclosure () -> String) {
         guard enabled else { return }
         let m = message()
-        logger.info("\(m, privacy: .public)")
+        // NOTICE, not info: `info` lives only in the in-memory ring buffer and never
+        // reaches disk, so it is evicted long before an untethered run can be exported
+        // (field log 2026-08-17 came back holding only the last ~77 entries — the whole
+        // capture phase was gone). `notice` persists, which is the entire point of
+        // lines that exist to be read after the fact.
+        logger.notice("\(m, privacy: .public)")
     }
 
     /// Time `body`, emit a signpost interval, and log its duration (always, or only when it

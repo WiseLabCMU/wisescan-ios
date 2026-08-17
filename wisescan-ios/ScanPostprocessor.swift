@@ -207,7 +207,14 @@ enum ScanPostprocessor {
     /// roomplan lands — hold the gate rather than let a half-finished scan through). Colorize is
     /// cosmetic and never gates.
     static func needsPostprocess(_ scan: CapturedScan) -> Bool {
-        !pendingSteps(for: scan, includeColorize: false).isEmpty || roomPending(scan)
+        // Operator/rig masks are excluded for the same reason colorize is: they are a
+        // DERIVED artifact, not scan integrity. Export rebuilds any that are missing, so
+        // a scan whose masks have not been built yet is still complete — blocking Save
+        // on them (as this did when the step was introduced) stops the user for
+        // something the export can do itself.
+        let blocking = pendingSteps(for: scan, includeColorize: false)
+            .filter { $0 != .equirectMasks }
+        return !blocking.isEmpty || roomPending(scan)
     }
 
     /// Location-level gate helper: the scans a rescan/connect flow depends on — the ORIGINAL
@@ -562,7 +569,7 @@ enum ScanPostprocessor {
         let raw = w.raw
         let steps = w.steps   // computed on main (SwiftData reads) before dispatch
         guard !steps.isEmpty else { return outcome }
-        log.info("postprocess \(w.name, privacy: .public): steps=\(steps.map(\.rawValue).joined(separator: "+"), privacy: .public)")
+        log.notice("postprocess \(w.name, privacy: .public): steps=\(steps.map(\.rawValue).joined(separator: "+"), privacy: .public)")
 
         // Writes derived artifacts to BOTH the scan dir top level (viewer / ghost loader / gates)
         // and raw_data/ (export staging parity with the old save-time pipeline).
@@ -603,7 +610,7 @@ enum ScanPostprocessor {
                         sidecarURL: stillsDir.appendingPathComponent(String(format: "still_%04d.json", item.sequence)))
                 }
             }
-            log.info("postprocess \(w.name, privacy: .public): equirect sweep \(fetched)/\(pending.count) downloaded")
+            log.notice("postprocess \(w.name, privacy: .public): equirect sweep \(fetched)/\(pending.count) downloaded")
             if fetched < pending.count {
                 report("360° camera needed for \(pending.count - fetched) still(s)")
             }
@@ -616,7 +623,7 @@ enum ScanPostprocessor {
         if w.thetaReachable {
             let swept = sweepCameraOriginals(rawDataPath: raw)
             if swept > 0 {
-                log.info("postprocess \(w.name, privacy: .public): deleted \(swept) transferred still(s) from camera")
+                log.notice("postprocess \(w.name, privacy: .public): deleted \(swept) transferred still(s) from camera")
             }
         }
 
@@ -625,7 +632,7 @@ enum ScanPostprocessor {
         if steps.contains(.equirectMasks) {
             report("Masking operator and rig…")
             let made = writeOperatorRigMasks(rawDataPath: raw)
-            log.info("postprocess \(w.name, privacy: .public): operator/rig masks — \(made, privacy: .public) written")
+            log.notice("postprocess \(w.name, privacy: .public): operator/rig masks — \(made, privacy: .public) written")
         }
 
         // ── 0.6 EQUIRECT CALIBRATION ── (RAW frame: must precede registration's bake;
@@ -634,9 +641,9 @@ enum ScanPostprocessor {
             if pendingEquirectDownloads(rawDataPath: raw).isEmpty {
                 report("Calibrating 360° rig…")
                 let status = EquirectPostCalibration.run(scanDir: dir, rawDataDir: raw, report: report)
-                log.info("postprocess \(w.name, privacy: .public): equirect calibration — \(status, privacy: .public)")
+                log.notice("postprocess \(w.name, privacy: .public): equirect calibration — \(status, privacy: .public)")
             } else {
-                log.info("postprocess \(w.name, privacy: .public): equirect calibration deferred — downloads incomplete")
+                log.notice("postprocess \(w.name, privacy: .public): equirect calibration deferred — downloads incomplete")
             }
         }
 

@@ -307,7 +307,7 @@ struct ScanExportManager {
                 if (try? png.write(to: target, options: .atomic)) != nil { built += 1 }
             }
         }
-        log.info("360° operator/rig masks: \(copied, privacy: .public) reused, \(built, privacy: .public) rebuilt of \(stills.count, privacy: .public)")
+        log.notice("360° operator/rig masks: \(copied, privacy: .public) reused, \(built, privacy: .public) rebuilt of \(stills.count, privacy: .public)")
     }
 
     private static func stageEquirectStills(rawDataDir: URL, stagingDir: URL,
@@ -389,7 +389,7 @@ struct ScanExportManager {
             }
         }
         let passMs = Int((CFAbsoluteTimeGetCurrent() - passStart) * 1000)
-        log.info("360° privacy pass: \(cleanCount, privacy: .public) clean, \(blurredCount, privacy: .public) blurred, \(excludedCount, privacy: .public) excluded — \(passMs, privacy: .public) ms")
+        log.notice("360° privacy pass: \(cleanCount, privacy: .public) clean, \(blurredCount, privacy: .public) blurred, \(excludedCount, privacy: .public) excluded — \(passMs, privacy: .public) ms")
     }
 
     /// Reprojects every surviving staged equirect into 5 pinhole cube faces (bottom face —
@@ -430,7 +430,7 @@ struct ScanExportManager {
             }
         }
         let faceMs = Int((CFAbsoluteTimeGetCurrent() - faceStart) * 1000)
-        log.info("cube faces: \(facesWritten, privacy: .public) emitted from \(survivors.count, privacy: .public) still(s) — \(faceMs, privacy: .public) ms")
+        log.notice("cube faces: \(facesWritten, privacy: .public) emitted from \(survivors.count, privacy: .public) still(s) — \(faceMs, privacy: .public) ms")
     }
 
     /// Fail-closed removal of one staged 360° still: the equirect AND its pose sidecar (an

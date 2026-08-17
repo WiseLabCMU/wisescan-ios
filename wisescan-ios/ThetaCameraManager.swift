@@ -184,7 +184,8 @@ final class ThetaCameraManager {
     func log(_ kind: ThetaEvent.Kind, _ message: String) {
         events.insert(ThetaEvent(date: Date(), kind: kind, message: message), at: 0)
         if events.count > 100 { events.removeLast(events.count - 100) }
-        logger.info("[\(kind.rawValue, privacy: .public)] \(message, privacy: .public)")
+        // notice, not info — info never reaches disk; see PerfDiag.log.
+        logger.notice("[\(kind.rawValue, privacy: .public)] \(message, privacy: .public)")
     }
 
     /// Logs Wi‑Fi/network reachability transitions — the literal "Wi‑Fi connect/disconnect"
