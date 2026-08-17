@@ -92,10 +92,20 @@ enum StillSpacingRings {
             out.append(pip)
         }
         // Lens-height ring: thinner, so at a glance the floor ring still reads as the
-        // one you stand on and this one as where the camera was.
-        if let cameraY, let air = bandMesh(center: point.position, height: cameraY, radius: radius,
-                                           width: AppConstants.stillRingBandWidthMeters * 0.6) {
-            out.append(air)
+        // one you stand on and this one as where the camera was. It carries its own
+        // centre pip — a bare ring in mid-air is ambiguous about which spot it belongs
+        // to, and the pip is what identifies it.
+        if let cameraY {
+            if let air = bandMesh(center: point.position, height: cameraY, radius: radius,
+                                  width: AppConstants.stillRingBandWidthMeters * 0.6) {
+                out.append(air)
+            }
+            if let airPip = bandMesh(center: point.position, height: cameraY,
+                                     radius: AppConstants.stillRingPipRadiusMeters,
+                                     width: AppConstants.stillRingPipRadiusMeters * 1.6,
+                                     segments: 16) {
+                out.append(airPip)
+            }
         }
         return out
     }
