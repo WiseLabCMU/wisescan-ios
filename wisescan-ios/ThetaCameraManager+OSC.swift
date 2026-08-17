@@ -160,6 +160,19 @@ extension ThetaCameraManager {
 
     /// Bulk erase. The spec's special values ("all" / "image" / "video") must be sent
     /// ALONE in fileUrls. Not permitted during video recording.
+    /// Deletes ONE camera-side file by its URL — the single-file twin of the security
+    /// sweep that runs after scan stills transfer. Failures are logged, never fatal: the
+    /// bytes are already safe on the device, and a file we could not delete is a cleanup
+    /// problem rather than a data-loss one.
+    func deleteCameraFile(_ fileURL: String) async {
+        do {
+            _ = try await execute(name: "camera.delete", parameters: ["fileUrls": [fileURL]])
+            log(.transfer, "Deleted the camera-side original after download")
+        } catch {
+            log(.transfer, "Could not delete the camera-side original (\(Self.describe(error)))")
+        }
+    }
+
     func deleteAllFiles(fileType: String = "all") async throws {
         let body: [String: Any] = ["name": "camera.delete",
                                    "parameters": ["fileUrls": [fileType]]]

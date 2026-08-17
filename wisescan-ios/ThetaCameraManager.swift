@@ -688,6 +688,15 @@ final class ThetaCameraManager {
                                       outcome.megabytes, outcome.elapsedMs, outcome.megabytesPerSecond))
                 // Downsample off the full JPEG so we never hold the ~60MP bitmap decoded.
                 previewImage = Self.downsampledImage(from: data, maxPixel: 1200)
+                // Same contract as a scan still: bytes verified on the device means the
+                // camera-side original goes. A test shot is a real photograph of a real
+                // room, and leaving it on an open AP with a serial-derived password
+                // because it came from the debug button is the kind of inconsistency
+                // that turns into a leak.
+                if !UserDefaults.standard.bool(forKey: AppConstants.Key.keepCameraOriginals),
+                   data.count > 0 {
+                    await deleteCameraFile(capture.fileURL)
+                }
             } catch {
                 let message = Self.describe(error)
                 lastError = message

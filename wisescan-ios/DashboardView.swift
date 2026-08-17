@@ -1022,27 +1022,6 @@ struct ThetaCameraCard: View {
                     Text("Captured in \(capture.roundTripMs) ms")
                         .font(.caption).foregroundColor(.white)
                 }
-                // The camera returns an absolute http URL to the JPEG; while the phone is on
-                // the camera's Wi‑Fi, tapping opens it in Safari to view/save the shot.
-                if let url = URL(string: capture.fileURL) {
-                    Link(destination: url) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "photo")
-                            Text(capture.fileURL)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        .font(.caption2)
-                        .foregroundColor(.cyan)
-                    }
-                } else {
-                    Text(capture.fileURL)
-                        .font(.caption2)
-                        .foregroundColor(.white.opacity(0.7))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
                 // Download the still on-device (measures P2 transfer time) + preview it.
                 Button(action: { manager.downloadLastCapture() }, label: {
                     HStack {
