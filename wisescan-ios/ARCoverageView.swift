@@ -682,7 +682,12 @@ struct ARCoverageView: UIViewRepresentable {
             coordinator.ringFloorUsed.append(floorY + AppConstants.stillRingLiftMeters)
             // MeshResource generation must happen on main, one resource per descriptor
             // (RealityKit's multi-part/background generation path crashes — see below).
-            for desc in StillSpacingRings.descriptors(for: point, floorY: floorY) {
+            // Lens height: the capture pose plus the measured rod. Unmeasured rig ⇒ no
+            // air ring rather than a guessed one, since a ring at the wrong height is
+            // worse than none (it reads as a real measurement).
+            let rodHeight = Float(UserDefaults.standard.double(forKey: AppConstants.Key.rigMeasuredDyMeters))
+            let cameraY: Float? = rodHeight > 0.1 ? position.y + rodHeight : nil
+            for desc in StillSpacingRings.descriptors(for: point, floorY: floorY, cameraY: cameraY) {
                 guard let resource = try? MeshResource.generate(from: [desc]) else { continue }
                 let model = ModelEntity(mesh: resource,
                                         materials: [point.source == .taken ? takenMaterial : suggestedMaterial])

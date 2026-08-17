@@ -65,22 +65,37 @@ enum StillSpacingRings {
 
     /// Ring + center pip for one point. Built on the caller's thread; the caller must
     /// turn descriptors into resources on MAIN (RealityKit resource-generation rule).
-    static func descriptors(for point: Point, floorY: Float) -> [MeshDescriptor] {
+    /// Two rings per point, at the floor and at the LENS.
+    ///
+    /// One ring is only visible if the operator happens to be looking that way. Scanning
+    /// is done heads-up — the iPad is often level or tilted up at a wall — so a marker
+    /// that lives only on the floor drops out of view exactly when someone is deciding
+    /// where to stand next. The lens-height ring sits at eye line and catches the other
+    /// half of the time; the floor ring stays because it is what you walk to.
+    ///
+    /// `cameraY` nil draws the floor ring alone (no rig height known yet).
+    static func descriptors(for point: Point, floorY: Float, cameraY: Float?) -> [MeshDescriptor] {
         let radius = AppConstants.stillSpacingTargetMeters * 0.5
         // Lift clear of the floor mesh — see stillRingLiftMeters.
-        let floorY = floorY + AppConstants.stillRingLiftMeters
+        let groundY = floorY + AppConstants.stillRingLiftMeters
         var out: [MeshDescriptor] = []
-        if let ring = bandMesh(center: point.position, height: floorY, radius: radius,
+        if let ring = bandMesh(center: point.position, height: groundY, radius: radius,
                                width: AppConstants.stillRingBandWidthMeters) {
             out.append(ring)
         }
         // Center pip: a small filled band reads as a dot at distance and marks the exact
         // spot the still was taken from, so a returning operator can stand off it.
-        if let pip = bandMesh(center: point.position, height: floorY,
+        if let pip = bandMesh(center: point.position, height: groundY,
                               radius: AppConstants.stillRingPipRadiusMeters,
                               width: AppConstants.stillRingPipRadiusMeters * 1.6,
                               segments: 16) {
             out.append(pip)
+        }
+        // Lens-height ring: thinner, so at a glance the floor ring still reads as the
+        // one you stand on and this one as where the camera was.
+        if let cameraY, let air = bandMesh(center: point.position, height: cameraY, radius: radius,
+                                           width: AppConstants.stillRingBandWidthMeters * 0.6) {
+            out.append(air)
         }
         return out
     }
