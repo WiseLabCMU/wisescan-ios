@@ -153,11 +153,24 @@ enum EquirectPostCalibration {
         let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds)
         let solveMs = ms(tSolve)
         let p = result.profile
-        PerfDiag.log(String(format: "[RigCal] postprocess solve: dy=%.3fm dLat=%.3fm yaw=%.2f° pitch=%.2f° elev=%.1f° (residual %.2f px, %@, %d inputs)",
+        // Run-to-run accuracy record — internal only, never surfaced to the operator.
+        // Carries the CONTEXT the residual needs to be comparable: RMS rises with the
+        // number of constraints, so a 5-input solve cannot be read against a 3-input one
+        // (across this project's field runs, every 3-4 input solve landed under 2.75 px
+        // and every 6-still scan over 4, with spread and heading flat throughout). Spread
+        // and input steadiness are logged for the same reason — they are the other two
+        // things that differ between runs.
+        let spreadM = selected.count > 1
+            ? selected.flatMap { first in selected.map { simd_distance(first.phonePos, $0.phonePos) } }.max() ?? 0
+            : 0
+        let meanSwayMm = selected.isEmpty ? 0
+            : selected.map { ($0.swayM ?? 0) * 1000 }.reduce(0, +) / Float(selected.count)
+        PerfDiag.log(String(format: "[RigCal] postprocess solve: dy=%.3fm dLat=%.3fm yaw=%.2f° pitch=%.2f° elev=%.1f° "
+                            + "(residual %.2f px, %@, %d inputs, spread %.2fm, mean sway %.0fmm)",
                             p.dy, p.dLateral, p.yaw * 180 / .pi, p.pitchResidual * 180 / .pi,
                             result.elevOffsetDeg,
                             result.residualPx, result.converged ? "converged" : "NOT converged",
-                            inputs.count))
+                            inputs.count, spreadM, meanSwayMm))
 
         guard result.converged, result.residualPx >= 0, result.residualPx.isFinite else {
             bake(stills: stills, profile: stored, source: sourcePrior, residual: nil)
