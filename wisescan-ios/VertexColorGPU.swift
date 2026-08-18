@@ -73,6 +73,7 @@ enum VertexColorGPU {
         var occlusionFrac: Float
         var edgeSpreadFrac: Float
         var backfaceDotMin: Float
+        var depthIsRaster: UInt32
     }
 
     // MARK: - Upload (once per colorize call)
@@ -111,7 +112,8 @@ enum VertexColorGPU {
         depthImage: CGImage?,
         maskImage: CGImage?,
         distFloor: Float,
-        occlusionToleranceMM: Float
+        occlusionToleranceMM: Float,
+        depthIsRaster: Bool = false
     ) -> [VertexColorResult]? {
         guard let device, let queue, let pipeline,
               let vBuf = vertexBuffer, let nBuf = normalBuffer,
@@ -182,7 +184,8 @@ enum VertexColorGPU {
             // keeps this already-long signature from growing further).
             occlusionFrac: AppConstants.colorizationOcclusionToleranceFrac,
             edgeSpreadFrac: AppConstants.colorizationDepthEdgeMaxSpreadFrac,
-            backfaceDotMin: AppConstants.colorizationBackfaceDotMin
+            backfaceDotMin: AppConstants.colorizationBackfaceDotMin,
+            depthIsRaster: depthIsRaster ? 1 : 0
         )
 
         // Output buffer
@@ -251,14 +254,13 @@ enum VertexColorGPU {
               let cfData = dataProvider.data,
               let srcPtr = CFDataGetBytePtr(cfData) else { return nil }
 
-        // Byte order: Metal reads .r16Uint host-little-endian, but 16-bit PNGs typically
-        // decode BIG-endian (the CPU path checks the same CGBitmapInfo flags and swaps —
-        // see VertexColorAccumulator's isDepthLittleEndian). Uploading raw big-endian bytes
-        // scrambled every depth (1000mm read as ~59k mm), silently disabling the occlusion
-        // test on the GPU path. Swap into a staging buffer when needed (~98KB at 256×192).
-        let info = image.bitmapInfo.rawValue
-        let isLittleEndian = (info & CGBitmapInfo.byteOrder16Little.rawValue) != 0
-            || (info & CGBitmapInfo.byteOrder32Little.rawValue) != 0
+        // Byte order: Metal reads .r16Uint host-little-endian. The decoded buffer's real
+        // byte order cannot be read off CGBitmapInfo — ImageIO stamps byteOrder16Little on
+        // every 16-bit PNG it decodes, whatever the writer declared — so this took the raw
+        // branch unconditionally and scrambled every capture depth (1000 mm as ~59k mm),
+        // silently disabling occlusion on the GPU path. DepthPNG votes on the values instead.
+        // Swap into a staging buffer when needed (~98KB at 256×192).
+        let isLittleEndian = DepthPNG.needsLittleEndianByteStream(image)
         if isLittleEndian {
             tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0,
                         withBytes: srcPtr, bytesPerRow: image.bytesPerRow)

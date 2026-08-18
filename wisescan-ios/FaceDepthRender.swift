@@ -65,10 +65,13 @@ enum FaceDepthRender {
             for row in minY...maxY {
                 for column in minX...maxX {
                     let point = SIMD2<Float>(Float(column) + 0.5, Float(row) + 0.5)
-                    var weightA = edge(pointB, pointC, point) / area
-                    var weightB = edge(pointC, pointA, point) / area
-                    var weightC = edge(pointA, pointB, point) / area
-                    if area < 0 { weightA = -weightA; weightB = -weightB; weightC = -weightC }
+                    // Dividing the sub-areas by the signed total area already normalises
+                    // the winding: a clockwise triangle flips both numerator and
+                    // denominator. Re-negating here would reject every pixel of every
+                    // negative-area triangle.
+                    let weightA = edge(pointB, pointC, point) / area
+                    let weightB = edge(pointC, pointA, point) / area
+                    let weightC = edge(pointA, pointB, point) / area
                     guard weightA >= 0, weightB >= 0, weightC >= 0 else { continue }
                     // Distance along the view axis, which is what the colorizer compares
                     // its expected depth against.
@@ -96,9 +99,10 @@ enum FaceDepthRender {
         (second.x - first.x) * (third.y - first.y) - (second.y - first.y) * (third.x - first.x)
     }
 
-    /// 16-bit grayscale PNG. Byte order is whatever CoreGraphics writes; the colorizer
-    /// reads it back from the image's own bitmapInfo rather than assuming, which is the
-    /// lesson from the capture depth PNGs having been byte-swapped on disk for months.
+    /// 16-bit grayscale PNG. `byteOrder16Little` must be declared explicitly: the raw
+    /// buffer is a native little-endian `[UInt16]`, and without it CoreGraphics treats
+    /// every sample as big-endian and writes byte-swapped millimetres (1000 mm -> 59395).
+    /// That is the same defect the capture depth PNGs have carried on disk for months.
     static func encodePNG(_ depth: [UInt16], side: Int) -> Data? {
         var bytes = depth
         return bytes.withUnsafeMutableBytes { raw -> Data? in
@@ -108,7 +112,8 @@ enum FaceDepthRender {
                                       bitsPerComponent: 16, bitsPerPixel: 16,
                                       bytesPerRow: side * 2,
                                       space: CGColorSpaceCreateDeviceGray(),
-                                      bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                                      bitmapInfo: CGBitmapInfo.byteOrder16Little.union(
+                                          CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)),
                                       provider: provider, decode: nil,
                                       shouldInterpolate: false, intent: .defaultIntent)
             else { return nil }

@@ -328,7 +328,7 @@ enum AppConstants {
     // Anti-bleed now lives in the REDUCE step (robustColorMedian), which can't lose
     // coverage. If revisiting these, change ONE knob per recolor.
     static let colorizationOcclusionToleranceMM: Float = 50.0 // FLOOR (mm) of the depth-occlusion tolerance; effective tol = max(floor, frac × depth). 25 mm starved inliers (see above)
-    static let colorizationOcclusionToleranceFrac: Float = 0  // distance-proportional tolerance part (LiDAR error grows with range). 0 = fixed floor only (legacy)
+    static let colorizationOcclusionToleranceFrac: Float = 0.05 // distance-proportional tolerance part (LiDAR error grows with range, and the mesh the cube-face z-buffer is rasterized from IS the mesh being colored, so its own reconstruction error shows up here too). 0 = fixed floor only. Held at 0 while the depth reads were byte-scrambled — occlusion was inert then, so the knob measured nothing; at 5% the effective tolerance is the 50 mm floor out to 1 m and grows with range
     static let colorizationDepthEdgeMaxSpreadFrac: Float = 0  // reject observations whose 3×3 depth neighborhood spans > frac × depth (silhouette-straddle guard). 0 = disabled (legacy); 0.15 killed too much near ALL edges
     static let colorizationBackfaceDotMin: Float = -1          // reject observations with signed n·v below this (seen-through-own-surface guard). -1 = disabled (legacy abs() weighting); 0.0 also zeroed noisy-normal grazing coverage
     static let thumbnailMaxWidth: CGFloat = 800              // max width for scan thumbnails

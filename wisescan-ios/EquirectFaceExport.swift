@@ -100,13 +100,31 @@ enum EquirectFaceExport {
         // Without it the colorizer disables occlusion for face frames and paints through
         // walls — and bleed looks exactly like misregistration, which is why the
         // 2026-08-17 runs could not separate them.
-        let mesh = (try? Data(contentsOf: rawDataDir.appendingPathComponent("mesh.obj")))
+        var mesh = (try? Data(contentsOf: rawDataDir.appendingPathComponent("mesh.obj")))
             .flatMap { MeshParser.parseOBJ(from: $0) }
             ?? (try? Data(contentsOf: rawDataDir.deletingLastPathComponent()
                             .appendingPathComponent("mesh.obj")))
             .flatMap { MeshParser.parseOBJ(from: $0) }
         if mesh == nil {
             PerfDiag.log("[Colorize] face depth unavailable (no mesh.obj) — occlusion OFF, expect bleed")
+        }
+        // Registered rescans: BOTH mesh.obj copies are baked into the location's CANONICAL
+        // frame (ScanPostprocessor mirrors the transformed mesh into raw_data/), while the
+        // face poses below come from the sidecars in this scan's RAW capture frame. Rasterising
+        // canonical geometry through raw cameras misregisters the depth by the registration
+        // translation — decimeters — so occlusion then rejects nearly every sample. Undo it,
+        // exactly as VertexColorAccumulator does for the same reason.
+        if let canonical = mesh,
+           let reg = SaveRegistration.loadSidecar(scanDirectory: rawDataDir.deletingLastPathComponent()),
+           reg.applied, let transform = reg.transformMatrix {
+            let inverse = transform.inverse
+            mesh = MeshParser.OBJData(vertices: canonical.vertices.map {
+                let point = inverse * SIMD4<Float>($0, 1)
+                return SIMD3(point.x, point.y, point.z)
+            }, faces: canonical.faces)
+            PerfDiag.log(String(format: "[Colorize] face depth: un-applied registration (trans=%.1fcm)",
+                                simd_length(SIMD3(transform.columns.3.x, transform.columns.3.y,
+                                                  transform.columns.3.z)) * 100))
         }
 
         var written = 0
