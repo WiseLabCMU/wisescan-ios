@@ -59,10 +59,15 @@ enum EquirectPostCalibration {
         let swayM: Float?
         let swayDeg: Float?
 
-        var swayed: Bool {
-            (swayM ?? 0) > AppConstants.thetaSwayWarnMeters
-                || (swayDeg ?? 0) > AppConstants.thetaSwayWarnDegrees
+        /// Lens displacement over the exposure window, in metres.
+        var swayCombinedM: Float {
+            AppConstants.swayCombinedMeters(translationM: swayM ?? 0, degrees: swayDeg ?? 0)
         }
+
+        /// The SOLVE-side gate, which is much looser than the operator warning: dropping
+        /// a still costs the solve a viewpoint, and viewpoint spread is what breaks the
+        /// room's rotational symmetry.
+        var swayed: Bool { swayCombinedM > AppConstants.thetaSwayRejectCombinedMeters }
     }
 
     /// Entry point from the postprocessor. Returns a short human status for the log.
@@ -191,7 +196,7 @@ enum EquirectPostCalibration {
             ? selected.flatMap { first in selected.map { simd_distance(first.phonePos, $0.phonePos) } }.max() ?? 0
             : 0
         let meanSwayMm = selected.isEmpty ? 0
-            : selected.map { ($0.swayM ?? 0) * 1000 }.reduce(0, +) / Float(selected.count)
+            : selected.map { $0.swayCombinedM * 1000 }.reduce(0, +) / Float(selected.count)
         PerfDiag.log(String(format: "[RigCal] postprocess solve: dy=%.3fm dLat=%.3fm yaw=%.2f° pitch=%.2f° elev=%.1f° "
                             + "(residual %.2f px, %@, %d inputs, spread %.2fm, mean sway %.0fmm)",
                             p.dy, p.dLateral, p.yaw * 180 / .pi, p.pitchResidual * 180 / .pi,
@@ -262,7 +267,9 @@ enum EquirectPostCalibration {
             }
             return clean
         }
-        let bySway = stills.sorted { ($0.swayM ?? 0) < ($1.swayM ?? 0) }
+        // Rank on the same combined lens displacement the gates use — translation
+        // alone put stills in the wrong order, since rotation dominates the metric.
+        let bySway = stills.sorted { $0.swayCombinedM < $1.swayCombinedM }
         if stills.contains(where: \.swayed) {
             report("Too few clean stills — least-swayed retained for the solve")
         }
@@ -289,14 +296,14 @@ enum EquirectPostCalibration {
         guard stills.count > cap else { return selectBySpread(stills, cap: cap) }
         let shortlistSize = min(stills.count, cap + 2)
         let steadiest = stills
-            .sorted { ($0.swayM ?? 0) < ($1.swayM ?? 0) }
+            .sorted { $0.swayCombinedM < $1.swayCombinedM }
             .prefix(shortlistSize)
             .sorted { $0.sequence < $1.sequence }
         let chosen = selectBySpread(Array(steadiest), cap: cap)
         report("Solving from \(chosen.count) of \(stills.count) stills (steadiest, best spread)")
         PerfDiag.log("[RigCal] selected stills "
-            + chosen.map { "#\($0.sequence)(\(Int(($0.swayM ?? 0) * 1000))mm)" }.joined(separator: " ")
-            + " from " + stills.map { "#\($0.sequence)(\(Int(($0.swayM ?? 0) * 1000))mm)" }.joined(separator: " "))
+            + chosen.map { "#\($0.sequence)(\(Int($0.swayCombinedM * 1000))mm)" }.joined(separator: " ")
+            + " from " + stills.map { "#\($0.sequence)(\(Int($0.swayCombinedM * 1000))mm)" }.joined(separator: " "))
         return chosen
     }
 

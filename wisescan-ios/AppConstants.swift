@@ -272,8 +272,33 @@ enum AppConstants {
     /// (calibrationElevationCutoffDeg), which this mask is meant to replace.
     static let rigNadirMaskDeg: Float = 20
 
-    static let thetaSwayWarnMeters: Float = 0.03
-    static let thetaSwayWarnDegrees: Float = 2.0
+    /// Sway is judged as ONE number: the distance the 360° lens actually moved during
+    /// the exposure window. The rig pivots near the operator's hands, so an angular
+    /// wobble displaces the lens by `rodLength · tan(angle)` — across the 41 usable
+    /// field stills that rotation term is 59% of the median and up to 89% of the worst
+    /// case, while translation alone never once exceeded 9 mm. The old pair of gates
+    /// (30 mm OR 2.0°) was therefore inert: 0 of 41 stills tripped either one.
+    ///
+    /// Distribution of combined displacement over those 41: p50 7.8 mm, p90 14.5,
+    /// p95 17.5, max 24.9. 18 mm flags 1 in 41 — about one warning every eight scans —
+    /// and is the old 2.0° gate re-expressed on a 0.72 m rod (1.42°), which is ~23 px
+    /// on a 2048 cube face at 1 m. Below that the sway is smaller than the pose error
+    /// the solve carries anyway.
+    static let thetaSwayWarnCombinedMeters: Float = 0.018
+    /// Solve-side rejection is deliberately far looser than the operator warning: a
+    /// warning costs a re-shoot, but dropping a still costs the solve a whole viewpoint,
+    /// and viewpoint spread is what breaks the room's rotational symmetry. Nothing in
+    /// the archive reaches this — it is a blunder guard, not a quality knob.
+    static let thetaSwayRejectCombinedMeters: Float = 0.040
+    /// Lever arm used when the operator has not measured the rig. See rigRodHeightMeters.
+    static let thetaSwayFallbackRodMeters: Float = 0.75
+
+    /// Lens displacement in metres from the two things the motion probe measures.
+    static func swayCombinedMeters(translationM: Float, degrees: Float) -> Float {
+        let measured = Float(UserDefaults.standard.double(forKey: Key.rigMeasuredDyMeters))
+        let rod = measured > 0.1 ? measured : thetaSwayFallbackRodMeters
+        return translationM + rod * tan(abs(degrees) * .pi / 180)
+    }
     /// Solver v8 yaw anchor. The edge cost is precise inside a basin but its basin
     /// CHOICE aliases in rectangular rooms, so the phone's keyframes — gravity-aligned
     /// and absolute — pick the basin first. 8 keyframes at stride 8 gave a clear winner

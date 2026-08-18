@@ -87,9 +87,12 @@ extension ThetaCameraManager {
             }
         }
 
-        var swayed: Bool {
-            exposureM > AppConstants.thetaSwayWarnMeters || exposureDeg > AppConstants.thetaSwayWarnDegrees
+        /// Lens displacement over the exposure window — the quantity that blurs the image.
+        var exposureCombinedM: Float {
+            AppConstants.swayCombinedMeters(translationM: exposureM, degrees: exposureDeg)
         }
+
+        var swayed: Bool { exposureCombinedM > AppConstants.thetaSwayWarnCombinedMeters }
     }
 
     /// How long the operator must actually hold still after tapping: the learned ack
@@ -147,9 +150,10 @@ extension ThetaCameraManager {
         if motion.swayed {
             swayedStillCount += 1
             playThetaSwayWarnCue()
-            log(.capture, String(format: "⚠️ Still #%d: moved %.0f cm / %.1f° during the exposure "
-                + "window — its pose may not match the pano. Hold still until the done tone.",
-                seq, motion.exposureM * 100, motion.exposureDeg))
+            log(.capture, String(format: "⚠️ Still #%d: the 360° lens moved %.0f mm during the "
+                + "exposure window (%.0f mm shift + %.1f° tilt) — its pose may not match the pano. "
+                + "Hold still until the done tone.",
+                seq, motion.exposureCombinedM * 1000, motion.exposureM * 1000, motion.exposureDeg))
         }
         return motion
     }
