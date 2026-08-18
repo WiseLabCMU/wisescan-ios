@@ -39,6 +39,16 @@ final class ThetaBLEManager: NSObject {
         /// pairing code — spec: "the camera does not use pairing". Carries the
         /// harvested identity so the caller can prefill manual setup.
         case needsWiFiSetup(model: String, serial: String)
+        /// The link is up and the control characteristic is present, but the camera
+        /// REFUSED the write at the ATT layer. Distinguished from `.writeFailed` because
+        /// the remedy is an operator action, not a retry: on 0x03 (write-not-permitted)
+        /// iOS does not escalate security, does not show a passkey prompt and does not
+        /// retry — it is deterministic in milliseconds and permanent for the life of the
+        /// bond. Observed 4/4 on 2026-08-18 across three connect cycles over 6.5 minutes,
+        /// on the same firmware that had fired the BLE shutter cold the day before, so it
+        /// is a stale iOS GATT cache or a camera-side authorization state — either way,
+        /// cured only by forgetting the device and re-pairing.
+        case controlRefused(CBATTError.Code)
         var errorDescription: String? {
             switch self {
             case .bluetoothOff: return "Bluetooth is off"
@@ -47,6 +57,10 @@ final class ThetaBLEManager: NSObject {
             case .linkNotReady: return "BLE link not ready"
             case .unsupportedCamera(let why): return why
             case .needsWiFiSetup(let model, _): return "\(model) needs Wi-Fi setup first"
+            case .controlRefused:
+                return "The camera refused Bluetooth control. In Settings → Bluetooth, "
+                    + "tap the ⓘ next to the camera and Forget This Device, then pair it "
+                    + "again from Add Camera."
             }
         }
     }
@@ -109,7 +123,18 @@ final class ThetaBLEManager: NSObject {
     /// Z1 fw 3.60.3 — GetInfo/GetState read fine unregistered, every v1 char and the
     /// auth char itself answered handle-invalid).
     var canWakeOverBLE: Bool { isLinkReady && chars[Self.ccv2SetOptionsChar] != nil }
-    var canShutterOverBLE: Bool { isLinkReady && chars[Self.ccv2ShutterChar] != nil }
+    /// Readiness is a write ACK coming back clean, not a characteristic existing. On
+    /// 2026-08-18 the shutter characteristic was present and `isLinkReady` was true for
+    /// the whole session while every control write was refused at the ATT layer, so the
+    /// record-start gate never fired and six stills silently fell back to OSC. See
+    /// `verifyControlWritable`.
+    var canShutterOverBLE: Bool {
+        isLinkReady && chars[Self.ccv2ShutterChar] != nil && controlVerifiedForLink
+    }
+    /// Scoped to the PHYSICAL LINK, never the app session: cleared on disconnect and at
+    /// the top of `establishLink`, because a fresh connection is the only thing that can
+    /// re-trigger encryption or re-read a moved attribute table.
+    var controlVerifiedForLink = false
     /// Mirrors key events into ThetaCameraManager's card log (wired at its init).
     var onLog: ((String) -> Void)?
 
@@ -206,6 +231,14 @@ final class ThetaBLEManager: NSObject {
             onLog?("BLE wake sent — waiting for the camera's Wi-Fi")
             try? await Task.sleep(nanoseconds: 3_000_000_000)   // AP rise headstart
             return true
+        } catch ThetaBLEManager.BLEError.controlRefused {
+            // This is where 2026-08-18 first announced the problem — six minutes and one
+            // wasted still before anyone acted on it. Say what fixes it, right here.
+            onLog?("The camera refused Bluetooth control — Settings → Bluetooth → ⓘ next to the "
+                   + "camera → Forget This Device, then pair it again from Add Camera. "
+                   + "Trying Wi-Fi directly.")
+            Self.log.notice("BLE wake refused at the ATT layer — bond needs to be rebuilt")
+            return false
         } catch {
             onLog?("BLE wake unavailable (\(error.localizedDescription)) — trying Wi-Fi directly")
             return false
@@ -273,6 +306,42 @@ final class ThetaBLEManager: NSObject {
             peripheral.writeValue(Data("{\"optionNames\":[\"_networkType\"]}".utf8),
                                   for: char, type: .withResponse)
         }
+    }
+
+    /// Prove the control plane actually accepts writes on THIS link, without taking a
+    /// picture. Reuses the `_networkType` GetOptions write: same characteristic family as
+    /// the shutter, zero side effects, and the write ack alone settles it — the camera's
+    /// reply is irrelevant here, only whether the ATT write was permitted.
+    @discardableResult
+    func verifyControlWritable(timeout: TimeInterval = 4) async -> Bool {
+        guard isLinkReady, chars[Self.ccv2GetOptionsChar] != nil else {
+            controlVerifiedForLink = false
+            return false
+        }
+        if controlVerifiedForLink { return true }
+        do {
+            try await writeJSON("{\"optionNames\":[\"_networkType\"]}",
+                                to: Self.ccv2GetOptionsChar, timeout: timeout)
+            controlVerifiedForLink = true
+            return true
+        } catch {
+            controlVerifiedForLink = false
+            let refused = (error as? BLEError).map { if case .controlRefused = $0 { return true } else { return false } } ?? false
+            onLog?(refused
+                   ? "BLE control REFUSED by the camera — forget it in Settings → Bluetooth and re-pair"
+                   : "BLE control probe failed: \(error.localizedDescription)")
+            Self.log.notice("control writability probe failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    /// One real recovery attempt for a refused control plane: a fresh connection is the
+    /// only thing that can re-trigger encryption or re-read a moved attribute table.
+    /// A second refusal is conclusive — do not loop.
+    func recoverControlPlane() async -> Bool {
+        teardown()
+        guard (try? await ensureLinkReady()) != nil else { return false }
+        return await verifyControlWritable()
     }
 
     /// Reach the stored camera and get the link to ready (services discovered,

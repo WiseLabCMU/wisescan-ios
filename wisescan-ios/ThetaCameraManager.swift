@@ -274,6 +274,18 @@ final class ThetaCameraManager {
     ///
     /// Returns true when the camera is ready; false means the operator should be told
     /// the scan will be phone-only.
+    /// Settle which shutter path this scan actually has, BEFORE anything depends on the
+    /// answer. A present shutter characteristic on a ready link is not evidence: on
+    /// 2026-08-18 both held for the whole session while every control write was refused
+    /// at the ATT layer, so `canShutterOverBLE` said yes, the record-start prompt never
+    /// fired, and six stills silently ran OSC with a 3.4 s ack the sway window then
+    /// anchored on. One probe write, and at most one reconnect-and-retry.
+    func prepareShutterPath() async {
+        guard ThetaBLEManager.shared.chars[ThetaBLEManager.ccv2ShutterChar] != nil else { return }
+        if await ThetaBLEManager.shared.verifyControlWritable() { return }
+        _ = await ThetaBLEManager.shared.recoverControlPlane()
+    }
+
     @discardableResult
     func verifyReadyForCapture() async -> Bool {
         guard isConnected else { return false }
@@ -283,7 +295,10 @@ final class ThetaCameraManager {
 
         let stored = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID)
         let onCameraNetwork = await currentSSID().map { $0 == stored } ?? true
-        if onCameraNetwork, await ThetaBLEManager.shared.isCameraResponding() { return true }
+        if onCameraNetwork, await ThetaBLEManager.shared.isCameraResponding() {
+            await prepareShutterPath()
+            return true
+        }
         if onCameraNetwork, !ThetaBLEManager.shared.isLinkReady {
             // No BLE link to ask over (Z1, or a dropped link) — trust the network check
             // and let the first still surface any real failure.
@@ -892,6 +907,20 @@ final class ThetaCameraManager {
             lastShutterPath = "ble"
             bleWriteFailures = 0
             return url
+        } catch ThetaBLEManager.BLEError.controlRefused {
+            // ONE strike, and a separate counter. The 2-strike rule below exists to stop
+            // burning the 3 s write watchdog per still on a flaky link; a refusal costs
+            // nothing to attempt and has never once recovered on the same link (0/4 on
+            // 2026-08-18), so there is nothing to spend a second still learning. It also
+            // must not consume bleWriteFailures — the two failures need separate budgets.
+            if !bleShutterDegraded {
+                bleShutterDegraded = true
+                log(.connection, "The camera refused Bluetooth control — using Wi-Fi for the rest of this "
+                    + "scan. To fix it: Settings → Bluetooth → tap ⓘ next to the camera → Forget This "
+                    + "Device, then pair it again from Add Camera.")
+            }
+            lastShutterPath = "osc"
+            return try await triggerStill(onAck: onAck)
         } catch ThetaBLEManager.BLEError.writeFailed(let why) {
             bleWriteFailures += 1
             log(.capture, "BLE shutter write failed (\(why)) — falling back to OSC")

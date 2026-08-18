@@ -115,12 +115,7 @@ extension CaptureView {
             showRigHeightPrompt = true
             return
         }
-        guard ThetaCameraManager.shared.isConnected,
-              !ThetaCameraManager.shared.shutterPathIsBLE else {
-            startRecording()
-            return
-        }
-        showBLEShutterPrompt = true
+        continueAfterRigHeightWarning()
     }
 
     /// Unset, or outside what any real rig measures.
@@ -130,13 +125,26 @@ extension CaptureView {
     }
 
     /// Prompt action: past the rig-height question, carry on with the shutter-path one.
+    ///
+    /// The path has to be PROVEN here, not read off `canShutterOverBLE`, and it has to be
+    /// proven before recording rather than alongside it: the probe used to run in a
+    /// detached Task from `armThetaForRecording`, racing the first still it was meant to
+    /// protect. One control write settles it in well under a second.
     func continueAfterRigHeightWarning() {
-        guard ThetaCameraManager.shared.isConnected,
-              !ThetaCameraManager.shared.shutterPathIsBLE else {
+        guard ThetaCameraManager.shared.isConnected else {
             startRecording()
             return
         }
-        showBLEShutterPrompt = true
+        isReconnectingBLE = true
+        Task { @MainActor in
+            await ThetaCameraManager.shared.prepareShutterPath()
+            isReconnectingBLE = false
+            if ThetaCameraManager.shared.shutterPathIsBLE {
+                startRecording()
+            } else {
+                showBLEShutterPrompt = true
+            }
+        }
     }
 
     /// Prompt action: try to bring the BLE link back, then record either way — a failed
@@ -144,10 +152,17 @@ extension CaptureView {
     func reconnectBLEThenRecord() {
         isReconnectingBLE = true
         Task { @MainActor in
-            try? await ThetaBLEManager.shared.ensureLinkReady()
+            // `ensureLinkReady` early-returns when the link IS ready, which is the exact
+            // state a refused control plane leaves behind — so on that failure this used
+            // to be a placebo. Tear the link down first: a fresh connection is the only
+            // thing that can re-trigger encryption or re-read a moved attribute table.
+            _ = await ThetaBLEManager.shared.recoverControlPlane()
             isReconnectingBLE = false
             if !ThetaBLEManager.shared.canShutterOverBLE {
-                showTransientMessage("Bluetooth didn't come back — recording over Wi-Fi.", duration: 4)
+                showTransientMessage(
+                    "Bluetooth control is still refused — recording over Wi-Fi. To fix it: "
+                    + "Settings → Bluetooth → ⓘ next to the camera → Forget This Device, then "
+                    + "pair it again from Add Camera.", duration: 8)
             }
             startRecording()
         }
