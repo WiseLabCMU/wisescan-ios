@@ -29,8 +29,9 @@ import simd
 ///     (staging_0755126C) puts the hardware between −73° and nadir, about a 17° cone;
 ///     the default carries a few degrees of margin over that. That bundle was earlier
 ///     annotated "tripod-mounted" — it is not: a nadir reprojection shows a bare hand,
-///     wrist and watch, as do all 12 distinct field scans in the archive. No tripod run
-///     exists, so the cone has only ever been measured handheld.
+///     wrist and watch, as do all 12 distinct field scans in the archive. The rig is
+///     occasionally set on a tripod for testing, but no such run is in the archive and
+///     it is not the working mode — size the cone for handheld.
 ///  2. SEGMENTED (people). The operator is NOT reliably under the camera — with the rig
 ///     on a tripod, or held out on a rod, they sit at ordinary elevations off to one
 ///     side (measured at −30° to −60° in the same bundle). Geometry cannot predict that;
