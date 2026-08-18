@@ -60,12 +60,25 @@
     },
     "rig_calibration_source": {
       "type": ["string", "null"],
-      "enum": ["solved", "mechanical_prior", null],
-      "description": "Source of the rig calibration used for cam_transform ('solved' or 'mechanical_prior')."
+      "enum": ["solved_capture", "solved_postprocess", "prior_postprocess", "mechanical_prior", null],
+      "description": "Source of the rig calibration used for cam_transform. Consumers should test for the 'solved' PREFIX rather than an exact match: anything starting with 'solved' carries a fitted rig extrinsic, anything else is the mechanical prior."
     },
-    "rig_calibration_residual_cm": {
+    "rig_calibration_residual_px_rms": {
       "type": ["number", "null"],
-      "description": "Calibration residual error in centimeters if solved."
+      "description": "RMS reprojection error of the calibration fit, in pixels of the 512-wide working equirect. NOT comparable across scans with different still counts: the RMS rises with the number of constraints, so a 5-input solve cannot be read against a 3-input one."
+    },
+    "rig_calibration_solver_version": {
+      "type": ["integer", "null"],
+      "description": "Version of the rig solver that produced cam_transform. A bump forces a re-solve on the scan's next Process, which is how superseded calibrations self-heal."
+    },
+    "rig_calibration_railed": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Solved parameters that came back sitting on a bound of their search box, one human-readable phrase each. NON-EMPTY MEANS THE POSE IS APPROXIMATE: the optimizer ran out of model rather than converging on the data, and the residual is a boundary value, not a fit. Empty array is the healthy case; the key is written on every bake, so its ABSENCE means the producing build predates this field, not that nothing was railed."
+    },
+    "elevation_offset_deg": {
+      "type": ["number", "null"],
+      "description": "Uniform vertical registration offset between the equirect's rows and the latitude mapping, solved per scan (+ = image content sits lower than geometry predicts). Consumers sampling the equirect with the standard mapping should compensate by this much. This is a fitted nuisance parameter absorbing model error, not a measured camera property, and is expected to be retired."
     }
   },
   "required": [

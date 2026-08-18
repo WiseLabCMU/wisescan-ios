@@ -221,13 +221,23 @@ enum EquirectPostCalibration {
                             result.residualPx, result.converged ? "converged" : "NOT converged",
                             inputs.count, spreadM, meanSwayMm))
 
+        // A parameter sitting on its bound is not a measurement, it is the optimizer telling
+        // you the model cannot reach the data — and it stamps as "solved, converged, 2.9 px"
+        // exactly like a real fit, which is how a boundary has been shipping as a pose.
+        // Name every railed parameter in the log AND in the sidecar so downstream can tell.
+        let rails = railedParameters(profile: p, bounds: bounds, result: result, anchorYaw: anchorYaw)
+        if !rails.isEmpty {
+            PerfDiag.log("[RigCal] ⚠️ AT THE LIMIT: \(rails.joined(separator: ", ")) — the residual is a "
+                + "boundary, not a fit; treat these poses as approximate")
+        }
+
         guard result.converged, result.residualPx >= 0, result.residualPx.isFinite else {
             bake(stills: stills, profile: stored, source: sourcePrior, residual: nil)
             return "solver did not converge — prior poses stamped"
         }
 
         bake(stills: stills, profile: result.profile, source: sourceSolved,
-             residual: result.residualPx, elevOffsetDeg: result.elevOffsetDeg)
+             residual: result.residualPx, elevOffsetDeg: result.elevOffsetDeg, railed: rails)
         // Rolling geometry: persist the refined rig constants (yaw stored too, but it is
         // session-local by hardware behavior — the next scan re-solves it).
         result.profile.with(cameraModel: stored.cameraModel,
@@ -346,7 +356,8 @@ enum EquirectPostCalibration {
     /// Write cam_transform + provenance (+ residual when solved) into every sidecar.
     private nonisolated static func bake(stills: [StillRecord], profile: RigProfile,
                                          source: String, residual: Float?,
-                                         elevOffsetDeg: Float? = nil) {
+                                         elevOffsetDeg: Float? = nil,
+                                         railed: [String] = []) {
         for still in stills {
             guard let data = try? Data(contentsOf: still.sidecarURL),
                   var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -363,6 +374,9 @@ enum EquirectPostCalibration {
             // Image-vertical registration nuisance — consumers sampling the equirect with
             // the standard mapping (e.g. face export) can compensate by this much.
             if let elevOffsetDeg { obj["elevation_offset_deg"] = Double(elevOffsetDeg) }
+            // Written on EVERY bake, empty array included: an absent key would be
+            // indistinguishable from "written by a build that did not check".
+            obj["rig_calibration_railed"] = railed
             if let out = try? JSONSerialization.data(withJSONObject: obj,
                                                      options: [.prettyPrinted, .sortedKeys]) {
                 try? out.write(to: still.sidecarURL, options: .atomic)
@@ -396,6 +410,40 @@ enum EquirectPostCalibration {
             return .mechanicalPrior
         }
         return stored
+    }
+
+    /// Which solved parameters came back on (or within a hair of) a bound. "Within a hair"
+    /// matters: Nelder-Mead approaches a wall asymptotically, so an exact equality test
+    /// misses the case entirely — 2 mm inside a ±50 mm box is a rail, not a fit.
+    private nonisolated static func railedParameters(
+        profile: RigProfile, bounds: RigCalibrationSolver.SolveBounds,
+        result: RigCalibrationSolver.CalibrationResult, anchorYaw: Float?) -> [String] {
+        var rails: [String] = []
+        let dyEdge = abs(abs(profile.dy - bounds.anchorDy) - bounds.dyHalf)
+        if dyEdge < 0.005 {
+            rails.append(String(format: "dy %.3fm on its ±%.0fcm bound", profile.dy, bounds.dyHalf * 100))
+        }
+        let latEdge = abs(abs(profile.dLateral - bounds.anchorLat) - bounds.latHalf)
+        if latEdge < 0.005 {
+            rails.append(String(format: "dLateral %.3fm on its ±%.0fcm bound", profile.dLateral, bounds.latHalf * 100))
+        }
+        let pitchDeg = profile.pitchResidual * 180 / .pi
+        if bounds.pitchHalfDeg - abs(pitchDeg) < 0.5 {
+            rails.append(String(format: "pitch %.1f° on its ±%.0f° bound", pitchDeg, bounds.pitchHalfDeg))
+        }
+        // The elevation sweep's own limit, derived the same way the solver derives the value.
+        if abs(result.elevOffsetDeg) >= AppConstants.calibrationElevationSweepLimitDeg - 0.05 {
+            rails.append(String(format: "elevation %.1f° at the end of its sweep", result.elevOffsetDeg))
+        }
+        // Not a bound, but the same class of problem: the edge cost walked a long way from
+        // the basin the keyframes picked, and the keyframes are the absolute reference.
+        if let anchorYaw {
+            let delta = abs(atan2(sin(profile.yaw - anchorYaw), cos(profile.yaw - anchorYaw))) * 180 / .pi
+            if delta > AppConstants.yawAnchorDisagreementWarnDeg {
+                rails.append(String(format: "yaw %.1f° from the keyframe anchor", delta))
+            }
+        }
+        return rails
     }
 
     private nonisolated static func meshURL(scanDir: URL, rawDataDir: URL) -> URL {

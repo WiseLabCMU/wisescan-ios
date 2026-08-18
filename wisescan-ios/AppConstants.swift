@@ -310,6 +310,17 @@ enum AppConstants {
     /// How far the edge-cost solve may roam from the anchor. Wide enough for the anchor
     /// to be a few degrees out, far too narrow to reach the next alias (~90°).
     static let yawAnchorWindowDeg: Float = 35
+    /// How far the edge solve may walk from the keyframe anchor before the result is
+    /// flagged. The anchor is an ABSOLUTE reference (gravity-aligned ARKit keyframes with
+    /// their own depth), the edge cost is a relative refinement with a known systematic
+    /// attractor, so a large disagreement means the refinement wandered, not that the
+    /// anchor was wrong. Field: 16.6° on the 2026-08-18 19:19 scan, alongside two
+    /// parameters sitting on their bounds.
+    static let yawAnchorDisagreementWarnDeg: Float = 12
+    /// Half-range of the solver's 1-D elevation-registration sweep, in degrees. Derived
+    /// from the sweep itself (±16 rows of a 256-row edge map): keep in step with the
+    /// `stride(from: -16, through: 16)` in RigCalibrationSolver.
+    static let calibrationElevationSweepLimitDeg: Float = 16 * 180 / 256
     static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry
     static let calibrationMinSpreadMeters: Float = 1.0                 // live sufficiency meter: max pairwise still-position distance below this = weak baseline for the Process-step solve
     static let calibrationResidualGreenPx: Float = 1.4                 // RMS reprojection error (equirect px, 512-wide) ≤ this → green. Behavior-preserving √ of the old mean-squared 2.0
