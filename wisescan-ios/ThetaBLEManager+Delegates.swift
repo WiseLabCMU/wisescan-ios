@@ -63,6 +63,7 @@ extension ThetaBLEManager: CBCentralManagerDelegate {
         let detail = error.map { " (" + $0.localizedDescription + ")" } ?? ""
         Self.log.notice("link dropped\(detail, privacy: .public)")
         onLog?("BLE link dropped\(detail)")
+        noteUnproductiveLink(error)
         chars.removeAll()
         linkState = .idle
         controlVerifiedForLink = false
@@ -101,6 +102,7 @@ extension ThetaBLEManager: CBPeripheralDelegate {
             clearWatchdog("link")
             linkState = .ready
             controlVerifiedForLink = false
+            linkReadyAt = Date()
             // Property bitmasks at link-ready settle the next refusal in one line: if a
             // control characteristic still advertises .write when the camera answers ATT
             // 0x03, the attribute table iOS cached has moved (stale GATT cache); if .write

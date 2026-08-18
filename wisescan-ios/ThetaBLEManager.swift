@@ -135,6 +135,11 @@ final class ThetaBLEManager: NSObject {
     /// the top of `establishLink`, because a fresh connection is the only thing that can
     /// re-trigger encryption or re-read a moved attribute table.
     var controlVerifiedForLink = false
+    /// When this link reached `.ready`, and how many times in a row a link has reached
+    /// ready and then died without a single successful control operation. See
+    /// `noteUnproductiveLink` — that pattern is the half-cleared-pairing signature.
+    var linkReadyAt: Date?
+    var unproductiveLinkCycles = 0
     /// Mirrors key events into ThetaCameraManager's card log (wired at its init).
     var onLog: ((String) -> Void)?
 
@@ -333,6 +338,39 @@ final class ThetaBLEManager: NSObject {
             Self.log.notice("control writability probe failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
+    }
+
+    /// Ready, then dead again inside the ATT transaction timeout, with nothing to show
+    /// for it — twice in a row. That is not a flaky radio, it is a PAIRING THAT ONLY ONE
+    /// SIDE FORGOT: the open CCv2 subset (GetInfo, NotifyState presence) enumerates on an
+    /// unencrypted link, so the link goes ready; then the NotifyState subscribe — a CCCD
+    /// write on an attribute the camera still believes is bonded — stalls for 30 s and
+    /// CoreBluetooth drops the connection. Clearing the bond on the phone alone produces
+    /// exactly this, because the camera keeps its half.
+    ///
+    /// Nothing in software can re-pair from here: iOS will not raise the passkey dialog
+    /// while the camera thinks it is already bonded. Say so, once, instead of looping.
+    func noteUnproductiveLink(_ error: Error?) {
+        guard let readyAt = linkReadyAt, !controlVerifiedForLink,
+              Date().timeIntervalSince(readyAt) < 45 else {
+            if controlVerifiedForLink { unproductiveLinkCycles = 0 }
+            linkReadyAt = nil
+            return
+        }
+        linkReadyAt = nil
+        unproductiveLinkCycles += 1
+        let paired = (error as? CBError).map {
+            $0.code == .peerRemovedPairingInformation || $0.code == .encryptionTimedOut
+        } ?? false
+        guard paired || unproductiveLinkCycles == 2 else { return }
+        let advice = "The camera's Bluetooth pairing is out of sync — it connects, then drops "
+            + "after about 30 s without ever accepting a command. Both sides have to forget "
+            + "each other: clear the pairing on the CAMERA (Settings → Bluetooth on its "
+            + "screen; a network/settings reset also clears it), then remove and re-add the "
+            + "camera here so it can pair fresh."
+        onLog?(advice)
+        Self.log.notice("unproductive link cycle \(self.unproductiveLinkCycles, privacy: .public) — pairing out of sync (camera still bonded, phone is not)")
+        unproductiveLinkCycles = 0
     }
 
     /// One real recovery attempt for a refused control plane: a fresh connection is the
