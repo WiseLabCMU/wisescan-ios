@@ -781,7 +781,7 @@ struct ThetaCameraCard: View {
                             sheetIsAdding = true
                         }
                     } footer: {
-                        Text("Clears the stored Wi-Fi credentials and Bluetooth pairing state, then leaves this sheet ready to add another camera. For a full reset, also remove the camera in iOS Settings → Bluetooth.")
+                        Text("Clears the stored Wi-Fi credentials and this app's Bluetooth pairing state, then leaves this sheet ready to add another camera.\n\nThis cannot remove the iOS Bluetooth bond — no app can. If you are re-pairing because Bluetooth stopped accepting commands, do iOS Settings → Bluetooth → ⓘ next to the camera → Forget This Device FIRST; that is the step that actually releases it, and without it the camera will connect and then drop about 30 seconds later.")
                     }
                 }
             }

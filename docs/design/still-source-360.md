@@ -1257,6 +1257,20 @@ prerequisite: Bluetooth ON in the X's touchscreen menu.**
   active" caption appears → record a scan: stills should log "Shutter via BLE —
   file pushed" with sidecars carrying the pushed camera_file_url; downloads +
   camera.delete sweep unchanged over Wi-Fi.
+- **RE-PAIRING: the iOS system bond is the one that matters (field, 2026-08-18).**
+  After an ATT 0x03 refusal the recovery went: cleared the pairing on the camera →
+  still refused; app-level Forget This Camera → still refused. What finally released
+  it was **iOS Settings → Bluetooth → ⓘ → Forget This Device**. The app's own
+  "Forget This Camera" clears credentials and our stored peripheral identifier, but
+  it CANNOT remove the iOS bond — no public CoreBluetooth API does — so on its own it
+  never fixes a bond-state problem. Between the camera-side clear and the iOS-side
+  clear there is also an intermediate state where the link reaches `.ready` (the open
+  CCv2 subset enumerates unencrypted) and then dies ~29 s later on the NotifyState
+  CCCD write, which is the ATT transaction timeout; `noteUnproductiveLink` detects
+  that pattern and prints the recovery order. Recovery order, decisive step first:
+  1. iOS Settings → Bluetooth → ⓘ → **Forget This Device**
+  2. clear the pairing on the camera's own screen
+  3. Forget This Camera in the sheet, then Add Camera → Find Camera via Bluetooth
 - **First-tap connect failure SOLVED (360ble5 → 8d2fe19):** the field pattern "first
   Connect always fails, second always succeeds" was DHCP lag, not SSID lead time —
   `NEHotspotConfiguration.apply` completes at ASSOCIATION, the camera's DHCP/route

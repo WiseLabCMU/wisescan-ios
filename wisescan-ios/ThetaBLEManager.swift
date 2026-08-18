@@ -363,11 +363,16 @@ final class ThetaBLEManager: NSObject {
             $0.code == .peerRemovedPairingInformation || $0.code == .encryptionTimedOut
         } ?? false
         guard paired || unproductiveLinkCycles == 2 else { return }
+        // Order matters and was established the hard way (2026-08-18): clearing the pairing
+        // on the CAMERA alone does not free it, and neither does Forget This Camera in the
+        // app — the decisive step is iOS's own bond record in Settings → Bluetooth. Lead
+        // with that one.
         let advice = "The camera's Bluetooth pairing is out of sync — it connects, then drops "
-            + "after about 30 s without ever accepting a command. Both sides have to forget "
-            + "each other: clear the pairing on the CAMERA (Settings → Bluetooth on its "
-            + "screen; a network/settings reset also clears it), then remove and re-add the "
-            + "camera here so it can pair fresh."
+            + "after about 30 s without ever accepting a command. Fix it in this order: "
+            + "1) iOS Settings → Bluetooth → ⓘ next to the camera → Forget This Device (this "
+            + "is the step that actually releases it). 2) Clear the pairing on the camera's "
+            + "own screen. 3) Forget This Camera here, then Add Camera → Find Camera via "
+            + "Bluetooth and enter the passkey."
         onLog?(advice)
         Self.log.notice("unproductive link cycle \(self.unproductiveLinkCycles, privacy: .public) — pairing out of sync (camera still bonded, phone is not)")
         unproductiveLinkCycles = 0
