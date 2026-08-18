@@ -46,7 +46,17 @@ enum EquirectPostCalibration {
     /// geometry; fixed to the face-export convention (atan2(x, −z)), all scans re-solve.
     /// 8: keyframe-anchored yaw basin selection. The bump is load-bearing — scans
     /// solved by v7 re-solve on their next Process and self-heal their colouring.
-    static let solverVersion = 8
+    /// 9: v8's anchor never actually worked — it read depth with the byte order
+    /// inverted, zeroed the translation column of every keyframe pose (parking them all
+    /// at the world origin), and scored at the 1.0 m mechanical prior rather than the
+    /// operator's measured rig. Alongside that: the rig height is now converted from the
+    /// along-rod distance the operator measures to the world-vertical offset the model
+    /// uses, the solve's frozen inclusion mask / coarse yaw ranking / elevation sweep all
+    /// evaluate at the centre of the solve box instead of the generic prior, and the
+    /// operator/rig segmentation mask is subtracted from the edge cost (the −45° band
+    /// never reached the operator's upper body on ANY scan in the archive). Every one of
+    /// those changes what a v8 solve would have returned, so v8 scans re-solve.
+    static let solverVersion = 9
 
     struct StillRecord {
         let sequence: Int
@@ -111,9 +121,16 @@ enum EquirectPostCalibration {
         for (idx, still) in selected.enumerated() {
             report("Calibrating 360° rig (\(idx + 1)/\(selected.count))…")
             let edges = edgesPerStill[idx]
+            // The operator/rig mask for this still, written moments earlier in the same
+            // Process run. Absent (older scan, or generation failed) just falls back to
+            // the elevation band.
+            let maskURL = rawDataDir.appendingPathComponent("equirect_masks")
+                .appendingPathComponent(still.jpgURL.deletingPathExtension()
+                    .appendingPathExtension("png").lastPathComponent)
             guard edges.count >= AppConstants.calibrationMinMeshEdges,
                   let jpegData = try? Data(contentsOf: still.jpgURL),
-                  let edgeMap = RigCalibrationSolver.detectEquirectEdges(in: jpegData)
+                  let edgeMap = RigCalibrationSolver.detectEquirectEdges(
+                      in: jpegData, operatorMask: OperatorRigMask.load(pngAt: maskURL))
             else { continue }
             inputs.append(RigCalibrationSolver.CalibrationInput(
                 phoneToWorld: still.phoneToWorld, edgeMap: edgeMap, meshEdges: edges))

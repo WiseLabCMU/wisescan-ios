@@ -739,7 +739,14 @@ enum RigCalibrationSolver {
 
     /// Detect edges in an equirect JPEG and produce a distance transform.
     /// Uses CoreImage's edge detection + a brute-force distance transform on a small image.
-    static func detectEquirectEdges(in jpegData: Data, maxWidth: Int = 512) -> EdgeMap? {
+    /// `operatorMask` (white = usable, black = ignore) removes the operator and rig from
+    /// the cost function. The blunt −45° band below cannot: across every field scan in the
+    /// archive the segmented operator reaches ABOVE the band, by a median of ~72° of
+    /// azimuth, so their head and torso have been inside the cost on every solve — and
+    /// they are the one thing in the scene that moves WITH the rig, which is exactly the
+    /// systematic attractor the band exists to exclude.
+    static func detectEquirectEdges(in jpegData: Data, maxWidth: Int = 512,
+                                    operatorMask: OperatorRigMask.Mask? = nil) -> EdgeMap? {
         guard let source = CGImageSourceCreateWithData(jpegData as CFData, nil),
               let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -796,6 +803,25 @@ enum RigCalibrationSolver {
             for row in maskStart..<height {
                 for col in 0..<width { edgeMask[row * width + col] = false }
             }
+        }
+
+        // Operator/rig mask, nearest-neighbour sampled from its own resolution onto the
+        // edge raster. Applied ON TOP of the band, not instead of it: the band still
+        // catches the rod below the segmenter's reach, and the mask catches everything
+        // above it.
+        if let operatorMask, operatorMask.width > 0, operatorMask.height > 0 {
+            var dropped = 0
+            for row in 0..<height {
+                let sourceRow = min(operatorMask.height - 1, row * operatorMask.height / height)
+                for col in 0..<width where edgeMask[row * width + col] {
+                    let sourceCol = min(operatorMask.width - 1, col * operatorMask.width / width)
+                    if operatorMask.bytes[sourceRow * operatorMask.width + sourceCol] == 0 {
+                        edgeMask[row * width + col] = false
+                        dropped += 1
+                    }
+                }
+            }
+            PerfDiag.log("[RigCal] operator/rig mask removed \(dropped) edge pixels from the cost")
         }
 
         // Distance transform: for each pixel, distance to nearest edge pixel.
