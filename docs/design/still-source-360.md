@@ -866,9 +866,16 @@ below turned out different from what earlier status notes implied.
 - **Security P2 (default-credential warning)** and **P3 (CL-mode digest auth)** — same,
   design-only, no code. P2 blocked on knowing whether the connect flow ever holds the
   join password (recon item from the original security test-plan section, never run).
-- **`elevation_offset_deg` is stamped but not consumed** — `EquirectFaceExport` doesn't
-  yet compensate the cube-face sampling by it. Low priority until #1/#2 above show
-  whether the offset is large enough to matter downstream.
+- **`elevation_offset_deg` is a fitted absorber, not a measurement** — it IS consumed
+  (`EquirectFaceExport` shifts both the face colour sampling and the face masks by it; an
+  earlier note here claiming otherwise was wrong). Solved values across the 12 archived
+  field bundles span −11.25° to +5.63°, which is too large to be a real registration
+  constant and too inconsistent to be a rig property — it is soaking up error the rig
+  model cannot express (see the phone-frame re-parameterisation item). Expect it to
+  collapse toward zero once the offset lives in the phone frame; it stays for one solver
+  cycle so that collapse can be observed rather than assumed. Note the shift is applied
+  as a uniform latitude offset, which is not a rigid rotation of the sphere — another
+  reason to treat it as temporary.
 - **Rig-settings UI beyond the height field** — ticket-matching/BLE trigger, coverage
   marking, and other original P3 backlog items from earlier in the design doc remain
   untouched by the pivot.

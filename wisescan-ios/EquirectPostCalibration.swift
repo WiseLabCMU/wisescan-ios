@@ -144,7 +144,20 @@ enum EquirectPostCalibration {
         // the health check). Unmeasured rigs fall back to the mechanical envelope.
         // dLat/pitch/yaw always solve free — they have no such attractor and match
         // physical truth when dy isn't straining (post2/3).
-        let measuredDy = Float(UserDefaults.standard.double(forKey: AppConstants.Key.rigMeasuredDyMeters))
+        // UNITS: the operator measures ALONG THE ROD (Settings and the rig-height sheet both
+        // ask for the lens-to-lens distance on the pole), but `dy` is a WORLD-VERTICAL offset —
+        // composeRigTransform can only raise the camera along world up. The rod leans with the
+        // phone, so the vertical drop is `slant · cos(tilt)`. Feeding the slant straight in put
+        // the box ~2 cm too high (0.724 measured vs 0.705 true on the 08-18 rig, tilt 13.2°),
+        // and dy then sat on a window wall on 4 of 12 field scans — the "solve adds no
+        // information" symptom was partly this, not just the cost's +dy pull.
+        let measuredSlant = Float(UserDefaults.standard.double(forKey: AppConstants.Key.rigMeasuredDyMeters))
+        let rodTiltCos = meanRodTiltCosine(selected)
+        let measuredDy = measuredSlant > 0.1 ? measuredSlant * rodTiltCos : 0
+        if measuredSlant > 0.1 {
+            PerfDiag.log(String(format: "[RigCal] rig height: %.3f m along rod × cos(%.1f°) = %.3f m vertical anchor",
+                                measuredSlant, acos(min(1, max(-1, rodTiltCos))) * 180 / .pi, measuredDy))
+        }
         let bounds: RigCalibrationSolver.SolveBounds = measuredDy > 0.1
             ? RigCalibrationSolver.SolveBounds(
                 anchorDy: measuredDy, anchorLat: 0,
@@ -155,8 +168,14 @@ enum EquirectPostCalibration {
         // v8: let the phone's keyframes choose the yaw basin before the edge cost
         // refines inside it. Uses the first selected still — any of them anchors the
         // same rig, and one is enough to break the room's rotational symmetry.
+        // The rod height it scores at must be the BEST one available, not `stored.dy`:
+        // persistedOrPrior() substitutes the 1.0 m mechanical prior whenever no sane profile
+        // exists, so a first solve on a 0.70 m rig placed the trial camera 30 cm too high and
+        // the yaw score — which is nothing but "does the still's content land where the
+        // keyframes say" — ranked the wrong basin.
+        let anchorRodHeight = measuredDy > 0.1 ? measuredDy : stored.dy
         let anchorYaw = anchorYawIfPossible(selected: selected, rawDataDir: rawDataDir,
-                                            rodHeight: stored.dy, report: report)
+                                            rodHeight: anchorRodHeight, report: report)
         let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds,
                                                 yawAnchor: anchorYaw)
         let solveMs = ms(tSolve)
@@ -338,7 +357,13 @@ enum EquirectPostCalibration {
         guard let stored = RigProfile.load(), stored.isSolved else { return .mechanicalPrior }
         let mech = RigProfile.mechanicalPrior
         let pitchMax = AppConstants.calibrationBoundPitchDeg * Float.pi / 180
-        let sane = abs(stored.dy - mech.dy) <= AppConstants.calibrationBoundDyM
+        // Centre on what the rig actually is when the operator has measured it. Judging a
+        // 0.70 m rig against the 1.0 m mechanical prior spends most of the ±0.3 m window on
+        // heights this rig cannot have, and rejects a perfectly good solved profile at 0.66 m
+        // only after it has already drifted.
+        let measured = Float(UserDefaults.standard.double(forKey: AppConstants.Key.rigMeasuredDyMeters))
+        let centre = measured > 0.1 ? measured : mech.dy
+        let sane = abs(stored.dy - centre) <= AppConstants.calibrationBoundDyM
             && abs(stored.dLateral) <= AppConstants.calibrationBoundLateralM
             && abs(stored.pitchResidual) <= pitchMax
         if !sane {
@@ -388,6 +413,28 @@ enum EquirectPostCalibration {
 extension EquirectPostCalibration {
     /// v8 basin selection — see EquirectYawAnchor. Uses the first selected still: any of
     /// them anchors the same rig, and one is enough to break the room's symmetry.
+    /// cos(angle between the rod axis and world up), averaged over the stills being solved.
+    /// The rod runs along the phone's −x̂ (long axis, camera end up in the clamp) — the same
+    /// axis the inclinometer readings in the design doc were taken against, and one ARKit
+    /// agrees with to a tenth of a degree on the scans where both exist. Returns 1 (no
+    /// correction) if the stills are missing or the pose is degenerate.
+    fileprivate nonisolated static func meanRodTiltCosine(_ selected: [StillRecord]) -> Float {
+        guard !selected.isEmpty else { return 1 }
+        var total: Float = 0
+        var counted = 0
+        for still in selected {
+            let column = still.phoneToWorld.columns.0
+            let rodUp = -SIMD3<Float>(column.x, column.y, column.z)
+            guard simd_length(rodUp) > 1e-3 else { continue }
+            total += simd_normalize(rodUp).y
+            counted += 1
+        }
+        guard counted > 0 else { return 1 }
+        // Clamped away from grazing angles: a cosine near zero would mean the rod is
+        // horizontal, which is not a rig this pipeline supports and is more likely a bad pose.
+        return min(1, max(0.7, total / Float(counted)))
+    }
+
     fileprivate static func anchorYawIfPossible(selected: [StillRecord], rawDataDir: URL,
                                                 rodHeight: Float, report: (String) -> Void) -> Float? {
         guard let still = selected.first else { return nil }

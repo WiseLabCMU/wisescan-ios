@@ -118,10 +118,16 @@ enum RigCalibrationSolver {
         // the cut — raising dy pushes awkward samples below the line where they cost
         // nothing (cost fell monotonically to the dy wall, retained samples 57%→23%).
         // With inclusion frozen, a real dy basin appears.
-        let anchor = RigProfile.mechanicalPrior
+        // The anchor pose is the CENTRE OF THE SOLVE BOX, not the generic mechanical prior:
+        // when the operator has measured the rig, the box is centred on that measurement and
+        // the mechanical prior may sit 30 cm away. Freezing the inclusion mask, ranking the
+        // coarse yaw circle and sweeping elevation all at a height the rig demonstrably is
+        // not was quietly biasing every one of those three decisions.
+        let anchorDy = bounds.anchorDy
+        let anchorLat = bounds.anchorLat
         let sampleMasks = sampledInputs.map { input -> [Bool] in
             let rig = composeRigTransform(phoneToWorld: input.phoneToWorld,
-                                          dy: anchor.dy, dLateral: 0, yaw: 0, pitchResidual: 0)
+                                          dy: anchorDy, dLateral: anchorLat, yaw: 0, pitchResidual: 0)
             let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
             return anchorInclusionMask(edges: input.meshEdges, camPos: camPos)
         }
@@ -143,7 +149,7 @@ enum RigCalibrationSolver {
             } else {
                 yaw = -Float.pi + Float(step) * (2 * Float.pi / 24)
             }
-            let params = SIMD4<Float>(anchor.dy, 0, yaw, 0)
+            let params = SIMD4<Float>(anchorDy, anchorLat, yaw, 0)
             yawStarts.append((yaw, totalCost(params: params, inputs: sampledInputs,
                                              masks: sampleMasks, stride: 3)))
         }
@@ -158,7 +164,7 @@ enum RigCalibrationSolver {
         var bestElevRows: Float = 0
         var bestElevCost = Float.greatestFiniteMagnitude
         for rows in Swift.stride(from: -16, through: 16, by: 2) {
-            let params = SIMD4<Float>(anchor.dy, 0, yawStarts[0].yaw, 0)
+            let params = SIMD4<Float>(anchorDy, anchorLat, yawStarts[0].yaw, 0)
             let cost = totalCost(params: params, inputs: sampledInputs, masks: sampleMasks,
                                  stride: 3, elevOffsetRows: Float(rows))
             if cost < bestElevCost { bestElevCost = cost; bestElevRows = Float(rows) }
@@ -329,9 +335,12 @@ enum RigCalibrationSolver {
         }
         let sub = CalibrationInput(phoneToWorld: input.phoneToWorld,
                                    edgeMap: input.edgeMap, meshEdges: edges)
-        let anchor = RigProfile.mechanicalPrior
+        // Freeze inclusion at the profile being refined — this path already KNOWS the rig
+        // geometry (that is what it is solving yaw on top of), so the generic mechanical
+        // prior was strictly worse information.
         let rig = composeRigTransform(phoneToWorld: sub.phoneToWorld,
-                                      dy: anchor.dy, dLateral: 0, yaw: 0, pitchResidual: 0)
+                                      dy: profile.dy, dLateral: profile.dLateral,
+                                      yaw: 0, pitchResidual: 0)
         let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
         let mask = anchorInclusionMask(edges: sub.meshEdges, camPos: camPos)
 

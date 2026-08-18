@@ -77,25 +77,8 @@ enum EquirectYawAnchor {
     private static func depthMillimetres(at url: URL) -> DepthMap? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
-              let data = image.dataProvider?.data as Data? else { return nil }
-        let width = image.width, height = image.height
-        let bytesPerRow = image.bytesPerRow
-        guard image.bitsPerComponent == 16, data.count >= bytesPerRow * height else { return nil }
-        // Byte order matters and has bitten this pipeline before (depth PNGs were stored
-        // byte-swapped for months), so read it from the image rather than assuming.
-        let little = (image.bitmapInfo.rawValue & CGBitmapInfo.byteOrder16Little.rawValue) != 0
-        var out = [UInt16](repeating: 0, count: width * height)
-        data.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
-            for row in 0..<height {
-                let rowPtr = base.advanced(by: row * bytesPerRow).assumingMemoryBound(to: UInt8.self)
-                for column in 0..<width {
-                    let low = UInt16(rowPtr[column * 2]), high = UInt16(rowPtr[column * 2 + 1])
-                    out[row * width + column] = little ? (high << 8) | low : (low << 8) | high
-                }
-            }
-        }
-        return DepthMap(values: out, width: width, height: height)
+              let decoded = DepthPNG.millimetres(from: image) else { return nil }
+        return DepthMap(values: decoded.values, width: decoded.width, height: decoded.height)
     }
 
     // MARK: - Keyframe samples
@@ -107,8 +90,12 @@ enum EquirectYawAnchor {
         let camerasDir = rawDataDir.appendingPathComponent("cameras")
         let imagesDir = rawDataDir.appendingPathComponent("images")
         let depthDir = rawDataDir.appendingPathComponent("depth")
+        // Only real capture keyframes: the colorize face probe writes its own camera
+        // records into this same directory, and those have no matching depth/image pair
+        // here — including them just wastes frames out of the maxFrames budget.
         guard let cameraFiles = try? FileManager.default.contentsOfDirectory(
-            at: camerasDir, includingPropertiesForKeys: nil).filter({ $0.pathExtension == "json" })
+            at: camerasDir, includingPropertiesForKeys: nil)
+            .filter({ $0.pathExtension == "json" && $0.lastPathComponent.hasPrefix("frame_") })
             .sorted(by: { $0.lastPathComponent < $1.lastPathComponent }), !cameraFiles.isEmpty
         else { return [] }
 
@@ -173,7 +160,11 @@ enum EquirectYawAnchor {
         for row in 0..<4 {
             for column in 0..<4 {
                 guard let value = (json["t_\(row)\(column)"] as? NSNumber)?.floatValue else {
-                    if row == 3 { values[12 + column] = column == 3 ? 1 : 0; continue }
+                    // Bottom row is optional in these JSONs; supply [0,0,0,1]. The index is
+                    // column-major like the assignment below — `values[12 + column]` wrote
+                    // into the TRANSLATION column instead, parking every keyframe at the
+                    // world origin and making the yaw score meaningless.
+                    if row == 3 { values[column * 4 + 3] = column == 3 ? 1 : 0; continue }
                     return nil
                 }
                 values[column * 4 + row] = value      // row-major source → column-major simd

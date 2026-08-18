@@ -189,7 +189,7 @@ enum AppConstants {
 
     // MARK: - 360° Rig (mechanical-prior extrinsic — calibration plan step 1; the solved
     // hand–eye refinement replaces these per rig profile later)
-    static let rigRodHeightMeters: Float = 1.0     // 360° camera height above the phone along WORLD up (ARKit is gravity-aligned; Theta zenith correction keeps the pano level, so the prior needs only position + yaw)
+    static let rigRodHeightMeters: Float = 0.75    // 360° camera height above the phone along WORLD up when the operator has NOT measured the rig (ARKit is gravity-aligned; Theta zenith correction keeps the pano level, so the prior needs only position + yaw). 1.0 m was a guess that no rig in the field has ever matched — every measured monopod rig has come in at 0.70-0.79 m along the rod, and centering the ±calibrationBoundDyM window on 1.0 put the truth on the window's edge. NOTE this is a WORLD-VERTICAL drop; the operator's tape measurement runs ALONG THE ROD and EquirectPostCalibration converts it by cos(tilt)
     static let rigYawOffsetDegrees: Float = 0      // pano-center (camera-body forward) yaw relative to the phone's horizontal forward; 0 = lenses aligned with the phone
     static let equirectFaceSizeMax = 2048          // cube-face edge cap (native density is equirectWidth/4; 11K Theta X stills would yield 2752 — capped for JPEG size/memory)
     static let equirectFaceDecodeMax = 8192        // staged-equirect decode cap for face sampling (8192×4096 RGBA ≈ 134 MB transient, per-still pooled; width/4 already saturates the face cap)
