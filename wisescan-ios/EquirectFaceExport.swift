@@ -12,8 +12,9 @@ import simd
 ///
 /// Pose = the **mechanical-prior rig extrinsic** (calibration plan step 1): ARKit is
 /// gravity-aligned and Theta zenith correction keeps the equirect level, so the prior only
-/// needs position + yaw — the camera sits `AppConstants.rigRodHeightMeters` above the phone
-/// along WORLD up, facing the phone's horizontal forward rotated by
+/// needs position + yaw — the camera sits `AppConstants.rigRodHeightMeters` up the rod from
+/// the phone (an offset in the PHONE's frame, so it swings with the device), facing the
+/// phone's horizontal forward rotated by
 /// `AppConstants.rigYawOffsetDegrees`. The solved hand–eye refinement replaces those two
 /// numbers later without changing this contract. Poses are camera-to-world in the ARKit
 /// world frame, same convention as every other frame in the bundle.
@@ -216,7 +217,7 @@ enum EquirectFaceExport {
             print("[prepareExport] \(equirectURL.lastPathComponent): no baked cam_transform (pre-contract still) — mechanical-prior pose")
             camTransform = RigCalibrationSolver.composeRigTransform(
                 phoneToWorld: phoneToWorld,
-                dy: AppConstants.rigRodHeightMeters, dLateral: 0,
+                offsetPhone: RigProfile.mechanicalPrior.offsetPhone,
                 yaw: AppConstants.rigYawOffsetDegrees * .pi / 180, pitchResidual: 0
             )
         }

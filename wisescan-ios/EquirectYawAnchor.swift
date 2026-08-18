@@ -182,9 +182,10 @@ enum EquirectYawAnchor {
     /// Lower is better. Points behind nothing in particular are simply sampled — the
     /// equirect sees every direction, so there is no frustum test to fail.
     private static func score(samples: [Sample], still: Gray,
-                              phoneToWorld: simd_float4x4, rodHeight: Float, yaw: Float) -> Float {
+                              phoneToWorld: simd_float4x4, offsetPhone: SIMD3<Float>,
+                              yaw: Float) -> Float {
         let camToWorld = RigCalibrationSolver.composeRigTransform(
-            phoneToWorld: phoneToWorld, dy: rodHeight, dLateral: 0, yaw: yaw, pitchResidual: 0)
+            phoneToWorld: phoneToWorld, offsetPhone: offsetPhone, yaw: yaw, pitchResidual: 0)
         let worldToCam = camToWorld.inverse
         var total: Float = 0
         var count = 0
@@ -204,7 +205,7 @@ enum EquirectYawAnchor {
     /// Scans the yaw circle and returns the photometric winner, in radians.
     /// nil when there is nothing to anchor against — the caller then keeps v7 behaviour.
     static func solve(rawDataDir: URL, stillJPG: URL, phoneToWorld: simd_float4x4,
-                      rodHeight: Float, report: (String) -> Void) -> Float? {
+                      offsetPhone: SIMD3<Float>, report: (String) -> Void) -> Float? {
         let samples = keyframeSamples(rawDataDir: rawDataDir,
                                       maxFrames: AppConstants.yawAnchorKeyframes,
                                       pixelStride: AppConstants.yawAnchorPixelStride)
@@ -216,7 +217,7 @@ enum EquirectYawAnchor {
         var step = -Float.pi
         while step < .pi {
             let cost = score(samples: samples, still: still,
-                             phoneToWorld: phoneToWorld, rodHeight: rodHeight, yaw: step)
+                             phoneToWorld: phoneToWorld, offsetPhone: offsetPhone, yaw: step)
             if best == nil || cost < best!.cost { best = (step, cost) }
             step += AppConstants.yawAnchorStepDeg * .pi / 180
         }

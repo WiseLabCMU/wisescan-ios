@@ -188,21 +188,31 @@ work but add hardware complexity and limit which rigs are supported. Natural-fea
 calibration using the LiDAR mesh the app already builds requires no extra hardware and
 works in any feature-rich indoor environment.
 
-### Solver: 4 DOF, on-device (Accelerate/simd)
+### Solver: 5 DOF, on-device (Accelerate/simd)
 
 With the Theta's zenith correction handling roll/pitch (validated for Theta X), the
-unknowns reduce to **4 parameters**:
+unknowns are a rigid offset plus a heading:
 
-1. **`dy`** — vertical offset (rod height along gravity)
-2. **`d_lateral`** — horizontal offset (phone clip distance from rod axis; typically ~2 cm)
-3. **`yaw`** — rotation around the vertical axis
-4. **`pitch_residual`** — small pitch correction for imperfect zenith compensation
+1. **`offsetPhone`** (3) — the phone-camera→360°-lens offset **in the phone's own frame**
+   (ARKit camera axes: +x right, +y up, −z view direction). The rod runs along −x̂, so a
+   0.72 m rig is about `(-0.72, 0, 0)`.
+2. **`yaw`** — rotation around the vertical axis
+3. **`pitch_residual`** — small pitch correction for imperfect zenith compensation
 
-**Initial guess** from the mechanical prior: `dy` = measured rod length,
-`d_lateral` = measured clip offset, `yaw` = 0 (lenses aligned with phone),
-`pitch_residual` = 0. The solver (Nelder-Mead simplex or Levenberg-Marquardt on a
-4-parameter cost function) minimizes the distance between mesh edges projected into the
-equirect at the candidate rig transform and Canny edges detected in the equirect image.
+The offset is in the PHONE's frame because that is what "rigid" means for a rig bolted to
+the phone — it rotates with the device. The original 4-parameter form stored a world-frame
+pair (`dy` along gravity, `d_lateral` across phone-horizontal) whose reachable set is a
+2-plane: when the phone tilts, the lens genuinely swings FORWARD, and no `(dy, d_lateral)`
+can express that. See "Rod tilt" below for what that cost in practice.
+
+**Initial guess** from the mechanical prior: `offsetPhone` = `(-rodLength, 0, 0)` with the
+operator's tape measurement as the rod length (it constrains `‖offsetPhone‖` directly, no
+frame conversion), `yaw` = 0 (lenses aligned with phone), `pitch_residual` = 0. The search
+box is deliberately anisotropic — tight along the rod where the tape pins it, ±13 cm across
+it, which is both real clamp slop and a ~10° cone for the rod not being exactly along −x̂.
+The solver (Nelder-Mead simplex on the 5-parameter cost) minimizes the distance between
+mesh edges projected into the equirect at the candidate rig transform and Canny edges
+detected in the equirect image.
 With 3 calibration stills × hundreds of edge correspondences each, the system is highly
 over-determined for 4 unknowns — convergence in milliseconds on-device.
 
@@ -725,7 +735,7 @@ per-image correction parameters vary). Meanwhile run 13 vs run 14-A yaw repeated
 0.8° — the solver itself is precise; the reference under it moves.
 
 **Architecture (implemented):** the model is split.
-- **Calibration** persists the true rig constants — dy, dLateral, pitchResidual —
+- **Calibration** persists the true rig constants — `offsetPhone` and `pitchResidual` —
   which repeat across sessions. The stored profile's yaw is only session-local.
 - **Session yaw** is re-solved from each scan's FIRST still
   (`RigCalibrationSolver.solveSessionYaw`: 1-D global coarse scan + two fine passes,
@@ -1600,15 +1610,29 @@ tilts **11.6-14.2°** from vertical (the operator angles the iPad down to see th
 putting the camera **14-17 cm FORWARD** of the phone, 3 cm lateral, and 70.5 cm up —
 against a 72.4 cm tape measure.
 
-The solve is 4-dimensional `(dy, dLateral, yaw, pitchResidual)` with `dy` along WORLD up
+The solve WAS 4-dimensional `(dy, dLateral, yaw, pitchResidual)` with `dy` along WORLD up
 and `dLateral` perpendicular to phone-forward. A forward offset is orthogonal to both and
 lives in the PHONE's frame, so it rotates as the operator turns and no global constant can
-absorb it — it leaks into residual and can bias yaw and dLateral.
+absorb it — it leaked into residual and biased yaw and dLateral.
 
-RECOMMENDED: re-parameterize the offset as a 3-vector in the PHONE frame (rod-axis,
-forward, lateral) rotated by the phone pose. That is physically what a rigid rig is, it
-makes the tape measure directly meaningful as the rod-axis component, and it handles tilt
-varying scan to scan for free.
+**FIXED (solver v10).** The offset is now a 3-vector in the PHONE frame rotated by the
+phone pose — physically what a rigid rig is. The tape measure is directly meaningful as
+‖offsetPhone‖, and tilt varying scan to scan is handled for free.
+
+What it had been costing, measured on `staging_60172200` (five stills, 1.4-4.3° tilt):
+the old and new models place the lens **11-13 cm apart per still**. Most of that was not
+the forward swing itself (3.8 cm at 3° tilt) but the error the model had pushed elsewhere
+to compensate — a `dy` railed 4.8 cm above the tape and a 9.9 cm `dLateral` with no
+physical basis. Under the new model the lens height comes out 0.722-0.724 m at every
+tilt, because the rod length is the thing that is actually fixed.
+
+The scan that motivated it stamped `solved_postprocess, 2.92 px, converged` with `dy` 2 mm
+from its wall and `elevation_offset_deg` pinned at the exact end of its sweep (-11.25°) on
+all five stills. `pitchResidual` and `elevation_offset_deg` are KEPT for one solver cycle
+on purpose: with no systematic error left to absorb they should collapse toward zero on
+their own, and that is the falsifiable test of this model. Railed parameters are now named
+in the log and stamped as `rig_calibration_railed` in every sidecar, so the next scan
+answers the question directly.
 
 ### Keyboard crash: the mechanism, not the trigger
 

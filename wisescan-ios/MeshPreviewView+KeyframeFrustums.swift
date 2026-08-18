@@ -328,13 +328,13 @@ extension MeshPreviewView {
             } else if let profile = rigProfile, profile.isSolved {
                 camTransform = RigCalibrationSolver.composeRigTransform(
                     phoneToWorld: phoneToWorld,
-                    dy: profile.dy, dLateral: profile.dLateral,
+                    offsetPhone: profile.offsetPhone,
                     yaw: profile.yaw, pitchResidual: profile.pitchResidual
                 )
             } else {
                 camTransform = RigCalibrationSolver.composeRigTransform(
                     phoneToWorld: phoneToWorld,
-                    dy: AppConstants.rigRodHeightMeters, dLateral: 0,
+                    offsetPhone: RigProfile.mechanicalPrior.offsetPhone,
                     yaw: AppConstants.rigYawOffsetDegrees * .pi / 180, pitchResidual: 0
                 )
             }

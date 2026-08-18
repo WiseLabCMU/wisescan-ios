@@ -9,7 +9,8 @@ import simd
 // Markerless mesh-edge reprojection solver for the 360° camera rig extrinsic.
 // See docs/design/still-source-360.md → "Pose & calibration plan".
 //
-// Solves a 4-DOF rigid transform (dy, d_lateral, yaw, pitch_residual) between the phone
+// Solves a 5-DOF rigid transform (offsetPhone as a 3-vector in the PHONE's frame, plus
+// yaw and a pitch residual) between the phone
 // and 360° camera by minimizing the distance between LiDAR mesh edges projected into the
 // equirect and Canny edges detected in the equirect image.
 //
@@ -56,29 +57,44 @@ enum RigCalibrationSolver {
 
     // MARK: - Entry
 
-    /// Solve the 4-DOF rig transform from calibration inputs.
+    /// Solve the rig transform from calibration inputs.
     /// Call on a background queue. The prior provides the initial guess.
     /// Returns a failed result if no input contains mesh edges (solver has nothing to align).
-    /// Geometry search box for the solve. Yaw is ALWAYS global (coarse circle scan) —
-    /// only dy/dLateral/pitch are bounded, around either the mechanical prior (first
-    /// solve) or a previously-solved profile (rolling refinement — run13/14 showed the
-    /// geometry repeats across sessions within ~4 cm / 2°).
+    /// Geometry search box for the solve, in the PHONE's frame. Yaw is ALWAYS global (a
+    /// coarse circle scan, narrowed by the keyframe anchor when one exists) — only the
+    /// offset and pitch are bounded, around either the mechanical prior (first solve) or a
+    /// previously-solved profile (rolling refinement — run13/14 showed the geometry repeats
+    /// across sessions within ~4 cm / 2°).
+    ///
+    /// The box is DELIBERATELY anisotropic. Along the rod (phone −x̂) the operator's tape
+    /// pins the length, so that axis needs only tape and clamp slop. Across the rod the
+    /// clamp geometry has never been measured at all, and the two half-ranges together also
+    /// have to admit the rod not being exactly along −x̂: ±0.13 m at 0.72 m is a ~10° cone,
+    /// which covers every inclinometer reading taken on this rig.
     struct SolveBounds {
-        let anchorDy: Float
-        let anchorLat: Float
-        let dyHalf: Float
-        let latHalf: Float
+        let anchorOffset: SIMD3<Float>
+        let offsetHalf: SIMD3<Float>
         let pitchHalfDeg: Float
 
+        /// Box around a measured rod length: tight along the rod, open across it.
+        static func measured(rodLengthM: Float) -> SolveBounds {
+            SolveBounds(anchorOffset: SIMD3<Float>(-rodLengthM, 0, 0),
+                        offsetHalf: SIMD3<Float>(AppConstants.calibrationMeasuredRodHalfM,
+                                                 AppConstants.calibrationBoundAcrossRodM,
+                                                 AppConstants.calibrationBoundAcrossRodM),
+                        pitchHalfDeg: AppConstants.calibrationBoundPitchDeg)
+        }
+
         static let mechanical = SolveBounds(
-            anchorDy: RigProfile.mechanicalPrior.dy, anchorLat: 0,
-            dyHalf: AppConstants.calibrationBoundDyM,
-            latHalf: AppConstants.calibrationBoundLateralM,
+            anchorOffset: RigProfile.mechanicalPrior.offsetPhone,
+            offsetHalf: SIMD3<Float>(AppConstants.calibrationBoundRodM,
+                                     AppConstants.calibrationBoundAcrossRodM,
+                                     AppConstants.calibrationBoundAcrossRodM),
             pitchHalfDeg: AppConstants.calibrationBoundPitchDeg)
 
         static func refinement(around profile: RigProfile) -> SolveBounds {
-            SolveBounds(anchorDy: profile.dy, anchorLat: profile.dLateral,
-                        dyHalf: 0.15, latHalf: 0.15, pitchHalfDeg: 6)
+            SolveBounds(anchorOffset: profile.offsetPhone,
+                        offsetHalf: SIMD3<Float>(repeating: 0.15), pitchHalfDeg: 6)
         }
     }
 
@@ -123,11 +139,10 @@ enum RigCalibrationSolver {
         // the mechanical prior may sit 30 cm away. Freezing the inclusion mask, ranking the
         // coarse yaw circle and sweeping elevation all at a height the rig demonstrably is
         // not was quietly biasing every one of those three decisions.
-        let anchorDy = bounds.anchorDy
-        let anchorLat = bounds.anchorLat
+        let anchorOffset = bounds.anchorOffset
         let sampleMasks = sampledInputs.map { input -> [Bool] in
             let rig = composeRigTransform(phoneToWorld: input.phoneToWorld,
-                                          dy: anchorDy, dLateral: anchorLat, yaw: 0, pitchResidual: 0)
+                                          offsetPhone: anchorOffset, yaw: 0, pitchResidual: 0)
             let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
             return anchorInclusionMask(edges: input.meshEdges, camPos: camPos)
         }
@@ -149,7 +164,7 @@ enum RigCalibrationSolver {
             } else {
                 yaw = -Float.pi + Float(step) * (2 * Float.pi / 24)
             }
-            let params = SIMD4<Float>(anchorDy, anchorLat, yaw, 0)
+            let params = pack(offset: anchorOffset, yaw: yaw, pitch: 0)
             yawStarts.append((yaw, totalCost(params: params, inputs: sampledInputs,
                                              masks: sampleMasks, stride: 3)))
         }
@@ -164,7 +179,7 @@ enum RigCalibrationSolver {
         var bestElevRows: Float = 0
         var bestElevCost = Float.greatestFiniteMagnitude
         for rows in Swift.stride(from: -16, through: 16, by: 2) {
-            let params = SIMD4<Float>(anchorDy, anchorLat, yawStarts[0].yaw, 0)
+            let params = pack(offset: anchorOffset, yaw: yawStarts[0].yaw, pitch: 0)
             let cost = totalCost(params: params, inputs: sampledInputs, masks: sampleMasks,
                                  stride: 3, elevOffsetRows: Float(rows))
             if cost < bestElevCost { bestElevCost = cost; bestElevRows = Float(rows) }
@@ -182,27 +197,26 @@ enum RigCalibrationSolver {
 
         let yawHalf = AppConstants.calibrationBoundYawDeg * Float.pi / 180
         let pitchHalf = bounds.pitchHalfDeg * Float.pi / 180
-        // Perturbation scales per parameter (order: dy, dLat, yaw, pitch)
-        let scales = SIMD4<Float>(0.1, 0.05, 0.1, 0.05) // meters, meters, radians, radians
+        // Perturbation scales (order: tx, ty, tz, yaw, pitch). 3 cm per translation axis:
+        // the physical uncertainty in a clamped rig is centimetres, and the old 0.1 m step
+        // on dy was large enough that the simplex reached a bound before it ever explored
+        // the interior — which is one reason a wall kept looking like a solution.
+        let scales = packed(SIMD3<Float>(repeating: 0.03), 0.1, 0.05)
 
         var result: NMResult?
         for yaw0 in starts {
-            let lo = SIMD4<Float>(bounds.anchorDy - bounds.dyHalf,
-                                  bounds.anchorLat - bounds.latHalf,
-                                  yaw0 - yawHalf,
-                                  -pitchHalf)
-            let hi = SIMD4<Float>(bounds.anchorDy + bounds.dyHalf,
-                                  bounds.anchorLat + bounds.latHalf,
-                                  yaw0 + yawHalf,
-                                  pitchHalf)
-            let x0 = SIMD4<Float>(bounds.anchorDy, bounds.anchorLat, yaw0, 0)
+            let lo = packed(bounds.anchorOffset - bounds.offsetHalf, yaw0 - yawHalf, -pitchHalf)
+            let hi = packed(bounds.anchorOffset + bounds.offsetHalf, yaw0 + yawHalf, pitchHalf)
+            let x0 = pack(offset: bounds.anchorOffset, yaw: yaw0, pitch: 0)
             let run = nelderMead(
                 initial: x0,
                 scales: scales,
                 maxIterations: AppConstants.calibrationMaxIterations,
                 tolerance: AppConstants.calibrationConvergenceTolerance
             ) { params in
-                if any(params .< lo) || any(params .> hi) { return 1e6 }
+                for lane in 0..<paramCount where params[lane] < lo[lane] || params[lane] > hi[lane] {
+                    return 1e6
+                }
                 return totalCost(params: params, inputs: sampledInputs, masks: sampleMasks,
                                  elevOffsetRows: bestElevRows)
             }
@@ -213,16 +227,15 @@ enum RigCalibrationSolver {
                                      iterations: 0, elevOffsetDeg: 0)
         }
         // Normalize yaw to (−π, π] for storage/display.
-        result = NMResult(point: SIMD4<Float>(result.point.x, result.point.y,
-                                              normalizeAngle(result.point.z), result.point.w),
-                          cost: result.cost, converged: result.converged,
+        var normalized = result.point
+        normalized[3] = normalizeAngle(normalized[3])
+        result = NMResult(point: normalized, cost: result.cost, converged: result.converged,
                           iterations: result.iterations)
 
         let solved = RigProfile(
-            dy: result.point.x,
-            dLateral: result.point.y,
-            yaw: result.point.z,
-            pitchResidual: result.point.w,
+            offsetPhone: offsetOf(result.point),
+            yaw: result.point[3],
+            pitchResidual: result.point[4],
             residualPx: result.cost,
             timestamp: Date(),
             cameraModel: prior.cameraModel,
@@ -270,7 +283,7 @@ enum RigCalibrationSolver {
         func splat(_ profile: RigProfile, red: UInt8, green: UInt8, blue: UInt8) {
             let rig = composeRigTransform(
                 phoneToWorld: input.phoneToWorld,
-                dy: profile.dy, dLateral: profile.dLateral,
+                offsetPhone: profile.offsetPhone,
                 yaw: profile.yaw, pitchResidual: profile.pitchResidual)
             let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
             // Camera-frame projection — must match edgeCost's lookup exactly.
@@ -339,14 +352,14 @@ enum RigCalibrationSolver {
         // geometry (that is what it is solving yaw on top of), so the generic mechanical
         // prior was strictly worse information.
         let rig = composeRigTransform(phoneToWorld: sub.phoneToWorld,
-                                      dy: profile.dy, dLateral: profile.dLateral,
+                                      offsetPhone: profile.offsetPhone,
                                       yaw: 0, pitchResidual: 0)
         let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
         let mask = anchorInclusionMask(edges: sub.meshEdges, camPos: camPos)
 
         func cost(_ yaw: Float) -> Float {
-            totalCost(params: SIMD4<Float>(profile.dy, profile.dLateral,
-                                           yaw, profile.pitchResidual),
+            totalCost(params: pack(offset: profile.offsetPhone, yaw: yaw,
+                                   pitch: profile.pitchResidual),
                       inputs: [sub], masks: [mask])
         }
         var best: (yaw: Float, cost: Float) = (0, .greatestFiniteMagnitude)
@@ -408,7 +421,7 @@ enum RigCalibrationSolver {
     /// `masks` is the anchor-frozen per-sample inclusion (see anchorInclusionMask).
     /// `stride` evaluates every Nth edge — the coarse yaw scan only ranks lobes, so it
     /// runs 3× cheaper without changing which basin wins.
-    private static func totalCost(params: SIMD4<Float>, inputs: [CalibrationInput],
+    private static func totalCost(params: Params, inputs: [CalibrationInput],
                                   masks: [[Bool]], stride: Int = 1,
                                   elevOffsetRows: Float = 0) -> Float {
         var total: Float = 0
@@ -416,8 +429,8 @@ enum RigCalibrationSolver {
         for (k, input) in inputs.enumerated() {
             let rigTransform = composeRigTransform(
                 phoneToWorld: input.phoneToWorld,
-                dy: params.x, dLateral: params.y,
-                yaw: params.z, pitchResidual: params.w
+                offsetPhone: offsetOf(params),
+                yaw: params[3], pitchResidual: params[4]
             )
             let camPos = SIMD3<Float>(rigTransform.columns.3.x,
                                      rigTransform.columns.3.y,
@@ -496,16 +509,29 @@ enum RigCalibrationSolver {
 
     /// Compose the world→360cam transform from the phone pose and rig parameters.
     /// Returns a 4×4 camera-to-world matrix for the 360° camera.
+    ///
+    /// POSITION is a rigid-body offset in the PHONE's frame, rotated into the world by the
+    /// phone's own orientation — the rig is bolted to the phone, so that is what "rigid"
+    /// means. ORIENTATION is separate and stays gravity-levelled: the Theta's zenith
+    /// correction keeps the pano level regardless of how the rig is held, so only yaw (and
+    /// a small pitch residual for imperfect zenith correction) are free.
     static func composeRigTransform(
         phoneToWorld: simd_float4x4,
-        dy: Float, dLateral: Float,
+        offsetPhone: SIMD3<Float>,
         yaw: Float, pitchResidual: Float
     ) -> simd_float4x4 {
         // Phone position in world
         let phonePos = SIMD3<Float>(phoneToWorld.columns.3.x,
                                    phoneToWorld.columns.3.y,
                                    phoneToWorld.columns.3.z)
-        // Phone's horizontal forward (gravity-projected)
+        let phoneRot = simd_float3x3(columns: (
+            SIMD3<Float>(phoneToWorld.columns.0.x, phoneToWorld.columns.0.y, phoneToWorld.columns.0.z),
+            SIMD3<Float>(phoneToWorld.columns.1.x, phoneToWorld.columns.1.y, phoneToWorld.columns.1.z),
+            SIMD3<Float>(phoneToWorld.columns.2.x, phoneToWorld.columns.2.y, phoneToWorld.columns.2.z)
+        ))
+        let camPos = phonePos + phoneRot * offsetPhone
+
+        // Phone's horizontal forward (gravity-projected) — orientation only.
         let phoneFwd = -SIMD3<Float>(phoneToWorld.columns.2.x,
                                      phoneToWorld.columns.2.y,
                                      phoneToWorld.columns.2.z)
@@ -515,14 +541,6 @@ enum RigCalibrationSolver {
             horiz = simd_length(phoneUp) > 1e-3 ? phoneUp : SIMD3<Float>(0, 0, -1)
         }
         let fwdNorm = simd_normalize(horiz)
-
-        // Lateral offset: perpendicular to forward in the horizontal plane
-        let right = simd_normalize(simd_cross(SIMD3<Float>(0, 1, 0), -fwdNorm))
-
-        // Camera position = phone position + height offset + lateral offset
-        var camPos = phonePos
-        camPos.y += dy
-        camPos += right * dLateral
 
         // Camera orientation: level, rotated by yaw from phone forward, with pitch residual
         var fwd = fwdNorm
@@ -864,8 +882,25 @@ enum RigCalibrationSolver {
 
     // MARK: - Nelder-Mead optimizer
 
+    /// Solve parameters live in one fixed-width vector so the simplex stays allocation-free
+    /// in the inner loop. Lanes 0-2 are the rig offset in the PHONE's frame, 3 is yaw, 4 is
+    /// the pitch residual; SIMD8 is the smallest SIMD that holds five, and the spare lanes
+    /// are never perturbed (their scale is 0) so they cost nothing but three floats.
+    typealias Params = SIMD8<Float>
+    static let paramCount = 5
+
+    static func pack(offset: SIMD3<Float>, yaw: Float, pitch: Float) -> Params {
+        Params(offset.x, offset.y, offset.z, yaw, pitch, 0, 0, 0)
+    }
+    static func packed(_ offset: SIMD3<Float>, _ yaw: Float, _ pitch: Float) -> Params {
+        pack(offset: offset, yaw: yaw, pitch: pitch)
+    }
+    static func offsetOf(_ params: Params) -> SIMD3<Float> {
+        SIMD3<Float>(params[0], params[1], params[2])
+    }
+
     private struct NMResult {
-        let point: SIMD4<Float>
+        let point: Params
         let cost: Float
         let converged: Bool
         let iterations: Int
@@ -873,20 +908,20 @@ enum RigCalibrationSolver {
 
     /// Nelder-Mead simplex optimizer for 4 dimensions.
     private static func nelderMead(
-        initial: SIMD4<Float>,
-        scales: SIMD4<Float>,
+        initial: Params,
+        scales: Params,
         maxIterations: Int,
         tolerance: Float,
-        cost: (SIMD4<Float>) -> Float
+        cost: (Params) -> Float
     ) -> NMResult {
-        let n = 4  // dimensions
+        let n = paramCount
         let alpha: Float = 1.0   // reflection
         let gamma: Float = 2.0   // expansion
         let rho: Float = 0.5     // contraction
         let sigma: Float = 0.5   // shrink
 
         // Initialize simplex: n+1 vertices
-        var simplex: [(point: SIMD4<Float>, cost: Float)] = []
+        var simplex: [(point: Params, cost: Float)] = []
         simplex.append((initial, cost(initial)))
         for d in 0..<n {
             var vertex = initial
@@ -909,7 +944,7 @@ enum RigCalibrationSolver {
             }
 
             // Centroid of all except worst
-            var centroid = SIMD4<Float>.zero
+            var centroid = Params.zero
             for i in 0..<n {
                 centroid += simplex[i].point
             }
@@ -957,13 +992,28 @@ enum RigCalibrationSolver {
 
 // MARK: - Rig Profile (persistable calibration)
 
-/// Solved rig calibration profile: the 4 parameters, residual, and provenance metadata.
+/// Solved rig calibration profile: the rig offset, yaw, residual, and provenance.
 /// Persisted to UserDefaults as JSON so the calibration survives app restarts.
 struct RigProfile: Codable, Equatable {
-    /// Vertical offset — rod height along gravity (meters).
-    let dy: Float
-    /// Horizontal offset — phone clip distance from rod axis (meters).
-    let dLateral: Float
+    /// Rig offset from the phone's camera to the 360° lens, expressed IN THE PHONE'S
+    /// OWN FRAME (ARKit camera axes: +x right, +y up, −z view direction). The rod runs
+    /// along −x̂, so a 0.72 m rig is roughly `(-0.72, 0, 0)`.
+    ///
+    /// THIS IS THE WHOLE POINT OF THE PARAMETERISATION. The rig is rigid *to the phone*,
+    /// so its offset is constant in the phone's frame and rotates with it. The previous
+    /// model stored a world-frame pair (dy along gravity + dLateral across phone-horizontal),
+    /// whose reachable set is a 2-plane: when the phone tilts, the 360° lens genuinely
+    /// swings FORWARD, and no (dy, dLateral) could express that. On the field archive's
+    /// 5–13° tilts and 0.72 m rod that is an unrepresentable 6–17 cm on every still, and
+    /// the solve absorbed it into whatever else would move — dy rode its bound, pitch went
+    /// to 77% of its own, and `elevation_offset_deg` pinned at the end of its sweep on all
+    /// five stills of the 2026-08-18 19:19 scan.
+    ///
+    /// Consequences worth keeping: the operator's tape measures ‖offsetPhone‖ DIRECTLY
+    /// (no cosine, no per-scan tilt correction), and `pitchResidual` /
+    /// `elevation_offset_deg` no longer have a systematic error to soak up, so their
+    /// collapsing toward zero is a falsifiable check on this model rather than a hope.
+    let offsetPhone: SIMD3<Float>
     /// Yaw offset — rotation around the vertical axis (radians).
     let yaw: Float
     /// Pitch residual — small correction for imperfect zenith compensation (radians).
@@ -980,11 +1030,13 @@ struct RigProfile: Codable, Equatable {
     /// Camera serial number for binding a calibration to a specific hardware device.
     let cameraSerialNumber: String?
 
-    /// The mechanical prior: `AppConstants` defaults, no calibration.
+    /// Distance from the phone camera to the 360° lens — the number the operator tapes.
+    var rodLengthM: Float { simd_length(offsetPhone) }
+
+    /// The mechanical prior: `AppConstants` defaults, no calibration. Straight up the rod.
     static var mechanicalPrior: RigProfile {
         RigProfile(
-            dy: AppConstants.rigRodHeightMeters,
-            dLateral: 0,
+            offsetPhone: SIMD3<Float>(-AppConstants.rigRodHeightMeters, 0, 0),
             yaw: AppConstants.rigYawOffsetDegrees * .pi / 180,
             pitchResidual: 0,
             residualPx: -1,  // sentinel: not calibrated
@@ -998,15 +1050,14 @@ struct RigProfile: Codable, Equatable {
 
     /// Same geometry with a substituted (per-session) yaw.
     func replacingYaw(_ yaw: Float) -> RigProfile {
-        RigProfile(dy: dy, dLateral: dLateral, yaw: yaw, pitchResidual: pitchResidual,
+        RigProfile(offsetPhone: offsetPhone, yaw: yaw, pitchResidual: pitchResidual,
                    residualPx: residualPx, timestamp: timestamp,
                    cameraModel: cameraModel, cameraSerialNumber: cameraSerialNumber)
     }
 
     func with(cameraModel: String?, cameraSerialNumber: String?) -> RigProfile {
         RigProfile(
-            dy: dy,
-            dLateral: dLateral,
+            offsetPhone: offsetPhone,
             yaw: yaw,
             pitchResidual: pitchResidual,
             residualPx: residualPx,

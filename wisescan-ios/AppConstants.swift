@@ -189,7 +189,7 @@ enum AppConstants {
 
     // MARK: - 360° Rig (mechanical-prior extrinsic — calibration plan step 1; the solved
     // hand–eye refinement replaces these per rig profile later)
-    static let rigRodHeightMeters: Float = 0.75    // 360° camera height above the phone along WORLD up when the operator has NOT measured the rig (ARKit is gravity-aligned; Theta zenith correction keeps the pano level, so the prior needs only position + yaw). 1.0 m was a guess that no rig in the field has ever matched — every measured monopod rig has come in at 0.70-0.79 m along the rod, and centering the ±calibrationBoundDyM window on 1.0 put the truth on the window's edge. NOTE this is a WORLD-VERTICAL drop; the operator's tape measurement runs ALONG THE ROD and EquirectPostCalibration converts it by cos(tilt)
+    static let rigRodHeightMeters: Float = 0.75    // rod length (m) from the phone camera to the 360° lens when the operator has NOT measured the rig. ALONG THE ROD, the same axis the operator tapes and the same axis RigProfile.offsetPhone stores — no frame conversion anywhere. 1.0 m was a guess no field rig has ever matched (every measured monopod: 0.70-0.79 m), which put the truth on the edge of the unmeasured search box
     static let rigYawOffsetDegrees: Float = 0      // pano-center (camera-body forward) yaw relative to the phone's horizontal forward; 0 = lenses aligned with the phone
     static let equirectFaceSizeMax = 2048          // cube-face edge cap (native density is equirectWidth/4; 11K Theta X stills would yield 2752 — capped for JPEG size/memory)
     static let equirectFaceDecodeMax = 8192        // staged-equirect decode cap for face sampling (8192×4096 RGBA ≈ 134 MB transient, per-still pooled; width/4 already saturates the face cap)
@@ -256,8 +256,8 @@ enum AppConstants {
     static let stillRingLiftMeters: Float = 0.08
 
     /// Plausible rig heights. The lower bound matters more than it looks: the solve
-    /// anchors dy to this value within ±calibrationMeasuredDyHalfM and has been observed
-    /// riding BOTH walls of that window, so a fat-fingered entry (0.285 for 0.285 m when
+    /// anchors the rod length to this value within ±calibrationMeasuredRodHalfM and has been
+    /// observed riding BOTH walls of that window, so a fat-fingered entry (0.285 m when
     /// 28.5 in was meant — a factor of ten) does not degrade the solve, it forces a wrong
     /// answer and the colour lands wrong with a healthy-looking residual. Below this the
     /// camera would be sitting on the phone, which no rig does.
@@ -330,9 +330,9 @@ enum AppConstants {
     // run8 (2026-07-30): with a near-flat chamfer cost surface in cluttered rooms, the
     // unbounded solver accepted dy=4.4 m / yaw=−240° at residuals indistinguishable
     // from plausible poses. A monopod rig cannot physically be outside these ranges.
-    static let calibrationBoundDyM: Float = 0.3                        // rod height half-range (m) around the anchor when the user hasn't MEASURED the rig. The chamfer cost has a systematic +dy pull (dense image-edge band above the elevation cut attracts the sparse projected mesh downward → camera up; 360post4: solved 1.299 vs tape-measured 0.787), so an unmeasured box stays tight to limit the damage — a measured rig uses ±calibrationMeasuredDyHalfM instead
-    static let calibrationMeasuredDyHalfM: Float = 0.05                // dy half-range around the USER-MEASURED rig height. The cost's +dy pull ALWAYS rides this window's upper wall (360post5: measured 0.79 → solved 0.94 at the +0.15 wall), so the in-window solve adds no information — the window is sized to tape/clamp uncertainty only
-    static let calibrationBoundLateralM: Float = 0.3                   // lateral offset half-range (m) around 0
+    static let calibrationBoundRodM: Float = 0.3                       // along-rod half-range (m) around the anchor when the user hasn't MEASURED the rig — the rod length is the one thing we genuinely don't know then
+    static let calibrationBoundAcrossRodM: Float = 0.13                // half-range (m) on each of the two axes ACROSS the rod. Covers real clamp offsets (a few cm) AND the rod not being exactly along the phone's −x̂: ±0.13 m at a 0.72 m rod is a ~10° cone, wider than every inclinometer reading taken on this rig
+    static let calibrationMeasuredRodHalfM: Float = 0.05               // along-rod half-range (m) when the operator HAS measured. Tape and clamp slop only — with the offset now in the phone frame this axis is the one the measurement actually constrains
     static let calibrationBoundYawDeg: Float = 45                      // yaw half-range (deg) around EACH coarse-scan start (yaw is solved globally: the 360° cam screws onto the rod at an arbitrary rotation, so a full-circle coarse scan picks the basin and local bounds keep Nelder-Mead inside it)
     static let calibrationBoundPitchDeg: Float = 10                    // pitch-residual half-range (deg) around 0 (zenith correction should leave only small error)
     static let calibrationConvergenceTolerance: Float = 1e-5           // cost-range convergence threshold

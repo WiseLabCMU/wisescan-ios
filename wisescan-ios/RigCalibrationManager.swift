@@ -419,8 +419,9 @@ final class RigCalibrationManager {
             // back-to-back runs should land within ~mm / tenths of a degree of each
             // other even when the residual floor (scene + operator noise) varies.
             let p = result.profile
-            PerfDiag.log(String(format: "[RigCal] solved params: dy=%.3fm dLat=%.3fm yaw=%.2f° pitch=%.2f° (residual %.2f px, %@)",
-                                p.dy, p.dLateral, p.yaw * 180 / .pi, p.pitchResidual * 180 / .pi,
+            PerfDiag.log(String(format: "[RigCal] solved params: offset=(%.3f,%.3f,%.3f)m |%.3fm| yaw=%.2f° pitch=%.2f° (residual %.2f px, %@)",
+                                p.offsetPhone.x, p.offsetPhone.y, p.offsetPhone.z, p.rodLengthM,
+                                p.yaw * 180 / .pi, p.pitchResidual * 180 / .pi,
                                 result.residualPx, result.converged ? "converged" : "NOT converged"))
 
             // Alignment diagnostics: white = image edges, cyan = mechanical prior, red =
