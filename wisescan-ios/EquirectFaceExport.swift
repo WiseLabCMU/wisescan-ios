@@ -84,32 +84,52 @@ enum EquirectFaceExport {
         let root = rawDataDir.appendingPathComponent("face_frames")
         let camerasDir = root.appendingPathComponent("cameras")
         let imagesDir = root.appendingPathComponent("images")
-        let fm = FileManager.default
-        guard let stills = try? fm.contentsOfDirectory(at: stillsDir, includingPropertiesForKeys: nil)
+        let fileManager = FileManager.default
+        guard let stills = try? fileManager.contentsOfDirectory(at: stillsDir, includingPropertiesForKeys: nil)
         else { return nil }
         let jpgs = stills.filter { $0.pathExtension.lowercased() == "jpg" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !jpgs.isEmpty else { return nil }
-        try? fm.removeItem(at: root)
-        try? fm.createDirectory(at: camerasDir, withIntermediateDirectories: true)
-        try? fm.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+        let depthDir = root.appendingPathComponent("depth")
+        try? fileManager.removeItem(at: root)
+        try? fileManager.createDirectory(at: camerasDir, withIntermediateDirectories: true)
+        try? fileManager.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+        try? fileManager.createDirectory(at: depthDir, withIntermediateDirectories: true)
+
+        // Depth from the scan's own mesh, so the probe measures POSE rather than bleed.
+        // Without it the colorizer disables occlusion for face frames and paints through
+        // walls — and bleed looks exactly like misregistration, which is why the
+        // 2026-08-17 runs could not separate them.
+        let mesh = (try? Data(contentsOf: rawDataDir.appendingPathComponent("mesh.obj")))
+            .flatMap { MeshParser.parseOBJ(from: $0) }
+            ?? (try? Data(contentsOf: rawDataDir.deletingLastPathComponent()
+                            .appendingPathComponent("mesh.obj")))
+            .flatMap { MeshParser.parseOBJ(from: $0) }
+        if mesh == nil {
+            PerfDiag.log("[Colorize] face depth unavailable (no mesh.obj) — occlusion OFF, expect bleed")
+        }
+
         var written = 0
         for jpg in jpgs {
             let sidecar = jpg.deletingPathExtension().appendingPathExtension("json")
             written += emitFaces(equirectURL: jpg, sidecarURL: sidecar,
-                                 imagesDir: imagesDir, camerasDir: camerasDir)
+                                 imagesDir: imagesDir, camerasDir: camerasDir,
+                                 depthDir: mesh == nil ? nil : depthDir, depthMesh: mesh)
         }
         // emitFaces writes staging-relative image paths ("images/<name>") for the
         // EXPORT layout; the colorizer resolves image_path against rawDir, so rewrite
         // to rawDir-relative ("face_frames/images/<name>"). 360post7: without this,
         // every face frame failed its image load silently and the model colored gray.
-        if let cams = try? fm.contentsOfDirectory(at: camerasDir, includingPropertiesForKeys: nil) {
+        if let cams = try? fileManager.contentsOfDirectory(at: camerasDir, includingPropertiesForKeys: nil) {
             for cam in cams where cam.pathExtension == "json" {
                 guard let data = try? Data(contentsOf: cam),
                       var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                       let imagePath = obj["image_path"] as? String,
                       imagePath.hasPrefix("images/") else { continue }
                 obj["image_path"] = "face_frames/" + imagePath
+                if let depthPath = obj["depth_path"] as? String, depthPath.hasPrefix("depth/") {
+                    obj["depth_path"] = "face_frames/" + depthPath
+                }
                 if let out = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) {
                     try? out.write(to: cam)
                 }
@@ -130,10 +150,15 @@ enum EquirectFaceExport {
     /// verify it belongs to the rig that captured a pre-contract still (review finding #9).
     /// `masksDir` receives one operator/rig mask per face when supplied — required for
     /// the down face to be usable downstream at all.
+    /// `depthMesh` turns on OCCLUSION for the faces: without depth the colorizer paints
+    /// every vertex in a face's cone, including surfaces behind walls, and that bleed is
+    /// indistinguishable from pose error. See FaceDepthRender.
     static func emitFaces(equirectURL: URL, sidecarURL: URL,
                           imagesDir: URL, camerasDir: URL,
                           masksDir: URL? = nil,
-                          equirectMask: OperatorRigMask.Mask? = nil) -> Int {
+                          equirectMask: OperatorRigMask.Mask? = nil,
+                          depthDir: URL? = nil,
+                          depthMesh: MeshParser.OBJData? = nil) -> Int {
         guard let sidecarData = try? Data(contentsOf: sidecarURL),
               let sidecar = (try? JSONSerialization.jsonObject(with: sidecarData)) as? [String: Any],
               let flat = sidecar["phone_transform"] as? [Double], flat.count == 16 else { return 0 }
@@ -230,9 +255,13 @@ enum EquirectFaceExport {
                 }
                 writeFaceMask(equirectMask, into: masksDir, face: face, baseName: baseName,
                               faceSize: faceSize, vOffsetFrac: elevOffsetFrac)
+                let depthPath = writeFaceDepth(mesh: depthMesh, into: depthDir,
+                                               camRot: camRot, camPos: camPos, face: face,
+                                               baseName: baseName, faceSize: faceSize)
                 writeCameraJSON(FaceCameraRecord(
                     name: "\(baseName)_\(face.name)",
                     imagePath: "images/\(imageName)",
+                    depthPath: depthPath,
                     rotation: simd_mul(camRot, face.rotation),
                     position: camPos,
                     side: faceSize,
@@ -271,6 +300,7 @@ enum EquirectFaceExport {
     private struct FaceCameraRecord {
         let name: String
         let imagePath: String
+        let depthPath: String?
         let rotation: simd_float3x3
         let position: SIMD3<Float>
         let side: Int
@@ -295,6 +325,7 @@ enum EquirectFaceExport {
             "face": rec.faceName,
             "camera_pose_source": rec.poseSource
         ]
+        if let depthPath = rec.depthPath { json["depth_path"] = depthPath }
         if let stillSource = rec.stillSource { json["still_source"] = stillSource }
         guard JSONSerialization.isValidJSONObject(json),
               let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
@@ -411,5 +442,30 @@ extension EquirectFaceExport {
         guard let png = OperatorRigMask.encodePNG(maskFace) else { return }
         try? png.write(to: masksDir.appendingPathComponent("\(baseName)_\(face.name).png"),
                        options: .atomic)
+    }
+}
+
+// MARK: - Face depth
+
+extension EquirectFaceExport {
+    /// Rasterises the mesh from one face's pose and writes it beside the face image.
+    /// Returns the rawDir-relative path for the camera JSON, or nil when there is no mesh
+    /// (occlusion then stays off, as before).
+    fileprivate static func writeFaceDepth(mesh: MeshParser.OBJData?, into depthDir: URL?,
+                                           camRot: simd_float3x3, camPos: SIMD3<Float>,
+                                           face: Face, baseName: String,
+                                           faceSize: Int) -> String? {
+        guard let mesh, let depthDir else { return nil }
+        let rotation = simd_mul(camRot, face.rotation)
+        let pose = simd_float4x4(SIMD4<Float>(rotation.columns.0, 0),
+                                 SIMD4<Float>(rotation.columns.1, 0),
+                                 SIMD4<Float>(rotation.columns.2, 0),
+                                 SIMD4<Float>(camPos, 1))
+        let depth = FaceDepthRender.render(mesh: mesh, camToWorld: pose, side: faceSize)
+        let name = "\(baseName)_\(face.name).png"
+        guard let png = FaceDepthRender.encodePNG(depth, side: faceSize),
+              (try? png.write(to: depthDir.appendingPathComponent(name), options: .atomic)) != nil
+        else { return nil }
+        return "depth/\(name)"
     }
 }
