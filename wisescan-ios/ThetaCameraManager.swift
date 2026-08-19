@@ -136,6 +136,12 @@ final class ThetaCameraManager {
     /// Phone positions at each scan-still trigger — feeds the live calibration
     /// sufficiency meter (count + baseline spread).
     private(set) var scanStillPositions: [SIMD3<Float>] = []
+    /// Camera-side file URLs already claimed by a still this session, and the newest image
+    /// that existed before it started. Together they let a BLE capture whose confirmation
+    /// was lost be recovered from the camera's file list without ever attaching a
+    /// pre-existing frame to a fresh pose. See triggerStillPreferringBLE.
+    private var seenStillURLs: Set<String> = []
+    private var preScanLatestImageURL: String?
 
     /// Max pairwise distance (m) between this scan's still positions: the calibration
     /// baseline. O(N²) over a handful of stills.
@@ -776,6 +782,13 @@ final class ThetaCameraManager {
         swayedStillCount = 0
         cameraUnresponsive = false
         scanStillPositions.removeAll()
+        // Baseline for confirmation-timeout recovery: anything newer than this on the
+        // camera, and not already claimed by a still this session, was shot by us.
+        seenStillURLs.removeAll()
+        Task { [weak self] in
+            guard let self else { return }
+            self.preScanLatestImageURL = try? await self.latestImageURL()
+        }
         if let dir = rawDataDir?.appendingPathComponent("equirect_stills"),
            let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
             let maxSeq = files.compactMap { file -> Int? in
@@ -899,14 +912,36 @@ final class ThetaCameraManager {
         // which the fallback below does not catch, failing the still outright.
         guard shutterPathIsBLE else {
             lastShutterPath = "osc"
-            return try await triggerStill(onAck: onAck)
+            let url = try await triggerStill(onAck: onAck)
+            seenStillURLs.insert(url)
+            return url
         }
         do {
             let url = try await ThetaBLEManager.shared.triggerShutter(onAck: onAck)
             log(.capture, "Shutter via BLE — file pushed")
             lastShutterPath = "ble"
             bleWriteFailures = 0
+            seenStillURLs.insert(url)
             return url
+        } catch ThetaBLEManager.BLEError.timeout(let what) {
+            // The WRITE was accepted; only the NotifyState push carrying _latestFileUrl
+            // never arrived — so the camera almost certainly took the picture, and
+            // re-triggering would double-shoot. That rule is why this used to surface as a
+            // hard failure, and on 2026-08-19 it cost a still outright.
+            //
+            // Ask the camera instead. A newer image than the one that existed when the scan
+            // began, which no still has already claimed, IS this shot. Both conditions
+            // matter: transferred stills are deleted camera-side as we go, but a camera with
+            // pre-existing files must never hand a stale frame to this still's pose.
+            let latest = try? await latestImageURL()
+            if let latest, latest != preScanLatestImageURL, !seenStillURLs.contains(latest) {
+                seenStillURLs.insert(latest)
+                lastShutterPath = "ble-unconfirmed"
+                log(.capture, "BLE shutter fired but the camera never pushed the file URL (\(what)) — "
+                    + "recovered it from the camera's file list")
+                return latest
+            }
+            throw ThetaBLEManager.BLEError.timeout(what)
         } catch ThetaBLEManager.BLEError.controlRefused {
             // ONE strike, and a separate counter. The 2-strike rule below exists to stop
             // burning the 3 s write watchdog per still on a flaky link; a refusal costs

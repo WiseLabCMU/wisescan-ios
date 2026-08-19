@@ -57,6 +57,10 @@ enum EquirectFaceExport {
     /// (yaw -90°), left along -X (yaw +90°), back along +Z (yaw 180°), up along +Y
     /// (pitch +90°). Pixel content must agree: the sampler's face bases below use the same
     /// axes, so face imagery and face pose rotate together.
+    /// Faces emitted per still — the divisor every consumer needs to turn a face count
+    /// back into a still count.
+    static var faceCount: Int { faces.count }
+
     private static let faces: [Face] = [
         Face(name: "front", rotation: matrix_identity_float3x3),
         Face(name: "right", rotation: yawRotation(-.pi / 2)),

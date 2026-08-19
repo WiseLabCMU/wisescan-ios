@@ -316,10 +316,18 @@ enum VertexColorAccumulator {
         // What the selector actually picked, split by kind. "48 frames" alone cannot
         // distinguish "all keyframes, motion frames dropped" from "a healthy mix", and that
         // is precisely the question asked of this step.
-        let selectedKeyframes = sampledFiles.filter { stems.contains($0.deletingPathExtension().lastPathComponent) }.count
-        PerfDiag.log("[VertexColor] frames: \(sampledFiles.count) of \(cameraFiles.count) selected "
-            + "— \(selectedKeyframes) keyframes + \(sampledFiles.count - selectedKeyframes) motion "
-            + "(budget \(AppConstants.maxColorizationFrames), \(stems.count) keyframes available)")
+        if useFaces {
+            // Face records are cut from the 360° stills and carry their own stems, so a
+            // keyframe/motion split against the CAPTURE keyframe list is meaningless here —
+            // reporting it read as "0 keyframes", which looks like a fault and is not one.
+            PerfDiag.log("[VertexColor] frames: \(sampledFiles.count) cube faces "
+                + "from \(sampledFiles.count / max(1, EquirectFaceExport.faceCount)) still(s)")
+        } else {
+            let selectedKeyframes = sampledFiles.filter { stems.contains($0.deletingPathExtension().lastPathComponent) }.count
+            PerfDiag.log("[VertexColor] frames: \(sampledFiles.count) of \(cameraFiles.count) selected "
+                + "— \(selectedKeyframes) keyframes + \(sampledFiles.count - selectedKeyframes) motion "
+                + "(budget \(AppConstants.maxColorizationFrames), \(stems.count) keyframes available)")
+        }
 
         // ── Privacy: keep person pixels out of colors.bin ──
         // Colorize bakes sampled pixels into colors.bin, which exports as PLY vertex colors — a

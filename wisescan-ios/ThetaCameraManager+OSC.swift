@@ -170,6 +170,20 @@ extension ThetaCameraManager {
         return response.results?.totalEntries ?? 0
     }
 
+    /// URL of the newest image on the camera, or nil if it has none. Used to recover a
+    /// still whose BLE capture CONFIRMATION never arrived: the shutter write was accepted,
+    /// so the picture almost certainly exists — only the NotifyState push was lost. One
+    /// entry, no thumbnail, so the camera enumerates as little as it can.
+    func latestImageURL() async throws -> String? {
+        let body: [String: Any] = ["name": "camera.listFiles",
+                                   "parameters": ["fileType": "image", "entryCount": 1,
+                                                  "maxThumbSize": 0, "startPosition": 0]]
+        let response = try await postJSON("/osc/commands/execute", body: body,
+                                          as: OSCListFilesResponse.self, timeout: 5)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "listFiles failed") }
+        return response.results?.entries?.first?.fileUrl
+    }
+
     /// Bulk erase. The spec's special values ("all" / "image" / "video") must be sent
     /// ALONE in fileUrls. Not permitted during video recording.
     /// Deletes ONE camera-side file by its URL — the single-file twin of the security
@@ -371,7 +385,11 @@ private struct OSCCommandResponse: Decodable {
 }
 
 private struct OSCListFilesResponse: Decodable {
-    struct Results: Decodable { let totalEntries: Int? }
+    struct Entry: Decodable { let fileUrl: String? }
+    struct Results: Decodable {
+        let totalEntries: Int?
+        let entries: [Entry]?
+    }
     let results: Results?
     let error: OSCErrorBody?
 }
