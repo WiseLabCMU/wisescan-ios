@@ -15,22 +15,40 @@ import simd
 /// rig rigidity and on the zenith-correction assumption, neither of which has ever been
 /// verified in the field.
 ///
-/// FORMAT (THETA X 2.92.0, verified against 10 field stills): the MakerNote is a TIFF IFD
-/// behind the header "Ricoh\0\0\0", and the vector sits in a run of three consecutive
-/// 8-byte SRATIONALs with denominator 100,000,000. It is NOT reachable through the IFD's
-/// own tags, so it is located STRUCTURALLY — scan for three consecutive rationals with that
-/// denominator whose values form a unit vector. That test is self-validating and survives a
-/// layout change; a fixed offset would not, and the layout is expected to differ by model
-/// (the Z1 in particular is unverified — it has no field capture in the archive yet).
+/// FORMAT. The MakerNote is a TIFF IFD behind the header "Ricoh\0\0\0", and the vector sits
+/// in a run of three consecutive 8-byte SRATIONALs sharing one denominator. It is NOT
+/// reachable through the IFD's own tags, so it is located STRUCTURALLY: scan for three
+/// consecutive rationals with a common scale-like denominator whose values form a unit
+/// vector. That test validates itself and survives a layout change; a fixed offset does not.
+///
+/// Verified on two models, which is exactly why the search is structural — they agree on the
+/// SEMANTICS and on nothing else:
+///
+///   THETA X  2.92.0  offset 848, denominator 100,000,000  (10 field stills)
+///   THETA Z1 3.60.3  offset 904, denominator 1,048,576 = 2^20  (9 field stills)
+///
+/// Both were checked against ARKit by fitting the one constant phone→camera rotation that
+/// should explain every still's reading: 1.57° mean residual on the X, 1.64° on the Z1, and
+/// they put the same physical rig's rod within 1.5° of each other. Hard-coding either
+/// model's denominator would silently lose the other.
+///
+/// The X also carries three further unit vectors later in its MakerNote (a near-identity
+/// matrix, most likely the zenith rotation it applied). Gravity precedes them on both models,
+/// so the FIRST match is taken — and the offset and denominator are logged, so a future model
+/// that breaks that ordering shows up as a wrong number rather than a silent one.
 enum ThetaGravity {
-    /// Denominator RICOH uses for the normalized accelerometer components.
-    private static let scale: UInt32 = 100_000_000
+    /// Smallest denominator treated as a fixed-point scale rather than an ordinary ratio.
+    private static let minimumScale: UInt32 = 1000
 
     /// Gravity direction in the CAMERA's body frame, unit length, or nil when this image
     /// carries no recognizable vector (different model, different firmware, stripped EXIF).
-    static func parse(jpeg: Data) -> SIMD3<Float>? {
+    static func parse(jpeg: Data) -> SIMD3<Float>? { parseDetailed(jpeg: jpeg)?.gravity }
+
+    /// The vector plus where it was found — the provenance a new model needs to be verified
+    /// from a field bundle rather than a teardown.
+    static func parseDetailed(jpeg: Data) -> (gravity: SIMD3<Float>, offset: Int, scale: UInt32)? {
         guard let makerNote = makerNote(in: jpeg) else { return nil }
-        return makerNote.withUnsafeBytes { raw -> SIMD3<Float>? in
+        return makerNote.withUnsafeBytes { raw -> (SIMD3<Float>, Int, UInt32)? in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return nil }
             let count = raw.count
             guard count >= 24 else { return nil }
@@ -38,12 +56,15 @@ enum ThetaGravity {
                 (UInt32(base[offset]) << 24) | (UInt32(base[offset + 1]) << 16)
                     | (UInt32(base[offset + 2]) << 8) | UInt32(base[offset + 3])
             }
-            // Rationals are 4-byte aligned within the MakerNote in every sample seen, but
+            // Rationals are 4-byte aligned within the MakerNote on both verified models, but
             // step by 2 so a shifted layout is still found.
             var offset = 0
             while offset + 24 <= count {
                 defer { offset += 2 }
-                guard be32(offset + 4) == scale,
+                // One shared denominator across all three components: that is what makes this
+                // a vector rather than three unrelated ratios that happen to sit together.
+                let scale = be32(offset + 4)
+                guard scale >= minimumScale,
                       be32(offset + 12) == scale,
                       be32(offset + 20) == scale else { continue }
                 let vector = SIMD3<Float>(
@@ -51,7 +72,7 @@ enum ThetaGravity {
                     Float(Int32(bitPattern: be32(offset + 8))) / Float(scale),
                     Float(Int32(bitPattern: be32(offset + 16))) / Float(scale))
                 guard abs(simd_length(vector) - 1) < 0.01 else { continue }
-                return vector
+                return (vector, offset, scale)
             }
             return nil
         }

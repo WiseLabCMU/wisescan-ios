@@ -46,6 +46,11 @@ enum EquirectPostCalibration {
     /// geometry; fixed to the face-export convention (atan2(x, −z)), all scans re-solve.
     /// 8: keyframe-anchored yaw basin selection. The bump is load-bearing — scans
     /// solved by v7 re-solve on their next Process and self-heal their colouring.
+    /// 12: the gravity read generalized to the Z1, whose MakerNote encodes the same vector at
+    /// a different offset with a 2^20 denominator instead of 1e8. A Z1 scan therefore stopped
+    /// falling back to the assumed rod direction. Its own fit is 1.64° mean (vs 1.57° on the
+    /// X) and it puts the rig's rod within 1.5° of where the X put it — two models, two
+    /// firmwares, two encodings, one physical rig.
     /// 11: the rod's DIRECTION is measured rather than assumed. The 360° camera writes its
     /// own accelerometer reading into every still, and the one constant phone→camera rotation
     /// that explains all of them puts the rod 7.6° off the assumed −x̂ on the field rig — 10 cm
@@ -73,7 +78,7 @@ enum EquirectPostCalibration {
     /// operator/rig segmentation mask is subtracted from the edge cost (the −45° band
     /// never reached the operator's upper body on ANY scan in the archive). Every one of
     /// those changes what a v8 solve would have returned, so v8 scans re-solve.
-    static let solverVersion = 11
+    static let solverVersion = 12
 
     struct StillRecord {
         let sequence: Int
@@ -535,7 +540,14 @@ extension EquirectPostCalibration {
         for still in stills {
             autoreleasepool {
                 guard let data = try? Data(contentsOf: still.jpgURL, options: .mappedIfSafe),
-                      let gravity = ThetaGravity.parse(jpeg: data) else { return }
+                      let found = ThetaGravity.parseDetailed(jpeg: data) else { return }
+                let gravity = found.gravity
+                if cameraG.isEmpty {
+                    // Once per scan: where the vector was found, so a model this has never
+                    // seen can be verified from a field bundle rather than a teardown.
+                    PerfDiag.log("[RigCal] camera gravity found at MakerNote offset \(found.offset), "
+                        + "scale 1/\(found.scale)")
+                }
                 // Gravity in the PHONE's frame is minus its world-up column, expressed locally.
                 let pose = still.phoneToWorld
                 let local = SIMD3<Float>(-pose.columns.0.y, -pose.columns.1.y, -pose.columns.2.y)
