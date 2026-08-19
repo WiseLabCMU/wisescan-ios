@@ -314,19 +314,27 @@ final class ThetaBLEManager: NSObject {
     }
 
     /// Prove the control plane actually accepts writes on THIS link, without taking a
-    /// picture. Reuses the `_networkType` GetOptions write: same characteristic family as
-    /// the shutter, zero side effects, and the write ack alone settles it — the camera's
-    /// reply is irrelevant here, only whether the ATT write was permitted.
+    /// picture.
+    ///
+    /// PROBE WITH THE WAKE WRITE, on SetOptions. The first version of this probed
+    /// GetOptions instead, and on 2026-08-19 that produced a false negative that cost a
+    /// whole scan's worth of BLE shutters: the wake write to SetOptions succeeded at
+    /// 10:14:09, and the GetOptions probe was refused at 10:15:47 — two DIFFERENT
+    /// characteristics, and neither of them the shutter. A refusal on GetOptions says
+    /// nothing about whether the shutter would fire, so gating on it was gating on
+    /// unrelated evidence. `cameraPower: on` is the exact write the wake path already
+    /// performs, it is proven to work on this hardware, and it is idempotent — the camera
+    /// is awake by the time this runs, so it does nothing at all.
     @discardableResult
     func verifyControlWritable(timeout: TimeInterval = 4) async -> Bool {
-        guard isLinkReady, chars[Self.ccv2GetOptionsChar] != nil else {
+        guard isLinkReady, chars[Self.ccv2SetOptionsChar] != nil else {
             controlVerifiedForLink = false
             return false
         }
         if controlVerifiedForLink { return true }
         do {
-            try await writeJSON("{\"optionNames\":[\"_networkType\"]}",
-                                to: Self.ccv2GetOptionsChar, timeout: timeout)
+            try await writeJSON("{\"cameraPower\":\"on\"}",
+                                to: Self.ccv2SetOptionsChar, timeout: timeout)
             controlVerifiedForLink = true
             return true
         } catch {
