@@ -860,9 +860,20 @@ below turned out different from what earlier status notes implied.
    own IMU agreeing with ARKit to 1.6–2.3° mean. The glass-room scan was excluded — its
    failure was reflections defeating the edge cost (fixed by making the yaw anchor binding
    in v13), not leveling.
-6. **Battery/thermal impact of `disableAutoSleep`** — never measured. Camera no longer
+6. **Photometric (ZNCC) solver A/B — RUN 2026-08-19, photometric recommended for port.**
+   Offline against all 23 field bundles (`tools/rigcal-ab/`): wins yaw decisively (glass
+   room solves natively without the v13 clamp; the weak-geometry scan the edge cost
+   triple-railed solves cleanly; per-still yaw spread works as a quality metric), needs
+   ZERO elevation nuisance on 22/23 bundles including the old-era scans where the edge
+   cost railed at ±11.25° (the offset was absorbing mesh/model error, not an image
+   property), and confirms neither cost measures rod length — the tape-owned ±3 cm axis
+   stays regardless (photometric's free-solve bias is LOW where the edge cost's was high,
+   so the rod-rail direction semantics flip at port time). ~700 lines of edge/chamfer
+   machinery and the mesh dependency retire when ported; needs an on-device validation
+   cycle before deletion.
+7. **Battery/thermal impact of `disableAutoSleep`** — never measured. Camera no longer
    naps between scans; a long field day's battery drain is unknown.
-7. **Color-from-360°-faces dev switch** — built and committed, ZERO device runs. First
+8. **Color-from-360°-faces dev switch** — built and committed, ZERO device runs. First
    test: toggle ON, recolor a people-free scan, compare against the OFF baseline.
 8. **Downstream face+pose registration** — test plan item, never confirmed executed:
    drop exported faces/poses into the actual Polycam-format consumer and check they
