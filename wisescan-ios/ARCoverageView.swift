@@ -22,6 +22,9 @@ struct ARCoverageView: UIViewRepresentable {
     /// CaptureView observes this to halt the scan and prompt the user to save or rescan, since
     /// any data captured after VIO loss is corrupt.
     @Binding var vioCompromised: Bool
+    /// Set when a tracking correction made ARKit PURGE a large share of the live mesh —
+    /// the "benign" isolated jump's real cost. Carries a short operator-facing message.
+    @Binding var meshResetNotice: String?
     var scanStats: ScanStats
     var privacyFilter: Bool
     var activeMeshColor: String = AppConstants.activeMeshColor
@@ -127,6 +130,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.isRecording.store(false, ordering: .relaxed)
         context.coordinator.isSessionReadyBinding = $isSessionReady
         context.coordinator.vioCompromisedBinding = $vioCompromised
+        context.coordinator.meshResetNoticeBinding = $meshResetNotice
         context.coordinator.finalCapturedRoomBinding = $finalCapturedRoom
         context.coordinator.hasWorldMap.store(config.initialWorldMap != nil, ordering: .relaxed)
         context.coordinator.scanStore = scanStore
@@ -882,6 +886,11 @@ struct ARCoverageView: UIViewRepresentable {
         /// Once armed, a drop to `.notAvailable`/`.relocalizing` means the world frame is lost and
         /// everything captured afterward is corrupt — so we trip the guard (halt + prompt) once.
         var vioCompromisedBinding: Binding<Bool>?
+        var meshResetNoticeBinding: Binding<String?>?
+        /// Armed by an isolated tracking jump: (when, mesh-anchor count at that moment).
+        /// A few seconds later the count is compared — ARKit re-pins SOME anchors after a
+        /// correction and silently deletes the rest, and only the delta says which happened.
+        var pendingMeshResetCheck: (at: TimeInterval, anchors: Int)?
         /// RoomPlan: binding to push the final CapturedRoom snapshot back to CaptureView for export.
         var finalCapturedRoomBinding: Binding<CapturedRoom?>?
         private var vioGuardArmed = false
@@ -2539,6 +2548,19 @@ struct ARCoverageView: UIViewRepresentable {
             // repins-immune-to-snaps]]). But a STORM of them (self-similar-room relocalization oscillating
             // under nominal `.normal` tracking) is a real "session destabilized" collapse the VIO guard
             // misses. Only flag on the storm. Recording-only (when geometry is committed).
+            // Delayed verdict on an armed mesh-reset check (see the jump handler below).
+            if let pending = pendingMeshResetCheck, frame.timestamp - pending.at > 4 {
+                pendingMeshResetCheck = nil
+                let now = frame.anchors.lazy.filter { $0 is ARMeshAnchor }.count
+                if isRecording.load(ordering: .relaxed), Float(now) < Float(pending.anchors) * 0.6 {
+                    let lostPct = Int((1 - Float(now) / Float(pending.anchors)) * 100)
+                    PerfDiag.log("[TrackStab] mesh PURGED after the correction: \(pending.anchors) → \(now) anchors (−\(lostPct)%) — earlier coverage was discarded by ARKit")
+                    DispatchQueue.main.async { [weak self] in
+                        self?.meshResetNoticeBinding?.wrappedValue =
+                            "Tracking corrected itself and ~\(lostPct)% of the captured mesh was reset — re-sweep the areas you scanned first."
+                    }
+                }
+            }
             if isRecording.load(ordering: .relaxed),
                let snap = trackingStability.observe(frame.camera.transform,
                                                     tracking: frame.camera.trackingState,
@@ -2547,6 +2569,14 @@ struct ARCoverageView: UIViewRepresentable {
                 PerfDiag.log(String(format: "[TrackStab] jump #%d: Δpos=%.1fcm Δrot=%.2f° (%.1f m/s)%@",
                                     count, snap.dPosM * 100, snap.dRotDeg, snap.velocityMS,
                                     snap.stormActive ? " — STORM (session destabilizing)" : " — isolated (benign; mesh re-pins)"))
+                // "Benign" is only the POSE story. On 2026-08-19 a single isolated 32 cm
+                // correction made ARKit purge 34 of 46 mesh anchors — 677k faces down to
+                // 71k, most of the scan's early reconstruction gone with no message
+                // anywhere. Arm a delayed count check; the purge takes ARKit a beat.
+                if !snap.stormActive {
+                    let meshCount = frame.anchors.lazy.filter { $0 is ARMeshAnchor }.count
+                    if meshCount >= 8 { pendingMeshResetCheck = (frame.timestamp, meshCount) }
+                }
                 if snap.stormJustTriggered {
                     PerfDiag.log(String(format: "[TrackStab] SNAP STORM: ≥%d non-physical jumps within %.0fs under .normal tracking — relocalization oscillating / session destabilized (VIO guard misses this — tracking still reports normal)",
                                         TrackingStabilityMonitor.stormThreshold, TrackingStabilityMonitor.stormWindow))

@@ -46,6 +46,7 @@ struct CaptureView: View {
     // Set true by ARCoverageView's coordinator when VIO tracking is lost mid‑recording; observed
     // below to halt the scan and prompt save/rescan (data after VIO loss is corrupt).
     @State var vioCompromised = false
+    @State var meshResetNotice: String?
     // Battery: pauses ARCoverageView's session after the capture tab has been hidden for
     // AppConstants.arIdleTeardownSeconds; resumed on return. Rapid successive scans stay warm.
     @State private var pauseARSession = false
@@ -818,6 +819,7 @@ struct CaptureView: View {
                 isRecording: $isRecording,
                 isSessionReady: $isARSessionReady,
                 vioCompromised: $vioCompromised,
+                meshResetNotice: $meshResetNotice,
                 scanStats: scanStats,
                 privacyFilter: isPrivacyFilterOn,
                 activeMeshColor: activeMeshColor,
@@ -919,6 +921,14 @@ struct CaptureView: View {
                 // Main's VIO-loss guard: halt + prompt save/rescan when tracking is lost mid-scan.
                 .onChange(of: vioCompromised) { _, lost in
                     if lost { handleVIOCompromised() }
+                }
+                // ARKit purged mesh after a tracking correction — recoverable by re-sweeping,
+                // but only if the operator finds out NOW rather than at Process.
+                .onChange(of: meshResetNotice) { _, notice in
+                    guard let notice else { return }
+                    showTransientMessage("⚠️ \(notice)", duration: 8)
+                    ThetaCameraManager.shared.playThetaSwayWarnCue()
+                    meshResetNotice = nil
                 }
                 // Rig calibration: enable mesh reconstruction when calibration starts,
                 // disable when it ends (pre-record only — recording enables mesh itself).
