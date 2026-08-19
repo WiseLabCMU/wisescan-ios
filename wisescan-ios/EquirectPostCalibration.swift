@@ -51,6 +51,17 @@ enum EquirectPostCalibration {
     /// healthy solves across both cameras all sat +8 to +10 cm ABOVE the true rod, climbing
     /// the box regardless of where it was centred. The tape owns that axis now; a rail on it
     /// means "re-measure the rod", which would have caught the stale tape on the first scan.
+    /// 15: the PHOTOMETRIC solver ships the poses (offline A/B on all 23 field bundles,
+    /// tools/rigcal-ab/): ZNCC over keyframe-unprojected points, per (keyframe, still)
+    /// pair, trimmed. The glass room solves natively without the v13 clamp, the
+    /// weak-geometry scans the edge cost triple-railed solve cleanly, and NO elevation
+    /// nuisance is needed on 22/23 bundles including the old-era scans where the edge
+    /// cost railed at ±11.25° — that offset was absorbing mesh/model error the image
+    /// never had. elevation_offset_deg is written as an explicit 0; pitchResidual is 0;
+    /// residual_px_rms retires in favour of zncc + per-still yaw spread (which also
+    /// gates: spread >15° rejects the solve). The edge cost still RUNS this cycle as a
+    /// logged comparison seeded with the photometric basin — never baked — and gets
+    /// deleted, not bypassed, once a couple of field runs agree.
     /// 13: the keyframe anchor's basin is BINDING, not advisory. The coarse yaw scan was
     /// confined to ±yawAnchorWindowDeg of the anchor, but Nelder-Mead then got
     /// ±calibrationBoundYawDeg around each start on top of it, so the reachable set was ±80°
@@ -89,7 +100,7 @@ enum EquirectPostCalibration {
     /// operator/rig segmentation mask is subtracted from the edge cost (the −45° band
     /// never reached the operator's upper body on ANY scan in the archive). Every one of
     /// those changes what a v8 solve would have returned, so v8 scans re-solve.
-    static let solverVersion = 14
+    static let solverVersion = 15
 
     struct StillRecord {
         let sequence: Int
@@ -171,22 +182,11 @@ enum EquirectPostCalibration {
         let prepMs = ms(tPrep)
 
         let stored = persistedOrPrior()
-
-        // Too few usable inputs for geometry: hold the persisted dy/dLat/pitch and solve
-        // the per-session yaw alone off the best still (1-D global scan — cheap, robust).
-        if inputs.count < AppConstants.calibrationMinStillsForSolve {
-            guard let first = inputs.first,
-                  let (yaw, residual) = RigCalibrationSolver.solveSessionYaw(
-                    input: first, profile: stored) else {
-                bake(stills: stills, profile: stored, source: sourcePrior, residual: nil)
-                return "insufficient solver inputs (\(inputs.count)) — prior poses stamped"
-            }
-            let profile = stored.replacingYaw(yaw)
-            bake(stills: stills, profile: profile, source: sourceYawOnly, residual: residual)
-            PerfDiag.log(String(format: "[RigCal] postprocess yaw-only solve: yaw=%.2f° residual=%.2f px (%d input(s))",
-                                yaw * 180 / .pi, residual, inputs.count))
-            return "yaw-only solve from \(inputs.count) still(s)"
-        }
+        // The v≤14 few-inputs path (hold geometry, edge-cost session yaw off one still) is
+        // gone: the photometric solver handles <4 stills itself by holding the offset at
+        // the tape anchor and refining yaw photometrically, which is the same idea with
+        // the better cost. Edge `inputs` are now built ONLY for the validation-cycle
+        // comparison and the diagnostics overlay — an empty set skips both, never the solve.
 
         // Full solve — mechanical bounds, yaw global (see below).
         report("Solving 360° rig calibration…")
@@ -221,22 +221,41 @@ enum EquirectPostCalibration {
                                                     acos(min(1, max(-1, -(rod!.x)))) * 180 / .pi),
                                 bounds.alongHalf * 100, bounds.acrossHalf * 100))
         }
-        // v8: let the phone's keyframes choose the yaw basin before the edge cost
-        // refines inside it. Uses the first selected still — any of them anchors the
-        // same rig, and one is enough to break the room's rotational symmetry.
-        // The offset it scores at must be the BEST one available, not the stored profile's:
-        // persistedOrPrior() substitutes the mechanical prior whenever no sane profile
-        // exists, so a first solve on a 0.70 m rig placed the trial camera well off the real
-        // lens position, and the yaw score — which is nothing but "does the still's content
-        // land where the keyframes say" — ranked the wrong basin.
-        // The camera's own accelerometer, per still — an INDEPENDENT measurement of two of
-        // the three rotational DOF, owing nothing to ARKit, the mesh, or the cost function.
-        let anchorYaw = anchorYawIfPossible(selected: selected, rawDataDir: rawDataDir,
-                                            offsetPhone: bounds.anchorOffset, report: report)
-        let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds,
-                                                yawAnchor: anchorYaw)
+        // v15: the PHOTOMETRIC solver ships the poses. The yaw anchor is not a separate
+        // pre-pass any more — the coarse full-circle scan inside the solver IS the anchor,
+        // and the refinement never leaves its basin. See PhotometricRigSolver for why it
+        // replaced the edge cost (offline A/B, tools/rigcal-ab/).
+        report("Solving 360° rig calibration…")
+        let photo = PhotometricRigSolver.solve(
+            stills: selected.map { ($0.jpgURL, $0.phoneToWorld) },
+            rawDataDir: rawDataDir, bounds: bounds, report: report)
+
+        // VALIDATION CYCLE ONLY: the edge cost still runs, seeded with the photometric
+        // basin so the two are compared inside the same quarter-turn, and its answer is
+        // LOGGED, never baked. One or two clean field comparisons and this block — and
+        // the ~700 lines it keeps alive — get deleted rather than bypassed.
+        if let photo, !inputs.isEmpty {
+            let edge = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds,
+                                                  yawAnchor: photo.coarseYawRad)
+            if edge.converged {
+                let dt = simd_length(edge.profile.offsetPhone - photo.profile.offsetPhone)
+                let dy = abs(atan2(sin(edge.profile.yaw - photo.profile.yaw),
+                                   cos(edge.profile.yaw - photo.profile.yaw))) * 180 / .pi
+                PerfDiag.log(String(format: "[RigCal] edge-compare: Δoffset=%.1fcm Δyaw=%.1f° "
+                    + "(edge |%.3fm| yaw=%.1f° %.2fpx elev=%.1f°)",
+                    dt * 100, dy, edge.profile.rodLengthM, edge.profile.yaw * 180 / .pi,
+                    edge.residualPx, edge.elevOffsetDeg))
+            } else {
+                PerfDiag.log("[RigCal] edge-compare: edge solve did not converge")
+            }
+        }
         let solveMs = ms(tSolve)
-        let p = result.profile
+
+        guard let photo else {
+            bake(stills: stills, profile: stored, source: sourcePrior, residual: nil)
+            return "photometric solve unavailable — prior poses stamped"
+        }
+        let p = photo.profile
         // Run-to-run accuracy record — internal only, never surfaced to the operator.
         // Carries the CONTEXT the residual needs to be comparable: RMS rises with the
         // number of constraints, so a 5-input solve cannot be read against a 3-input one
@@ -252,50 +271,58 @@ enum EquirectPostCalibration {
         // The scan's identity leads the line: a batch re-solve (solver-version bump) emits
         // eight of these back to back, and without the id they cannot be told apart or
         // matched to a staged bundle.
-        PerfDiag.log(String(format: "[RigCal] postprocess solve [\(scanDir.lastPathComponent.prefix(8))]: offset=(%.3f,%.3f,%.3f)m |%.3fm| yaw=%.2f° pitch=%.2f° elev=%.1f° "
-                            + "(residual %.2f px, %@, %d inputs, spread %.2fm, mean sway %.0fmm)",
+        PerfDiag.log(String(format: "[RigCal] postprocess solve [\(scanDir.lastPathComponent.prefix(8))]: offset=(%.3f,%.3f,%.3f)m |%.3fm| yaw=%.2f° "
+                            + "(zncc %.3f, yaw spread %.1f°, %@%@, %d stills, spread %.2fm, mean sway %.0fmm)",
                             p.offsetPhone.x, p.offsetPhone.y, p.offsetPhone.z, p.rodLengthM,
-                            p.yaw * 180 / .pi, p.pitchResidual * 180 / .pi,
-                            result.elevOffsetDeg,
-                            result.residualPx, result.converged ? "converged" : "NOT converged",
-                            inputs.count, spreadM, meanSwayMm))
+                            p.yaw * 180 / .pi,
+                            photo.zncc, photo.yawSpreadDeg,
+                            photo.converged ? "converged" : "NOT converged",
+                            photo.yawOnly ? ", YAW-ONLY (<4 stills)" : "",
+                            photo.usedStills, spreadM, meanSwayMm))
 
         // A parameter sitting on its bound is not a measurement, it is the optimizer telling
-        // you the model cannot reach the data — and it stamps as "solved, converged, 2.9 px"
-        // exactly like a real fit, which is how a boundary has been shipping as a pose.
-        // Name every railed parameter in the log AND in the sidecar so downstream can tell.
-        let rails = railedParameters(profile: p, bounds: bounds, result: result, anchorYaw: anchorYaw)
+        // you the model cannot reach the data. Name every railed parameter in the log AND
+        // the sidecar so downstream can tell.
+        let rails = railedParameters(profile: p, bounds: bounds)
         if !rails.isEmpty {
-            // The upward rod rail ALONE is not a failed fit — it is the tape doing its job of
-            // capping the solver's documented upward pull, and the pose error is bounded by
-            // the box. Saying "treat as approximate" for that case sent the operator off to
-            // re-measure a rod that had not moved. Anything else railed keeps the loud form.
-            let onlyCappedPull = rails.count == 1 && rails[0].contains("known upward pull")
+            // The DOWNWARD rod rail alone is the tape doing its job — the photometric
+            // cost's known pull is LOW (offline A/B: median −3 cm freed of the tape),
+            // opposite the edge cost's. Pose error stays bounded by the box.
+            let onlyCappedPull = rails.count == 1 && rails[0].contains("known downward pull")
             PerfDiag.log(onlyCappedPull
                 ? "[RigCal] \(rails[0]) — poses good to ~\(Int(bounds.alongHalf * 100))cm along the rod"
                 : "[RigCal] ⚠️ AT THE LIMIT: \(rails.joined(separator: ", ")) — the residual is a "
                     + "boundary, not a fit; treat these poses as approximate")
         }
 
-        guard result.converged, result.residualPx >= 0, result.residualPx.isFinite else {
+        // Reject on the quality metric, not just convergence: a yaw spread past the gate
+        // means the stills DISAGREE about which way the room faces, and no single number
+        // from the optimizer can make that trustworthy.
+        guard photo.converged, photo.yawSpreadDeg <= AppConstants.photometricYawSpreadMaxDeg else {
+            PerfDiag.log(String(format: "[RigCal] solve REJECTED (yaw spread %.1f° > %.0f°, or not converged) — prior poses stamped",
+                                photo.yawSpreadDeg, AppConstants.photometricYawSpreadMaxDeg))
             bake(stills: stills, profile: stored, source: sourcePrior, residual: nil)
-            return "solver did not converge — prior poses stamped"
+            return "photometric solve rejected — prior poses stamped"
         }
 
-        bake(stills: stills, profile: result.profile, source: sourceSolved,
-             residual: result.residualPx, elevOffsetDeg: result.elevOffsetDeg, railed: rails,
-             rodAnchor: (simd_length(bounds.anchorOffset), measuredRod > 0.1))
+        // elevation_offset_deg is written as an explicit 0, never omitted: bake() merges
+        // into existing sidecar JSON, and a stale nonzero value from a v≤14 solve would
+        // otherwise survive and keep shifting the face sampling.
+        bake(stills: stills, profile: p, source: photo.yawOnly ? sourceYawOnly : sourceSolved,
+             residual: nil, elevOffsetDeg: 0, railed: rails,
+             rodAnchor: (simd_length(bounds.anchorOffset), measuredRod > 0.1),
+             zncc: photo.zncc, yawSpreadDeg: photo.yawSpreadDeg)
         // Rolling geometry: persist the refined rig constants (yaw stored too, but it is
         // session-local by hardware behavior — the next scan re-solves it).
-        result.profile.with(cameraModel: stored.cameraModel,
+        p.with(cameraModel: stored.cameraModel,
                             cameraSerialNumber: stored.cameraSerialNumber).save()
 
-        if PerfDiag.enabled {
-            writeDiagnostics(inputs: inputs, solved: result.profile)
+        if PerfDiag.enabled, !inputs.isEmpty {
+            writeDiagnostics(inputs: inputs, solved: p)
         }
-        return String(format: "solved (%.2f px, %d inputs; parse %ds + prep %ds + solve %ds, %d iters; total %ds)",
-                      result.residualPx, inputs.count, parseMs / 1000, prepMs / 1000,
-                      solveMs / 1000, result.iterations, ms(t0) / 1000)
+        return String(format: "solved (zncc %.3f, spread %.1f°, %d stills; parse %ds + prep %ds + solve %ds, %d iters; total %ds)",
+                      photo.zncc, photo.yawSpreadDeg, photo.usedStills, parseMs / 1000, prepMs / 1000,
+                      solveMs / 1000, photo.iterations, ms(t0) / 1000)
     }
 
     // MARK: - Stills
@@ -405,7 +432,8 @@ enum EquirectPostCalibration {
                                          source: String, residual: Float?,
                                          elevOffsetDeg: Float? = nil,
                                          railed: [String] = [],
-                                         rodAnchor: (meters: Float, fromTape: Bool)? = nil) {
+                                         rodAnchor: (meters: Float, fromTape: Bool)? = nil,
+                                         zncc: Float? = nil, yawSpreadDeg: Float? = nil) {
         for still in stills {
             guard let data = try? Data(contentsOf: still.sidecarURL),
                   var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -433,6 +461,12 @@ enum EquirectPostCalibration {
                 obj["rig_rod_anchor_m"] = Double(rodAnchor.meters)
                 obj["rig_rod_anchor_source"] = rodAnchor.fromTape ? "tape" : "mechanical_default"
             }
+            // Photometric (solver ≥15) quality record: trimmed-mean ZNCC at the solution
+            // and the per-still yaw agreement spread — the honest confidence pair that
+            // replaces residual_px_rms (which no longer gets written; it was an edge-cost
+            // quantity and was never comparable across still counts anyway).
+            if let zncc { obj["rig_calibration_zncc"] = Double(zncc) }
+            if let yawSpreadDeg { obj["rig_calibration_yaw_spread_deg"] = Double(yawSpreadDeg) }
             // The geometry that produced cam_transform, so a consumer can audit a pose
             // without re-deriving it: the offset in the PHONE's frame (metres) and its
             // length, which is the number the operator taped.
@@ -482,24 +516,22 @@ enum EquirectPostCalibration {
 
     /// Which solved parameters came back on (or within a hair of) a bound. "Within a hair"
     /// matters: Nelder-Mead approaches a wall asymptotically, so an exact equality test
-    /// misses the case entirely — 2 mm inside a ±50 mm box is a rail, not a fit.
+    /// misses the case entirely — 2 mm inside a ±30 mm box is a rail, not a fit.
     private nonisolated static func railedParameters(
-        profile: RigProfile, bounds: RigCalibrationSolver.SolveBounds,
-        result: RigCalibrationSolver.CalibrationResult, anchorYaw: Float?) -> [String] {
+        profile: RigProfile, bounds: RigCalibrationSolver.SolveBounds) -> [String] {
         var rails: [String] = []
         // Along and across the rod, matching the cylinder the solve is actually bounded by.
-        // The along-rod rail is direction-aware because its two walls mean different things:
-        // the UPPER wall is the documented upward pull being capped by the tape (expected on
-        // a healthy scan — 2026-08-19: +2.0 cm then +3.0 cm railed, back to back, same rig,
-        // fresh tape), while the LOWER wall means the solve wants a shorter rod than the
-        // tape says, i.e. the tape entry is long or belongs to a different rig era.
+        // Direction-aware, and the semantics FLIPPED with the photometric port (offline
+        // A/B): this cost's known pull is DOWN (median −3 cm freed of the tape) where the
+        // edge cost's was up, so the LOWER wall is now the benign capped-pull case and the
+        // UPPER wall means the tape is short or from another rig era.
         let excursion = bounds.excursion(profile.offsetPhone)
         let alongSigned = simd_dot(profile.offsetPhone - bounds.anchorOffset, bounds.rodDirection)
         if abs(excursion.along - bounds.alongHalf) < 0.005 {
-            rails.append(alongSigned > 0
-                ? String(format: "rod length %.3fm at the tape's +%.0fcm wall (known upward pull, capped — re-measure only if the rig changed)",
+            rails.append(alongSigned < 0
+                ? String(format: "rod length %.3fm at the tape's −%.0fcm wall (known downward pull, capped — re-measure only if the rig changed)",
                          simd_length(profile.offsetPhone), bounds.alongHalf * 100)
-                : String(format: "rod length %.3fm at the tape's −%.0fcm wall (solve wants a SHORTER rod than the tape — the tape entry is likely long or from another rig era)",
+                : String(format: "rod length %.3fm at the tape's +%.0fcm wall (solve wants a LONGER rod than the tape — the tape entry is likely short or from another rig era)",
                          simd_length(profile.offsetPhone), bounds.alongHalf * 100))
         }
         if abs(excursion.across - bounds.acrossHalf) < 0.005 {
@@ -510,67 +542,12 @@ enum EquirectPostCalibration {
         if bounds.pitchHalfDeg - abs(pitchDeg) < 0.5 {
             rails.append(String(format: "pitch %.1f° on its ±%.0f° bound", pitchDeg, bounds.pitchHalfDeg))
         }
-        // The elevation sweep's own limit, derived the same way the solver derives the value.
-        if abs(result.elevOffsetDeg) >= AppConstants.calibrationElevationSweepLimitDeg - 0.05 {
-            rails.append(String(format: "elevation %.1f° at the end of its sweep", result.elevOffsetDeg))
-        }
-        // Not a bound, but the same class of problem: the edge cost walked a long way from
-        // the basin the keyframes picked, and the keyframes are the absolute reference.
-        if let anchorYaw {
-            let delta = abs(atan2(sin(profile.yaw - anchorYaw), cos(profile.yaw - anchorYaw))) * 180 / .pi
-            if delta > AppConstants.yawAnchorDisagreementWarnDeg {
-                rails.append(String(format: "yaw %.1f° from the keyframe anchor", delta))
-            }
-        }
+        // No elevation rail (v15 has no elevation parameter) and no anchor-disagreement
+        // rail (the refinement is confined to the coarse basin by construction); the
+        // per-still yaw SPREAD gate covers the failure those used to catch.
         return rails
     }
 
-    private nonisolated static func meshURL(scanDir: URL, rawDataDir: URL) -> URL {
-        let top = scanDir.appendingPathComponent("mesh.obj")
-        return FileManager.default.fileExists(atPath: top.path)
-            ? top : rawDataDir.appendingPathComponent("mesh.obj")
-    }
-
-    private nonisolated static func writeDiagnostics(
-        inputs: [RigCalibrationSolver.CalibrationInput], solved: RigProfile
-    ) {
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("rigcal_diag", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let stamp = Int64(Date().timeIntervalSince1970 * 1000)   // epoch ms (CONTRIBUTING → Units & time)
-        let renderStart = Date()
-        for (idx, input) in inputs.enumerated() {
-            // Subsample edges for the overlay like the solve does — splatting the full
-            // uncapped set (~50k edges/still) cost ~30 s of the 360post3 total.
-            let maxEdges = AppConstants.calibrationMaxEdgesPerInput
-            let edges: [RigCalibrationSolver.MeshEdge]
-            if input.meshEdges.count <= maxEdges {
-                edges = input.meshEdges
-            } else {
-                let step = max(1, input.meshEdges.count / maxEdges)
-                edges = Swift.stride(from: 0, to: input.meshEdges.count, by: step)
-                    .prefix(maxEdges).map { input.meshEdges[$0] }
-            }
-            let slim = RigCalibrationSolver.CalibrationInput(
-                phoneToWorld: input.phoneToWorld, edgeMap: input.edgeMap, meshEdges: edges)
-            guard let png = RigCalibrationSolver.renderDiagnostic(
-                input: slim, solved: solved, prior: .mechanicalPrior) else { continue }
-            try? png.write(to: dir.appendingPathComponent("post_\(stamp)_still\(idx + 1).png"))
-        }
-        PerfDiag.log("[RigCal] postprocess diagnostics (\(Int(Date().timeIntervalSince(renderStart) * 1000)) ms) → Documents/rigcal_diag/post_*.png")
-    }
-}
-
-extension EquirectPostCalibration {
-    /// v8 basin selection — see EquirectYawAnchor. Uses the first selected still: any of
-    /// them anchors the same rig, and one is enough to break the room's symmetry.
-    /// Fit the ONE constant phone→camera rotation that best explains every still's gravity
-    /// reading, and report how well it holds. The rig is rigid, so a good fit means the
-    /// clamp held and the camera's zenith reference agrees with ARKit's; a per-still
-    /// outlier means that still moved, and a bad fit across the board means the rig shifted
-    /// mid-scan — none of which anything else in this pipeline can currently detect.
-    ///
-    /// Field baseline (THETA X 2.92.0, 10 stills, 2026-08-19): mean 1.57°, max 4.88°.
     /// The rod's direction in the phone's frame, from the camera's own accelerometer, or nil
     /// when it cannot be trusted. Returns a unit vector pointing from the phone camera toward
     /// the 360° lens.
@@ -676,12 +653,41 @@ extension EquirectPostCalibration {
         return simd_float3x3(simd_quatf(ix: q.y, iy: q.z, iz: q.w, r: q.x))
     }
 
-    fileprivate static func anchorYawIfPossible(selected: [StillRecord], rawDataDir: URL,
-                                                offsetPhone: SIMD3<Float>,
-                                                report: (String) -> Void) -> Float? {
-        guard let still = selected.first else { return nil }
-        return EquirectYawAnchor.solve(rawDataDir: rawDataDir, stillJPG: still.jpgURL,
-                                       phoneToWorld: still.phoneToWorld,
-                                       offsetPhone: offsetPhone, report: report)
+    private nonisolated static func meshURL(scanDir: URL, rawDataDir: URL) -> URL {
+        let top = scanDir.appendingPathComponent("mesh.obj")
+        return FileManager.default.fileExists(atPath: top.path)
+            ? top : rawDataDir.appendingPathComponent("mesh.obj")
     }
+
+    private nonisolated static func writeDiagnostics(
+        inputs: [RigCalibrationSolver.CalibrationInput], solved: RigProfile
+    ) {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("rigcal_diag", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let stamp = Int64(Date().timeIntervalSince1970 * 1000)   // epoch ms (CONTRIBUTING → Units & time)
+        let renderStart = Date()
+        for (idx, input) in inputs.enumerated() {
+            // Subsample edges for the overlay like the solve does — splatting the full
+            // uncapped set (~50k edges/still) cost ~30 s of the 360post3 total.
+            let maxEdges = AppConstants.calibrationMaxEdgesPerInput
+            let edges: [RigCalibrationSolver.MeshEdge]
+            if input.meshEdges.count <= maxEdges {
+                edges = input.meshEdges
+            } else {
+                let step = max(1, input.meshEdges.count / maxEdges)
+                edges = Swift.stride(from: 0, to: input.meshEdges.count, by: step)
+                    .prefix(maxEdges).map { input.meshEdges[$0] }
+            }
+            let slim = RigCalibrationSolver.CalibrationInput(
+                phoneToWorld: input.phoneToWorld, edgeMap: input.edgeMap, meshEdges: edges)
+            guard let png = RigCalibrationSolver.renderDiagnostic(
+                input: slim, solved: solved, prior: .mechanicalPrior) else { continue }
+            try? png.write(to: dir.appendingPathComponent("post_\(stamp)_still\(idx + 1).png"))
+        }
+        PerfDiag.log("[RigCal] postprocess diagnostics (\(Int(Date().timeIntervalSince(renderStart) * 1000)) ms) → Documents/rigcal_diag/post_*.png")
+    }
+}
+
+extension EquirectPostCalibration {
 }

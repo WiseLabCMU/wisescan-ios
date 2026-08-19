@@ -27,6 +27,11 @@ import simd
 ///
 /// The anchor only SEEDS: it narrows the edge-cost solve to ±35° of its winner, leaving
 /// the precise local refinement to the cost function that is good at it.
+///
+/// v15: SUBSUMED by `PhotometricRigSolver`, which grew this file's idea into the shipping
+/// solver — its coarse full-circle scan IS this anchor, running on the same samples. The
+/// sampling helpers below feed it; `solve(rawDataDir:stillJPG:...)` has no callers left
+/// and goes with the edge cost's deletion sweep.
 enum EquirectYawAnchor {
 
     /// One depth-unprojected keyframe point: where it is, and how bright it looked.
@@ -87,6 +92,15 @@ enum EquirectYawAnchor {
     /// Strided rather than dense: the score only needs enough points to rank a yaw, and
     /// this runs inside the Process step alongside the solve itself.
     static func keyframeSamples(rawDataDir: URL, maxFrames: Int, pixelStride: Int) -> [Sample] {
+        keyframeSampleGroups(rawDataDir: rawDataDir, maxFrames: maxFrames,
+                             pixelStride: pixelStride).flatMap { $0 }
+    }
+
+    /// Same sampling, one array per keyframe: the photometric solver's ZNCC is computed
+    /// per (keyframe, still) PAIR — exposure differs between keyframes, and pooling them
+    /// would let one bright frame dominate the normalisation.
+    static func keyframeSampleGroups(rawDataDir: URL, maxFrames: Int,
+                                     pixelStride: Int) -> [[Sample]] {
         let camerasDir = rawDataDir.appendingPathComponent("cameras")
         let imagesDir = rawDataDir.appendingPathComponent("images")
         let depthDir = rawDataDir.appendingPathComponent("depth")
@@ -102,9 +116,10 @@ enum EquirectYawAnchor {
         // Even spread across the walk rather than the first N, which would cluster at one
         // end of the room and re-introduce the symmetry we are trying to break.
         let step = max(1, cameraFiles.count / max(1, maxFrames))
-        var samples: [Sample] = []
+        var groups: [[Sample]] = []
         for file in Swift.stride(from: 0, to: cameraFiles.count, by: step).map({ cameraFiles[$0] }) {
             autoreleasepool {
+                var samples: [Sample] = []
                 let stem = file.deletingPathExtension().lastPathComponent
                 guard let json = (try? Data(contentsOf: file)).flatMap({
                           try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any],
@@ -132,9 +147,10 @@ enum EquirectYawAnchor {
                                               gray: image.at(imageColumn, imageRow)))
                     }
                 }
+                if !samples.isEmpty { groups.append(samples) }
             }
         }
-        return samples
+        return groups
     }
 
     struct Intrinsics {

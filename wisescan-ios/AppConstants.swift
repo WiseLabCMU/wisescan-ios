@@ -307,6 +307,19 @@ enum AppConstants {
     static let yawAnchorKeyframes = 8
     static let yawAnchorPixelStride = 8
     static let yawAnchorStepDeg: Float = 3
+    /// Photometric solver (v15) — see PhotometricRigSolver. Keyframes/stride budget the
+    /// point count (~10×(192/6)×(256/6) ≈ 14k raw, less after depth gating); more frames
+    /// beat denser frames because ZNCC pairs are per keyframe.
+    static let photometricKeyframes = 10
+    static let photometricPixelStride = 6
+    static let photometricStillMaxPixel = 1024
+    static let photometricTrimFrac: Float = 0.2          // drop the worst 20% of (keyframe, still) pairs
+    static let photometricMinPairSamples = 60            // a pair below this many valid samples is no evidence
+    /// Max−min of the per-still yaw re-solves before the solve is REJECTED and the prior
+    /// ships. Archive: 1.0–4.5° on healthy scans, 7.5° on the weakest; a spread past 15°
+    /// means the stills disagree about which way the room faces, and unlike a residual
+    /// this cannot be flattered by having fewer inputs.
+    static let photometricYawSpreadMaxDeg: Float = 15
     /// How far the edge-cost solve may roam from the anchor. Wide enough for the anchor
     /// to be a few degrees out, far too narrow to reach the next alias (~90°).
     static let yawAnchorWindowDeg: Float = 35
