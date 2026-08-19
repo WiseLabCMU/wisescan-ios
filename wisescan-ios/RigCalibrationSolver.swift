@@ -73,28 +73,56 @@ enum RigCalibrationSolver {
     /// which covers every inclinometer reading taken on this rig.
     struct SolveBounds {
         let anchorOffset: SIMD3<Float>
-        let offsetHalf: SIMD3<Float>
+        /// Unit vector from the phone camera toward the 360° lens — the rod's direction in
+        /// the phone's frame. A CYLINDER around this axis, not an axis-aligned box: the two
+        /// uncertainties are physically different (tape slop along it, clamp geometry across
+        /// it) and they stopped lining up with x/y/z the moment the direction became a
+        /// measurement instead of the assumed −x̂.
+        let rodDirection: SIMD3<Float>
+        let alongHalf: Float
+        let acrossHalf: Float
         let pitchHalfDeg: Float
 
-        /// Box around a measured rod length: tight along the rod, open across it.
-        static func measured(rodLengthM: Float) -> SolveBounds {
-            SolveBounds(anchorOffset: SIMD3<Float>(-rodLengthM, 0, 0),
-                        offsetHalf: SIMD3<Float>(AppConstants.calibrationMeasuredRodHalfM,
-                                                 AppConstants.calibrationBoundAcrossRodM,
-                                                 AppConstants.calibrationBoundAcrossRodM),
-                        pitchHalfDeg: AppConstants.calibrationBoundPitchDeg)
+        /// Distance outside the box, 0 when inside — along and across the rod separately.
+        func excursion(_ offset: SIMD3<Float>) -> (along: Float, across: Float) {
+            let delta = offset - anchorOffset
+            let along = simd_dot(delta, rodDirection)
+            let across = simd_length(delta - along * rodDirection)
+            return (abs(along), across)
+        }
+
+        func contains(_ offset: SIMD3<Float>) -> Bool {
+            let e = excursion(offset)
+            return e.along <= alongHalf && e.across <= acrossHalf
+        }
+
+        /// Measured rod length, and — when the camera's own accelerometer supplied one — a
+        /// measured DIRECTION too, which lets the across-rod slop tighten from a ~10° cone
+        /// of ignorance to real clamp geometry.
+        static func measured(rodLengthM: Float, direction: SIMD3<Float>? = nil) -> SolveBounds {
+            let axis = direction.map { simd_normalize($0) } ?? SIMD3<Float>(-1, 0, 0)
+            return SolveBounds(
+                anchorOffset: rodLengthM * axis,
+                rodDirection: axis,
+                alongHalf: AppConstants.calibrationMeasuredRodHalfM,
+                acrossHalf: direction == nil ? AppConstants.calibrationBoundAcrossRodM
+                                             : AppConstants.calibrationMeasuredAcrossRodM,
+                pitchHalfDeg: AppConstants.calibrationBoundPitchDeg)
         }
 
         static let mechanical = SolveBounds(
             anchorOffset: RigProfile.mechanicalPrior.offsetPhone,
-            offsetHalf: SIMD3<Float>(AppConstants.calibrationBoundRodM,
-                                     AppConstants.calibrationBoundAcrossRodM,
-                                     AppConstants.calibrationBoundAcrossRodM),
+            rodDirection: SIMD3<Float>(-1, 0, 0),
+            alongHalf: AppConstants.calibrationBoundRodM,
+            acrossHalf: AppConstants.calibrationBoundAcrossRodM,
             pitchHalfDeg: AppConstants.calibrationBoundPitchDeg)
 
         static func refinement(around profile: RigProfile) -> SolveBounds {
-            SolveBounds(anchorOffset: profile.offsetPhone,
-                        offsetHalf: SIMD3<Float>(repeating: 0.15), pitchHalfDeg: 6)
+            let length = simd_length(profile.offsetPhone)
+            return SolveBounds(
+                anchorOffset: profile.offsetPhone,
+                rodDirection: length > 1e-3 ? profile.offsetPhone / length : SIMD3<Float>(-1, 0, 0),
+                alongHalf: 0.15, acrossHalf: 0.15, pitchHalfDeg: 6)
         }
     }
 
@@ -205,8 +233,6 @@ enum RigCalibrationSolver {
 
         var result: NMResult?
         for yaw0 in starts {
-            let lo = packed(bounds.anchorOffset - bounds.offsetHalf, yaw0 - yawHalf, -pitchHalf)
-            let hi = packed(bounds.anchorOffset + bounds.offsetHalf, yaw0 + yawHalf, pitchHalf)
             let x0 = pack(offset: bounds.anchorOffset, yaw: yaw0, pitch: 0)
             let run = nelderMead(
                 initial: x0,
@@ -214,9 +240,9 @@ enum RigCalibrationSolver {
                 maxIterations: AppConstants.calibrationMaxIterations,
                 tolerance: AppConstants.calibrationConvergenceTolerance
             ) { params in
-                for lane in 0..<paramCount where params[lane] < lo[lane] || params[lane] > hi[lane] {
-                    return 1e6
-                }
+                guard bounds.contains(offsetOf(params)),
+                      abs(params[3] - yaw0) <= yawHalf,
+                      abs(params[4]) <= pitchHalf else { return 1e6 }
                 return totalCost(params: params, inputs: sampledInputs, masks: sampleMasks,
                                  elevOffsetRows: bestElevRows)
             }

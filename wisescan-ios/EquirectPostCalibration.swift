@@ -46,6 +46,13 @@ enum EquirectPostCalibration {
     /// geometry; fixed to the face-export convention (atan2(x, −z)), all scans re-solve.
     /// 8: keyframe-anchored yaw basin selection. The bump is load-bearing — scans
     /// solved by v7 re-solve on their next Process and self-heal their colouring.
+    /// 11: the rod's DIRECTION is measured rather than assumed. The 360° camera writes its
+    /// own accelerometer reading into every still, and the one constant phone→camera rotation
+    /// that explains all of them puts the rod 7.6° off the assumed −x̂ on the field rig — 10 cm
+    /// of lateral offset at 0.77 m, which is exactly what the solve had been forcing into its
+    /// across-rod axes. The solve box became a CYLINDER around that measured axis, so its two
+    /// half-ranges finally mean what they say (tape slop along, clamp geometry across) rather
+    /// than being x/y/z ranges that only lined up while the direction was assumed.
     /// 10: the rig offset moved into the PHONE's frame (RigProfile.offsetPhone). The old
     /// world-frame pair (dy along gravity + dLateral across phone-horizontal) spanned a
     /// 2-plane and could not express the forward swing a tilted phone gives the lens —
@@ -66,7 +73,7 @@ enum EquirectPostCalibration {
     /// operator/rig segmentation mask is subtracted from the edge cost (the −45° band
     /// never reached the operator's upper body on ANY scan in the archive). Every one of
     /// those changes what a v8 solve would have returned, so v8 scans re-solve.
-    static let solverVersion = 10
+    static let solverVersion = 11
 
     struct StillRecord {
         let sequence: Int
@@ -180,13 +187,23 @@ enum EquirectPostCalibration {
         // own frame that is exactly what the model wants — no cosine, no per-scan tilt
         // correction, no reinterpretation. It pins ‖offsetPhone‖ directly.
         let measuredRod = Float(UserDefaults.standard.double(forKey: AppConstants.Key.rigMeasuredDyMeters))
+        // The camera's own accelerometer measures which way the rod points, which was the
+        // last purely assumed input in the whole geometry. On staging_B42F9231 it came out
+        // 7.6° off the assumed −x̂ — 10 cm of lateral offset on a 0.77 m rod, which is exactly
+        // the magnitude the solve had been forcing into its across-rod axes (and railing at
+        // 0.125 m the run before). It agreed with the edge cost's own independent answer to
+        // 4.4°, so this is corroboration rather than a substitution.
+        let rod = measuredRodDirection(stills: stills)
         let bounds: RigCalibrationSolver.SolveBounds = measuredRod > 0.1
-            ? .measured(rodLengthM: measuredRod)
+            ? .measured(rodLengthM: measuredRod, direction: rod)
             : .mechanical
         if measuredRod > 0.1 {
-            PerfDiag.log(String(format: "[RigCal] rig offset anchored at %.3f m along the rod (±%.0fcm along, ±%.0fcm across)",
-                                measuredRod, AppConstants.calibrationMeasuredRodHalfM * 100,
-                                AppConstants.calibrationBoundAcrossRodM * 100))
+            PerfDiag.log(String(format: "[RigCal] rig offset anchored at %.3f m along %@ (±%.0fcm along, ±%.0fcm across)",
+                                measuredRod,
+                                rod == nil ? "the assumed −x̂ (no camera gravity)"
+                                           : String(format: "the MEASURED rod (%.1f° off −x̂)",
+                                                    acos(min(1, max(-1, -(rod!.x)))) * 180 / .pi),
+                                bounds.alongHalf * 100, bounds.acrossHalf * 100))
         }
         // v8: let the phone's keyframes choose the yaw basin before the edge cost
         // refines inside it. Uses the first selected still — any of them anchors the
@@ -198,10 +215,6 @@ enum EquirectPostCalibration {
         // land where the keyframes say" — ranked the wrong basin.
         // The camera's own accelerometer, per still — an INDEPENDENT measurement of two of
         // the three rotational DOF, owing nothing to ARKit, the mesh, or the cost function.
-        // Reported, not yet consumed: one scan is not enough to decide whether it should
-        // constrain pitchResidual, and the Z1's MakerNote layout is still unverified.
-        reportGravityAgreement(stills: stills)
-
         let anchorYaw = anchorYawIfPossible(selected: selected, rawDataDir: rawDataDir,
                                             offsetPhone: bounds.anchorOffset, report: report)
         let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds,
@@ -438,14 +451,15 @@ enum EquirectPostCalibration {
         profile: RigProfile, bounds: RigCalibrationSolver.SolveBounds,
         result: RigCalibrationSolver.CalibrationResult, anchorYaw: Float?) -> [String] {
         var rails: [String] = []
-        let axisNames = ["offset x (along rod)", "offset y (across rod)", "offset z (across rod)"]
-        for axis in 0..<3 {
-            let half = bounds.offsetHalf[axis]
-            let distance = abs(profile.offsetPhone[axis] - bounds.anchorOffset[axis])
-            if abs(distance - half) < 0.005 {
-                rails.append(String(format: "%@ %.3fm on its ±%.0fcm bound",
-                                    axisNames[axis], profile.offsetPhone[axis], half * 100))
-            }
+        // Along and across the rod, matching the cylinder the solve is actually bounded by.
+        let excursion = bounds.excursion(profile.offsetPhone)
+        if abs(excursion.along - bounds.alongHalf) < 0.005 {
+            rails.append(String(format: "rod length %.3fm on its ±%.0fcm bound",
+                                simd_length(profile.offsetPhone), bounds.alongHalf * 100))
+        }
+        if abs(excursion.across - bounds.acrossHalf) < 0.005 {
+            rails.append(String(format: "across-rod offset %.3fm on its ±%.0fcm bound",
+                                excursion.across, bounds.acrossHalf * 100))
         }
         let pitchDeg = profile.pitchResidual * 180 / .pi
         if bounds.pitchHalfDeg - abs(pitchDeg) < 0.5 {
@@ -512,7 +526,10 @@ extension EquirectPostCalibration {
     /// mid-scan — none of which anything else in this pipeline can currently detect.
     ///
     /// Field baseline (THETA X 2.92.0, 10 stills, 2026-08-19): mean 1.57°, max 4.88°.
-    private nonisolated static func reportGravityAgreement(stills: [StillRecord]) {
+    /// The rod's direction in the phone's frame, from the camera's own accelerometer, or nil
+    /// when it cannot be trusted. Returns a unit vector pointing from the phone camera toward
+    /// the 360° lens.
+    private nonisolated static func measuredRodDirection(stills: [StillRecord]) -> SIMD3<Float>? {
         var cameraG: [SIMD3<Float>] = []
         var phoneG: [SIMD3<Float>] = []
         for still in stills {
@@ -527,22 +544,55 @@ extension EquirectPostCalibration {
                 phoneG.append(simd_normalize(local))
             }
         }
-        guard cameraG.count >= 3 else {
+        // Four, not three: three unit vectors determine a rotation exactly, so the residual
+        // that gates everything below would be identically zero and prove nothing.
+        guard cameraG.count >= 4, let rotation = bestFitRotation(from: phoneG, to: cameraG) else {
             PerfDiag.log(cameraG.isEmpty
-                ? "[RigCal] camera gravity: not present in these stills (unrecognized MakerNote — different model or firmware)"
-                : "[RigCal] camera gravity: only \(cameraG.count) still(s) carried it — need 3 to fit")
-            return
+                ? "[RigCal] camera gravity: not present in these stills (unrecognized MakerNote — different model or firmware); rod direction assumed"
+                : "[RigCal] camera gravity: only \(cameraG.count) still(s) carried it — need 4 to fit; rod direction assumed")
+            return nil
         }
-        guard let rotation = bestFitRotation(from: phoneG, to: cameraG) else { return }
         let errors = zip(phoneG, cameraG).map { phone, camera -> Float in
-            let mapped = rotation * phone
-            return acos(min(1, max(-1, simd_dot(mapped, camera)))) * 180 / .pi
+            acos(min(1, max(-1, simd_dot(rotation * phone, camera)))) * 180 / .pi
         }
         let mean = errors.reduce(0, +) / Float(errors.count)
+
+        // The rod runs along whichever camera body axis gravity loads — the Theta sits on top
+        // of the pole, so that axis IS the pole. Pick it from the data rather than naming it,
+        // since axis conventions differ by model.
+        let meanCameraG = simd_normalize(cameraG.reduce(SIMD3<Float>.zero, +))
+        var axis = SIMD3<Float>(0, 0, 1)
+        if abs(meanCameraG.x) > abs(meanCameraG.y), abs(meanCameraG.x) > abs(meanCameraG.z) {
+            axis = SIMD3<Float>(meanCameraG.x > 0 ? 1 : -1, 0, 0)
+        } else if abs(meanCameraG.y) > abs(meanCameraG.z) {
+            axis = SIMD3<Float>(0, meanCameraG.y > 0 ? 1 : -1, 0)
+        } else {
+            axis = SIMD3<Float>(0, 0, meanCameraG.z > 0 ? 1 : -1)
+        }
+        // Gravity points DOWN the rod, so the lens is the other way. rotation maps
+        // phone→camera; its transpose brings the body axis back into the phone's frame.
+        let direction = simd_normalize(-(rotation.transpose * axis))
+
+        let offAssumed = acos(min(1, max(-1, simd_dot(direction, SIMD3<Float>(-1, 0, 0))))) * 180 / .pi
         PerfDiag.log(String(format:
-            "[RigCal] camera gravity vs ARKit over %d stills: mean %.2f° max %.2f° "
-            + "(rig rigidity + zenith check; measurement, not a fit)",
-            errors.count, mean, errors.max() ?? 0))
+            "[RigCal] camera gravity vs ARKit over %d stills: mean %.2f° max %.2f° — rod points "
+            + "(%+.3f,%+.3f,%+.3f) in the phone frame, %.1f° off the assumed −x̂",
+            errors.count, mean, errors.max() ?? 0, direction.x, direction.y, direction.z, offAssumed))
+
+        // Gates. A poor fit means the rig moved mid-scan or the vector was misread; a wild
+        // direction means the fit found a different geometry than a rod-mounted rig, and in
+        // either case the ASSUMPTION is safer than a bad measurement.
+        guard mean <= AppConstants.calibrationGravityFitMaxDeg else {
+            PerfDiag.log(String(format: "[RigCal] gravity fit too loose (%.2f° > %.1f°) — rod direction assumed; the rig may have shifted mid-scan",
+                                mean, AppConstants.calibrationGravityFitMaxDeg))
+            return nil
+        }
+        guard offAssumed <= AppConstants.calibrationRodDirectionMaxOffDeg else {
+            PerfDiag.log(String(format: "[RigCal] measured rod direction %.1f° off −x̂, beyond the %.0f° sanity limit — assumed instead",
+                                offAssumed, AppConstants.calibrationRodDirectionMaxOffDeg))
+            return nil
+        }
+        return direction
     }
 
     /// Horn's quaternion solution for the rotation minimizing ‖R·a − b‖, via power iteration
