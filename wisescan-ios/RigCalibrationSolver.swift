@@ -224,6 +224,17 @@ enum RigCalibrationSolver {
         }
 
         let yawHalf = AppConstants.calibrationBoundYawDeg * Float.pi / 180
+        // HARD ceiling on how far the refinement may wander from the basin the keyframe
+        // anchor chose. The coarse scan is already confined to ±yawAnchorWindowDeg of the
+        // anchor, but Nelder-Mead then got ±calibrationBoundYawDeg around each start on top
+        // of that — so the reachable set was ±80°, and the anchor's choice was advisory
+        // rather than binding. In a glass-walled room on 2026-08-19 the edge cost took that
+        // room and solved 50.1° away from a perfectly healthy anchor: the "edges" there are
+        // reflections, and reflections move with the camera. The anchor is absolute
+        // (gravity-aligned keyframes carrying their own depth), the edge cost is a relative
+        // refinement with a documented systematic attractor, so when they disagree this far
+        // it is the refinement that is wrong.
+        let anchorLimit = windowRad
         let pitchHalf = bounds.pitchHalfDeg * Float.pi / 180
         // Perturbation scales (order: tx, ty, tz, yaw, pitch). 3 cm per translation axis:
         // the physical uncertainty in a clamped rig is centimetres, and the old 0.1 m step
@@ -242,6 +253,7 @@ enum RigCalibrationSolver {
             ) { params in
                 guard bounds.contains(offsetOf(params)),
                       abs(params[3] - yaw0) <= yawHalf,
+                      anchorYaw.map { abs(angleDelta(params[3], $0)) <= anchorLimit } ?? true,
                       abs(params[4]) <= pitchHalf else { return 1e6 }
                 return totalCost(params: params, inputs: sampledInputs, masks: sampleMasks,
                                  elevOffsetRows: bestElevRows)

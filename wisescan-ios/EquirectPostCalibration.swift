@@ -46,6 +46,12 @@ enum EquirectPostCalibration {
     /// geometry; fixed to the face-export convention (atan2(x, −z)), all scans re-solve.
     /// 8: keyframe-anchored yaw basin selection. The bump is load-bearing — scans
     /// solved by v7 re-solve on their next Process and self-heal their colouring.
+    /// 13: the keyframe anchor's basin is BINDING, not advisory. The coarse yaw scan was
+    /// confined to ±yawAnchorWindowDeg of the anchor, but Nelder-Mead then got
+    /// ±calibrationBoundYawDeg around each start on top of it, so the reachable set was ±80°
+    /// and the refinement could leave the basin the anchor chose. A glass-walled room on
+    /// 2026-08-19 did exactly that — solved 50.1° from a healthy anchor, because the "edges"
+    /// in a room of glass are reflections and reflections move with the camera.
     /// 12: the gravity read generalized to the Z1, whose MakerNote encodes the same vector at
     /// a different offset with a 2^20 denominator instead of 1e8. A Z1 scan therefore stopped
     /// falling back to the assumed rod direction. Its own fit is 1.64° mean (vs 1.57° on the
@@ -78,7 +84,7 @@ enum EquirectPostCalibration {
     /// operator/rig segmentation mask is subtracted from the edge cost (the −45° band
     /// never reached the operator's upper body on ANY scan in the archive). Every one of
     /// those changes what a v8 solve would have returned, so v8 scans re-solve.
-    static let solverVersion = 12
+    static let solverVersion = 13
 
     struct StillRecord {
         let sequence: Int
