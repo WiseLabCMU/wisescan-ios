@@ -1,6 +1,7 @@
 import Foundation
 import os
 import ARKit
+import Synchronization
 import UIKit
 
 /// Post-processing utilities for vertex coloring and ARWorldMap export.
@@ -195,7 +196,15 @@ enum VertexColorAccumulator {
     /// there by the capture writers. Missing/old transforms.json degrades to an empty set
     /// (pure even-stride selection, the pre-keyframe behavior).
     static func keyframeStems(rawDir: URL) -> Set<String> {
-        let url = rawDir.appendingPathComponent("transforms.json")
+        // Both locations, as MeshPreviewView already does: the file has been written to the
+        // scan root as well as raw_data/ across pipeline generations, and reading only one
+        // degraded SILENTLY to pure even-stride selection with no keyframe priority at all.
+        let candidates = [rawDir.appendingPathComponent("transforms.json"),
+                          rawDir.deletingLastPathComponent().appendingPathComponent("transforms.json")]
+        guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            PerfDiag.log("[VertexColor] no transforms.json — keyframes get no selection priority this run")
+            return []
+        }
         guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let frames = json["frames"] as? [[String: Any]] else { return [] }
@@ -299,10 +308,18 @@ enum VertexColorAccumulator {
 
         // Sample up to maxColorizationFrames, preferring sharp keyframes (see helper).
         phase?("Selecting frames…")
+        let stems = Self.keyframeStems(rawDir: rawDir)
         let sampledFiles = Self.selectColorizationFrames(
             from: cameraFiles, max: AppConstants.maxColorizationFrames,
-            keyframeStems: Self.keyframeStems(rawDir: rawDir)
+            keyframeStems: stems
         )
+        // What the selector actually picked, split by kind. "48 frames" alone cannot
+        // distinguish "all keyframes, motion frames dropped" from "a healthy mix", and that
+        // is precisely the question asked of this step.
+        let selectedKeyframes = sampledFiles.filter { stems.contains($0.deletingPathExtension().lastPathComponent) }.count
+        PerfDiag.log("[VertexColor] frames: \(sampledFiles.count) of \(cameraFiles.count) selected "
+            + "— \(selectedKeyframes) keyframes + \(sampledFiles.count - selectedKeyframes) motion "
+            + "(budget \(AppConstants.maxColorizationFrames), \(stems.count) keyframes available)")
 
         // ── Privacy: keep person pixels out of colors.bin ──
         // Colorize bakes sampled pixels into colors.bin, which exports as PLY vertex colors — a
@@ -316,6 +333,7 @@ enum VertexColorAccumulator {
         // depth==0 skip keeps protecting them; privacy-off captures have an empty masks/ → no-op.
         let masksDir = rawDir.appendingPathComponent("masks")
         let maskMode = Self.privacyMaskModeWouldApply(rawDir: rawDir)   // sample per-frame masks + skip unmasked frames
+        let maskSkipped = Mutex<Int>(0)
         if maskMode { Self.log.info("privacy mask mode ON (deferred-blur capture) — masking person regions") }
 
         // Per-vertex top-N observation buffers (flat, row = K entries per vertex).
@@ -487,7 +505,13 @@ enum VertexColorAccumulator {
                 guard let mData = try? Data(contentsOf: maskURL),
                       let mImg = UIImage(data: mData)?.cgImage,
                       mImg.bitsPerPixel == 8,   // fail closed: only the known 8bpp-gray layout is safe to index 1 byte/pixel
-                      let mProvider = mImg.dataProvider?.data else { return }   // missing/unreadable/unexpected mask → skip frame
+                      let mProvider = mImg.dataProvider?.data else {
+                    // Fail closed, but NOT silently: this drops the WHOLE frame, and with
+                    // masks written only for frames whose stencil had warmed up it can drop
+                    // most of a scan — including every motion frame — with no trace at all.
+                    maskSkipped.withLock { $0 += 1 }
+                    return
+                }
                 maskCGImage = mImg
                 maskDataBuffer = mProvider
                 maskPtr = CFDataGetBytePtr(mProvider)
@@ -727,6 +751,11 @@ enum VertexColorAccumulator {
         // The single number that says whether a colorize run worked, and the one that was
         // missing from every exported diagnostics bundle: gray fraction. `log.info` is
         // memory-only in the unified log, so it never survived to a pulled bundle.
+        let skipped = maskSkipped.withLock { $0 }
+        if skipped > 0 {
+            PerfDiag.log("[VertexColor] ⚠️ \(skipped) of \(sampledFiles.count) frames dropped for a missing/unreadable "
+                + "person mask — privacy fails closed, but that much dropped coverage shows up as gray")
+        }
         PerfDiag.log(String(format: "[VertexColor] colored %d/%d verts (%.1f%% gray) from %d frames, source=%@, %.1fs",
                             coloredCount, vertexCount,
                             vertexCount > 0 ? Double(vertexCount - coloredCount) / Double(vertexCount) * 100 : 0,
