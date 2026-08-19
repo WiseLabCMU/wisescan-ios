@@ -263,8 +263,15 @@ enum EquirectPostCalibration {
         // Name every railed parameter in the log AND in the sidecar so downstream can tell.
         let rails = railedParameters(profile: p, bounds: bounds, result: result, anchorYaw: anchorYaw)
         if !rails.isEmpty {
-            PerfDiag.log("[RigCal] ⚠️ AT THE LIMIT: \(rails.joined(separator: ", ")) — the residual is a "
-                + "boundary, not a fit; treat these poses as approximate")
+            // The upward rod rail ALONE is not a failed fit — it is the tape doing its job of
+            // capping the solver's documented upward pull, and the pose error is bounded by
+            // the box. Saying "treat as approximate" for that case sent the operator off to
+            // re-measure a rod that had not moved. Anything else railed keeps the loud form.
+            let onlyCappedPull = rails.count == 1 && rails[0].contains("known upward pull")
+            PerfDiag.log(onlyCappedPull
+                ? "[RigCal] \(rails[0]) — poses good to ~\(Int(bounds.alongHalf * 100))cm along the rod"
+                : "[RigCal] ⚠️ AT THE LIMIT: \(rails.joined(separator: ", ")) — the residual is a "
+                    + "boundary, not a fit; treat these poses as approximate")
         }
 
         guard result.converged, result.residualPx >= 0, result.residualPx.isFinite else {
@@ -478,10 +485,19 @@ enum EquirectPostCalibration {
         result: RigCalibrationSolver.CalibrationResult, anchorYaw: Float?) -> [String] {
         var rails: [String] = []
         // Along and across the rod, matching the cylinder the solve is actually bounded by.
+        // The along-rod rail is direction-aware because its two walls mean different things:
+        // the UPPER wall is the documented upward pull being capped by the tape (expected on
+        // a healthy scan — 2026-08-19: +2.0 cm then +3.0 cm railed, back to back, same rig,
+        // fresh tape), while the LOWER wall means the solve wants a shorter rod than the
+        // tape says, i.e. the tape entry is long or belongs to a different rig era.
         let excursion = bounds.excursion(profile.offsetPhone)
+        let alongSigned = simd_dot(profile.offsetPhone - bounds.anchorOffset, bounds.rodDirection)
         if abs(excursion.along - bounds.alongHalf) < 0.005 {
-            rails.append(String(format: "rod length %.3fm on its ±%.0fcm bound",
-                                simd_length(profile.offsetPhone), bounds.alongHalf * 100))
+            rails.append(alongSigned > 0
+                ? String(format: "rod length %.3fm at the tape's +%.0fcm wall (known upward pull, capped — re-measure only if the rig changed)",
+                         simd_length(profile.offsetPhone), bounds.alongHalf * 100)
+                : String(format: "rod length %.3fm at the tape's −%.0fcm wall (solve wants a SHORTER rod than the tape — the tape entry is likely long or from another rig era)",
+                         simd_length(profile.offsetPhone), bounds.alongHalf * 100))
         }
         if abs(excursion.across - bounds.acrossHalf) < 0.005 {
             rails.append(String(format: "across-rod offset %.3fm on its ±%.0fcm bound",
