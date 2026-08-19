@@ -46,6 +46,11 @@ enum EquirectPostCalibration {
     /// geometry; fixed to the face-export convention (atan2(x, −z)), all scans re-solve.
     /// 8: keyframe-anchored yaw basin selection. The bump is load-bearing — scans
     /// solved by v7 re-solve on their next Process and self-heal their colouring.
+    /// 14: the along-rod window tightened ±5 → ±3 cm, and the tape anchor stamped into the
+    /// sidecar. A field re-measure (0.724 → 0.686 m) handed the solver ground truth: three
+    /// healthy solves across both cameras all sat +8 to +10 cm ABOVE the true rod, climbing
+    /// the box regardless of where it was centred. The tape owns that axis now; a rail on it
+    /// means "re-measure the rod", which would have caught the stale tape on the first scan.
     /// 13: the keyframe anchor's basin is BINDING, not advisory. The coarse yaw scan was
     /// confined to ±yawAnchorWindowDeg of the anchor, but Nelder-Mead then got
     /// ±calibrationBoundYawDeg around each start on top of it, so the reachable set was ±80°
@@ -84,7 +89,7 @@ enum EquirectPostCalibration {
     /// operator/rig segmentation mask is subtracted from the edge cost (the −45° band
     /// never reached the operator's upper body on ANY scan in the archive). Every one of
     /// those changes what a v8 solve would have returned, so v8 scans re-solve.
-    static let solverVersion = 13
+    static let solverVersion = 14
 
     struct StillRecord {
         let sequence: Int
@@ -268,7 +273,8 @@ enum EquirectPostCalibration {
         }
 
         bake(stills: stills, profile: result.profile, source: sourceSolved,
-             residual: result.residualPx, elevOffsetDeg: result.elevOffsetDeg, railed: rails)
+             residual: result.residualPx, elevOffsetDeg: result.elevOffsetDeg, railed: rails,
+             rodAnchor: (simd_length(bounds.anchorOffset), measuredRod > 0.1))
         // Rolling geometry: persist the refined rig constants (yaw stored too, but it is
         // session-local by hardware behavior — the next scan re-solves it).
         result.profile.with(cameraModel: stored.cameraModel,
@@ -388,7 +394,8 @@ enum EquirectPostCalibration {
     private nonisolated static func bake(stills: [StillRecord], profile: RigProfile,
                                          source: String, residual: Float?,
                                          elevOffsetDeg: Float? = nil,
-                                         railed: [String] = []) {
+                                         railed: [String] = [],
+                                         rodAnchor: (meters: Float, fromTape: Bool)? = nil) {
         for still in stills {
             guard let data = try? Data(contentsOf: still.sidecarURL),
                   var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -408,6 +415,14 @@ enum EquirectPostCalibration {
             // Written on EVERY bake, empty array included: an absent key would be
             // indistinguishable from "written by a build that did not check".
             obj["rig_calibration_railed"] = railed
+            // The rod-length ANCHOR this solve was centred on, and where it came from. The
+            // 2026-08-19 stale-tape incident (solved with 0.724 on a rod that had been 0.686
+            // for a day and a half) was invisible downstream because only the SOLVED length
+            // was stamped — with the input recorded, a wrong tape is auditable per scan.
+            if let rodAnchor {
+                obj["rig_rod_anchor_m"] = Double(rodAnchor.meters)
+                obj["rig_rod_anchor_source"] = rodAnchor.fromTape ? "tape" : "mechanical_default"
+            }
             // The geometry that produced cam_transform, so a consumer can audit a pose
             // without re-deriving it: the offset in the PHONE's frame (metres) and its
             // length, which is the number the operator taped.

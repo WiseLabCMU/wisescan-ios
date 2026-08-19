@@ -91,6 +91,15 @@
       "type": ["number", "null"],
       "description": "Solved yaw of the 360 camera relative to the phone's horizontal forward, degrees. Note heading = -yaw."
     },
+    "rig_rod_anchor_m": {
+      "type": ["number", "null"],
+      "description": "Rod length (m) the calibration solve was ANCHORED on — the operator's tape entry at solve time, or the mechanical default. Compare with rig_rod_length_m (the solved value): a solve pinned against this anchor's bound means the tape and the data disagree, i.e. re-measure the rod."
+    },
+    "rig_rod_anchor_source": {
+      "type": ["string", "null"],
+      "enum": ["tape", "mechanical_default", null],
+      "description": "Whether rig_rod_anchor_m came from the operator's measurement or the built-in default."
+    },
     "elevation_offset_deg": {
       "type": ["number", "null"],
       "description": "Uniform vertical registration offset between the equirect's rows and the latitude mapping, solved per scan (+ = image content sits lower than geometry predicts). Consumers sampling the equirect with the standard mapping should compensate by this much. This is a fitted nuisance parameter absorbing model error, not a measured camera property, and is expected to be retired."
