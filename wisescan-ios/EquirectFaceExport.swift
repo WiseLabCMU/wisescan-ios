@@ -27,9 +27,19 @@ enum EquirectFaceExport {
     /// Whether a camera model's panos can be trusted LEVEL — the rig-prior pose math assumes
     /// zenith-corrected (internally "gimbaled") equirects; a non-leveling camera would bake
     /// its roll/pitch into every face pose. Gate by the sidecar's reported model:
-    /// - `.validated` — leveling confirmed on device (Theta X).
-    /// - `.assumedLevel` — the hardware levels (Theta Z1 zenith correction) but we have not
-    ///   validated its OSC-configured behavior; faces emit with a marked pose source.
+    /// - `.validated` — leveling confirmed on device.
+    ///   THETA X: original field validation.
+    ///   THETA Z1 (fw 3.60.3, promoted 2026-08-19): three healthy field scans against the
+    ///   criterion set for it — solved elevation offsets +1.4° / +2.8° / +1.4° (a leveling
+    ///   failure would land here and track rig tilt; it does not), pitch residual collapsed
+    ///   to 0.09° / 0.17° once the rod tape was corrected, keyframe-anchor agreement ≤3.6°,
+    ///   residuals 3.7–4.4 px in the X's range, and its own IMU agreeing with ARKit to
+    ///   1.6–2.3° mean across every scan. Its XMP also asserts PosePitch/Roll = 0.0, the
+    ///   same claim the X makes. (A fourth scan, a glass-walled room, was excluded — its
+    ///   failure was the edge cost misled by reflections, not leveling, and it is what made
+    ///   the yaw anchor binding in v13.)
+    /// - `.assumedLevel` — the hardware levels but no field evidence yet; faces emit with a
+    ///   marked pose source. No current camera sits here; the case stays for the next model.
     /// - `.unsupported` — unknown model: the level-pano assumption is unsafe, so NO pose-
     ///   bearing faces are emitted (the archived equirect still ships). A later feature can
     ///   compensate from the camera's own gyro metadata and lift this gate.
@@ -42,7 +52,7 @@ enum EquirectFaceExport {
     static func levelingSupport(forModel model: String?) -> LevelingSupport {
         guard let model = model?.uppercased() else { return .unsupported }
         if model.contains("THETA X") { return .validated }
-        if model.contains("THETA Z1") { return .assumedLevel }
+        if model.contains("THETA Z1") { return .validated }
         return .unsupported
     }
 

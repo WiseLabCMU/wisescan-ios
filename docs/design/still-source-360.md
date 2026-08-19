@@ -334,12 +334,12 @@ stillness gate gains a **rig mode**:
 > room geometry); rig settings UI + solved calibration remain (calibration plan steps 2–3).
 > The archived equirect stays in `equirect_stills/` alongside the faces.
 >
-> **Leveling gate (2026-07-28):** face poses assume zenith-corrected (level) panos, so the
-> exporter gates on the sidecar's camera model — Theta X: validated; Theta Z1: leveling
-> hardware exists but unvalidated → faces emit with `camera_pose_source =
-> "rig_prior_unvalidated_leveling"` + a warning; unknown models: NO pose-bearing faces
-> (equirect archives; connect-time warning on the Dashboard card) until a gyro-metadata
-> compensation feature lifts the gate.
+> **Leveling gate (2026-07-28; Z1 promoted 2026-08-19):** face poses assume
+> zenith-corrected (level) panos, so the exporter gates on the sidecar's camera model —
+> Theta X and Theta Z1: validated (see the open-items list for the Z1's three-scan
+> evidence); unknown models: NO pose-bearing faces (equirect archives; connect-time
+> warning on the Dashboard card) until a gyro-metadata compensation feature lifts the
+> gate. The `.assumedLevel` tier stays in the code for the next unvalidated model.
 
 Rather than exporting raw equirectangular frames, the export pipeline **reprojects each
 360° still into a cube map and discards the bottom face**, which is dominated by the
@@ -853,8 +853,13 @@ below turned out different from what earlier status notes implied.
    fix data (mirrored geometry could itself have looked like an attractor). Re ‑derive
    whether operator masking is still needed once #1 above gives 2-3 clean repeatability
    runs — don't build it speculatively.
-5. **Z1 leveling** — still "if available," never device-validated. `.assumedLevel`
-   stands; promoting to `.validated` is a one-line change once someone does the run.
+5. **Z1 leveling** — VALIDATED 2026-08-19 (fw 3.60.3) and promoted. Three healthy field
+   scans: solved elevation offsets +1.4°/+2.8°/+1.4° (a leveling failure would land here
+   and track rig tilt; it does not), pitch residual 0.09°/0.17° once the rod tape was
+   corrected, anchor agreement ≤3.6°, residuals 3.7–4.4 px in the X's range, and the Z1's
+   own IMU agreeing with ARKit to 1.6–2.3° mean. The glass-room scan was excluded — its
+   failure was reflections defeating the edge cost (fixed by making the yaw anchor binding
+   in v13), not leveling.
 6. **Battery/thermal impact of `disableAutoSleep`** — never measured. Camera no longer
    naps between scans; a long field day's battery drain is unknown.
 7. **Color-from-360°-faces dev switch** — built and committed, ZERO device runs. First
@@ -933,8 +938,8 @@ overlay distinguishes "covered, transfer pending" from "confirmed".
 concrete. The DATA layer is camera-agnostic (still_source in sidecars, equirect_stills
 naming), but adding Insta360 or another camera still means refactor-first. The Insta360
 SDK-access question (approval time, what the iOS SDK exposes) remains unanswered, so
-P2's "written go/no-go per camera" is complete only for Theta X (go) and half of Z1
-(leveling validation pending).
+P2's "written go/no-go per camera" is complete for Theta X (go) and Z1 (go —
+leveling validated 2026-08-19; BLE control remains v1-auth-gated, so Z1 is OSC-only).
 
 **Hybrid export** — SHIPPED (equirects + cube faces both export today). Deferred
 remainder: equirect entries in `transforms.json` (`camera_model: EQUIRECTANGULAR`) for
