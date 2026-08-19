@@ -196,6 +196,12 @@ enum EquirectPostCalibration {
         // exists, so a first solve on a 0.70 m rig placed the trial camera well off the real
         // lens position, and the yaw score — which is nothing but "does the still's content
         // land where the keyframes say" — ranked the wrong basin.
+        // The camera's own accelerometer, per still — an INDEPENDENT measurement of two of
+        // the three rotational DOF, owing nothing to ARKit, the mesh, or the cost function.
+        // Reported, not yet consumed: one scan is not enough to decide whether it should
+        // constrain pitchResidual, and the Z1's MakerNote layout is still unverified.
+        reportGravityAgreement(stills: stills)
+
         let anchorYaw = anchorYawIfPossible(selected: selected, rawDataDir: rawDataDir,
                                             offsetPhone: bounds.anchorOffset, report: report)
         let result = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds,
@@ -499,6 +505,75 @@ enum EquirectPostCalibration {
 extension EquirectPostCalibration {
     /// v8 basin selection — see EquirectYawAnchor. Uses the first selected still: any of
     /// them anchors the same rig, and one is enough to break the room's symmetry.
+    /// Fit the ONE constant phone→camera rotation that best explains every still's gravity
+    /// reading, and report how well it holds. The rig is rigid, so a good fit means the
+    /// clamp held and the camera's zenith reference agrees with ARKit's; a per-still
+    /// outlier means that still moved, and a bad fit across the board means the rig shifted
+    /// mid-scan — none of which anything else in this pipeline can currently detect.
+    ///
+    /// Field baseline (THETA X 2.92.0, 10 stills, 2026-08-19): mean 1.57°, max 4.88°.
+    private nonisolated static func reportGravityAgreement(stills: [StillRecord]) {
+        var cameraG: [SIMD3<Float>] = []
+        var phoneG: [SIMD3<Float>] = []
+        for still in stills {
+            autoreleasepool {
+                guard let data = try? Data(contentsOf: still.jpgURL, options: .mappedIfSafe),
+                      let gravity = ThetaGravity.parse(jpeg: data) else { return }
+                // Gravity in the PHONE's frame is minus its world-up column, expressed locally.
+                let pose = still.phoneToWorld
+                let local = SIMD3<Float>(-pose.columns.0.y, -pose.columns.1.y, -pose.columns.2.y)
+                guard simd_length(local) > 0.5 else { return }
+                cameraG.append(simd_normalize(gravity))
+                phoneG.append(simd_normalize(local))
+            }
+        }
+        guard cameraG.count >= 3 else {
+            PerfDiag.log(cameraG.isEmpty
+                ? "[RigCal] camera gravity: not present in these stills (unrecognized MakerNote — different model or firmware)"
+                : "[RigCal] camera gravity: only \(cameraG.count) still(s) carried it — need 3 to fit")
+            return
+        }
+        guard let rotation = bestFitRotation(from: phoneG, to: cameraG) else { return }
+        let errors = zip(phoneG, cameraG).map { phone, camera -> Float in
+            let mapped = rotation * phone
+            return acos(min(1, max(-1, simd_dot(mapped, camera)))) * 180 / .pi
+        }
+        let mean = errors.reduce(0, +) / Float(errors.count)
+        PerfDiag.log(String(format:
+            "[RigCal] camera gravity vs ARKit over %d stills: mean %.2f° max %.2f° "
+            + "(rig rigidity + zenith check; measurement, not a fit)",
+            errors.count, mean, errors.max() ?? 0))
+    }
+
+    /// Horn's quaternion solution for the rotation minimizing ‖R·a − b‖, via power iteration
+    /// on the 4×4 profile matrix — a handful of unit vectors, so no linear-algebra dependency.
+    private nonisolated static func bestFitRotation(from source: [SIMD3<Float>],
+                                                    to target: [SIMD3<Float>]) -> simd_float3x3? {
+        guard source.count == target.count, source.count >= 3 else { return nil }
+        var covariance = simd_float3x3(0)
+        for (a, b) in zip(source, target) {
+            covariance += simd_float3x3(columns: (a.x * b, a.y * b, a.z * b))
+        }
+        let m = covariance
+        let trace = m[0][0] + m[1][1] + m[2][2]
+        var profile = simd_float4x4(0)
+        profile[0] = SIMD4<Float>(trace, m[1][2] - m[2][1], m[2][0] - m[0][2], m[0][1] - m[1][0])
+        profile[1] = SIMD4<Float>(m[1][2] - m[2][1], m[0][0] - m[1][1] - m[2][2], m[0][1] + m[1][0], m[2][0] + m[0][2])
+        profile[2] = SIMD4<Float>(m[2][0] - m[0][2], m[0][1] + m[1][0], -m[0][0] + m[1][1] - m[2][2], m[1][2] + m[2][1])
+        profile[3] = SIMD4<Float>(m[0][1] - m[1][0], m[2][0] + m[0][2], m[1][2] + m[2][1], -m[0][0] - m[1][1] + m[2][2])
+        // Shifted power iteration: the shift keeps the dominant eigenvalue positive so the
+        // iteration converges on the LARGEST one, which is the optimal quaternion.
+        var q = SIMD4<Float>(1, 0, 0, 0)
+        let shift = abs(trace) + 3
+        for _ in 0..<200 {
+            let next = profile * q + shift * q
+            let length = simd_length(next)
+            guard length > 1e-9 else { return nil }
+            q = next / length
+        }
+        return simd_float3x3(simd_quatf(ix: q.y, iy: q.z, iz: q.w, r: q.x))
+    }
+
     fileprivate static func anchorYawIfPossible(selected: [StillRecord], rawDataDir: URL,
                                                 offsetPhone: SIMD3<Float>,
                                                 report: (String) -> Void) -> Float? {
