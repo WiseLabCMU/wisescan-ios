@@ -216,7 +216,7 @@ enum EquirectPostCalibration {
         if measuredRod > 0.1 {
             PerfDiag.log(String(format: "[RigCal] rig offset anchored at %.3f m along %@ (±%.0fcm along, ±%.0fcm across)",
                                 measuredRod,
-                                rod == nil ? "the assumed −x̂ (no camera gravity)"
+                                rod == nil ? "the assumed −x̂ (camera gravity absent or rejected — see above)"
                                            : String(format: "the MEASURED rod (%.1f° off −x̂)",
                                                     acos(min(1, max(-1, -(rod!.x)))) * 180 / .pi),
                                 bounds.alongHalf * 100, bounds.acrossHalf * 100))
