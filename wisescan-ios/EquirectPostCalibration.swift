@@ -249,7 +249,10 @@ enum EquirectPostCalibration {
             : 0
         let meanSwayMm = selected.isEmpty ? 0
             : selected.map { $0.swayCombinedM * 1000 }.reduce(0, +) / Float(selected.count)
-        PerfDiag.log(String(format: "[RigCal] postprocess solve: offset=(%.3f,%.3f,%.3f)m |%.3fm| yaw=%.2f° pitch=%.2f° elev=%.1f° "
+        // The scan's identity leads the line: a batch re-solve (solver-version bump) emits
+        // eight of these back to back, and without the id they cannot be told apart or
+        // matched to a staged bundle.
+        PerfDiag.log(String(format: "[RigCal] postprocess solve [\(scanDir.lastPathComponent.prefix(8))]: offset=(%.3f,%.3f,%.3f)m |%.3fm| yaw=%.2f° pitch=%.2f° elev=%.1f° "
                             + "(residual %.2f px, %@, %d inputs, spread %.2fm, mean sway %.0fmm)",
                             p.offsetPhone.x, p.offsetPhone.y, p.offsetPhone.z, p.rodLengthM,
                             p.yaw * 180 / .pi, p.pitchResidual * 180 / .pi,
