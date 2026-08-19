@@ -3,6 +3,13 @@ on:
     branches:
       - main
 name: release-please
+# One run at a time: on 2026-08-19 two runs triggered ~30 s apart raced on the
+# release branch ref — the loser failed with "Error updating ref" after the
+# winner had already moved it. Queue instead of cancel: a queued run re-reads
+# main and converges, while a cancelled one could drop a merge's release notes.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
 permissions:
   contents: write
   pull-requests: write
