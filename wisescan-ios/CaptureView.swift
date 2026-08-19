@@ -1763,6 +1763,13 @@ struct CaptureView: View {
             // Pick up any Settings change to the diagnostics flag, then start the main-thread
             // stall watchdog for this capture session (both no-ops unless Perf Diagnostics is on).
             PerfDiag.refresh()
+            if let openMs = PerfDiag.sinceMark("captureViewOpen") {
+                // The window MainThreadWatchdog structurally cannot see, because it starts
+                // on the line below. Anything over ~1 s here is a user-visible freeze on the
+                // tab tap, and the only place it will ever be recorded.
+                PerfDiag.log("[PerfDiag] capture view open took \(openMs)ms (tab tap → onAppear)"
+                    + (openMs > 1000 ? " ⚠️ user-visible stall — main-thread work before the view exists" : ""))
+            }
             mainThreadWatchdog.start()
             memoryPressureMonitor.start()
 
