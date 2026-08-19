@@ -1255,8 +1255,10 @@ struct ScanCard: View {
                     .alert("Map May Be Unreliable", isPresented: $showSuspectMapAlert) {
                         Button("OK", role: .cancel) { }
                     } message: {
-                        Text("Tracking was disrupted while this scan was recorded (for example by " +
-                             "an interruption), so its relocalization map may be unreliable. " +
+                        Text("This scan's relocalization map contains a detached clump of feature " +
+                             "points far from everything else — the signature of a tracking " +
+                             "excursion being merged back into the map — so the map may be " +
+                             "unreliable. " +
                              "Rescan and Connect Adjacent will warn before using it, and a rescan " +
                              "seeded from it usually inherits the problem. To clear it, delete this " +
                              "scan so the most recent clean scan becomes the reference. The scan's " +

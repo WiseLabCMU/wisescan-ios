@@ -50,10 +50,10 @@ enum VertexColorAccumulator {
 
             // Wandering-cluster check (see mapSuspect doc): flag a map whose feature cloud was
             // polluted by a tracking excursion so rescan/link flows can warn before trusting it.
+            // mapSuspect logs its own numbers and verdict at .notice — a bare "looks
+            // corrupted" via print() never reached the unified log, so the badge was
+            // unexplainable from a pulled bundle.
             let suspect = LocalizationDiag.mapSuspect(map)
-            if suspect {
-                print("[Warning] World map feature cloud looks corrupted (outlier cluster) — flagging scan's map as suspect")
-            }
 
             do {
                 let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)

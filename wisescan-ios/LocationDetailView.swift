@@ -699,8 +699,9 @@ struct LocationDetailView: View {
                 }
                 Button("Cancel", role: .cancel) { continueAction = nil }
             } message: {
-                Text("The previous scan's tracking was disrupted while it was recorded (for example " +
-                     "by an interruption), so the ghost overlay and alignment may start offset — and " +
+                Text("The previous scan's relocalization map contains a detached clump of feature points " +
+                     "far from everything else — the signature of a tracking excursion merged back " +
+                     "into the map — so the ghost overlay and alignment may start offset, and " +
                      "a rescan that starts from an unreliable map usually inherits the problem. " +
                      "To clear it, delete the flagged scan so the most recent clean scan becomes " +
                      "the reference. Processing can still auto-align the result either way.")
