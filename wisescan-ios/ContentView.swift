@@ -36,6 +36,13 @@ struct ContentView: View {
                     .tag(2)
             }
             .environment(scanStore)
+            // Stamp the moment the tab actually changes, so the capture view can report how
+            // long it took to come up. Everything between here and CaptureView's .onAppear —
+            // view construction, ARSession configure, RoomPlan start, ghost/world-map load —
+            // runs before MainThreadWatchdog is armed and was completely unmeasured.
+            .onChange(of: selectedTab) { _, tab in
+                if tab == 1 { PerfDiag.mark("captureViewOpen") }
+            }
             // Auto-navigate tabs for the rig calibration flow:
             //   Dashboard "Calibrate" → Capture tab (AR mesh + stills) → Dashboard (review results)
             // The calibration overlay and AR session (mesh) live on the capture tab;

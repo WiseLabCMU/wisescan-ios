@@ -781,7 +781,7 @@ struct ThetaCameraCard: View {
                             sheetIsAdding = true
                         }
                     } footer: {
-                        Text("Clears the stored Wi-Fi credentials and Bluetooth pairing state, then leaves this sheet ready to add another camera. For a full reset, also remove the camera in iOS Settings → Bluetooth.")
+                        Text("Clears the stored Wi-Fi credentials and this app's Bluetooth pairing state, then leaves this sheet ready to add another camera.\n\nThis cannot remove the iOS Bluetooth bond — no app can. If you are re-pairing because Bluetooth stopped accepting commands, do iOS Settings → Bluetooth → ⓘ next to the camera → Forget This Device FIRST; that is the step that actually releases it, and without it the camera will connect and then drop about 30 seconds later.")
                     }
                 }
             }
@@ -1022,27 +1022,6 @@ struct ThetaCameraCard: View {
                     Text("Captured in \(capture.roundTripMs) ms")
                         .font(.caption).foregroundColor(.white)
                 }
-                // The camera returns an absolute http URL to the JPEG; while the phone is on
-                // the camera's Wi‑Fi, tapping opens it in Safari to view/save the shot.
-                if let url = URL(string: capture.fileURL) {
-                    Link(destination: url) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "photo")
-                            Text(capture.fileURL)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                        .font(.caption2)
-                        .foregroundColor(.cyan)
-                    }
-                } else {
-                    Text(capture.fileURL)
-                        .font(.caption2)
-                        .foregroundColor(.white.opacity(0.7))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
                 // Download the still on-device (measures P2 transfer time) + preview it.
                 Button(action: { manager.downloadLastCapture() }, label: {
                     HStack {
@@ -1148,7 +1127,12 @@ struct ThetaCameraCard: View {
                 eventsExpanded = true
             case .connected:
                 eventsExpanded = false
-                Task { await refreshFileCount() }
+                // Detached and last: the count is a convenience row, and the connect
+                // chain is already several serial round trips deep before it starts.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(400))
+                    await refreshFileCount()
+                }
             case .disconnected:
                 eventsExpanded = false
             }

@@ -247,7 +247,7 @@ final class ThetaBLEProbe: NSObject {
         if logLines.count > 60 { logLines.removeFirst(logLines.count - 60) }
     }
 
-    private static func describeProps(_ props: CBCharacteristicProperties) -> String {
+    static func describeProps(_ props: CBCharacteristicProperties) -> String {
         var out: [String] = []
         if props.contains(.read) { out.append("R") }
         if props.contains(.write) { out.append("W") }

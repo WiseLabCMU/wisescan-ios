@@ -37,6 +37,10 @@ extension ThetaCameraManager {
         /// per-model length) — the sway that actually corrupts the pose.
         let exposureMotionM: Float?
         let exposureMotionDeg: Float?
+        /// "ble" or "osc". On an OSC fallback the ack below is a watchdog timeout plus
+        /// an HTTP round trip rather than a shutter time, so anything tuning the sway
+        /// window must filter on this.
+        let shutterPath: String
         /// When the camera acknowledged the shutter command, ms after the tap — the
         /// exposure window's anchor (BLE write-ack on the X, OSC response on the Z1).
         let shutterAckMs: Int?
@@ -57,10 +61,12 @@ extension ThetaCameraManager {
     /// through the download queue / Process sweep). Download state is derived from disk:
     /// sidecar present + JPG missing ⇒ pending.
     /// Retro-annotates a still's sidecar with the EXIF exposure time parsed from the
-    /// downloaded equirect bytes — ground truth for tuning the per-model sway window
-    /// (the live verdict uses a seeded window; this is the calibration data). Both
-    /// download paths call it: the live drain and the Process sweep.
-    nonisolated static func annotateExifExposure(jpegData: Data, sidecarURL: URL) {
+    /// downloaded equirect bytes, and feeds the value back into the per-model estimate
+    /// the live sway window uses — so a dim room widens the guard by itself instead of
+    /// waiting on a constant. Both download paths call it: the live drain and the
+    /// Process sweep.
+    nonisolated static func annotateExifExposure(jpegData: Data, sidecarURL: URL,
+                                                 model: String? = nil) {
         guard let src = CGImageSourceCreateWithData(jpegData as CFData, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
               let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any],
@@ -70,6 +76,16 @@ extension ThetaCameraManager {
               obj["exif_exposure_time_s"] == nil
         else { return }
         obj["exif_exposure_time_s"] = exposure
+
+        // Learn the model's worst-case exposure (the sidecar names the source camera
+        // when the caller didn't). Monotonic: only ever widens, so one bright frame
+        // can't narrow the guard back under a dim room's real exposure.
+        if let model = model ?? (obj["still_source"] as? String) {
+            let key = "\(AppConstants.Key.thetaObservedExposurePrefix).\(model)"
+            let known = UserDefaults.standard.double(forKey: key)
+            if exposure > known { UserDefaults.standard.set(exposure, forKey: key) }
+        }
+
         if let out = try? JSONSerialization.data(withJSONObject: obj,
                                                  options: [.prettyPrinted, .sortedKeys]) {
             try? out.write(to: sidecarURL, options: .atomic)
@@ -105,6 +121,7 @@ extension ThetaCameraManager {
             triggerMotionDeg: input.triggerMotionDeg,
             exposureMotionM: input.exposureMotionM,
             exposureMotionDeg: input.exposureMotionDeg,
+            shutterPath: input.shutterPath,
             shutterAckMs: input.shutterAckMs,
             exposureWindowMs: input.exposureWindowMs,
             motionSamples: input.motionSamples.map { samples in
@@ -143,6 +160,7 @@ private struct EquirectStillMetadata: Encodable {
     let triggerMotionDeg: Float?
     let exposureMotionM: Float?
     let exposureMotionDeg: Float?
+    let shutterPath: String
     let shutterAckMs: Int?
     let exposureWindowMs: Int?
     /// [t_ms, m, deg] triples from the trigger-window motion probe.
@@ -168,6 +186,7 @@ private struct EquirectStillMetadata: Encodable {
         case triggerMotionDeg = "trigger_motion_deg"
         case exposureMotionM = "exposure_motion_m"
         case exposureMotionDeg = "exposure_motion_deg"
+        case shutterPath = "shutter_path"
         case shutterAckMs = "shutter_ack_ms"
         case exposureWindowMs = "exposure_window_ms"
         case motionSamples = "motion_samples"

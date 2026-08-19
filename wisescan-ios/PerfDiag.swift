@@ -28,6 +28,28 @@ enum PerfDiag {
         _enabled.store(UserDefaults.standard.bool(forKey: AppConstants.Key.perfDiagnostics), ordering: .relaxed)
     }
 
+    /// Wall-clock marks for work that happens BEFORE the capture view exists, and is
+    /// therefore invisible to `MainThreadWatchdog` — which only starts in that view's
+    /// `.onAppear`, i.e. after the stall it would have measured has already finished.
+    /// A field report of "major stall opening the capture view" left a 60 s hole in the
+    /// diagnostics with nothing in it at all; `mark`/`sinceMark` fill exactly that hole.
+    /// Stored regardless of the toggle so turning diagnostics on mid-session still gets a
+    /// sane baseline; only the logging is gated.
+    private static let marks = Mutex<[String: Double]>([:])
+
+    static func mark(_ name: String) {
+        let now = CACurrentMediaTime()
+        marks.withLock { $0[name] = now }
+    }
+
+    /// Milliseconds since `mark(name)`, or nil if it was never marked. Consumes the mark,
+    /// so a repeated transition measures each occurrence rather than accumulating.
+    static func sinceMark(_ name: String) -> Int? {
+        let start = marks.withLock { $0.removeValue(forKey: name) }
+        guard let start else { return nil }
+        return Int((CACurrentMediaTime() - start) * 1000)
+    }
+
     static let subsystem = "org.arenaxr.scan4d"
     private static let logger = Logger(subsystem: subsystem, category: "perf")
     private static let signposter = OSSignposter(subsystem: subsystem, category: "perf")
@@ -37,7 +59,12 @@ enum PerfDiag {
     static func log(_ message: @autoclosure () -> String) {
         guard enabled else { return }
         let m = message()
-        logger.info("\(m, privacy: .public)")
+        // NOTICE, not info: `info` lives only in the in-memory ring buffer and never
+        // reaches disk, so it is evicted long before an untethered run can be exported
+        // (field log 2026-08-17 came back holding only the last ~77 entries — the whole
+        // capture phase was gone). `notice` persists, which is the entire point of
+        // lines that exist to be read after the fact.
+        logger.notice("\(m, privacy: .public)")
     }
 
     /// Time `body`, emit a signpost interval, and log its duration (always, or only when it

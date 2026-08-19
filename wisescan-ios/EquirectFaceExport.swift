@@ -4,17 +4,17 @@ import UIKit
 import simd
 
 /// Cube-face export for equirectangular 360° stills (docs/design/still-source-360.md →
-/// "Export: cube map, bottom face discarded"): each staged still reprojects into **5
-/// synthetic pinhole faces** — front/right/back/left/up; the bottom face is dominated by
-/// the operator, grip, and rod and is dropped by construction — emitted as ordinary
+/// "Export: cube map"): each staged still reprojects into **6 synthetic pinhole faces**
+/// — front/right/back/left/up/down — each shipping with an operator/rig mask, emitted as ordinary
 /// keyframe images + Polycam camera JSONs, so the equirectangular camera model disappears
 /// from the data contract entirely. Each face is an exact 90° FOV pinhole:
 /// `fx = fy = cx = cy = faceSize / 2`.
 ///
 /// Pose = the **mechanical-prior rig extrinsic** (calibration plan step 1): ARKit is
 /// gravity-aligned and Theta zenith correction keeps the equirect level, so the prior only
-/// needs position + yaw — the camera sits `AppConstants.rigRodHeightMeters` above the phone
-/// along WORLD up, facing the phone's horizontal forward rotated by
+/// needs position + yaw — the camera sits `AppConstants.rigRodHeightMeters` up the rod from
+/// the phone (an offset in the PHONE's frame, so it swings with the device), facing the
+/// phone's horizontal forward rotated by
 /// `AppConstants.rigYawOffsetDegrees`. The solved hand–eye refinement replaces those two
 /// numbers later without changing this contract. Poses are camera-to-world in the ARKit
 /// world frame, same convention as every other frame in the bundle.
@@ -27,9 +27,19 @@ enum EquirectFaceExport {
     /// Whether a camera model's panos can be trusted LEVEL — the rig-prior pose math assumes
     /// zenith-corrected (internally "gimbaled") equirects; a non-leveling camera would bake
     /// its roll/pitch into every face pose. Gate by the sidecar's reported model:
-    /// - `.validated` — leveling confirmed on device (Theta X).
-    /// - `.assumedLevel` — the hardware levels (Theta Z1 zenith correction) but we have not
-    ///   validated its OSC-configured behavior; faces emit with a marked pose source.
+    /// - `.validated` — leveling confirmed on device.
+    ///   THETA X: original field validation.
+    ///   THETA Z1 (fw 3.60.3, promoted 2026-08-19): three healthy field scans against the
+    ///   criterion set for it — solved elevation offsets +1.4° / +2.8° / +1.4° (a leveling
+    ///   failure would land here and track rig tilt; it does not), pitch residual collapsed
+    ///   to 0.09° / 0.17° once the rod tape was corrected, keyframe-anchor agreement ≤3.6°,
+    ///   residuals 3.7–4.4 px in the X's range, and its own IMU agreeing with ARKit to
+    ///   1.6–2.3° mean across every scan. Its XMP also asserts PosePitch/Roll = 0.0, the
+    ///   same claim the X makes. (A fourth scan, a glass-walled room, was excluded — its
+    ///   failure was the edge cost misled by reflections, not leveling, and it is what made
+    ///   the yaw anchor binding in v13.)
+    /// - `.assumedLevel` — the hardware levels but no field evidence yet; faces emit with a
+    ///   marked pose source. No current camera sits here; the case stays for the next model.
     /// - `.unsupported` — unknown model: the level-pano assumption is unsafe, so NO pose-
     ///   bearing faces are emitted (the archived equirect still ships). A later feature can
     ///   compensate from the camera's own gyro metadata and lift this gate.
@@ -42,12 +52,12 @@ enum EquirectFaceExport {
     static func levelingSupport(forModel model: String?) -> LevelingSupport {
         guard let model = model?.uppercased() else { return .unsupported }
         if model.contains("THETA X") { return .validated }
-        if model.contains("THETA Z1") { return .assumedLevel }
+        if model.contains("THETA Z1") { return .validated }
         return .unsupported
     }
 
     /// One emitted cube face: name suffix + its rotation FROM the rig camera frame.
-    private struct Face {
+    fileprivate struct Face {
         let name: String
         let rotation: simd_float3x3
     }
@@ -57,12 +67,22 @@ enum EquirectFaceExport {
     /// (yaw -90°), left along -X (yaw +90°), back along +Z (yaw 180°), up along +Y
     /// (pitch +90°). Pixel content must agree: the sampler's face bases below use the same
     /// axes, so face imagery and face pose rotate together.
+    /// Faces emitted per still — the divisor every consumer needs to turn a face count
+    /// back into a still count.
+    static var faceCount: Int { faces.count }
+
     private static let faces: [Face] = [
         Face(name: "front", rotation: matrix_identity_float3x3),
         Face(name: "right", rotation: yawRotation(-.pi / 2)),
         Face(name: "back", rotation: yawRotation(.pi)),
         Face(name: "left", rotation: yawRotation(.pi / 2)),
-        Face(name: "up", rotation: pitchRotation(.pi / 2))
+        Face(name: "up", rotation: pitchRotation(.pi / 2)),
+        // The down face ships now that a per-face mask ships with it. It was dropped by
+        // construction because it is dominated by the operator, grip and rod — but that
+        // also threw away the floor immediately under the camera, the closest and
+        // best-parallax geometry in the still. Masked precisely rather than discarded
+        // wholesale, the useful part survives and downstream keeps the choice.
+        Face(name: "down", rotation: pitchRotation(-.pi / 2))
     ]
 
     // MARK: - Colorize source (Developer Mode probe)
@@ -79,32 +99,70 @@ enum EquirectFaceExport {
         let root = rawDataDir.appendingPathComponent("face_frames")
         let camerasDir = root.appendingPathComponent("cameras")
         let imagesDir = root.appendingPathComponent("images")
-        let fm = FileManager.default
-        guard let stills = try? fm.contentsOfDirectory(at: stillsDir, includingPropertiesForKeys: nil)
+        let fileManager = FileManager.default
+        guard let stills = try? fileManager.contentsOfDirectory(at: stillsDir, includingPropertiesForKeys: nil)
         else { return nil }
         let jpgs = stills.filter { $0.pathExtension.lowercased() == "jpg" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !jpgs.isEmpty else { return nil }
-        try? fm.removeItem(at: root)
-        try? fm.createDirectory(at: camerasDir, withIntermediateDirectories: true)
-        try? fm.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+        let depthDir = root.appendingPathComponent("depth")
+        try? fileManager.removeItem(at: root)
+        try? fileManager.createDirectory(at: camerasDir, withIntermediateDirectories: true)
+        try? fileManager.createDirectory(at: imagesDir, withIntermediateDirectories: true)
+        try? fileManager.createDirectory(at: depthDir, withIntermediateDirectories: true)
+
+        // Depth from the scan's own mesh, so the probe measures POSE rather than bleed.
+        // Without it the colorizer disables occlusion for face frames and paints through
+        // walls — and bleed looks exactly like misregistration, which is why the
+        // 2026-08-17 runs could not separate them.
+        var mesh = (try? Data(contentsOf: rawDataDir.appendingPathComponent("mesh.obj")))
+            .flatMap { MeshParser.parseOBJ(from: $0) }
+            ?? (try? Data(contentsOf: rawDataDir.deletingLastPathComponent()
+                            .appendingPathComponent("mesh.obj")))
+            .flatMap { MeshParser.parseOBJ(from: $0) }
+        if mesh == nil {
+            PerfDiag.log("[Colorize] face depth unavailable (no mesh.obj) — occlusion OFF, expect bleed")
+        }
+        // Registered rescans: BOTH mesh.obj copies are baked into the location's CANONICAL
+        // frame (ScanPostprocessor mirrors the transformed mesh into raw_data/), while the
+        // face poses below come from the sidecars in this scan's RAW capture frame. Rasterising
+        // canonical geometry through raw cameras misregisters the depth by the registration
+        // translation — decimeters — so occlusion then rejects nearly every sample. Undo it,
+        // exactly as VertexColorAccumulator does for the same reason.
+        if let canonical = mesh,
+           let reg = SaveRegistration.loadSidecar(scanDirectory: rawDataDir.deletingLastPathComponent()),
+           reg.applied, let transform = reg.transformMatrix {
+            let inverse = transform.inverse
+            mesh = MeshParser.OBJData(vertices: canonical.vertices.map {
+                let point = inverse * SIMD4<Float>($0, 1)
+                return SIMD3(point.x, point.y, point.z)
+            }, faces: canonical.faces)
+            PerfDiag.log(String(format: "[Colorize] face depth: un-applied registration (trans=%.1fcm)",
+                                simd_length(SIMD3(transform.columns.3.x, transform.columns.3.y,
+                                                  transform.columns.3.z)) * 100))
+        }
+
         var written = 0
         for jpg in jpgs {
             let sidecar = jpg.deletingPathExtension().appendingPathExtension("json")
             written += emitFaces(equirectURL: jpg, sidecarURL: sidecar,
-                                 imagesDir: imagesDir, camerasDir: camerasDir)
+                                 imagesDir: imagesDir, camerasDir: camerasDir,
+                                 depthDir: mesh == nil ? nil : depthDir, depthMesh: mesh)
         }
         // emitFaces writes staging-relative image paths ("images/<name>") for the
         // EXPORT layout; the colorizer resolves image_path against rawDir, so rewrite
         // to rawDir-relative ("face_frames/images/<name>"). 360post7: without this,
         // every face frame failed its image load silently and the model colored gray.
-        if let cams = try? fm.contentsOfDirectory(at: camerasDir, includingPropertiesForKeys: nil) {
+        if let cams = try? fileManager.contentsOfDirectory(at: camerasDir, includingPropertiesForKeys: nil) {
             for cam in cams where cam.pathExtension == "json" {
                 guard let data = try? Data(contentsOf: cam),
                       var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                       let imagePath = obj["image_path"] as? String,
                       imagePath.hasPrefix("images/") else { continue }
                 obj["image_path"] = "face_frames/" + imagePath
+                if let depthPath = obj["depth_path"] as? String, depthPath.hasPrefix("depth/") {
+                    obj["depth_path"] = "face_frames/" + depthPath
+                }
                 if let out = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) {
                     try? out.write(to: cam)
                 }
@@ -123,8 +181,17 @@ enum EquirectFaceExport {
     /// mechanical prior, composed at capture — where the profile↔camera serial binding is
     /// verified). A stored RigProfile is deliberately NOT applied here: export time cannot
     /// verify it belongs to the rig that captured a pre-contract still (review finding #9).
+    /// `masksDir` receives one operator/rig mask per face when supplied — required for
+    /// the down face to be usable downstream at all.
+    /// `depthMesh` turns on OCCLUSION for the faces: without depth the colorizer paints
+    /// every vertex in a face's cone, including surfaces behind walls, and that bleed is
+    /// indistinguishable from pose error. See FaceDepthRender.
     static func emitFaces(equirectURL: URL, sidecarURL: URL,
-                          imagesDir: URL, camerasDir: URL) -> Int {
+                          imagesDir: URL, camerasDir: URL,
+                          masksDir: URL? = nil,
+                          equirectMask: OperatorRigMask.Mask? = nil,
+                          depthDir: URL? = nil,
+                          depthMesh: MeshParser.OBJData? = nil) -> Int {
         guard let sidecarData = try? Data(contentsOf: sidecarURL),
               let sidecar = (try? JSONSerialization.jsonObject(with: sidecarData)) as? [String: Any],
               let flat = sidecar["phone_transform"] as? [Double], flat.count == 16 else { return 0 }
@@ -164,7 +231,7 @@ enum EquirectFaceExport {
             print("[prepareExport] \(equirectURL.lastPathComponent): no baked cam_transform (pre-contract still) — mechanical-prior pose")
             camTransform = RigCalibrationSolver.composeRigTransform(
                 phoneToWorld: phoneToWorld,
-                dy: AppConstants.rigRodHeightMeters, dLateral: 0,
+                offsetPhone: RigProfile.mechanicalPrior.offsetPhone,
                 yaw: AppConstants.rigYawOffsetDegrees * .pi / 180, pitchResidual: 0
             )
         }
@@ -219,9 +286,15 @@ enum EquirectFaceExport {
                 } catch {
                     return
                 }
+                writeFaceMask(equirectMask, into: masksDir, face: face, baseName: baseName,
+                              faceSize: faceSize, vOffsetFrac: elevOffsetFrac)
+                let depthPath = writeFaceDepth(mesh: depthMesh, into: depthDir,
+                                               camRot: camRot, camPos: camPos, face: face,
+                                               baseName: baseName, faceSize: faceSize)
                 writeCameraJSON(FaceCameraRecord(
                     name: "\(baseName)_\(face.name)",
                     imagePath: "images/\(imageName)",
+                    depthPath: depthPath,
                     rotation: simd_mul(camRot, face.rotation),
                     position: camPos,
                     side: faceSize,
@@ -234,11 +307,9 @@ enum EquirectFaceExport {
         return written
     }
 
-
     // NOTE: rigCameraRotation (mechanical-prior pose composition) has been superseded by
     // RigCalibrationSolver.composeRigTransform, which handles both the mechanical prior
     // and solved calibration paths. See docs/design/still-source-360.md (Calibration).
-
 
     private static func yawRotation(_ angle: Float) -> simd_float3x3 {
         simd_float3x3(simd_quatf(angle: angle, axis: SIMD3<Float>(0, 1, 0)))
@@ -262,6 +333,7 @@ enum EquirectFaceExport {
     private struct FaceCameraRecord {
         let name: String
         let imagePath: String
+        let depthPath: String?
         let rotation: simd_float3x3
         let position: SIMD3<Float>
         let side: Int
@@ -286,6 +358,7 @@ enum EquirectFaceExport {
             "face": rec.faceName,
             "camera_pose_source": rec.poseSource
         ]
+        if let depthPath = rec.depthPath { json["depth_path"] = depthPath }
         if let stillSource = rec.stillSource { json["still_source"] = stillSource }
         guard JSONSerialization.isValidJSONObject(json),
               let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
@@ -384,5 +457,48 @@ enum EquirectFaceExport {
         let top = simd_mix(texel(col0, row0), texel(col0 + 1, row0), SIMD3(repeating: wgtX))
         let bot = simd_mix(texel(col0, row0 + 1), texel(col0 + 1, row0 + 1), SIMD3(repeating: wgtX))
         return simd_mix(top, bot, SIMD3(repeating: wgtY))
+    }
+}
+
+extension EquirectFaceExport {
+    /// Ships the face's operator/rig mask WITH the face. A face without its mask is
+    /// worse than no face — downstream would reconstruct the rig and the operator as
+    /// scene content, which is exactly why the down face used to be discarded outright.
+    /// Mask faces are coarse on purpose: they reject regions, they do not cut edges.
+    fileprivate static func writeFaceMask(_ equirectMask: OperatorRigMask.Mask?, into masksDir: URL?,
+                                          face: Face, baseName: String,
+                                          faceSize: Int, vOffsetFrac: Float) {
+        guard let equirectMask, let masksDir else { return }
+        let side = max(128, faceSize / 4)
+        let maskFace = OperatorRigMask.faceMask(from: equirectMask, rotation: face.rotation,
+                                                side: side, vOffsetFrac: vOffsetFrac)
+        guard let png = OperatorRigMask.encodePNG(maskFace) else { return }
+        try? png.write(to: masksDir.appendingPathComponent("\(baseName)_\(face.name).png"),
+                       options: .atomic)
+    }
+}
+
+// MARK: - Face depth
+
+extension EquirectFaceExport {
+    /// Rasterises the mesh from one face's pose and writes it beside the face image.
+    /// Returns the rawDir-relative path for the camera JSON, or nil when there is no mesh
+    /// (occlusion then stays off, as before).
+    fileprivate static func writeFaceDepth(mesh: MeshParser.OBJData?, into depthDir: URL?,
+                                           camRot: simd_float3x3, camPos: SIMD3<Float>,
+                                           face: Face, baseName: String,
+                                           faceSize: Int) -> String? {
+        guard let mesh, let depthDir else { return nil }
+        let rotation = simd_mul(camRot, face.rotation)
+        let pose = simd_float4x4(SIMD4<Float>(rotation.columns.0, 0),
+                                 SIMD4<Float>(rotation.columns.1, 0),
+                                 SIMD4<Float>(rotation.columns.2, 0),
+                                 SIMD4<Float>(camPos, 1))
+        let depth = FaceDepthRender.render(mesh: mesh, camToWorld: pose, side: faceSize)
+        let name = "\(baseName)_\(face.name).png"
+        guard let png = FaceDepthRender.encodePNG(depth, side: faceSize),
+              (try? png.write(to: depthDir.appendingPathComponent(name), options: .atomic)) != nil
+        else { return nil }
+        return "depth/\(name)"
     }
 }

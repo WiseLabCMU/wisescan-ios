@@ -63,7 +63,18 @@ enum AppConstants {
         static let keepCameraOriginals = "keepCameraOriginals"        // Developer Mode: skip the security-P1 sweep that deletes each 360° still from the camera after verified transfer
         static let thetaBLESerial = "thetaBLESerial"                  // 8-digit serial of the paired camera (BLE identity + factory password)
         static let thetaBLEPeripheralID = "thetaBLEPeripheralID"      // CBPeripheral identifier for scan-free reconnects
-        static let thetaCameraProfiles = "thetaCameraProfiles"        // JSON roster of known cameras (multi-camera: X for texture, Z1 for low light — switch per collection)
+        static let thetaCameraProfiles = "thetaCameraProfiles"
+        /// Longest EXIF exposure observed per camera model ("thetaObservedExposure.<model>"),
+        /// learned from downloaded stills — widens the sway window in dim rooms.
+        static let thetaObservedExposurePrefix = "thetaObservedExposure"
+        /// Longest shutter-ack delay observed per camera model
+        /// ("thetaObservedAck.<model>"), learned per still — the visual cue's hold
+        /// length. The X answers over BLE in ~0.2 s, the Z1 over OSC in ~0.4 s.
+        static let thetaObservedAckPrefix = "thetaObservedAck"
+        /// This operator's observed capture height above the floor, in metres —
+        /// learned, because it differs by half a metre or more between a seated user
+        /// and a tall standing one, and a constant serves neither.
+        static let operatorCaptureHeight = "operatorCaptureHeight"        // JSON roster of known cameras (multi-camera: X for texture, Z1 for low light — switch per collection)
         static let thetaSSID = "thetaSSID"                            // stored camera Wi-Fi SSID for one-tap join (NEHotspotConfiguration)
         static let thetaPassphrase = "thetaPassphrase"                // stored camera Wi-Fi passphrase. TODO(security P2): move to Keychain + default-credential warning — see design doc Security section
     }
@@ -178,7 +189,7 @@ enum AppConstants {
 
     // MARK: - 360° Rig (mechanical-prior extrinsic — calibration plan step 1; the solved
     // hand–eye refinement replaces these per rig profile later)
-    static let rigRodHeightMeters: Float = 1.0     // 360° camera height above the phone along WORLD up (ARKit is gravity-aligned; Theta zenith correction keeps the pano level, so the prior needs only position + yaw)
+    static let rigRodHeightMeters: Float = 0.75    // rod length (m) from the phone camera to the 360° lens when the operator has NOT measured the rig. ALONG THE ROD, the same axis the operator tapes and the same axis RigProfile.offsetPhone stores — no frame conversion anywhere. 1.0 m was a guess no field rig has ever matched (every measured monopod: 0.70-0.79 m), which put the truth on the edge of the unmeasured search box
     static let rigYawOffsetDegrees: Float = 0      // pano-center (camera-body forward) yaw relative to the phone's horizontal forward; 0 = lenses aligned with the phone
     static let equirectFaceSizeMax = 2048          // cube-face edge cap (native density is equirectWidth/4; 11K Theta X stills would yield 2752 — capped for JPEG size/memory)
     static let equirectFaceDecodeMax = 8192        // staged-equirect decode cap for face sampling (8192×4096 RGBA ≈ 134 MB transient, per-still pooled; width/4 already saturates the face cap)
@@ -204,10 +215,112 @@ enum AppConstants {
     /// warning cue + chip count at capture, and the calibration solve prefers clean
     /// stills. 0.03 m matches the dy anchor's half-width; 2° at a ~2 m rig lever arm
     /// is ~7 cm of lens travel.
-    static let thetaExposureWindowSecondsX: TimeInterval = 1.0      // BLE ack → shutter is fast
-    static let thetaExposureWindowSecondsZ1: TimeInterval = 1.5     // OSC ack over Wi-Fi, slower body
-    static let thetaSwayWarnMeters: Float = 0.03
-    static let thetaSwayWarnDegrees: Float = 2.0
+    /// Ack → shutter-open uncertainty. The ack says the camera ACCEPTED the command;
+    /// it fires shortly after. Field data (360update4): ack lands 164-232 ms after the
+    /// tap on the X over BLE.
+    static let thetaShutterLatencyAllowance: TimeInterval = 0.12
+    /// Exposure length used before this camera has ever reported one. 1/30 s is what
+    /// the X returned in room light (360update4: EXIF 0.0333 on every still); the
+    /// observed value replaces it per model as soon as a still downloads.
+    static let thetaDefaultExposureSeconds: TimeInterval = 1.0 / 30
+    /// Clamp on the learned exposure so one absurd EXIF value can't widen the guard
+    /// into uselessness (a genuinely dark room still tops out well inside this).
+    static let thetaMaxExposureSeconds: TimeInterval = 0.5
+    /// Pose-probe sampling period. The real window is ~250 ms, so 250 ms sampling put
+    /// exactly ONE sample in it; 50 ms gives ~5 and costs one transform read each.
+    static let thetaMotionSampleSeconds: TimeInterval = 0.05
+
+    // MARK: - 360° still spacing guidance
+    /// Target distance between consecutive 360° stills. Rings render at HALF this, so
+    /// two rings that just touch are exactly this far apart — the operator reads the
+    /// spacing off the geometry rather than off a number. Baseline spread is what
+    /// sharpens the calibration solve and what gives a surface more than one viewpoint
+    /// (which is also how downstream rejects stitch-seam artifacts).
+    static let stillSpacingTargetMeters: Float = 2.0
+    static let stillRingBandWidthMeters: Float = 0.035
+    static let stillRingPipRadiusMeters: Float = 0.05
+    /// LAST-RESORT drop below the capture pose, used only before any floor has been
+    /// observed AND before this operator's own height has been learned. It is a poor
+    /// assumption on purpose-built terms: operators scan from wheelchairs, and some are
+    /// very tall, so capture height varies by half a metre or more between people. The
+    /// learned value (operatorCaptureHeight) replaces it after the first still that
+    /// sees a floor, and persists across sessions.
+    static let stillRingFallbackDropMeters: Float = 1.3
+    /// Rings sit this far ABOVE the floor estimate. The live scene mesh lies on the
+    /// floor, so a coplanar ring loses the depth test and the mesh paints over it as
+    /// soon as it enters view (field report 360update5). Lifting the ring puts it
+    /// nearer the camera than the floor it marks, which wins the test from any
+    /// looking-down angle without disabling depth.
+    /// Biased deliberately high: a ring slightly above the floor still reads as a
+    /// spacing guide, while one a centimetre BELOW it is swallowed by the mesh.
+    static let stillRingLiftMeters: Float = 0.08
+
+    /// Plausible rig heights. The lower bound matters more than it looks: the solve
+    /// anchors the rod length to this value within ±calibrationMeasuredRodHalfM and has been
+    /// observed riding BOTH walls of that window, so a fat-fingered entry (0.285 m when
+    /// 28.5 in was meant — a factor of ten) does not degrade the solve, it forces a wrong
+    /// answer and the colour lands wrong with a healthy-looking residual. Below this the
+    /// camera would be sitting on the phone, which no rig does.
+    static let rigHeightMinPlausibleMeters = 0.2
+    static let rigHeightMaxPlausibleMeters = 3.0
+
+    /// Half-angle of the nadir cone occupied by the capture hardware (rod, mount,
+    /// tripod), in degrees from straight down — everything below −(90 − this) is
+    /// masked. Field measurement (staging_0755126C, tripod-mounted) put the hardware
+    /// inside 17°; 20° carries margin without eating floor a neighbouring still at the
+    /// 2 m spacing target would have to make up. Compare the SOLVER's blunt −45°
+    /// (calibrationElevationCutoffDeg), which this mask is meant to replace.
+    static let rigNadirMaskDeg: Float = 20
+
+    /// Sway is judged as ONE number: the distance the 360° lens actually moved during
+    /// the exposure window. The rig pivots near the operator's hands, so an angular
+    /// wobble displaces the lens by `rodLength · tan(angle)` — across the 41 usable
+    /// field stills that rotation term is 59% of the median and up to 89% of the worst
+    /// case, while translation alone never once exceeded 9 mm. The old pair of gates
+    /// (30 mm OR 2.0°) was therefore inert: 0 of 41 stills tripped either one.
+    ///
+    /// Distribution of combined displacement over those 41: p50 7.8 mm, p90 14.5,
+    /// p95 17.5, max 24.9. 18 mm flags 1 in 41 — about one warning every eight scans —
+    /// and is the old 2.0° gate re-expressed on a 0.72 m rod (1.42°), which is ~23 px
+    /// on a 2048 cube face at 1 m. Below that the sway is smaller than the pose error
+    /// the solve carries anyway.
+    static let thetaSwayWarnCombinedMeters: Float = 0.018
+    /// Solve-side rejection is deliberately far looser than the operator warning: a
+    /// warning costs a re-shoot, but dropping a still costs the solve a whole viewpoint,
+    /// and viewpoint spread is what breaks the room's rotational symmetry. Nothing in
+    /// the archive reaches this — it is a blunder guard, not a quality knob.
+    static let thetaSwayRejectCombinedMeters: Float = 0.040
+    /// Lever arm used when the operator has not measured the rig. See rigRodHeightMeters.
+    static let thetaSwayFallbackRodMeters: Float = 0.75
+
+    /// Lens displacement in metres from the two things the motion probe measures.
+    static func swayCombinedMeters(translationM: Float, degrees: Float) -> Float {
+        let measured = Float(UserDefaults.standard.double(forKey: Key.rigMeasuredDyMeters))
+        let rod = measured > 0.1 ? measured : thetaSwayFallbackRodMeters
+        return translationM + rod * tan(abs(degrees) * .pi / 180)
+    }
+    /// Solver v8 yaw anchor. The edge cost is precise inside a basin but its basin
+    /// CHOICE aliases in rectangular rooms, so the phone's keyframes — gravity-aligned
+    /// and absolute — pick the basin first. 8 keyframes at stride 8 gave a clear winner
+    /// offline (top-5 candidates within 12° of each other); 3° steps resolve far finer
+    /// than the ±35° window handed to the edge solve.
+    static let yawAnchorKeyframes = 8
+    static let yawAnchorPixelStride = 8
+    static let yawAnchorStepDeg: Float = 3
+    /// How far the edge-cost solve may roam from the anchor. Wide enough for the anchor
+    /// to be a few degrees out, far too narrow to reach the next alias (~90°).
+    static let yawAnchorWindowDeg: Float = 35
+    /// How far the edge solve may walk from the keyframe anchor before the result is
+    /// flagged. The anchor is an ABSOLUTE reference (gravity-aligned ARKit keyframes with
+    /// their own depth), the edge cost is a relative refinement with a known systematic
+    /// attractor, so a large disagreement means the refinement wandered, not that the
+    /// anchor was wrong. Field: 16.6° on the 2026-08-18 19:19 scan, alongside two
+    /// parameters sitting on their bounds.
+    static let yawAnchorDisagreementWarnDeg: Float = 12
+    /// Half-range of the solver's 1-D elevation-registration sweep, in degrees. Derived
+    /// from the sweep itself (±16 rows of a 256-row edge map): keep in step with the
+    /// `stride(from: -16, through: 16)` in RigCalibrationSolver.
+    static let calibrationElevationSweepLimitDeg: Float = 16 * 180 / 256
     static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry
     static let calibrationMinSpreadMeters: Float = 1.0                 // live sufficiency meter: max pairwise still-position distance below this = weak baseline for the Process-step solve
     static let calibrationResidualGreenPx: Float = 1.4                 // RMS reprojection error (equirect px, 512-wide) ≤ this → green. Behavior-preserving √ of the old mean-squared 2.0
@@ -217,9 +330,12 @@ enum AppConstants {
     // run8 (2026-07-30): with a near-flat chamfer cost surface in cluttered rooms, the
     // unbounded solver accepted dy=4.4 m / yaw=−240° at residuals indistinguishable
     // from plausible poses. A monopod rig cannot physically be outside these ranges.
-    static let calibrationBoundDyM: Float = 0.3                        // rod height half-range (m) around the anchor when the user hasn't MEASURED the rig. The chamfer cost has a systematic +dy pull (dense image-edge band above the elevation cut attracts the sparse projected mesh downward → camera up; 360post4: solved 1.299 vs tape-measured 0.787), so an unmeasured box stays tight to limit the damage — a measured rig uses ±calibrationMeasuredDyHalfM instead
-    static let calibrationMeasuredDyHalfM: Float = 0.05                // dy half-range around the USER-MEASURED rig height. The cost's +dy pull ALWAYS rides this window's upper wall (360post5: measured 0.79 → solved 0.94 at the +0.15 wall), so the in-window solve adds no information — the window is sized to tape/clamp uncertainty only
-    static let calibrationBoundLateralM: Float = 0.3                   // lateral offset half-range (m) around 0
+    static let calibrationBoundRodM: Float = 0.3                       // along-rod half-range (m) around the anchor when the user hasn't MEASURED the rig — the rod length is the one thing we genuinely don't know then
+    static let calibrationBoundAcrossRodM: Float = 0.13                // half-range (m) on each of the two axes ACROSS the rod. Covers real clamp offsets (a few cm) AND the rod not being exactly along the phone's −x̂: ±0.13 m at a 0.72 m rod is a ~10° cone, wider than every inclinometer reading taken on this rig
+    static let calibrationGravityFitMaxDeg: Float = 3.0                 // max mean angular residual (deg) of the one-constant-rotation fit to the camera's per-still gravity before its rod direction is distrusted. Field baseline on a rigid rig: 1.57° mean / 4.88° max over 10 stills, so 3° mean flags a rig that actually moved rather than ordinary sway
+    static let calibrationRodDirectionMaxOffDeg: Float = 25             // sanity limit (deg) on how far the MEASURED rod direction may sit from the assumed −x̂ before it is rejected as a bad fit rather than believed. Measured 7.6° on the field rig
+    static let calibrationMeasuredAcrossRodM: Float = 0.07              // half-range (m) across the rod when its DIRECTION was measured from the camera's own accelerometer, not assumed. calibrationBoundAcrossRodM's 0.13 is mostly a ~10° cone of ignorance about where the rod points; with the direction measured to a few degrees, what is left is real clamp geometry plus the fit's own slop
+    static let calibrationMeasuredRodHalfM: Float = 0.03               // along-rod half-range (m) when the operator HAS measured. GROUND-TRUTHED 2026-08-19: a field re-measure corrected the tape from 0.724 to 0.686 m, giving truth against three healthy solves — all landed +8.1 to +10.5 cm ABOVE it, riding up even though truth sat near the BOTTOM of the ±5 cm box, on both the X and the Z1. The cost's along-rod content is bias (the documented +pull), not signal, so the window is tape+optical-centre slop only. A rail on this axis now MEANS 're-measure the rod' — with ±3 cm, every scan that day would have railed and named the stale tape, which is exactly how the error was eventually found by hand
     static let calibrationBoundYawDeg: Float = 45                      // yaw half-range (deg) around EACH coarse-scan start (yaw is solved globally: the 360° cam screws onto the rod at an arbitrary rotation, so a full-circle coarse scan picks the basin and local bounds keep Nelder-Mead inside it)
     static let calibrationBoundPitchDeg: Float = 10                    // pitch-residual half-range (deg) around 0 (zenith correction should leave only small error)
     static let calibrationConvergenceTolerance: Float = 1e-5           // cost-range convergence threshold
@@ -250,8 +366,8 @@ enum AppConstants {
     // GOOD observation population; the junk that survives then wins the median.
     // Anti-bleed now lives in the REDUCE step (robustColorMedian), which can't lose
     // coverage. If revisiting these, change ONE knob per recolor.
-    static let colorizationOcclusionToleranceMM: Float = 50.0 // FLOOR (mm) of the depth-occlusion tolerance; effective tol = max(floor, frac × depth). 25 mm starved inliers (see above)
-    static let colorizationOcclusionToleranceFrac: Float = 0  // distance-proportional tolerance part (LiDAR error grows with range). 0 = fixed floor only (legacy)
+    static let colorizationOcclusionToleranceMM: Float = 80.0 // FLOOR (mm) of the depth-occlusion tolerance; effective tol = max(floor, frac × depth). Measured, not guessed: unprojecting one keyframe's depth into the NEXT keyframe and comparing against that frame's own depth (staging_60172200, 64k overlapping samples) puts the sensor's self-disagreement at a 36 mm median absolute error — so a 50 mm floor was only ~1.4x the noise it has to see past. 25 mm starved inliers outright
+    static let colorizationOcclusionToleranceFrac: Float = 0.08 // distance-proportional tolerance part (LiDAR error grows with range, and the mesh the cube-face z-buffer is rasterized from IS the mesh being colored, so its own reconstruction error shows up here too). 0 = fixed floor only. Held at 0 while the depth reads were byte-scrambled — occlusion was inert then, so the knob measured nothing. Tuned on the same 64k-sample depth-vs-depth cross-check: against the unambiguously-occluded fraction (>500 mm behind) of each range band, max(80 mm, 8%) over-rejects by 4.2/4.9/1.7 points at <1.5 m / 1.5-3 m / >3 m, beating max(50 mm, 5%)'s 5.5/6.3/4.3 everywhere. The ~4 points that remain are sensor noise and pose error that no threshold can separate from a real occluder
     static let colorizationDepthEdgeMaxSpreadFrac: Float = 0  // reject observations whose 3×3 depth neighborhood spans > frac × depth (silhouette-straddle guard). 0 = disabled (legacy); 0.15 killed too much near ALL edges
     static let colorizationBackfaceDotMin: Float = -1          // reject observations with signed n·v below this (seen-through-own-surface guard). -1 = disabled (legacy abs() weighting); 0.0 also zeroed noisy-normal grazing coverage
     static let thumbnailMaxWidth: CGFloat = 800              // max width for scan thumbnails

@@ -575,6 +575,8 @@ sequenceDiagram
     CV-->>U: 360° chip — rig prior state · rig height (orange until measured) · sufficiency (while recording)
     U->>CV: Record
     CV->>TCM: beginScanStillSession(rawDataDir) — seq counter seeded FROM DISK
+    TCM->>TCM: verifyReadyForCapture — SSID check, then a BLE state read; reconnect if either fails, else the scan records phone-only and says so
+    Note over CV: each still drops a floor ring (radius = half the 2 m spacing target) and the chip reports distance to the nearest still
 ```
 
 ##### AR/VR capture (per stillness pause)
@@ -591,7 +593,7 @@ sequenceDiagram
     participant D as raw_data/equirect_stills
 
     U->>FCS: pause (device settles — rig mode tightens the angular gate by lever arm)
-    Note over FCS,TCM: sway guard — motion in the shutter-ack-anchored exposure window beyond 3 cm / 2° marks the still SWAYED (warning cue + chip count) and the Process solve prefers clean stills — downloaded JPGs retro-annotate EXIF exposure time for window tuning
+    Note over FCS,TCM: sway guard — the sidecar pose is sampled at the TAP but the shutter fires ~ack+latency later, so drift over [tap, ack+latency+exposure] (~250 ms measured) is pose error; beyond 3 cm / 2° the still is SWAYED (warning cue + chip count) and the Process solve prefers clean stills. Downloaded JPGs report EXIF exposure, which widens the window per model in dim rooms
     FCS-->>U: stillness chime (cue 1)
     U->>FCS: shutter tap → requestStillCapture() arms
     FCS->>FCS: keyframe fires while stillness holds (hi-res + LiDAR depth + mask)
@@ -603,9 +605,9 @@ sequenceDiagram
     else
         TCM->>X: triggerStill() (OSC)
     end
-    CV-->>U: chip: "📸 exposing — hold still…" (orange)
+    CV-->>U: chip: "📸 exposing — hold still…" (orange) + a ring that closes over the pose-critical hold (learned per model) then reads OK to move — the visual half of the cues, since a muted iPad has no haptics either
     TCM->>D: still_NNNN.json — phone_transform, frame_timestamp, captured_at_epoch_ms, trigger+exposure motion m/deg, camera_file_url — NO cam_transform
-    TCM-->>U: done tone + success haptic (cue 3 — walk now)
+    TCM-->>U: done tone + success haptic (cue 3 — walk now) — fires at EXPOSURE CLOSE (ack + latency + learned exposure), not at file landing; stitch/listing/download continue while the operator walks
     TCM->>TCM: enqueue JPG download
     loop while NOT capturing (yields to triggers)
         TCM->>X: download next queued equirect → still_NNNN.JPG
@@ -711,7 +713,7 @@ sequenceDiagram
     EXP->>Z: privacy passes — masks → pixelate person regions, FAIL CLOSED (unverifiable frames excluded)
     EXP->>Z: stageEquirectStills — per-still privacy (filter ON ⇒ blur-or-exclude, OFF ⇒ consent logged, privacy_filter=false in metadata)
     EXP->>FACE: emitCubeFaces — poses from SIDECAR cam_transform ONLY (capture-provenance, v7 convention shared with the solver)
-    FACE->>Z: 5 faces/still + Polycam camera JSONs (camera_pose_source, still_source, elevation_offset_deg applied in sampling)
+    FACE->>Z: 6 faces/still (incl. DOWN) + per-face operator/rig masks + Polycam camera JSONs (camera_pose_source, still_source, elevation_offset_deg applied in sampling)
     EXP->>Z: zip with phase labels (Privacy blur i/n → Cube faces i/n → Zipping…)
     LDV-->>U: card pill shows phase + meter — upload posts to the configured server
 ```

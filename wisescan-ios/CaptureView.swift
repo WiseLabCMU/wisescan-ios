@@ -23,7 +23,8 @@ struct CaptureView: View {
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession?
     @State private var thetaManager = ThetaCameraManager.shared
-    @AppStorage(AppConstants.Key.rigMeasuredDyMeters) private var rigMeasuredDyMeters: Double = 0
+    // Internal: the record-start pre-flight lives in the +Recording split.
+    @AppStorage(AppConstants.Key.rigMeasuredDyMeters) var rigMeasuredDyMeters: Double = 0
     /// Calibration capture is settle-gated: true while waiting for rig stillness after a tap.
     @State private var isSettlingCalibration = false
     /// Mesh-gap coach input: throttled classification census over the live mesh
@@ -113,6 +114,11 @@ struct CaptureView: View {
     @State var isAwaitingAlignment = false // Phase 2.1 (perfDiag): briefly holding record for the auto-align correction
 
     @State private var showSettings = false
+    @State private var showRigHeightSheet = false
+    // Internal, not private: the record-start gate lives in the +Recording split.
+    @State var showBLEShutterPrompt = false
+    @State var showRigHeightPrompt = false
+    @State var isReconnectingBLE = false
     @State private var activeLocationName: String?
     // Ghost-mesh manual "nudger" (from main) — coexists with our anchor-based AlignmentOverlayView.
     // The sliders adjust the ghost overlay; startRecording bakes the offset into the ARKit world
@@ -201,11 +207,6 @@ struct CaptureView: View {
                         + "pose may be off. Hold still until the done tone.", duration: 4)
                 }
             }
-            if stillNumber == 1, rigMeasuredDyMeters <= 0.1 {
-                // First 360° still of the scan on an unmeasured rig: one actionable
-                // heads-up (the chip shows the persistent orange state).
-                showTransientMessage("⚠️ Rig height not set — poses will be estimated. Settings → 360° Rig Height.", duration: 5)
-            }
             // Post-process pivot: no first-still spot-check / session-yaw solve here —
             // calibration runs in the Process step against the completed scan's own
             // stills and mesh, where the yaw reference and the poses share a session
@@ -242,27 +243,53 @@ struct CaptureView: View {
         .cornerRadius(6)
     }
 
+    /// Live spacing verdict against the rings already on the floor: how far the operator
+    /// is from the nearest still they've taken. Recomputed from the AR pose each time
+    /// the chip redraws — ≤20 points, so a distance test, not a grid lookup.
+    private var spacingSuffix: String {
+        guard isRecording, thetaManager.isConnected,
+              let pose = currentARSession?.currentFrame?.camera.transform else { return "" }
+        let here = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
+        switch StillSpacingRings.spacing(at: here, points: thetaManager.scanStillPositions) {
+        case .first:
+            return ""
+        case .tooClose(let distance):
+            return String(format: " · %.1f m from last — move on", distance)
+        case .good:
+            return " · ✓ spot"
+        }
+    }
+
     /// Rig-height state on the 360° chip: the tape-measured value when set (the solve's
     /// bootstrap anchor), or an orange call-to-action when unset — an unmeasured rig
     /// falls back to the mechanical envelope, where the solve's known +dy pull operates
     /// unchecked (360post4: solved 1.30 m vs measured 0.79 m).
     @ViewBuilder
+    /// Tappable: swapping rigs is a capture-time task, so the chip opens a one-field
+    /// editor rather than sending the operator to full Settings (whose List + keyboard
+    /// layout competes with the live ARSession — see RigHeightSheet).
     private var thetaRigHeightChip: some View {
         let measured = rigMeasuredDyMeters > 0.1
-        HStack(spacing: 5) {
-            Circle()
-                .fill(measured ? Color.cyan : Color.orange)
-                .frame(width: 7, height: 7)
-            Text(measured
-                 ? String(format: "Rig height %.2f m", rigMeasuredDyMeters)
-                 : "Rig height unset — Settings")
-        }
-        .font(.caption2).bold()
-        .foregroundColor(measured ? .white : .orange)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.ultraThinMaterial)
-        .cornerRadius(6)
+        Button(action: { showRigHeightSheet = true }, label: {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(measured ? Color.cyan : Color.orange)
+                    .frame(width: 7, height: 7)
+                Text(measured
+                     ? String(format: "Rig height %.2f m", rigMeasuredDyMeters)
+                     : "Rig height unset — tap to set")
+                Image(systemName: "pencil")
+                    .font(.system(size: 8))
+                    .opacity(0.7)
+            }
+            .font(.caption2).bold()
+            .foregroundColor(measured ? .white : .orange)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.ultraThinMaterial)
+            .cornerRadius(6)
+        })
+        .buttonStyle(.plain)
     }
 
     /// Live calibration-sufficiency meter while recording: still count, baseline
@@ -277,15 +304,21 @@ struct CaptureView: View {
             && spread >= AppConstants.calibrationMinSpreadMeters
         HStack(spacing: 5) {
             Circle()
-                .fill(thetaManager.isCapturing ? Color.orange
+                .fill(thetaManager.cameraUnresponsive ? Color.red
+                      : thetaManager.isHoldingForExposure ? Color.orange
                       : count == 0 ? Color.gray : sufficient ? Color.green : Color.yellow)
                 .frame(width: 7, height: 7)
-            Text(thetaManager.isCapturing
+            Text(thetaManager.cameraUnresponsive
+                 ? "360° camera lost — reconnect to resume"
+                 : thetaManager.isHoldingForExposure
                  ? "📸 exposing — hold still…"
                  : count == 0
-                 ? "No 360° stills yet"
-                 : String(format: "%d still%@ · spread %.1f m%@%@",
+                 ? (thetaManager.shutterPathIsBLE
+                    ? "No 360° stills yet · BLE"
+                    : "No 360° stills yet · Wi-Fi (slower)")
+                 : String(format: "%d still%@ · spread %.1f m%@%@%@",
                           count, count == 1 ? "" : "s", spread,
+                          spacingSuffix,
                           pending > 0 ? " · ↓\(pending)" : "",
                           thetaManager.swayedStillCount > 0
                           ? " · ⚠️\(thetaManager.swayedStillCount) swayed" : ""))
@@ -776,10 +809,11 @@ struct CaptureView: View {
         selectedTab = 2
     }
 
-    var body: some View {
-        ZStack {
-            // Live ARKit Scene Reconstruction View
-            ARCoverageView(
+    /// Extracted from `body`: with this inline, the body's modifier chain exceeded the
+    /// type checker's budget ("unable to type-check this expression in reasonable time").
+    /// Isolating the AR layer keeps inference local and the body cheap to compile.
+    private var arCoverageLayer: some View {
+        ARCoverageView(
                 arSession: $currentARSession,
                 isRecording: $isRecording,
                 isSessionReady: $isARSessionReady,
@@ -804,6 +838,7 @@ struct CaptureView: View {
                 ghostIsProxy: ghostIsProxy,
                 scanStore: scanStore,
                 connectorAnchors: connectorAnchors,
+                stillRingPositions: thetaManager.scanStillPositions as [SIMD3<Float>],
                 finalCapturedRoom: $finalCapturedRoom,
                 frameCaptureSession: frameCaptureSession,
                 ghostYRotation: ghostYRotation,
@@ -814,6 +849,43 @@ struct CaptureView: View {
                 pauseARSession: pauseARSession,
                 isAnalyzing: $isAnalyzing
             )
+        .alert(rigMeasuredDyMeters < 0.01 ? "Rig height not set" : "Rig height looks wrong",
+               isPresented: $showRigHeightPrompt) {
+            Button("Set Rig Height") { showRigHeightSheet = true }
+            Button("Record Anyway") { continueAfterRigHeightWarning() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every 360° pose is anchored to this measurement, within a few centimetres. "
+                 + "If it is wrong the stills will still capture, but their poses — and the "
+                 + "colour and cube faces built from them — will be confidently wrong, and "
+                 + "nothing downstream can tell. Measure from the iPad's camera to the 360° "
+                 + "lens centre.")
+        }
+        .alert("Bluetooth shutter is not connected", isPresented: $showBLEShutterPrompt) {
+            Button("Reconnect Bluetooth") { reconnectBLEThenRecord() }
+            Button("Continue on Wi-Fi") { startRecording() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Over Bluetooth each 360° still fires about 1.3 s sooner and the camera pushes "
+                 + "the file, so you wait less between shots. Wi-Fi works, but every trigger is an "
+                 + "HTTP round trip — slower, and on a busy device slow enough to blur the "
+                 + "hold-still timing.")
+        }
+        .onChange(of: thetaManager.cameraUnresponsive) { _, lost in
+            // One message when the camera drops — at record-start verification or the
+            // first failed still. The chip carries the persistent state; this makes sure
+            // a walking operator finds out now rather than at Process. Lives here, not
+            // in `body`: that modifier chain is already at the type checker's limit.
+            guard lost else { return }
+            showTransientMessage("⚠️ 360° camera unavailable — recording phone-only. "
+                + "Reconnect from the Dashboard to resume stills.", duration: 5)
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            // Live ARKit Scene Reconstruction View
+            arCoverageLayer
                 .ignoresSafeArea()
                 // Shutter tap — the deterministic still trigger, gated on stillness.
                 // Attached to the AR view (behind the HUD) so buttons keep their own
@@ -903,6 +975,13 @@ struct CaptureView: View {
             if isRecording && isARSessionReady {
                 StillnessReticleHost(session: frameCaptureSession)
                     .allowsHitTesting(false)
+            }
+
+            // 360° capture cue: the visual half of the audio sequence, so a muted iPad
+            // (no haptics either) still shows when to hold and when it's safe to move.
+            // Hosted like the reticle so only its own body re-evaluates.
+            if isRecording, thetaManager.isConnected {
+                ThetaCaptureCueHost(manager: thetaManager)
             }
 
             // Centered startup/tracking pills (kept separate from ScanCoach)
@@ -1684,6 +1763,13 @@ struct CaptureView: View {
             // Pick up any Settings change to the diagnostics flag, then start the main-thread
             // stall watchdog for this capture session (both no-ops unless Perf Diagnostics is on).
             PerfDiag.refresh()
+            if let openMs = PerfDiag.sinceMark("captureViewOpen") {
+                // The window MainThreadWatchdog structurally cannot see, because it starts
+                // on the line below. Anything over ~1 s here is a user-visible freeze on the
+                // tab tap, and the only place it will ever be recorded.
+                PerfDiag.log("[PerfDiag] capture view open took \(openMs)ms (tab tap → onAppear)"
+                    + (openMs > 1000 ? " ⚠️ user-visible stall — main-thread work before the view exists" : ""))
+            }
             mainThreadWatchdog.start()
             memoryPressureMonitor.start()
 
@@ -1916,6 +2002,9 @@ struct CaptureView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Move the device around to map more of the environment before placing a connector.")
+        }
+        .sheet(isPresented: $showRigHeightSheet) {
+            RigHeightSheet()
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()

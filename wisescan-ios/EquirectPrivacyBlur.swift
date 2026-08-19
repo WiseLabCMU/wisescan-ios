@@ -8,12 +8,30 @@ import simd
 /// Person-privacy blur for equirectangular 360° stills — the still-source-360 HARD invariant:
 /// no unblurred person leaves the device (docs/design/still-source-360.md → Privacy).
 ///
+/// POLICY — NO SECOND-GUESSING THE MODEL. Vision's answer is used as given. Two filters
+/// were tried and both removed: a confident-core requirement (which discarded a real
+/// person who was small on one cube face, leaving their head unmasked) and an
+/// above-horizon ceiling-wash rejection. Neither is coming back, and the reason is
+/// durability rather than the specific bugs: the segmentation model ships with iOS and
+/// changes without notice, so a heuristic fitted to today's failure mode becomes
+/// silently wrong on an OS update we do not control and cannot chase at release cadence.
+/// A stale privacy filter fails in the direction that ships someone's face.
+///
+/// The cost is accepted deliberately: Vision over-masks flat ceilings, so those stills
+/// lose ceiling texture. That loss is per-still and other stills of the same room
+/// recover it. Per-face statistics are still logged, as OBSERVATION — so a regression
+/// stays visible — but nothing branches on them.
+///
+/// Note what this does NOT cover: the nadir cone in OperatorRigMask is not second-
+/// guessing anything. The rod and mount hang below the lens by construction; that is
+/// measured geometry, not a judgement about the model's output.
+///
 /// Person detection directly on an equirect is unreliable (distortion grows toward the poles
 /// and people wrap around the ±180° seam), so the still is resampled into 6 pinhole cube faces
-/// — ordinary perspective images Vision was trained on — person segmentation runs per face,
-/// the per-face masks are projected back into equirect space, and person regions are pixelated
-/// on the FULL-resolution equirect. A person straddling a face seam is covered by the union of
-/// the partial masks on both faces; the pole regions are the up/down faces' centers where the
+/// — ordinary perspective images Vision was trained on — segmentation runs per face,
+/// masks project back into equirect space, and person regions are pixelated
+/// on the FULL-resolution equirect. Seam-straddlers are covered by personMaskUnion (two cube
+/// orientations); the pole regions are the up/down faces' centers where the
 /// pinhole projection is least distorted.
 ///
 /// Memory: detection runs on a ≤4K-wide decode and 1024² faces; only the final composite
@@ -33,27 +51,39 @@ enum EquirectPrivacyBlur {
     // MARK: - Tuning
 
     /// Cube-face edge in pixels for detection. 1024 ≈ what Vision's person model resolves well;
-    /// faces render from the ≤4K working decode, so higher only costs CPU, not fidelity.
-    private static let faceSize = 1024
-    /// Equirect mask is built at 1/8 still resolution — plenty for pixelation blocks that are
-    /// themselves ~1% of image width, and it keeps the projection loop under a megapixel.
-    private static let maskScale = 8
+    /// faces render from the ≤4K working decode, so higher costs CPU, not fidelity.
+    static let faceSize = 1024
+    /// Equirect mask is built at 1/8 still resolution — plenty for pixelation blocks
+    /// ~1% of image width, and it keeps the projection loop under a megapixel.
+    static let maskScale = 8
     /// Vision confidence (0–255) at which a mask pixel counts as person.
-    private static let maskThreshold: UInt8 = 128
+    static let maskThreshold: UInt8 = 128
+    /// OBSERVATION ONLY — nothing branches on this. Reported per face so a Vision
+    /// failure (a flat ceiling returning high-confidence "person") stays visible in the
+    /// logs, while the pipeline acts on none of it. See the type doc.
+    static let coreThreshold: UInt8 = 210
     /// Binary dilation radius in mask-space pixels (~2×maskScale full-res px of safety margin).
-    private static let dilateRadius = 2
+    static let dilateRadius = 2
     /// Working-decode cap for face extraction (full res is only used for the final composite).
     private static let workingMaxPixel = 4096
 
-    private struct FaceBasis {
+    struct FaceBasis {
         let fwd: SIMD3<Float>
         let right: SIMD3<Float>
         let upv: SIMD3<Float>
+
+        /// The same face, with the cube spun about the vertical axis.
+        func rotatedAboutY(_ radians: Float) -> FaceBasis {
+            guard radians != 0 else { return self }
+            return FaceBasis(fwd: rotateAboutY(fwd, radians),
+                             right: rotateAboutY(right, radians),
+                             upv: rotateAboutY(upv, radians))
+        }
     }
 
     /// Cube face bases: forward, right, up. Direction convention matches `direction(lon:lat:)`
     /// (lon 0 = equirect center = +Z, lat +90° = +Y).
-    private static let faceBases: [FaceBasis] = [
+    static let faceBases: [FaceBasis] = [
         FaceBasis(fwd: SIMD3(0, 0, 1), right: SIMD3(1, 0, 0), upv: SIMD3(0, 1, 0)),    // front
         FaceBasis(fwd: SIMD3(1, 0, 0), right: SIMD3(0, 0, -1), upv: SIMD3(0, 1, 0)),   // right
         FaceBasis(fwd: SIMD3(0, 0, -1), right: SIMD3(-1, 0, 0), upv: SIMD3(0, 1, 0)),  // back
@@ -68,12 +98,14 @@ enum EquirectPrivacyBlur {
 
     /// Verify/blur one equirectangular JPEG. Pure function of the data; call off-main
     /// (export queue) inside the caller's per-still autoreleasepool.
-    static func process(equirectJPEG data: Data) -> Outcome {
-        let working: Bitmap? = PerfDiag.timed("eq_decode") { decodeWorkingBitmap(from: data) }
-        guard let working else {
-            return .failed("equirect decode failed")
-        }
+    /// Runs person segmentation across the six cube faces. Shared by `process` (which
+    /// composites the blur) and `personMaskEquirect` (which wants the mask alone).
+    struct SegmentationFailure: Error { let reason: String }
 
+    /// `yawOffset` rotates the whole cube before extraction, so a second pass lands its
+    /// face BOUNDARIES where the first pass had face CENTRES.
+    static func segmentFaces(working: Bitmap, yawOffset: Float = 0)
+        -> Result<(masks: [FaceMask?], anyPerson: Bool), SegmentationFailure> {
         // Upload working bitmap to GPU texture once; reused for all 6 face dispatches.
         let gpuTexture = EquirectGPU.isAvailable
             ? EquirectGPU.makeTexture(from: working.pixels, width: working.width, height: working.height)
@@ -82,9 +114,9 @@ enum EquirectPrivacyBlur {
         var faceMasks: [FaceMask?] = []
         var anyPerson = false
         for faceIndex in 0..<faceBases.count {
-            var outcome: Outcome?
+            var failure: String?
             autoreleasepool {
-                let base = faceBases[faceIndex]
+                let base = faceBases[faceIndex].rotatedAboutY(yawOffset)
                 let face: CGImage?
                 if let gpuTexture {
                     face = PerfDiag.timed("eq_face_extract_gpu") {
@@ -96,7 +128,7 @@ enum EquirectPrivacyBlur {
                     face = PerfDiag.timed("eq_face_extract_cpu") { extractFace(faceIndex, from: working) }
                 }
                 guard let face else {
-                    outcome = .failed("face \(faceIndex) extraction failed")
+                    failure = "face \(faceIndex) extraction failed"
                     return
                 }
                 let segResult = PerfDiag.timed("eq_vision_segment") { personMask(for: face) }
@@ -105,14 +137,23 @@ enum EquirectPrivacyBlur {
                     faceMasks.append(mask)
                     if let mask { anyPerson = anyPerson || mask.hasPerson }
                 case .failure(let reason):
-                    outcome = .failed("face \(faceIndex): \(reason)")
+                    failure = "face \(faceIndex): \(reason)"
                 }
             }
-            if let outcome { return outcome }
+            if let failure { return .failure(SegmentationFailure(reason: failure)) }
         }
-        guard anyPerson else { return .clean }
+        return .success((faceMasks, anyPerson))
+    }
 
-        let eqMask = PerfDiag.timed("eq_mask_project") { buildEquirectMask(from: faceMasks) }
+    static func process(equirectJPEG data: Data) -> Outcome {
+        let working: Bitmap? = PerfDiag.timed("eq_decode") { decodeWorkingBitmap(from: data) }
+        guard let working else {
+            return .failed("equirect decode failed")
+        }
+        let masked: EquirectMask? = PerfDiag.timed("eq_mask_project") {
+            personMaskUnion(working: working)
+        }
+        guard let eqMask = masked else { return .clean }
         let composited: Data? = PerfDiag.timed("eq_pixelate") { composite(original: data, mask: eqMask) }
         guard let composited else {
             return .failed("composite/encode failed")
@@ -122,7 +163,7 @@ enum EquirectPrivacyBlur {
 
     // MARK: - Working decode
 
-    private struct Bitmap {
+    struct Bitmap {
         let pixels: [UInt8]   // RGBA8, premultiplied
         let width: Int
         let height: Int
@@ -131,7 +172,7 @@ enum EquirectPrivacyBlur {
 
     /// Decode the equirect once at ≤4K width for face extraction (ImageIO downsamples during
     /// decode, so the 61 MP original is never fully materialized here).
-    private static func decodeWorkingBitmap(from data: Data) -> Bitmap? {
+    static func decodeWorkingBitmap(from data: Data) -> Bitmap? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -155,196 +196,6 @@ enum EquirectPrivacyBlur {
     }
 
     // MARK: - Sphere math
-
-    private static func direction(lon: Float, lat: Float) -> SIMD3<Float> {
-        SIMD3(cos(lat) * sin(lon), sin(lat), cos(lat) * cos(lon))
-    }
-
-    /// Bilinear RGB sample of the working bitmap at equirect coords derived from `dir`.
-    /// Longitude wraps; latitude clamps.
-    private static func sampleEquirect(_ bmp: Bitmap, dir: SIMD3<Float>) -> SIMD3<Float> {
-        let lat = asin(max(-1, min(1, dir.y)))
-        let lon = atan2(dir.x, dir.z)
-        let eqX = (lon + .pi) / (2 * .pi) * Float(bmp.width) - 0.5
-        let eqY = (Float.pi / 2 - lat) / .pi * Float(bmp.height) - 0.5
-        let floorX = floor(eqX), floorY = floor(eqY)
-        let wgtX = eqX - floorX, wgtY = eqY - floorY
-        func texel(_ col: Int, _ row: Int) -> SIMD3<Float> {
-            let wrapped = ((col % bmp.width) + bmp.width) % bmp.width
-            let clamped = max(0, min(bmp.height - 1, row))
-            let base = clamped * bmp.bytesPerRow + wrapped * 4
-            return SIMD3(Float(bmp.pixels[base]), Float(bmp.pixels[base + 1]), Float(bmp.pixels[base + 2]))
-        }
-        let col0 = Int(floorX), row0 = Int(floorY)
-        let top = simd_mix(texel(col0, row0), texel(col0 + 1, row0), SIMD3(repeating: wgtX))
-        let bot = simd_mix(texel(col0, row0 + 1), texel(col0 + 1, row0 + 1), SIMD3(repeating: wgtX))
-        return simd_mix(top, bot, SIMD3(repeating: wgtY))
-    }
-
-    // MARK: - Face extraction
-
-    /// Render one 90°-FOV pinhole face from the working equirect bitmap.
-    private static func extractFace(_ faceIndex: Int, from bmp: Bitmap) -> CGImage? {
-        let base = faceBases[faceIndex]
-        let side = faceSize
-        var buf = [UInt8](repeating: 255, count: side * side * 4)
-        for row in 0..<side {
-            let ndcV = 1 - 2 * (Float(row) + 0.5) / Float(side)
-            for col in 0..<side {
-                let ndcU = 2 * (Float(col) + 0.5) / Float(side) - 1
-                let dir = simd_normalize(base.fwd + ndcU * base.right + ndcV * base.upv)
-                let rgb = sampleEquirect(bmp, dir: dir)
-                let out = (row * side + col) * 4
-                buf[out] = UInt8(max(0, min(255, rgb.x)))
-                buf[out + 1] = UInt8(max(0, min(255, rgb.y)))
-                buf[out + 2] = UInt8(max(0, min(255, rgb.z)))
-            }
-        }
-        return buf.withUnsafeMutableBytes { raw -> CGImage? in
-            guard let ctx = CGContext(data: raw.baseAddress, width: side, height: side,
-                                      bitsPerComponent: 8, bytesPerRow: side * 4,
-                                      space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-            else { return nil }
-            return ctx.makeImage()
-        }
-    }
-
-    // MARK: - Equirect mask
-
-    private struct EquirectMask {
-        var bytes: [UInt8]
-        let width: Int
-        let height: Int
-    }
-
-    /// Project the per-face person masks back into a 1/`maskScale` equirect mask, then dilate
-    /// for a safety margin. Faces with no person contribute nothing (nil entries).
-    private static func buildEquirectMask(from faceMasks: [FaceMask?]) -> EquirectMask {
-        // Mask dims derive from the DETECTION space; the composite rescales to the true full
-        // res, so exact divisibility doesn't matter — only aspect (2:1 for equirects).
-        let width = faceSize * 4 / maskScale       // ~512 for 1024 faces: plenty
-        let height = width / 2
-        var mask = EquirectMask(bytes: [UInt8](repeating: 0, count: width * height),
-                                width: width, height: height)
-        for row in 0..<height {
-            let lat = Float.pi / 2 - (Float(row) + 0.5) / Float(height) * .pi
-            for col in 0..<width {
-                let lon = (Float(col) + 0.5) / Float(width) * 2 * .pi - .pi
-                let dir = direction(lon: lon, lat: lat)
-                let hit = dominantFace(for: dir)
-                guard let faceMask = faceMasks[hit.index] else { continue }
-                let mcol = max(0, min(faceMask.width - 1, Int((hit.faceU + 1) / 2 * Float(faceMask.width))))
-                let mrow = max(0, min(faceMask.height - 1, Int((1 - (hit.faceV + 1) / 2) * Float(faceMask.height))))
-                if faceMask.bytes[mrow * faceMask.width + mcol] >= maskThreshold {
-                    mask.bytes[row * width + col] = 255
-                }
-            }
-        }
-        dilate(&mask, radius: dilateRadius)
-        return mask
-    }
-
-    private struct FaceHit {
-        let index: Int
-        let faceU: Float
-        let faceV: Float
-    }
-
-    /// Dominant-axis cube face for a direction + its face-plane UV in [-1, 1].
-    private static func dominantFace(for dir: SIMD3<Float>) -> FaceHit {
-        let absDir = simd_abs(dir)
-        let faceIndex: Int
-        if absDir.y >= absDir.x && absDir.y >= absDir.z {
-            faceIndex = dir.y >= 0 ? 4 : 5
-        } else if absDir.x >= absDir.z {
-            faceIndex = dir.x >= 0 ? 1 : 3
-        } else {
-            faceIndex = dir.z >= 0 ? 0 : 2
-        }
-        let base = faceBases[faceIndex]
-        let denom = simd_dot(dir, base.fwd)
-        return FaceHit(index: faceIndex,
-                       faceU: simd_dot(dir, base.right) / denom,
-                       faceV: simd_dot(dir, base.upv) / denom)
-    }
-
-    /// Separable binary max-filter (horizontal then vertical). Longitude wraps so a person on
-    /// the ±180° seam keeps their margin across it.
-    private static func dilate(_ mask: inout EquirectMask, radius: Int) {
-        guard radius > 0 else { return }
-        let width = mask.width, height = mask.height
-        var pass = [UInt8](repeating: 0, count: width * height)
-        for row in 0..<height {
-            for col in 0..<width where mask.bytes[row * width + col] == 255 {
-                for off in -radius...radius {
-                    let wrapped = ((col + off) % width + width) % width
-                    pass[row * width + wrapped] = 255
-                }
-            }
-        }
-        for row in 0..<height {
-            for col in 0..<width where pass[row * width + col] == 255 {
-                for off in -radius...radius {
-                    let clamped = max(0, min(height - 1, row + off))
-                    mask.bytes[clamped * width + col] = 255
-                }
-            }
-        }
-    }
-
-}
-
-// MARK: - Vision + composite stages
-// (Separate extension keeps the enum body inside the type_body_length budget.)
-
-private extension EquirectPrivacyBlur {
-
-    // MARK: - Vision per face
-
-    struct FaceMask {
-        let bytes: [UInt8]
-        let width: Int
-        let height: Int
-        let hasPerson: Bool
-    }
-
-    /// Run person segmentation on one pinhole face. `.success(nil)` = clean face.
-    static func personMask(for face: CGImage) -> Result<FaceMask?, StringError> {
-        let request = VNGeneratePersonSegmentationRequest()
-        request.qualityLevel = .balanced
-        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
-        let handler = VNImageRequestHandler(cgImage: face, options: [:])
-        do {
-            try handler.perform([request])
-        } catch {
-            return .failure(StringError("Vision segmentation failed: \(error.localizedDescription)"))
-        }
-        guard let buffer = request.results?.first?.pixelBuffer else {
-            return .failure(StringError("Vision returned no segmentation mask"))
-        }
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-        guard let baseAddr = CVPixelBufferGetBaseAddress(buffer) else {
-            return .failure(StringError("segmentation mask has no base address"))
-        }
-        let width = CVPixelBufferGetWidth(buffer)
-        let height = CVPixelBufferGetHeight(buffer)
-        let stride = CVPixelBufferGetBytesPerRow(buffer)
-        var bytes = [UInt8](repeating: 0, count: width * height)
-        var hasPerson = false
-        let src = baseAddr.assumingMemoryBound(to: UInt8.self)
-        for row in 0..<height {
-            for col in 0..<width {
-                let value = src[row * stride + col]
-                bytes[row * width + col] = value
-                if value >= maskThreshold { hasPerson = true }
-            }
-        }
-        return .success(hasPerson ? FaceMask(bytes: bytes, width: width, height: height, hasPerson: true) : nil)
-    }
-
-    struct StringError: Error { let message: String; init(_ msg: String) { message = msg } }
 
     // MARK: - Full-res composite
 

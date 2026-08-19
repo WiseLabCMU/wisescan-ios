@@ -148,6 +148,9 @@ To build the project locally, open `wisescan-ios.xcodeproj` with Xcode.
 
 The `wisescan-ios` repository uses [Release Please](https://github.com/googleapis/release-please) to automate CHANGELOG generation and semantic versioning. Your PR titles *must* follow Conventional Commit standards (e.g., `feat:`, `fix:`, `chore:`). Keep commit subjects to ~50 chars. Fastlane is used to automate TestFlight deployments via `fastlane testflight`.
 
+> [!CAUTION]
+> **Never use `BREAKING CHANGE` in commit/PR bodies or the `!` suffix on commit/PR types (e.g., `feat!:`, `fix!:`).** These tokens cause release-please to automatically bump the major version. Major version increments are reserved for the maintainer's explicit decision — contributors and agents do not decide what constitutes a breaking change for semver purposes.
+
 > [!WARNING]
 > **Xcode strips `x-release-please-version` markers.** The `MARKETING_VERSION` lines in `project.pbxproj` contain `/* x-release-please-version */` inline comments that release-please uses to locate the version string. Xcode's project serializer does **not** preserve non-standard inline comments — opening the project or modifying build settings will silently strip these markers. **Before committing any `project.pbxproj` changes, verify the markers are intact:**
 > ```bash

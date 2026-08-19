@@ -1,10 +1,16 @@
 import Foundation
+import os
 import SwiftData
 import UIKit
 import CoreImage
 import CoreImage.CIFilterBuiltins
 
 struct ScanExportManager {
+    /// Outcome lines go through the unified log, not print(): print is invisible in
+    /// RELEASE and TestFlight builds, so anything needed to diagnose a field export has
+    /// to be Logger. Per-item chatter can stay on print/PerfDiag.
+    private static let log = Logger(subsystem: "org.arenaxr.scan4d", category: "export")
+
     // `prepareExport` runs off the main actor with no injected ModelContext, so it fetches through
     // the app's shared container on a @MainActor hop (creating its own background ModelContext).
     // Reuse the SINGLE app container rather than opening a second one over the same SQLite store —
@@ -272,6 +278,38 @@ struct ScanExportManager {
     /// stage unblurred by the user's informed, per-scan consent (the capture UI warns that a
     /// 360° camera captures ALL directions — including people behind the operator — and the
     /// scan's `privacy_filter` metadata records the choice for downstream consumers).
+    /// Writes one `equirect_masks/still_NNNN.png` per still: white where the pixel is
+    /// usable, black over the capture hardware and any person. See OperatorRigMask for
+    /// why this exists and why the convention is that way round (COLMAP ignores
+    /// zero-valued mask pixels; Nerfstudio treats 1 as keep).
+    private static func emitOperatorRigMasks(for stills: [URL], rawDataDir: URL, into stagingDir: URL,
+                                             phase: ((ExportPhase) -> Void)? = nil) {
+        let maskDir = stagingDir.appendingPathComponent("equirect_masks")
+        let fileManager = FileManager.default
+        try? fileManager.createDirectory(at: maskDir, withIntermediateDirectories: true)
+        let sourceDir = rawDataDir.appendingPathComponent("equirect_masks")
+        var copied = 0, built = 0
+        for (index, still) in stills.enumerated() {
+            phase?(.counted("360° masks", index + 1, of: stills.count))
+            let name = still.deletingPathExtension().lastPathComponent + ".png"
+            let target = maskDir.appendingPathComponent(name)
+            // Process time already built these (it needs them for the solver), so the
+            // export copies rather than re-running six Vision passes per 60 MP still.
+            if (try? fileManager.copyItem(at: sourceDir.appendingPathComponent(name), to: target)) != nil {
+                copied += 1
+                continue
+            }
+            // Fallback for scans processed before masks moved into Process.
+            autoreleasepool {
+                guard let data = try? Data(contentsOf: still) else { return }
+                let mask = OperatorRigMask.build(equirectJPEG: data)
+                guard let png = OperatorRigMask.encodePNG(mask) else { return }
+                if (try? png.write(to: target, options: .atomic)) != nil { built += 1 }
+            }
+        }
+        log.notice("360° operator/rig masks: \(copied, privacy: .public) reused, \(built, privacy: .public) rebuilt of \(stills.count, privacy: .public)")
+    }
+
     private static func stageEquirectStills(rawDataDir: URL, stagingDir: URL,
                                             phase: ((ExportPhase) -> Void)? = nil) {
         let fileMgr = FileManager.default
@@ -289,6 +327,12 @@ struct ScanExportManager {
             .filter { $0.pathExtension.lowercased() == "jpg" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !stills.isEmpty else { return }
+        // Operator/rig masks ship for EVERY scan, privacy filter or not: they are a
+        // reconstruction-quality artifact (exclude what moves with the camera, keep the
+        // floor), not a privacy one. Emitted BEFORE the privacy pass so detection runs
+        // on the original pixels rather than on pixelated blobs.
+        emitOperatorRigMasks(for: stills, rawDataDir: rawDataDir, into: stagingDir, phase: phase)
+
         if privacyFilterWasOn(rawDataDir: rawDataDir, maskedFrames: maskedFrameNames(rawDataDir: rawDataDir)) {
             runEquirectPrivacyPass(on: stills, phase: phase)
         } else {
@@ -335,7 +379,7 @@ struct ScanExportManager {
                         label = "excluded"
                     }
                 case .failed(let reason):
-                    print("[prepareExport] ✗ 360° still \(url.lastPathComponent) failed verification (\(reason)) — excluding from export")
+                    log.error("360° still \(url.lastPathComponent, privacy: .public) failed verification (\(reason, privacy: .public)) — excluded from export")
                     excludeStill(url)
                     excludedCount += 1
                     label = "excluded"
@@ -345,7 +389,7 @@ struct ScanExportManager {
             }
         }
         let passMs = Int((CFAbsoluteTimeGetCurrent() - passStart) * 1000)
-        print("[prepareExport] ✓ 360° privacy pass: \(cleanCount) clean, \(blurredCount) blurred, \(excludedCount) excluded — \(passMs) ms total")
+        log.notice("360° privacy pass: \(cleanCount, privacy: .public) clean, \(blurredCount, privacy: .public) blurred, \(excludedCount, privacy: .public) excluded — \(passMs, privacy: .public) ms")
     }
 
     /// Reprojects every surviving staged equirect into 5 pinhole cube faces (bottom face —
@@ -358,6 +402,9 @@ struct ScanExportManager {
         let fileMgr = FileManager.default
         let imagesDir = stagingDir.appendingPathComponent("images")
         let camerasDir = stagingDir.appendingPathComponent("cameras")
+        let masksDir = stagingDir.appendingPathComponent("masks")
+        let maskRoot = stagingDir.appendingPathComponent("equirect_masks")
+        try? fileMgr.createDirectory(at: masksDir, withIntermediateDirectories: true)
         guard fileMgr.fileExists(atPath: imagesDir.path), fileMgr.fileExists(atPath: camerasDir.path) else {
             print("[prepareExport] ✗ cube faces skipped — images/ or cameras/ not staged")
             return
@@ -372,13 +419,18 @@ struct ScanExportManager {
             phase?(.counted("Cube faces", index + 1, of: survivors.count))
             autoreleasepool {
                 let sidecar = url.deletingPathExtension().appendingPathExtension("json")
+                // Reuse the equirect mask already written for this still rather than
+                // re-running six Vision passes per face.
+                let maskName = url.deletingPathExtension().lastPathComponent + ".png"
+                let equirectMask = OperatorRigMask.load(pngAt: maskRoot.appendingPathComponent(maskName))
                 facesWritten += EquirectFaceExport.emitFaces(
                     equirectURL: url, sidecarURL: sidecar,
-                    imagesDir: imagesDir, camerasDir: camerasDir)
+                    imagesDir: imagesDir, camerasDir: camerasDir,
+                    masksDir: masksDir, equirectMask: equirectMask)
             }
         }
         let faceMs = Int((CFAbsoluteTimeGetCurrent() - faceStart) * 1000)
-        print("[prepareExport] ✓ cube faces: \(facesWritten) emitted from \(survivors.count) still(s) — \(faceMs) ms (poses from capture-baked cam_transform; per-face provenance in camera_pose_source)")
+        log.notice("cube faces: \(facesWritten, privacy: .public) emitted from \(survivors.count, privacy: .public) still(s) — \(faceMs, privacy: .public) ms")
     }
 
     /// Fail-closed removal of one staged 360° still: the equirect AND its pose sidecar (an

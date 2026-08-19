@@ -42,6 +42,9 @@ extension ThetaBLEManager {
 
     func establishLink(_ target: CBPeripheral, timeout: TimeInterval) async throws {
         linkState = .connecting
+        // Control writability is a property of the physical link, not the app session —
+        // a new connection is exactly the event that can change the answer.
+        controlVerifiedForLink = false
         peripheral = target
         target.delegate = self
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in

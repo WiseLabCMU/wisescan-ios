@@ -1131,6 +1131,12 @@ class ScanFileManager {
                 poseMatrix: previewInputs.pose, frameCenter: previewInputs.center),
                   let data = img.jpegData(compressionQuality: 0.8) else { return }
             try? data.write(to: previewInputs.out)
+            // Tell the card the file now exists. It reloads on `updatedAt`, and moving
+            // this render off-main meant the preview started landing AFTER the save that
+            // last touched it — so the card kept showing the camera-frame placeholder
+            // until something unrelated changed. The write is the thing that finished;
+            // it has to be the thing that announces itself.
+            await MainActor.run { targetLocation.updatedAt = Date() }
         }
 
         try? context.save()

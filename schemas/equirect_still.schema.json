@@ -60,12 +60,49 @@
     },
     "rig_calibration_source": {
       "type": ["string", "null"],
-      "enum": ["solved", "mechanical_prior", null],
-      "description": "Source of the rig calibration used for cam_transform ('solved' or 'mechanical_prior')."
+      "enum": ["solved_capture", "solved_postprocess", "prior_postprocess", "mechanical_prior", null],
+      "description": "Source of the rig calibration used for cam_transform. Consumers should test for the 'solved' PREFIX rather than an exact match: anything starting with 'solved' carries a fitted rig extrinsic, anything else is the mechanical prior."
     },
-    "rig_calibration_residual_cm": {
+    "rig_calibration_residual_px_rms": {
       "type": ["number", "null"],
-      "description": "Calibration residual error in centimeters if solved."
+      "description": "RMS reprojection error of the calibration fit, in pixels of the 512-wide working equirect. NOT comparable across scans with different still counts: the RMS rises with the number of constraints, so a 5-input solve cannot be read against a 3-input one."
+    },
+    "rig_calibration_solver_version": {
+      "type": ["integer", "null"],
+      "description": "Version of the rig solver that produced cam_transform. A bump forces a re-solve on the scan's next Process, which is how superseded calibrations self-heal."
+    },
+    "rig_calibration_railed": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Solved parameters that came back sitting on a bound of their search box, one human-readable phrase each. NON-EMPTY MEANS THE POSE IS APPROXIMATE: the optimizer ran out of model rather than converging on the data, and the residual is a boundary value, not a fit. Empty array is the healthy case; the key is written on every bake, so its ABSENCE means the producing build predates this field, not that nothing was railed."
+    },
+    "rig_offset_phone_m": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "Rig offset from the phone camera to the 360 lens, in the PHONE's own frame (ARKit camera axes: +x right, +y up, -z view direction), metres. The rod runs along -x, so a 0.72 m rig is about [-0.72, 0, 0]. This is the geometry cam_transform was composed from: cam_position = phone_position + phone_rotation * rig_offset_phone_m."
+    },
+    "rig_rod_length_m": {
+      "type": ["number", "null"],
+      "description": "Magnitude of rig_offset_phone_m — the phone-camera-to-lens distance along the rod, i.e. the quantity the operator measures with a tape."
+    },
+    "rig_yaw_deg": {
+      "type": ["number", "null"],
+      "description": "Solved yaw of the 360 camera relative to the phone's horizontal forward, degrees. Note heading = -yaw."
+    },
+    "rig_rod_anchor_m": {
+      "type": ["number", "null"],
+      "description": "Rod length (m) the calibration solve was ANCHORED on — the operator's tape entry at solve time, or the mechanical default. Compare with rig_rod_length_m (the solved value): a solve pinned against this anchor's bound means the tape and the data disagree, i.e. re-measure the rod."
+    },
+    "rig_rod_anchor_source": {
+      "type": ["string", "null"],
+      "enum": ["tape", "mechanical_default", null],
+      "description": "Whether rig_rod_anchor_m came from the operator's measurement or the built-in default."
+    },
+    "elevation_offset_deg": {
+      "type": ["number", "null"],
+      "description": "Uniform vertical registration offset between the equirect's rows and the latitude mapping, solved per scan (+ = image content sits lower than geometry predicts). Consumers sampling the equirect with the standard mapping should compensate by this much. This is a fitted nuisance parameter absorbing model error, not a measured camera property, and is expected to be retired."
     }
   },
   "required": [

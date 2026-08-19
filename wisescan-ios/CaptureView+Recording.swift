@@ -64,7 +64,7 @@ extension CaptureView {
                 && scanStore.icpAlignReady == nil
                 && !isAwaitingAlignment
             guard shouldAwaitAlignment else {
-                startRecording()
+                startRecordingCheckingShutterPath()
                 return
             }
             isAwaitingAlignment = true
@@ -74,8 +74,97 @@ extension CaptureView {
                 while scanStore.icpAlignReady == nil, Date() < deadline {
                     try? await Task.sleep(nanoseconds: 150_000_000) // 150 ms
                 }
-                startRecording()
+                startRecordingCheckingShutterPath()
             }
+        }
+    }
+
+    /// Record-start work for the 360° source: warn if the audio cues will be inaudible,
+    /// open the still session, and confirm the camera is really reachable before the
+    /// operator walks off (the chip reports the verdict — CaptureView observes
+    /// `cameraUnresponsive`). Extracted to keep `startRecording` inside the body-length
+    /// limit.
+    private func armThetaForRecording() {
+        if let cueWarning = CaptureCueAudibility.warningIfInaudible() {
+            showTransientMessage(cueWarning, duration: 5)
+        }
+        ThetaCameraManager.shared.beginScanStillSession(rawDataDir: frameCaptureSession.captureDir)
+        Task { await ThetaCameraManager.shared.verifyReadyForCapture() }
+    }
+
+    /// Records only after the operator knows which shutter path they are getting.
+    ///
+    /// The OSC fallback is silent and capture still works, which is the problem: BLE
+    /// shuts the camera ~1.3 s faster per still and pushes the file URL instead of
+    /// polling, so a dropped link quietly turns a brisk scan into a slow one. Worse, the
+    /// sway window is anchored on the shutter ack, and an OSC ack is an HTTP round trip
+    /// — on a loaded device that measured up to 3.4 s, which makes the resulting sway
+    /// numbers meaningless rather than merely late.
+    ///
+    /// So it asks, rather than choosing for them: reconnect, continue on Wi-Fi, or
+    /// cancel. Nothing is blocked — Wi-Fi capture is legitimate — but it stops being the
+    /// default that nobody noticed.
+    func startRecordingCheckingShutterPath() {
+        // Rig height first: it is the one pre-flight whose failure cannot be recovered
+        // afterwards. The solve anchors dy to it within ±5 cm and has been seen riding
+        // both walls of that window, so an unset or mistyped height does not merely
+        // degrade the result — it produces confidently wrong poses, and the colour lands
+        // wrong with a healthy-looking residual. Warning at the FIRST STILL (where this
+        // used to live) is too late: the operator has already walked into the room.
+        if ThetaCameraManager.shared.isConnected, rigHeightImplausible {
+            showRigHeightPrompt = true
+            return
+        }
+        continueAfterRigHeightWarning()
+    }
+
+    /// Unset, or outside what any real rig measures.
+    var rigHeightImplausible: Bool {
+        rigMeasuredDyMeters < AppConstants.rigHeightMinPlausibleMeters
+            || rigMeasuredDyMeters > AppConstants.rigHeightMaxPlausibleMeters
+    }
+
+    /// Prompt action: past the rig-height question, carry on with the shutter-path one.
+    ///
+    /// The path has to be PROVEN here, not read off `canShutterOverBLE`, and it has to be
+    /// proven before recording rather than alongside it: the probe used to run in a
+    /// detached Task from `armThetaForRecording`, racing the first still it was meant to
+    /// protect. One control write settles it in well under a second.
+    func continueAfterRigHeightWarning() {
+        guard ThetaCameraManager.shared.isConnected else {
+            startRecording()
+            return
+        }
+        isReconnectingBLE = true
+        Task { @MainActor in
+            await ThetaCameraManager.shared.prepareShutterPath()
+            isReconnectingBLE = false
+            if ThetaCameraManager.shared.shutterPathIsBLE {
+                startRecording()
+            } else {
+                showBLEShutterPrompt = true
+            }
+        }
+    }
+
+    /// Prompt action: try to bring the BLE link back, then record either way — a failed
+    /// reconnect must not strand the operator standing in the room.
+    func reconnectBLEThenRecord() {
+        isReconnectingBLE = true
+        Task { @MainActor in
+            // `ensureLinkReady` early-returns when the link IS ready, which is the exact
+            // state a refused control plane leaves behind — so on that failure this used
+            // to be a placebo. Tear the link down first: a fresh connection is the only
+            // thing that can re-trigger encryption or re-read a moved attribute table.
+            _ = await ThetaBLEManager.shared.recoverControlPlane()
+            isReconnectingBLE = false
+            if !ThetaBLEManager.shared.canShutterOverBLE {
+                showTransientMessage(
+                    "Bluetooth control is still refused — recording over Wi-Fi. To fix it: "
+                    + "Settings → Bluetooth → ⓘ next to the camera → Forget This Device, then "
+                    + "pair it again from Add Camera.", duration: 8)
+            }
+            startRecording()
         }
     }
 
@@ -114,7 +203,7 @@ extension CaptureView {
         scanCoach.reset()
         sampleStorageHeadroom()
         // Reset the per-scan 360° still counter so equirect_stills/ numbering starts at 1.
-        ThetaCameraManager.shared.beginScanStillSession(rawDataDir: frameCaptureSession.captureDir)
+        armThetaForRecording()
 
         // Rod-stillness rig mode: with the 360° camera riding above the phone, tighten
         // the angular stillness gate by the lever arm (measured rig height when set,
@@ -700,6 +789,7 @@ extension CaptureView {
     /// created for this flow, and resets state. For the extend flow it fires completion(nil) so the
     /// caller (pinAndExtend) can abort its session-restart sequence and clean up its new location.
     func discardInProgressScan(isExtendFlow: Bool, completion: ((CapturedScan?) -> Void)?) {
+        ThetaCameraManager.shared.endScanStillSession()   // drop the 360° floor markers with the scan
         isRecording = false
         recordingTimer?.invalidate()
         recordingTimer = nil
@@ -876,6 +966,7 @@ extension CaptureView {
                                                scanStore: scanStore)
 
         saveMessage = "Scan Saved!"
+        ThetaCameraManager.shared.endScanStillSession()   // the scan's floor markers retire with it
         pendingScan = nil
         // Release the processing/waiting claim now that the save is done — otherwise isWaitingToSave
         // (set in finishStopRecording's rescan branch / the name-prompt Save) leaks true and leaves the

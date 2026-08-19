@@ -1,5 +1,6 @@
 import Foundation
 import ARKit
+import os
 import simd
 
 /// Phase-0 localization diagnostics (see `docs/fix-localization-plan.md`).
@@ -17,6 +18,11 @@ import simd
 /// - `[LocDiag snap]`— single-frame camera-pose discontinuities (the relocalization/loop-closure
 ///                     snap that baked `world:.zero` overlays don't follow) (0.3)
 enum LocalizationDiag {
+    /// Always-on channel for the handful of lines here that are PRODUCTION decisions rather
+    /// than developer probes — `PerfDiag.log` is gated on the diagnostics toggle, and a
+    /// verdict the operator sees as a badge must be explainable from any bundle.
+    private static let log = Logger(subsystem: PerfDiag.subsystem, category: "localization")
+
 
     // MARK: - 0.1 Relocalization ε
 
@@ -68,11 +74,54 @@ enum LocalizationDiag {
         let med = SIMD3<Float>(xs[xs.count / 2], ys[ys.count / 2], zs[zs.count / 2])
         var dists = pts.map { simd_distance($0, med) }
         dists.sort()
-        let p99 = dists[min(dists.count - 1, Int(Float(dists.count - 1) * 0.99))]
+        func percentile(_ q: Float) -> Float {
+            dists[min(dists.count - 1, Int(Float(dists.count - 1) * q))]
+        }
+        let p99 = percentile(0.99)
         let maxD = dists[dists.count - 1]
         // Both an absolute floor (a 20 m excursion in a 100 m warehouse map is fine) and the
         // ratio (a genuinely huge chained map keeps p99 near max) must trip.
-        return maxD > 25 && maxD > 5 * p99
+        let farSignature = maxD > 25 && maxD > 5 * p99
+
+        // ...but max-vs-p99 alone describes a TAIL, not a CLUSTER, and the failure mode is a
+        // cluster. One stray feature point at 50 m satisfies both tests while 99% of the map
+        // sits inside 10 m, which is an ordinary indoor cloud — distant points come free
+        // through windows and doorways. Every 360° scan in the 2026-08-17..19 field set
+        // tripped it (max 44-55 m against p99 6.6-9.3) with tracking that never once left
+        // .normal, no OS interruption, no VIO gap and zero frame corrections. The mechanism
+        // this detector exists to catch REQUIRES a disturbance: features get dead-reckoned
+        // during a SLAM reinit and merged back in a wrong frame.
+        //
+        // So separate the two shapes by looking at the gap. A dead-reckoned excursion leaves
+        // a DETACHED clump — points out to p99, then empty space, then a clump — while
+        // ordinary distant features thin out continuously. Measure the largest empty radial
+        // gap in the far tail: detached means most of the span from p99 to max is empty.
+        var largestGap: Float = 0
+        var gapAt: Float = p99
+        let tailStart = min(dists.count - 1, Int(Float(dists.count - 1) * 0.99))
+        if dists.count - tailStart > 2 {
+            for index in (tailStart + 1)..<dists.count where dists[index] - dists[index - 1] > largestGap {
+                largestGap = dists[index] - dists[index - 1]
+                gapAt = dists[index - 1]
+            }
+        }
+        let span = max(maxD - p99, 0.001)
+        let detached = largestGap / span > 0.5
+        // How much mass is out past the gap — a genuine excursion carries features with it.
+        let beyond = dists.filter { $0 > gapAt }.count
+        let suspect = farSignature && detached && beyond >= 3
+
+        // Deliberately NOT on PerfDiag (which is gated on the developer toggle): this decides
+        // a badge the operator sees and a warning that gates rescan/link, so its inputs belong
+        // in every diagnostics bundle. The old code said only "looks corrupted" via `print`,
+        // which never reaches the unified log at all — so the verdict shipped with no numbers.
+        let summary = String(format:
+            "[LocDiag] map cloud: n=%d p50=%.1f p95=%.1f p99=%.1f max=%.1f | far=%@ gap=%.1fm@%.1fm (%.0f%% of span) beyond=%d → %@",
+            pts.count, percentile(0.50), percentile(0.95), p99, maxD,
+            farSignature ? "yes" : "no", largestGap, gapAt, largestGap / span * 100, beyond,
+            suspect ? "SUSPECT" : "clean")
+        log.notice("\(summary, privacy: .public)")
+        return suspect
     }
 
     /// Log the live-camera pose the moment relocalization settles (tracking reaches

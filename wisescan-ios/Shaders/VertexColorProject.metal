@@ -36,6 +36,7 @@ struct VertexColorParams {
     float    occlusionFrac;      // distance-proportional occlusion tolerance (0 = fixed occlusionMM only)
     float    edgeSpreadFrac;     // reject if 3×3 depth spread > frac × depth (0 disables)
     float    backfaceDotMin;     // reject if signed n·v below this (-1 disables)
+    uint     depthIsRaster;      // 1 when depth was RASTERIZED from the mesh (cube faces), 0 for sensor depth
 };
 
 // Per-vertex output: packed (r, g, b, _) + weight
@@ -92,8 +93,27 @@ kernel void vertexColorProject(
             float depthMM = float(depthRaw);
             float expectedMM = -camPos.z * 1000.0;
 
-            // depth == 0 → no valid depth / privacy mask
-            if (depthMM == 0.0) return;
+            // depth == 0 has OPPOSITE meanings for the two depth sources. Sensor depth:
+            // the LiDAR returned nothing here, so we cannot tell occluded from visible —
+            // skip. Rasterized depth: no mesh lies along this ray, so nothing can be
+            // occluding — pass. Treating a raster hole as sensor no-data painted every
+            // mesh gap gray on the cube-face path.
+            if (depthMM == 0.0 && params.depthIsRaster == 0) return;
+
+            if (depthMM > 0.0) {
+            // Rasterized depth is a hard-edged z-buffer of the very mesh being colored, so
+            // a vertex on a silhouette lands a sub-pixel on the far side of its own edge and
+            // self-occludes. Compare against the 3×3 MAX rather than the center sample.
+            if (params.depthIsRaster != 0) {
+                float dMax3 = depthMM;
+                for (int sy = dpy - 1; sy <= dpy + 1; ++sy) {
+                    for (int sx = dpx - 1; sx <= dpx + 1; ++sx) {
+                        if (sx < 0 || sx >= params.depthW || sy < 0 || sy >= params.depthH) continue;
+                        dMax3 = max(dMax3, float(depthTex.read(uint2(sx, sy)).r));
+                    }
+                }
+                depthMM = dMax3;
+            }
 
             // Occluded if expected distance exceeds stored depth + tolerance.
             // Tolerance scales with range (LiDAR error grows with distance) with a
@@ -118,6 +138,7 @@ kernel void vertexColorProject(
                     }
                 }
                 if (dMax - dMin > params.edgeSpreadFrac * depthMM) return;
+            }
             }
         }
     }
