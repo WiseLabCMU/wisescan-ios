@@ -860,7 +860,16 @@ below turned out different from what earlier status notes implied.
    own IMU agreeing with ARKit to 1.6–2.3° mean. The glass-room scan was excluded — its
    failure was reflections defeating the edge cost (fixed by making the yaw anchor binding
    in v13), not leveling.
-6. **Photometric (ZNCC) solver A/B — RUN 2026-08-19, photometric recommended for port.**
+6. **Photometric (ZNCC) solver — A/B RUN and PORTED (solver v15) 2026-08-19.**
+   `PhotometricRigSolver` ships the poses. The edge cost ran a six-comparison validation
+   cycle (Δyaw 1.5–4.3° where it was trustworthy, 8–37° exactly on its known failure
+   modes) and was then DELETED 2026-08-20 — solver, chamfer cost, edge extraction,
+   distance transform, elevation sweep, Nelder-Mead, and the Calibrate dev bench that
+   was its last caller (~1,900 lines). The solve's inputs are now exactly: keyframes,
+   stills, operator masks, the tape, and the camera's own gravity. No mesh, no edges. Quality is `rig_calibration_zncc` + per-still yaw spread (gate:
+   >15° rejects, prior ships); `residual_px_rms` retires; `elevation_offset_deg` is
+   written as an explicit 0; rod-rail semantics FLIPPED (photometric pull is low).
+   The A/B evidence:**
    Offline against all 23 field bundles (`tools/rigcal-ab/`): wins yaw decisively (glass
    room solves natively without the v13 clamp; the weak-geometry scan the edge cost
    triple-railed solves cleanly; per-still yaw spread works as a quality metric), needs

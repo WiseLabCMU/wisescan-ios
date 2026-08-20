@@ -541,7 +541,6 @@ struct WearableCard: View {
 /// reachable via the Manage menu. See ThetaCameraManager.
 struct ThetaCameraCard: View {
     @Bindable var manager: ThetaCameraManager
-    @State private var calibrationManager = RigCalibrationManager.shared
     @State private var showNetworkSheet = false
     @State private var sheetSSID = ""
     @State private var sheetPassphrase = ""
@@ -950,8 +949,6 @@ struct ThetaCameraCard: View {
                     }
                 }
 
-                // Rig calibration section
-                rigCalibrationSection
             }
 
             HStack(spacing: 12) {
@@ -1143,163 +1140,6 @@ struct ThetaCameraCard: View {
         .cornerRadius(16)
     }
 
-    // MARK: - Rig Calibration Section (dev diagnostics bench)
-    //
-    // Post-process pivot (2026-07-30): production calibration happens in the Process
-    // step from each scan's own stills — no pre-scan ritual. This walk-3-positions
-    // bench remains for solver diagnostics (controlled captures, alignment overlays,
-    // input bundles) and is Developer-Mode only.
-
-    @ViewBuilder
-    private var rigCalibrationSection: some View {
-      if UserDefaults.standard.bool(forKey: AppConstants.Key.developerMode) {
-        Divider().background(Color.white.opacity(0.1))
-
-        switch calibrationManager.state {
-        case .idle:
-            idleCalibrationRow
-        case .capturing(let count):
-            capturingCalibrationRow(count: count)
-        case .solving:
-            HStack(spacing: 8) {
-                ProgressView().tint(.cyan)
-                Text("Solving rig calibration…")
-                    .font(.caption)
-                    .foregroundColor(.white)
-            }
-        case .review(let residualPx, _):
-            reviewCalibrationRow(residualPx: residualPx)
-        case .failed(let message):
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                    Text(message)
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                }
-                Button("Try Again") { calibrationManager.beginCalibration() }
-                    .font(.caption.bold())
-                    .foregroundColor(.cyan)
-            }
-        }
-      }
-    }
-
-    private var idleCalibrationRow: some View {
-        HStack(spacing: 8) {
-            if let profile = calibrationManager.currentProfile, profile.isSolved {
-                Circle()
-                    .fill(profile.residualPx <= AppConstants.calibrationResidualGreenPx ? .green
-                          : profile.residualPx <= AppConstants.calibrationResidualYellowPx ? .yellow
-                          : .red)
-                    .frame(width: 8, height: 8)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Rig calibrated")
-                        .font(.caption.bold())
-                        .foregroundColor(.white)
-                    if let age = calibrationManager.calibrationAgeDescription {
-                        Text("\(age) · \(String(format: "%.1f", profile.residualPx)) px residual")
-                            .font(.caption2)
-                            .foregroundColor(.white.opacity(0.7))
-                    }
-                }
-                Spacer()
-                Button("Re-calibrate") { calibrationManager.beginCalibration() }
-                    .font(.caption.bold())
-                    .foregroundColor(.cyan)
-            } else {
-                Circle().fill(Color.orange).frame(width: 8, height: 8)
-                Text("No rig calibration")
-                    .font(.caption)
-                    .foregroundColor(.orange)
-                Spacer()
-                Button("Calibrate") { calibrationManager.beginCalibration() }
-                    .font(.caption.bold())
-                    .foregroundColor(.cyan)
-            }
-        }
-    }
-
-    private func capturingCalibrationRow(count: Int) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "scope")
-                    .foregroundColor(.cyan)
-                Text("Calibration: still \(count)/\(AppConstants.calibrationStillCount)")
-                    .font(.caption.bold())
-                    .foregroundColor(.white)
-                Spacer()
-                Button("Cancel") { calibrationManager.cancelCalibration() }
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.7))
-            }
-            Text("Walk to \(AppConstants.calibrationStillCount) positions (~1–2 m apart), pause at each to capture.")
-                .font(.caption2)
-                .foregroundColor(.white.opacity(0.7))
-
-            if !calibrationManager.isEnvironmentSufficient {
-                HStack(spacing: 4) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption2)
-                        .foregroundColor(.yellow)
-                    Text("Low mesh density — move to an area with more visible surfaces.")
-                        .font(.caption2)
-                        .foregroundColor(.yellow)
-                }
-            }
-        }
-    }
-
-    private func reviewCalibrationRow(residualPx: Float) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(residualPx <= AppConstants.calibrationResidualGreenPx ? .green
-                          : residualPx <= AppConstants.calibrationResidualYellowPx ? .yellow
-                          : .red)
-                    .frame(width: 8, height: 8)
-                Text(String(format: "Calibration residual: %.1f px", residualPx))
-                    .font(.caption.bold())
-                    .foregroundColor(.white)
-            }
-            if residualPx > AppConstants.calibrationResidualYellowPx {
-                Text("High residual — consider re-adjusting the rig and re-calibrating.")
-                    .font(.caption2)
-                    .foregroundColor(.orange)
-            }
-            HStack(spacing: 12) {
-                Button(action: { calibrationManager.acceptCalibration() }) {
-                    Text("Accept")
-                        .font(.subheadline.bold())
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(Color.green.opacity(0.3))
-                        .cornerRadius(8)
-                        .foregroundColor(.green)
-                }
-                Button(action: { calibrationManager.redoCalibration() }) {
-                    Text("Redo")
-                        .font(.subheadline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(8)
-                        .foregroundColor(.white)
-                }
-                // Discard the result, keep the previously saved calibration (if any).
-                Button(action: { calibrationManager.cancelCalibration() }) {
-                    Text("Cancel")
-                        .font(.subheadline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(8)
-                        .foregroundColor(.white.opacity(0.7))
-                }
-            }
-        }
-    }
 }
 
 #Preview {

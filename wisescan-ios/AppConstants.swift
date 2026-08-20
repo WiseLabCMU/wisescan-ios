@@ -54,6 +54,7 @@ enum AppConstants {
         static let registerLegacyScans = "registerLegacyScans"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
+        static let rigMeasuredDyDateMs = "rigMeasuredDyDateMs"        // when the rig height was last entered/confirmed, UTC epoch ms — drives the staleness nudge (2026-08-19: a 28.5-inch entry outlived its rig by a day and a half, and poses shipped ~8 cm long with nothing anywhere to say the number had gone stale)
         static let rigMeasuredDyMeters = "rigMeasuredDyMeters"        // user's tape-measured iPad-camera→360°-lens distance — ALWAYS persisted in METERS (UI may display/accept imperial); 0 = unmeasured
         static let rigHeightUnitImperial = "rigHeightUnitImperial"    // display/entry unit preference for the rig height field (false = metric)
         static let colorizeFrom360Faces = "colorizeFrom360Faces"      // Developer Mode: color the preview mesh from 360° cube faces instead of keyframes (pose-accuracy probe)
@@ -195,16 +196,11 @@ enum AppConstants {
     static let equirectFaceDecodeMax = 8192        // staged-equirect decode cap for face sampling (8192×4096 RGBA ≈ 134 MB transient, per-still pooled; width/4 already saturates the face cap)
 
     // MARK: - 360° Rig Calibration (markerless mesh-edge solver — see docs/design/still-source-360.md)
-    static let calibrationStillCount = 3                               // stills captured at distinct positions before the solver runs
-    static let calibrationMeshRadiusMeters: Float = 3.0                // radius around each phone position for mesh edge extraction
     static let calibrationMeshVertexMinimum = 500                      // minimum vertex count within radius for a reliable solve (environment quality gate)
-    static let calibrationMinMeshEdges = 500                           // HARD gate at capture: fewer extracted mesh edges than this → reject the position (run6: three 0-edge stills sailed through to a guaranteed-failed solve)
-    static let calibrationMinCoverageDeg: Float = 90                   // HARD gate at capture: yaw span of mesh edges around the position. run9 diagnostics: mesh confined to one ~60° wedge → 4-DOF solve is ambiguous (yaw slides along the wedge, dy/pitch trade off) no matter how many edges the wedge holds
     static let lowStorageWarnBytes: Int64 = 5_000_000_000   // warn below ~5 GB free: a long LiDAR scan writes 0.5-2 GB of frames/depth before save, and a save that fails for space loses the whole capture
     static let coachRigGapSeconds: TimeInterval = 25                   // mesh-gap coach (all scans): seconds of recording before the ceiling/floor prompts can fire (gives the sweep a fair chance first)
     static let coachFloorMinFaces = 1500                               // mesh-gap coach: fewer floor-classified mesh faces than this late in a scan → floor prompt (WARNING — nadir face is dropped downstream, so LiDAR is the only floor source). Tune from [Coach] census log lines.
     static let coachCeilingMinFaces = 500                              // mesh-gap coach: fewer ceiling-classified faces → ceiling prompt (guidance — up-faces give it image coverage; mesh matters for the solver + mesh product). Tune from [Coach] census log lines.
-    static let calibrationElevationCutoffDeg: Float = -45              // calibration cost (solve AND spot-check) ignores everything below this elevation: the bottom band holds the rod/tripod and usually the operator — the only content that moves WITH the rig, i.e. systematic attractors (runs 8-10 pulled params toward it). -90 disables
     /// 360° exposure-sway guard. The window that corrupts the pose runs from the
     /// camera ACCEPTING the shutter command (BLE write-ack / OSC response — recorded
     /// as shutter_ack_ms) to shutter close; motion during stitch/transfer is harmless.
@@ -261,6 +257,9 @@ enum AppConstants {
     /// 28.5 in was meant — a factor of ten) does not degrade the solve, it forces a wrong
     /// answer and the colour lands wrong with a healthy-looking residual. Below this the
     /// camera would be sitting on the phone, which no rig does.
+    /// Days after which the rig-height entry earns a "still right?" at record start.
+    /// Confirming re-stamps the date, so the nudge costs one tap per week, not per scan.
+    static let rigHeightStaleDays = 7.0
     static let rigHeightMinPlausibleMeters = 0.2
     static let rigHeightMaxPlausibleMeters = 3.0
 
@@ -269,7 +268,7 @@ enum AppConstants {
     /// masked. Field measurement (staging_0755126C, tripod-mounted) put the hardware
     /// inside 17°; 20° carries margin without eating floor a neighbouring still at the
     /// 2 m spacing target would have to make up. Compare the SOLVER's blunt −45°
-    /// (calibrationElevationCutoffDeg), which this mask is meant to replace.
+    /// −45° elevation band (deleted with the edge cost), which this mask replaced.
     static let rigNadirMaskDeg: Float = 20
 
     /// Sway is judged as ONE number: the distance the 360° lens actually moved during
@@ -299,47 +298,37 @@ enum AppConstants {
         let rod = measured > 0.1 ? measured : thetaSwayFallbackRodMeters
         return translationM + rod * tan(abs(degrees) * .pi / 180)
     }
-    /// Solver v8 yaw anchor. The edge cost is precise inside a basin but its basin
-    /// CHOICE aliases in rectangular rooms, so the phone's keyframes — gravity-aligned
-    /// and absolute — pick the basin first. 8 keyframes at stride 8 gave a clear winner
-    /// offline (top-5 candidates within 12° of each other); 3° steps resolve far finer
-    /// than the ±35° window handed to the edge solve.
-    static let yawAnchorKeyframes = 8
-    static let yawAnchorPixelStride = 8
-    static let yawAnchorStepDeg: Float = 3
+    /// Photometric solver (v15) — see PhotometricRigSolver. Keyframes/stride budget the
+    /// point count (~10×(192/6)×(256/6) ≈ 14k raw, less after depth gating); more frames
+    /// beat denser frames because ZNCC pairs are per keyframe.
+    static let photometricKeyframes = 10
+    static let photometricPixelStride = 6
+    static let photometricStillMaxPixel = 1024
+    static let photometricTrimFrac: Float = 0.2          // drop the worst 20% of (keyframe, still) pairs
+    static let photometricMinPairSamples = 60            // a pair below this many valid samples is no evidence
+    /// Max−min of the per-still yaw re-solves before the solve is REJECTED and the prior
+    /// ships. Archive: 1.0–4.5° on healthy scans, 7.5° on the weakest; a spread past 15°
+    /// means the stills disagree about which way the room faces, and unlike a residual
+    /// this cannot be flattered by having fewer inputs.
+    static let photometricYawSpreadMaxDeg: Float = 15
     /// How far the edge-cost solve may roam from the anchor. Wide enough for the anchor
     /// to be a few degrees out, far too narrow to reach the next alias (~90°).
     static let yawAnchorWindowDeg: Float = 35
-    /// How far the edge solve may walk from the keyframe anchor before the result is
-    /// flagged. The anchor is an ABSOLUTE reference (gravity-aligned ARKit keyframes with
-    /// their own depth), the edge cost is a relative refinement with a known systematic
-    /// attractor, so a large disagreement means the refinement wandered, not that the
-    /// anchor was wrong. Field: 16.6° on the 2026-08-18 19:19 scan, alongside two
-    /// parameters sitting on their bounds.
-    static let yawAnchorDisagreementWarnDeg: Float = 12
-    /// Half-range of the solver's 1-D elevation-registration sweep, in degrees. Derived
-    /// from the sweep itself (±16 rows of a 256-row edge map): keep in step with the
-    /// `stride(from: -16, through: 16)` in RigCalibrationSolver.
-    static let calibrationElevationSweepLimitDeg: Float = 16 * 180 / 256
     static let calibrationMinStillsForSolve = 3                        // live sufficiency meter + Process-step solve floor: fewer equirects than this → poses fall back to prior geometry
     static let calibrationMinSpreadMeters: Float = 1.0                 // live sufficiency meter: max pairwise still-position distance below this = weak baseline for the Process-step solve
     static let calibrationResidualGreenPx: Float = 1.4                 // RMS reprojection error (equirect px, 512-wide) ≤ this → green. Behavior-preserving √ of the old mean-squared 2.0
     static let calibrationResidualYellowPx: Float = 2.2                // ≤ this → yellow (marginal); above → red (suggest re-do). √5.0
-    static let calibrationMaxIterations = 150                          // Nelder-Mead iteration cap (device solves converge in 57-97; 500 let Debug-build postprocess solves run 60-70 s)
     // Physical solve bounds, anchored to the MECHANICAL prior (the rig's ground truth).
     // run8 (2026-07-30): with a near-flat chamfer cost surface in cluttered rooms, the
     // unbounded solver accepted dy=4.4 m / yaw=−240° at residuals indistinguishable
     // from plausible poses. A monopod rig cannot physically be outside these ranges.
     static let calibrationBoundRodM: Float = 0.3                       // along-rod half-range (m) around the anchor when the user hasn't MEASURED the rig — the rod length is the one thing we genuinely don't know then
     static let calibrationBoundAcrossRodM: Float = 0.13                // half-range (m) on each of the two axes ACROSS the rod. Covers real clamp offsets (a few cm) AND the rod not being exactly along the phone's −x̂: ±0.13 m at a 0.72 m rod is a ~10° cone, wider than every inclinometer reading taken on this rig
-    static let calibrationGravityFitMaxDeg: Float = 3.0                 // max mean angular residual (deg) of the one-constant-rotation fit to the camera's per-still gravity before its rod direction is distrusted. Field baseline on a rigid rig: 1.57° mean / 4.88° max over 10 stills, so 3° mean flags a rig that actually moved rather than ordinary sway
+    static let calibrationGravityFitMaxDeg: Float = 4.0                 // max mean angular residual (deg) of the one-constant-rotation fit to the camera's per-still gravity before its rod direction is distrusted. Was 3.0, and two consecutive healthy scans (2026-08-19/20: fits 3.12° and 3.03°, solves at 0.8°/1.5° yaw spread, rod direction agreeing with history at 9-11° off −x̂) were rejected into the wide ±13cm box for being a whisker over — the field range on a rigid rig runs to ~3.1°, and a rig that actually shifted mid-scan shows up far past 4
     static let calibrationRodDirectionMaxOffDeg: Float = 25             // sanity limit (deg) on how far the MEASURED rod direction may sit from the assumed −x̂ before it is rejected as a bad fit rather than believed. Measured 7.6° on the field rig
     static let calibrationMeasuredAcrossRodM: Float = 0.07              // half-range (m) across the rod when its DIRECTION was measured from the camera's own accelerometer, not assumed. calibrationBoundAcrossRodM's 0.13 is mostly a ~10° cone of ignorance about where the rod points; with the direction measured to a few degrees, what is left is real clamp geometry plus the fit's own slop
     static let calibrationMeasuredRodHalfM: Float = 0.03               // along-rod half-range (m) when the operator HAS measured. GROUND-TRUTHED 2026-08-19: a field re-measure corrected the tape from 0.724 to 0.686 m, giving truth against three healthy solves — all landed +8.1 to +10.5 cm ABOVE it, riding up even though truth sat near the BOTTOM of the ±5 cm box, on both the X and the Z1. The cost's along-rod content is bias (the documented +pull), not signal, so the window is tape+optical-centre slop only. A rail on this axis now MEANS 're-measure the rod' — with ±3 cm, every scan that day would have railed and named the stale tape, which is exactly how the error was eventually found by hand
-    static let calibrationBoundYawDeg: Float = 45                      // yaw half-range (deg) around EACH coarse-scan start (yaw is solved globally: the 360° cam screws onto the rod at an arbitrary rotation, so a full-circle coarse scan picks the basin and local bounds keep Nelder-Mead inside it)
     static let calibrationBoundPitchDeg: Float = 10                    // pitch-residual half-range (deg) around 0 (zenith correction should leave only small error)
-    static let calibrationConvergenceTolerance: Float = 1e-5           // cost-range convergence threshold
-    static let calibrationMaxEdgesPerInput = 1200                      // subsample mesh edges per input to cap solver time (2000 → 1200 after 360post1: per-eval cost dominates the postprocess solve)
     static let vioDegradedTripSeconds: TimeInterval = 2.5    // VIO guard: tracking continuously degraded (limited/relocalizing/unavailable) this long mid-scan → halt
     static let voxelDecayInterval: TimeInterval = 0.5        // VR: min seconds between 350K-voxel confidence-decay passes; throttled off every-integration so the voxelQueue can't back up (drove multi-second stalls)
     static let arIdleTeardownSeconds: TimeInterval = 60      // battery: seconds on a non-capture tab before pausing the AR session (camera/sensors off); resumed on return. Long enough that rapid successive scans stay warm.

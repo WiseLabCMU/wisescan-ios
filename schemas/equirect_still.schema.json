@@ -58,6 +58,14 @@
       "type": "integer",
       "description": "File size of the captured JPEG image in bytes."
     },
+    "camera_clock_offset_ms": {
+      "type": ["integer", "null"],
+      "description": "Camera clock minus phone clock at scan start, milliseconds (+ = camera ahead), measured by catching a second tick of the camera's dateTimeZone. Add to a phone timestamp to compare against the camera's EXIF DateTimeOriginal (1 s resolution): shutter latency = EXIF_second(+offset window) - trigger tap. The camera drifts 1-7 s/day, so the offset is per scan, never reusable."
+    },
+    "camera_clock_offset_unc_ms": {
+      "type": ["integer", "null"],
+      "description": "Half-window uncertainty of camera_clock_offset_ms, milliseconds (poll gap at the tick plus half the HTTP round trip)."
+    },
     "rig_calibration_source": {
       "type": ["string", "null"],
       "enum": ["solved_capture", "solved_postprocess", "prior_postprocess", "mechanical_prior", null],
@@ -65,7 +73,15 @@
     },
     "rig_calibration_residual_px_rms": {
       "type": ["number", "null"],
-      "description": "RMS reprojection error of the calibration fit, in pixels of the 512-wide working equirect. NOT comparable across scans with different still counts: the RMS rises with the number of constraints, so a 5-input solve cannot be read against a 3-input one."
+      "description": "RMS reprojection error of the edge-cost calibration fit (solver <= 14 only), in pixels of the 512-wide working equirect. NOT comparable across scans with different still counts. Solver >= 15 (photometric) does not write this — see rig_calibration_zncc and rig_calibration_yaw_spread_deg."
+    },
+    "rig_calibration_zncc": {
+      "type": ["number", "null"],
+      "description": "Trimmed-mean zero-normalized cross-correlation between keyframe-unprojected points and the still at the solved pose (solver >= 15). Higher is better; field range ~0.5-0.8. The photometric replacement for residual_px_rms."
+    },
+    "rig_calibration_yaw_spread_deg": {
+      "type": ["number", "null"],
+      "description": "Max-minus-min of per-still yaw re-solves at the solved offset (solver >= 15) — the solve's honest confidence number, immune to being flattered by fewer inputs. Field range 1-4.5 deg healthy; solves past 15 deg are rejected and the prior ships instead."
     },
     "rig_calibration_solver_version": {
       "type": ["integer", "null"],

@@ -27,6 +27,10 @@ import simd
 ///
 /// The anchor only SEEDS: it narrows the edge-cost solve to ±35° of its winner, leaving
 /// the precise local refinement to the cost function that is good at it.
+///
+/// v15: this file's idea became `PhotometricRigSolver`, the shipping solver — its coarse
+/// full-circle scan IS this anchor. What remains here is the keyframe SAMPLING the
+/// photometric cost feeds on; the anchor's own solve/score went with the edge cost.
 enum EquirectYawAnchor {
 
     /// One depth-unprojected keyframe point: where it is, and how bright it looked.
@@ -87,6 +91,15 @@ enum EquirectYawAnchor {
     /// Strided rather than dense: the score only needs enough points to rank a yaw, and
     /// this runs inside the Process step alongside the solve itself.
     static func keyframeSamples(rawDataDir: URL, maxFrames: Int, pixelStride: Int) -> [Sample] {
+        keyframeSampleGroups(rawDataDir: rawDataDir, maxFrames: maxFrames,
+                             pixelStride: pixelStride).flatMap { $0 }
+    }
+
+    /// Same sampling, one array per keyframe: the photometric solver's ZNCC is computed
+    /// per (keyframe, still) PAIR — exposure differs between keyframes, and pooling them
+    /// would let one bright frame dominate the normalisation.
+    static func keyframeSampleGroups(rawDataDir: URL, maxFrames: Int,
+                                     pixelStride: Int) -> [[Sample]] {
         let camerasDir = rawDataDir.appendingPathComponent("cameras")
         let imagesDir = rawDataDir.appendingPathComponent("images")
         let depthDir = rawDataDir.appendingPathComponent("depth")
@@ -102,9 +115,10 @@ enum EquirectYawAnchor {
         // Even spread across the walk rather than the first N, which would cluster at one
         // end of the room and re-introduce the symmetry we are trying to break.
         let step = max(1, cameraFiles.count / max(1, maxFrames))
-        var samples: [Sample] = []
+        var groups: [[Sample]] = []
         for file in Swift.stride(from: 0, to: cameraFiles.count, by: step).map({ cameraFiles[$0] }) {
             autoreleasepool {
+                var samples: [Sample] = []
                 let stem = file.deletingPathExtension().lastPathComponent
                 guard let json = (try? Data(contentsOf: file)).flatMap({
                           try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any],
@@ -132,9 +146,10 @@ enum EquirectYawAnchor {
                                               gray: image.at(imageColumn, imageRow)))
                     }
                 }
+                if !samples.isEmpty { groups.append(samples) }
             }
         }
-        return samples
+        return groups
     }
 
     struct Intrinsics {
@@ -178,52 +193,5 @@ enum EquirectYawAnchor {
 
     // MARK: - Scoring
 
-    /// Mean |Δgray| between keyframe points and where they land in the still at this yaw.
-    /// Lower is better. Points behind nothing in particular are simply sampled — the
-    /// equirect sees every direction, so there is no frustum test to fail.
-    private static func score(samples: [Sample], still: Gray,
-                              phoneToWorld: simd_float4x4, offsetPhone: SIMD3<Float>,
-                              yaw: Float) -> Float {
-        let camToWorld = RigCalibrationSolver.composeRigTransform(
-            phoneToWorld: phoneToWorld, offsetPhone: offsetPhone, yaw: yaw, pitchResidual: 0)
-        let worldToCam = camToWorld.inverse
-        var total: Float = 0
-        var count = 0
-        for sample in samples {
-            let local = worldToCam * SIMD4<Float>(sample.world, 1)
-            let direction = SIMD3<Float>(local.x, local.y, local.z)
-            let length = simd_length(direction)
-            guard length > 0.3 else { continue }                   // ignore points on top of the lens
-            let (equirectX, equirectY) = RigCalibrationSolver.dirToEquirect(
-                dir: direction / length, width: still.width, height: still.height)
-            total += abs(still.at(Int(equirectX), Int(equirectY)) - sample.gray)
-            count += 1
-        }
-        return count > 0 ? total / Float(count) : .greatestFiniteMagnitude
-    }
 
-    /// Scans the yaw circle and returns the photometric winner, in radians.
-    /// nil when there is nothing to anchor against — the caller then keeps v7 behaviour.
-    static func solve(rawDataDir: URL, stillJPG: URL, phoneToWorld: simd_float4x4,
-                      offsetPhone: SIMD3<Float>, report: (String) -> Void) -> Float? {
-        let samples = keyframeSamples(rawDataDir: rawDataDir,
-                                      maxFrames: AppConstants.yawAnchorKeyframes,
-                                      pixelStride: AppConstants.yawAnchorPixelStride)
-        guard samples.count >= 200, let still = gray(at: stillJPG, maxPixel: 1024) else {
-            report("Yaw anchor unavailable — solving without it")
-            return nil
-        }
-        var best: (yaw: Float, cost: Float)?
-        var step = -Float.pi
-        while step < .pi {
-            let cost = score(samples: samples, still: still,
-                             phoneToWorld: phoneToWorld, offsetPhone: offsetPhone, yaw: step)
-            if best == nil || cost < best!.cost { best = (step, cost) }
-            step += AppConstants.yawAnchorStepDeg * .pi / 180
-        }
-        guard let best else { return nil }
-        PerfDiag.log(String(format: "[RigCal] yaw anchor: %.1f° from %d keyframe points (score %.4f)",
-                            best.yaw * 180 / .pi, samples.count, best.cost))
-        return best.yaw
-    }
 }
