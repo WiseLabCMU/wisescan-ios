@@ -3525,6 +3525,13 @@ struct ARCoverageView: UIViewRepresentable {
             return nil
         }
 
+        // The class partition, ONCE. Every derivation and mask consumer below reads these instead of
+        // re-sweeping all faces — the build used to make up to nine full-mesh passes, each re-deriving
+        // class, cross product, area and centroid, and that was most of its runtime.
+        let (wallPatches, floorPatches) = classifyPatches(verts: verts, faces: faces,
+                                                          faceClasses: faceClasses)
+        lap("classify")
+
         // Levels RoomPlan never modelled — upper landings, raised platforms, sunken areas — derived
         // from this same classified mesh (see `deriveLevelPlanes`). They are baked as quads AND fed to
         // the coverage test below, so each one subtracts its own mesh faces exactly as the RoomPlan
@@ -3539,7 +3546,7 @@ struct ARCoverageView: UIViewRepresentable {
         // from the mesh itself, so preferring it cannot lose the surface. RoomPlan floors with no
         // matching level (its seat on a stairwell flight, say) still bake, cell-gated like everything
         // else.
-        let levelSearch = deriveLevelPlanes(verts: verts, faces: faces, faceClasses: faceClasses,
+        let levelSearch = deriveLevelPlanes(floorPatches: floorPatches,
                                             reference: roomPlanFloors.first)
         lap("levels")
         let allLevels = levelSearch.levels
@@ -3556,8 +3563,8 @@ struct ARCoverageView: UIViewRepresentable {
         // real straight wall explains nearly all of its mesh. Derived levels and ramps are exempt by
         // construction — they are measured from this mesh, so they cannot mis-model it.
         let roomPlanQuads = roomPlanWalls + dedupedFloors
-        let fitness = quadModelFitness(planes: roomPlanQuads, verts: verts, faces: faces,
-                                       faceClasses: faceClasses)
+        let fitness = quadModelFitness(planes: roomPlanQuads, wallPatches: wallPatches,
+                                       floorPatches: floorPatches)
         let trusted = zip(roomPlanQuads, fitness).filter { $0.1 >= quadModelMinExplainedRatio }.map(\.0)
         let demoted = zip(roomPlanQuads, fitness).filter { $0.1 < quadModelMinExplainedRatio }
         let walls = trusted.filter { $0.category == .wall }
@@ -3582,24 +3589,22 @@ struct ARCoverageView: UIViewRepresentable {
         // adjacent level's behalf, which truncated a fitted ramp's bottom short of the floor it meets
         // and starved the fit of its end geometry. Candidate selection wants the levels' true
         // footprint; the dilated masks below still govern what gets subtracted and drawn.
-        let floorSupport = buildQuadSupport(planes: keptRoomPlanFloors + derivedLevels, verts: verts,
-                                            faces: faces, faceClasses: faceClasses, dilateBy: 0)
-        let rampSearch = deriveRampPlanes(verts: verts, faces: faces, faceClasses: faceClasses,
+        let floorSupport = buildQuadSupport(planes: keptRoomPlanFloors + derivedLevels,
+                                            wallPatches: [], floorPatches: floorPatches, dilateBy: 0)
+        let rampSearch = deriveRampPlanes(floorPatches: floorPatches,
                                           explainedBy: keptRoomPlanFloors + derivedLevels,
                                           support: floorSupport)
         lap("ramps")
         let derivedRamps = rampSearch.ramps
         let floorQuads = keptRoomPlanFloors + derivedLevels + derivedRamps
         let bakedPlanes = walls + keptRoomPlanFloors + derivedLevels + derivedRamps
-        // A mask set per list rather than one indexed across them: the lists overlap but their orders do
-        // not correspond, and a masks array is only ever valid alongside the exact plane list it was
-        // built from. Each call is one pass over the faces against a handful of planes.
-        let bakedSupport = buildQuadSupport(planes: bakedPlanes, verts: verts, faces: faces,
-                                            faceClasses: faceClasses)
-        let floorSupportAll = buildQuadSupport(planes: floorQuads, verts: verts, faces: faces,
-                                               faceClasses: faceClasses)
-        let wallSupport = buildQuadSupport(planes: walls, verts: verts, faces: faces,
-                                           faceClasses: faceClasses)
+        // ONE mask build. Competition is within-family and bakedPlanes is walls + floorQuads in that
+        // order, so the wall and floor mask sets are exactly slices of the baked set — building them
+        // separately produced identical masks at three times the cost.
+        let bakedSupport = buildQuadSupport(planes: bakedPlanes, wallPatches: wallPatches,
+                                            floorPatches: floorPatches)
+        let wallSupport = Array(bakedSupport[0..<walls.count])
+        let floorSupportAll = Array(bakedSupport[walls.count...])
         lap("supports")
 
         var objData = Data()
@@ -3967,64 +3972,53 @@ struct ARCoverageView: UIViewRepresentable {
     static func buildQuadSupport(planes: [PlaneRegistration.Plane], verts: [SIMD3<Float>],
                                  faces: [(Int, Int, Int)], faceClasses: Data,
                                  dilateBy: Int = quadSupportDilateCells) -> [QuadSupport] {
-        // Accumulate an area-weighted normal per cell rather than a boolean. Presence alone is not
-        // enough, and the reason is circular: a ramp crossing a level's height is itself floor-class and
-        // within the coverage distance, so it MARKS the cells that then exclude it, the level quad claims
-        // its band, and ramp detection is suppressed by geometry it supplied. Orientation is what
-        // separates "this cell is part of that surface" from "something else passes through here".
-        //
-        // Per-FACE orientation cannot do it — a real floor's per-face normals scatter by ~10°, further
-        // than a 5° ramp is tilted. The area-weighted mean over a cell can: noise cancels, coherent slope
-        // survives. Exactly the argument the level search's mean-tilt gate already rests on.
-        var sums = planes.map { p -> [SIMD3<Float>] in
-            let (cols, rows) = quadSupportGrid(p)
-            return [SIMD3<Float>](repeating: .zero, count: cols * rows)
-        }
-        var areas = planes.map { p -> [Float] in
-            let (cols, rows) = quadSupportGrid(p)
-            return [Float](repeating: 0, count: cols * rows)
-        }
-        for (idx, f) in faces.enumerated() {
-            guard idx < faceClasses.count,
-                  f.0 >= 0, f.1 >= 0, f.2 >= 0,
-                  f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
-            let family: PlaneRegistration.Category
-            switch faceClasses[faceClasses.startIndex + idx] {
-            case 1, 6, 7: family = .wall
-            case 2: family = .floor
-            default: continue          // content backs no architectural quad
+        let patches = classifyPatches(verts: verts, faces: faces, faceClasses: faceClasses)
+        return buildQuadSupport(planes: planes, wallPatches: patches.walls,
+                                floorPatches: patches.floors, dilateBy: dilateBy)
+    }
+
+    /// Patch-based core — the builder computes the class partition once and every mask consumer
+    /// reuses it instead of re-sweeping the whole mesh.
+    static func buildQuadSupport(planes: [PlaneRegistration.Plane],
+                                 wallPatches: [SurfacePatch], floorPatches: [SurfacePatch],
+                                 dilateBy: Int = quadSupportDilateCells) -> [QuadSupport] {
+        let grids = planes.map { quadSupportGrid($0) }
+        var sums = grids.map { [SIMD3<Float>](repeating: .zero, count: $0.cols * $0.rows) }
+        var areas = grids.map { [Float](repeating: 0, count: $0.cols * $0.rows) }
+        let wallIdx = planes.indices.filter { planes[$0].category == .wall }
+        let floorIdx = planes.indices.filter { planes[$0].category == .floor }
+
+        // COMPETITIVE assignment: the patch backs only the plane that explains it best (smallest
+        // perpendicular distance), never every plane within tolerance. Where two planes of one family
+        // meet — a ramp rising into a landing, wall facets at a corner — the tolerance bands overlap
+        // for metres, and first-match let the landing claim the top of the ramp, square itself outward
+        // over it, and subtract mesh the ramp quad should have owned. Best-fit assignment gives the
+        // overlap to whichever surface it actually lies on.
+        func accumulate(_ patches: [SurfacePatch], _ planeIdx: [Int]) {
+            guard !planeIdx.isEmpty else { return }
+            for patch in patches {
+                var best: (i: Int, cell: (c: Int, r: Int), dist: Float)?
+                for i in planeIdx {
+                    guard let cell = quadSupportCell(planes[i], patch.c) else { continue }
+                    let dist = abs(simd_dot(patch.c - planes[i].center, planes[i].normal))
+                    if best == nil || dist < best!.dist { best = (i, cell, dist) }
+                }
+                guard let best else { continue }
+                let p = planes[best.i]
+                // Face winding is not trusted, so orient each normal toward the plane's before
+                // summing — otherwise opposite windings on one surface would cancel to nothing.
+                let oriented = simd_dot(patch.n, p.normal) < 0 ? -patch.n : patch.n
+                let k = best.cell.r * grids[best.i].cols + best.cell.c
+                sums[best.i][k] += oriented * patch.area
+                areas[best.i][k] += patch.area
             }
-            let a = verts[f.0], b = verts[f.1], c = verts[f.2]
-            let cross = simd_cross(b - a, c - a)
-            let area = 0.5 * simd_length(cross)
-            guard area > 1e-6 else { continue }
-            let n = cross / (2 * area)
-            let ctr = (a + b + c) / 3
-            // COMPETITIVE assignment: the face backs only the plane that explains it best (smallest
-            // perpendicular distance), never every plane within tolerance. Where two planes of one
-            // family meet — a ramp rising into a landing, wall facets at a corner — the tolerance
-            // bands overlap for metres, and first-match let the landing claim the top of the ramp,
-            // square itself outward over it, and subtract mesh the ramp quad should have owned
-            // (device: the landing lattice stretching visibly past the flat, the ramp diving under
-            // it). Best-fit assignment gives the overlap to whichever surface it actually lies on.
-            var best: (i: Int, cell: (c: Int, r: Int), dist: Float)?
-            for (i, p) in planes.enumerated() where p.category == family {
-                guard let cell = quadSupportCell(p, ctr) else { continue }
-                let dist = abs(simd_dot(ctr - p.center, p.normal))
-                if best == nil || dist < best!.dist { best = (i, cell, dist) }
-            }
-            guard let best else { continue }
-            let p = planes[best.i]
-            // Face winding is not trusted, so orient each normal toward the plane's before summing —
-            // otherwise opposite windings on one surface would cancel to nothing.
-            let oriented = simd_dot(n, p.normal) < 0 ? -n : n
-            let k = best.cell.r * quadSupportGrid(p).cols + best.cell.c
-            sums[best.i][k] += oriented * area
-            areas[best.i][k] += area
         }
+        accumulate(wallPatches, wallIdx)
+        accumulate(floorPatches, floorIdx)
+
         return planes.indices.map { i in
             let p = planes[i]
-            let (cols, rows) = quadSupportGrid(p)
+            let (cols, rows) = grids[i]
             var mask = QuadSupport(cols: cols, rows: rows)
             // Floors need a tight bound: the surface they must not absorb is a shallow ramp, only degrees
             // away. Walls need a loose one: what they must not absorb is a differently-oriented surface,
@@ -4044,6 +4038,42 @@ struct ARCoverageView: UIViewRepresentable {
         }
     }
 
+    /// One classified surface patch: a mesh face reduced to what every derivation and mask consumer
+    /// actually reads. Computed ONCE per build — the machinery used to re-derive class, cross product,
+    /// area and centroid in up to nine separate full-mesh sweeps, which is where the build time went.
+    /// Floor patches carry their normal oriented upward (winding is untrusted); wall patches keep the
+    /// raw normal, since wall consumers orient against each plane's own normal.
+    typealias SurfacePatch = (c: SIMD3<Float>, n: SIMD3<Float>, area: Float)
+
+    /// Partition the mesh by class family, once. Content faces appear in neither list — no derivation
+    /// or mask consumer reads them.
+    static func classifyPatches(verts: [SIMD3<Float>], faces: [(Int, Int, Int)],
+                                faceClasses: Data) -> (walls: [SurfacePatch], floors: [SurfacePatch]) {
+        var walls: [SurfacePatch] = []
+        var floors: [SurfacePatch] = []
+        walls.reserveCapacity(faces.count / 3)
+        floors.reserveCapacity(faces.count / 3)
+        for (idx, f) in faces.enumerated() {
+            guard idx < faceClasses.count,
+                  f.0 >= 0, f.1 >= 0, f.2 >= 0,
+                  f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
+            let cls = faceClasses[faceClasses.startIndex + idx]
+            guard cls == 1 || cls == 2 || cls == 6 || cls == 7 else { continue }
+            let a = verts[f.0], b = verts[f.1], c = verts[f.2]
+            let cross = simd_cross(b - a, c - a)
+            let area = 0.5 * simd_length(cross)
+            guard area > 1e-6 else { continue }
+            let n = cross / (2 * area)
+            let ctr = (a + b + c) / 3
+            if cls == 2 {
+                floors.append((c: ctr, n: n.y < 0 ? -n : n, area: area))
+            } else {
+                walls.append((c: ctr, n: n, area: area))
+            }
+        }
+        return (walls, floors)
+    }
+
     /// How well each quad MODELS the mesh in its own footprint: explained area / present area, where
     /// "present" is same-family mesh projecting into the rectangle within a generous perpendicular band
     /// and "explained" is the subset the plane actually accounts for (within coverage distance, at the
@@ -4060,39 +4090,38 @@ struct ARCoverageView: UIViewRepresentable {
     /// question here is each quad's own fitness, not which quad owns the face.
     static func quadModelFitness(planes: [PlaneRegistration.Plane], verts: [SIMD3<Float>],
                                  faces: [(Int, Int, Int)], faceClasses: Data) -> [Float] {
+        let patches = classifyPatches(verts: verts, faces: faces, faceClasses: faceClasses)
+        return quadModelFitness(planes: planes, wallPatches: patches.walls, floorPatches: patches.floors)
+    }
+
+    /// Patch-based core — see the wrapper above for semantics.
+    static func quadModelFitness(planes: [PlaneRegistration.Plane],
+                                 wallPatches: [SurfacePatch], floorPatches: [SurfacePatch]) -> [Float] {
         var explained = [Float](repeating: 0, count: planes.count)
         var present = [Float](repeating: 0, count: planes.count)
-        for (idx, f) in faces.enumerated() {
-            guard idx < faceClasses.count,
-                  f.0 >= 0, f.1 >= 0, f.2 >= 0,
-                  f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
-            let family: PlaneRegistration.Category
-            switch faceClasses[faceClasses.startIndex + idx] {
-            case 1, 6, 7: family = .wall
-            case 2: family = .floor
-            default: continue
-            }
-            let a = verts[f.0], b = verts[f.1], c = verts[f.2]
-            let cross = simd_cross(b - a, c - a)
-            let area = 0.5 * simd_length(cross)
-            guard area > 1e-6 else { continue }
-            let n = cross / (2 * area)
-            let ctr = (a + b + c) / 3
-            for (i, p) in planes.enumerated() where p.category == family {
-                let d = ctr - p.center
-                let perp = abs(simd_dot(d, p.normal))
-                guard perp <= quadModelBandMeters,
-                      abs(simd_dot(d, p.xAxis)) <= p.width / 2 + 0.2,
-                      abs(simd_dot(d, p.yAxis)) <= p.height / 2 + 0.2 else { continue }
-                present[i] += area
-                let toleranceDeg = p.category == .floor ? quadSupportFloorMeanTiltDeg
-                                                        : quadSupportWallMeanTiltDeg
-                if perp <= ghostProxyQuadCoverageMeters,
-                   abs(simd_dot(n, p.normal)) >= cos(toleranceDeg * .pi / 180) {
-                    explained[i] += area
+        let wallIdx = planes.indices.filter { planes[$0].category == .wall }
+        let floorIdx = planes.indices.filter { planes[$0].category == .floor }
+        func tally(_ patches: [SurfacePatch], _ planeIdx: [Int], toleranceDeg: Float) {
+            guard !planeIdx.isEmpty else { return }
+            let minDot = cos(toleranceDeg * .pi / 180)
+            for patch in patches {
+                for i in planeIdx {
+                    let p = planes[i]
+                    let d = patch.c - p.center
+                    let perp = abs(simd_dot(d, p.normal))
+                    guard perp <= quadModelBandMeters,
+                          abs(simd_dot(d, p.xAxis)) <= p.width / 2 + 0.2,
+                          abs(simd_dot(d, p.yAxis)) <= p.height / 2 + 0.2 else { continue }
+                    present[i] += patch.area
+                    if perp <= ghostProxyQuadCoverageMeters,
+                       abs(simd_dot(patch.n, p.normal)) >= minDot {
+                        explained[i] += patch.area
+                    }
                 }
             }
         }
+        tally(wallPatches, wallIdx, toleranceDeg: quadSupportWallMeanTiltDeg)
+        tally(floorPatches, floorIdx, toleranceDeg: quadSupportFloorMeanTiltDeg)
         return planes.indices.map { i in
             // Too little mesh to judge either way → benefit of the doubt; with nothing to back it, the
             // cell masks keep it from baking anyway.
@@ -4218,6 +4247,13 @@ struct ARCoverageView: UIViewRepresentable {
     /// plane fit. Until that exists, a ramp's faces just fail the pitch gate and survive as mesh.
     static func deriveLevelPlanes(verts: [SIMD3<Float>], faces: [(Int, Int, Int)], faceClasses: Data,
                                   reference: PlaneRegistration.Plane?) -> LevelDerivation {
+        let patches = classifyPatches(verts: verts, faces: faces, faceClasses: faceClasses)
+        return deriveLevelPlanes(floorPatches: patches.floors, reference: reference)
+    }
+
+    /// Patch-based core — the builder computes the class partition once and every consumer reuses it.
+    static func deriveLevelPlanes(floorPatches: [SurfacePatch],
+                                  reference: PlaneRegistration.Plane?) -> LevelDerivation {
         // One horizontal frame shared by every derived level, so they read as storeys of one building
         // rather than N independently-oriented slabs. RoomPlan's floor plane already carries the
         // room's orientation; world axes when there is none.
@@ -4237,19 +4273,9 @@ struct ARCoverageView: UIViewRepresentable {
         // (sign-normalized upward, since face winding is not trusted — see the mean-tilt gate).
         let cosMaxPitch = cos(levelFaceMaxPitchDeg * .pi / 180)
         var votes: [(y: Float, area: Float, u: Float, v: Float, n: SIMD3<Float>)] = []
-        for (idx, f) in faces.enumerated() {
-            guard idx < faceClasses.count,
-                  faceClasses[faceClasses.startIndex + idx] == 2,
-                  f.0 >= 0, f.1 >= 0, f.2 >= 0,
-                  f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
-            let a = verts[f.0], b = verts[f.1], c = verts[f.2]
-            let cross = simd_cross(b - a, c - a)
-            let area = 0.5 * simd_length(cross)
-            // |cross| == 2·area, so |cross.y| / 2·area is |normal.y| without a normalize.
-            guard area > 1e-6, abs(cross.y) / (2 * area) >= cosMaxPitch else { continue }
-            let ctr = (a + b + c) / 3
-            let n = simd_normalize(cross.y < 0 ? -cross : cross)
-            votes.append((y: ctr.y, area: area, u: simd_dot(ctr, xAxis), v: simd_dot(ctr, yAxis), n: n))
+        votes.reserveCapacity(floorPatches.count)
+        for p in floorPatches where p.n.y >= cosMaxPitch {
+            votes.append((y: p.c.y, area: p.area, u: simd_dot(p.c, xAxis), v: simd_dot(p.c, yAxis), n: p.n))
         }
         guard let minY = votes.map(\.y).min(), let maxY = votes.map(\.y).max() else {
             return LevelDerivation(levels: [], candidates: [])
@@ -4448,23 +4474,23 @@ struct ARCoverageView: UIViewRepresentable {
     static func deriveRampPlanes(verts: [SIMD3<Float>], faces: [(Int, Int, Int)], faceClasses: Data,
                                  explainedBy explained: [PlaneRegistration.Plane],
                                  support: [QuadSupport]? = nil) -> RampDerivation {
+        let patches = classifyPatches(verts: verts, faces: faces, faceClasses: faceClasses)
+        return deriveRampPlanes(floorPatches: patches.floors, explainedBy: explained, support: support)
+    }
+
+    /// Patch-based core — the builder computes the class partition once and every consumer reuses it.
+    static func deriveRampPlanes(floorPatches: [SurfacePatch],
+                                 explainedBy explained: [PlaneRegistration.Plane],
+                                 support: [QuadSupport]? = nil) -> RampDerivation {
         typealias Patch = (c: SIMD3<Float>, area: Float, n: SIMD3<Float>)
         let cosMaxPitch = cos(rampFaceMaxPitchDeg * .pi / 180)
         var candidates: [Patch] = []
-        for (idx, f) in faces.enumerated() {
-            guard idx < faceClasses.count,
-                  faceClasses[faceClasses.startIndex + idx] == 2,
-                  f.0 >= 0, f.1 >= 0, f.2 >= 0,
-                  f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
-            let a = verts[f.0], b = verts[f.1], c = verts[f.2]
-            let cross = simd_cross(b - a, c - a)
-            let area = 0.5 * simd_length(cross)
+        for p in floorPatches {
             // Upper bound only — near-level faces MUST be admitted, since that is what a ramp is made
             // of. This just keeps near-vertical junk (a riser the classifier called floor) out.
-            guard area > 1e-6, abs(cross.y) / (2 * area) >= cosMaxPitch else { continue }
-            let ctr = (a + b + c) / 3
-            guard !quadCovers(explained, support: support, ctr) else { continue }
-            candidates.append((c: ctr, area: area, n: simd_normalize(cross.y < 0 ? -cross : cross)))
+            guard p.n.y >= cosMaxPitch else { continue }
+            guard !quadCovers(explained, support: support, p.c) else { continue }
+            candidates.append((c: p.c, area: p.area, n: p.n))
         }
 
         /// Area-weighted plane through a patch set, with the residual that says whether it IS a plane.
