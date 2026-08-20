@@ -3578,10 +3578,12 @@ struct ARCoverageView: UIViewRepresentable {
         let roomPlanQuads = roomPlanWalls + dedupedFloors
         let fitness = quadModelFitness(planes: roomPlanQuads, wallPatches: wallPatches,
                                        floorPatches: floorPatches)
-        let trusted = zip(roomPlanQuads, fitness).filter { $0.1 >= quadModelMinExplainedRatio }.map(\.0)
+        let trustedWithFitness = zip(roomPlanQuads, fitness).filter { $0.1 >= quadModelMinExplainedRatio }
         let demoted = zip(roomPlanQuads, fitness).filter { $0.1 < quadModelMinExplainedRatio }
-        let walls = trusted.filter { $0.category == .wall }
-        let keptRoomPlanFloors = trusted.filter { $0.category == .floor }
+        let walls = trustedWithFitness.filter { $0.0.category == .wall }.map(\.0)
+        let wallFitness = trustedWithFitness.filter { $0.0.category == .wall }.map(\.1)
+        let keptRoomPlanFloors = trustedWithFitness.filter { $0.0.category == .floor }.map(\.0)
+        let floorFitness = trustedWithFitness.filter { $0.0.category == .floor }.map(\.1)
         if !demoted.isEmpty {
             let desc = demoted.map { p, r in
                 String(format: "%@ %.1f×%.1fm explains %.0f%%",
@@ -3833,11 +3835,25 @@ struct ARCoverageView: UIViewRepresentable {
         // Backed cells vs total, per plane: how much of each rectangle survived the support mask. A low
         // fraction is the rectangle over-claiming, which is what the mask exists to contain — and seeing
         // it per plane is what tells RoomPlan's footprint quad apart from two disconnected landings.
-        let supportDesc = zip(bakedPlanes, bakedSupport)
-            .map { p, m in
+        //
+        // `fit=` (RoomPlan-sourced quads only) is the model-fitness ratio for the quads that PASSED —
+        // demotions already print theirs, but a straight wall passing at 55% is one bad scan from a
+        // false demotion and was invisible. `holes=` counts interior unbacked cells that survived
+        // dilation: the objective patchiness metric — a well-scanned surface should read holes=0, and a
+        // real count on ordinary scans is the signal to raise quadSupportDilateCells.
+        let bakedFitness: [Float?] = wallFitness.map { $0 } + floorFitness.map { $0 }
+            + [Float?](repeating: nil, count: derivedLevels.count + derivedRamps.count)
+        let supportDesc = bakedPlanes.indices
+            .map { i in
+                let p = bakedPlanes[i]
+                let m = bakedSupport[i]
                 let (cols, rows) = quadSupportGrid(p)
-                return String(format: "%@ %d/%d", p.category == .wall ? "wall" : "floor",
-                              m.keptCount, cols * rows)
+                var out = String(format: "%@ %d/%d", p.category == .wall ? "wall" : "floor",
+                                 m.keptCount, cols * rows)
+                if let f = bakedFitness[i] { out += String(format: " fit=%.0f%%", f * 100) }
+                let holes = m.interiorHoleCells
+                if holes > 0 { out += " holes=\(holes)" }
+                return out
             }
             .joined(separator: " ")
         if !rampSearch.groups.isEmpty {
@@ -3911,6 +3927,40 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         var keptCount: Int { kept.lazy.filter { $0 }.count }
+
+        /// Unbacked cells fully enclosed by the backed region — pinholes that survived dilation. The
+        /// objective patchiness metric: flood the unbacked region from the grid border; whatever
+        /// unbacked cells the flood cannot reach are interior holes. Honest partial coverage (edges,
+        /// truncation) touches the border and counts zero; only genuine pinholes register.
+        var interiorHoleCells: Int {
+            var reach = [Bool](repeating: false, count: cols * rows)
+            var stack: [Int] = []
+            for c in 0..<cols {
+                for r in [0, rows - 1] where !kept[r * cols + c] && !reach[r * cols + c] {
+                    reach[r * cols + c] = true
+                    stack.append(r * cols + c)
+                }
+            }
+            for r in 0..<rows {
+                for c in [0, cols - 1] where !kept[r * cols + c] && !reach[r * cols + c] {
+                    reach[r * cols + c] = true
+                    stack.append(r * cols + c)
+                }
+            }
+            while let k = stack.popLast() {
+                let c = k % cols, r = k / cols
+                for (dc, dr) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let cc = c + dc, rr = r + dr
+                    guard cc >= 0, cc < cols, rr >= 0, rr < rows else { continue }
+                    let kk = rr * cols + cc
+                    if !kept[kk], !reach[kk] {
+                        reach[kk] = true
+                        stack.append(kk)
+                    }
+                }
+            }
+            return (0..<(cols * rows)).lazy.filter { !self.kept[$0] && !reach[$0] }.count
+        }
 
         /// Grow the backed region by `radius` cells (Chebyshev), closing thin gaps in real coverage.
         mutating func dilate(by radius: Int) {

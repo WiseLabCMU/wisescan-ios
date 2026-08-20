@@ -499,6 +499,20 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
                        "overlap beats gap — never trim")
     }
 
+    /// The pinhole metric must distinguish the two kinds of unbacked cell: honest partial coverage
+    /// (touches the mask border — a thin scan, a truncated chord) counts zero, while a genuinely
+    /// enclosed gap counts. It is the objective form of "do the walls look patchy".
+    func testInteriorHoleCells_countEnclosedGapsOnly() {
+        var mask = ARCoverageView.QuadSupport(cols: 5, rows: 5)
+        // Fill everything, then punch one interior cell and one border-touching notch.
+        for r in 0..<5 { for c in 0..<5 { mask.mark(c, r) } }
+        XCTAssertEqual(mask.interiorHoleCells, 0)
+
+        var holed = ARCoverageView.QuadSupport(cols: 5, rows: 5)
+        for r in 0..<5 { for c in 0..<5 where !(c == 2 && r == 2) && !(c == 0 && r == 1) { holed.mark(c, r) } }
+        XCTAssertEqual(holed.interiorHoleCells, 1, "the centre gap is a hole; the border notch is not")
+    }
+
     // MARK: - Model fitness (per-quad graceful degradation)
 
     /// The 5-sided-room case: RoomPlan models a curved wall as a straight chord, and historically that
