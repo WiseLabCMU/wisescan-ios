@@ -3544,8 +3544,30 @@ struct ARCoverageView: UIViewRepresentable {
         lap("levels")
         let allLevels = levelSearch.levels
         let derivedLevels = allLevels
-        let keptRoomPlanFloors = roomPlanFloors.filter { fl in
+        let dedupedFloors = roomPlanFloors.filter { fl in
             !allLevels.contains { abs($0.center.y - fl.center.y) <= ghostProxyQuadCoverageMeters }
+        }
+
+        // Per-quad graceful degradation. RoomPlan is designed to emit neat boxes; in a non-boxy room a
+        // wall quad can be a straight chord across a curve, and even cell-gated it subtracts the true
+        // curved mesh at its tangency and bakes a flat lattice through it. A quad that explains too
+        // little of the mesh in its own footprint is DEMOTED — it neither subtracts nor bakes, and its
+        // geometry stays honest mesh (the same decision the helix gets). Box rooms are untouched: every
+        // real straight wall explains nearly all of its mesh. Derived levels and ramps are exempt by
+        // construction — they are measured from this mesh, so they cannot mis-model it.
+        let roomPlanQuads = roomPlanWalls + dedupedFloors
+        let fitness = quadModelFitness(planes: roomPlanQuads, verts: verts, faces: faces,
+                                       faceClasses: faceClasses)
+        let trusted = zip(roomPlanQuads, fitness).filter { $0.1 >= quadModelMinExplainedRatio }.map(\.0)
+        let demoted = zip(roomPlanQuads, fitness).filter { $0.1 < quadModelMinExplainedRatio }
+        let walls = trusted.filter { $0.category == .wall }
+        let keptRoomPlanFloors = trusted.filter { $0.category == .floor }
+        if !demoted.isEmpty {
+            let desc = demoted.map { p, r in
+                String(format: "%@ %.1f×%.1fm explains %.0f%%",
+                       p.category == .wall ? "wall" : "floor", p.width, p.height, r * 100)
+            }.joined(separator: ", ")
+            print("[GhostProxy] demoted (kept as mesh): \(desc)")
         }
         // A ramp is fitted to whatever the levels leave unexplained — see `deriveRampPlanes`. It joins
         // the same two lists, so a ramp that fits coherently gets a clean tilted lattice and stops
@@ -3568,7 +3590,7 @@ struct ARCoverageView: UIViewRepresentable {
         lap("ramps")
         let derivedRamps = rampSearch.ramps
         let floorQuads = keptRoomPlanFloors + derivedLevels + derivedRamps
-        let bakedPlanes = roomPlanWalls + keptRoomPlanFloors + derivedLevels + derivedRamps
+        let bakedPlanes = walls + keptRoomPlanFloors + derivedLevels + derivedRamps
         // A mask set per list rather than one indexed across them: the lists overlap but their orders do
         // not correspond, and a masks array is only ever valid alongside the exact plane list it was
         // built from. Each call is one pass over the faces against a handful of planes.
@@ -3576,7 +3598,7 @@ struct ARCoverageView: UIViewRepresentable {
                                             faceClasses: faceClasses)
         let floorSupportAll = buildQuadSupport(planes: floorQuads, verts: verts, faces: faces,
                                                faceClasses: faceClasses)
-        let wallSupport = buildQuadSupport(planes: roomPlanWalls, verts: verts, faces: faces,
+        let wallSupport = buildQuadSupport(planes: walls, verts: verts, faces: faces,
                                            faceClasses: faceClasses)
         lap("supports")
 
@@ -3652,7 +3674,7 @@ struct ARCoverageView: UIViewRepresentable {
                 isFloorRemainder = true
             case 1, 6, 7:
                 // wall-plane family — subtract only where a RoomPlan quad replaces it
-                if quadCovers(roomPlanWalls, support: wallSupport, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
+                if quadCovers(walls, support: wallSupport, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
                     droppedCoveredWall += 1
                     continue
                 }
@@ -3747,7 +3769,7 @@ struct ARCoverageView: UIViewRepresentable {
         // Mirrors bakedPlanes' order exactly, so this line and "quad cells backed" read in parallel.
         // Floors carry their HEIGHT: on a multi-level scan the whole question is where RoomPlan seated
         // its floor plane relative to the levels actually present, and a size alone cannot answer it.
-        let quadDesc = (roomPlanWalls
+        let quadDesc = (walls
             .map { String(format: "wall %.1f×%.1fm", $0.width, $0.height) }
             + keptRoomPlanFloors
             .map { String(format: "floor y=%+.2f %.1f×%.1fm", $0.center.y, $0.width, $0.height) }
@@ -4019,6 +4041,62 @@ struct ARCoverageView: UIViewRepresentable {
             }
             mask.dilate(by: dilateBy)
             return mask
+        }
+    }
+
+    /// How well each quad MODELS the mesh in its own footprint: explained area / present area, where
+    /// "present" is same-family mesh projecting into the rectangle within a generous perpendicular band
+    /// and "explained" is the subset the plane actually accounts for (within coverage distance, at the
+    /// family's orientation tolerance).
+    ///
+    /// This is the per-quad box-room detector. RoomPlan is built to emit neat boxes; on a curved wall it
+    /// emits a straight chord, and even with cell gating the chord's tangency strip subtracts true
+    /// curved mesh and bakes a flat lattice through it — a straight chop slicing the curve. A chord
+    /// explains only its tangency strip (low ratio); a genuinely straight wall explains ~everything.
+    /// Thin scanning does NOT lower the ratio, because both sides of it count only mesh that exists —
+    /// an unscanned stretch contributes to neither.
+    ///
+    /// Deliberately non-competitive: a face may count as present for two overlapping quads. The
+    /// question here is each quad's own fitness, not which quad owns the face.
+    static func quadModelFitness(planes: [PlaneRegistration.Plane], verts: [SIMD3<Float>],
+                                 faces: [(Int, Int, Int)], faceClasses: Data) -> [Float] {
+        var explained = [Float](repeating: 0, count: planes.count)
+        var present = [Float](repeating: 0, count: planes.count)
+        for (idx, f) in faces.enumerated() {
+            guard idx < faceClasses.count,
+                  f.0 >= 0, f.1 >= 0, f.2 >= 0,
+                  f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
+            let family: PlaneRegistration.Category
+            switch faceClasses[faceClasses.startIndex + idx] {
+            case 1, 6, 7: family = .wall
+            case 2: family = .floor
+            default: continue
+            }
+            let a = verts[f.0], b = verts[f.1], c = verts[f.2]
+            let cross = simd_cross(b - a, c - a)
+            let area = 0.5 * simd_length(cross)
+            guard area > 1e-6 else { continue }
+            let n = cross / (2 * area)
+            let ctr = (a + b + c) / 3
+            for (i, p) in planes.enumerated() where p.category == family {
+                let d = ctr - p.center
+                let perp = abs(simd_dot(d, p.normal))
+                guard perp <= quadModelBandMeters,
+                      abs(simd_dot(d, p.xAxis)) <= p.width / 2 + 0.2,
+                      abs(simd_dot(d, p.yAxis)) <= p.height / 2 + 0.2 else { continue }
+                present[i] += area
+                let toleranceDeg = p.category == .floor ? quadSupportFloorMeanTiltDeg
+                                                        : quadSupportWallMeanTiltDeg
+                if perp <= ghostProxyQuadCoverageMeters,
+                   abs(simd_dot(n, p.normal)) >= cos(toleranceDeg * .pi / 180) {
+                    explained[i] += area
+                }
+            }
+        }
+        return planes.indices.map { i in
+            // Too little mesh to judge either way → benefit of the doubt; with nothing to back it, the
+            // cell masks keep it from baking anyway.
+            present[i] >= quadModelMinMeshAreaM2 ? explained[i] / present[i] : 1
         }
     }
 
@@ -4729,6 +4807,16 @@ struct ARCoverageView: UIViewRepresentable {
     /// Minimum face area for a support cell's orientation to count. A fully-meshed 0.25 m cell holds
     /// ~0.06 m²; a quarter of that keeps boundary slivers from claiming cells.
     static let quadSupportCellMinAreaM2: Float = 0.015
+    /// Perpendicular band for the model-fitness "present" count: how far off a quad's plane same-family
+    /// mesh may sit and still be considered part of what that quad is claiming to model. Wide enough to
+    /// see a curve's sagitta bulging away from its chord.
+    static let quadModelBandMeters: Float = 1.0
+    /// Below this explained/present ratio, a RoomPlan quad is demoted: it neither subtracts nor bakes,
+    /// and its mesh stays. A chord across a curve explains only its tangency strip; a real straight
+    /// wall explains nearly everything, and thin scanning does not lower the ratio.
+    static let quadModelMinExplainedRatio: Float = 0.5
+    /// Minimum same-family mesh area near a quad before fitness is judged at all.
+    static let quadModelMinMeshAreaM2: Float = 2.0
     /// How far a quad's backed region grows before unbacked cells are dropped, in SUPPORT cells
     /// (0.25 m). The size allowance that keeps a thinly-scanned wall solid while still cutting a quad
     /// off where it runs into open space.
@@ -4806,8 +4894,11 @@ struct ARCoverageView: UIViewRepresentable {
     /// v18: support analysis runs on a 0.25 m grid decoupled from the 1 m bake lattice (blended
     /// boundary cells were passing the tilt gate and claiming a metre at a time over ramps, flights and
     /// through walls), and each level is one in-plane connected component rather than one height — two
-    /// same-height areas separated by a wall are different surfaces.
-    static let ghostProxyVersionHeader = "# ghostproxy v18"
+    /// same-height areas separated by a wall are different surfaces. v19: a RoomPlan quad that explains
+    /// too little of the mesh in its own footprint is demoted outright — neither subtracting nor baking
+    /// — so a chord across a curved wall stops flattening even its tangency strip, and non-boxy rooms
+    /// degrade per-quad to honest mesh instead of failing room-wide.
+    static let ghostProxyVersionHeader = "# ghostproxy v19"
     /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
     /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/

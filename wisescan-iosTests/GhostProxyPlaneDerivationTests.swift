@@ -95,6 +95,27 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
             }
         }
 
+        /// A vertical wall curved in plan — a cylindrical band around the origin, wall-classified.
+        mutating func addCurvedWall(radius: Float, startDeg: Float, endDeg: Float, height: Float,
+                                    steps: Int = 40, rows: Int = 6) {
+            let base = verts.count
+            for i in 0...steps {
+                let a = (startDeg + (endDeg - startDeg) * Float(i) / Float(steps)) * .pi / 180
+                for j in 0...rows {
+                    verts.append(SIMD3(radius * cos(a), height * Float(j) / Float(rows), radius * sin(a)))
+                }
+            }
+            func vid(_ i: Int, _ j: Int) -> Int { base + i * (rows + 1) + j }
+            for i in 0..<steps {
+                for j in 0..<rows {
+                    faces.append((vid(i, j), vid(i + 1, j), vid(i + 1, j + 1)))
+                    faces.append((vid(i, j), vid(i + 1, j + 1), vid(i, j + 1)))
+                    classes.append(1)
+                    classes.append(1)
+                }
+            }
+        }
+
         /// A flight of treads: `count` steps of `tread` depth, each `riser` above the last.
         mutating func addFlight(baseY: Float, riser: Float, tread: Float, count: Int,
                                 width: ClosedRange<Float>, startZ: Float) {
@@ -412,6 +433,48 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
         XCTAssertEqual(rp.count, 1)
         let tilt = acos(min(abs(try XCTUnwrap(rp.first).normal.y), 1)) * 180 / .pi
         XCTAssertEqual(tilt, 8, accuracy: 1.0)
+    }
+
+    // MARK: - Model fitness (per-quad graceful degradation)
+
+    /// The 5-sided-room case: RoomPlan models a curved wall as a straight chord, and historically that
+    /// chord REPLACED the curve — the mesh was lopped and a flat quad stood in. Fitness is the per-quad
+    /// box-room detector: a chord explains only its tangency strip of the curve's mesh (low ratio), so
+    /// it is demoted and the curve survives as mesh; a genuinely straight wall explains ~everything.
+    func testChordAcrossACurvedWall_scoresLowFitness() {
+        var m = MeshBuilder()
+        // 80° of arc at R=4 (sagitta ~0.94 m), 3 m tall.
+        m.addCurvedWall(radius: 4, startDeg: -40, endDeg: 40, height: 3)
+
+        // The chord RoomPlan would emit: normal along +X, seated mid-sagitta, spanning the arc.
+        let chord = PlaneRegistration.Plane(
+            center: SIMD3(3.5, 1.5, 0), normal: SIMD3(1, 0, 0),
+            xAxis: SIMD3(0, 0, 1), yAxis: SIMD3(0, 1, 0),
+            width: 5.2, height: 3, category: .wall)
+
+        let fitness = ARCoverageView.quadModelFitness(planes: [chord], verts: m.verts,
+                                                      faces: m.faces, faceClasses: m.classData)[0]
+        XCTAssertLessThan(fitness, ARCoverageView.quadModelMinExplainedRatio,
+                          "a chord across a curve must be demoted, got \(fitness)")
+    }
+
+    /// The control: a straight wall quad on a straight (jittered) wall explains nearly all of it, and a
+    /// PARTIAL scan of that wall must not lower the score — both sides of the ratio count only mesh
+    /// that exists.
+    func testStraightWall_scoresHighFitness_evenPartiallyScanned() {
+        var m = MeshBuilder()
+        // A vertical wall as a curved wall of enormous radius (locally straight), covering only 60%
+        // of the quad's extent — the partial-scan case.
+        m.addCurvedWall(radius: 400, startDeg: -0.36, endDeg: 0.36, height: 3)
+
+        let wall = PlaneRegistration.Plane(
+            center: SIMD3(400, 1.5, 0), normal: SIMD3(1, 0, 0),
+            xAxis: SIMD3(0, 0, 1), yAxis: SIMD3(0, 1, 0),
+            width: 8.4, height: 3, category: .wall)   // wider than the scanned 5 m stretch
+
+        let fitness = ARCoverageView.quadModelFitness(planes: [wall], verts: m.verts,
+                                                      faces: m.faces, faceClasses: m.classData)[0]
+        XCTAssertGreaterThan(fitness, 0.9, "a straight wall explains its mesh, got \(fitness)")
     }
 
     // MARK: - Per-cell quad support
