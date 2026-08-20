@@ -142,51 +142,11 @@ enum EquirectPostCalibration {
             return "registration already baked — prior poses stamped for \(stills.count) still(s)"
         }
 
-        report("Reading scan mesh…")
-        let tParse = Date()
-        guard let mesh = RigCalibrationSolver.SavedMeshOBJ.load(objURL: meshURL(scanDir: scanDir, rawDataDir: rawDataDir)) else {
-            bake(stills: stills, profile: persistedOrPrior(), source: sourcePrior,
-                 residual: nil)
-            return "mesh.obj unavailable — prior poses stamped for \(stills.count) still(s)"
-        }
-        let parseMs = ms(tParse)
-
+        // v15's photometric cost needs no mesh at all — the solver's last mesh dependency
+        // left with the edge cost (validated over six field comparisons, then deleted).
         let solveSet = swayFiltered(stills, report: report)
-
-        // Build solver inputs from the best-spread subset (aliasing shrinks and the
-        // solve sharpens with baseline; cost grows linearly with inputs). Mesh edges for
-        // ALL positions extract in one face pass; the edge maps decode per still.
-        let tPrep = Date()
         let selected = selectForSolve(solveSet, cap: 5, report: report)
-        let edgesPerStill = RigCalibrationSolver.extractMeshEdges(
-            mesh: mesh, nearAll: selected.map(\.phonePos),
-            radius: AppConstants.calibrationMeshRadiusMeters)
-        var inputs: [RigCalibrationSolver.CalibrationInput] = []
-        for (idx, still) in selected.enumerated() {
-            report("Calibrating 360° rig (\(idx + 1)/\(selected.count))…")
-            let edges = edgesPerStill[idx]
-            // The operator/rig mask for this still, written moments earlier in the same
-            // Process run. Absent (older scan, or generation failed) just falls back to
-            // the elevation band.
-            let maskURL = rawDataDir.appendingPathComponent("equirect_masks")
-                .appendingPathComponent(still.jpgURL.deletingPathExtension()
-                    .appendingPathExtension("png").lastPathComponent)
-            guard edges.count >= AppConstants.calibrationMinMeshEdges,
-                  let jpegData = try? Data(contentsOf: still.jpgURL),
-                  let edgeMap = RigCalibrationSolver.detectEquirectEdges(
-                      in: jpegData, operatorMask: OperatorRigMask.load(pngAt: maskURL))
-            else { continue }
-            inputs.append(RigCalibrationSolver.CalibrationInput(
-                phoneToWorld: still.phoneToWorld, edgeMap: edgeMap, meshEdges: edges))
-        }
-        let prepMs = ms(tPrep)
-
         let stored = persistedOrPrior()
-        // The v≤14 few-inputs path (hold geometry, edge-cost session yaw off one still) is
-        // gone: the photometric solver handles <4 stills itself by holding the offset at
-        // the tape anchor and refining yaw photometrically, which is the same idea with
-        // the better cost. Edge `inputs` are now built ONLY for the validation-cycle
-        // comparison and the diagnostics overlay — an empty set skips both, never the solve.
 
         // Full solve — mechanical bounds, yaw global (see below).
         report("Solving 360° rig calibration…")
@@ -230,25 +190,6 @@ enum EquirectPostCalibration {
             stills: selected.map { ($0.jpgURL, $0.phoneToWorld) },
             rawDataDir: rawDataDir, bounds: bounds, report: report)
 
-        // VALIDATION CYCLE ONLY: the edge cost still runs, seeded with the photometric
-        // basin so the two are compared inside the same quarter-turn, and its answer is
-        // LOGGED, never baked. One or two clean field comparisons and this block — and
-        // the ~700 lines it keeps alive — get deleted rather than bypassed.
-        if let photo, !inputs.isEmpty {
-            let edge = RigCalibrationSolver.solve(inputs: inputs, prior: stored, bounds: bounds,
-                                                  yawAnchor: photo.coarseYawRad)
-            if edge.converged {
-                let dt = simd_length(edge.profile.offsetPhone - photo.profile.offsetPhone)
-                let dy = abs(atan2(sin(edge.profile.yaw - photo.profile.yaw),
-                                   cos(edge.profile.yaw - photo.profile.yaw))) * 180 / .pi
-                PerfDiag.log(String(format: "[RigCal] edge-compare: Δoffset=%.1fcm Δyaw=%.1f° "
-                    + "(edge |%.3fm| yaw=%.1f° %.2fpx elev=%.1f°)",
-                    dt * 100, dy, edge.profile.rodLengthM, edge.profile.yaw * 180 / .pi,
-                    edge.residualPx, edge.elevOffsetDeg))
-            } else {
-                PerfDiag.log("[RigCal] edge-compare: edge solve did not converge")
-            }
-        }
         let solveMs = ms(tSolve)
 
         guard let photo else {
@@ -317,11 +258,8 @@ enum EquirectPostCalibration {
         p.with(cameraModel: stored.cameraModel,
                             cameraSerialNumber: stored.cameraSerialNumber).save()
 
-        if PerfDiag.enabled, !inputs.isEmpty {
-            writeDiagnostics(inputs: inputs, solved: p)
-        }
-        return String(format: "solved (zncc %.3f, spread %.1f°, %d stills; parse %ds + prep %ds + solve %ds, %d iters; total %ds)",
-                      photo.zncc, photo.yawSpreadDeg, photo.usedStills, parseMs / 1000, prepMs / 1000,
+        return String(format: "solved (zncc %.3f, spread %.1f°, %d stills; solve %ds, %d iters; total %ds)",
+                      photo.zncc, photo.yawSpreadDeg, photo.usedStills,
                       solveMs / 1000, photo.iterations, ms(t0) / 1000)
     }
 
@@ -514,6 +452,35 @@ enum EquirectPostCalibration {
         return stored
     }
 
+    /// Horn's quaternion solution for the rotation minimizing ‖R·a − b‖, via power iteration
+    /// on the 4×4 profile matrix — a handful of unit vectors, so no linear-algebra dependency.
+    private nonisolated static func bestFitRotation(from source: [SIMD3<Float>],
+                                                    to target: [SIMD3<Float>]) -> simd_float3x3? {
+        guard source.count == target.count, source.count >= 3 else { return nil }
+        var covariance = simd_float3x3(0)
+        for (a, b) in zip(source, target) {
+            covariance += simd_float3x3(columns: (a.x * b, a.y * b, a.z * b))
+        }
+        let m = covariance
+        let trace = m[0][0] + m[1][1] + m[2][2]
+        var profile = simd_float4x4(0)
+        profile[0] = SIMD4<Float>(trace, m[1][2] - m[2][1], m[2][0] - m[0][2], m[0][1] - m[1][0])
+        profile[1] = SIMD4<Float>(m[1][2] - m[2][1], m[0][0] - m[1][1] - m[2][2], m[0][1] + m[1][0], m[2][0] + m[0][2])
+        profile[2] = SIMD4<Float>(m[2][0] - m[0][2], m[0][1] + m[1][0], -m[0][0] + m[1][1] - m[2][2], m[1][2] + m[2][1])
+        profile[3] = SIMD4<Float>(m[0][1] - m[1][0], m[2][0] + m[0][2], m[1][2] + m[2][1], -m[0][0] - m[1][1] + m[2][2])
+        // Shifted power iteration: the shift keeps the dominant eigenvalue positive so the
+        // iteration converges on the LARGEST one, which is the optimal quaternion.
+        var q = SIMD4<Float>(1, 0, 0, 0)
+        let shift = abs(trace) + 3
+        for _ in 0..<200 {
+            let next = profile * q + shift * q
+            let length = simd_length(next)
+            guard length > 1e-9 else { return nil }
+            q = next / length
+        }
+        return simd_float3x3(simd_quatf(ix: q.y, iy: q.z, iz: q.w, r: q.x))
+    }
+
     /// Which solved parameters came back on (or within a hair of) a bound. "Within a hair"
     /// matters: Nelder-Mead approaches a wall asymptotically, so an exact equality test
     /// misses the case entirely — 2 mm inside a ±30 mm box is a rail, not a fit.
@@ -624,69 +591,6 @@ enum EquirectPostCalibration {
         return direction
     }
 
-    /// Horn's quaternion solution for the rotation minimizing ‖R·a − b‖, via power iteration
-    /// on the 4×4 profile matrix — a handful of unit vectors, so no linear-algebra dependency.
-    private nonisolated static func bestFitRotation(from source: [SIMD3<Float>],
-                                                    to target: [SIMD3<Float>]) -> simd_float3x3? {
-        guard source.count == target.count, source.count >= 3 else { return nil }
-        var covariance = simd_float3x3(0)
-        for (a, b) in zip(source, target) {
-            covariance += simd_float3x3(columns: (a.x * b, a.y * b, a.z * b))
-        }
-        let m = covariance
-        let trace = m[0][0] + m[1][1] + m[2][2]
-        var profile = simd_float4x4(0)
-        profile[0] = SIMD4<Float>(trace, m[1][2] - m[2][1], m[2][0] - m[0][2], m[0][1] - m[1][0])
-        profile[1] = SIMD4<Float>(m[1][2] - m[2][1], m[0][0] - m[1][1] - m[2][2], m[0][1] + m[1][0], m[2][0] + m[0][2])
-        profile[2] = SIMD4<Float>(m[2][0] - m[0][2], m[0][1] + m[1][0], -m[0][0] + m[1][1] - m[2][2], m[1][2] + m[2][1])
-        profile[3] = SIMD4<Float>(m[0][1] - m[1][0], m[2][0] + m[0][2], m[1][2] + m[2][1], -m[0][0] - m[1][1] + m[2][2])
-        // Shifted power iteration: the shift keeps the dominant eigenvalue positive so the
-        // iteration converges on the LARGEST one, which is the optimal quaternion.
-        var q = SIMD4<Float>(1, 0, 0, 0)
-        let shift = abs(trace) + 3
-        for _ in 0..<200 {
-            let next = profile * q + shift * q
-            let length = simd_length(next)
-            guard length > 1e-9 else { return nil }
-            q = next / length
-        }
-        return simd_float3x3(simd_quatf(ix: q.y, iy: q.z, iz: q.w, r: q.x))
-    }
-
-    private nonisolated static func meshURL(scanDir: URL, rawDataDir: URL) -> URL {
-        let top = scanDir.appendingPathComponent("mesh.obj")
-        return FileManager.default.fileExists(atPath: top.path)
-            ? top : rawDataDir.appendingPathComponent("mesh.obj")
-    }
-
-    private nonisolated static func writeDiagnostics(
-        inputs: [RigCalibrationSolver.CalibrationInput], solved: RigProfile
-    ) {
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("rigcal_diag", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let stamp = Int64(Date().timeIntervalSince1970 * 1000)   // epoch ms (CONTRIBUTING → Units & time)
-        let renderStart = Date()
-        for (idx, input) in inputs.enumerated() {
-            // Subsample edges for the overlay like the solve does — splatting the full
-            // uncapped set (~50k edges/still) cost ~30 s of the 360post3 total.
-            let maxEdges = AppConstants.calibrationMaxEdgesPerInput
-            let edges: [RigCalibrationSolver.MeshEdge]
-            if input.meshEdges.count <= maxEdges {
-                edges = input.meshEdges
-            } else {
-                let step = max(1, input.meshEdges.count / maxEdges)
-                edges = Swift.stride(from: 0, to: input.meshEdges.count, by: step)
-                    .prefix(maxEdges).map { input.meshEdges[$0] }
-            }
-            let slim = RigCalibrationSolver.CalibrationInput(
-                phoneToWorld: input.phoneToWorld, edgeMap: input.edgeMap, meshEdges: edges)
-            guard let png = RigCalibrationSolver.renderDiagnostic(
-                input: slim, solved: solved, prior: .mechanicalPrior) else { continue }
-            try? png.write(to: dir.appendingPathComponent("post_\(stamp)_still\(idx + 1).png"))
-        }
-        PerfDiag.log("[RigCal] postprocess diagnostics (\(Int(Date().timeIntervalSince(renderStart) * 1000)) ms) → Documents/rigcal_diag/post_*.png")
-    }
 }
 
 extension EquirectPostCalibration {

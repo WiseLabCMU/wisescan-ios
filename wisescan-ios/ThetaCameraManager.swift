@@ -801,6 +801,11 @@ final class ThetaCameraManager {
                 self.cameraClockOffsetUncMs = clock.uncertaintyMs
                 self.log(.capture, String(format: "Camera clock offset %+.2f s ±%dms — EXIF times decode to true shutter times this scan",
                                           Double(clock.offsetMs) / 1000, clock.uncertaintyMs))
+            } else {
+                // Say so — an absent offset in the sidecars must be distinguishable from
+                // a build that never measured. Not fatal: this scan's EXIF just stays
+                // latency-plus-offset, like every scan before it.
+                self.log(.capture, "Camera clock offset unavailable (tick never caught) — EXIF stays uncorrected this scan")
             }
         }
         if let dir = rawDataDir?.appendingPathComponent("equirect_stills"),
