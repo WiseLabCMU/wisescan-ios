@@ -3466,6 +3466,18 @@ struct ARCoverageView: UIViewRepresentable {
         let roomPlanFloors = roomPlanPlanes.filter { $0.category == .floor }
         guard !roomPlanWalls.isEmpty else { return nil }
 
+        // Phase timing, printed with the other build diagnostics. The derivation/support machinery is
+        // O(faces × planes) in several separate passes, so its cost scales with exactly the scenes it
+        // helps most — measure rather than assume.
+        let tStart = DispatchTime.now()
+        var tPrev = tStart
+        var laps: [(String, Double)] = []
+        func lap(_ name: String) {
+            let now = DispatchTime.now()
+            laps.append((name, Double(now.uptimeNanoseconds - tPrev.uptimeNanoseconds) / 1e6))
+            tPrev = now
+        }
+
         // Parse the OBJ's v/f lines (buildMeshOBJ emits only those; transformOBJ may add comment
         // lines — skipped). Faces are 1-based vertex indices.
         var verts: [SIMD3<Float>] = []
@@ -3505,6 +3517,7 @@ struct ARCoverageView: UIViewRepresentable {
                 i = j + 1
             }
         }
+        lap("parse")
         // Alignment contract: one class byte per emitted face. A mismatch means the inputs are
         // from different builds — refuse rather than subtract the wrong faces.
         guard faces.count == faceClasses.count, !verts.isEmpty else {
@@ -3513,25 +3526,59 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         // Levels RoomPlan never modelled — upper landings, raised platforms, sunken areas — derived
-        // from this same classified mesh (see `deriveLevelPlanes`) and deduped against the one floor
-        // plane RoomPlan did give us. They are baked as quads AND fed to the coverage test below, so
-        // each one subtracts its own mesh faces exactly as the RoomPlan floor does for a flat room:
-        // a landing arrives as a clean quad instead of a lump. A flat single-level room derives one
-        // level that the RoomPlan floor already represents, so it dedupes away to nothing and the
-        // output is identical to not running this at all.
+        // from this same classified mesh (see `deriveLevelPlanes`). They are baked as quads AND fed to
+        // the coverage test below, so each one subtracts its own mesh faces exactly as the RoomPlan
+        // floor does for a flat room: a landing arrives as a clean quad instead of a lump.
+        //
+        // Where a RoomPlan floor and a derived level sit at one height, the DERIVED level wins and the
+        // RoomPlan floor is dropped. Both directions of this dedupe have now been tried, and preferring
+        // RoomPlan lost twice over: its floor is seated on coverage, not geometry (measured 22 cm off —
+        // one riser — on a partially-covered landing), and under per-cell support a mis-seated plane can
+        // back zero cells, at which point deduping the level away leaves genuine flat floor with NO quad
+        // at all (device-observed: floor 0/216 with the matching level discarded). The level is measured
+        // from the mesh itself, so preferring it cannot lose the surface. RoomPlan floors with no
+        // matching level (its seat on a stairwell flight, say) still bake, cell-gated like everything
+        // else.
         let levelSearch = deriveLevelPlanes(verts: verts, faces: faces, faceClasses: faceClasses,
                                             reference: roomPlanFloors.first)
+        lap("levels")
         let allLevels = levelSearch.levels
-        let derivedLevels = allLevels.filter { lvl in
-            !roomPlanFloors.contains { abs($0.center.y - lvl.center.y) <= ghostProxyQuadCoverageMeters }
+        let derivedLevels = allLevels
+        let keptRoomPlanFloors = roomPlanFloors.filter { fl in
+            !allLevels.contains { abs($0.center.y - fl.center.y) <= ghostProxyQuadCoverageMeters }
         }
         // A ramp is fitted to whatever the levels leave unexplained — see `deriveRampPlanes`. It joins
         // the same two lists, so a ramp that fits coherently gets a clean tilted lattice and stops
         // being a lump, and one that does not just stays mesh.
-        let derivedRamps = deriveRampPlanes(verts: verts, faces: faces, faceClasses: faceClasses,
-                                            explainedBy: roomPlanFloors + derivedLevels)
-        let floorQuads = roomPlanFloors + derivedLevels + derivedRamps
-        let bakedPlanes = roomPlanPlanes + derivedLevels + derivedRamps
+        //
+        // The "unexplained" set is computed against per-cell support, which is load-bearing rather than a
+        // refinement: an over-claiming floor rectangle removes a 30 cm-tall band from every ramp passing
+        // through its height, which for an 8° slope is ~2 m of run per quad. Three such rectangles sliced
+        // a real ramp into fragments below the area gate and suppressed ramp detection entirely.
+        // UNDILATED mask for ramp-candidate selection only. Dilation is an anti-patchiness allowance
+        // for subtraction and baking; on a 1 m grid it also claims up to a metre of the ramp on the
+        // adjacent level's behalf, which truncated a fitted ramp's bottom short of the floor it meets
+        // and starved the fit of its end geometry. Candidate selection wants the levels' true
+        // footprint; the dilated masks below still govern what gets subtracted and drawn.
+        let floorSupport = buildQuadSupport(planes: keptRoomPlanFloors + derivedLevels, verts: verts,
+                                            faces: faces, faceClasses: faceClasses, dilateBy: 0)
+        let rampSearch = deriveRampPlanes(verts: verts, faces: faces, faceClasses: faceClasses,
+                                          explainedBy: keptRoomPlanFloors + derivedLevels,
+                                          support: floorSupport)
+        lap("ramps")
+        let derivedRamps = rampSearch.ramps
+        let floorQuads = keptRoomPlanFloors + derivedLevels + derivedRamps
+        let bakedPlanes = roomPlanWalls + keptRoomPlanFloors + derivedLevels + derivedRamps
+        // A mask set per list rather than one indexed across them: the lists overlap but their orders do
+        // not correspond, and a masks array is only ever valid alongside the exact plane list it was
+        // built from. Each call is one pass over the faces against a handful of planes.
+        let bakedSupport = buildQuadSupport(planes: bakedPlanes, verts: verts, faces: faces,
+                                            faceClasses: faceClasses)
+        let floorSupportAll = buildQuadSupport(planes: floorQuads, verts: verts, faces: faces,
+                                               faceClasses: faceClasses)
+        let wallSupport = buildQuadSupport(planes: roomPlanWalls, verts: verts, faces: faces,
+                                           faceClasses: faceClasses)
+        lap("supports")
 
         var objData = Data()
         objData.reserveCapacity(256 * 1024)
@@ -3540,11 +3587,28 @@ struct ARCoverageView: UIViewRepresentable {
         // Process; `quadFaces` tells the ghost renderer how many TRAILING faces are the RoomPlan
         // lattice (they get thick wireframe lines — sparse 1 m grid lines at the default 1 mm
         // thickness are sub-pixel beyond ~1.5 m and visually vanish; 2026-07-16 device finding).
-        let quadFaceCount = bakedPlanes.reduce(0) { acc, p in
-            let cols = max(1, Int((p.width / ghostProxyQuadCellMeters).rounded(.up)))
-            let rows = max(1, Int((p.height / ghostProxyQuadCellMeters).rounded(.up)))
-            return acc + cols * rows * 2
+        // The support masks are FINE-grid (0.25 m); baking happens on the 1 m lattice. A bake cell is
+        // kept when any of its fine cells is backed — the drawn lattice stays coarse and readable while
+        // the decision underneath is precise. Computed once here and reused by the bake loop and the
+        // header count, which must agree with what is actually emitted.
+        func bakeKept(_ p: PlaneRegistration.Plane, _ mask: QuadSupport) -> [Bool] {
+            let (bCols, bRows) = quadGrid(p)
+            let (fCols, fRows) = quadSupportGrid(p)
+            var kept = [Bool](repeating: false, count: bCols * bRows)
+            for fr in 0..<fRows {
+                for fc in 0..<fCols where mask.isKept(fc, fr) {
+                    // Map by coordinate, not by ratio — the two grids round up independently.
+                    let u = (Float(fc) + 0.5) * p.width / Float(fCols)
+                    let v = (Float(fr) + 0.5) * p.height / Float(fRows)
+                    let bc = min(bCols - 1, max(0, Int(u / (p.width / Float(bCols)))))
+                    let br = min(bRows - 1, max(0, Int(v / (p.height / Float(bRows)))))
+                    kept[br * bCols + bc] = true
+                }
+            }
+            return kept
         }
+        let bakedKept = zip(bakedPlanes, bakedSupport).map { bakeKept($0, $1) }
+        let quadFaceCount = bakedKept.reduce(0) { $0 + $1.lazy.filter { $0 }.count * 2 }
         objData.append(contentsOf: "\(ghostProxyVersionHeader) quadFaces=\(quadFaceCount)\n".utf8)
 
         // Pass 1: faces surviving the class filter. Two sets come out of the one pass — the proxy's,
@@ -3558,6 +3622,8 @@ struct ARCoverageView: UIViewRepresentable {
         var keptFloorBeyondExtent = 0
         var keptFloorOffPlane = 0
         var droppedCoveredWall = 0
+        var keptWall = 0
+        var keptContent = 0
         for (faceIdx, f) in faces.enumerated() {
             guard f.0 >= 0, f.1 >= 0, f.2 >= 0, f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
             // Off-level floor geometry the proxy keeps but the dynamic mesh must not: it is
@@ -3573,7 +3639,8 @@ struct ARCoverageView: UIViewRepresentable {
                 // floor family — subtract only where a RoomPlan floor quad actually sits on it, so
                 // off-level geometry (landings, treads, ledges, the climbing part of a ramp)
                 // survives instead of being replaced by the single flat full-extent quad
-                switch quadCoverage(floorQuads, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
+                switch quadCoverage(floorQuads, support: floorSupportAll,
+                                    (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
                 case .covered:
                     droppedCoveredFloor += 1
                     continue
@@ -3585,17 +3652,19 @@ struct ARCoverageView: UIViewRepresentable {
                 isFloorRemainder = true
             case 1, 6, 7:
                 // wall-plane family — subtract only where a RoomPlan quad replaces it
-                if quadCovers(roomPlanWalls, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
+                if quadCovers(roomPlanWalls, support: wallSupport, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
                     droppedCoveredWall += 1
                     continue
                 }
+                keptWall += 1
             default:
-                break    // content — keep
+                keptContent += 1    // content — keep
             }
             keptFaces.append(f)
             if !isFloorRemainder { dynamicFaces.append(f) }
         }
 
+        lap("filter")
         // Pass 2: compact vertices (only referenced ones emitted, indices remapped 1-based) for a
         // face subset. Runs once per artifact — the two sets differ, so they cannot share a body.
         func compactedBody(_ faceList: [(Int, Int, Int)]) -> (data: Data, vertices: Int) {
@@ -3633,6 +3702,7 @@ struct ARCoverageView: UIViewRepresentable {
         dynamicOBJData.append(dynamicBody.data)
         let dynamicVertexCount = dynamicBody.vertices
         let dynamicFaceCount = dynamicFaces.count
+        lap("compact")
 
         // Bake the wall + floor + derived-level quads into the same OBJ (the clean stand-ins for the
         // subtracted architectural faces). Tessellated into ~1 m grid cells rather than one big
@@ -3641,9 +3711,9 @@ struct ARCoverageView: UIViewRepresentable {
         // visually tell what the walls are"). A 1 m grid draws as a visible lattice — reads as a
         // solid face — while still being massive decimation (a 5×3 m wall = 30 tris vs. the
         // thousands of mesh faces it replaced).
-        for p in bakedPlanes {
-            let cols = max(1, Int((p.width / ghostProxyQuadCellMeters).rounded(.up)))
-            let rows = max(1, Int((p.height / ghostProxyQuadCellMeters).rounded(.up)))
+        for (planeIdx, p) in bakedPlanes.enumerated() {
+            let (cols, rows) = quadGrid(p)
+            let keptCells = bakedKept[planeIdx]
             let origin = p.center - p.xAxis * (p.width / 2) - p.yAxis * (p.height / 2)
             let dx = p.xAxis * (p.width / Float(cols))
             let dy = p.yAxis * (p.height / Float(rows))
@@ -3656,7 +3726,7 @@ struct ARCoverageView: UIViewRepresentable {
             }
             func vid(_ c: Int, _ r: Int) -> Int { vertexOffset + r * (cols + 1) + c }
             for r in 0..<rows {
-                for c in 0..<cols {
+                for c in 0..<cols where keptCells[r * cols + c] {
                     objData.append(contentsOf: "f \(vid(c, r)) \(vid(c + 1, r)) \(vid(c + 1, r + 1))\n".utf8)
                     objData.append(contentsOf: "f \(vid(c, r)) \(vid(c + 1, r + 1)) \(vid(c, r + 1))\n".utf8)
                     totalFaces += 2
@@ -3666,6 +3736,7 @@ struct ARCoverageView: UIViewRepresentable {
             totalVertices += (cols + 1) * (rows + 1)
         }
 
+        lap("bake")
         guard totalFaces > 0 else { return nil }
         // Diagnostic: the baked quad dimensions, verbatim from the roomplan surfaces. A wall whose
         // lattice looks "short" on device either really is short here (RoomPlan partial-wall
@@ -3673,15 +3744,13 @@ struct ARCoverageView: UIViewRepresentable {
         // were dropped by class (see the drop tally) — this line separates the two from console.
         // Derived levels are listed with their HEIGHT rather than just their size: on a stairwell the
         // whole point is which levels came out and how far apart they sit.
-        let quadDesc = (roomPlanPlanes
-            .map { p in
-                // Floors carry their HEIGHT: on a multi-level scan the whole question is where RoomPlan
-                // seated its one floor plane relative to the levels actually present, and a size alone
-                // cannot answer it.
-                p.category == .wall
-                    ? String(format: "wall %.1f×%.1fm", p.width, p.height)
-                    : String(format: "floor y=%+.2f %.1f×%.1fm", p.center.y, p.width, p.height)
-            }
+        // Mirrors bakedPlanes' order exactly, so this line and "quad cells backed" read in parallel.
+        // Floors carry their HEIGHT: on a multi-level scan the whole question is where RoomPlan seated
+        // its floor plane relative to the levels actually present, and a size alone cannot answer it.
+        let quadDesc = (roomPlanWalls
+            .map { String(format: "wall %.1f×%.1fm", $0.width, $0.height) }
+            + keptRoomPlanFloors
+            .map { String(format: "floor y=%+.2f %.1f×%.1fm", $0.center.y, $0.width, $0.height) }
             + derivedLevels
             .map { String(format: "level y=%.2f %.1f×%.1fm", $0.center.y, $0.width, $0.height) }
             + derivedRamps
@@ -3697,11 +3766,260 @@ struct ARCoverageView: UIViewRepresentable {
         if !levelSearch.candidates.isEmpty {
             print("[GhostProxy] level candidates: \(levelSearch.traceDescription)")
         }
-        print("[GhostProxy] quads baked: \(quadDesc) | mesh faces kept=\(keptFaces.count) (dynamic \(dynamicFaces.count)) dropped: ceiling=\(droppedCeiling) coveredFloor=\(droppedCoveredFloor) coveredWall=\(droppedCoveredWall) | floorKept=\(keptFloorBeyondExtent + keptFloorOffPlane) (beyondExtent=\(keptFloorBeyondExtent) offPlane=\(keptFloorOffPlane))")
+        // Backed cells vs total, per plane: how much of each rectangle survived the support mask. A low
+        // fraction is the rectangle over-claiming, which is what the mask exists to contain — and seeing
+        // it per plane is what tells RoomPlan's footprint quad apart from two disconnected landings.
+        let supportDesc = zip(bakedPlanes, bakedSupport)
+            .map { p, m in
+                let (cols, rows) = quadSupportGrid(p)
+                return String(format: "%@ %d/%d", p.category == .wall ? "wall" : "floor",
+                              m.keptCount, cols * rows)
+            }
+            .joined(separator: " ")
+        if !rampSearch.groups.isEmpty {
+            print("[GhostProxy] ramp groups: \(rampSearch.traceDescription)")
+            for (i, g) in rampSearch.groups.enumerated() {
+                if let map = g.shapeMap {
+                    print("[GhostProxy] ramp shape[\(i)] (\(g.verdict.rawValue), across × up-slope):\n\(map)")
+                }
+            }
+        }
+        let totalMs = Double(DispatchTime.now().uptimeNanoseconds - tStart.uptimeNanoseconds) / 1e6
+        let lapDesc = laps.map { String(format: "%@ %.0fms", $0.0, $0.1) }.joined(separator: " ")
+        print(String(format: "[GhostProxy] build time %.0fms | %@", totalMs, lapDesc))
+        print("[GhostProxy] quads baked: \(quadDesc)")
+        print("[GhostProxy] quad cells backed: \(supportDesc)")
+        // The face budget, split by WHY each face survived — the decimation picture in one line. The
+        // quads themselves are a rounding error here (a few hundred faces against six figures), so the
+        // only levers on artifact size are how much architecture gets subtracted and how much content
+        // there is. `keptWall` is therefore the addressable pool for deriving more wall planes from the
+        // mesh: it is architecture RoomPlan did not model, and every plane recovered from it converts
+        // thousands of faces into a handful of lattice cells. `keptContent` is the honest signal and is
+        // not addressable that way — it can only be decimated, which costs fidelity.
+        let total = keptFaces.count + droppedCeiling + droppedCoveredFloor + droppedCoveredWall
+        let keptPct = total > 0 ? 100 * keptFaces.count / total : 0
+        print("[GhostProxy] faces: \(total) → \(keptFaces.count) kept (\(keptPct)%), dynamic \(dynamicFaces.count) | dropped: wall=\(droppedCoveredWall) floor=\(droppedCoveredFloor) ceiling=\(droppedCeiling) | kept: wall=\(keptWall) content=\(keptContent) floor=\(keptFloorBeyondExtent + keptFloorOffPlane) (beyondExtent=\(keptFloorBeyondExtent) offPlane=\(keptFloorOffPlane))")
         let proxyResult = MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces)
         let dynamicResult = MeshExportResult(data: dynamicOBJData, vertexCount: dynamicVertexCount, faceCount: dynamicFaceCount)
         return GhostProxyBuildResult(proxy: proxyResult, dynamic: dynamicResult,
                                      levels: allLevels, ramps: derivedRamps)
+    }
+
+    /// Which cells of a quad's tessellation grid are actually backed by mesh, so a quad stands in only
+    /// where it demonstrably describes something.
+    ///
+    /// Rectangles are a bad fit for real surfaces, and the failures compound. RoomPlan's floor spans the
+    /// room's whole plan-view footprint (observed: 8.9×23.9 m). A derived level's bounding rectangle
+    /// spans every patch at that height, including the space between two areas that are not connected
+    /// (observed: 6.3 m² of floor inside a 12.0×14.9 m box — 3.5% fill). A single plane fitted to a
+    /// curved wall runs straight through open space. In every case the quad both DRAWS where there is
+    /// nothing and SUBTRACTS mesh it does not represent — and the subtraction is the worse half, because
+    /// it sliced a ramp into fragments too small to fit and so suppressed ramp detection entirely.
+    ///
+    /// Working per cell instead of per rectangle fixes all of them with one mechanism: the rectangle
+    /// stays rectangular but only its backed cells exist, so a quad becomes a rasterisation of the shape
+    /// actually observed. Baking and subtraction read the SAME mask, so a dropped cell can never leave a
+    /// hole — there was nothing there to stand in for.
+    ///
+    /// `dilate` is the tolerance, and it is deliberately a size allowance rather than a per-cell test:
+    /// marked cells grow by `quadSupportDilateCells`, so thin or patchy coverage on a genuine wall still
+    /// reads as solid, while a large contiguous unbacked region — the open space beyond a curve, the gap
+    /// between two disconnected landings — stays dropped.
+    struct QuadSupport {
+        let cols: Int
+        let rows: Int
+        private(set) var kept: [Bool]
+
+        init(cols: Int, rows: Int) {
+            self.cols = max(1, cols)
+            self.rows = max(1, rows)
+            kept = [Bool](repeating: false, count: self.cols * self.rows)
+        }
+
+        func isKept(_ c: Int, _ r: Int) -> Bool {
+            guard c >= 0, c < cols, r >= 0, r < rows else { return false }
+            return kept[r * cols + c]
+        }
+
+        mutating func mark(_ c: Int, _ r: Int) {
+            guard c >= 0, c < cols, r >= 0, r < rows else { return }
+            kept[r * cols + c] = true
+        }
+
+        var keptCount: Int { kept.lazy.filter { $0 }.count }
+
+        /// Grow the backed region by `radius` cells (Chebyshev), closing thin gaps in real coverage.
+        mutating func dilate(by radius: Int) {
+            guard radius > 0 else { return }
+            for _ in 0..<radius {
+                var next = kept
+                for r in 0..<rows {
+                    for c in 0..<cols where kept[r * cols + c] {
+                        for dr in -1...1 {
+                            for dc in -1...1 {
+                                let rr = r + dr, cc = c + dc
+                                guard rr >= 0, rr < rows, cc >= 0, cc < cols else { continue }
+                                next[rr * cols + cc] = true
+                            }
+                        }
+                    }
+                }
+                kept = next
+            }
+        }
+    }
+
+    /// Cell grid dimensions a plane tessellates into for BAKING (the drawn lattice).
+    static func quadGrid(_ p: PlaneRegistration.Plane) -> (cols: Int, rows: Int) {
+        (max(1, Int((p.width / ghostProxyQuadCellMeters).rounded(.up))),
+         max(1, Int((p.height / ghostProxyQuadCellMeters).rounded(.up))))
+    }
+
+    /// Cell grid the SUPPORT analysis runs on — deliberately finer than the bake lattice. At bake
+    /// resolution (1 m) a cell straddling a landing's edge blends the landing's faces with the ramp,
+    /// flight or next-room floor beside it, the blend passes the tilt gate, and the whole metre gets
+    /// claimed — device-observed as the landing lattice squared out over a ramp, into a staircase, and
+    /// through walls. At 0.25 m the same cells read the foreign surface's own orientation (a ramp's
+    /// 3.9°, a smoothed flight's ~30°) and are rejected on their merits.
+    static func quadSupportGrid(_ p: PlaneRegistration.Plane) -> (cols: Int, rows: Int) {
+        (max(1, Int((p.width / quadSupportCellMeters).rounded(.up))),
+         max(1, Int((p.height / quadSupportCellMeters).rounded(.up))))
+    }
+
+    /// In-plane connected components over an occupancy grid. 4-connected, and a cell counts only above
+    /// a real-area threshold, so boundary slivers can neither claim cells nor bridge a wall's mesh gap.
+    /// Points in sub-threshold cells belong to no component — they are speckle. Components come back
+    /// largest-first.
+    static func horizontalComponents(_ pts: [(u: Float, v: Float, area: Float)],
+                                     cellMeters: Float = quadSupportCellMeters,
+                                     minCellAreaM2: Float = quadSupportCellMinAreaM2) -> [[Int]] {
+        guard !pts.isEmpty else { return [] }
+        var cellOf: [SIMD2<Int32>: [Int]] = [:]
+        var cellArea: [SIMD2<Int32>: Float] = [:]
+        for (i, p) in pts.enumerated() {
+            let key = SIMD2(Int32((p.u / cellMeters).rounded(.down)),
+                            Int32((p.v / cellMeters).rounded(.down)))
+            cellOf[key, default: []].append(i)
+            cellArea[key, default: 0] += p.area
+        }
+        let occupied = cellOf.filter { cellArea[$0.key]! >= minCellAreaM2 }
+        var compOf: [SIMD2<Int32>: Int] = [:]
+        var comps: [[Int]] = []
+        for seed in occupied.keys where compOf[seed] == nil {
+            var members: [Int] = []
+            var stack = [seed]
+            compOf[seed] = comps.count
+            while let k = stack.popLast() {
+                members.append(contentsOf: occupied[k] ?? [])
+                for d in [SIMD2<Int32>(1, 0), SIMD2(-1, 0), SIMD2(0, 1), SIMD2(0, -1)] {
+                    let nk = k &+ d
+                    if occupied[nk] != nil, compOf[nk] == nil {
+                        compOf[nk] = comps.count
+                        stack.append(nk)
+                    }
+                }
+            }
+            comps.append(members)
+        }
+        return comps.sorted { a, b in
+            a.reduce(Float(0)) { $0 + pts[$1].area } > b.reduce(Float(0)) { $0 + pts[$1].area }
+        }
+    }
+
+    /// Which SUPPORT cell of `p` a world point falls in, or nil if it is off the rectangle or off the
+    /// plane. The `+0.2` in-plane slack matches the rectangle coverage test it replaces.
+    static func quadSupportCell(_ p: PlaneRegistration.Plane, _ point: SIMD3<Float>) -> (c: Int, r: Int)? {
+        let d = point - p.center
+        guard abs(simd_dot(d, p.normal)) <= ghostProxyQuadCoverageMeters else { return nil }
+        let (cols, rows) = quadSupportGrid(p)
+        let u = simd_dot(d, p.xAxis) + p.width / 2
+        let v = simd_dot(d, p.yAxis) + p.height / 2
+        guard u >= -0.2, u <= p.width + 0.2, v >= -0.2, v <= p.height + 0.2 else { return nil }
+        let c = min(cols - 1, max(0, Int(u / (p.width / Float(cols)))))
+        let r = min(rows - 1, max(0, Int(v / (p.height / Float(rows)))))
+        return (c, r)
+    }
+
+    /// Build one support mask per plane from the faces whose CLASS matches that plane's family — walls
+    /// backed by the wall family, floors/levels/ramps by floor-class faces.
+    static func buildQuadSupport(planes: [PlaneRegistration.Plane], verts: [SIMD3<Float>],
+                                 faces: [(Int, Int, Int)], faceClasses: Data,
+                                 dilateBy: Int = quadSupportDilateCells) -> [QuadSupport] {
+        // Accumulate an area-weighted normal per cell rather than a boolean. Presence alone is not
+        // enough, and the reason is circular: a ramp crossing a level's height is itself floor-class and
+        // within the coverage distance, so it MARKS the cells that then exclude it, the level quad claims
+        // its band, and ramp detection is suppressed by geometry it supplied. Orientation is what
+        // separates "this cell is part of that surface" from "something else passes through here".
+        //
+        // Per-FACE orientation cannot do it — a real floor's per-face normals scatter by ~10°, further
+        // than a 5° ramp is tilted. The area-weighted mean over a cell can: noise cancels, coherent slope
+        // survives. Exactly the argument the level search's mean-tilt gate already rests on.
+        var sums = planes.map { p -> [SIMD3<Float>] in
+            let (cols, rows) = quadSupportGrid(p)
+            return [SIMD3<Float>](repeating: .zero, count: cols * rows)
+        }
+        var areas = planes.map { p -> [Float] in
+            let (cols, rows) = quadSupportGrid(p)
+            return [Float](repeating: 0, count: cols * rows)
+        }
+        for (idx, f) in faces.enumerated() {
+            guard idx < faceClasses.count,
+                  f.0 >= 0, f.1 >= 0, f.2 >= 0,
+                  f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
+            let family: PlaneRegistration.Category
+            switch faceClasses[faceClasses.startIndex + idx] {
+            case 1, 6, 7: family = .wall
+            case 2: family = .floor
+            default: continue          // content backs no architectural quad
+            }
+            let a = verts[f.0], b = verts[f.1], c = verts[f.2]
+            let cross = simd_cross(b - a, c - a)
+            let area = 0.5 * simd_length(cross)
+            guard area > 1e-6 else { continue }
+            let n = cross / (2 * area)
+            let ctr = (a + b + c) / 3
+            // COMPETITIVE assignment: the face backs only the plane that explains it best (smallest
+            // perpendicular distance), never every plane within tolerance. Where two planes of one
+            // family meet — a ramp rising into a landing, wall facets at a corner — the tolerance
+            // bands overlap for metres, and first-match let the landing claim the top of the ramp,
+            // square itself outward over it, and subtract mesh the ramp quad should have owned
+            // (device: the landing lattice stretching visibly past the flat, the ramp diving under
+            // it). Best-fit assignment gives the overlap to whichever surface it actually lies on.
+            var best: (i: Int, cell: (c: Int, r: Int), dist: Float)?
+            for (i, p) in planes.enumerated() where p.category == family {
+                guard let cell = quadSupportCell(p, ctr) else { continue }
+                let dist = abs(simd_dot(ctr - p.center, p.normal))
+                if best == nil || dist < best!.dist { best = (i, cell, dist) }
+            }
+            guard let best else { continue }
+            let p = planes[best.i]
+            // Face winding is not trusted, so orient each normal toward the plane's before summing —
+            // otherwise opposite windings on one surface would cancel to nothing.
+            let oriented = simd_dot(n, p.normal) < 0 ? -n : n
+            let k = best.cell.r * quadSupportGrid(p).cols + best.cell.c
+            sums[best.i][k] += oriented * area
+            areas[best.i][k] += area
+        }
+        return planes.indices.map { i in
+            let p = planes[i]
+            let (cols, rows) = quadSupportGrid(p)
+            var mask = QuadSupport(cols: cols, rows: rows)
+            // Floors need a tight bound: the surface they must not absorb is a shallow ramp, only degrees
+            // away. Walls need a loose one: what they must not absorb is a differently-oriented surface,
+            // tens of degrees away, so a tight bound there would only punish noise on a genuine wall.
+            let toleranceDeg = p.category == .floor ? quadSupportFloorMeanTiltDeg : quadSupportWallMeanTiltDeg
+            let minDot = cos(toleranceDeg * .pi / 180)
+            // A cell needs real area behind it before its orientation means anything — a couple of
+            // boundary slivers should not claim a quarter-metre of quad.
+            for k in 0..<(cols * rows) where areas[i][k] >= quadSupportCellMinAreaM2 {
+                let mean = sums[i][k] / areas[i][k]
+                let len = simd_length(mean)
+                guard len > 1e-6, simd_dot(mean / len, p.normal) >= minDot else { continue }
+                mask.mark(k % cols, k / cols)
+            }
+            mask.dilate(by: dilateBy)
+            return mask
+        }
     }
 
     /// Why a point is or is not covered by a quad. The two uncovered cases mean very different things
@@ -3715,15 +4033,27 @@ struct ARCoverageView: UIViewRepresentable {
         case offPlane
     }
 
-    /// `quadCovers` with the reason, for diagnostics.
-    static func quadCoverage(_ planes: [PlaneRegistration.Plane], _ p: SIMD3<Float>) -> QuadCoverage {
+    /// `quadCovers` with the reason, for diagnostics. `support` gates on the per-cell mask when present,
+    /// so a quad only claims the part of its rectangle that mesh actually backs.
+    static func quadCoverage(_ planes: [PlaneRegistration.Plane], support: [QuadSupport]?,
+                             _ p: SIMD3<Float>) -> QuadCoverage {
+        // Mirrors the support builder's competitive rule: the point belongs to its best-fit plane, and
+        // is covered iff THAT plane's cell is backed. First-match here would re-open the overlap the
+        // builder just resolved — a point the ramp won could still be swallowed by the landing.
         var atRightHeight = false
-        for q in planes {
+        var best: (i: Int, cell: (c: Int, r: Int), dist: Float)?
+        for (i, q) in planes.enumerated() {
             let d = p - q.center
-            guard abs(simd_dot(d, q.normal)) <= ghostProxyQuadCoverageMeters else { continue }
+            let dist = abs(simd_dot(d, q.normal))
+            guard dist <= ghostProxyQuadCoverageMeters else { continue }
             atRightHeight = true
-            guard abs(simd_dot(d, q.xAxis)) <= q.width / 2 + 0.2,
-                  abs(simd_dot(d, q.yAxis)) <= q.height / 2 + 0.2 else { continue }
+            guard let cell = quadSupportCell(q, p) else { continue }
+            if best == nil || dist < best!.dist { best = (i, cell, dist) }
+        }
+        if let best {
+            if let support, best.i < support.count {
+                return support[best.i].isKept(best.cell.c, best.cell.r) ? .covered : .beyondExtent
+            }
             return .covered
         }
         return atRightHeight ? .beyondExtent : .offPlane
@@ -3733,15 +4063,9 @@ struct ARCoverageView: UIViewRepresentable {
     /// `ghostProxyQuadCoverageMeters` of the plane and inside its rectangle (+20 cm margin for
     /// RoomPlan seating and extent error). Used both to subtract mesh faces a quad replaces and to
     /// decide what the quads so far have left unexplained.
-    static func quadCovers(_ planes: [PlaneRegistration.Plane], _ p: SIMD3<Float>) -> Bool {
-        for q in planes {
-            let d = p - q.center
-            guard abs(simd_dot(d, q.normal)) <= ghostProxyQuadCoverageMeters,
-                  abs(simd_dot(d, q.xAxis)) <= q.width / 2 + 0.2,
-                  abs(simd_dot(d, q.yAxis)) <= q.height / 2 + 0.2 else { continue }
-            return true
-        }
-        return false
+    static func quadCovers(_ planes: [PlaneRegistration.Plane], support: [QuadSupport]? = nil,
+                           _ p: SIMD3<Float>) -> Bool {
+        quadCoverage(planes, support: support, p) == .covered
     }
 
     /// What the level search found, plus what it looked at and turned down. The rejections matter as
@@ -3907,41 +4231,61 @@ struct ARCoverageView: UIViewRepresentable {
                 continue
             }
 
-            let slab = sorted[lo..<hi]
-            let weight = slabArea
+            let slab = Array(sorted[lo..<hi])
 
-            // Slope gate. The slab test alone cannot tell a flat surface from a SLICE of a ramp: a
-            // 6 m ADA ramp at 4.8° is under the per-face pitch gate, and a 12 cm slice of it holds
-            // metres² of area, so a ramp would be chopped into a level every 20 cm of rise —
-            // stair-stepping flat quads up a continuous slope, worse than leaving it as mesh. The
-            // discriminator is the MEAN normal: per-face noise on a real floor cancels out, while a
-            // coherent slope survives averaging intact. Threshold sits below the ADA maximum, so a
-            // built ramp never reads as a level and no realistic floor is excluded.
-            let meanN = slab.reduce(SIMD3<Float>.zero) { $0 + $1.n * $1.area } / weight
-            let meanLen = simd_length(meanN)
-            let tiltDeg = meanLen > 1e-6 ? acos(min(abs(meanN.y) / meanLen, 1)) * 180 / .pi : Float.nan
-            guard tiltDeg <= levelMeanTiltMaxDeg else {
-                record(.tooSloped, tiltDeg: tiltDeg, span: .zero)
-                continue
-            }
+            // One level per in-plane CONNECTED COMPONENT of the slab, not one level per height. Two
+            // same-height areas separated by a wall are different surfaces, and a single spanning
+            // rectangle both draws through the wall and claims mesh next door (device: the landing
+            // quad reaching into the adjacent space, over an off-angle staircase, and past the helix
+            // wall). A wall's mesh gap breaks contiguity at the 0.25 m component grid; 4-connectivity
+            // on purpose, since 8 would corner-leak across a thin gap.
+            for compIdx in Self.horizontalComponents(slab.map { (u: $0.u, v: $0.v, area: $0.area) }) {
+                guard out.count < levelMaxCount else { break }
+                let comp = compIdx.map { slab[$0] }
+                let compArea = comp.reduce(Float(0)) { $0 + $1.area }
+                let compY = comp.reduce(Float(0)) { $0 + $1.y * $1.area } / max(compArea, 1e-6)
+                func recordComp(_ verdict: LevelDerivation.Verdict, tiltDeg: Float, span: SIMD2<Float>) {
+                    guard compArea >= 0.25 * levelMinAreaM2 else { return }
+                    candidates.append(LevelDerivation.Candidate(y: compY, areaM2: compArea,
+                                                                meanTiltDeg: tiltDeg, spanM: span,
+                                                                verdict: verdict))
+                }
+                guard compArea >= levelMinAreaM2 else {
+                    recordComp(.belowMinArea, tiltDeg: .nan, span: .zero)
+                    continue
+                }
 
-            guard let uMin = slab.map(\.u).min(), let uMax = slab.map(\.u).max(),
-                  let vMin = slab.map(\.v).min(), let vMax = slab.map(\.v).max() else { continue }
-            let width = uMax - uMin, height = vMax - vMin
-            // A level thinner than this in plan view is a sliver along a wall or a mis-classified
-            // step nosing, not a surface anyone stands on.
-            guard width >= levelMinSpanMeters, height >= levelMinSpanMeters else {
-                record(.tooNarrow, tiltDeg: tiltDeg, span: SIMD2(width, height))
-                continue
+                // Slope gate, per component. The slab test alone cannot tell a flat surface from a
+                // SLICE of a ramp: a 6 m ADA ramp is under the per-face pitch gate and a 12 cm slice
+                // of it holds metres², so a ramp would be chopped into a level every 20 cm of rise.
+                // The discriminator is the MEAN normal — per-face noise on a real floor cancels,
+                // coherent slope survives averaging — and judging it per component keeps one flat
+                // landing from vouching for a sloped patch elsewhere at the same height.
+                let meanN = comp.reduce(SIMD3<Float>.zero) { $0 + $1.n * $1.area } / compArea
+                let meanLen = simd_length(meanN)
+                let tiltDeg = meanLen > 1e-6 ? acos(min(abs(meanN.y) / meanLen, 1)) * 180 / .pi : Float.nan
+                guard tiltDeg <= levelMeanTiltMaxDeg else {
+                    recordComp(.tooSloped, tiltDeg: tiltDeg, span: .zero)
+                    continue
+                }
+
+                guard let uMin = comp.map(\.u).min(), let uMax = comp.map(\.u).max(),
+                      let vMin = comp.map(\.v).min(), let vMax = comp.map(\.v).max() else { continue }
+                let width = uMax - uMin, height = vMax - vMin
+                // A level thinner than this in plan view is a sliver along a wall or a mis-classified
+                // step nosing, not a surface anyone stands on.
+                guard width >= levelMinSpanMeters, height >= levelMinSpanMeters else {
+                    recordComp(.tooNarrow, tiltDeg: tiltDeg, span: SIMD2(width, height))
+                    continue
+                }
+                recordComp(.accepted, tiltDeg: tiltDeg, span: SIMD2(width, height))
+                // Height is the component's area-weighted mean, not the peak bin's midpoint — the bin
+                // is 5 cm and the levels feed a 15 cm coverage test, so the precision is free accuracy.
+                out.append(PlaneRegistration.Plane(
+                    center: xAxis * ((uMin + uMax) / 2) + yAxis * ((vMin + vMax) / 2) + SIMD3<Float>(0, compY, 0),
+                    normal: SIMD3<Float>(0, 1, 0), xAxis: xAxis, yAxis: yAxis,
+                    width: width, height: height, category: .floor))
             }
-            record(.accepted, tiltDeg: tiltDeg, span: SIMD2(width, height))
-            // Height is the area-weighted mean of the slab, not the peak bin's midpoint — the bin is
-            // 5 cm and the levels feed a 15 cm coverage test, so the extra precision is free accuracy.
-            let y = slab.reduce(Float(0)) { $0 + $1.y * $1.area } / weight
-            out.append(PlaneRegistration.Plane(
-                center: xAxis * ((uMin + uMax) / 2) + yAxis * ((vMin + vMax) / 2) + SIMD3<Float>(0, y, 0),
-                normal: SIMD3<Float>(0, 1, 0), xAxis: xAxis, yAxis: yAxis,
-                width: width, height: height, category: .floor))
         }
         return LevelDerivation(levels: out.sorted { $0.center.y < $1.center.y },
                                candidates: candidates.sorted { $0.y < $1.y })
@@ -3964,11 +4308,68 @@ struct ARCoverageView: UIViewRepresentable {
     /// One trimmed re-fit runs before those gates: unrelated speckle in the remainder would otherwise
     /// drag both the normal and the residual of a real ramp.
     ///
-    /// Returns at most ONE ramp. Two ramps facing different directions average into a normal that fits
-    /// neither, so the residual gate rejects both and they stay mesh — the honest failure, and rare
-    /// enough indoors not to justify a full multi-plane segmentation here.
+    /// Candidates are grouped by normal DIRECTION before anything is fitted, and each group is fitted
+    /// independently. One global fit was the original design and it fails outright on a real scene: a
+    /// straight ramp, a helical ramp and a stair flight in one scan average into a normal that fits none
+    /// of them, the residual blows the gate, and NOTHING is emitted — including the straight ramp that
+    /// would have fitted perfectly on its own. Grouping is by the horizontal component of the normal
+    /// rather than by azimuth, because a shallow ramp's horizontal component is small (an ADA ramp's is
+    /// 0.08) which makes its azimuth extremely noisy; a radius in that plane degrades gracefully where
+    /// an angle does not. Membership is tested against the group's SEED, not a running mean, so a
+    /// continuously-curving surface cannot chain its way into one group that spans every direction.
+    ///
+    /// A `rampMinFillRatio` test makes "is this actually quad-like?" explicit rather than hoping the
+    /// residual implies it. A curved ramp fitted per-direction produces annular-sector groups whose
+    /// bounding rectangle is far larger than the surface inside it, so they are declined and the curve
+    /// stays mesh — the right outcome, since a rectangle laid over a curve is exactly the "plane
+    /// sticking into open space" failure. A ramp that is mostly a clean quad and then widens into a
+    /// trapezoid still passes comfortably, which is the case worth capturing.
+    /// What the ramp search found plus what it examined and turned down — the same legibility contract
+    /// as `LevelDerivation`, for the same reason: every gate is otherwise a silent nil, and "no ramp
+    /// exists" vs "a ramp missed one threshold" call for opposite responses.
+    struct RampDerivation {
+        let ramps: [PlaneRegistration.Plane]
+        let groups: [Group]
+
+        enum Verdict: String {
+            case accepted
+            case belowMinArea      // not enough candidate area in this direction
+            case notPlanar         // residual too high: treads up a flight, or curvature
+            case tooFlat           // mean tilt under the level threshold — level-like remainder
+            case tooSteep          // past the walkable cap — flight-like
+            case tooNarrow         // under the minimum span in some direction
+            case poorFill          // planar and sloped, but fills too little of its rectangle: a curve
+        }
+
+        struct Group {
+            let areaM2: Float
+            let tiltDeg: Float
+            let rmsM: Float
+            let fill: Float        // area / bounding rectangle, NaN before it is computed
+            let boxM: SIMD2<Float> // bounding rectangle dims, .zero before computed
+            let verdict: Verdict
+            /// In-plane occupancy map of the fitted component (rows of #/·), for the verdicts where the
+            /// SHAPE is the question — fill and box numbers alone cannot distinguish an L, a diagonal
+            /// band, or a strip with a speckle tail, and those call for different fixes.
+            let shapeMap: String?
+        }
+
+        var traceDescription: String {
+            groups.map { g in
+                var parts = [String(format: "%.1fm²", g.areaM2)]
+                if !g.tiltDeg.isNaN { parts.append(String(format: "tilt=%.1f°", g.tiltDeg)) }
+                if !g.rmsM.isNaN { parts.append(String(format: "rms=%.0fmm", g.rmsM * 1000)) }
+                if !g.fill.isNaN { parts.append(String(format: "fill=%.2f", g.fill)) }
+                if g.boxM != .zero { parts.append(String(format: "box=%.1f×%.1fm", g.boxM.x, g.boxM.y)) }
+                parts.append(g.verdict.rawValue)
+                return parts.joined(separator: " ")
+            }.joined(separator: ", ")
+        }
+    }
+
     static func deriveRampPlanes(verts: [SIMD3<Float>], faces: [(Int, Int, Int)], faceClasses: Data,
-                                 explainedBy explained: [PlaneRegistration.Plane]) -> [PlaneRegistration.Plane] {
+                                 explainedBy explained: [PlaneRegistration.Plane],
+                                 support: [QuadSupport]? = nil) -> RampDerivation {
         typealias Patch = (c: SIMD3<Float>, area: Float, n: SIMD3<Float>)
         let cosMaxPitch = cos(rampFaceMaxPitchDeg * .pi / 180)
         var candidates: [Patch] = []
@@ -3984,18 +4385,46 @@ struct ARCoverageView: UIViewRepresentable {
             // of. This just keeps near-vertical junk (a riser the classifier called floor) out.
             guard area > 1e-6, abs(cross.y) / (2 * area) >= cosMaxPitch else { continue }
             let ctr = (a + b + c) / 3
-            guard !quadCovers(explained, ctr) else { continue }
+            guard !quadCovers(explained, support: support, ctr) else { continue }
             candidates.append((c: ctr, area: area, n: simd_normalize(cross.y < 0 ? -cross : cross)))
         }
 
         /// Area-weighted plane through a patch set, with the residual that says whether it IS a plane.
+        /// The normal comes from POSITION least-squares, not the mean of mesh face normals: mesh
+        /// normals at a ramp's ends are smoothed toward the flat surfaces it transitions into, which
+        /// biased a whole fitted ramp shallow (device: top of the quad sitting a foot below the landing
+        /// it meets). Positions are the geometry; normals are a derived, smoothed signal — good enough
+        /// to seed and orient the solve, not to be the estimate.
         func fit(_ patches: [Patch]) -> (n: SIMD3<Float>, c: SIMD3<Float>, area: Float, rms: Float)? {
             let area = patches.reduce(Float(0)) { $0 + $1.area }
             guard area > 1e-6 else { return nil }
             let centroid = patches.reduce(SIMD3<Float>.zero) { $0 + $1.c * $1.area } / area
             let meanN = patches.reduce(SIMD3<Float>.zero) { $0 + $1.n * $1.area } / area
             guard simd_length(meanN) > 1e-6 else { return nil }
-            let n = simd_normalize(meanN)
+            // Smallest eigenvector of the area-weighted position covariance = best-fit plane normal.
+            // Inverse iteration seeded by the mean normal: each solve amplifies the smallest-eigenvalue
+            // component, and for a strip metres across with millimetres of thickness two or three
+            // rounds are decisive. A tiny ridge keeps the inverse defined for a perfectly flat set.
+            var m = simd_float3x3(0)
+            for p in patches {
+                let d = p.c - centroid
+                m.columns.0 += d * (d.x * p.area)
+                m.columns.1 += d * (d.y * p.area)
+                m.columns.2 += d * (d.z * p.area)
+            }
+            let ridge = max(1e-9, 1e-6 * (m.columns.0.x + m.columns.1.y + m.columns.2.z))
+            m.columns.0.x += ridge
+            m.columns.1.y += ridge
+            m.columns.2.z += ridge
+            var n = simd_normalize(meanN)
+            let inv = m.inverse
+            for _ in 0..<3 {
+                let next = inv * n
+                let len = simd_length(next)
+                guard len.isFinite, len > 1e-12 else { break }
+                n = next / len
+            }
+            if simd_dot(n, meanN) < 0 { n = -n }
             let variance = patches.reduce(Float(0)) { acc, p in
                 let d = simd_dot(p.c - centroid, n)
                 return acc + p.area * d * d
@@ -4003,29 +4432,260 @@ struct ARCoverageView: UIViewRepresentable {
             return (n: n, c: centroid, area: area, rms: sqrt(variance))
         }
 
-        guard let rough = fit(candidates), rough.area >= rampMinAreaM2 else { return [] }
-        let trimmed = candidates.filter {
-            abs(simd_dot($0.c - rough.c, rough.n)) <= max(2 * rough.rms, rampTrimFloorMeters)
-        }
-        guard let f = fit(trimmed), f.area >= rampMinAreaM2, f.rms <= rampMaxResidualMeters else { return [] }
-        let tiltDeg = acos(min(abs(f.n.y), 1)) * 180 / .pi
-        guard tiltDeg >= levelMeanTiltMaxDeg, tiltDeg <= rampMaxTiltDeg else { return [] }
+        /// Fit one direction-group to a single plane and gate it. The verdict carries the measurement
+        /// that decided it either way.
+        func fitRamp(_ patches: [Patch]) -> (plane: PlaneRegistration.Plane?, group: RampDerivation.Group) {
+            func declined(_ v: RampDerivation.Verdict, area: Float, tilt: Float = .nan,
+                          rms: Float = .nan, fill: Float = .nan, box: SIMD2<Float> = .zero,
+                          shape: String? = nil) -> (PlaneRegistration.Plane?, RampDerivation.Group) {
+                (nil, RampDerivation.Group(areaM2: area, tiltDeg: tilt, rmsM: rms, fill: fill,
+                                           boxM: box, verdict: v, shapeMap: shape))
+            }
+            guard let rough = fit(patches), rough.area >= rampMinAreaM2 else {
+                return declined(.belowMinArea, area: patches.reduce(0) { $0 + $1.area })
+            }
+            let trimmed = patches.filter {
+                abs(simd_dot($0.c - rough.c, rough.n)) <= max(2 * rough.rms, rampTrimFloorMeters)
+            }
+            guard let f = fit(trimmed), f.area >= rampMinAreaM2 else {
+                return declined(.belowMinArea, area: rough.area, rms: rough.rms)
+            }
+            let tiltDeg = acos(min(abs(f.n.y), 1)) * 180 / .pi
+            guard f.rms <= rampMaxResidualMeters else {
+                return declined(.notPlanar, area: f.area, tilt: tiltDeg, rms: f.rms)
+            }
+            guard tiltDeg >= levelMeanTiltMaxDeg else {
+                return declined(.tooFlat, area: f.area, tilt: tiltDeg, rms: f.rms)
+            }
+            guard tiltDeg <= rampMaxTiltDeg else {
+                return declined(.tooSteep, area: f.area, tilt: tiltDeg, rms: f.rms)
+            }
 
-        // In-plane frame: xAxis runs horizontally ACROSS the slope, yAxis UP it. Well-conditioned
-        // because the tilt gate above already guarantees the normal is off vertical.
-        let across = simd_cross(f.n, SIMD3<Float>(0, 1, 0))
-        guard simd_length(across) > 1e-3 else { return [] }
-        let xAxis = simd_normalize(across)
-        let yAxis = simd_normalize(simd_cross(xAxis, f.n))
-        let us = trimmed.map { simd_dot($0.c - f.c, xAxis) }
-        let vs = trimmed.map { simd_dot($0.c - f.c, yAxis) }
-        guard let uMin = us.min(), let uMax = us.max(), let vMin = vs.min(), let vMax = vs.max() else { return [] }
-        let width = uMax - uMin, height = vMax - vMin
-        guard width >= levelMinSpanMeters, height >= levelMinSpanMeters else { return [] }
-        return [PlaneRegistration.Plane(
-            center: f.c + xAxis * ((uMin + uMax) / 2) + yAxis * ((vMin + vMax) / 2),
-            normal: f.n, xAxis: xAxis, yAxis: yAxis,
-            width: width, height: height, category: .floor)]
+            // In-plane frame. The provisional axes come from the slope (across / up-slope), but the BOX
+            // must align with the surface's own long axis, not the tilt direction: real ramps carry
+            // cross-slope (drainage fall — ~1° is normal), and at a shallow main slope even 1° rotates
+            // the steepest-descent direction by ~15°, which skews a slope-aligned box off the walkway
+            // and balloons it (device map: a clean constant-width strip lying diagonal in its frame,
+            // 2.3 m box for a 1.5 m strip). Area-weighted in-plane PCA recovers the strip's axis; the
+            // quad's frame just needs to be orthonormal in the plane, nothing downstream assumes
+            // up-slope.
+            let across = simd_cross(f.n, SIMD3<Float>(0, 1, 0))
+            guard simd_length(across) > 1e-3 else {
+                return declined(.tooFlat, area: f.area, tilt: tiltDeg, rms: f.rms)
+            }
+            let xAxis0 = simd_normalize(across)
+            let yAxis0 = simd_normalize(simd_cross(xAxis0, f.n))
+            let us0 = trimmed.map { simd_dot($0.c - f.c, xAxis0) }
+            let vs0 = trimmed.map { simd_dot($0.c - f.c, yAxis0) }
+            var suu: Float = 0, svv: Float = 0, suv: Float = 0
+            for (i, p) in trimmed.enumerated() {
+                suu += p.area * us0[i] * us0[i]
+                svv += p.area * vs0[i] * vs0[i]
+                suv += p.area * us0[i] * vs0[i]
+            }
+            // Angle of the principal (long) axis from the provisional u-axis.
+            let theta = 0.5 * atan2(2 * suv, suu - svv)
+            var major = xAxis0 * cos(theta) + yAxis0 * sin(theta)
+            // Keep it pointing broadly up-slope so the map still reads bottom-to-top.
+            if simd_dot(major, yAxis0) < 0 { major = -major }
+            // The PCA angle diagonalizes but may hand back the minor axis; pick whichever direction
+            // actually carries the larger spread.
+            let minor = simd_normalize(simd_cross(f.n, major))
+            var spreadMajor: Float = 0, spreadMinor: Float = 0
+            for p in trimmed {
+                let d = p.c - f.c
+                let m = simd_dot(d, major), n2 = simd_dot(d, minor)
+                spreadMajor += p.area * m * m
+                spreadMinor += p.area * n2 * n2
+            }
+            let yAxis = spreadMajor >= spreadMinor ? simd_normalize(major) : simd_normalize(minor)
+            let xAxis = simd_normalize(simd_cross(yAxis, f.n))
+            let us = trimmed.map { simd_dot($0.c - f.c, xAxis) }
+            let vs = trimmed.map { simd_dot($0.c - f.c, yAxis) }
+            guard let uMin = us.min(), let uMax = us.max(), let vMin = vs.min(), let vMax = vs.max() else {
+                return declined(.belowMinArea, area: f.area)
+            }
+            let width = uMax - uMin, height = vMax - vMin
+            guard width >= levelMinSpanMeters, height >= levelMinSpanMeters else {
+                return declined(.tooNarrow, area: f.area, tilt: tiltDeg, rms: f.rms)
+            }
+            // The quad-like test, stated outright: how much of the rectangle that would stand in for
+            // this surface does the surface actually occupy? A curve fitted per-direction yields
+            // annular-sector groups whose bounding rectangle is mostly empty space, and laying a quad
+            // over that is precisely the "plane sticking out into open space" failure. A run that widens
+            // into a trapezoid still fills most of its box, so the case worth keeping survives.
+            // Fill by occupied CELLS, not raw face area: fill judges the SHAPE (does the surface occupy
+            // its rectangle?), and face area double-penalizes internal classification holes — 5.9 m² of
+            // faces on an ~11 m² strip read as poor fill even with the box tight on the strip.
+            var occupied = Set<SIMD2<Int32>>()
+            let fillCell = rampComponentCellMeters
+            for (i, u) in us.enumerated() {
+                occupied.insert(SIMD2(Int32(((u - uMin) / fillCell).rounded(.down)),
+                                      Int32(((vs[i] - vMin) / fillCell).rounded(.down))))
+            }
+            let fill = min(1, Float(occupied.count) * fillCell * fillCell / (width * height))
+            // Occupancy map in the fitted frame: which 0.5 m in-plane cells the component actually
+            // touches. Downsampled toward ~24 columns for the log.
+            func shapeMap() -> String {
+                let cell = rampComponentCellMeters
+                let cols0 = max(1, Int((width / cell).rounded(.up)))
+                let rows0 = max(1, Int((height / cell).rounded(.up)))
+                let step = max(1, (max(cols0, rows0) + 23) / 24)
+                let cols = (cols0 + step - 1) / step, rows = (rows0 + step - 1) / step
+                var grid = [Bool](repeating: false, count: cols * rows)
+                for (i, u) in us.enumerated() {
+                    let c = min(cols - 1, max(0, Int((u - uMin) / cell) / step))
+                    let r = min(rows - 1, max(0, Int((vs[i] - vMin) / cell) / step))
+                    grid[r * cols + c] = true
+                }
+                return (0..<rows).map { r in
+                    String((0..<cols).map { grid[r * cols + $0] ? "#" : "·" })
+                }.joined(separator: "\n")
+            }
+            guard fill >= rampMinFillRatio else {
+                return declined(.poorFill, area: f.area, tilt: tiltDeg, rms: f.rms, fill: fill,
+                                box: SIMD2(width, height), shape: shapeMap())
+            }
+            let plane = PlaneRegistration.Plane(
+                center: f.c + xAxis * ((uMin + uMax) / 2) + yAxis * ((vMin + vMax) / 2),
+                normal: f.n, xAxis: xAxis, yAxis: yAxis,
+                width: width, height: height, category: .floor)
+            return (plane, RampDerivation.Group(areaM2: f.area, tiltDeg: tiltDeg, rmsM: f.rms,
+                                                fill: fill, boxM: SIMD2(width, height),
+                                                verdict: .accepted, shapeMap: shapeMap()))
+        }
+
+        // Group by normal direction against each group's SEED (not a running mean, which would let a
+        // continuously-curving surface chain into a single group spanning every direction).
+        var groups: [(seed: SIMD2<Float>, area: Float, patches: [Patch])] = []
+        for c in candidates {
+            let h = SIMD2(c.n.x, c.n.z)
+            if let i = groups.firstIndex(where: { simd_distance($0.seed, h) <= rampNormalGroupRadius }) {
+                groups[i].area += c.area
+                groups[i].patches.append(c)
+            } else if groups.count < rampMaxGroups {
+                groups.append((seed: h, area: c.area, patches: [c]))
+            }
+        }
+
+        // Within one direction group, split by plane OFFSET before fitting. Direction alone cannot
+        // separate parallel surfaces: a helix's tangent parallels a straight ramp somewhere on every
+        // turn, so its fragments join the ramp's group at a different offset, the single fit straddles
+        // both planes, and the residual reads bimodal — device-observed as an 8.3 m² group at the
+        // ramp's exact tilt dying notPlanar at 94 mm RMS. A true plane's patches agree on offset to
+        // ±3–5 cm of mesh noise; anything parallel-but-elsewhere sits decimetres away, so a 1D window
+        // along the group normal separates them exactly the way the height slab separates levels.
+        func offsetModes(_ patches: [Patch]) -> [[Patch]] {
+            let totalArea = patches.reduce(Float(0)) { $0 + $1.area }
+            guard totalArea > 1e-6 else { return [] }
+            let meanN = patches.reduce(SIMD3<Float>.zero) { $0 + $1.n * $1.area } / totalArea
+            guard simd_length(meanN) > 1e-6 else { return [] }
+            let axis = simd_normalize(meanN)
+            var remaining = patches
+                .map { (patch: $0, d: simd_dot($0.c, axis)) }
+                .sorted { $0.d < $1.d }
+            var modes: [[Patch]] = []
+            while modes.count < rampMaxOffsetModes, !remaining.isEmpty {
+                // Two-pointer max-area window of fixed width — the offset analogue of the level slab.
+                var bestArea: Float = 0
+                var bestRange = 0..<0
+                var lo = 0
+                var windowArea: Float = 0
+                var hi = 0
+                while lo < remaining.count {
+                    while hi < remaining.count,
+                          remaining[hi].d - remaining[lo].d <= 2 * rampOffsetSlabHalfMeters {
+                        windowArea += remaining[hi].patch.area
+                        hi += 1
+                    }
+                    if windowArea > bestArea { bestArea = windowArea; bestRange = lo..<hi }
+                    windowArea -= remaining[lo].patch.area
+                    lo += 1
+                    if hi < lo { hi = lo; windowArea = 0 }
+                }
+                guard bestArea >= 0.5 * rampMinAreaM2 else { break }
+                modes.append(remaining[bestRange].map(\.patch))
+                // Remove the window plus a margin, so the same plane's edges cannot re-seed a mode.
+                let dLo = remaining[bestRange.lowerBound].d - rampOffsetSlabHalfMeters
+                let dHi = remaining[bestRange.upperBound - 1].d + rampOffsetSlabHalfMeters
+                remaining.removeAll { $0.d >= dLo && $0.d <= dHi }
+            }
+            return modes
+        }
+
+        // Within one offset mode, split by in-plane CONNECTivity before fitting. The offset window
+        // cannot separate what is genuinely ON the plane: fragments coplanar with the ramp — a helix's
+        // osculating patch, coplanar floor speckle across the hall — pass the offset test at zero
+        // residual cost and only show up as a ballooned bounding rectangle (device-observed: rms down
+        // to 9 mm but 6.2 m² filling 33% of its box, and a pure-speckle mode at 5%). A contiguous
+        // strip is its own component and fills its box; coplanar-but-elsewhere fragments become
+        // separate components that die on area.
+        func components(_ patches: [Patch]) -> [[Patch]] {
+            let totalArea = patches.reduce(Float(0)) { $0 + $1.area }
+            guard totalArea > 1e-6 else { return [] }
+            let meanN = patches.reduce(SIMD3<Float>.zero) { $0 + $1.n * $1.area } / totalArea
+            guard simd_length(meanN) > 1e-6 else { return [patches] }
+            let n = simd_normalize(meanN)
+            let ref = abs(n.y) < 0.9 ? SIMD3<Float>(0, 1, 0) : SIMD3<Float>(1, 0, 0)
+            let uAxis = simd_normalize(simd_cross(n, ref))
+            let vAxis = simd_cross(n, uAxis)
+            // Union by occupied grid cell, 8-connected: two patches connect when their cells touch.
+            // A cell is OCCUPIED only above a real area threshold. Without it, sparse coplanar speckle
+            // forms corner-touching chains that add almost no area (the fit stays tight) yet bridge the
+            // component out to distant geometry — the box balloons while rms sits at mesh noise, which
+            // is exactly the poorFill-at-9mm signature. Sub-threshold cells' patches are dropped
+            // entirely: they are speckle, not surface.
+            let cell = rampComponentCellMeters
+            var cellOf: [SIMD2<Int32>: [Int]] = [:]
+            var cellArea: [SIMD2<Int32>: Float] = [:]
+            for (i, p) in patches.enumerated() {
+                let key = SIMD2(Int32((simd_dot(p.c, uAxis) / cell).rounded(.down)),
+                                Int32((simd_dot(p.c, vAxis) / cell).rounded(.down)))
+                cellOf[key, default: []].append(i)
+                cellArea[key, default: 0] += p.area
+            }
+            cellOf = cellOf.filter { cellArea[$0.key]! >= rampCellMinAreaM2 }
+            var comp = [Int](repeating: -1, count: patches.count)
+            var next = 0
+            for key in cellOf.keys where comp[cellOf[key]![0]] == -1 {
+                // BFS over adjacent occupied cells.
+                var stack = [key]
+                while let k = stack.popLast() {
+                    guard let members = cellOf[k], comp[members[0]] == -1 else { continue }
+                    for m in members { comp[m] = next }
+                    for du in Int32(-1)...1 {
+                        for dv in Int32(-1)...1 where du != 0 || dv != 0 {
+                            let nk = SIMD2(k.x + du, k.y + dv)
+                            if let ms = cellOf[nk], comp[ms[0]] == -1 { stack.append(nk) }
+                        }
+                    }
+                }
+                next += 1
+            }
+            var buckets = [[Patch]](repeating: [], count: next)
+            // comp == -1 is a patch whose cell fell under the area threshold — speckle, dropped.
+            for (i, p) in patches.enumerated() where comp[i] >= 0 { buckets[comp[i]].append(p) }
+            return buckets.sorted {
+                $0.reduce(Float(0)) { $0 + $1.area } > $1.reduce(Float(0)) { $0 + $1.area }
+            }
+        }
+
+        // Largest first, so a cap keeps the surfaces that matter rather than whichever came first in
+        // mesh order. Groups under half the area bar are noise, not near-misses — left out of the trace.
+        var out: [PlaneRegistration.Plane] = []
+        var trace: [RampDerivation.Group] = []
+        for group in groups.sorted(by: { $0.area > $1.area }) where out.count < rampMaxCount {
+            guard group.area >= 0.5 * rampMinAreaM2 else { continue }
+            for mode in offsetModes(group.patches) where out.count < rampMaxCount {
+                for component in components(mode) where out.count < rampMaxCount {
+                    guard component.reduce(Float(0), { $0 + $1.area }) >= 0.5 * rampMinAreaM2 else { break }
+                    let (plane, record) = fitRamp(component)
+                    trace.append(record)
+                    if let plane { out.append(plane) }
+                }
+            }
+        }
+        return RampDerivation(ramps: out, groups: trace)
     }
 
     /// Upper bound on a face's pitch for it to be a ramp candidate — keeps near-vertical geometry out
@@ -4041,6 +4701,48 @@ struct ARCoverageView: UIViewRepresentable {
     /// Steepest mean tilt still considered a walkable ramp. Above generous built ramps (~10°) and well
     /// below a staircase's 30–37° effective slope.
     static let rampMaxTiltDeg: Float = 15
+    /// Grouping radius in the HORIZONTAL component of the face normal — the up-slope direction. Not an
+    /// angle: a shallow ramp's horizontal component is only ~0.08 long, so its azimuth is very noisy
+    /// while its position in this plane is stable.
+    static let rampNormalGroupRadius: Float = 0.06
+    /// Cap on direction groups examined, so a curved surface cannot spawn unbounded work.
+    static let rampMaxGroups = 32
+    /// Half-width of the offset window that splits parallel surfaces within one direction group — the
+    /// offset analogue of the level slab. Wide enough for a real plane's ±3–5 cm of patch noise, narrow
+    /// against the ≥ riser-height gap to anything walkable that is parallel but elsewhere.
+    static let rampOffsetSlabHalfMeters: Float = 0.08
+    /// Cap on offset modes examined per direction group.
+    static let rampMaxOffsetModes = 4
+    /// Grid cell for the in-plane connectivity split. Patches whose cells touch (8-connected) are one
+    /// component, so gaps under ~2 cells merge while a fragment metres away is its own component.
+    static let rampComponentCellMeters: Float = 0.5
+    /// Minimum face area for a connectivity cell to count as occupied. A fully-meshed 0.5 m cell holds
+    /// ~0.25 m²; requiring a quarter of that stops sparse speckle chains from bridging components while
+    /// never touching a genuinely-surfaced cell.
+    static let rampCellMinAreaM2: Float = 0.06
+    /// Cap on ramps emitted per scan.
+    static let rampMaxCount = 4
+    /// Support-analysis cell size. Finer than the bake lattice on purpose: at 1 m a cell straddling a
+    /// landing's edge blends the landing with whatever lies beside it and the blend passes the tilt
+    /// gate; at 0.25 m foreign surfaces read their own orientation and are rejected on their merits.
+    static let quadSupportCellMeters: Float = 0.25
+    /// Minimum face area for a support cell's orientation to count. A fully-meshed 0.25 m cell holds
+    /// ~0.06 m²; a quarter of that keeps boundary slivers from claiming cells.
+    static let quadSupportCellMinAreaM2: Float = 0.015
+    /// How far a quad's backed region grows before unbacked cells are dropped, in SUPPORT cells
+    /// (0.25 m). The size allowance that keeps a thinly-scanned wall solid while still cutting a quad
+    /// off where it runs into open space.
+    static let quadSupportDilateCells = 1
+    /// How far a cell's area-weighted mean normal may sit from a FLOOR plane's normal and still count as
+    /// part of it. Tight, because the surface a level must not absorb is a shallow ramp — an ADA ramp is
+    /// only 4.8° away, and absorbing it both draws a lie and suppresses ramp detection.
+    static let quadSupportFloorMeanTiltDeg: Float = 3
+    /// The same for a WALL plane. Loose, because what a wall must not absorb is a differently-oriented
+    /// surface tens of degrees away; tightening it would only punish noise on a genuine wall.
+    static let quadSupportWallMeanTiltDeg: Float = 20
+    /// Minimum share of its bounding rectangle a ramp must actually occupy. The explicit "quad-like"
+    /// test — it is what declines a curve, whose sector-shaped groups leave most of the rectangle empty.
+    static let rampMinFillRatio: Float = 0.6
 
     /// How far off horizontal a floor-class face may be and still vote for a level. Generous, because
     /// per-face normals on a real floor are noisy — coherent slope is rejected by the mean-tilt gate
@@ -4079,7 +4781,33 @@ struct ARCoverageView: UIViewRepresentable {
     /// v7: a coherently sloped walkable surface is fitted as a tilted ramp quad. v8: no change to the
     /// artifact — the version is also the only "rebuild this" trigger there is, and the kept-floor
     /// tallies are computed during the build, so a corrected diagnostic needs the builder to re-run.
-    static let ghostProxyVersionHeader = "# ghostproxy v8"
+    /// v9: quads exist only where mesh actually backs them, per tessellation cell, for both drawing and
+    /// subtraction — a rectangle no longer claims the open space it happens to span. v10: cell support is
+    /// decided by the cell's area-weighted mean NORMAL, not mere presence, so a level stops absorbing a
+    /// ramp that crosses its height (presence alone was circular — the ramp backed the cells that then
+    /// excluded it). v11: derived levels outrank RoomPlan floors at the same height — RoomPlan's floor is
+    /// seated on coverage, not geometry (measured 22 cm off), and under cell support a mis-seated plane
+    /// backs zero cells, so deduping the level away left real floor with no quad at all. v12: ramp
+    /// direction groups split by plane offset before fitting — direction alone cannot separate parallel
+    /// surfaces, and helix fragments tangent to a straight ramp were blowing its residual (8.3 m² at the
+    /// ramp's tilt dying notPlanar at 94 mm). v13: offset modes split by in-plane connectivity before
+    /// fitting — coplanar-but-elsewhere fragments cost no residual and only balloon the bounding box
+    /// (9 mm rms at 33% fill), so contiguity is the remaining separator. v14: connectivity cells need
+    /// real area to count (speckle chains bridged the box open), and poorFill components log their
+    /// in-plane occupancy map so the shape stops being inferred. v15: the box aligns with the strip's
+    /// own PCA axis rather than the tilt direction (cross-slope rotates steepest-descent off the
+    /// walkway — the map showed a clean strip lying diagonal in its box), and fill counts occupied
+    /// cells rather than face area so classification holes stop reading as bad shape. v16: plane
+    /// normals from position least-squares (mesh normals smooth toward adjacent flats and biased the
+    /// ramp shallow — its top sat a foot under the landing), and ramp candidates selected against
+    /// UNDILATED level masks (the 1 m dilation truncated the ramp's ends). v17: support and coverage
+    /// assign each face to its BEST-fit plane instead of any plane within tolerance — first-match let a
+    /// landing claim the top of the ramp rising into it and square itself outward over the slope.
+    /// v18: support analysis runs on a 0.25 m grid decoupled from the 1 m bake lattice (blended
+    /// boundary cells were passing the tilt gate and claiming a metre at a time over ramps, flights and
+    /// through walls), and each level is one in-plane connected component rather than one height — two
+    /// same-height areas separated by a wall are different surfaces.
+    static let ghostProxyVersionHeader = "# ghostproxy v18"
     /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
     /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/

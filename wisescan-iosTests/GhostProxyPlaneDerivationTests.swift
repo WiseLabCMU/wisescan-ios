@@ -34,9 +34,12 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
         /// A flat horizontal surface at height `y`, optionally pitched about the X axis by `pitchDeg`
         /// (rising along +Z) to stand in for a ramp, and optionally roughened by `jitter` metres of
         /// deterministic per-vertex height noise to stand in for real reconstruction.
+        /// `skewX` shears the footprint: each vertex shifts in X by `skewX` per metre of Z, so the
+        /// strip's long axis runs diagonal to Z while the surface normal still tilts about X — the
+        /// cross-slope geometry of a real walkway, where steepest descent is rotated off the run.
         mutating func addSurface(y: Float, x: ClosedRange<Float>, z: ClosedRange<Float>,
                                  cls: UInt8 = 2, pitchDeg: Float = 0, jitter: Float = 0,
-                                 cell: Float = 0.25) {
+                                 skewX: Float = 0, cell: Float = 0.25) {
             let slope = tan(pitchDeg * .pi / 180)
             // Deterministic hash-based noise: a seeded RNG would make failures unreproducible.
             func noise(_ c: Int, _ r: Int) -> Float {
@@ -51,7 +54,8 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
             func vertex(_ c: Int, _ r: Int) -> SIMD3<Float> {
                 let px = x.lowerBound + dx * Float(c)
                 let pz = z.lowerBound + dz * Float(r)
-                return SIMD3(px, y + slope * (pz - z.lowerBound) + noise(c, r), pz)
+                return SIMD3(px + skewX * (pz - z.lowerBound),
+                             y + slope * (pz - z.lowerBound) + noise(c, r), pz)
             }
             let base = verts.count
             for r in 0...rows { for c in 0...cols { verts.append(vertex(c, r)) } }
@@ -62,6 +66,31 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
                     faces.append((vid(c, r), vid(c + 1, r + 1), vid(c, r + 1)))
                     classes.append(cls)
                     classes.append(cls)
+                }
+            }
+        }
+
+        /// A helical ramp — an annular sector swept through `turns`, rising `rise` in total. Local pitch
+        /// is ramp-like everywhere (a 3 m rise per turn at 3 m radius is ~9°), which is exactly why a
+        /// helix is dangerous: every patch of it looks like a legitimate ramp face.
+        mutating func addHelix(innerR: Float, outerR: Float, turns: Float, rise: Float,
+                               steps: Int = 48, rings: Int = 4) {
+            let base = verts.count
+            let totalAngle = turns * 2 * .pi
+            for i in 0...steps {
+                let a = totalAngle * Float(i) / Float(steps)
+                for j in 0...rings {
+                    let r = innerR + (outerR - innerR) * Float(j) / Float(rings)
+                    verts.append(SIMD3(r * cos(a), rise * Float(i) / Float(steps), r * sin(a)))
+                }
+            }
+            func vid(_ i: Int, _ j: Int) -> Int { base + i * (rings + 1) + j }
+            for i in 0..<steps {
+                for j in 0..<rings {
+                    faces.append((vid(i, j), vid(i + 1, j), vid(i + 1, j + 1)))
+                    faces.append((vid(i, j), vid(i + 1, j + 1), vid(i, j + 1)))
+                    classes.append(2)
+                    classes.append(2)
                 }
             }
         }
@@ -101,7 +130,7 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
     /// Ramps are fitted to what the levels leave over, so the two always run in that order.
     private func ramps(_ m: MeshBuilder) -> [PlaneRegistration.Plane] {
         ARCoverageView.deriveRampPlanes(verts: m.verts, faces: m.faces, faceClasses: m.classData,
-                                        explainedBy: levels(m))
+                                        explainedBy: levels(m)).ramps
     }
 
     // MARK: - Levels
@@ -273,6 +302,101 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
         XCTAssertTrue(ramps(m).isEmpty)
     }
 
+    /// The regression that motivated per-direction grouping. Two ramps facing opposite ways used to
+    /// destroy each other: one global fit averaged them into a normal fitting neither, the residual blew
+    /// the gate, and BOTH were lost — including a ramp that would have fitted perfectly alone. Observed
+    /// on a real scan containing a straight ramp, a helical ramp and a stair flight, where nothing at all
+    /// came out.
+    func testTwoRampsFacingOppositeWays_areBothFitted() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-0.75)...0.75, z: 0...6, pitchDeg: 8)      // rises toward +Z
+        m.addSurface(y: 0, x: 3...4.5, z: 0...6, pitchDeg: -8)            // rises toward -Z
+
+        let out = ramps(m)
+        XCTAssertEqual(out.count, 2, "each ramp must be fitted on its own direction")
+        // Opposite slopes, so the up-slope components point opposite ways along Z.
+        let zs = out.map { $0.normal.z }.sorted()
+        XCTAssertLessThan(zs[0], 0)
+        XCTAssertGreaterThan(zs[1], 0)
+    }
+
+    /// A helix must NOT be forced into planes. Its local pitch is ramp-like everywhere, so nothing about
+    /// a single face gives it away — but grouped by direction it yields annular sectors whose bounding
+    /// rectangle is mostly empty, and a quad laid over that is the "plane sticking into open space"
+    /// failure. Declining it and leaving the mesh is the correct answer.
+    func testHelicalRamp_isNotFittedAsQuads() {
+        var m = MeshBuilder()
+        m.addHelix(innerR: 2, outerR: 3.5, turns: 1, rise: 3)
+
+        XCTAssertTrue(ramps(m).isEmpty, "helix produced \(ramps(m).count) quad(s)")
+    }
+
+    /// Grouping must not cost the ordinary case. A straight ramp is one direction, so it still comes out
+    /// as exactly one plane rather than being split.
+    func testStraightRamp_isStillOnePlaneAfterGrouping() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-0.75)...0.75, z: 0...6, pitchDeg: 4.8)
+
+        XCTAssertEqual(ramps(m).count, 1)
+    }
+
+    /// The device failure verbatim: direction alone cannot separate PARALLEL surfaces. A helix's tangent
+    /// parallels a straight ramp somewhere on every turn, so its fragments join the ramp's direction
+    /// group at a different offset, the single fit straddles both planes, and an 8.3 m² group at the
+    /// ramp's exact tilt died notPlanar at 94 mm RMS. The offset split has to rescue the ramp.
+    func testStraightRamp_survivesParallelContaminationAtAnotherOffset() throws {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-0.75)...0.75, z: 0...6, pitchDeg: 8)          // the real ramp
+        // Same pitch, same direction, 1.2 m overhead — a helix pass whose tangent parallels the ramp.
+        // 0.96 m², under the 1.5 m² ramp bar, so alone it is too small to be a ramp; its only effect
+        // should be nothing at all.
+        m.addSurface(y: 1.2, x: (-0.4)...0.4, z: 2...3.2, pitchDeg: 8)
+
+        let out = ramps(m)
+        XCTAssertEqual(out.count, 1, "the contaminant must be separated, not averaged in")
+        let ramp = try XCTUnwrap(out.first)
+        let tilt = acos(min(abs(ramp.normal.y), 1)) * 180 / .pi
+        XCTAssertEqual(tilt, 8, accuracy: 0.5)
+        XCTAssertEqual(ramp.height, 6.0, accuracy: 0.5, "the fitted extent must be the real ramp's run")
+    }
+
+    /// The device failure the occupancy map finally made visible: a clean constant-width strip lying
+    /// DIAGONAL in its fitted frame. A slope-aligned box assumes the walkway runs up the steepest
+    /// descent, but any cross-slope rotates steepest descent off the run — at a 3.9° main slope even
+    /// ~1° of drainage fall skews the frame by ~15°, the box balloons around the diagonal band, and
+    /// fill kills a perfectly real ramp. The box must align with the strip's own principal axis.
+    func testCrossSlopedRamp_getsATightBoxAndFits() throws {
+        var m = MeshBuilder()
+        // 1.5 m strip, 6 m run, 8° pitch, drifting 0.25 m sideways per metre (~14° skew).
+        m.addSurface(y: 0, x: (-0.75)...0.75, z: 0...6, pitchDeg: 8, skewX: 0.25)
+
+        let out = ramps(m)
+        XCTAssertEqual(out.count, 1, "a cross-sloped ramp is still one clean quad")
+        let ramp = try XCTUnwrap(out.first)
+        XCTAssertEqual(ramp.width, 1.5, accuracy: 0.4,
+                       "the box must hug the strip, not the slope-aligned bounding rectangle")
+        XCTAssertGreaterThan(ramp.height, 5.0, "the long axis must run along the strip")
+    }
+
+    /// The failure after the offset split: a fragment COPLANAR with the ramp costs no residual — the
+    /// offset window cannot separate what is genuinely on the plane — and only shows up as a ballooned
+    /// bounding box (device: rms 9 mm, fill 0.33 → poorFill, ramp lost). Contiguity is the remaining
+    /// separator: the ramp is its own connected component and fills its box, the distant fragment is
+    /// another and dies on area.
+    func testStraightRamp_survivesCoplanarFragmentFarAwayInPlane() throws {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-0.75)...0.75, z: 0...6, pitchDeg: 8)
+        // Exactly coplanar (the plane y = tan(8°)·z is independent of x), 4+ m away laterally, and
+        // under the area bar on its own.
+        let y2 = tan(Float(8) * .pi / 180) * 2
+        m.addSurface(y: y2, x: 5...5.8, z: 2...3.2, pitchDeg: 8)
+
+        let out = ramps(m)
+        XCTAssertEqual(out.count, 1, "the coplanar fragment must be split off, not boxed in")
+        let ramp = try XCTUnwrap(out.first)
+        XCTAssertEqual(ramp.width, 1.5, accuracy: 0.4, "extent must be the ramp's, not the spanning box")
+    }
+
     /// A floor with a ramp leading off it: the flat part is a level, the slope is a ramp, and neither
     /// claims the other's geometry.
     func testFloorWithRamp_yieldsOneOfEach() throws {
@@ -288,6 +412,126 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
         XCTAssertEqual(rp.count, 1)
         let tilt = acos(min(abs(try XCTUnwrap(rp.first).normal.y), 1)) * 180 / .pi
         XCTAssertEqual(tilt, 8, accuracy: 1.0)
+    }
+
+    // MARK: - Per-cell quad support
+
+    /// Two floor patches at the same height with a gap between them are two SURFACES, not one level
+    /// with a spanning rectangle — the spanning box was observed on device as 6.3 m² of floor inside a
+    /// 12.0×14.9 m quad reaching through walls and over a staircase. Contiguity now splits them at
+    /// derivation, so each gets its own honest rectangle.
+    func testDisconnectedPatches_becomeSeparateLevels() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-6)...(-3), z: (-1.5)...1.5)
+        m.addSurface(y: 0, x: 3...6, z: (-1.5)...1.5)
+
+        let out = levels(m)
+        XCTAssertEqual(out.count, 2, "one component per patch, got \(out.map(\.width))")
+        for level in out {
+            XCTAssertEqual(level.width, 3.0, accuracy: 0.4, "each rectangle hugs its own patch")
+            XCTAssertEqual(level.height, 3.0, accuracy: 0.4)
+            XCTAssertEqual(level.center.y, 0, accuracy: 0.02)
+        }
+        // And nothing claims the gap: the point between the patches is off every rectangle.
+        let masks = ARCoverageView.buildQuadSupport(planes: out, verts: m.verts,
+                                                    faces: m.faces, faceClasses: m.classData)
+        XCTAssertFalse(ARCoverageView.quadCovers(out, support: masks, SIMD3(0, 0, 0)),
+                       "the gap between two separate levels was claimed")
+    }
+
+    /// The mask must not punch holes in a surface that really is continuous — that is what would make a
+    /// thinly-scanned wall read patchy.
+    func testContinuousSurface_isFullyBacked() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-2)...2, z: (-2)...2, jitter: 0.01)
+
+        guard let level = levels(m).first else { return XCTFail("no level") }
+        let mask = ARCoverageView.buildQuadSupport(planes: [level], verts: m.verts,
+                                                   faces: m.faces, faceClasses: m.classData)[0]
+        let (cols, rows) = ARCoverageView.quadSupportGrid(level)
+        XCTAssertEqual(mask.keptCount, cols * rows, "a continuous floor must be backed everywhere")
+    }
+
+    /// Presence alone cannot decide support, and the reason is circular: a ramp crossing a level's height
+    /// is itself floor-class and within the coverage distance, so it backs the very cells that then
+    /// exclude it. This pins the orientation test directly — a cell whose only content is sloped must not
+    /// count as part of a level.
+    func testCellBackedOnlyBySlopedFaces_isNotPartOfALevel() {
+        let level = PlaneRegistration.Plane(
+            center: .zero, normal: SIMD3(0, 1, 0),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, 0, 1),
+            width: 4, height: 4, category: .floor)
+
+        var flat = MeshBuilder()
+        flat.addSurface(y: 0, x: (-2)...2, z: (-2)...2)
+        let flatMask = ARCoverageView.buildQuadSupport(planes: [level], verts: flat.verts,
+                                                       faces: flat.faces, faceClasses: flat.classData)[0]
+        XCTAssertGreaterThan(flatMask.keptCount, 0, "a real floor must back its cells")
+
+        // A ramp crossing y=0 inside the rectangle: same class, within the coverage distance, but sloped.
+        var ramp = MeshBuilder()
+        ramp.addSurface(y: -0.2, x: (-2)...2, z: (-2)...2, pitchDeg: 8)
+        let rampMask = ARCoverageView.buildQuadSupport(planes: [level], verts: ramp.verts,
+                                                       faces: ramp.faces, faceClasses: ramp.classData)[0]
+        XCTAssertEqual(rampMask.keptCount, 0,
+                       "sloped faces crossing the plane must not back it — that is what sliced the ramp")
+    }
+
+    /// The end-to-end consequence: a ramp crossing a level's height stays a ramp candidate instead of
+    /// being absorbed. Without the orientation test the level's rectangle eats the ramp's band, which on a
+    /// real scan (three such rectangles) left nothing fittable and reported no ramp at all.
+    func testRampCrossingALevel_survivesAsACandidate() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-6)...(-3), z: (-2)...2)      // floor patch
+        m.addSurface(y: 0, x: 3...6, z: (-2)...2)            // and another, far away
+        // A ramp in the empty middle, climbing through y=0 well inside the spanning rectangle.
+        m.addSurface(y: -0.35, x: (-1)...1, z: (-2)...2.5, pitchDeg: 8)
+
+        let lv = levels(m)
+        let support = ARCoverageView.buildQuadSupport(planes: lv, verts: m.verts, faces: m.faces,
+                                                      faceClasses: m.classData)
+        let fitted = ARCoverageView.deriveRampPlanes(verts: m.verts, faces: m.faces,
+                                                     faceClasses: m.classData, explainedBy: lv,
+                                                     support: support).ramps
+        XCTAssertEqual(fitted.count, 1, "the ramp must survive the level's spanning rectangle")
+        let tilt = acos(min(abs(fitted[0].normal.y), 1)) * 180 / .pi
+        XCTAssertEqual(tilt, 8, accuracy: 1.5)
+    }
+
+    /// Where a ramp rises into a landing, their tolerance bands overlap for metres: at 2.8° the whole
+    /// top 3 m of run sits within 15 cm of the landing plane, and the cell tilt gate cannot help (2.8°
+    /// is under its 3° threshold). First-match assignment let the landing back those cells, square
+    /// itself outward over the slope, and subtract mesh the ramp owned. Assignment must be competitive:
+    /// the overlap belongs to whichever plane fits it best.
+    func testRampRisingIntoALanding_belongsToTheRampNotTheLanding() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-1)...1, z: 0...6, pitchDeg: 2.8)   // ramp rising to y≈0.29
+
+        let rise = tan(Float(2.8) * .pi / 180) * 6
+        let ramp = PlaneRegistration.Plane(
+            center: SIMD3(0, rise / 2, 3),
+            normal: simd_normalize(SIMD3(0, cos(2.8 * Float.pi / 180), -sin(2.8 * Float.pi / 180))),
+            xAxis: SIMD3(1, 0, 0),
+            yAxis: simd_normalize(SIMD3(0, sin(2.8 * Float.pi / 180), cos(2.8 * Float.pi / 180))),
+            width: 2, height: 6, category: .floor)
+        // A landing plane at the ramp's top height whose rectangle over-reaches back over the slope —
+        // the device geometry, deliberately.
+        let landing = PlaneRegistration.Plane(
+            center: SIMD3(0, rise, 4.5), normal: SIMD3(0, 1, 0),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, 0, 1),
+            width: 2, height: 5, category: .floor)
+
+        let masks = ARCoverageView.buildQuadSupport(planes: [landing, ramp], verts: m.verts,
+                                                    faces: m.faces, faceClasses: m.classData,
+                                                    dilateBy: 0)
+        XCTAssertEqual(masks[0].keptCount, 0,
+                       "every face lies ON the ramp plane — the landing must win none of them")
+        XCTAssertGreaterThan(masks[1].keptCount, 0)
+
+        // And coverage follows the same rule: a point on the ramp's surface inside the landing's
+        // over-reached rectangle is covered by the ramp, not swallowed by the landing.
+        let onRamp = SIMD3<Float>(0, tan(2.8 * Float.pi / 180) * 4.5, 4.5)
+        XCTAssertEqual(ARCoverageView.quadCoverage([landing, ramp], support: masks, onRamp), .covered)
     }
 
     // MARK: - End to end through the proxy builder
