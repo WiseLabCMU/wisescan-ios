@@ -3653,9 +3653,12 @@ struct ARCoverageView: UIViewRepresentable {
         var keptContent = 0
         for (faceIdx, f) in faces.enumerated() {
             guard f.0 >= 0, f.1 >= 0, f.2 >= 0, f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
-            // Off-level floor geometry the proxy keeps but the dynamic mesh must not: it is
-            // architecture (a landing, a tread, a ramp), just architecture RoomPlan failed to model.
-            var isFloorRemainder = false
+            // Geometry the proxy keeps but the dynamic mesh must not: architecture — off-level floor
+            // (a landing, a tread, a ramp) and uncovered wall-family faces alike. The dynamic artifact
+            // is the change-detection signal, and until now kept WALL faces fell through into it, so it
+            // carried the building as if it were furniture (dynamic == kept − floorKept, exactly);
+            // demotion made that much worse by un-covering whole curved walls into the kept set.
+            var isInfrastructure = false
             // ARMeshClassification raw: 0 none, 1 wall, 2 floor, 3 ceiling, 4 table,
             // 5 seat, 6 window, 7 door.
             switch faceClasses[faceClasses.startIndex + faceIdx] {
@@ -3676,7 +3679,7 @@ struct ARCoverageView: UIViewRepresentable {
                 case .offPlane:
                     keptFloorOffPlane += 1
                 }
-                isFloorRemainder = true
+                isInfrastructure = true
             case 1, 6, 7:
                 // wall-plane family — subtract only where a RoomPlan quad replaces it
                 if quadCovers(walls, support: wallSupport, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
@@ -3684,11 +3687,12 @@ struct ARCoverageView: UIViewRepresentable {
                     continue
                 }
                 keptWall += 1
+                isInfrastructure = true
             default:
                 keptContent += 1    // content — keep
             }
             keptFaces.append(f)
-            if !isFloorRemainder { dynamicFaces.append(f) }
+            if !isInfrastructure { dynamicFaces.append(f) }
         }
 
         lap("filter")
@@ -4929,8 +4933,10 @@ struct ARCoverageView: UIViewRepresentable {
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
     /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/
     /// ceilings, no RoomPlan quads). v2: compacted independently of the proxy, so the off-level
-    /// floor faces the proxy started keeping in v5 stay out of the change-detection artifact.
-    static let dynamicMeshVersionHeader = "# dynamicmesh v2"
+    /// floor faces the proxy started keeping in v5 stay out of the change-detection artifact. v3:
+    /// uncovered wall-family faces excluded too — they had always fallen through into the artifact
+    /// (dynamic == kept − floorKept exactly), and quad demotion made the contamination wholesale.
+    static let dynamicMeshVersionHeader = "# dynamicmesh v3"
     /// Target grid cell size for the tessellated RoomPlan quads.
     static let ghostProxyQuadCellMeters: Float = 1.0
     /// How close a mesh face must be to a RoomPlan quad's PLANE for that quad to count as standing
