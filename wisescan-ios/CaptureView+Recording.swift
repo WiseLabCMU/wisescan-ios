@@ -119,6 +119,9 @@ extension CaptureView {
         // whether it is right for the rig standing here now. Confirming re-stamps the
         // date (one tap a week); a missing stamp counts as stale exactly once.
         if ThetaCameraManager.shared.isConnected, rigHeightStale {
+            // Logged because the alert itself leaves no trace: the 2026-08-20 field run
+            // could not answer "did the nudge fire?" from its diagnostics.
+            PerfDiag.log("[RigCal] rig-height staleness nudge shown at record start")
             showRigHeightStalePrompt = true
             return
         }
@@ -135,6 +138,7 @@ extension CaptureView {
 
     /// Prompt action: the operator confirmed the current tape entry still matches the rig.
     func confirmRigHeightStillCurrent() {
+        PerfDiag.log("[RigCal] rig height confirmed current by the operator — re-stamped")
         UserDefaults.standard.set(Int64(Date().timeIntervalSince1970 * 1000),
                                   forKey: AppConstants.Key.rigMeasuredDyDateMs)
         continueAfterRigHeightWarning()
