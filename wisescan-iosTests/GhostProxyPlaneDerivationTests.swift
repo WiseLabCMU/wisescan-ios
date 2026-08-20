@@ -536,6 +536,43 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
                           "a chord across a curve must be demoted, got \(fitness)")
     }
 
+    /// The flat-room false demotion, reproduced: a straight wall's fitness band sweeps through the room
+    /// corner and captures a deep strip of the PERPENDICULAR wall — mesh this quad could never explain,
+    /// counted against it. In a small box room two corners rival the wall's own area, which demoted two
+    /// genuinely straight walls at 14% and 49% on device. Perpendicular mesh must not count as present.
+    func testStraightWall_isNotPunishedForItsCorners() {
+        var m = MeshBuilder()
+        // The wall under test: locally-straight band along Z at x≈400.
+        m.addCurvedWall(radius: 400, startDeg: -0.3, endDeg: 0.3, height: 3)
+        // A perpendicular wall crossing its band at one end: vertical, normal along Z, sitting at the
+        // corner (z ≈ +2.1, spanning x from the wall inward — well inside the ±1 m fitness band).
+        let base = m.verts.count
+        for i in 0...16 {
+            for j in 0...6 {
+                m.verts.append(SIMD3(399.0 + Float(i) * 0.0625, Float(j) * 0.5, 2.1))
+            }
+        }
+        for i in 0..<16 {
+            for j in 0..<6 {
+                let vid = { (a: Int, b: Int) in base + a * 7 + b }
+                m.faces.append((vid(i, j), vid(i + 1, j), vid(i + 1, j + 1)))
+                m.faces.append((vid(i, j), vid(i + 1, j + 1), vid(i, j + 1)))
+                m.classes.append(1)
+                m.classes.append(1)
+            }
+        }
+
+        let wall = PlaneRegistration.Plane(
+            center: SIMD3(400, 1.5, 0), normal: SIMD3(1, 0, 0),
+            xAxis: SIMD3(0, 0, 1), yAxis: SIMD3(0, 1, 0),
+            width: 4.2, height: 3, category: .wall)
+
+        let fitness = ARCoverageView.quadModelFitness(planes: [wall], verts: m.verts,
+                                                      faces: m.faces, faceClasses: m.classData)[0]
+        XCTAssertGreaterThan(fitness, 0.9,
+                             "the perpendicular wall at the corner must not count against this one, got \(fitness)")
+    }
+
     /// The control: a straight wall quad on a straight (jittered) wall explains nearly all of it, and a
     /// PARTIAL scan of that wall must not lower the score — both sides of the ratio count only mesh
     /// that exists.

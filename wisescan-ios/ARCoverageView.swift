@@ -4191,6 +4191,7 @@ struct ARCoverageView: UIViewRepresentable {
         func tally(_ patches: [SurfacePatch], _ planeIdx: [Int], toleranceDeg: Float) {
             guard !planeIdx.isEmpty else { return }
             let minDot = cos(toleranceDeg * .pi / 180)
+            let presenceMinDot = cos(quadModelPresenceTiltDeg * .pi / 180)
             for patch in patches {
                 for i in planeIdx {
                     let p = planes[i]
@@ -4199,6 +4200,15 @@ struct ARCoverageView: UIViewRepresentable {
                     guard perp <= quadModelBandMeters,
                           abs(simd_dot(d, p.xAxis)) <= p.width / 2 + 0.2,
                           abs(simd_dot(d, p.yAxis)) <= p.height / 2 + 0.2 else { continue }
+                    // Presence is orientation-gated at a MIDDLE tolerance. Ungated, every corner
+                    // admits a band-deep strip of the PERPENDICULAR wall into this wall's footprint —
+                    // mesh this quad could never explain, counted against it. In a small box room two
+                    // corners rival the wall's own area, which dragged every straight wall's fitness
+                    // toward ~50% and falsely demoted two of them in the flat-room control. The gate
+                    // sits between the explain tolerance (20°) and perpendicular (90°): a curve's
+                    // continuation (≤~40° off its chord) still counts against the chord, so the curve
+                    // detector is intact; a corner does not.
+                    guard abs(simd_dot(patch.n, p.normal)) >= presenceMinDot else { continue }
                     present[i] += patch.area
                     if perp <= ghostProxyQuadCoverageMeters,
                        abs(simd_dot(patch.n, p.normal)) >= minDot {
@@ -5008,6 +5018,12 @@ struct ARCoverageView: UIViewRepresentable {
     /// mesh may sit and still be considered part of what that quad is claiming to model. Wide enough to
     /// see a curve's sagitta bulging away from its chord.
     static let quadModelBandMeters: Float = 1.0
+    /// Orientation gate on the fitness PRESENT count. Must sit between the family explain tolerance
+    /// and perpendicular: wide enough that a curved wall's continuation counts against its chord
+    /// (an 80° arc deviates ≤40°), narrow enough that the perpendicular wall crossing every corner
+    /// does not pollute the denominator.
+    static let quadModelPresenceTiltDeg: Float = 55
+
     /// Below this explained/present ratio, a RoomPlan quad is demoted: it neither subtracts nor bakes,
     /// and its mesh stays. A chord across a curve explains only its tangency strip; a real straight
     /// wall explains nearly everything, and thin scanning does not lower the ratio.
@@ -5100,7 +5116,9 @@ struct ARCoverageView: UIViewRepresentable {
     /// width (~1.2 m of run at a rounded shallow junction, past the old 0.75 m cap), and extension
     /// cells bake by construction — they carry no candidate mesh by definition, so waiting for
     /// support there meant the closed seam never drew.
-    static let ghostProxyVersionHeader = "# ghostproxy v21"
+    /// v22: fitness presence is orientation-gated, so corners stop polluting straight walls'
+    /// denominators (two big straight walls in the flat-room control were falsely demoted at 14%/49%).
+    static let ghostProxyVersionHeader = "# ghostproxy v22"
     /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
     /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/
