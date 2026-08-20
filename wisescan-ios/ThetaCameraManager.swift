@@ -142,6 +142,10 @@ final class ThetaCameraManager {
     /// pre-existing frame to a fresh pose. See triggerStillPreferringBLE.
     private var seenStillURLs: Set<String> = []
     private var preScanLatestImageURL: String?
+    /// Camera-vs-phone clock offset measured at scan start (see measureCameraClockOffset).
+    /// Stamped into every still sidecar so shutter latency is recoverable from EXIF offline.
+    private var cameraClockOffsetMs: Int64?
+    private var cameraClockOffsetUncMs: Int?
 
     /// Max pairwise distance (m) between this scan's still positions: the calibration
     /// baseline. O(N²) over a handful of stills.
@@ -785,9 +789,19 @@ final class ThetaCameraManager {
         // Baseline for confirmation-timeout recovery: anything newer than this on the
         // camera, and not already claimed by a still this session, was shot by us.
         seenStillURLs.removeAll()
+        cameraClockOffsetMs = nil
+        cameraClockOffsetUncMs = nil
         Task { [weak self] in
             guard let self else { return }
             self.preScanLatestImageURL = try? await self.latestImageURL()
+            // Sequential, same Task: both are small OSC calls and the first still is
+            // seconds away — no reason to race two requests on the camera's AP.
+            if let clock = await self.measureCameraClockOffset() {
+                self.cameraClockOffsetMs = clock.offsetMs
+                self.cameraClockOffsetUncMs = clock.uncertaintyMs
+                self.log(.capture, String(format: "Camera clock offset %+.2f s ±%dms — EXIF times decode to true shutter times this scan",
+                                          Double(clock.offsetMs) / 1000, clock.uncertaintyMs))
+            }
         }
         if let dir = rawDataDir?.appendingPathComponent("equirect_stills"),
            let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
@@ -865,6 +879,8 @@ final class ThetaCameraManager {
                     exposureMotionM: motion?.exposureM, exposureMotionDeg: motion?.exposureDeg,
                     shutterPath: lastShutterPath,
                     shutterAckMs: motion?.ackOffset.map { Int($0 * 1000) },
+                    cameraClockOffsetMs: cameraClockOffsetMs,
+                    cameraClockOffsetUncMs: cameraClockOffsetUncMs,
                     exposureWindowMs: motion.map { Int($0.window * 1000) },
                     motionSamples: motion?.samples)
                 // Sidecar NOW (phone pose can't be reconstructed later); JPG via the queue;

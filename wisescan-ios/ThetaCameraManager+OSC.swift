@@ -184,6 +184,54 @@ extension ThetaCameraManager {
         return response.results?.entries?.first?.fileUrl
     }
 
+    /// The camera's clock offset versus the phone, measured to poll-interval precision by
+    /// catching a SECOND TICK: poll `dateTimeZone` back-to-back until the returned second
+    /// increments — at that moment the camera's clock just crossed a whole-second
+    /// boundary, so cameraTime − phoneTime is known to roughly the gap between the last
+    /// two polls plus half the HTTP round trip.
+    ///
+    /// WHY IT EXISTS (measurement brief, 2026-08-19): the Theta stamps EXIF
+    /// DateTimeOriginal at 1 s resolution with no sub-second field, and its clock drifts
+    /// 1–7 s/day — so EXIF alone yields shutter-latency-plus-clock-offset, never latency.
+    /// With the offset stamped per scan, the ack→shutter latency λ falls out of every
+    /// scan's EXIF offline, for free, forever — replacing a bench session that the
+    /// archive analysis showed could never work anyway.
+    ///
+    /// Positive offset = the camera's clock is AHEAD of the phone's.
+    func measureCameraClockOffset() async -> (offsetMs: Int64, uncertaintyMs: Int)? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ssZZZZZ"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        func readClock() async -> (value: String, at: Date, rttMs: Int)? {
+            let sent = Date()
+            let body: [String: Any] = ["name": "camera.getOptions",
+                                       "parameters": ["optionNames": ["dateTimeZone"]]]
+            guard let response = try? await postJSON("/osc/commands/execute", body: body,
+                                                     as: OSCGetOptionsResponse.self, timeout: 3),
+                  let value = response.results?.options?.dateTimeZone else { return nil }
+            let now = Date()
+            return (value, now, Int(now.timeIntervalSince(sent) * 1000))
+        }
+        guard var previous = await readClock() else { return nil }
+        let deadline = Date().addingTimeInterval(2.6)   // a tick MUST land within ~1 s + margin
+        while Date() < deadline {
+            guard let current = await readClock() else { return nil }
+            if current.value != previous.value {
+                guard let cameraSecond = formatter.date(from: current.value) else { return nil }
+                // The tick happened between the two responses; take the midpoint of the
+                // window [previous response, current response] as the boundary estimate.
+                let windowMs = Int(current.at.timeIntervalSince(previous.at) * 1000)
+                let boundary = previous.at.addingTimeInterval(Double(windowMs) / 2000)
+                let offsetMs = Int64((cameraSecond.timeIntervalSince1970
+                                      - boundary.timeIntervalSince1970) * 1000)
+                return (offsetMs, windowMs / 2 + current.rttMs / 2)
+            }
+            previous = current
+            try? await Task.sleep(nanoseconds: 40_000_000)
+        }
+        return nil
+    }
+
     /// Bulk erase. The spec's special values ("all" / "image" / "video") must be sent
     /// ALONE in fileUrls. Not permitted during video recording.
     /// Deletes ONE camera-side file by its URL — the single-file twin of the security
@@ -380,6 +428,15 @@ private struct OSCCommandResponse: Decodable {
     struct Results: Decodable { let fileUrl: String? }
     let id: String?
     let state: String
+    let results: Results?
+    let error: OSCErrorBody?
+}
+
+private struct OSCGetOptionsResponse: Decodable {
+    struct Options: Decodable {
+        let dateTimeZone: String?
+    }
+    struct Results: Decodable { let options: Options? }
     let results: Results?
     let error: OSCErrorBody?
 }

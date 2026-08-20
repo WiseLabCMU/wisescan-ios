@@ -54,6 +54,7 @@ enum AppConstants {
         static let registerLegacyScans = "registerLegacyScans"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
+        static let rigMeasuredDyDateMs = "rigMeasuredDyDateMs"        // when the rig height was last entered/confirmed, UTC epoch ms — drives the staleness nudge (2026-08-19: a 28.5-inch entry outlived its rig by a day and a half, and poses shipped ~8 cm long with nothing anywhere to say the number had gone stale)
         static let rigMeasuredDyMeters = "rigMeasuredDyMeters"        // user's tape-measured iPad-camera→360°-lens distance — ALWAYS persisted in METERS (UI may display/accept imperial); 0 = unmeasured
         static let rigHeightUnitImperial = "rigHeightUnitImperial"    // display/entry unit preference for the rig height field (false = metric)
         static let colorizeFrom360Faces = "colorizeFrom360Faces"      // Developer Mode: color the preview mesh from 360° cube faces instead of keyframes (pose-accuracy probe)
@@ -261,6 +262,9 @@ enum AppConstants {
     /// 28.5 in was meant — a factor of ten) does not degrade the solve, it forces a wrong
     /// answer and the colour lands wrong with a healthy-looking residual. Below this the
     /// camera would be sitting on the phone, which no rig does.
+    /// Days after which the rig-height entry earns a "still right?" at record start.
+    /// Confirming re-stamps the date, so the nudge costs one tap per week, not per scan.
+    static let rigHeightStaleDays = 7.0
     static let rigHeightMinPlausibleMeters = 0.2
     static let rigHeightMaxPlausibleMeters = 3.0
 

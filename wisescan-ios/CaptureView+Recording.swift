@@ -115,6 +115,28 @@ extension CaptureView {
             showRigHeightPrompt = true
             return
         }
+        // Plausible but OLD: the number was right for SOME rig once — the question is
+        // whether it is right for the rig standing here now. Confirming re-stamps the
+        // date (one tap a week); a missing stamp counts as stale exactly once.
+        if ThetaCameraManager.shared.isConnected, rigHeightStale {
+            showRigHeightStalePrompt = true
+            return
+        }
+        continueAfterRigHeightWarning()
+    }
+
+    /// Entered/confirmed more than rigHeightStaleDays ago (or never stamped).
+    var rigHeightStale: Bool {
+        let stampMs = UserDefaults.standard.object(forKey: AppConstants.Key.rigMeasuredDyDateMs) as? Int64
+        guard let stampMs else { return true }
+        let age = Date().timeIntervalSince1970 - Double(stampMs) / 1000
+        return age > AppConstants.rigHeightStaleDays * 86400
+    }
+
+    /// Prompt action: the operator confirmed the current tape entry still matches the rig.
+    func confirmRigHeightStillCurrent() {
+        UserDefaults.standard.set(Int64(Date().timeIntervalSince1970 * 1000),
+                                  forKey: AppConstants.Key.rigMeasuredDyDateMs)
         continueAfterRigHeightWarning()
     }
 

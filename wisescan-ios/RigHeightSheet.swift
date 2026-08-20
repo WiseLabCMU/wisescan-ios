@@ -180,6 +180,10 @@ struct RigHeightSheet: View {
     private func commit() {
         guard let meters = previewMeters, !outOfRange else { return }
         rigMeasuredDyMeters = meters
+        // The measurement's AGE is part of the measurement: a stale entry once shipped
+        // poses ~8 cm long for a day and a half. Record start nudges past rigHeightStaleDays.
+        UserDefaults.standard.set(Int64(Date().timeIntervalSince1970 * 1000),
+                                  forKey: AppConstants.Key.rigMeasuredDyDateMs)
         dismiss()
     }
 }

@@ -58,6 +58,14 @@
       "type": "integer",
       "description": "File size of the captured JPEG image in bytes."
     },
+    "camera_clock_offset_ms": {
+      "type": ["integer", "null"],
+      "description": "Camera clock minus phone clock at scan start, milliseconds (+ = camera ahead), measured by catching a second tick of the camera's dateTimeZone. Add to a phone timestamp to compare against the camera's EXIF DateTimeOriginal (1 s resolution): shutter latency = EXIF_second(+offset window) - trigger tap. The camera drifts 1-7 s/day, so the offset is per scan, never reusable."
+    },
+    "camera_clock_offset_unc_ms": {
+      "type": ["integer", "null"],
+      "description": "Half-window uncertainty of camera_clock_offset_ms, milliseconds (poll gap at the tick plus half the HTTP round trip)."
+    },
     "rig_calibration_source": {
       "type": ["string", "null"],
       "enum": ["solved_capture", "solved_postprocess", "prior_postprocess", "mechanical_prior", null],

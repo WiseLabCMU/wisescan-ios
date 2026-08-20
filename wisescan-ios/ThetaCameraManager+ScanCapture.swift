@@ -44,6 +44,11 @@ extension ThetaCameraManager {
         /// When the camera acknowledged the shutter command, ms after the tap — the
         /// exposure window's anchor (BLE write-ack on the X, OSC response on the Z1).
         let shutterAckMs: Int?
+        /// Camera-vs-phone clock offset at scan start (+ = camera ahead), and how well it
+        /// was pinned — turns the camera's 1 s EXIF stamps into true shutter times, which
+        /// is what makes ack→shutter latency recoverable offline from every scan.
+        let cameraClockOffsetMs: Int64?
+        let cameraClockOffsetUncMs: Int?
         /// Window length applied for the sway verdict, ms.
         let exposureWindowMs: Int?
         /// Raw probe samples (t vs tap, displacement) — lets the window be re-derived
@@ -123,6 +128,8 @@ extension ThetaCameraManager {
             exposureMotionDeg: input.exposureMotionDeg,
             shutterPath: input.shutterPath,
             shutterAckMs: input.shutterAckMs,
+            cameraClockOffsetMs: input.cameraClockOffsetMs,
+            cameraClockOffsetUncMs: input.cameraClockOffsetUncMs,
             exposureWindowMs: input.exposureWindowMs,
             motionSamples: input.motionSamples.map { samples in
                 samples.map { [Double(Int($0.sinceTap * 1000)), Double($0.meters), Double($0.deg)] }
@@ -162,6 +169,8 @@ private struct EquirectStillMetadata: Encodable {
     let exposureMotionDeg: Float?
     let shutterPath: String
     let shutterAckMs: Int?
+    let cameraClockOffsetMs: Int64?
+    let cameraClockOffsetUncMs: Int?
     let exposureWindowMs: Int?
     /// [t_ms, m, deg] triples from the trigger-window motion probe.
     let motionSamples: [[Double]]?
@@ -188,6 +197,8 @@ private struct EquirectStillMetadata: Encodable {
         case exposureMotionDeg = "exposure_motion_deg"
         case shutterPath = "shutter_path"
         case shutterAckMs = "shutter_ack_ms"
+        case cameraClockOffsetMs = "camera_clock_offset_ms"
+        case cameraClockOffsetUncMs = "camera_clock_offset_unc_ms"
         case exposureWindowMs = "exposure_window_ms"
         case motionSamples = "motion_samples"
     }

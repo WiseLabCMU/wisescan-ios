@@ -119,6 +119,7 @@ struct CaptureView: View {
     // Internal, not private: the record-start gate lives in the +Recording split.
     @State var showBLEShutterPrompt = false
     @State var showRigHeightPrompt = false
+    @State var showRigHeightStalePrompt = false
     @State var isReconnectingBLE = false
     @State private var activeLocationName: String?
     // Ghost-mesh manual "nudger" (from main) — coexists with our anchor-based AlignmentOverlayView.
@@ -862,6 +863,16 @@ struct CaptureView: View {
                  + "colour and cube faces built from them — will be confidently wrong, and "
                  + "nothing downstream can tell. Measure from the iPad's camera to the 360° "
                  + "lens centre.")
+        }
+        .alert(String(format: "Rig height still %.2f m?", rigMeasuredDyMeters),
+               isPresented: $showRigHeightStalePrompt) {
+            Button("Yes — Record") { confirmRigHeightStillCurrent() }
+            Button("Update Height") { showRigHeightSheet = true }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This measurement is over a week old. Rigs get re-clamped and rods get "
+                 + "swapped; a stale entry doesn't degrade the poses, it makes them "
+                 + "confidently wrong. Confirming keeps it for another week.")
         }
         .alert("Bluetooth shutter is not connected", isPresented: $showBLEShutterPrompt) {
             Button("Reconnect Bluetooth") { reconnectBLEThenRecord() }
