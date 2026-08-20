@@ -435,6 +435,70 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
         XCTAssertEqual(tilt, 8, accuracy: 1.0)
     }
 
+    // MARK: - Ramp end-snapping
+
+    /// The seam problem: the flattening band where a ramp meets its landing belongs to neither plane,
+    /// so the fitted extent stops short of the intersection and the proxy shows a visible gap. The quad
+    /// extends to the plane-intersection line — extend only, never trim (overlap beats gap by decision).
+    func testRampEndsShortOfItsLanding_snapsToTheSeam() {
+        let tilt: Float = 8 * .pi / 180
+        // Ramp rising along +Z through the origin, fitted extent ending at v=+2.5 (world z≈2.48) —
+        // 0.4 m short of the landing plane at y = tan(8°)·2.87.
+        let ramp = PlaneRegistration.Plane(
+            center: .zero, normal: SIMD3(0, cos(tilt), -sin(tilt)),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, sin(tilt), cos(tilt)),
+            width: 1.5, height: 5, category: .floor)
+        let seamV: Float = 2.9
+        let landingY = sin(tilt) * seamV
+        let landing = PlaneRegistration.Plane(
+            center: SIMD3(0, landingY, cos(tilt) * seamV + 2), normal: SIMD3(0, 1, 0),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, 0, 1),
+            width: 4, height: 5, category: .floor)
+
+        let snapped = ARCoverageView.snapRampEnds([ramp], to: [landing])[0]
+        // Top extends from +2.5 to the seam at +2.9; bottom (−2.5) untouched → height 5.4.
+        XCTAssertEqual(snapped.plane.height, 5.4, accuracy: 0.02)
+        XCTAssertEqual(snapped.extendedTopM, 0.4, accuracy: 0.02)
+        XCTAssertEqual(snapped.extendedBottomM, 0, accuracy: 1e-4)
+        // The new top edge lies ON the landing plane.
+        let topEdge = snapped.plane.center + snapped.plane.yAxis * (snapped.plane.height / 2)
+        XCTAssertEqual(topEdge.y, landingY, accuracy: 0.01)
+    }
+
+    /// A level at the right height but far away laterally is a coincidence, not a junction — the seam
+    /// point falls outside its rectangle, so no snap.
+    func testRampDoesNotSnapToADistantLevelAtTheSameHeight() {
+        let tilt: Float = 8 * .pi / 180
+        let ramp = PlaneRegistration.Plane(
+            center: .zero, normal: SIMD3(0, cos(tilt), -sin(tilt)),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, sin(tilt), cos(tilt)),
+            width: 1.5, height: 5, category: .floor)
+        let farLevel = PlaneRegistration.Plane(
+            center: SIMD3(30, sin(tilt) * 2.9, 2.9), normal: SIMD3(0, 1, 0),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, 0, 1),
+            width: 4, height: 4, category: .floor)
+
+        XCTAssertEqual(ARCoverageView.snapRampEnds([ramp], to: [farLevel])[0].plane.height, 5,
+                       "snapped across open space to an unrelated level")
+    }
+
+    /// Extend-only: a ramp already overlapping past the seam is left alone.
+    func testRampOverlappingItsFloor_isNotTrimmed() {
+        let tilt: Float = 8 * .pi / 180
+        let ramp = PlaneRegistration.Plane(
+            center: .zero, normal: SIMD3(0, cos(tilt), -sin(tilt)),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, sin(tilt), cos(tilt)),
+            width: 1.5, height: 5, category: .floor)
+        // Floor plane whose seam sits at v = −2.0, INSIDE the ramp's extent (bottom overlap).
+        let floor = PlaneRegistration.Plane(
+            center: SIMD3(0, sin(tilt) * -2, -2), normal: SIMD3(0, 1, 0),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, 0, 1),
+            width: 4, height: 6, category: .floor)
+
+        XCTAssertEqual(ARCoverageView.snapRampEnds([ramp], to: [floor])[0].plane.height, 5,
+                       "overlap beats gap — never trim")
+    }
+
     // MARK: - Model fitness (per-quad graceful degradation)
 
     /// The 5-sided-room case: RoomPlan models a curved wall as a straight chord, and historically that

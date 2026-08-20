@@ -3595,14 +3595,34 @@ struct ARCoverageView: UIViewRepresentable {
                                           explainedBy: keptRoomPlanFloors + derivedLevels,
                                           support: floorSupport)
         lap("ramps")
-        let derivedRamps = rampSearch.ramps
+        // Snapped BEFORE the masks are built. The extension region is baked by construction below —
+        // it carries no candidate mesh by definition (that band belongs to neither plane), so waiting
+        // for support that structurally cannot arrive would leave the seam open.
+        let snappedRamps = snapRampEnds(rampSearch.ramps, to: keptRoomPlanFloors + derivedLevels)
+        let derivedRamps = snappedRamps.map(\.plane)
+        for (i, r) in snappedRamps.enumerated() where r.note != nil {
+            print("[GhostProxy] ramp snap[\(i)]: \(r.note!)")
+        }
         let floorQuads = keptRoomPlanFloors + derivedLevels + derivedRamps
         let bakedPlanes = walls + keptRoomPlanFloors + derivedLevels + derivedRamps
         // ONE mask build. Competition is within-family and bakedPlanes is walls + floorQuads in that
         // order, so the wall and floor mask sets are exactly slices of the baked set — building them
         // separately produced identical masks at three times the cost.
-        let bakedSupport = buildQuadSupport(planes: bakedPlanes, wallPatches: wallPatches,
+        var bakedSupport = buildQuadSupport(planes: bakedPlanes, wallPatches: wallPatches,
                                             floorPatches: floorPatches)
+        // Bake the snap extensions by construction: mark every fine cell in the extended band of each
+        // ramp's mask. bakedPlanes puts ramps at the tail, after walls + floors + levels.
+        let rampMaskOffset = bakedPlanes.count - derivedRamps.count
+        for (j, r) in snappedRamps.enumerated() where r.extendedTopM > 0 || r.extendedBottomM > 0 {
+            let p = r.plane
+            let (cols, rows) = quadSupportGrid(p)
+            let rowMeters = p.height / Float(rows)
+            let topRows = Int((r.extendedTopM / rowMeters).rounded(.up))
+            let bottomRows = Int((r.extendedBottomM / rowMeters).rounded(.up))
+            for row in 0..<rows where row < bottomRows || row >= rows - topRows {
+                for col in 0..<cols { bakedSupport[rampMaskOffset + j].mark(col, row) }
+            }
+        }
         let wallSupport = Array(bakedSupport[0..<walls.count])
         let floorSupportAll = Array(bakedSupport[walls.count...])
         lap("supports")
@@ -4796,6 +4816,90 @@ struct ARCoverageView: UIViewRepresentable {
         return RampDerivation(ramps: out, groups: trace)
     }
 
+    /// Extend fitted ramps to MEET the levels they run into. The transition band where a ramp
+    /// flattens into its landing belongs to neither plane — its faces are exactly what the ramp's
+    /// candidate set cannot include — so the fitted extent structurally stops short of the seam and
+    /// the proxy shows a visible gap at the junction. The two planes intersect in a well-defined
+    /// line; if a ramp's end lies within `rampSnapMaxMeters` of that line, its rectangle is extended
+    /// to touch it. Extend-only, never trim: a ramp overlapping into its floor is more accurate than
+    /// a gap, by decision.
+    ///
+    /// A level qualifies only if the would-be seam actually lands inside its rectangle (plus slack) —
+    /// otherwise a distant level at the right height would attract the snap across open space.
+    struct SnappedRamp {
+        let plane: PlaneRegistration.Plane
+        /// Metres of extension applied at each end (0 = untouched). The extension region carries no
+        /// candidate mesh by definition, so the builder bakes it by construction rather than waiting
+        /// for support that structurally cannot arrive.
+        let extendedBottomM: Float
+        let extendedTopM: Float
+        /// One line per end describing what happened — snapped how far, or why not.
+        let note: String?
+    }
+
+    static func snapRampEnds(_ ramps: [PlaneRegistration.Plane],
+                             to floors: [PlaneRegistration.Plane]) -> [SnappedRamp] {
+        ramps.map { ramp in
+            let fittedLo = -ramp.height / 2
+            let fittedHi = ramp.height / 2
+            var vMin = fittedLo
+            var vMax = fittedHi
+            var declined: [String] = []
+            for level in floors {
+                // v (along the ramp's long axis) at which the ramp's plane crosses the level's plane,
+                // measured at the ramp's mid-line. Solve dot(center + yAxis·v − levelCenter,
+                // levelNormal) = 0.
+                let denom = simd_dot(ramp.yAxis, level.normal)
+                guard abs(denom) > 1e-4 else { continue }   // parallel planes never meet
+                let v = simd_dot(level.center - ramp.center, level.normal) / denom
+                // The world point of the would-be seam must lie on the LEVEL's rectangle, or this is
+                // a coincidence of heights across open space, not a junction.
+                let seam = ramp.center + ramp.yAxis * v
+                let d = seam - level.center
+                guard abs(simd_dot(d, level.xAxis)) <= level.width / 2 + 0.2,
+                      abs(simd_dot(d, level.yAxis)) <= level.height / 2 + 0.2 else { continue }
+                if v > vMax {
+                    if v - vMax <= rampSnapMaxMeters {
+                        vMax = v
+                    } else {
+                        declined.append(String(format: "top seam %.1fm beyond end (cap %.1f)",
+                                               v - fittedHi, rampSnapMaxMeters))
+                    }
+                }
+                if v < vMin {
+                    if vMin - v <= rampSnapMaxMeters {
+                        vMin = v
+                    } else {
+                        declined.append(String(format: "bottom seam %.1fm beyond end (cap %.1f)",
+                                               fittedLo - v, rampSnapMaxMeters))
+                    }
+                }
+            }
+            let extTop = vMax - fittedHi
+            let extBottom = fittedLo - vMin
+            var notes = declined
+            if extTop > 1e-4 { notes.insert(String(format: "top +%.2fm to seam", extTop), at: 0) }
+            if extBottom > 1e-4 { notes.insert(String(format: "bottom +%.2fm to seam", extBottom), at: 0) }
+            guard extTop > 1e-4 || extBottom > 1e-4 else {
+                return SnappedRamp(plane: ramp, extendedBottomM: 0, extendedTopM: 0,
+                                   note: notes.isEmpty ? nil : notes.joined(separator: ", "))
+            }
+            let plane = PlaneRegistration.Plane(
+                center: ramp.center + ramp.yAxis * ((vMin + vMax) / 2),
+                normal: ramp.normal, xAxis: ramp.xAxis, yAxis: ramp.yAxis,
+                width: ramp.width, height: vMax - vMin, category: .floor)
+            return SnappedRamp(plane: plane, extendedBottomM: extBottom, extendedTopM: extTop,
+                               note: notes.joined(separator: ", "))
+        }
+    }
+
+    /// Farthest a fitted ramp end may sit from its plane-intersection seam and still be snapped to
+    /// it. Sized from device measurement: mesh reconstruction rounds a shallow ramp/landing corner
+    /// over more than a metre, so the candidate set can end ~1.2 m of run before the physical
+    /// junction. The seam-inside-the-level's-rectangle gate is what carries the correctness burden;
+    /// this cap only guards against pathological geometry.
+    static let rampSnapMaxMeters: Float = 2.0
+
     /// Upper bound on a face's pitch for it to be a ramp candidate — keeps near-vertical geometry out
     /// while still admitting the near-level faces a real ramp is built from.
     static let rampFaceMaxPitchDeg: Float = 25
@@ -4927,8 +5031,13 @@ struct ARCoverageView: UIViewRepresentable {
     /// same-height areas separated by a wall are different surfaces. v19: a RoomPlan quad that explains
     /// too little of the mesh in its own footprint is demoted outright — neither subtracting nor baking
     /// — so a chord across a curved wall stops flattening even its tangency strip, and non-boxy rooms
-    /// degrade per-quad to honest mesh instead of failing room-wide.
-    static let ghostProxyVersionHeader = "# ghostproxy v19"
+    /// degrade per-quad to honest mesh instead of failing room-wide. v20: fitted ramps extend to meet
+    /// the levels they run into (the transition band belongs to neither plane, so the fitted extent
+    /// structurally stopped short of the seam). v21: the snap cap widened to the measured transition
+    /// width (~1.2 m of run at a rounded shallow junction, past the old 0.75 m cap), and extension
+    /// cells bake by construction — they carry no candidate mesh by definition, so waiting for
+    /// support there meant the closed seam never drew.
+    static let ghostProxyVersionHeader = "# ghostproxy v21"
     /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
     /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/
