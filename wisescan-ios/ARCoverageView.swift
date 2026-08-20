@@ -3554,6 +3554,19 @@ struct ARCoverageView: UIViewRepresentable {
         let dedupedFloors = roomPlanFloors.filter { fl in
             !allLevels.contains { abs($0.center.y - fl.center.y) <= ghostProxyQuadCoverageMeters }
         }
+        // Floor census. RoomPlan floors leave this build by three exits — baked (in the quads line),
+        // demoted (its own line), or replaced here by a matching derived level, which was previously
+        // silent. With all three visible, the console answers how many floor planes RoomPlan actually
+        // emitted per scan — needed to settle whether "exactly one floor per CapturedRoom" (asserted
+        // throughout the docs, doubted on a two-segment observation) is fact or an artifact of
+        // landing-size coverage.
+        if dedupedFloors.count != roomPlanFloors.count {
+            let desc = roomPlanFloors.filter { fl in
+                allLevels.contains { abs($0.center.y - fl.center.y) <= ghostProxyQuadCoverageMeters }
+            }.map { String(format: "floor y=%+.2f %.1f×%.1fm", $0.center.y, $0.width, $0.height) }
+                .joined(separator: ", ")
+            print("[GhostProxy] replaced by derived level: \(desc) (RoomPlan emitted \(roomPlanFloors.count) floor(s))")
+        }
 
         // Per-quad graceful degradation. RoomPlan is designed to emit neat boxes; in a non-boxy room a
         // wall quad can be a straight chord across a curve, and even cell-gated it subtracts the true
