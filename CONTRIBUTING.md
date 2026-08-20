@@ -146,6 +146,10 @@ Either way, the local hooks are convenience: **CI enforces the same checks on ev
 
 To build the project locally, open `wisescan-ios.xcodeproj` with Xcode.
 
+Field-testing and debugging tools — Performance Diagnostics, the on-device
+diagnostics log export, simulation toggles, the BLE probe bench, the offline
+solver harness — are catalogued in [docs/developer-tools.md](docs/developer-tools.md).
+
 The `wisescan-ios` repository uses [Release Please](https://github.com/googleapis/release-please) to automate CHANGELOG generation and semantic versioning. Your PR titles *must* follow Conventional Commit standards (e.g., `feat:`, `fix:`, `chore:`). Keep commit subjects to ~50 chars. Fastlane is used to automate TestFlight deployments via `fastlane testflight`.
 
 > [!CAUTION]

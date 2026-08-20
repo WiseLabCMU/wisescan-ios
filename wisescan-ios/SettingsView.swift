@@ -206,7 +206,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Color from 360° Faces")
                             .foregroundColor(.white)
-                        Text("Colors the preview mesh EXCLUSIVELY from cube faces cut from the scan's 360° stills at their baked poses (normal keyframe/motion frames excluded). A measurement tool: misplaced color reads back cube-face pose error directly. Faces carry no depth, so occlusion is off — bleed-through is expected and not the signal. Privacy fail-closed still applies: on privacy-ON deferred-blur scans, maskless face frames are skipped entirely — probe with a people-free or consent (filter OFF) scan. Re-run Color after toggling.")
+                        Text("Colors the preview mesh EXCLUSIVELY from cube faces cut from the scan's 360° stills at their baked poses (normal keyframe/motion frames excluded). A measurement tool: misplaced color reads back cube-face pose error directly. Faces carry depth rasterized from the scan's own mesh, so occlusion is ON and misplaced color measures POSE, not bleed. Privacy fail-closed still applies: on privacy-ON deferred-blur scans, maskless face frames are skipped entirely — probe with a people-free or consent (filter OFF) scan. Re-run Color after toggling.")
                             .font(.caption)
                             .foregroundColor(.gray)
                     }
