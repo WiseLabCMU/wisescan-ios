@@ -513,6 +513,48 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
         XCTAssertEqual(holed.interiorHoleCells, 1, "the centre gap is a hole; the border notch is not")
     }
 
+    /// The 15–20 cm band, closed from above: a standard 17 cm riser resolves into two levels. This was
+    /// the gap where a single-step split level — sunken lounge, raised dais — got no quad because the
+    /// height-histogram clearing wiped the second surface.
+    func testSingleRiserStep_yieldsTwoLevels() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-2)...2, z: (-2)...1)          // main floor
+        m.addSurface(y: 0.17, x: (-2)...2, z: 1...3)          // platform one riser up
+
+        let out = levels(m)
+        XCTAssertEqual(out.count, 2, "one riser must be two surfaces, got \(out.map(\.center.y))")
+        XCTAssertEqual(out[0].center.y, 0, accuracy: 0.02)
+        XCTAssertEqual(out[1].center.y, 0.17, accuracy: 0.02)
+    }
+
+    /// The same band, closed from below: a step too shallow to resolve into its own level must stay
+    /// honest mesh, not be silently flattened. Under the loose 15 cm band a 12 cm platform sat inside
+    /// its floor's tolerance and was subtracted as if it were that floor; the tight derived-plane band
+    /// leaves it offPlane, which the proxy keeps.
+    func testSubRiserStep_staysMeshInsteadOfBeingFlattened() throws {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-2)...2, z: (-2)...1)
+        m.addSurface(y: 0.12, x: (-1)...1, z: 1.2...2.6)      // 12 cm platform, sub-riser
+
+        let out = levels(m)
+        XCTAssertEqual(out.count, 1, "a sub-riser step is below the resolvable spacing")
+        let floor = try XCTUnwrap(out.first)
+        XCTAssertEqual(floor.center.y, 0, accuracy: 0.03)
+
+        let masks = ARCoverageView.buildQuadSupport(planes: out, verts: m.verts, faces: m.faces,
+                                                    faceClasses: m.classData,
+                                                    dilateBy: 0)
+        // Derived-plane tolerance: the platform's surface is 12 cm off the floor plane — outside the
+        // 8 cm band, so it must NOT be covered (old behaviour: inside 15 cm, silently subtracted).
+        let tight = [ARCoverageView.derivedQuadCoverageMeters]
+        let onPlatform = SIMD3<Float>(0, 0.12, 1.9)
+        XCTAssertEqual(ARCoverageView.quadCoverage(out, support: masks, tolerances: tight, onPlatform),
+                       .offPlane, "the platform was absorbed by its neighbouring floor")
+        // And the floor itself is still covered under the tight band.
+        XCTAssertTrue(ARCoverageView.quadCovers(out, support: masks, tolerances: tight,
+                                                SIMD3(0, 0, -0.5)))
+    }
+
     // MARK: - Model fitness (per-quad graceful degradation)
 
     /// The 5-sided-room case: RoomPlan models a curved wall as a straight chord, and historically that

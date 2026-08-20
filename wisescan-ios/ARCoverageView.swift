@@ -3604,11 +3604,21 @@ struct ARCoverageView: UIViewRepresentable {
         // adjacent level's behalf, which truncated a fitted ramp's bottom short of the floor it meets
         // and starved the fit of its end geometry. Candidate selection wants the levels' true
         // footprint; the dilated masks below still govern what gets subtracted and drawn.
+        // Per-SOURCE perpendicular tolerances, everywhere planes and mesh meet: RoomPlan quads keep the
+        // loose band (their seating error is real), mesh-derived planes get the tight one (they are
+        // fitted to this very mesh). The loose band on derived floors was what silently flattened any
+        // step shallower than 15 cm — a sunken area or single-step platform was subtracted as if it
+        // were its neighbouring floor.
+        let candidateTolerances = [Float](repeating: ghostProxyQuadCoverageMeters,
+                                          count: keptRoomPlanFloors.count)
+            + [Float](repeating: derivedQuadCoverageMeters, count: derivedLevels.count)
         let floorSupport = buildQuadSupport(planes: keptRoomPlanFloors + derivedLevels,
-                                            wallPatches: [], floorPatches: floorPatches, dilateBy: 0)
+                                            wallPatches: [], floorPatches: floorPatches, dilateBy: 0,
+                                            tolerances: candidateTolerances)
         let rampSearch = deriveRampPlanes(floorPatches: floorPatches,
                                           explainedBy: keptRoomPlanFloors + derivedLevels,
-                                          support: floorSupport)
+                                          support: floorSupport,
+                                          explainedTolerances: candidateTolerances)
         lap("ramps")
         // Snapped BEFORE the masks are built. The extension region is baked by construction below —
         // it carries no candidate mesh by definition (that band belongs to neither plane), so waiting
@@ -3623,8 +3633,14 @@ struct ARCoverageView: UIViewRepresentable {
         // ONE mask build. Competition is within-family and bakedPlanes is walls + floorQuads in that
         // order, so the wall and floor mask sets are exactly slices of the baked set — building them
         // separately produced identical masks at three times the cost.
+        let floorQuadTolerances = [Float](repeating: ghostProxyQuadCoverageMeters,
+                                          count: keptRoomPlanFloors.count)
+            + [Float](repeating: derivedQuadCoverageMeters,
+                      count: derivedLevels.count + derivedRamps.count)
+        let bakedTolerances = [Float](repeating: ghostProxyQuadCoverageMeters, count: walls.count)
+            + floorQuadTolerances
         var bakedSupport = buildQuadSupport(planes: bakedPlanes, wallPatches: wallPatches,
-                                            floorPatches: floorPatches)
+                                            floorPatches: floorPatches, tolerances: bakedTolerances)
         // Bake the snap extensions by construction: mark every fine cell in the extended band of each
         // ramp's mask. bakedPlanes puts ramps at the tail, after walls + floors + levels.
         let rampMaskOffset = bakedPlanes.count - derivedRamps.count
@@ -3705,6 +3721,7 @@ struct ARCoverageView: UIViewRepresentable {
                 // off-level geometry (landings, treads, ledges, the climbing part of a ramp)
                 // survives instead of being replaced by the single flat full-extent quad
                 switch quadCoverage(floorQuads, support: floorSupportAll,
+                                    tolerances: floorQuadTolerances,
                                     (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
                 case .covered:
                     droppedCoveredFloor += 1
@@ -4041,10 +4058,15 @@ struct ARCoverageView: UIViewRepresentable {
     }
 
     /// Which SUPPORT cell of `p` a world point falls in, or nil if it is off the rectangle or off the
-    /// plane. The `+0.2` in-plane slack matches the rectangle coverage test it replaces.
-    static func quadSupportCell(_ p: PlaneRegistration.Plane, _ point: SIMD3<Float>) -> (c: Int, r: Int)? {
+    /// plane. The `+0.2` in-plane slack matches the rectangle coverage test it replaces. `tolerance` is
+    /// the perpendicular band — per-SOURCE, not global: RoomPlan quads need the loose default because
+    /// their seating error is real (a floor measured 22 cm off its landing), but a derived level or
+    /// ramp is fitted to this very mesh and only needs noise headroom. The loose band is what silently
+    /// flattened sub-riser steps: a 12 cm platform sat inside its floor's 15 cm band and was subtracted.
+    static func quadSupportCell(_ p: PlaneRegistration.Plane, _ point: SIMD3<Float>,
+                                tolerance: Float = ghostProxyQuadCoverageMeters) -> (c: Int, r: Int)? {
         let d = point - p.center
-        guard abs(simd_dot(d, p.normal)) <= ghostProxyQuadCoverageMeters else { return nil }
+        guard abs(simd_dot(d, p.normal)) <= tolerance else { return nil }
         let (cols, rows) = quadSupportGrid(p)
         let u = simd_dot(d, p.xAxis) + p.width / 2
         let v = simd_dot(d, p.yAxis) + p.height / 2
@@ -4068,7 +4090,8 @@ struct ARCoverageView: UIViewRepresentable {
     /// reuses it instead of re-sweeping the whole mesh.
     static func buildQuadSupport(planes: [PlaneRegistration.Plane],
                                  wallPatches: [SurfacePatch], floorPatches: [SurfacePatch],
-                                 dilateBy: Int = quadSupportDilateCells) -> [QuadSupport] {
+                                 dilateBy: Int = quadSupportDilateCells,
+                                 tolerances: [Float]? = nil) -> [QuadSupport] {
         let grids = planes.map { quadSupportGrid($0) }
         var sums = grids.map { [SIMD3<Float>](repeating: .zero, count: $0.cols * $0.rows) }
         var areas = grids.map { [Float](repeating: 0, count: $0.cols * $0.rows) }
@@ -4086,7 +4109,8 @@ struct ARCoverageView: UIViewRepresentable {
             for patch in patches {
                 var best: (i: Int, cell: (c: Int, r: Int), dist: Float)?
                 for i in planeIdx {
-                    guard let cell = quadSupportCell(planes[i], patch.c) else { continue }
+                    let tol = tolerances?[i] ?? ghostProxyQuadCoverageMeters
+                    guard let cell = quadSupportCell(planes[i], patch.c, tolerance: tol) else { continue }
                     let dist = abs(simd_dot(patch.c - planes[i].center, planes[i].normal))
                     if best == nil || dist < best!.dist { best = (i, cell, dist) }
                 }
@@ -4240,18 +4264,19 @@ struct ARCoverageView: UIViewRepresentable {
     /// `quadCovers` with the reason, for diagnostics. `support` gates on the per-cell mask when present,
     /// so a quad only claims the part of its rectangle that mesh actually backs.
     static func quadCoverage(_ planes: [PlaneRegistration.Plane], support: [QuadSupport]?,
-                             _ p: SIMD3<Float>) -> QuadCoverage {
+                             tolerances: [Float]? = nil, _ p: SIMD3<Float>) -> QuadCoverage {
         // Mirrors the support builder's competitive rule: the point belongs to its best-fit plane, and
         // is covered iff THAT plane's cell is backed. First-match here would re-open the overlap the
         // builder just resolved — a point the ramp won could still be swallowed by the landing.
         var atRightHeight = false
         var best: (i: Int, cell: (c: Int, r: Int), dist: Float)?
         for (i, q) in planes.enumerated() {
+            let tol = tolerances?[i] ?? ghostProxyQuadCoverageMeters
             let d = p - q.center
             let dist = abs(simd_dot(d, q.normal))
-            guard dist <= ghostProxyQuadCoverageMeters else { continue }
+            guard dist <= tol else { continue }
             atRightHeight = true
-            guard let cell = quadSupportCell(q, p) else { continue }
+            guard let cell = quadSupportCell(q, p, tolerance: tol) else { continue }
             if best == nil || dist < best!.dist { best = (i, cell, dist) }
         }
         if let best {
@@ -4268,8 +4293,8 @@ struct ARCoverageView: UIViewRepresentable {
     /// RoomPlan seating and extent error). Used both to subtract mesh faces a quad replaces and to
     /// decide what the quads so far have left unexplained.
     static func quadCovers(_ planes: [PlaneRegistration.Plane], support: [QuadSupport]? = nil,
-                           _ p: SIMD3<Float>) -> Bool {
-        quadCoverage(planes, support: support, p) == .covered
+                           tolerances: [Float]? = nil, _ p: SIMD3<Float>) -> Bool {
+        quadCoverage(planes, support: support, tolerances: tolerances, p) == .covered
     }
 
     /// What the level search found, plus what it looked at and turned down. The rejections matter as
@@ -4578,7 +4603,8 @@ struct ARCoverageView: UIViewRepresentable {
     /// Patch-based core — the builder computes the class partition once and every consumer reuses it.
     static func deriveRampPlanes(floorPatches: [SurfacePatch],
                                  explainedBy explained: [PlaneRegistration.Plane],
-                                 support: [QuadSupport]? = nil) -> RampDerivation {
+                                 support: [QuadSupport]? = nil,
+                                 explainedTolerances: [Float]? = nil) -> RampDerivation {
         typealias Patch = (c: SIMD3<Float>, area: Float, n: SIMD3<Float>)
         let cosMaxPitch = cos(rampFaceMaxPitchDeg * .pi / 180)
         var candidates: [Patch] = []
@@ -4586,7 +4612,7 @@ struct ARCoverageView: UIViewRepresentable {
             // Upper bound only — near-level faces MUST be admitted, since that is what a ramp is made
             // of. This just keeps near-vertical junk (a riser the classifier called floor) out.
             guard p.n.y >= cosMaxPitch else { continue }
-            guard !quadCovers(explained, support: support, p.c) else { continue }
+            guard !quadCovers(explained, support: support, tolerances: explainedTolerances, p.c) else { continue }
             candidates.append((c: p.c, area: p.area, n: p.n))
         }
 
@@ -5062,7 +5088,13 @@ struct ARCoverageView: UIViewRepresentable {
     static let levelMinAreaM2: Float = 1.0
     /// Minimum height gap between two accepted levels. Above a typical 17–18 cm stair riser, so a
     /// flight cannot register tread-by-tread even if the treads were wide enough to pass on area.
-    static let levelSeparationMeters: Float = 0.20
+    /// 0.10 resolves the standard 17–18 cm riser into two levels (histogram clearing is quantized to
+    /// 5 cm bins, so the effective wipe is ±12.5 cm worst-case — surfaces ≥15 cm apart survive). Treads
+    /// cannot re-enter through this: they are excluded upstream by pitch (reconstruction smooths a
+    /// flight into a ~30° slope), by span (a 0.28 m tread against the 0.6 m gate) and by area, and the
+    /// flight tests pin all three. Caveat for the future vertical-assignment work: tighter level
+    /// spacing raises the aliasing hazard there, which its uniqueness gate must own.
+    static let levelSeparationMeters: Float = 0.10
     /// Minimum plan-view span of a derived level in either horizontal direction.
     static let levelMinSpanMeters: Float = 0.6
     /// Cap on derived levels per scan — a backstop against a pathological histogram, not a real limit.
@@ -5107,7 +5139,10 @@ struct ARCoverageView: UIViewRepresentable {
     /// v18: support analysis runs on a 0.25 m grid decoupled from the 1 m bake lattice (blended
     /// boundary cells were passing the tilt gate and claiming a metre at a time over ramps, flights and
     /// through walls), and each level is one in-plane connected component rather than one height — two
-    /// same-height areas separated by a wall are different surfaces. v19: a RoomPlan quad that explains
+    /// same-height areas separated by a wall are different surfaces. v23: level separation drops to
+    /// 0.10 m so a standard riser resolves into two levels, and mesh-derived planes subtract within a
+    /// tight 8 cm band while RoomPlan quads keep 15 cm — a sub-riser step stays honest mesh instead of
+    /// being silently flattened into its neighbouring floor. v19: a RoomPlan quad that explains
     /// too little of the mesh in its own footprint is demoted outright — neither subtracting nor baking
     /// — so a chord across a curved wall stops flattening even its tangency strip, and non-boxy rooms
     /// degrade per-quad to honest mesh instead of failing room-wide. v20: fitted ramps extend to meet
@@ -5118,7 +5153,7 @@ struct ARCoverageView: UIViewRepresentable {
     /// support there meant the closed seam never drew.
     /// v22: fitness presence is orientation-gated, so corners stop polluting straight walls'
     /// denominators (two big straight walls in the flat-room control were falsely demoted at 14%/49%).
-    static let ghostProxyVersionHeader = "# ghostproxy v22"
+    static let ghostProxyVersionHeader = "# ghostproxy v23"
     /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
     /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/
@@ -5134,6 +5169,12 @@ struct ARCoverageView: UIViewRepresentable {
     /// spot, since a step/ledge shallower than this reads as coplanar and gets subtracted (a typical
     /// stair riser is 17–18 cm, so treads clear it — but a low curb or threshold does not).
     static let ghostProxyQuadCoverageMeters: Float = 0.15
+    /// The perpendicular band for MESH-DERIVED planes (levels, ramps). Tight, because they are fitted
+    /// to this very mesh — a level's slab is ±6 cm and an accepted ramp's residual is ≤6 cm RMS, so
+    /// 8 cm is pure noise headroom. RoomPlan quads keep the loose band above; their seating error is
+    /// real (a floor measured 22 cm off its landing). The loose band on a derived floor was what
+    /// silently flattened any step shallower than 15 cm.
+    static let derivedQuadCoverageMeters: Float = 0.08
     /// Wireframe line thickness for the proxy's RoomPlan lattice (the mesh remainder keeps the
     /// default 1 mm). Sparse 1 m grid lines need real thickness to survive viewing distance:
     /// 8 mm ≈ 6 px at 3 m — reads as architecture, not noise.
