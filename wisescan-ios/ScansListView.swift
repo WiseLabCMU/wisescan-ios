@@ -1000,6 +1000,7 @@ struct ScanCard: View {
     var onDelete: (CapturedScan) -> Void
 
     @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
+    @AppStorage(AppConstants.Key.forceRebuildArtifacts) private var forceRebuildArtifacts: Bool = AppConstants.forceRebuildArtifacts
     @Environment(\.modelContext) private var modelContext
     @State private var exportItem: ZipExportItem?
     @State private var showExportError = false
@@ -1493,7 +1494,11 @@ struct ScanCard: View {
     /// Long-press menu: STRUCTURAL re-run only, no coloring — the recovery tool for
     /// camera-gone downloads, late roomplans, and pipeline upgrades.
     private func reRunProcessing() {
-        guard !ScanPostprocessor.pendingSteps(for: scan, includeColorize: false).isEmpty else {
+        // With Force Rebuild on, a scan already at the current builder version still re-runs — the
+        // derived-artifact builders compute their diagnostics during the build, so "nothing to
+        // process" is exactly the state you cannot inspect without it.
+        guard !ScanPostprocessor.pendingSteps(for: scan, includeColorize: false,
+                                              forceRebuild: forceRebuildArtifacts).isEmpty else {
             coloringMessage = "Nothing to process"
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(2))
@@ -1501,9 +1506,10 @@ struct ScanCard: View {
             }
             return
         }
-        coloringMessage = "Processing…"
+        coloringMessage = forceRebuildArtifacts ? "Rebuilding…" : "Processing…"
         ScanPostprocessor.run(
             scans: [scan],
+            forceRebuild: forceRebuildArtifacts,
             modelContext: modelContext,
             progress: { _, msg in coloringMessage = msg ?? coloringMessage },
             completion: {

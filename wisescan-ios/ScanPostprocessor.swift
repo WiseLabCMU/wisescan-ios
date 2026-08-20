@@ -129,7 +129,14 @@ enum ScanPostprocessor {
     /// The achievable-but-not-done steps for a scan, in execution order. Empty = complete to the
     /// tier this scan's raw inputs allow (which for a roomless scan is "nothing room-derived").
     /// Room-derived steps become achievable only once the deferred build has landed roomplan.json.
-    static func pendingSteps(for scan: CapturedScan, includeColorize: Bool) -> [Step] {
+    /// `forceRebuild` bypasses the "already at the current builder version" shortcuts, so a step whose
+    /// output is up to date runs anyway. This is a DEVELOPER affordance: the derived-artifact builders
+    /// compute their diagnostics during the build, so a scan already at the current version prints
+    /// nothing and there is otherwise no way to re-examine it short of bumping a version header. It
+    /// deliberately does NOT force registration — that bakes a transform into mesh.obj in place, and
+    /// re-running it against already-canonical artifacts would double-bake.
+    static func pendingSteps(for scan: CapturedScan, includeColorize: Bool,
+                             forceRebuild: Bool = false) -> [Step] {
         var steps: [Step] = []
         let fm = FileManager.default
         let roomDone = artifactURL("roomplan.json", in: scan) != nil
@@ -178,7 +185,7 @@ enum ScanPostprocessor {
         // quads, invisible as wireframe).
         let proxyCurrent = artifactURL("mesh_proxy.obj", in: scan).map(proxyIsCurrent) ?? false
         let dynamicCurrent = artifactURL("mesh_dynamic.obj", in: scan).map(dynamicIsCurrent) ?? false
-        if (!proxyCurrent || !dynamicCurrent), roomDone,
+        if (forceRebuild || !proxyCurrent || !dynamicCurrent), roomDone,
            artifactURL("face_classes.bin", in: scan) != nil {
             steps.append(.proxy)
         }
@@ -422,6 +429,7 @@ enum ScanPostprocessor {
     /// that scan); `completion` fires on main after the whole batch.
     static func run(scans: [CapturedScan],
                     colorize: Bool = false,
+                    forceRebuild: Bool = false,
                     modelContext: ModelContext,
                     progress: ((CapturedScan, String?) -> Void)? = nil,
                     completion: (() -> Void)? = nil) {
@@ -469,7 +477,7 @@ enum ScanPostprocessor {
                 raw: scan.rawDataPath,
                 name: scan.name,
                 previewURL: scan.modelPreviewURL,
-                steps: pendingSteps(for: scan, includeColorize: colorize),
+                steps: pendingSteps(for: scan, includeColorize: colorize, forceRebuild: forceRebuild),
                 origRoomPlanURL: orig.flatMap { artifactURL("roomplan.json", in: $0) },
                 origId: orig?.id,
                 pose: scan.location?.imagingPoseMatrix,

@@ -21,6 +21,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
     @AppStorage(AppConstants.Key.vrBloomEnabled) private var vrBloomEnabled: Bool = AppConstants.vrBloomEnabled
     @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
+    @AppStorage(AppConstants.Key.forceRebuildArtifacts) private var forceRebuildArtifacts: Bool = AppConstants.forceRebuildArtifacts
     @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
     @AppStorage(AppConstants.Key.colorizeFrom360Faces) private var colorizeFrom360Faces: Bool = AppConstants.colorizeFrom360Faces
     @AppStorage(AppConstants.Key.keepCameraOriginals) private var keepCameraOriginals: Bool = AppConstants.keepCameraOriginals
@@ -348,6 +349,7 @@ struct SettingsView: View {
                                     self.perfDiagnostics = AppConstants.perfDiagnostics
                                     self.pauseVRCompute = AppConstants.pauseVRCompute
                                     self.memDiagForceReclaim = AppConstants.memDiagForceReclaim
+                                    self.forceRebuildArtifacts = AppConstants.forceRebuildArtifacts
                                 }
                             }
                         )) {
@@ -526,6 +528,18 @@ struct SettingsView: View {
                                     Text("MemDiag Force Reclaim")
                                         .foregroundColor(.white)
                                     Text("Memory attribution only. Forces freed pages back to the OS before [MemDiag] teardown snapshots so free-deltas reflect real reclaim, not cached pages. Expensive — leave OFF except when profiling. Needs Perf Diagnostics on.")
+                                        .font(.caption)
+                                        .foregroundColor(.gray)
+                                }
+                            }
+                            .tint(.orange)
+                            .padding(.vertical, 4)
+
+                            Toggle(isOn: $forceRebuildArtifacts) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Force Rebuild Artifacts")
+                                        .foregroundColor(.white)
+                                    Text("Makes long-press Re-run Processing rebuild the derived artifacts (ghost proxy, dynamic mesh, derived surfaces) even when they are already at the current builder version, instead of reporting \"Nothing to process\". Their diagnostics are computed during the build, so this is the only way to re-examine a finished scan without bumping a version header. Registration is never forced — it bakes into mesh.obj in place.")
                                         .font(.caption)
                                         .foregroundColor(.gray)
                                 }

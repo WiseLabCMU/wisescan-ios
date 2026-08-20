@@ -3519,8 +3519,9 @@ struct ARCoverageView: UIViewRepresentable {
         // a landing arrives as a clean quad instead of a lump. A flat single-level room derives one
         // level that the RoomPlan floor already represents, so it dedupes away to nothing and the
         // output is identical to not running this at all.
-        let allLevels = deriveLevelPlanes(verts: verts, faces: faces, faceClasses: faceClasses,
-                                         reference: roomPlanFloors.first)
+        let levelSearch = deriveLevelPlanes(verts: verts, faces: faces, faceClasses: faceClasses,
+                                            reference: roomPlanFloors.first)
+        let allLevels = levelSearch.levels
         let derivedLevels = allLevels.filter { lvl in
             !roomPlanFloors.contains { abs($0.center.y - lvl.center.y) <= ghostProxyQuadCoverageMeters }
         }
@@ -3554,7 +3555,8 @@ struct ARCoverageView: UIViewRepresentable {
         dynamicFaces.reserveCapacity(faces.count / 4)
         var droppedCeiling = 0
         var droppedCoveredFloor = 0
-        var keptUncoveredFloor = 0
+        var keptFloorBeyondExtent = 0
+        var keptFloorOffPlane = 0
         var droppedCoveredWall = 0
         for (faceIdx, f) in faces.enumerated() {
             guard f.0 >= 0, f.1 >= 0, f.2 >= 0, f.0 < verts.count, f.1 < verts.count, f.2 < verts.count else { continue }
@@ -3571,11 +3573,15 @@ struct ARCoverageView: UIViewRepresentable {
                 // floor family — subtract only where a RoomPlan floor quad actually sits on it, so
                 // off-level geometry (landings, treads, ledges, the climbing part of a ramp)
                 // survives instead of being replaced by the single flat full-extent quad
-                if quadCovers(floorQuads, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
+                switch quadCoverage(floorQuads, (verts[f.0] + verts[f.1] + verts[f.2]) / 3) {
+                case .covered:
                     droppedCoveredFloor += 1
                     continue
+                case .beyondExtent:
+                    keptFloorBeyondExtent += 1
+                case .offPlane:
+                    keptFloorOffPlane += 1
                 }
-                keptUncoveredFloor += 1
                 isFloorRemainder = true
             case 1, 6, 7:
                 // wall-plane family — subtract only where a RoomPlan quad replaces it
@@ -3668,21 +3674,59 @@ struct ARCoverageView: UIViewRepresentable {
         // Derived levels are listed with their HEIGHT rather than just their size: on a stairwell the
         // whole point is which levels came out and how far apart they sit.
         let quadDesc = (roomPlanPlanes
-            .map { String(format: "%@ %.1f×%.1fm", $0.category == .wall ? "wall" : "floor", $0.width, $0.height) }
+            .map { p in
+                // Floors carry their HEIGHT: on a multi-level scan the whole question is where RoomPlan
+                // seated its one floor plane relative to the levels actually present, and a size alone
+                // cannot answer it.
+                p.category == .wall
+                    ? String(format: "wall %.1f×%.1fm", p.width, p.height)
+                    : String(format: "floor y=%+.2f %.1f×%.1fm", p.center.y, p.width, p.height)
+            }
             + derivedLevels
             .map { String(format: "level y=%.2f %.1f×%.1fm", $0.center.y, $0.width, $0.height) }
             + derivedRamps
             .map { String(format: "ramp %.1f° %.1f×%.1fm",
                           acos(min(abs($0.normal.y), 1)) * 180 / .pi, $0.width, $0.height) })
             .joined(separator: ", ")
-        // `floorKept` is the level-mismatch signal: a flat single-level room should read near zero
-        // (only floor-edge speckle outside the quad), while a stairwell / ramp / raised platform
-        // shows a real count — that is the geometry the old unconditional drop was deleting.
-        print("[GhostProxy] quads baked: \(quadDesc) | mesh faces kept=\(keptFaces.count) (dynamic \(dynamicFaces.count)) dropped: ceiling=\(droppedCeiling) coveredFloor=\(droppedCoveredFloor) coveredWall=\(droppedCoveredWall) | floorKept=\(keptUncoveredFloor)")
+        // The floor-remainder split is the diagnostic that matters, because the two halves mean
+        // opposite things. `beyondExtent` is floor at the RIGHT height but outside the modelled
+        // footprint — mesh captured through a doorway or past the room boundary — and is expected in
+        // any room you did not scan strictly within its walls. `offPlane` is floor at a height NO quad
+        // sits at: the landing / ledge / ramp signal the old unconditional drop was deleting, and in a
+        // room believed to be flat and single-level it is a warning rather than a curiosity.
+        if !levelSearch.candidates.isEmpty {
+            print("[GhostProxy] level candidates: \(levelSearch.traceDescription)")
+        }
+        print("[GhostProxy] quads baked: \(quadDesc) | mesh faces kept=\(keptFaces.count) (dynamic \(dynamicFaces.count)) dropped: ceiling=\(droppedCeiling) coveredFloor=\(droppedCoveredFloor) coveredWall=\(droppedCoveredWall) | floorKept=\(keptFloorBeyondExtent + keptFloorOffPlane) (beyondExtent=\(keptFloorBeyondExtent) offPlane=\(keptFloorOffPlane))")
         let proxyResult = MeshExportResult(data: objData, vertexCount: totalVertices, faceCount: totalFaces)
         let dynamicResult = MeshExportResult(data: dynamicOBJData, vertexCount: dynamicVertexCount, faceCount: dynamicFaceCount)
         return GhostProxyBuildResult(proxy: proxyResult, dynamic: dynamicResult,
                                      levels: allLevels, ramps: derivedRamps)
+    }
+
+    /// Why a point is or is not covered by a quad. The two uncovered cases mean very different things
+    /// for a floor, and the raw kept-count cannot tell them apart: `beyondExtent` is mesh at the right
+    /// HEIGHT but outside the modelled footprint — floor seen through a doorway or past the room
+    /// boundary, which is expected and correctly kept — while `offPlane` is mesh at a height no quad
+    /// sits at, which is the landing/ledge/ramp signal, and in a room believed to be flat is a warning.
+    enum QuadCoverage {
+        case covered
+        case beyondExtent
+        case offPlane
+    }
+
+    /// `quadCovers` with the reason, for diagnostics.
+    static func quadCoverage(_ planes: [PlaneRegistration.Plane], _ p: SIMD3<Float>) -> QuadCoverage {
+        var atRightHeight = false
+        for q in planes {
+            let d = p - q.center
+            guard abs(simd_dot(d, q.normal)) <= ghostProxyQuadCoverageMeters else { continue }
+            atRightHeight = true
+            guard abs(simd_dot(d, q.xAxis)) <= q.width / 2 + 0.2,
+                  abs(simd_dot(d, q.yAxis)) <= q.height / 2 + 0.2 else { continue }
+            return .covered
+        }
+        return atRightHeight ? .beyondExtent : .offPlane
     }
 
     /// Whether any of `planes` genuinely stands in for the point `p`: within
@@ -3698,6 +3742,45 @@ struct ARCoverageView: UIViewRepresentable {
             return true
         }
         return false
+    }
+
+    /// What the level search found, plus what it looked at and turned down. The rejections matter as
+    /// much as the results: every gate is otherwise a silent skip, so from the outside "no landing at
+    /// that height" is indistinguishable from "a landing that missed a threshold by a hair" — and those
+    /// call for opposite responses (accept the room as-is vs. move a number).
+    struct LevelDerivation {
+        let levels: [PlaneRegistration.Plane]
+        let candidates: [Candidate]
+
+        enum Verdict: String {
+            case accepted
+            case belowMinArea       // not enough face area in the slab — a tread, or thin coverage
+            case tooSloped          // coherent slope: a ramp, or a slice of one
+            case tooNarrow          // a sliver along a wall, or a step nosing
+        }
+
+        struct Candidate {
+            let y: Float
+            let areaM2: Float
+            let meanTiltDeg: Float
+            let spanM: SIMD2<Float>
+            let verdict: Verdict
+        }
+
+        /// One-line-per-candidate summary for the build log.
+        var traceDescription: String {
+            candidates.map { c in
+                switch c.verdict {
+                case .belowMinArea:
+                    return String(format: "y=%+.2f %.1fm² %@", c.y, c.areaM2, c.verdict.rawValue)
+                case .tooSloped:
+                    return String(format: "y=%+.2f %.1fm² tilt=%.1f° %@", c.y, c.areaM2, c.meanTiltDeg, c.verdict.rawValue)
+                default:
+                    return String(format: "y=%+.2f %.1fm² tilt=%.1f° %.1f×%.1fm %@",
+                                  c.y, c.areaM2, c.meanTiltDeg, c.spanM.x, c.spanM.y, c.verdict.rawValue)
+                }
+            }.joined(separator: ", ")
+        }
     }
 
     /// Derive LEVEL planes — walkable horizontal surfaces at distinct heights — from the classified
@@ -3732,7 +3815,7 @@ struct ARCoverageView: UIViewRepresentable {
     /// Sloped surfaces are out of scope here: a ramp has no single Y and would need its own tilted
     /// plane fit. Until that exists, a ramp's faces just fail the pitch gate and survive as mesh.
     static func deriveLevelPlanes(verts: [SIMD3<Float>], faces: [(Int, Int, Int)], faceClasses: Data,
-                                  reference: PlaneRegistration.Plane?) -> [PlaneRegistration.Plane] {
+                                  reference: PlaneRegistration.Plane?) -> LevelDerivation {
         // One horizontal frame shared by every derived level, so they read as storeys of one building
         // rather than N independently-oriented slabs. RoomPlan's floor plane already carries the
         // room's orientation; world axes when there is none.
@@ -3746,6 +3829,7 @@ struct ARCoverageView: UIViewRepresentable {
                 yAxis = simd_normalize(fy)
             }
         }
+        var candidates: [LevelDerivation.Candidate] = []
 
         // One vote per near-level floor face: its height, area, position in the frame, and normal
         // (sign-normalized upward, since face winding is not trusted — see the mean-tilt gate).
@@ -3765,7 +3849,9 @@ struct ARCoverageView: UIViewRepresentable {
             let n = simd_normalize(cross.y < 0 ? -cross : cross)
             votes.append((y: ctr.y, area: area, u: simd_dot(ctr, xAxis), v: simd_dot(ctr, yAxis), n: n))
         }
-        guard let minY = votes.map(\.y).min(), let maxY = votes.map(\.y).max() else { return [] }
+        guard let minY = votes.map(\.y).min(), let maxY = votes.map(\.y).max() else {
+            return LevelDerivation(levels: [], candidates: [])
+        }
 
         // Sorted votes + an area prefix sum turn "how much area lies within ±6 cm of this height?"
         // into two binary searches, so the slab test can be exact rather than approximated by whole
@@ -3803,10 +3889,26 @@ struct ARCoverageView: UIViewRepresentable {
 
             let lo = lowerBound(peakY - levelSlabHalfThicknessMeters)
             let hi = lowerBound(peakY + levelSlabHalfThicknessMeters + 1e-6)
-            guard prefix[hi] - prefix[lo] >= levelMinAreaM2 else { continue }
+            let slabArea = prefix[hi] - prefix[lo]
+
+            // Record every candidate with real area behind it, accepted or not. Each gate below is
+            // otherwise a silent `continue`, which makes "there is no landing at that height" and "the
+            // landing missed a threshold by a hair" indistinguishable from outside — and those call for
+            // opposite responses. Candidates under a quarter of the area bar are noise, not near-misses.
+            let worthReporting = slabArea >= 0.25 * levelMinAreaM2
+            func record(_ verdict: LevelDerivation.Verdict, tiltDeg: Float, span: SIMD2<Float>) {
+                guard worthReporting else { return }
+                candidates.append(LevelDerivation.Candidate(y: peakY, areaM2: slabArea,
+                                                            meanTiltDeg: tiltDeg, spanM: span,
+                                                            verdict: verdict))
+            }
+            guard slabArea >= levelMinAreaM2 else {
+                record(.belowMinArea, tiltDeg: .nan, span: .zero)
+                continue
+            }
 
             let slab = sorted[lo..<hi]
-            let weight = prefix[hi] - prefix[lo]
+            let weight = slabArea
 
             // Slope gate. The slab test alone cannot tell a flat surface from a SLICE of a ramp: a
             // 6 m ADA ramp at 4.8° is under the per-face pitch gate, and a 12 cm slice of it holds
@@ -3817,15 +3919,22 @@ struct ARCoverageView: UIViewRepresentable {
             // built ramp never reads as a level and no realistic floor is excluded.
             let meanN = slab.reduce(SIMD3<Float>.zero) { $0 + $1.n * $1.area } / weight
             let meanLen = simd_length(meanN)
-            guard meanLen > 1e-6,
-                  acos(min(abs(meanN.y) / meanLen, 1)) * 180 / .pi <= levelMeanTiltMaxDeg else { continue }
+            let tiltDeg = meanLen > 1e-6 ? acos(min(abs(meanN.y) / meanLen, 1)) * 180 / .pi : Float.nan
+            guard tiltDeg <= levelMeanTiltMaxDeg else {
+                record(.tooSloped, tiltDeg: tiltDeg, span: .zero)
+                continue
+            }
 
             guard let uMin = slab.map(\.u).min(), let uMax = slab.map(\.u).max(),
                   let vMin = slab.map(\.v).min(), let vMax = slab.map(\.v).max() else { continue }
             let width = uMax - uMin, height = vMax - vMin
             // A level thinner than this in plan view is a sliver along a wall or a mis-classified
             // step nosing, not a surface anyone stands on.
-            guard width >= levelMinSpanMeters, height >= levelMinSpanMeters else { continue }
+            guard width >= levelMinSpanMeters, height >= levelMinSpanMeters else {
+                record(.tooNarrow, tiltDeg: tiltDeg, span: SIMD2(width, height))
+                continue
+            }
+            record(.accepted, tiltDeg: tiltDeg, span: SIMD2(width, height))
             // Height is the area-weighted mean of the slab, not the peak bin's midpoint — the bin is
             // 5 cm and the levels feed a 15 cm coverage test, so the extra precision is free accuracy.
             let y = slab.reduce(Float(0)) { $0 + $1.y * $1.area } / weight
@@ -3834,7 +3943,8 @@ struct ARCoverageView: UIViewRepresentable {
                 normal: SIMD3<Float>(0, 1, 0), xAxis: xAxis, yAxis: yAxis,
                 width: width, height: height, category: .floor))
         }
-        return out.sorted { $0.center.y < $1.center.y }
+        return LevelDerivation(levels: out.sorted { $0.center.y < $1.center.y },
+                               candidates: candidates.sorted { $0.y < $1.y })
     }
 
     /// Fit a RAMP — one coherent tilted walkable plane — to the floor-class faces the level planes
@@ -3966,8 +4076,10 @@ struct ARCoverageView: UIViewRepresentable {
     /// where a floor quad actually covers them (was unconditional, which deleted stairs/landings/
     /// ramps and substituted the single flat full-extent quad). v6: levels RoomPlan never modelled
     /// (upper landings, platforms) are derived from the classified mesh and baked as their own quads.
-    /// v7: a coherently sloped walkable surface is fitted as a tilted ramp quad.
-    static let ghostProxyVersionHeader = "# ghostproxy v7"
+    /// v7: a coherently sloped walkable surface is fitted as a tilted ramp quad. v8: no change to the
+    /// artifact — the version is also the only "rebuild this" trigger there is, and the kept-floor
+    /// tallies are computed during the build, so a corrected diagnostic needs the builder to re-run.
+    static let ghostProxyVersionHeader = "# ghostproxy v8"
     /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
     /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/

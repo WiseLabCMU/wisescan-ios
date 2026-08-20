@@ -89,7 +89,13 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
     private func levels(_ m: MeshBuilder,
                         reference: PlaneRegistration.Plane? = nil) -> [PlaneRegistration.Plane] {
         ARCoverageView.deriveLevelPlanes(verts: m.verts, faces: m.faces,
-                                         faceClasses: m.classData, reference: reference)
+                                         faceClasses: m.classData, reference: reference).levels
+    }
+
+    /// The search's own account of what it examined and why it turned things down.
+    private func levelCandidates(_ m: MeshBuilder) -> [ARCoverageView.LevelDerivation.Candidate] {
+        ARCoverageView.deriveLevelPlanes(verts: m.verts, faces: m.faces,
+                                         faceClasses: m.classData, reference: nil).candidates
     }
 
     /// Ramps are fitted to what the levels leave over, so the two always run in that order.
@@ -137,6 +143,32 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
                     width: (-0.6)...0.6, startZ: 0)
 
         XCTAssertTrue(levels(m).isEmpty)
+    }
+
+    /// A near-miss has to be distinguishable from an absence. A landing just under the area bar must be
+    /// reported as rejected-on-area rather than vanishing, because that is what tells you a threshold
+    /// wants moving instead of that the room has no landing there.
+    func testLandingJustUnderTheAreaBar_isReportedAsANearMiss() throws {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-1.5)...1.5, z: (-1.5)...1.5)          // real floor
+        m.addSurface(y: 2.0, x: (-0.45)...0.45, z: (-0.45)...0.45)    // ~0.8 m² — under the 1 m² bar
+
+        XCTAssertEqual(levels(m).count, 1, "the small upper surface must not become a level")
+        let nearMiss = try XCTUnwrap(levelCandidates(m).first { abs($0.y - 2.0) < 0.1 })
+        XCTAssertEqual(nearMiss.verdict, .belowMinArea)
+        XCTAssertLessThan(nearMiss.areaM2, ARCoverageView.levelMinAreaM2)
+        XCTAssertGreaterThan(nearMiss.areaM2, 0.5, "should be a near-miss, not noise")
+    }
+
+    /// The accepted levels have to show up in the trace too, or a log with no rejections would look
+    /// like a search that never ran.
+    func testAcceptedLevelsAppearInTheTrace() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-1)...1, z: (-2)...0)
+        m.addSurface(y: 1.5, x: (-1)...1, z: 2.24...4.24)
+
+        let accepted = levelCandidates(m).filter { $0.verdict == .accepted }
+        XCTAssertEqual(accepted.count, 2)
     }
 
     /// A ramp is not a level: it produces nothing here and survives as mesh in the proxy instead of
