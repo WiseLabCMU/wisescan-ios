@@ -24,6 +24,17 @@ enum DiagnosticsLogExport {
 
     static let subsystem = "org.arenaxr.scan4d"
 
+    /// Which configuration produced this binary. In the header because timings in these
+    /// exports get compared across builds, and on 2026-08-20 a week of field numbers was
+    /// mis-attributed to Debug from memory — the file itself should say.
+    private static var buildConfiguration: String {
+        #if DEBUG
+        return "Debug (-Onone — timings here are slower than shipping builds)"
+        #else
+        return "Release (-O)"
+        #endif
+    }
+
     /// Formatted log text for this launch, newest last. `since` defaults to process
     /// start. Runs off-main by contract: `getEntries` walks the whole store.
     nonisolated static func collect(since: Date? = nil) throws -> String {
@@ -47,6 +58,7 @@ enum DiagnosticsLogExport {
         Scan4D diagnostics — \(lines.count) entries
         device: \(UIDevice.current.model) · iOS \(UIDevice.current.systemVersion)
         performance diagnostics: \(PerfDiag.enabled ? "ON" : "OFF — most tuning lines are suppressed")
+        build: \(buildConfiguration)
 
         """
         return header + lines.joined(separator: "\n") + "\n"
