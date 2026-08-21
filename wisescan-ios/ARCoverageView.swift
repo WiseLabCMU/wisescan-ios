@@ -5759,7 +5759,11 @@ struct ARCoverageView: UIViewRepresentable {
 /// **Eviction: capacity ONE.** A key other than the held one replaces the entry, so at most a single
 /// `ARWorldMap` is ever retained here. The key is the file's path, byte size and modification date,
 /// so a map rewritten at a path already seen is re-read rather than served stale.
-private final class WorldMapCache: @unchecked Sendable {
+///
+/// Explicitly `nonisolated` (the project defaults types to MainActor): without it the cache, its
+/// `NSLock` and `map(for:)` would all be main-actor-isolated and the lock would be moot. The
+/// `@unchecked Sendable` + lock pair is what lets `map(for:)` be called from any thread.
+private nonisolated final class WorldMapCache: @unchecked Sendable {
     static let shared = WorldMapCache()
 
     private let lock = NSLock()
