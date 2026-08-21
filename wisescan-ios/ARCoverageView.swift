@@ -4169,7 +4169,9 @@ struct ARCoverageView: UIViewRepresentable {
                 return out
             }
             .joined(separator: " ")
-        if !rampSearch.groups.isEmpty {
+        // `|| cappedDroppedM2 > 0`: saturated-and-shredded is exactly the case this trace exists for,
+        // and it can end with an empty group trace, which would have kept the diagnostic dark.
+        if !rampSearch.groups.isEmpty || rampSearch.cappedDroppedM2 > 0 {
             print("[GhostProxy] ramp groups: \(rampSearch.traceDescription)")
         }
         let totalMs = Double(DispatchTime.now().uptimeNanoseconds - tStart.uptimeNanoseconds) / 1e6
@@ -4883,6 +4885,14 @@ struct ARCoverageView: UIViewRepresentable {
     struct RampDerivation {
         let ramps: [PlaneRegistration.Plane]
         let groups: [Group]
+        /// Candidate area discarded because `rampMaxGroups` was already full when its direction turned
+        /// up — invisible in `groups`, which only describes directions that got a group. Saturation
+        /// plus a big dropped area means a curved or noisy scene shredded into more directions than the
+        /// cap admits, and whatever was dropped can never be fitted however good it was.
+        let cappedDroppedM2: Float
+        /// How many direction groups the search actually held (== `rampMaxGroups` when saturated).
+        /// Not on `Group`, which is per fitted component, several of which can come from one group.
+        let groupCount: Int
 
         enum Verdict: String {
             case accepted
@@ -4913,6 +4923,9 @@ struct ARCoverageView: UIViewRepresentable {
                 parts.append(g.verdict.rawValue)
                 return parts.joined(separator: " ")
             }.joined(separator: ", ")
+                + (cappedDroppedM2 > 0
+                   ? String(format: " | capped %d grp, dropped %.1fm²", groupCount, cappedDroppedM2)
+                   : "")
         }
     }
 
@@ -5090,6 +5103,9 @@ struct ARCoverageView: UIViewRepresentable {
         // Group by normal direction against each group's SEED (not a running mean, which would let a
         // continuously-curving surface chain into a single group spanning every direction).
         var groups: [(seed: SIMD2<Float>, area: Float, patches: [Patch])] = []
+        // Area thrown away by the group cap — otherwise a silent loss, since a dropped patch appears
+        // in no group and so in no trace line. Log-only.
+        var droppedArea: Float = 0
         for c in candidates {
             let h = SIMD2(c.n.x, c.n.z)
             if let i = groups.firstIndex(where: { simd_distance($0.seed, h) <= rampNormalGroupRadius }) {
@@ -5097,6 +5113,8 @@ struct ARCoverageView: UIViewRepresentable {
                 groups[i].patches.append(c)
             } else if groups.count < rampMaxGroups {
                 groups.append((seed: h, area: c.area, patches: [c]))
+            } else {
+                droppedArea += c.area
             }
         }
 
@@ -5217,7 +5235,8 @@ struct ARCoverageView: UIViewRepresentable {
                 }
             }
         }
-        return RampDerivation(ramps: out, groups: trace)
+        return RampDerivation(ramps: out, groups: trace,
+                              cappedDroppedM2: droppedArea, groupCount: groups.count)
     }
 
     /// Extend fitted ramps to MEET the levels they run into. The transition band where a ramp
