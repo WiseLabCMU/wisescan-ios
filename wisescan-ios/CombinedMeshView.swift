@@ -827,15 +827,21 @@ struct CombinedMeshView: UIViewRepresentable {
                 // own extent means the same physical height is a different color per map — actively
                 // misleading for judging whether two landings sit at the same level.
                 //
-                // Deliberately re-parses in pass 2 rather than holding every parsed mesh in memory
-                // at once: N large meshes resident is the worse trade on device, and this runs
-                // off-main behind the existing "Loading N meshes…" overlay.
+                // The parse is HANDED to pass 2 rather than thrown away and redone. A parsed OBJ is
+                // just its vertex + face arrays — a fraction of what one built geometry costs in
+                // subdivided arrays, `Data` copies and SceneKit sources — and pass 2 drops each map's
+                // parse the moment it has consumed it, so the accumulating geometries are still what
+                // sets the peak, as before. What goes away is one file read and one full-mesh parse
+                // per map from the "Loading N meshes…" wait.
                 var unionMin = Float.greatestFiniteMagnitude
                 var unionMax = -Float.greatestFiniteMagnitude
-                for item in items {
+                var parsedMeshes = [MeshParser.OBJData?](repeating: nil, count: items.count)
+                for (idx, item) in items.enumerated() {
                     guard let data = try? Data(contentsOf: item.meshURL),
-                          let parsed = MeshParser.parseOBJ(from: data),
-                          let r = MeshPreviewView.worldHeightRange(parsed: parsed, transform: item.transform)
+                          let parsed = MeshParser.parseOBJ(from: data)
+                    else { continue }
+                    parsedMeshes[idx] = parsed
+                    guard let r = MeshPreviewView.worldHeightRange(parsed: parsed, transform: item.transform)
                     else { continue }
                     unionMin = min(unionMin, r.min)
                     unionMax = max(unionMax, r.max)
@@ -853,12 +859,13 @@ struct CombinedMeshView: UIViewRepresentable {
                 var proxyMissing = 0
                 var dynamicAvailable = 0
                 var dynamicMissing = 0
-                for item in items {
-                    guard let data = try? Data(contentsOf: item.meshURL) else { continue }
+                for (idx, item) in items.enumerated() {
+                    guard let parsed = parsedMeshes[idx] else { continue }
+                    parsedMeshes[idx] = nil   // released as soon as this map's geometry is built
                     let colors = item.colorsURL.flatMap { try? Data(contentsOf: $0) }
                     if colors == nil { usedHeightRamp = true }
                     guard let (geometry, _) = MeshPreviewView.buildGeometry(
-                        from: data, vertexColors: colors,
+                        parsed: parsed, vertexColors: colors,
                         heightRange: sharedRange, heightTransform: item.transform
                     ) else { continue }
 
