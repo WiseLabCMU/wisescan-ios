@@ -155,6 +155,10 @@ The `wisescan-ios` repository uses [Release Please](https://github.com/googleapi
 > [!CAUTION]
 > **Never use `BREAKING CHANGE` in commit/PR bodies or the `!` suffix on commit/PR types (e.g., `feat!:`, `fix!:`).** These tokens cause release-please to automatically bump the major version. Major version increments are reserved for the maintainer's explicit decision — contributors and agents do not decide what constitutes a breaking change for semver purposes.
 
+> [!IMPORTANT]
+> **Issue and PR References in Commit & PR Messages:**
+> Only use `#NN` notation in commit messages, PR titles, and PR descriptions if they correspond to actual GitHub issues or pull requests. Do **not** use `#NN` notation for internal enumerations of planning docs or triage items (e.g., use `REQ-NNN`, `Task NN`, or plain text instead), as this creates erroneous links and may result in unintended automatic actions.
+
 > [!WARNING]
 > **Xcode strips `x-release-please-version` markers.** The `MARKETING_VERSION` lines in `project.pbxproj` contain `/* x-release-please-version */` inline comments that release-please uses to locate the version string. Xcode's project serializer does **not** preserve non-standard inline comments — opening the project or modifying build settings will silently strip these markers. **Before committing any `project.pbxproj` changes, verify the markers are intact:**
 > ```bash
