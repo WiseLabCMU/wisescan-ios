@@ -1,6 +1,7 @@
 import CoreGraphics
 import CryptoKit
 import ImageIO
+import Metal
 import UIKit
 import simd
 
@@ -316,7 +317,13 @@ enum EquirectFaceExport {
 
         // Upload bitmap to GPU texture once; reused for all 5 face dispatches.
         let gpuTexture = EquirectGPU.isAvailable
-            ? EquirectGPU.makeTexture(from: bitmap.pixels, width: bitmap.width, height: bitmap.height)
+            ? (bitmap.buffer.flatMap {
+                // Zero-copy view of the memory the decode already wrote into.
+                EquirectGPU.makeTexture(from: $0, width: bitmap.width, height: bitmap.height,
+                                        bytesPerRow: bitmap.bytesPerRow)
+               } ?? bitmap.array.flatMap {
+                EquirectGPU.makeTexture(from: $0, width: bitmap.width, height: bitmap.height)
+               })
             : nil
 
         var written = 0
@@ -427,11 +434,35 @@ enum EquirectFaceExport {
 
     // MARK: - Sampling (gnomonic; sibling of EquirectPrivacyBlur's detection-res sampler)
 
+    /// A decoded equirect, held ONCE.
+    ///
+    /// This used to be a Swift `[UInt8]` that was then uploaded into a `.shared` MTLTexture
+    /// via `replace(withBytes:)` — two full-size allocations of the same image, both alive
+    /// for the whole six-face loop. At the 8192-wide decode cap that is 134 MB each, so
+    /// steady state was ~268 MB per still, and the repo already records an OOM kill on this
+    /// path (iPhone 17 Pro, 2026-07-23).
+    ///
+    /// Now the CGContext draws STRAIGHT into GPU-visible memory: one `MTLBuffer`, wrapped
+    /// zero-copy as a texture for the GPU reproject and read directly by the CPU
+    /// sampler. One allocation, one decode, no upload copy. Without Metal it falls back to
+    /// a plain array, which is what the CPU-only path always used.
     private struct Bitmap {
-        let pixels: [UInt8]
         let width: Int
         let height: Int
         let bytesPerRow: Int
+        /// GPU-visible backing when Metal is available; the texture is a view of THIS.
+        let buffer: MTLBuffer?
+        /// CPU-only fallback storage.
+        let array: [UInt8]?
+
+        /// Base pointer for CPU sampling, whichever backing is in use.
+        func withPixels<R>(_ body: (UnsafePointer<UInt8>) -> R) -> R? {
+            if let buffer {
+                return body(buffer.contents().assumingMemoryBound(to: UInt8.self))
+            }
+            guard let array else { return nil }
+            return array.withUnsafeBufferPointer { body($0.baseAddress!) }
+        }
     }
 
     /// Decode the staged equirect capped at `equirectFaceDecodeMax` wide — face resolution
@@ -446,10 +477,9 @@ enum EquirectFaceExport {
               ] as CFDictionary) else { return nil }
         let width = cgImage.width
         let height = cgImage.height
-        let bytesPerRow = width * 4
-        var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
-        let rendered = pixels.withUnsafeMutableBytes { raw -> Bool in
-            guard let ctx = CGContext(data: raw.baseAddress, width: width, height: height,
+
+        func draw(into base: UnsafeMutableRawPointer, bytesPerRow: Int) -> Bool {
+            guard let ctx = CGContext(data: base, width: width, height: height,
                                       bitsPerComponent: 8, bytesPerRow: bytesPerRow,
                                       space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
@@ -457,7 +487,27 @@ enum EquirectFaceExport {
             ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
             return true
         }
-        return rendered ? Bitmap(pixels: pixels, width: width, height: height, bytesPerRow: bytesPerRow) : nil
+
+        // Preferred path: decode straight into GPU-visible memory so the reproject needs no
+        // upload copy. The row stride is padded to the device's linear-texture alignment —
+        // required for a buffer-backed texture, and CGContext is happy with any stride.
+        if let (buffer, bytesPerRow) = EquirectGPU.makeSharedBuffer(width: width, height: height),
+           draw(into: buffer.contents(), bytesPerRow: bytesPerRow) {
+            PerfDiag.log(String(format: "[Colorize] equirect decode: %dx%d into ONE %.0f MB shared buffer (was 2x, decode + upload copy)",
+                                width, height, Double(bytesPerRow * height) / 1_048_576))
+            return Bitmap(width: width, height: height, bytesPerRow: bytesPerRow,
+                          buffer: buffer, array: nil)
+        }
+
+        // No Metal (or allocation refused): plain array, as the CPU-only path always used.
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let rendered = pixels.withUnsafeMutableBytes { raw -> Bool in
+            guard let base = raw.baseAddress else { return false }
+            return draw(into: base, bytesPerRow: bytesPerRow)
+        }
+        return rendered ? Bitmap(width: width, height: height, bytesPerRow: bytesPerRow,
+                                 buffer: nil, array: pixels) : nil
     }
 
     /// Render one face by gnomonic sampling. The face's view direction is `rotation * -Z`,
@@ -466,6 +516,9 @@ enum EquirectFaceExport {
     private static func renderFace(_ rotation: simd_float3x3, from bmp: Bitmap, side: Int,
                                    vOffsetFrac: Float = 0) -> Data? {
         var buf = [UInt8](repeating: 255, count: side * side * 4)
+        // Resolve the source pointer ONCE: the sampler runs side² times (4.2M at a 2048
+        // face), so re-deriving it per pixel would dwarf the sampling itself.
+        let ok: Bool? = bmp.withPixels { pixels in
         for row in 0..<side {
             let ndcV = 1 - 2 * (Float(row) + 0.5) / Float(side)
             for col in 0..<side {
@@ -477,13 +530,16 @@ enum EquirectFaceExport {
                 // atan2(dir.x, dir.z), so feeding dir = (x, y, -z) makes lon ≡ ψ exactly.
                 let camRay = simd_normalize(rotation * SIMD3<Float>(ndcU, ndcV, -1))
                 let dir = SIMD3<Float>(camRay.x, camRay.y, -camRay.z)
-                let rgb = sample(bmp, dir: dir, vOffsetFrac: vOffsetFrac)
+                let rgb = sample(bmp, pixels: pixels, dir: dir, vOffsetFrac: vOffsetFrac)
                 let out = (row * side + col) * 4
                 buf[out] = UInt8(max(0, min(255, rgb.x)))
                 buf[out + 1] = UInt8(max(0, min(255, rgb.y)))
                 buf[out + 2] = UInt8(max(0, min(255, rgb.z)))
             }
         }
+        return true
+        }
+        guard ok == true else { return nil }
         let image: CGImage? = buf.withUnsafeMutableBytes { raw in
             guard let ctx = CGContext(data: raw.baseAddress, width: side, height: side,
                                       bitsPerComponent: 8, bytesPerRow: side * 4,
@@ -498,7 +554,7 @@ enum EquirectFaceExport {
 
     /// Bilinear equirect sample; longitude wraps, latitude clamps. `dir` is in the equirect
     /// sampling frame (lon 0 = +Z, lat +90° = +Y) — same convention as EquirectPrivacyBlur.
-    private static func sample(_ bmp: Bitmap, dir: SIMD3<Float>,
+    private static func sample(_ bmp: Bitmap, pixels: UnsafePointer<UInt8>, dir: SIMD3<Float>,
                                vOffsetFrac: Float = 0) -> SIMD3<Float> {
         let lat = asin(max(-1, min(1, dir.y)))
         let lon = atan2(dir.x, dir.z)
@@ -510,7 +566,7 @@ enum EquirectFaceExport {
             let wrapped = ((col % bmp.width) + bmp.width) % bmp.width
             let clamped = max(0, min(bmp.height - 1, row))
             let base = clamped * bmp.bytesPerRow + wrapped * 4
-            return SIMD3(Float(bmp.pixels[base]), Float(bmp.pixels[base + 1]), Float(bmp.pixels[base + 2]))
+            return SIMD3(Float(pixels[base]), Float(pixels[base + 1]), Float(pixels[base + 2]))
         }
         let col0 = Int(floorX), row0 = Int(floorY)
         let top = simd_mix(texel(col0, row0), texel(col0 + 1, row0), SIMD3(repeating: wgtX))

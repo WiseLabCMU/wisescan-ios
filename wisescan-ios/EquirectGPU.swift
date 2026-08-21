@@ -64,6 +64,33 @@ enum EquirectGPU {
 
     // MARK: - Texture creation
 
+    /// A GPU-visible RGBA8 buffer sized for `width`×`height`, plus the row stride to use.
+    ///
+    /// The stride is padded up to `minimumLinearTextureAlignment`, which a buffer-backed
+    /// texture requires and which CGContext accepts without complaint — so a caller can
+    /// decode an image DIRECTLY into this memory and then wrap it with `makeTexture(from:)`
+    /// below, paying for the image once instead of decoding into a Swift array and copying
+    /// that into a texture.
+    static func makeSharedBuffer(width: Int, height: Int) -> (MTLBuffer, bytesPerRow: Int)? {
+        guard let device, width > 0, height > 0 else { return nil }
+        let alignment = max(1, device.minimumLinearTextureAlignment(for: .rgba8Unorm))
+        let unpadded = width * 4
+        let bytesPerRow = ((unpadded + alignment - 1) / alignment) * alignment
+        guard let buffer = device.makeBuffer(length: bytesPerRow * height, options: .storageModeShared)
+        else { return nil }
+        return (buffer, bytesPerRow)
+    }
+
+    /// Wrap an already-populated shared buffer as a texture — a VIEW, not a copy.
+    static func makeTexture(from buffer: MTLBuffer, width: Int, height: Int,
+                            bytesPerRow: Int) -> MTLTexture? {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+        desc.usage = [.shaderRead]
+        desc.storageMode = .shared
+        return buffer.makeTexture(descriptor: desc, offset: 0, bytesPerRow: bytesPerRow)
+    }
+
     /// Create a Metal texture from RGBA8 bitmap data.
     static func makeTexture(from pixels: [UInt8], width: Int, height: Int) -> MTLTexture? {
         guard let device else { return nil }
