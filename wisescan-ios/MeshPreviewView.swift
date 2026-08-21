@@ -877,13 +877,19 @@ struct MeshPreviewView: UIViewRepresentable {
             let v1 = SIMD3<Float>(finalVertices[i1].x, finalVertices[i1].y, finalVertices[i1].z)
             let v2 = SIMD3<Float>(finalVertices[i2].x, finalVertices[i2].y, finalVertices[i2].z)
 
-            let normal = simd_normalize(simd_cross(v1 - v0, v2 - v0))
+            // A collinear triangle's cross product is zero, and normalizing it yields NaN that
+            // spreads into all three vertices — one sliver is enough to garbage the shading of
+            // everything it touches. Same length gate the other normal sites use.
+            let faceNormal = simd_cross(v1 - v0, v2 - v0)
+            guard simd_length(faceNormal) > 1e-8 else { continue }
+            let normal = simd_normalize(faceNormal)
             vertexNormals[i0] += normal
             vertexNormals[i1] += normal
             vertexNormals[i2] += normal
         }
-        // Normalize
-        let normals = vertexNormals.map { simd_normalize($0) }
+        // Normalize. A vertex whose every face was degenerate accumulated nothing, so it needs the
+        // same arbitrary-but-finite fallback the other accumulation consumers use.
+        let normals = vertexNormals.map { simd_length($0) > 0 ? simd_normalize($0) : SIMD3<Float>(0, 0, 1) }
             .map { SCNVector3($0.x, $0.y, $0.z) }
 
         let vertexSource = SCNGeometrySource(vertices: finalVertices)

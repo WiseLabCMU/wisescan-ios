@@ -3424,6 +3424,98 @@ struct ARCoverageView: UIViewRepresentable {
                                 faceClasses: anyClassification ? faceClasses : nil)
     }
 
+    /// Byte-level `v x y z` / `f a b c` line emitter for the ghost-proxy bodies, which are written
+    /// twice per build (proxy + dynamic) at hundreds of thousands of lines each. String
+    /// interpolation allocates per token and per line; this formats into one reused scratch buffer
+    /// and hands the finished line to `Data` as a single memcpy.
+    ///
+    /// Floats are fixed 4-decimal via integer fixed-point — locale-independent (unlike
+    /// String(format:)) and a 0.1 mm grid: ≤0.05 mm per axis, under 0.09 mm of displacement once
+    /// re-read, which is pure headroom against the ≥6 cm geometric tolerances this file works in.
+    private struct OBJLineWriter {
+        /// Sized for the worst case both line kinds can reach (sign + 19 digits + '.' + 4 per
+        /// float, 19 digits per index): a `put` past the end traps rather than corrupting.
+        private var buf = [UInt8](repeating: 0, count: 96)
+        private var len = 0
+
+        private static let space = UInt8(ascii: " ")
+        private static let newline = UInt8(ascii: "\n")
+        private static let zero = UInt8(ascii: "0")
+
+        private mutating func put(_ byte: UInt8) {
+            buf[len] = byte
+            len += 1
+        }
+
+        /// Digits of a non-negative value, written in place then reversed — no allocation.
+        private mutating func putUInt(_ value: Int64) {
+            if value == 0 { put(Self.zero); return }
+            let start = len
+            var v = value
+            while v > 0 {
+                put(Self.zero + UInt8(v % 10))
+                v /= 10
+            }
+            var i = start, j = len - 1
+            while i < j {
+                let t = buf[i]; buf[i] = buf[j]; buf[j] = t
+                i += 1; j -= 1
+            }
+        }
+
+        private mutating func putFloat(_ value: Float) {
+            // Scale first, round once: the carry out of the fraction (0.99995 → "1.0000") is the
+            // rounding, not a special case.
+            let scaledDouble = (Double(value) * 10000).rounded()
+            // Non-finite/absurd coordinates cannot come from mesh geometry, and would trap the
+            // Int64 conversion — hand those to Swift's own formatting (allocating on a
+            // pathological path is fine). A fabricated "0.0000" would be worse than "nan": it
+            // reads as a real vertex at the world origin and drags every consumer that takes an
+            // extent, where a non-finite token hits the guards that already drop it.
+            guard scaledDouble.magnitude < 9.0e18 else {
+                for byte in "\(value)".utf8 { put(byte) }
+                return
+            }
+            var scaled = Int64(scaledDouble)
+            // Int64 has no -0, so a tiny negative that rounds to zero prints "0.0000", not "-0.0000".
+            if scaled < 0 {
+                put(UInt8(ascii: "-"))
+                scaled = -scaled
+            }
+            putUInt(scaled / 10000)
+            put(UInt8(ascii: "."))
+            let frac = scaled % 10000
+            put(Self.zero + UInt8(frac / 1000))
+            put(Self.zero + UInt8((frac / 100) % 10))
+            put(Self.zero + UInt8((frac / 10) % 10))
+            put(Self.zero + UInt8(frac % 10))
+        }
+
+        private mutating func flush(into data: inout Data) {
+            buf.withUnsafeBufferPointer { p in
+                data.append(p.baseAddress!, count: len)
+            }
+            len = 0
+        }
+
+        mutating func appendVertex(_ p: SIMD3<Float>, into data: inout Data) {
+            put(UInt8(ascii: "v")); put(Self.space)
+            putFloat(p.x); put(Self.space)
+            putFloat(p.y); put(Self.space)
+            putFloat(p.z); put(Self.newline)
+            flush(into: &data)
+        }
+
+        /// Indices are written as given — 1-based, as the OBJ format requires.
+        mutating func appendFace(_ a: Int, _ b: Int, _ c: Int, into data: inout Data) {
+            put(UInt8(ascii: "f")); put(Self.space)
+            putUInt(Int64(a)); put(Self.space)
+            putUInt(Int64(b)); put(Self.space)
+            putUInt(Int64(c)); put(Self.newline)
+            flush(into: &data)
+        }
+    }
+
     /// DECISION 2 / DECISION 3 — build the rescan ghost's light proxy mesh from the PERSISTED save
     /// artifacts (mesh.obj + the face-aligned face_classes.bin sidecar), so it can run at
     /// POST-PROCESS, chained on the RoomBuilder room (mesh.obj itself stays the untouched
@@ -3479,44 +3571,14 @@ struct ARCoverageView: UIViewRepresentable {
         }
 
         // Parse the OBJ's v/f lines (buildMeshOBJ emits only those; transformOBJ may add comment
-        // lines — skipped). Faces are 1-based vertex indices.
-        var verts: [SIMD3<Float>] = []
-        var faces: [(Int, Int, Int)] = []
-        let nl = UInt8(ascii: "\n")
-        meshOBJ.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            var i = 0
-            let count = raw.count
-            while i < count {
-                var j = i
-                while j < count && base[j] != nl { j += 1 }
-                if j > i + 2, base[i + 1] == UInt8(ascii: " ") {
-                    let kind = base[i]
-                    if kind == UInt8(ascii: "v") || kind == UInt8(ascii: "f") {
-                        // Parse three whitespace-separated numbers after the tag.
-                        var vals: [Double] = []
-                        var k = i + 2
-                        while k < j && vals.count < 3 {
-                            while k < j && base[k] == UInt8(ascii: " ") { k += 1 }
-                            var m = k
-                            while m < j && base[m] != UInt8(ascii: " ") { m += 1 }
-                            if m > k, let s = String(bytes: raw[k..<m], encoding: .utf8), let d = Double(s) {
-                                vals.append(d)
-                            }
-                            k = m
-                        }
-                        if vals.count == 3 {
-                            if kind == UInt8(ascii: "v") {
-                                verts.append(SIMD3(Float(vals[0]), Float(vals[1]), Float(vals[2])))
-                            } else {
-                                faces.append((Int(vals[0]) - 1, Int(vals[1]) - 1, Int(vals[2]) - 1))
-                            }
-                        }
-                    }
-                }
-                i = j + 1
-            }
-        }
+        // lines — skipped). The RAW variant is required: `parseOBJ` drops faces whose indices are
+        // out of range, and a silently dropped face would break the one-class-byte-per-face
+        // contract checked immediately below instead of tripping it. Faces come back 0-based;
+        // a face line with a non-positive index is not parsed at all (buildMeshOBJ never emits
+        // one, and refusal is the intended answer to malformed input).
+        let parsed = MeshParser.parseOBJRaw(from: meshOBJ)
+        let verts = parsed.vertices
+        let faces: [(Int, Int, Int)] = parsed.faces.map { (Int($0.0), Int($0.1), Int($0.2)) }
         lap("parse")
         // Alignment contract: one class byte per emitted face. A mismatch means the inputs are
         // from different builds — refuse rather than subtract the wrong faces.
@@ -3754,17 +3816,19 @@ struct ARCoverageView: UIViewRepresentable {
             var body = Data()
             body.reserveCapacity(faceList.count * 48)
             var used = [Bool](repeating: false, count: verts.count)
+            // Indexing unguarded: both face lists come from pass 1, which admitted only faces whose
+            // three indices are already in range.
             for f in faceList { used[f.0] = true; used[f.1] = true; used[f.2] = true }
             var remap = [Int](repeating: 0, count: verts.count)
             var next = 1
+            var writer = OBJLineWriter()
             for idx in 0..<verts.count where used[idx] {
                 remap[idx] = next
                 next += 1
-                let p = verts[idx]
-                body.append(contentsOf: "v \(p.x) \(p.y) \(p.z)\n".utf8)
+                writer.appendVertex(verts[idx], into: &body)
             }
             for f in faceList {
-                body.append(contentsOf: "f \(remap[f.0]) \(remap[f.1]) \(remap[f.2])\n".utf8)
+                writer.appendFace(remap[f.0], remap[f.1], remap[f.2], into: &body)
             }
             return (body, next - 1)
         }
@@ -5139,10 +5203,7 @@ struct ARCoverageView: UIViewRepresentable {
     /// v18: support analysis runs on a 0.25 m grid decoupled from the 1 m bake lattice (blended
     /// boundary cells were passing the tilt gate and claiming a metre at a time over ramps, flights and
     /// through walls), and each level is one in-plane connected component rather than one height — two
-    /// same-height areas separated by a wall are different surfaces. v23: level separation drops to
-    /// 0.10 m so a standard riser resolves into two levels, and mesh-derived planes subtract within a
-    /// tight 8 cm band while RoomPlan quads keep 15 cm — a sub-riser step stays honest mesh instead of
-    /// being silently flattened into its neighbouring floor. v19: a RoomPlan quad that explains
+    /// same-height areas separated by a wall are different surfaces. v19: a RoomPlan quad that explains
     /// too little of the mesh in its own footprint is demoted outright — neither subtracting nor baking
     /// — so a chord across a curved wall stops flattening even its tangency strip, and non-boxy rooms
     /// degrade per-quad to honest mesh instead of failing room-wide. v20: fitted ramps extend to meet
@@ -5153,6 +5214,10 @@ struct ARCoverageView: UIViewRepresentable {
     /// support there meant the closed seam never drew.
     /// v22: fitness presence is orientation-gated, so corners stop polluting straight walls'
     /// denominators (two big straight walls in the flat-room control were falsely demoted at 14%/49%).
+    /// v23: level separation drops to 0.10 m so a standard riser resolves into two levels, and
+    /// mesh-derived planes subtract within a tight 8 cm band while RoomPlan quads keep 15 cm — a
+    /// sub-riser step stays honest mesh instead of being silently flattened into its neighbouring
+    /// floor.
     static let ghostProxyVersionHeader = "# ghostproxy v23"
     /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
