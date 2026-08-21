@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Scan4D Derived Surfaces JSON Schema",
+  "description": "Per-scan walkable surfaces recovered from the classified mesh, written to `derived_surfaces.json` in the scan directory and mirrored to `raw_data/`. These are the surfaces RoomPlan did not model — steps, landings, mezzanines, shallow ramps — since RoomPlan models one floor per room. Generated at Process time by the ghost-proxy build from the same inputs as `mesh_proxy.obj` (`mesh.obj` + `face_classes.bin`), so it is co-framed with the mesh and the proxy and is regenerated rather than transformed whenever they are; its staleness rides the ghost-proxy version header. This is an on-device artifact and is NOT included in any export archive. Absent when a scan produced no derived surfaces, which is the normal case for a flat single-level room.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "description": "Schema version. Currently 1. Readers reject any version other than the current one rather than attempting a partial decode; the file regenerates on the next Process."
+    },
+    "surfaces": {
+      "type": "array",
+      "description": "Derived walkable planes; levels are emitted before ramps. Never empty when the file exists — a rebuild that finds nothing deletes the file rather than leaving a stale answer.",
+      "items": { "$ref": "#/definitions/surface" }
+    }
+  },
+  "required": ["version", "surfaces"],
+  "definitions": {
+    "surface": {
+      "type": "object",
+      "description": "An oriented plane for one derived walkable surface. Unlike a roomplan.json surface it carries no `id` and no `confidence`, and the file has no `source` field.",
+      "properties": {
+        "category": {
+          "type": "string",
+          "enum": ["level", "ramp"],
+          "description": "'level' = a walkable horizontal surface at a distinct height; 'ramp' = a coherently sloped walkable plane. Deliberately never 'floor': the plane-registration decoder accepts only 'wall' and 'floor', so a decoder pointed at this file drops these surfaces rather than feeding them silently into a coordinate solve. A ramp is not interchangeable with a level there — the fit's plane matcher admits pairs up to 25 degrees apart, so a shallow ramp would correspond to a flat floor and pull the vertical solution with it. Consumers must opt in per category."
+        },
+        "dimensions": {
+          "$ref": "#/definitions/dimensions",
+          "description": "Extent in the surface's own plane, in meters."
+        },
+        "transform": {
+          "$ref": "#/definitions/flatMatrix4x4",
+          "description": "4x4 transform placing the surface in the scan's world space (column-major, 16 floats): col0 = xAxis, col1 = yAxis, col2 = plane normal, col3 = center. Same convention as roomplan.json."
+        }
+      },
+      "required": ["category", "dimensions", "transform"]
+    },
+    "dimensions": {
+      "type": "object",
+      "description": "Planar extent in meters. This is the bounding rectangle of the mesh faces that contributed to the surface, not the room footprint.",
+      "properties": {
+        "width":  { "type": "number", "description": "Extent along the transform's first column (meters)." },
+        "height": { "type": "number", "description": "Extent along the transform's second column (meters)." },
+        "depth":  { "type": "number", "description": "Always 0 — a derived surface is a plane, not a volume. Present only so the shape matches roomplan.json's dimensions for renderers that consume both." }
+      },
+      "required": ["width", "height", "depth"]
+    },
+    "flatMatrix4x4": {
+      "type": "array",
+      "description": "A 4x4 matrix flattened to 16 floats in column-major order: [c0r0, c0r1, c0r2, c0r3, c1r0, c1r1, c1r2, c1r3, c2r0, c2r1, c2r2, c2r3, c3r0, c3r1, c3r2, c3r3]. Matches the convention used by roomplan.json, stitching.json and transforms.json.",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": { "type": "number" }
+    }
+  }
+}

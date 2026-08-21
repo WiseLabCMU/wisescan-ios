@@ -141,6 +141,44 @@ A companion file `roomplan_raw.json` is also written, containing Apple's native 
   - **`confidence`** *(String)*: Detection confidence — `"low"`, `"medium"`, `"high"`, or `"unknown"`.
 - **`objects`** *(Array)*: Detected 3D objects (furniture/fixtures). Same structure as surfaces with additional categories: `"table"`, `"chair"`, `"sofa"`, `"bed"`, `"storage"`, `"stove"`, `"sink"`, `"washerDryer"`, `"toilet"`, `"bathtub"`, `"oven"`, `"dishwasher"`, `"refrigerator"`, `"television"`, `"stairs"`, `"fireplace"`.
 
+### `derived_surfaces.json`
+**Schema definition:** [`derived_surfaces.schema.json`](./derived_surfaces.schema.json)
+
+The walkable surfaces RoomPlan did not model — steps, landings, mezzanines, shallow ramps — recovered from the classified mesh by the ghost-proxy build at Process time (`DerivedSurfaces.swift` / `ScanPostprocessor.swift`). RoomPlan models one floor per room, so anything at another height comes back as bare mesh; these planes fill that gap. Written to the scan directory and mirrored to `raw_data/`; readers should prefer the top-level copy, since the mirror can lag during a registration frame rewrite (same precedence as `roomplan.json`).
+
+Transforms are in the same frame as `mesh.obj` and `mesh_proxy.obj` at the time of the build (raw, or canonical if a registration has been baked) — generated in the same step from the same inputs, so co-framed by construction, and therefore **regenerated rather than transformed** whenever those are.
+
+> [!NOTE]
+> Unlike every other file documented here, this one is **on-device only** — it is not part of the Scan4D, Polycam, or RAW export archives. It is documented for on-device consumers and for future export.
+
+Absent when a scan produced no derived surfaces, which is the normal case for a flat single-level room: everything there was already modelled.
+
+```json
+{
+  "version": 1,
+  "surfaces": [
+    {
+      "category": "level",
+      "dimensions": { "width": 2.4, "height": 1.8, "depth": 0 },
+      "transform": [1,0,0,0, 0,0,-1,0, 0,1,0,0, 1.2,0.18,-3.4,1]
+    },
+    {
+      "category": "ramp",
+      "dimensions": { "width": 1.1, "height": 2.6, "depth": 0 },
+      "transform": [1,0,0,0, 0,0.13,-0.99,0, 0,0.99,0.13,0, 0.4,0.09,-2.0,1]
+    }
+  ]
+}
+```
+
+#### Fields:
+- **`version`** *(Integer)*: Schema version (currently `1`). Readers reject any version other than the current one rather than attempting a partial decode — the file regenerates on the next Process.
+- **`surfaces`** *(Array)*: Derived walkable planes, levels before ramps. Never empty when the file exists: a rebuild that finds nothing deletes the file rather than leaving a stale answer. Each surface:
+  - **`category`** *(String)*: `"level"` (a walkable horizontal surface at a distinct height) or `"ramp"` (a coherently sloped walkable plane). **Deliberately never `"floor"`** — the plane-registration decoder accepts only `"wall"` and `"floor"`, so a decoder pointed at this file drops these surfaces instead of feeding them silently into a coordinate solve. A ramp is not interchangeable with a level there: the fit's plane matcher admits pairs up to 25° apart, so a shallow ramp would correspond to a flat floor and pull the vertical solution with it. Anything wiring these into registration has to opt in per category.
+  - **`dimensions`** *(Object)*: Planar extent in meters — `width` along the transform's first column, `height` along its second. `depth` is always `0` (these are planes, not volumes) and exists only so the shape matches `roomplan.json`'s dimensions for renderers that consume both. The extent is the bounding rectangle of the mesh faces that contributed, not the room footprint.
+  - **`transform`** *(Array of 16 Floats)*: 4×4 column-major world-space transform — col0 = xAxis, col1 = yAxis, col2 = plane normal, col3 = center. Same convention as `roomplan.json`.
+- No `source`, `id`, or `confidence` field: every surface here comes from the same detector, has no stable cross-scan identity (it is re-derived each build), and is accept/reject rather than scored.
+
 ### `stitching.json`
 **Schema definition:** [`stitching.schema.json`](./stitching.schema.json)
 
