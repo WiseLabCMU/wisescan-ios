@@ -115,8 +115,11 @@ class MetaWearableManager {
         private var count = 0
         private let limit: Int
         init(limit: Int) { self.limit = limit }
-        /// True when this frame was admitted — the caller MUST then call `release()` exactly once
-        /// when its work finishes (use `defer`), or the pipeline latches shut.
+        /// True when this frame was admitted — `release()` MUST then be called exactly once when
+        /// the admitted work finishes, or the pipeline latches shut. The caller may hand that
+        /// obligation to the job it starts, but every path out of the acquiring scope — including
+        /// the ones that never start a job — has to discharge it (see the frame listener's
+        /// `handedToTask` defer and the Task's `releaseOnce`).
         func tryAcquire() -> Bool {
             os_unfair_lock_lock(&lock)
             defer { os_unfair_lock_unlock(&lock) }
@@ -685,6 +688,28 @@ class MetaWearableManager {
             let localGate = self.inFlightFrames
             self.frameToken = session.videoFramePublisher.listen { [weak self] frame in
                 guard let self = self else { return }
+
+                // Admission cap FIRST, throttle second. A frame the gate is going to drop must not
+                // advance the throttle's clock: when the job outruns the frame interval, every
+                // gate-drop burns a throttle slot and the delivered rate collapses (admit at t=0
+                // with a 200 ms job and a 143 ms interval → the next admit slips to t=333 ms
+                // instead of ~200 ms). While the pipeline is idle this now runs tryAcquire+release
+                // on every frame of the raw ~30 fps stream — an uncontended os_unfair_lock
+                // round-trip, tens of nanoseconds, negligible next to the decode it guards.
+                guard localGate.tryAcquire() else {
+                    if PerfDiag.enabled { PerfDiag.log("[MetaWearable] frame DROPPED — job already in flight (cap \(AppConstants.wearableFramesInFlight))") }
+                    return
+                }
+
+                // The one and only release point for the slot just acquired. Every early exit
+                // below unwinds through the defer; the single path that doesn't is the one that
+                // hands the slot to the Task, which then releases it itself. At cap 1 one leaked
+                // acquire latches the wearable pipeline shut forever, so this is structural
+                // rather than a release repeated on each `return`.
+                let releaseGate: @Sendable () -> Void = { localGate.release() }
+                var handedToTask = false
+                defer { if !handedToTask { releaseGate() } }
+
                 // Throttle to ~7 FPS
                 guard localThrottle.shouldProcess() else { return }
 
@@ -702,71 +727,85 @@ class MetaWearableManager {
                 //     print("[MetaWearable] Sample buffer attachments (non-propagate): \(attachments)")
                 // }
 
-                if let pixelBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer) {
-
-                    // Drop rather than queue when a previous frame's job is still running. Checked
-                    // BEFORE the decode so a dropped frame costs nothing; released in the Task's
-                    // defer below. The SDK recycles its buffers, so a queued frame would be stale
-                    // anyway — the newest frame is the only one worth the segmentation pass.
-                    guard localGate.tryAcquire() else {
-                        if PerfDiag.enabled { PerfDiag.log("[MetaWearable] frame DROPPED — job already in flight (cap \(AppConstants.wearableFramesInFlight))") }
-                        return
-                    }
-
-                    // Decode the frame here (the SDK `frame` is not Sendable, so don't capture
-                    // it in the Task). Read settings directly — UserDefaults is thread-safe and
-                    // AppConstants is a plain constant, so no MainActor hop is needed.
-                    let rawImage = frame.makeUIImage()
-                    let isPrivacyEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.privacyFilter)
-                    let compression = AppConstants.jpegCompressionQuality
-
-                    // Fallback JPEG, encoded NOW while the SDK pixel buffer is still valid. The SDK
-                    // recycles its frame buffers, so the raw CVPixelBuffer must never be read later on
-                    // the Task / MainActor (use-after-free). Only needed when the frame failed to
-                    // decode to a UIImage, and never in privacy mode (raw buffer would leak an
-                    // un-blurred frame), so the normal path pays nothing.
-                    let fallbackJpeg: Data? = (!isPrivacyEnabled && rawImage == nil)
-                        ? pixelBufferToJPEG(pixelBuffer, compression: compression)
-                        : nil
-
-                    Task {
-                        defer { localGate.release() }
-                        var finalJpegData: Data?
-                        var finalUIImage: UIImage?
-
-                        if isPrivacyEnabled, let img = rawImage, let ciImage = CIImage(image: img) {
-                            // Run segmentation/pixelation on the decoded frame and encode JPEG
-                            // once — avoids encoding a raw JPEG only to decode + re-encode it.
-                            // The wearable stream is natively landscape-right → Vision .up.
-                            let (blurredData, _) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(ciImage: ciImage, orientation: .up)
-                            finalJpegData = blurredData
-                            finalUIImage = blurredData.flatMap { UIImage(data: $0) }
-                        } else {
-                            finalJpegData = rawImage?.jpegData(compressionQuality: compression)
-                            finalUIImage = rawImage
-                        }
-
-                        let safeJpegData = finalJpegData ?? fallbackJpeg
-                        let safeUIImage = finalUIImage
-
-                        await MainActor.run { [weak self] in
-                            guard let self = self else { return }
-                            self.isStreaming = true
-                            if let uiImage = safeUIImage {
-                                self.latestProxyImage = uiImage
-                            } else {
-                                print("[MetaWearable] Failed to create UIImage from frame")
-                            }
-
-                            if let jpeg = safeJpegData {
-                                self.activeCaptureSession?.captureProxyFrameData(jpeg)
-                            } else {
-                                print("[MetaWearable] Dropped frame — no decodable image data")
-                            }
-                        }
-                    }
-                } else {
+                guard let pixelBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer) else {
                     print("[MetaWearable] Frame had no pixel buffer")
+                    return
+                }
+
+                // Decode the frame here rather than inside the Task. 0.9.0's `VideoFrame` IS
+                // Sendable, so capturing it would compile — but the SDK recycles its frame
+                // buffers, so the decode has to happen now, on the publisher's callback, while
+                // this buffer is still guaranteed valid; deferring it would also keep an SDK
+                // buffer out of the pool for as long as the job runs. Read settings directly —
+                // UserDefaults is thread-safe and AppConstants is a plain constant, so no
+                // MainActor hop is needed.
+                let rawImage = frame.makeUIImage()
+                let isPrivacyEnabled = UserDefaults.standard.bool(forKey: AppConstants.Key.privacyFilter)
+                let compression = AppConstants.jpegCompressionQuality
+
+                // Fallback JPEG, encoded NOW while the SDK pixel buffer is still valid. The SDK
+                // recycles its frame buffers, so the raw CVPixelBuffer must never be read later on
+                // the Task / MainActor (use-after-free). Only needed when the frame failed to
+                // decode to a UIImage, and never in privacy mode (raw buffer would leak an
+                // un-blurred frame), so the normal path pays nothing.
+                let fallbackJpeg: Data? = (!isPrivacyEnabled && rawImage == nil)
+                    ? pixelBufferToJPEG(pixelBuffer, compression: compression)
+                    : nil
+
+                handedToTask = true
+                Task {
+                    // The slot covers the compute only — never the MainActor hop below. Holding it
+                    // across `await MainActor.run` lets a stalled main thread (AR session bring-up
+                    // blocks it for seconds) freeze wearable admission entirely at cap 1.
+                    // releaseOnce() keeps the release exactly-once whether it lands at the explicit
+                    // call after the compute or at the defer on an early return; the Task body is
+                    // sequential, so plain locals are enough to make that structural.
+                    var released = false
+                    func releaseOnce() {
+                        guard !released else { return }
+                        released = true
+                        releaseGate()
+                    }
+                    defer { releaseOnce() }
+
+                    var finalJpegData: Data?
+                    var finalUIImage: UIImage?
+
+                    if isPrivacyEnabled, let img = rawImage, let ciImage = CIImage(image: img) {
+                        // Run segmentation/pixelation on the decoded frame and encode JPEG
+                        // once — avoids encoding a raw JPEG only to decode + re-encode it.
+                        // The wearable stream is natively landscape-right → Vision .up.
+                        let (blurredData, _) = PrivacyBlurUtil.pixelatePersonsAndGetFaceCenters(ciImage: ciImage, orientation: .up)
+                        finalJpegData = blurredData
+                        finalUIImage = blurredData.flatMap { UIImage(data: $0) }
+                    } else {
+                        finalJpegData = rawImage?.jpegData(compressionQuality: compression)
+                        finalUIImage = rawImage
+                    }
+
+                    let safeJpegData = finalJpegData ?? fallbackJpeg
+                    let safeUIImage = finalUIImage
+
+                    // Compute done: free the slot so the next frame can start decoding while this
+                    // one waits its turn on the main actor. Nothing below touches the SDK buffer —
+                    // only the already-materialised UIImage / Data — so the next job can't race it.
+                    releaseOnce()
+
+                    await MainActor.run { [weak self] in
+                        guard let self = self else { return }
+                        self.isStreaming = true
+                        if let uiImage = safeUIImage {
+                            self.latestProxyImage = uiImage
+                        } else {
+                            print("[MetaWearable] Failed to create UIImage from frame")
+                        }
+
+                        if let jpeg = safeJpegData {
+                            self.activeCaptureSession?.captureProxyFrameData(jpeg)
+                        } else {
+                            print("[MetaWearable] Dropped frame — no decodable image data")
+                        }
+                    }
                 }
             }
 
