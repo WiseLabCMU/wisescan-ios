@@ -5148,6 +5148,11 @@ struct ARCoverageView: UIViewRepresentable {
     ///
     /// A level qualifies only if the would-be seam actually lands inside its rectangle (plus slack) —
     /// otherwise a distant level at the right height would attract the snap across open space.
+    ///
+    /// The cap is measured from the FITTED end, never from the running bound, so the total extension
+    /// at each end is bounded by `rampSnapMaxMeters` no matter how many levels qualify there. Two
+    /// levels 1.5 m and 3.0 m past the same end cannot walk the rectangle out 4.5 m one hop at a
+    /// time; the far one is declined and reported at its true distance from the fitted end.
     struct SnappedRamp {
         let plane: PlaneRegistration.Plane
         /// Metres of extension applied at each end (0 = untouched). The extension region carries no
@@ -5180,19 +5185,19 @@ struct ARCoverageView: UIViewRepresentable {
                 let d = seam - level.center
                 guard abs(simd_dot(d, level.xAxis)) <= level.width / 2 + 0.2,
                       abs(simd_dot(d, level.yAxis)) <= level.height / 2 + 0.2 else { continue }
-                if v > vMax {
-                    if v - vMax <= rampSnapMaxMeters {
-                        vMax = v
+                if v > fittedHi {
+                    if v - fittedHi <= rampSnapMaxMeters {
+                        vMax = max(vMax, v)
                     } else {
-                        declined.append(String(format: "top seam %.1fm beyond end (cap %.1f)",
+                        declined.append(String(format: "top seam %.2fm beyond end (cap %.1f)",
                                                v - fittedHi, rampSnapMaxMeters))
                     }
                 }
-                if v < vMin {
-                    if vMin - v <= rampSnapMaxMeters {
-                        vMin = v
+                if v < fittedLo {
+                    if fittedLo - v <= rampSnapMaxMeters {
+                        vMin = min(vMin, v)
                     } else {
-                        declined.append(String(format: "bottom seam %.1fm beyond end (cap %.1f)",
+                        declined.append(String(format: "bottom seam %.2fm beyond end (cap %.1f)",
                                                fittedLo - v, rampSnapMaxMeters))
                     }
                 }

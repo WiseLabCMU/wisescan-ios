@@ -499,6 +499,56 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
                        "overlap beats gap — never trim")
     }
 
+    /// The cap must bound the TOTAL extension per end, not each hop. Measured from the running bound,
+    /// two levels past the same end walk the rectangle out one qualifying step at a time — 1.5 m then
+    /// another 1.5 m — so a 2 m cap silently permits 3 m of extension, and the declined-seam trace
+    /// reports the gap to the previous level rather than to the ramp's own end.
+    func testTwoLevelsPastTheSameRampEnd_capsFromTheFittedEnd() {
+        let tilt: Float = 8 * .pi / 180
+        // Fitted extent ends at v = +2.5. Levels put seams at v = 4.0 (+1.5, inside the cap) and
+        // v = 5.5 (+3.0, past it).
+        let ramp = PlaneRegistration.Plane(
+            center: .zero, normal: SIMD3(0, cos(tilt), -sin(tilt)),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, sin(tilt), cos(tilt)),
+            width: 1.5, height: 5, category: .floor)
+        func level(seamV: Float) -> PlaneRegistration.Plane {
+            PlaneRegistration.Plane(
+                center: SIMD3(0, sin(tilt) * seamV, cos(tilt) * seamV), normal: SIMD3(0, 1, 0),
+                xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, 0, 1),
+                width: 4, height: 4, category: .floor)
+        }
+
+        let snapped = ARCoverageView.snapRampEnds([ramp], to: [level(seamV: 4.0), level(seamV: 5.5)])[0]
+        XCTAssertEqual(snapped.extendedTopM, 1.5, accuracy: 0.02,
+                       "extended \(snapped.extendedTopM)m — the cap is being measured per hop, not from the fitted end")
+        XCTAssertEqual(snapped.extendedBottomM, 0, accuracy: 1e-4)
+        // Top edge lands on the NEARER level's intersection line.
+        let topEdge = snapped.plane.center + snapped.plane.yAxis * (snapped.plane.height / 2)
+        XCTAssertEqual(topEdge.y, sin(tilt) * 4.0, accuracy: 0.01)
+        let note = snapped.note ?? "nil"
+        XCTAssertTrue(note.contains("3.00m beyond end"),
+                      "far seam should be declined at its distance from the fitted end, got: \(note)")
+        XCTAssertFalse(note.contains("1.50m beyond end"),
+                       "declined distance measured from the other level, not the ramp end: \(note)")
+    }
+
+    /// A level whose seam falls INSIDE the fitted extent is not a declined snap, it is a non-event —
+    /// the running-bound form reported it as a cap violation with a negative distance.
+    func testRampOverlappingItsFloor_reportsNoDeclinedSeam() {
+        let tilt: Float = 8 * .pi / 180
+        let ramp = PlaneRegistration.Plane(
+            center: .zero, normal: SIMD3(0, cos(tilt), -sin(tilt)),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, sin(tilt), cos(tilt)),
+            width: 1.5, height: 5, category: .floor)
+        let floor = PlaneRegistration.Plane(
+            center: SIMD3(0, sin(tilt) * -2, -2), normal: SIMD3(0, 1, 0),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, 0, 1),
+            width: 4, height: 6, category: .floor)
+
+        let snapped = ARCoverageView.snapRampEnds([ramp], to: [floor])[0]
+        XCTAssertNil(snapped.note, "a seam inside the fitted extent produced a bogus note: \(snapped.note ?? "")")
+    }
+
     /// The pinhole metric must distinguish the two kinds of unbacked cell: honest partial coverage
     /// (touches the mask border — a thin scan, a truncated chord) counts zero, while a genuinely
     /// enclosed gap counts. It is the objective form of "do the walls look patchy".
