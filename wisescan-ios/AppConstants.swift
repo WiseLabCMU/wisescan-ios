@@ -249,7 +249,13 @@ enum AppConstants {
     /// looking-down angle without disabling depth.
     /// Biased deliberately high: a ring slightly above the floor still reads as a
     /// spacing guide, while one a centimetre BELOW it is swallowed by the mesh.
-    static let stillRingLiftMeters: Float = 0.08
+    /// Raised 0.08 → 0.13 (field 2026-08-21): the floor ring was hard to pick out in VR
+    /// while the lens-height ring read clearly in both modes. The lift was already 4× the
+    /// 2 cm voxel cell, so occlusion was not the problem — a floor ring is viewed nearly
+    /// EDGE-ON from standing height, and what buys legibility there is vertical separation
+    /// from the surface behind it, not clearance from it. Applies to both modes; the
+    /// lens-height ring is unaffected (it sits at the measured rod height).
+    static let stillRingLiftMeters: Float = 0.13
 
     /// Plausible rig heights. The lower bound matters more than it looks: the solve
     /// anchors the rod length to this value within ±calibrationMeasuredRodHalfM and has been
