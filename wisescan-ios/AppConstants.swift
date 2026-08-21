@@ -468,6 +468,20 @@ enum AppConstants {
     static let analysisYawCompletionDeg: Float = 330              // yaw coverage (degrees) to count as "360°" (allow slight gap)
     static let analysisYawMaxFillDeg = 45                         // max per-frame yaw delta credited as swept rotation (beyond = tracking snap, credit nothing)
 
+    // MARK: - Mesh Preview Geometry
+
+    /// Above this many input faces the viewer skips the 4:1 triangle subdivision it otherwise
+    /// applies before rendering. The split never changed the color gradient — a midpoint's
+    /// stored color is the average of its edge's endpoints, exactly what GPU interpolation
+    /// already produces there — so its only visible effect is slightly sharper edge-midpoint
+    /// shading normals under the physically-based height-ramp material (~8° on non-planar
+    /// edges). At room-scale density every source variant lands above the gate (device logs:
+    /// full mesh 413k-790k faces, proxy 130k, dynamic derived from the proxy), so real scans
+    /// skip the split uniformly and save 4x the geometry, index and normal-accumulation cost;
+    /// only small synthetic or single-object meshes keep it.
+    /// `nonisolated`: read from `buildGeometry`, which runs off the main actor.
+    nonisolated static let meshSubdivisionMaxFaces = 50_000
+
     // MARK: - Scan Timeline (mesh-preview time scrubber)
     /// A/B auto-blink cadence. ~1 s is long enough to read the geometry and short enough that the
     /// difference between two generations pops as motion rather than as two separate pictures.

@@ -1061,11 +1061,14 @@ struct MeshPreviewView: UIViewRepresentable {
         } else {
             colors = heightGradientColors(vertices: vertices, minY: minY, maxY: maxY)
         }
-        // Subdivide mesh for smoother vertex color interpolation
-        // Each triangle → 4 sub-triangles via edge midpoints
+        // Subdivide mesh: each triangle → 4 sub-triangles via edge midpoints, gated on input
+        // face count. The split is cosmetic — midpoint colors equal what GPU interpolation
+        // already produces, so its only effect is sharper edge-midpoint shading normals —
+        // and on a room-scale mesh that isn't worth 4x the geometry, normals and index buffer.
+        let subdivide = indices.count / 3 <= AppConstants.meshSubdivisionMaxFaces
         var subVertices = vertices
         var subColors = colors
-        var subIndices = [UInt32]()
+        var subIndices = subdivide ? [UInt32]() : indices
         // Cache: sorted edge pair → midpoint vertex index
         var edgeMidpoints: [UInt64: UInt32] = [:]
 
@@ -1085,16 +1088,18 @@ struct MeshPreviewView: UIViewRepresentable {
             return idx
         }
 
-        for i in stride(from: 0, to: indices.count, by: 3) {
-            let a = indices[i], b = indices[i + 1], c = indices[i + 2]
-            let ab = midpointIndex(a, b)
-            let bc = midpointIndex(b, c)
-            let ca = midpointIndex(c, a)
-            // 4 sub-triangles
-            subIndices.append(contentsOf: [a, ab, ca])
-            subIndices.append(contentsOf: [ab, b, bc])
-            subIndices.append(contentsOf: [ca, bc, c])
-            subIndices.append(contentsOf: [ab, bc, ca])
+        if subdivide {
+            for i in stride(from: 0, to: indices.count, by: 3) {
+                let a = indices[i], b = indices[i + 1], c = indices[i + 2]
+                let ab = midpointIndex(a, b)
+                let bc = midpointIndex(b, c)
+                let ca = midpointIndex(c, a)
+                // 4 sub-triangles
+                subIndices.append(contentsOf: [a, ab, ca])
+                subIndices.append(contentsOf: [ab, b, bc])
+                subIndices.append(contentsOf: [ca, bc, c])
+                subIndices.append(contentsOf: [ab, bc, ca])
+            }
         }
 
         // Use subdivided data for rendering
