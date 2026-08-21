@@ -82,6 +82,14 @@ final class SaveScanPersistenceTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: movedDepth.path),
                       "depth frame missing at \(movedDepth.path)")
         XCTAssertEqual(try Data(contentsOf: movedDepth), depthBytes)
+
+        // The raw-dir mesh mirror exists and carries the same bytes. It is hard-linked from the
+        // top-level copy (with an atomic-write fallback), so a silent total link failure would
+        // otherwise be invisible: nothing else asserts this file.
+        let rawMesh = scan.rawDataPath.appendingPathComponent("mesh.obj")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: rawMesh.path),
+                      "raw_data/mesh.obj mirror missing at \(rawMesh.path)")
+        XCTAssertEqual(try Data(contentsOf: rawMesh), meshBytes)
     }
 
     func testSaveScan_newLocationByName_createsLocationAndPlacesFiles() throws {

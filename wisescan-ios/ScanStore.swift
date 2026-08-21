@@ -1093,10 +1093,12 @@ class ScanFileManager {
             do {
                 try FileManager.default.moveItem(at: raw, to: newScan.rawDataPath)
 
-                // raw_data/mesh.obj is the export-staging mirror of the mesh written above (top
-                // level stays authoritative). Hard-link it instead of writing the same tens of MB
-                // a second time — every later rewrite of either path is atomic (ScanPostprocessor's
-                // registration bake), so the shared inode can never be mutated underneath one name.
+                // raw_data/mesh.obj is the schema's raw-dir mirror of the mesh written above (top
+                // level stays authoritative; export stages from the top-level copy, and the one
+                // raw-first reader, EquirectFaceExport, falls back to top level). Hard-link it
+                // instead of writing the same tens of MB a second time — every later rewrite of
+                // either path is atomic (ScanPostprocessor's registration bake replaces the inode
+                // via rename), so the shared inode can never be mutated underneath one name.
                 let rawMeshURL = newScan.rawDataPath.appendingPathComponent("mesh.obj")
                 if (try? FileManager.default.linkItem(at: newScan.meshFileURL, to: rawMeshURL)) == nil {
                     try? meshData.write(to: rawMeshURL, options: .atomic)

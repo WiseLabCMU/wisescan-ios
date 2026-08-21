@@ -685,8 +685,13 @@ extension CaptureView {
                         }
                         // Face-aligned per-face classification (the proxy build's subtraction
                         // input). One byte per mesh.obj face; absent when the classifier was off.
+                        // .atomic: files in this directory may end up hard-link siblings after
+                        // save, and the invariant the links rest on is that NO writer in the app
+                        // ever truncates in place — a non-atomic write here would be the sole
+                        // exception, safe only because it happens to run before the links exist.
                         if let classes = result.faceClasses {
-                            try? classes.write(to: rawDir.appendingPathComponent("face_classes.bin"))
+                            try? classes.write(to: rawDir.appendingPathComponent("face_classes.bin"),
+                                               options: .atomic)
                         }
                     }
 
