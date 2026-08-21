@@ -3171,25 +3171,31 @@ struct ARCoverageView: UIViewRepresentable {
             }
 
             DispatchQueue.main.async { [weak self] in
-                scanStats.totalVertices = totalVerts
-                scanStats.totalFaces = totalFaces
-                scanStats.anchorCount = anchorCount
-                scanStats.sessionDuration = duration
-                scanStats.memoryUsageMB = memoryMB
-                scanStats.baselineMemoryMB = self?.baselineMemoryMB ?? memoryMB
-                scanStats.footprintMB = footprintMB      // capacity bar: avail-based memoryPressure
-                scanStats.availableMB = availableMB
-                scanStats.smoothedFPS = smoothedFPS      // capacity bar: fpsPressure
-                scanStats.targetFPS = targetFPS          // capacity bar: fpsPressure ceiling (relative)
-                scanStats.cpuPercent = smoothedCPU       // capacity bar: cpuPressure (leading compute axis)
-                scanStats.driftEstimate = drift
-                scanStats.mappingStatus = statusStr
-                if anchorCount > 0 {
-                    let avgUpdates = Double(totalUpdates) / Double(anchorCount)
-                    scanStats.averageQuality = min(avgUpdates / 10.0, 1.0)
-                } else {
-                    scanStats.averageQuality = 0.0
-                }
+                // Publish only the fields that actually CHANGED. @Observable notifies on every write,
+                // equal or not, so an unconditional republish of all fourteen at 10 Hz invalidates every
+                // observer of ScanStats for the whole recording — including the fields that go quiet in a
+                // steady state (anchorCount, mappingStatus, targetFPS, baselineMemoryMB).
+                let baseline = self?.baselineMemoryMB ?? memoryMB
+                if scanStats.totalVertices != totalVerts { scanStats.totalVertices = totalVerts }
+                if scanStats.totalFaces != totalFaces { scanStats.totalFaces = totalFaces }
+                if scanStats.anchorCount != anchorCount { scanStats.anchorCount = anchorCount }
+                if scanStats.sessionDuration != duration { scanStats.sessionDuration = duration }
+                if scanStats.memoryUsageMB != memoryMB { scanStats.memoryUsageMB = memoryMB }
+                if scanStats.baselineMemoryMB != baseline { scanStats.baselineMemoryMB = baseline }
+                // capacity bar: avail-based memoryPressure
+                if scanStats.footprintMB != footprintMB { scanStats.footprintMB = footprintMB }
+                if scanStats.availableMB != availableMB { scanStats.availableMB = availableMB }
+                // capacity bar: fpsPressure, and its (relative) ceiling
+                if scanStats.smoothedFPS != smoothedFPS { scanStats.smoothedFPS = smoothedFPS }
+                if scanStats.targetFPS != targetFPS { scanStats.targetFPS = targetFPS }
+                // capacity bar: cpuPressure (leading compute axis)
+                if scanStats.cpuPercent != smoothedCPU { scanStats.cpuPercent = smoothedCPU }
+                if scanStats.driftEstimate != drift { scanStats.driftEstimate = drift }
+                if scanStats.mappingStatus != statusStr { scanStats.mappingStatus = statusStr }
+                let quality = anchorCount > 0
+                    ? min((Double(totalUpdates) / Double(anchorCount)) / 10.0, 1.0)
+                    : 0.0
+                if scanStats.averageQuality != quality { scanStats.averageQuality = quality }
             }
         }
 
