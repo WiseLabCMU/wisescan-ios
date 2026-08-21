@@ -670,19 +670,28 @@ extension CaptureView {
                 let vertexColors = VertexColorAccumulator.generateNormalsColors(objData: meshData)
 
                 DispatchQueue.main.async {
-                    // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping.
+                    // Package the ARWorldMap into the raw data directory for zipping.
                     // DECISION 3: raw artifacts only — roomplan.json lands post-save via the
                     // deferred RoomBuilder; registration.json / mesh_proxy.obj are written by
-                    // ScanPostprocessor later.
+                    // ScanPostprocessor later. raw_data/mesh.obj is NOT written here any more:
+                    // saveScan writes the authoritative copy and hard-links this mirror from it,
+                    // so the same tens of MB no longer hit the disk twice on the save transition.
                     if let rawDir = rawDataPath {
-                        let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
-                        try? meshData.write(to: meshFileURL)
                         let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
-                        try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
+                        // Hard-link the map (immutable once exported, up to 50 MB) instead of
+                        // copying it; saveScan links its own copy from the same temp file.
+                        if (try? FileManager.default.linkItem(at: mapURL, to: destMapURL)) == nil {
+                            try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
+                        }
                         // Face-aligned per-face classification (the proxy build's subtraction
                         // input). One byte per mesh.obj face; absent when the classifier was off.
+                        // .atomic: files in this directory may end up hard-link siblings after
+                        // save, and the invariant the links rest on is that NO writer in the app
+                        // ever truncates in place — a non-atomic write here would be the sole
+                        // exception, safe only because it happens to run before the links exist.
                         if let classes = result.faceClasses {
-                            try? classes.write(to: rawDir.appendingPathComponent("face_classes.bin"))
+                            try? classes.write(to: rawDir.appendingPathComponent("face_classes.bin"),
+                                               options: .atomic)
                         }
                     }
 
