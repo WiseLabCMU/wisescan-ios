@@ -83,6 +83,14 @@ kernel void vertexColorProject(
     int texH = int(colorTex.get_height());
     if (px >= texW || py >= texH) return;
 
+    // FRUSTUM WITNESS. From here the vertex is inside this frame's image — whatever
+    // happens next (occlusion, person mask, backface) is a REJECTION, not a coverage
+    // gap. The alpha channel of the packed color is otherwise unused (always 0), so this
+    // costs nothing and lets the accumulator split "never seen by any frame" from "seen
+    // and always rejected" — the difference between needing more sweep and needing a
+    // looser test.
+    results[tid].rgba.w = 1;
+
     // Depth occlusion test
     if (params.hasDepth != 0 && params.depthW > 0) {
         int dpx = px * params.downscaleFactor * params.depthW / max(params.imgW, 1);
@@ -186,6 +194,6 @@ kernel void vertexColorProject(
     results[tid].rgba = uchar4(uchar(color.r * 255.0h),
                                 uchar(color.g * 255.0h),
                                 uchar(color.b * 255.0h),
-                                0);
+                                1);   // keep the frustum witness set on the success path
     results[tid].weight = w;
 }

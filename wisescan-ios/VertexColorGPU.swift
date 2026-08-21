@@ -42,7 +42,10 @@ enum VertexColorGPU {
         var r: UInt8
         var g: UInt8
         var b: UInt8
-        var _pad: UInt8
+        /// Frustum witness, not padding: 1 when the kernel had this vertex inside the
+        /// frame's image, whether or not it then survived occlusion / mask / backface.
+        /// Splits "no frame ever saw it" from "seen but always rejected".
+        var a: UInt8
         var weight: Float
     }
 

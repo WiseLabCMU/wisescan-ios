@@ -364,6 +364,11 @@ enum VertexColorAccumulator {
         var obsB = [UInt8](repeating: 0, count: vertexCount * K)
         var obsW = [Float](repeating: 0, count: vertexCount * K)
         var obsCount = [UInt8](repeating: 0, count: vertexCount)
+        // Diagnostic only (1 byte/vertex): was this vertex ever inside ANY frame's image,
+        // regardless of whether it survived the tests? Splits the gray fraction into
+        // "nothing ever looked at it" (a sweep/coverage problem the operator can fix) and
+        // "looked at and always rejected" (an occlusion/mask/backface problem we can).
+        var everInFrustum = [UInt8](repeating: 0, count: vertexCount)
         let distFloor = max(AppConstants.colorizationMinDistanceM, 0.001)
 
         // Downscale factor — vertex coloring doesn't need full-res images
@@ -560,6 +565,9 @@ enum VertexColorAccumulator {
                 var visibleCount = 0
                 for i in 0..<vertexCount {
                     let obs = gpuResults[i]
+                    // The kernel's frustum witness (see VertexColorProject.metal): this frame
+                    // had the vertex inside its image, whether or not it survived the tests.
+                    if obs.a != 0 { everInFrustum[i] = 1 }
                     guard obs.weight > 0 else { continue }
                     visibleCount += 1
 
@@ -599,6 +607,7 @@ enum VertexColorAccumulator {
 
                     guard px >= 0 && px < scaledW && py >= 0 && py < scaledH else { continue }
                     guard px < width && py < height else { continue }
+                    everInFrustum[i] = 1   // frustum witness — see the GPU path
 
                     // Depth Occlusion Test (mirrors the GPU kernel exactly — keep in lockstep)
                     if let dPtr = depthPtr {
@@ -779,6 +788,21 @@ enum VertexColorAccumulator {
                             coloredCount, vertexCount,
                             vertexCount > 0 ? Double(vertexCount - coloredCount) / Double(vertexCount) * 100 : 0,
                             sampledFiles.count, useFaces ? "360-faces" : "keyframes", elapsed))
+        // WHERE the gray is, which decides whose problem it is. On 2026-08-21 the two
+        // sources differed 1.4% vs 10.6% on the same mesh with dense LiDAR depth (measured:
+        // ZERO no-data pixels across 52 maps), so the gap is not sensor holes — this split
+        // says whether it is coverage (a 360 camera sees the ceiling the iPad never pointed
+        // at) or rejection (a test we control being too strict).
+        if vertexCount > 0 {
+            var grayUnseen = 0, graySeen = 0
+            for i in 0..<vertexCount where obsCount[i] == 0 {
+                if everInFrustum[i] == 0 { grayUnseen += 1 } else { graySeen += 1 }
+            }
+            let total = Double(vertexCount)
+            PerfDiag.log(String(format: "[VertexColor] gray breakdown: %.1f%% never in any frustum (coverage), "
+                                + "%.1f%% seen but always rejected (occlusion/mask/backface)",
+                                Double(grayUnseen) / total * 100, Double(graySeen) / total * 100))
+        }
         return data
     }
 
