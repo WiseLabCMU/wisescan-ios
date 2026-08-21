@@ -23,8 +23,14 @@ import simd
 /// per category.
 struct DerivedSurfacesData: Codable {
 
-    /// Schema version. Increment when the structure changes; readers should ignore what they do not
-    /// understand rather than fail, since the file regenerates on the next Post-process anyway.
+    /// Schema version. Increment when the structure changes. `load` REJECTS any version other than the
+    /// current one rather than trying to read what it does not understand — the sidecar regenerates on
+    /// the next Post-process, so absence is cheap and a half-understood file is not.
+    ///
+    /// Coupling rule: bumping this MUST come with a bump of `ARCoverageView.ghostProxyVersionHeader`.
+    /// The two artifacts are written by the same build branch, in the same step, from the same inputs,
+    /// and the proxy header is what drives `pendingSteps` — that is what regenerates this file, and
+    /// what makes a separate currency check for the sidecar unnecessary.
     static let schemaVersion = 1
 
     let version: Int
@@ -73,8 +79,11 @@ struct DerivedSurfacesData: Codable {
     static func load(scanDirectory: URL) -> DerivedSurfacesData? {
         for url in [scanDirectory.appendingPathComponent(filename),
                     scanDirectory.appendingPathComponent("raw_data").appendingPathComponent(filename)] {
+            // The version check sits INSIDE the loop: a stale top-level copy must not shadow a
+            // current raw_data mirror, it must fall through to it.
             if let data = try? Data(contentsOf: url),
-               let decoded = try? JSONDecoder().decode(DerivedSurfacesData.self, from: data) {
+               let decoded = try? JSONDecoder().decode(DerivedSurfacesData.self, from: data),
+               decoded.version == schemaVersion {
                 return decoded
             }
         }

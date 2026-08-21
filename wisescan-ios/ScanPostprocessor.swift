@@ -730,6 +730,18 @@ enum ScanPostprocessor {
         // out from under a version-current proxy — rebuild it even though its header says current.
         if steps.contains(.proxy) || appliedT != nil {
             report("Building proxy…")
+            // A registration was just baked into mesh.obj, so every derived artifact sitting on disk
+            // describes the OLD raw frame — and the ghost loader would de-register it a second time.
+            // Delete first: an interrupted or failing rebuild then leaves ABSENCE, which consumers
+            // handle (fall back to the full mesh, and pendingSteps re-offers .proxy), rather than a
+            // version-current artifact in the wrong frame, which nothing detects. Only on a bake —
+            // a .proxy-only run's artifacts are already frame-correct and must survive a failure.
+            if appliedT != nil {
+                removeBoth("mesh_proxy.obj")
+                removeBoth("mesh_dynamic.obj")
+                removeBoth(DerivedSurfacesData.filename)
+                log.notice("[GhostProxy] cleared raw-frame artifacts before re-framed rebuild for \(w.name, privacy: .public)")
+            }
             if let classesURL = artifact("face_classes.bin"),
                let classes = try? Data(contentsOf: classesURL),
                let mesh = try? Data(contentsOf: dir.appendingPathComponent("mesh.obj")),
@@ -742,19 +754,31 @@ enum ScanPostprocessor {
                     // the plane list without re-parsing the mesh. A rebuild that finds NOTHING must
                     // clear the file rather than leave the previous run's answer standing: coverage
                     // changes between generations, so a level found once can legitimately disappear.
-                    if !result.levels.isEmpty || !result.ramps.isEmpty,
-                       let json = try? JSONEncoder().encode(
-                           DerivedSurfacesData(levels: result.levels, ramps: result.ramps)) {
+                    if result.levels.isEmpty && result.ramps.isEmpty {
+                        removeBoth(DerivedSurfacesData.filename)
+                        log.info("[GhostProxy] derived surfaces: none found — sidecar cleared")
+                    } else if let json = try? JSONEncoder().encode(
+                                  DerivedSurfacesData(levels: result.levels, ramps: result.ramps)) {
                         writeBoth(json, DerivedSurfacesData.filename)
                         log.info("[GhostProxy] derived surfaces: \(result.levels.count) level(s), \(result.ramps.count) ramp(s)")
                     } else {
                         removeBoth(DerivedSurfacesData.filename)
+                        log.warning("[GhostProxy] derived surfaces ENCODE FAILED (\(result.levels.count) level(s), \(result.ramps.count) ramp(s)) — sidecar cleared")
                     }
                     outcome.didStructural = true
                     log.info("[GhostProxy] built at postprocess: proxy \(result.proxy.faceCount) faces (\(result.proxy.data.count / 1024) KB), dynamic \(result.dynamic.faceCount) faces (\(result.dynamic.data.count / 1024) KB)")
                 } else {
                     log.warning("[GhostProxy] skipped at postprocess: no RoomPlan walls or face/class mismatch")
                 }
+            } else {
+                // Which input was missing. Diagnosed with existence checks rather than by hoisting the
+                // reads into eager locals — that would pull the whole mesh.obj off disk on every run
+                // where face_classes.bin is the piece that is absent. A plane count of -1 means the
+                // planes could not be decoded at all, which zero does not distinguish.
+                let planeCount = currentFramePlanes(scanDirectory: dir)?.count ?? -1
+                let hasClasses = artifact("face_classes.bin") != nil
+                let hasMesh = fm.fileExists(atPath: dir.appendingPathComponent("mesh.obj").path)
+                log.warning("[GhostProxy] no proxy build for \(w.name, privacy: .public): face_classes.bin=\(hasClasses, privacy: .public) mesh.obj=\(hasMesh, privacy: .public) planes=\(planeCount, privacy: .public) (-1 = undecodable)")
             }
         }
 
