@@ -827,12 +827,16 @@ struct CombinedMeshView: UIViewRepresentable {
                 // own extent means the same physical height is a different color per map — actively
                 // misleading for judging whether two landings sit at the same level.
                 //
-                // The parse is HANDED to pass 2 rather than thrown away and redone. A parsed OBJ is
-                // just its vertex + face arrays — a fraction of what one built geometry costs in
-                // subdivided arrays, `Data` copies and SceneKit sources — and pass 2 drops each map's
-                // parse the moment it has consumed it, so the accumulating geometries are still what
-                // sets the peak, as before. What goes away is one file read and one full-mesh parse
-                // per map from the "Loading N meshes…" wait.
+                // The parse is HANDED to pass 2 rather than thrown away and redone. A held parse is
+                // NOT free — its vertex buffer keeps the parser's data.count/30 capacity reservation,
+                // so it weighs roughly the file on disk, about a third of one built geometry — but a
+                // geometry outweighs its own parse better than 2:1 for any mesh shape, and pass 2
+                // drops each parse as it consumes it, so the all-parses plateau at the start of
+                // pass 2 can never exceed the all-geometries tail that set the peak before. The peak
+                // actually falls: pass 2 no longer re-reads the file, so its transient `Data` is
+                // gone. Feeding both passes from ONE parse also closes a real window: mesh.obj
+                // rewrites are atomic, so the old double read could see pre-registration bytes in
+                // pass 1 and post-registration bytes in pass 2 and silently miscolor the union.
                 var unionMin = Float.greatestFiniteMagnitude
                 var unionMax = -Float.greatestFiniteMagnitude
                 var parsedMeshes = [MeshParser.OBJData?](repeating: nil, count: items.count)
@@ -861,8 +865,14 @@ struct CombinedMeshView: UIViewRepresentable {
                 var dynamicMissing = 0
                 for (idx, item) in items.enumerated() {
                     guard let parsed = parsedMeshes[idx] else { continue }
-                    parsedMeshes[idx] = nil   // released as soon as this map's geometry is built
+                    parsedMeshes[idx] = nil   // one parse resident at a time from here: the slot
+                                              // clears now, the local lasts to the end of this pass
                     let colors = item.colorsURL.flatMap { try? Data(contentsOf: $0) }
+                    // Incidental fix riding the parse handoff: only items that PARSED can reach this
+                    // line now, where the old pass 2 re-read the file itself — so a mesh whose parse
+                    // fails can no longer flip the flag and summon a height legend for a map that
+                    // never rendered. Matches the "only when something actually rendered" intent
+                    // documented at the legend publish below.
                     if colors == nil { usedHeightRamp = true }
                     guard let (geometry, _) = MeshPreviewView.buildGeometry(
                         parsed: parsed, vertexColors: colors,
