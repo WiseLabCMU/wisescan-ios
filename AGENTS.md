@@ -28,6 +28,11 @@ Orientation for agents (and humans) working in this repo. Detailed docs live in 
 ## In-app user guide (documentation written in Swift)
 - [wisescan-ios/UserGuideView.swift](wisescan-ios/UserGuideView.swift) — the in-app **User Guide** (Settings → User Guide & Documentation): the user-facing walkthrough (capture → save → rescan/link → export), scan-technique tips, export-format descriptions, supported wearables, and recommended viewers. Treat it as **documentation that happens to live in SwiftUI**: when user-facing workflows, scan suggestions, or export formats change, update it in the same change set — exactly as you would [README.md](README.md), [REQUIREMENTS.md](REQUIREMENTS.md), and [docs/APPSTORE.md](docs/APPSTORE.md). Its scan tips should stay consistent with [docs/SCAN_GUIDANCE.md](docs/SCAN_GUIDANCE.md) (the coaching/analyzer reference).
 
+## Field testing & diagnostics
+- [docs/developer-tools.md](docs/developer-tools.md) — the on-device developer/field-test surface: Performance Diagnostics and what each `[perf]` log prefix means, the diagnostics log export (and its two iOS-imposed limits), simulation toggles, the Color-from-360°-Faces pose probe, the BLE bench, and calibration provenance in sidecars.
+- [tools/rigcal-ab/README.md](tools/rigcal-ab/README.md) — Mac-side offline solver harness (ffmpeg + numpy): re-run the photometric rig solve against exported `staging_*` bundles, A/B cost functions; carries the edge-vs-photometric verdict behind solver v15.
+- [docs/testing/2026-07-30-360-branch-test-plan.md](docs/testing/2026-07-30-360-branch-test-plan.md) — device test plan for the 360° still-source branch (dated; useful as the template for future branch test plans).
+
 ## Privacy & troubleshooting
 - [docs/PRIVACY.md](docs/PRIVACY.md) — privacy model (person-segmentation blur, on-device processing, what leaves the device).
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — known issues and recovery steps (Meta Wearables SDK, hardware quirks, relocalization/stitching alignment).
