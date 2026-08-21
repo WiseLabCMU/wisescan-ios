@@ -3868,16 +3868,18 @@ struct ARCoverageView: UIViewRepresentable {
         let roomPlanQuads = roomPlanWalls + dedupedFloors
         let fitness = quadModelFitness(planes: roomPlanQuads, wallPatches: wallPatches,
                                        floorPatches: floorPatches)
-        let trustedWithFitness = zip(roomPlanQuads, fitness).filter { $0.1 >= quadModelMinExplainedRatio }
-        let demoted = zip(roomPlanQuads, fitness).filter { $0.1 < quadModelMinExplainedRatio }
+        let trustedWithFitness = zip(roomPlanQuads, fitness).filter { $0.1.ratio >= quadModelMinExplainedRatio }
+        let demoted = zip(roomPlanQuads, fitness).filter { $0.1.ratio < quadModelMinExplainedRatio }
         let walls = trustedWithFitness.filter { $0.0.category == .wall }.map(\.0)
         let wallFitness = trustedWithFitness.filter { $0.0.category == .wall }.map(\.1)
         let keptRoomPlanFloors = trustedWithFitness.filter { $0.0.category == .floor }.map(\.0)
         let floorFitness = trustedWithFitness.filter { $0.0.category == .floor }.map(\.1)
         if !demoted.isEmpty {
-            let desc = demoted.map { p, r in
+            // No unmeasured marker here: the waved-through ratio is 1.0, which clears any threshold
+            // below 1, so nothing on this list can be a benefit-of-the-doubt score.
+            let desc = demoted.map { p, f in
                 String(format: "%@ %.1f×%.1fm explains %.0f%%",
-                       p.category == .wall ? "wall" : "floor", p.width, p.height, r * 100)
+                       p.category == .wall ? "wall" : "floor", p.width, p.height, f.ratio * 100)
             }.joined(separator: ", ")
             print("[GhostProxy] demoted (kept as mesh): \(desc)")
         }
@@ -4151,11 +4153,14 @@ struct ARCoverageView: UIViewRepresentable {
         //
         // `fit=` (RoomPlan-sourced quads only) is the model-fitness ratio for the quads that PASSED —
         // demotions already print theirs, but a straight wall passing at 55% is one bad scan from a
-        // false demotion and was invisible. `holes=` counts interior unbacked cells that survived
-        // dilation: the objective patchiness metric — a well-scanned surface should read holes=0, and a
-        // real count on ordinary scans is the signal to raise quadSupportDilateCells.
-        let bakedFitness: [Float?] = wallFitness.map { $0 } + floorFitness.map { $0 }
-            + [Float?](repeating: nil, count: derivedLevels.count + derivedRamps.count)
+        // false demotion and was invisible. A `~` prefix (`fit=~100%`) marks the benefit-of-the-doubt
+        // pass: the quad held under quadModelMinMeshAreaM2 of same-family mesh, so nothing was graded
+        // and the 1.0 is trust rather than a score — a sliver wall and a wall that really does explain
+        // all of its mesh otherwise print identically. `holes=` counts interior unbacked cells that
+        // survived dilation: the objective patchiness metric — a well-scanned surface should read
+        // holes=0, and a real count on ordinary scans is the signal to raise quadSupportDilateCells.
+        let bakedFitness: [QuadFitness?] = wallFitness.map { $0 } + floorFitness.map { $0 }
+            + [QuadFitness?](repeating: nil, count: derivedLevels.count + derivedRamps.count)
         let supportDesc = bakedPlanes.indices
             .map { i in
                 let p = bakedPlanes[i]
@@ -4163,7 +4168,9 @@ struct ARCoverageView: UIViewRepresentable {
                 let (cols, rows) = quadSupportGrid(p)
                 var out = String(format: "%@ %d/%d", p.category == .wall ? "wall" : "floor",
                                  m.keptCount, cols * rows)
-                if let f = bakedFitness[i] { out += String(format: " fit=%.0f%%", f * 100) }
+                if let f = bakedFitness[i] {
+                    out += String(format: " fit=%@%.0f%%", f.measured ? "" : "~", f.ratio * 100)
+                }
                 let holes = m.interiorHoleCells
                 if holes > 0 { out += " holes=\(holes)" }
                 return out
@@ -4500,12 +4507,22 @@ struct ARCoverageView: UIViewRepresentable {
     static func quadModelFitness(planes: [PlaneRegistration.Plane], verts: [SIMD3<Float>],
                                  faces: [(Int, Int, Int)], faceClasses: Data) -> [Float] {
         let patches = classifyPatches(verts: verts, faces: faces, faceClasses: faceClasses)
-        return quadModelFitness(planes: planes, wallPatches: patches.walls, floorPatches: patches.floors)
+        return quadModelFitness(planes: planes, wallPatches: patches.walls,
+                                floorPatches: patches.floors).map(\.ratio)
+    }
+
+    /// One quad's fitness verdict. `measured` distinguishes an earned ratio from the
+    /// benefit-of-the-doubt 1.0 handed to a quad with too little mesh to judge — the demotion decision
+    /// cannot tell them apart (both pass), but a diagnostic that prints them identically hides the
+    /// difference between a wall that explains its mesh and a sliver nobody measured.
+    struct QuadFitness {
+        let ratio: Float
+        let measured: Bool
     }
 
     /// Patch-based core — see the wrapper above for semantics.
     static func quadModelFitness(planes: [PlaneRegistration.Plane],
-                                 wallPatches: [SurfacePatch], floorPatches: [SurfacePatch]) -> [Float] {
+                                 wallPatches: [SurfacePatch], floorPatches: [SurfacePatch]) -> [QuadFitness] {
         var explained = [Float](repeating: 0, count: planes.count)
         var present = [Float](repeating: 0, count: planes.count)
         let wallIdx = planes.indices.filter { planes[$0].category == .wall }
@@ -4577,7 +4594,10 @@ struct ARCoverageView: UIViewRepresentable {
             let presentArea = max(0, present[i])
             // Too little mesh to judge either way → benefit of the doubt; with nothing to back it, the
             // cell masks keep it from baking anyway.
-            return presentArea >= quadModelMinMeshAreaM2 ? explained[i] / presentArea : 1
+            // Flagged unmeasured because a sliver below the 2 m² bar is TRUSTED, not scored, and the
+            // build log must not present that 1.0 as a measured result.
+            guard presentArea >= quadModelMinMeshAreaM2 else { return QuadFitness(ratio: 1, measured: false) }
+            return QuadFitness(ratio: explained[i] / presentArea, measured: true)
         }
     }
 
