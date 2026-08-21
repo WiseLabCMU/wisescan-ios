@@ -3740,8 +3740,24 @@ struct ARCoverageView: UIViewRepresentable {
     /// and the rescan ghost falls back to the full mesh.
     static func buildGhostProxyOBJ(objData meshOBJ: Data, faceClasses: Data,
                                    roomPlanPlanes: [PlaneRegistration.Plane]) -> GhostProxyBuildResult? {
-        let roomPlanWalls = roomPlanPlanes.filter { $0.category == .wall }
-        let roomPlanFloors = roomPlanPlanes.filter { $0.category == .floor }
+        let allWalls = roomPlanPlanes.filter { $0.category == .wall }
+        let allFloors = roomPlanPlanes.filter { $0.category == .floor }
+        // A RoomPlan surface with a zero/sub-millimetre extent is not a sliver, it is a degenerate
+        // rectangle: quadSupportGrid clamps its cell count to 1, so the cell width is 0 and
+        // Int(u / 0) in quadSupportCell / bakeKept is a hard trap, not a wrong answer. The proxy is
+        // the ONE consumer fed minArea: 0 (Plane.area floors at 1e-4, so the default minArea: 1
+        // guard drops these for every other caller). The 1 mm bar cannot touch a real sliver: the
+        // smallest surface RoomPlan is on record for is the 0.2 m window-wall fragment, 200x this bar.
+        func nonDegenerate(_ p: PlaneRegistration.Plane) -> Bool { p.width > 1e-3 && p.height > 1e-3 }
+        let roomPlanWalls = allWalls.filter(nonDegenerate)
+        let roomPlanFloors = allFloors.filter(nonDegenerate)
+        let droppedDegenerate = (allWalls + allFloors).filter { !nonDegenerate($0) }
+        if !droppedDegenerate.isEmpty {
+            let desc = droppedDegenerate.map {
+                String(format: "%@ %.4f x %.4f m", $0.category == .wall ? "wall" : "floor", $0.width, $0.height)
+            }.joined(separator: ", ")
+            print("[GhostProxy] dropped degenerate roomplan surface(s): \(desc)")
+        }
         guard !roomPlanWalls.isEmpty else { return nil }
 
         // Phase timing, printed with the other build diagnostics. The derivation/support machinery is
@@ -3813,7 +3829,9 @@ struct ARCoverageView: UIViewRepresentable {
                 allLevels.contains { abs($0.center.y - fl.center.y) <= ghostProxyQuadCoverageMeters }
             }.map { String(format: "floor y=%+.2f %.1f×%.1fm", $0.center.y, $0.width, $0.height) }
                 .joined(separator: ", ")
-            print("[GhostProxy] replaced by derived level: \(desc) (RoomPlan emitted \(roomPlanFloors.count) floor(s))")
+            // PRE-filter count: the census exists to answer how many floors RoomPlan emitted, and a
+            // degenerate floor is exactly the anomaly it has to surface.
+            print("[GhostProxy] replaced by derived level: \(desc) (RoomPlan emitted \(allFloors.count) floor(s))")
         }
 
         // Per-quad graceful degradation. RoomPlan is designed to emit neat boxes; in a non-boxy room a
@@ -3926,8 +3944,12 @@ struct ARCoverageView: UIViewRepresentable {
                     // Map by coordinate, not by ratio — the two grids round up independently.
                     let u = (Float(fc) + 0.5) * p.width / Float(fCols)
                     let v = (Float(fr) + 0.5) * p.height / Float(fRows)
-                    let bc = min(bCols - 1, max(0, Int(u / (p.width / Float(bCols)))))
-                    let br = min(bRows - 1, max(0, Int(v / (p.height / Float(bRows)))))
+                    // Divisor clamped as defence-in-depth behind the degenerate-rectangle filter at
+                    // the build entrance: a zero-extent quad makes this cell size 0 and Int(u / 0)
+                    // traps. Both this site and quadSupportCell are clamped — the filter is what
+                    // keeps such a quad out, not this.
+                    let bc = min(bCols - 1, max(0, Int(u / max(p.width / Float(bCols), 1e-4))))
+                    let br = min(bRows - 1, max(0, Int(v / max(p.height / Float(bRows), 1e-4))))
                     kept[br * bCols + bc] = true
                 }
             }
@@ -4316,8 +4338,11 @@ struct ARCoverageView: UIViewRepresentable {
         let u = simd_dot(d, p.xAxis) + p.width / 2
         let v = simd_dot(d, p.yAxis) + p.height / 2
         guard u >= -0.2, u <= p.width + 0.2, v >= -0.2, v <= p.height + 0.2 else { return nil }
-        let c = min(cols - 1, max(0, Int(u / (p.width / Float(cols)))))
-        let r = min(rows - 1, max(0, Int(v / (p.height / Float(rows)))))
+        // Divisor clamped as defence-in-depth behind the degenerate-rectangle filter at the proxy
+        // build's entrance — a zero-extent rectangle makes this cell size 0 and Int(u / 0) traps.
+        // Clamped at bakeKept too; the filter is what keeps such a quad out, not this.
+        let c = min(cols - 1, max(0, Int(u / max(p.width / Float(cols), 1e-4))))
+        let r = min(rows - 1, max(0, Int(v / max(p.height / Float(rows), 1e-4))))
         return (c, r)
     }
 
