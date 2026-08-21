@@ -714,8 +714,11 @@ struct CaptureView: View {
                 .onChange(of: vioCompromised) { _, lost in
                     if lost { handleVIOCompromised() }
                 }
-                // ARKit purged mesh after a tracking correction — recoverable by re-sweeping,
-                // but only if the operator finds out NOW rather than at Process.
+                // The AR view's mid-recording notice channel: message only, never capture state.
+                // Carries ARKit purging the mesh after a tracking correction (recoverable by
+                // re-sweeping, but only if the operator finds out NOW rather than at Process) and a
+                // record-start world-map load failure. Both are things the operator can only act on
+                // while still holding the device up.
                 .onChange(of: meshResetNotice) { _, notice in
                     guard let notice else { return }
                     showTransientMessage("⚠️ \(notice)", duration: 8)
@@ -1704,6 +1707,37 @@ struct CaptureView: View {
                 scanStore.resetCaptureState()
                 scanStore.pendingStitchLink = inflightStitchLink
                 cachedGhostMeshData = nil
+                // Release the ~50 MB relocalization ARWorldMap on the way out of capture. The
+                // stop/save teardown in ARCoverageView hangs its purge off the isRecording
+                // true→false edge, so a rescan the user never RECORDED — relocalization never locks
+                // and they "Go Back" (exitCaptureFromRelocTimeout), or they simply leave the tab —
+                // never reaches it and the map stays resident for the app's lifetime. Cost-only: the
+                // next bring-up re-reads the archive from disk.
+                ARCoverageView.releaseCachedWorldMap()
+                // The cache is only ONE of the two strong references. The live session's
+                // configuration holds the same map in `initialWorldMap` (makeUIView ran it at
+                // bring-up), so purging the cache alone frees nothing on that path — swapping the
+                // session onto a fresh map-less nominal config is what actually drops it. Same move
+                // the stop/save teardown in ARCoverageView makes on its nominal-downgrade run
+                // (`uiView.session.run(Self.makeConfiguration())` on the isRecording true→false edge).
+                //
+                // Deliberately NOT `currentARSession = nil`: CaptureView is an always-instantiated
+                // TabView page that is never destroyed, so ARCoverageView.makeUIView — the ONLY
+                // writer of this binding — does not run again when the user comes back (that is also
+                // why the idle teardown pauses the session instead of dropping it). A nil here is
+                // therefore permanent, and it would silently no-op every reader: the in-flight save
+                // path (exportWorldMap(from: currentARSession), which runs asynchronously AFTER this
+                // onDisappear on the force-stop path above), the extend/alignment flows, and frame
+                // capture at the next record-start. Keeping the session and dropping its map frees
+                // the same bytes and breaks nothing.
+                //
+                // Gated on nothing being in flight, mirroring the idle-teardown timer above: a save
+                // still reads the live session's mesh anchors and exports its world map, and this
+                // config swap drops scene reconstruction. When something IS in flight the recording
+                // ends normally, and the stop/save teardown's purge covers it.
+                if !isRecording && !isProcessingMesh && pendingScan == nil && !scanStore.isProcessingScan {
+                    currentARSession?.run(ARCoverageView.makeConfiguration())
+                }
                 showExtendOverlay = false
                 isARSessionReady = false
                 sessionStabilizationTask?.cancel()
