@@ -443,6 +443,39 @@ struct ARCoverageView: UIViewRepresentable {
                 if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
                     config.frameSemantics.insert(.sceneDepth)
                 }
+                // Same GENUINE map-load failure the two load sites above guard (makeUIView and the
+                // ghost-arrival branch): a relocalization map was requested but the archive was
+                // missing/corrupt, knowable synchronously the instant the config is built. Without a
+                // guard this branch degrades in SILENCE — every `config.initialWorldMap == nil` test
+                // below reads as "new scan", and the operator is told nothing.
+                //
+                // Deliberately NOT routed through `scanStore.mapLoadFailed` the way those two sites
+                // are. That handler calls `resetCaptureState()`, which is only safe when nothing is
+                // recording. Mid-recording it nils `activeLocationForScan` — the field
+                // performStopRecording snapshots at STOP — so this rescan would be filed into a
+                // phantom NEW location while its raw-frame metadata keeps the original location_id;
+                // it also nils `activeScanToExtend`, un-hiding "Save & Scan Adjacent" on a rescan,
+                // which would then write a StitchLink pointing at that phantom.
+                //
+                // So the recording proceeds and its routing stays correct. It also stays co-framed
+                // with the source scan whenever tracking is nominal: of the runOptions built below,
+                // .resetTracking is added only if the session is itself still .limited(.relocalizing)
+                // (the branch a few lines down) or a VIO-collapse halt left needsTrackingReset
+                // pending — never merely because the map is missing. The real damage of a lost
+                // map — the exported feature set collapses to what this session observed itself, so
+                // the NEXT generation may not relocalize against it — is the load failure's own and
+                // predates this cache work. What we owe the operator here is only that it isn't
+                // silent, so: log it, plus a transient notice through the coordinator's notice
+                // binding (showTransientMessage in CaptureView — message state only, no capture-state
+                // mutation, unlike the mapLoadFailed handler).
+                if initialWorldMapURL != nil && config.initialWorldMap == nil {
+                    PerfDiag.log("record-start: world map requested but not loadable — recording anyway, routing preserved")
+                    let coord = context.coordinator
+                    DispatchQueue.main.async {
+                        coord.meshResetNoticeBinding?.wrappedValue =
+                            "Saved map couldn't be reloaded — this scan is still recording, but re-scanning from it later may not relocalize."
+                    }
+                }
                 // Don't reset tracking — preserve the current relocalized coordinate frame.
                 // But for a NEW scan, drop any ARMeshAnchors the warm session is still holding from
                 // a previous scan of the same space — otherwise scene-reconstruction geometry from
@@ -603,7 +636,9 @@ struct ARCoverageView: UIViewRepresentable {
                 }
 
                 let config = Self.makeConfiguration()
-                if scanStore?.needsTrackingReset == true {
+                // Which teardown is this? Read BEFORE the halt branch below consumes the flag.
+                let isPostHaltTeardown = scanStore?.needsTrackingReset == true
+                if isPostHaltTeardown {
                     // VIO-compromised halt: re-bootstrap tracking with the nominal downgrade —
                     // the collapsed session otherwise stays relocalizing against its corrupt
                     // internal map indefinitely and the next scan can never establish tracking.
@@ -614,6 +649,30 @@ struct ARCoverageView: UIViewRepresentable {
                     uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
                 } else {
                     uiView.session.run(config)
+                }
+                // Release the cached ARWorldMap (~50 MB) now the map-bearing config is off the
+                // session — after the run above, so the new run can't re-retain the map we just
+                // dropped (the run itself is async: ARKit swaps the config on its own queue, so the
+                // OLD config's release — and with it the map's — may land after the TEARDOWN marker
+                // below rather than inside the PRE-TEARDOWN→TEARDOWN delta. The delta usually shows
+                // the free; it isn't guaranteed to). Here and nowhere earlier: this branch is the
+                // isRecording true→false edge, so it can't fire between the bring-up's repeated
+                // makeConfiguration calls (makeUIView / ghost-arrival / record-start all run with
+                // isRecording unchanged or going true), which is the whole reason the cache exists.
+                // A rescan chain's next bring-up re-reads from disk, which is correct: map files are
+                // write-once per scan directory.
+                //
+                // NOT on the post-halt teardown. That teardown isn't the end of the capture — the
+                // VIO-collapse halt's expected next act is the user re-tapping record, and
+                // record-start calls makeConfiguration(worldMapURL:) again. Purging here would make
+                // that tap re-read 50 MB synchronously on the main thread (the documented bring-up
+                // freeze class) on exactly the marginal device that just collapsed. An operator who
+                // abandons after the halt instead of re-recording is covered by CaptureView's
+                // leave-capture dismissal release (ARCoverageView.releaseCachedWorldMap from
+                // .onDisappear), which fires after a halt like on any other exit — so skipping the
+                // purge here leaks nothing.
+                if !isPostHaltTeardown {
+                    WorldMapCache.shared.purge()
                 }
                 // Clear ALL debug options for pure passthrough (or VR background)
                 uiView.debugOptions = []
@@ -5745,6 +5804,17 @@ struct ARCoverageView: UIViewRepresentable {
         return config
     }
 
+    /// Releases the process-wide cached `ARWorldMap` (see `WorldMapCache`). Exposed for CaptureView's
+    /// leave-capture teardown, which is the only release point OUTSIDE this file: a rescan that never
+    /// records (relocalization never locks and the user backs out) never produces the
+    /// `isRecording` true→false edge that the stop/save teardown purge hangs off, so without this the
+    /// map stays resident for the app's lifetime. A forwarder rather than making the cache internal —
+    /// purging is the entire surface other files need, and the cache stays unreachable otherwise.
+    /// Cost-only, never correctness: the next `makeConfiguration(worldMapURL:)` re-reads from disk.
+    static func releaseCachedWorldMap() {
+        WorldMapCache.shared.purge()
+    }
+
 }
 
 // MARK: - World-Map Cache
@@ -5760,6 +5830,33 @@ struct ARCoverageView: UIViewRepresentable {
 /// `ARWorldMap` is ever retained here. The key is the file's path, byte size and modification date,
 /// so a map rewritten at a path already seen is re-read rather than served stale.
 ///
+/// **Lifetime: the held map is released at exactly three points** — the normal stop/save teardown
+/// (the `isRecording` true→false edge in `updateUIView`), CaptureView's leave-capture dismissal
+/// (`ARCoverageView.releaseCachedWorldMap` from `.onDisappear`, which is what covers a rescan the
+/// user abandons without ever recording), and a memory warning (the observer in `init`). Deliberately
+/// NOT the post-halt teardown: after a VIO-collapse halt the user is expected to re-tap record, and
+/// record-start rebuilds the same config — purging there would charge that tap a fresh 50 MB
+/// synchronous main-thread read on the very device that just collapsed. The dismissal release covers
+/// the abandoned-after-halt case instead.
+///
+/// The memory-warning release is the one that is NOT bounded to a teardown: it can land mid-bring-up
+/// or mid-alignment and purge a map the current capture still wants. Usually that is cost-only — the
+/// next `makeConfiguration(worldMapURL:)` re-reads the archive from disk. The exception is a
+/// re-read that FAILS under that same pressure at record-start, which degrades exactly as documented
+/// at the record-start map-load guard in `updateUIView`: the recording proceeds with its routing
+/// intact, but the map it exports is feature-poor.
+///
+/// Before all this the map's last strong reference died with
+/// the config/session; a cache that only ever *adds* one keeps 50 MB resident for the app's
+/// lifetime — including through postprocess/colorize, which is exactly where memory peaks.
+/// Releasing it is cheap because the cache only has to serve the repeats WITHIN ONE BRING-UP: a
+/// later rescan re-reads from disk, and map files are write-once per scan directory so a re-read is
+/// never staler than the served copy would have been.
+///
+/// Repeats are served the SAME instance, not a copy: the save path already re-runs a config whose
+/// `initialWorldMap` was consumed (device-verified), and `anchors` is the map's only publicly
+/// writable property — no writer exists in this codebase.
+///
 /// Explicitly `nonisolated` (the project defaults types to MainActor): without it the cache, its
 /// `NSLock` and `map(for:)` would all be main-actor-isolated and the lock would be moot. The
 /// `@unchecked Sendable` + lock pair is what lets `map(for:)` be called from any thread.
@@ -5769,6 +5866,15 @@ private nonisolated final class WorldMapCache: @unchecked Sendable {
     private let lock = NSLock()
     private var cachedKey = ""
     private var cachedMap: ARWorldMap?
+
+    private init() {
+        // A memory warning is the second release point, and the singleton has no owner to wire it
+        // from — so register here. `purge()` is lock-guarded and callable from any context, and the
+        // observer's lifetime is the process's, like `shared`'s.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil
+        ) { [weak self] _ in self?.purge() }
+    }
 
     /// The map archived at `url`, deserializing it on a miss. `nil` for an unreadable file or a blob
     /// that isn't an `ARWorldMap` — the same failure mode as the inline load this replaces.
@@ -5780,9 +5886,15 @@ private nonisolated final class WorldMapCache: @unchecked Sendable {
 
         if let hit = lock.withLock({ cachedKey == key ? cachedMap : nil }) { return hit }
 
-        let loaded = PerfDiag.timed("worldmap_load", warnOverMs: 100) { () -> ARWorldMap? in
-            guard let data = try? Data(contentsOf: url) else { return nil }
-            return try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data)
+        // `PerfDiag` is main-actor-bound (project default isolation) while this class is
+        // deliberately nonisolated; every `map(for:)` caller is one of the three main-actor
+        // config-build sites, so assume rather than hop — a future off-main caller traps here
+        // instead of racing the diag state.
+        let loaded = MainActor.assumeIsolated {
+            PerfDiag.timed("worldmap_load", warnOverMs: 100) { () -> ARWorldMap? in
+                guard let data = try? Data(contentsOf: url) else { return nil }
+                return try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data)
+            }
         }
         guard let loaded else { return nil }
 
@@ -5791,6 +5903,15 @@ private nonisolated final class WorldMapCache: @unchecked Sendable {
             cachedMap = loaded
         }
         return loaded
+    }
+
+    /// Releases the held map. The next `map(for:)` re-reads from disk, so this is only ever a cost
+    /// question — never a correctness one. Lock-guarded: callable from any thread/context.
+    func purge() {
+        lock.withLock {
+            cachedKey = ""
+            cachedMap = nil
+        }
     }
 }
 
