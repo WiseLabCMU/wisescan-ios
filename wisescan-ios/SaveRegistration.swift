@@ -367,24 +367,35 @@ enum SaveRegistration {
     /// through verbatim (faces, comments — the save's OBJ carries no normals; extra vertex
     /// components like colors are preserved untransformed). One O(n) text pass — runs on the
     /// save pipeline's background queue (and at ghost load, to undo).
+    ///
+    /// Appends into ONE pre-reserved output string rather than collecting a `[String]` of lines
+    /// and `joined()`-ing it. A room-scale mesh is 600k-1.2M lines, and every emitted vertex line
+    /// is past the small-string inline limit, so the line array was that many heap allocations held
+    /// live at once plus a second whole-file string for the join — two of the six whole-file copies
+    /// this ran with, inside the registration bake's rollback window. The formatting is deliberately
+    /// unchanged (same interpolation, same passthrough), so the output bytes are identical.
     static func transformOBJ(_ data: Data, by m: simd_float4x4) -> Data {
         guard let text = String(data: data, encoding: .utf8) else { return data }
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        var out = [String]()
-        out.reserveCapacity(lines.count)
-        for line in lines {
+        var out = String()
+        out.reserveCapacity(text.utf8.count)
+        var needsSeparator = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if needsSeparator { out += "\n" }
+            needsSeparator = true
             if line.hasPrefix("v ") {
                 let c = line.dropFirst(2).split(separator: " ")
                 if c.count >= 3, let x = Float(c[0]), let y = Float(c[1]), let z = Float(c[2]) {
                     let p = m * SIMD4<Float>(x, y, z, 1)
-                    var v = "v \(p.x) \(p.y) \(p.z)"
-                    for extra in c.dropFirst(3) { v += " \(extra)" }
-                    out.append(v)
+                    out += "v \(p.x) \(p.y) \(p.z)"
+                    for extra in c.dropFirst(3) {
+                        out += " "
+                        out.append(contentsOf: extra)
+                    }
                     continue
                 }
             }
-            out.append(String(line))
+            out.append(contentsOf: line)
         }
-        return Data(out.joined(separator: "\n").utf8)
+        return Data(out.utf8)
     }
 }
