@@ -1031,137 +1031,7 @@ struct CaptureView: View {
                     ZStack(alignment: .bottom) {
                         // HUD background with live stats (only during recording)
                         if isRecording {
-                            VStack(spacing: 8) {
-                                // Row 1: Live metrics
-                                HStack(spacing: 16) {
-                                    Label(scanStats.formattedPolygons, systemImage: "triangle.fill")
-                                        .font(.caption2)
-                                        .foregroundColor(.white)
-                                    Label("\(scanStats.anchorCount)", systemImage: "square.grid.3x3")
-                                        .font(.caption2)
-                                        .foregroundColor(.white)
-                                    Label(scanStats.relocalizationLabel, systemImage: "map")
-                                        .font(.caption2)
-                                        .foregroundColor(scanStats.hasEnoughFeaturesForRelocalization ? .white : .red)
-                                    Label(scanStats.driftLabel, systemImage: "location.slash")
-                                        .font(.caption2)
-                                        .foregroundColor(scanStats.driftEstimate > 0.5 ? .orange : .white)
-                                    Spacer()
-                                    Label(scanStats.formattedDuration, systemImage: "clock")
-                                        .font(.caption2)
-                                        .foregroundColor(.white)
-                                }
-
-                                // Row 1.5: Semantic classes detected (colored dot + label).
-                                // DISABLED with the deferred-build migration: we no longer render live
-                                // RoomPlan outlines, so the color legend maps to nothing on screen.
-                                // detectedClasses is still collected (extractRoomMetadata → saved
-                                // semanticClassesDetected). Restore this if a visualize-RoomPlan mode lands.
-                                /*
-                                if !scanStats.detectedClasses.isEmpty {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "tag.fill")
-                                            .font(.caption2)
-                                            .foregroundColor(.gray)
-                                        ForEach(SemanticClass.allCases.filter { $0 != .none && scanStats.detectedClasses.contains($0.rawValue) },
-                                                id: \.rawValue) { cls in
-                                            HStack(spacing: 2) {
-                                                Circle()
-                                                    .fill(cls.swiftUIDisplayColor)
-                                                    .frame(width: 8, height: 8)
-                                                Text(cls.rawValue.capitalized)
-                                                    .font(.system(size: 9))
-                                                    .foregroundColor(.white.opacity(0.7))
-                                            }
-                                        }
-                                        Spacer()
-                                    }
-                                }
-                                */
-
-                                // Row 1.5b: Capture quality (sharp vs total frames)
-                                if frameCaptureSession.totalCapturedFrameCount > 0 {
-                                    HStack(spacing: 16) {
-                                        HStack(spacing: 4) {
-                                            Image(systemName: "camera.fill")
-                                                .font(.caption2)
-                                                .foregroundColor(.green)
-                                            Text("\(frameCaptureSession.sharpFrameCount)")
-                                                .font(.caption2).bold()
-                                                .foregroundColor(.green)
-                                            Text("sharp")
-                                                .font(.caption2)
-                                                .foregroundColor(.white.opacity(0.6))
-                                        }
-                                        HStack(spacing: 4) {
-                                            Image(systemName: "photo.on.rectangle")
-                                                .font(.caption2)
-                                                .foregroundColor(.white.opacity(0.6))
-                                            Text("\(frameCaptureSession.totalCapturedFrameCount)")
-                                                .font(.caption2)
-                                                .foregroundColor(.white.opacity(0.6))
-                                            Text("total")
-                                                .font(.caption2)
-                                                .foregroundColor(.white.opacity(0.6))
-                                        }
-                                        Spacer()
-                                        // Stillness indicator
-                                        if frameCaptureSession.isCurrentlyStill {
-                                            HStack(spacing: 3) {
-                                                Image(systemName: "hand.raised.fill")
-                                                    .font(.caption2)
-                                                Text("Still")
-                                                    .font(.caption2).bold()
-                                            }
-                                            .foregroundColor(.green)
-                                        }
-                                    }
-                                }
-
-                                // Row 2: Capacity bar
-                                VStack(spacing: 4) {
-                                    HStack {
-                                        Text("Session Capacity")
-                                            .font(.caption2)
-                                            .foregroundColor(.white.opacity(0.7))
-                                        Spacer()
-                                        Text("\(scanStats.capacityPercent)%")
-                                            .font(.caption2).bold()
-                                            .foregroundColor(Color(
-                                                red: scanStats.capacityColor.red,
-                                                green: scanStats.capacityColor.green,
-                                                blue: 0
-                                            ))
-                                    }
-                                    GeometryReader { geo in
-                                        ZStack(alignment: .leading) {
-                                            Rectangle()
-                                                .fill(Color.white.opacity(0.15))
-                                                .frame(height: 6)
-                                            Rectangle()
-                                                .fill(Color(
-                                                    red: scanStats.capacityColor.red,
-                                                    green: scanStats.capacityColor.green,
-                                                    blue: 0
-                                                ))
-                                                .frame(width: geo.size.width * scanStats.capacityScore, height: 6)
-                                        }
-                                        .cornerRadius(3)
-                                    }
-                                    .frame(height: 6)
-                                }
-                            }
-                            .padding()
-                            .frame(height: 90)
-                            .background(.ultraThinMaterial)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 24)
-                                    .stroke(scanStats.isNearCapacity
-                                            ? Color.orange.opacity(0.6)
-                                            : Color.white.opacity(0.2), lineWidth: 1)
-                            )
-                            .cornerRadius(24)
-                            .padding(.horizontal)
+                            CaptureStatsHUD(scanStats: scanStats, frameCaptureSession: frameCaptureSession)
                         }
 
                         // Capture Button + Analyze Space Button
@@ -2260,6 +2130,148 @@ struct CaptureView: View {
         while let presented = top.presentedViewController { top = presented }
         top.present(alert, animated: true)
         return true
+    }
+}
+
+/// Recording HUD: live mesh/session metrics, capture quality and the session-capacity bar.
+/// Extracted from `CaptureView.body` so the 10 Hz `ScanStats` publish (`ARCoverageView`
+/// `Coordinator.updateStats`) invalidates only this subtree instead of the whole capture body.
+private struct CaptureStatsHUD: View {
+    let scanStats: ScanStats
+    let frameCaptureSession: FrameCaptureSession
+
+    var body: some View {
+        VStack(spacing: 8) {
+            // Row 1: Live metrics
+            HStack(spacing: 16) {
+                Label(scanStats.formattedPolygons, systemImage: "triangle.fill")
+                    .font(.caption2)
+                    .foregroundColor(.white)
+                Label("\(scanStats.anchorCount)", systemImage: "square.grid.3x3")
+                    .font(.caption2)
+                    .foregroundColor(.white)
+                Label(scanStats.relocalizationLabel, systemImage: "map")
+                    .font(.caption2)
+                    .foregroundColor(scanStats.hasEnoughFeaturesForRelocalization ? .white : .red)
+                Label(scanStats.driftLabel, systemImage: "location.slash")
+                    .font(.caption2)
+                    .foregroundColor(scanStats.driftEstimate > 0.5 ? .orange : .white)
+                Spacer()
+                Label(scanStats.formattedDuration, systemImage: "clock")
+                    .font(.caption2)
+                    .foregroundColor(.white)
+            }
+
+            // Row 1.5: Semantic classes detected (colored dot + label).
+            // DISABLED with the deferred-build migration: we no longer render live
+            // RoomPlan outlines, so the color legend maps to nothing on screen.
+            // detectedClasses is still collected (extractRoomMetadata → saved
+            // semanticClassesDetected). Restore this if a visualize-RoomPlan mode lands.
+            /*
+            if !scanStats.detectedClasses.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "tag.fill")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                    ForEach(SemanticClass.allCases.filter { $0 != .none && scanStats.detectedClasses.contains($0.rawValue) },
+                            id: \.rawValue) { cls in
+                        HStack(spacing: 2) {
+                            Circle()
+                                .fill(cls.swiftUIDisplayColor)
+                                .frame(width: 8, height: 8)
+                            Text(cls.rawValue.capitalized)
+                                .font(.system(size: 9))
+                                .foregroundColor(.white.opacity(0.7))
+                        }
+                    }
+                    Spacer()
+                }
+            }
+            */
+
+            // Row 1.5b: Capture quality (sharp vs total frames)
+            if frameCaptureSession.totalCapturedFrameCount > 0 {
+                HStack(spacing: 16) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "camera.fill")
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                        Text("\(frameCaptureSession.sharpFrameCount)")
+                            .font(.caption2).bold()
+                            .foregroundColor(.green)
+                        Text("sharp")
+                            .font(.caption2)
+                            .foregroundColor(.white.opacity(0.6))
+                    }
+                    HStack(spacing: 4) {
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.caption2)
+                            .foregroundColor(.white.opacity(0.6))
+                        Text("\(frameCaptureSession.totalCapturedFrameCount)")
+                            .font(.caption2)
+                            .foregroundColor(.white.opacity(0.6))
+                        Text("total")
+                            .font(.caption2)
+                            .foregroundColor(.white.opacity(0.6))
+                    }
+                    Spacer()
+                    // Stillness indicator
+                    if frameCaptureSession.isCurrentlyStill {
+                        HStack(spacing: 3) {
+                            Image(systemName: "hand.raised.fill")
+                                .font(.caption2)
+                            Text("Still")
+                                .font(.caption2).bold()
+                        }
+                        .foregroundColor(.green)
+                    }
+                }
+            }
+
+            // Row 2: Capacity bar
+            VStack(spacing: 4) {
+                HStack {
+                    Text("Session Capacity")
+                        .font(.caption2)
+                        .foregroundColor(.white.opacity(0.7))
+                    Spacer()
+                    Text("\(scanStats.capacityPercent)%")
+                        .font(.caption2).bold()
+                        .foregroundColor(Color(
+                            red: scanStats.capacityColor.red,
+                            green: scanStats.capacityColor.green,
+                            blue: 0
+                        ))
+                }
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.15))
+                            .frame(height: 6)
+                        Rectangle()
+                            .fill(Color(
+                                red: scanStats.capacityColor.red,
+                                green: scanStats.capacityColor.green,
+                                blue: 0
+                            ))
+                            .frame(width: geo.size.width * scanStats.capacityScore, height: 6)
+                    }
+                    .cornerRadius(3)
+                }
+                .frame(height: 6)
+            }
+        }
+        .padding()
+        .frame(height: 90)
+        .background(.ultraThinMaterial)
+        .overlay(
+            RoundedRectangle(cornerRadius: 24)
+                .stroke(scanStats.isNearCapacity
+                        ? Color.orange.opacity(0.6)
+                        : Color.white.opacity(0.2), lineWidth: 1)
+        )
+        .cornerRadius(24)
+        .padding(.horizontal)
     }
 }
 
