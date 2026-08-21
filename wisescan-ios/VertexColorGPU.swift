@@ -238,6 +238,15 @@ enum VertexColorGPU {
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
 
+        // A failed dispatch must not be read back. With the reused buffer this stopped being
+        // merely-undefined: the readback would deterministically return frame n-1's complete
+        // observation set, double-counting that frame in the weighted median under frame n's
+        // camera. Returning nil hands this frame to the caller's CPU fallback instead.
+        guard cmdBuf.error == nil else {
+            if PerfDiag.enabled { PerfDiag.log("[VertexColorGPU] dispatch failed: \(String(describing: cmdBuf.error)) — frame falls back to CPU") }
+            return nil
+        }
+
         // Read back results
         let ptr = resultBuf.contents().bindMemory(to: VertexColorResult.self, capacity: vertexCount)
         return Array(UnsafeBufferPointer(start: ptr, count: vertexCount))
