@@ -8,10 +8,6 @@
       "type": "integer",
       "description": "1-based sequence index of the still in the capture session."
     },
-    "timestamp": {
-      "type": "number",
-      "description": "Unix epoch time (UTC) when the still was triggered."
-    },
     "still_source": {
       "type": "string",
       "description": "Camera model or capture source identifier (e.g., RICOH THETA X)."
@@ -21,23 +17,36 @@
       "description": "Camera projection type, typically equirectangular."
     },
     "width": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "description": "Pixel width of the equirectangular JPEG image."
     },
     "height": {
-      "type": ["integer", "null"],
+      "type": [
+        "integer",
+        "null"
+      ],
       "description": "Pixel height of the equirectangular JPEG image."
     },
     "phone_transform": {
       "type": "array",
-      "items": { "type": "number" },
+      "items": {
+        "type": "number"
+      },
       "minItems": 16,
       "maxItems": 16,
       "description": "4x4 column-major phone-to-world transform at the moment of capture."
     },
     "cam_transform": {
-      "type": ["array", "null"],
-      "items": { "type": "number" },
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "number"
+      },
       "minItems": 16,
       "maxItems": 16,
       "description": "4x4 column-major 360° camera-to-world transform, composed from phone pose + baked rig profile at capture time."
@@ -51,32 +60,228 @@
       "description": "Elapsed milliseconds to trigger the shutter."
     },
     "transfer_ms": {
-      "type": "integer",
-      "description": "Elapsed milliseconds to download the image from the camera."
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Elapsed milliseconds to download the image from the camera. Written when the download completes — absent while a transfer is pending or when its sidecar update raced the scan's stop."
     },
     "bytes": {
-      "type": "integer",
-      "description": "File size of the captured JPEG image in bytes."
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "File size of the captured JPEG image in bytes. Written when the download completes — absent while a transfer is pending or when its sidecar update raced the scan's stop."
+    },
+    "camera_clock_offset_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Camera clock minus phone clock at scan start, milliseconds (+ = camera ahead), measured by catching a second tick of the camera's dateTimeZone. Add to a phone timestamp to compare against the camera's EXIF DateTimeOriginal (1 s resolution): shutter latency = EXIF_second(+offset window) - trigger tap. The camera drifts 1-7 s/day, so the offset is per scan, never reusable."
+    },
+    "camera_clock_offset_unc_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Half-window uncertainty of camera_clock_offset_ms, milliseconds (poll gap at the tick plus half the HTTP round trip)."
     },
     "rig_calibration_source": {
-      "type": ["string", "null"],
-      "enum": ["solved", "mechanical_prior", null],
-      "description": "Source of the rig calibration used for cam_transform ('solved' or 'mechanical_prior')."
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "solved_capture",
+        "solved_postprocess",
+        "prior_postprocess",
+        "mechanical_prior",
+        null
+      ],
+      "description": "Source of the rig calibration used for cam_transform. Consumers should test for the 'solved' PREFIX rather than an exact match: anything starting with 'solved' carries a fitted rig extrinsic, anything else is the mechanical prior."
     },
-    "rig_calibration_residual_cm": {
-      "type": ["number", "null"],
-      "description": "Calibration residual error in centimeters if solved."
+    "rig_calibration_residual_px_rms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "RMS reprojection error of the edge-cost calibration fit (solver <= 14 only), in pixels of the 512-wide working equirect. NOT comparable across scans with different still counts. Solver >= 15 (photometric) does not write this — see rig_calibration_zncc and rig_calibration_yaw_spread_deg."
+    },
+    "rig_calibration_zncc": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Trimmed-mean zero-normalized cross-correlation between keyframe-unprojected points and the still at the solved pose (solver >= 15). Higher is better; field range ~0.5-0.8. The photometric replacement for residual_px_rms."
+    },
+    "rig_calibration_yaw_spread_deg": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Max-minus-min of per-still yaw re-solves at the solved offset (solver >= 15) — the solve's honest confidence number, immune to being flattered by fewer inputs. Field range 1-4.5 deg healthy; solves past 15 deg are rejected and the prior ships instead."
+    },
+    "rig_calibration_solver_version": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Version of the rig solver that produced cam_transform. A bump forces a re-solve on the scan's next Process, which is how superseded calibrations self-heal."
+    },
+    "rig_calibration_railed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Solved parameters that came back sitting on a bound of their search box, one human-readable phrase each. NON-EMPTY MEANS THE POSE IS APPROXIMATE: the optimizer ran out of model rather than converging on the data, and the residual is a boundary value, not a fit. Empty array is the healthy case; the key is written on every bake, so its ABSENCE means the producing build predates this field, not that nothing was railed."
+    },
+    "rig_offset_phone_m": {
+      "type": "array",
+      "items": {
+        "type": "number"
+      },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "Rig offset from the phone camera to the 360 lens, in the PHONE's own frame (ARKit camera axes: +x right, +y up, -z view direction), metres. The rod runs along -x, so a 0.72 m rig is about [-0.72, 0, 0]. This is the geometry cam_transform was composed from: cam_position = phone_position + phone_rotation * rig_offset_phone_m."
+    },
+    "rig_rod_length_m": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Magnitude of rig_offset_phone_m — the phone-camera-to-lens distance along the rod, i.e. the quantity the operator measures with a tape."
+    },
+    "rig_yaw_deg": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Solved yaw of the 360 camera relative to the phone's horizontal forward, degrees. Note heading = -yaw."
+    },
+    "rig_rod_anchor_m": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Rod length (m) the calibration solve was ANCHORED on — the operator's tape entry at solve time, or the mechanical default. Compare with rig_rod_length_m (the solved value): a solve pinned against this anchor's bound means the tape and the data disagree, i.e. re-measure the rod."
+    },
+    "rig_rod_anchor_source": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "tape",
+        "mechanical_default",
+        null
+      ],
+      "description": "Whether rig_rod_anchor_m came from the operator's measurement or the built-in default."
+    },
+    "elevation_offset_deg": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Uniform vertical registration offset between the equirect's rows and the latitude mapping, solved per scan (+ = image content sits lower than geometry predicts). Consumers sampling the equirect with the standard mapping should compensate by this much. This is a fitted nuisance parameter absorbing model error, not a measured camera property, and is expected to be retired."
+    },
+    "frame_timestamp": {
+      "type": "number",
+      "description": "ARKit frame timestamp at the trigger tap, seconds, BOOT-RELATIVE — the same clock as transforms.json, so stills pair with keyframes by comparing these. Not wall-clock."
+    },
+    "captured_at_epoch_ms": {
+      "type": "integer",
+      "description": "Wall-clock capture moment on the PHONE, UTC epoch milliseconds. Compare with the camera's EXIF via camera_clock_offset_ms."
+    },
+    "shutter_path": {
+      "type": "string",
+      "enum": [
+        "ble",
+        "osc",
+        "ble-unconfirmed"
+      ],
+      "description": "How the shutter was triggered. 'ble' = write ack anchored the exposure window (ack is a true shutter time, tens of ms). 'osc' = HTTP round trip; the ack can be seconds late on a loaded device, so anything tuning sway windows must filter on this. 'ble-unconfirmed' = the BLE write was accepted but the file-URL push was lost; the file was recovered from the camera's file list."
+    },
+    "shutter_ack_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "When the camera acknowledged the shutter command, milliseconds after the trigger tap — the exposure window's anchor."
+    },
+    "exposure_window_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "description": "Length of the exposure window used for the sway verdict, milliseconds (learned per camera model: ack + latency allowance + exposure)."
+    },
+    "trigger_motion_m": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Max phone translation (m) observed across the WHOLE trigger window (tap to file event) versus the tap pose."
+    },
+    "trigger_motion_deg": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Max phone rotation (deg) across the whole trigger window."
+    },
+    "exposure_motion_m": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Max phone translation (m) restricted to the exposure window — the sway that actually corrupts the baked pose. Combined lens displacement = this + rodLength*tan(exposure_motion_deg)."
+    },
+    "exposure_motion_deg": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Max phone rotation (deg) restricted to the exposure window."
+    },
+    "motion_samples": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "number"
+        },
+        "minItems": 3,
+        "maxItems": 3
+      },
+      "description": "[t_ms_since_tap, translation_m, rotation_deg] triples from the trigger-window motion probe — lets sway windows be re-derived offline under different assumptions."
+    },
+    "camera_file_deleted": {
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "description": "True once the camera-side original was deleted after transfer (the privacy sweep — raw equirects must not persist on the camera's unauthenticated storage). Stamped by the postprocess sweep; absent means the sweep has not confirmed deletion."
+    },
+    "exif_exposure_time_s": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "ExposureTime read from the transferred JPEG's EXIF, seconds (e.g. 1/30). Sizes the tail of the exposure window for the sway verdict."
     }
   },
   "required": [
     "sequence",
-    "timestamp",
+    "frame_timestamp",
     "still_source",
     "camera_model",
     "phone_transform",
     "camera_file_url",
     "trigger_ms",
-    "transfer_ms",
-    "bytes"
+    "captured_at_epoch_ms"
   ]
 }

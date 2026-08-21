@@ -1,6 +1,7 @@
 import Foundation
 import os
 import ARKit
+import Synchronization
 import UIKit
 
 /// Post-processing utilities for vertex coloring and ARWorldMap export.
@@ -50,10 +51,10 @@ enum VertexColorAccumulator {
 
             // Wandering-cluster check (see mapSuspect doc): flag a map whose feature cloud was
             // polluted by a tracking excursion so rescan/link flows can warn before trusting it.
+            // mapSuspect logs its own numbers and verdict at .notice — a bare "looks
+            // corrupted" via print() never reached the unified log, so the badge was
+            // unexplainable from a pulled bundle.
             let suspect = LocalizationDiag.mapSuspect(map)
-            if suspect {
-                print("[Warning] World map feature cloud looks corrupted (outlier cluster) — flagging scan's map as suspect")
-            }
 
             do {
                 let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
@@ -195,7 +196,15 @@ enum VertexColorAccumulator {
     /// there by the capture writers. Missing/old transforms.json degrades to an empty set
     /// (pure even-stride selection, the pre-keyframe behavior).
     static func keyframeStems(rawDir: URL) -> Set<String> {
-        let url = rawDir.appendingPathComponent("transforms.json")
+        // Both locations, as MeshPreviewView already does: the file has been written to the
+        // scan root as well as raw_data/ across pipeline generations, and reading only one
+        // degraded SILENTLY to pure even-stride selection with no keyframe priority at all.
+        let candidates = [rawDir.appendingPathComponent("transforms.json"),
+                          rawDir.deletingLastPathComponent().appendingPathComponent("transforms.json")]
+        guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
+            PerfDiag.log("[VertexColor] no transforms.json — keyframes get no selection priority this run")
+            return []
+        }
         guard let data = try? Data(contentsOf: url),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let frames = json["frames"] as? [[String: Any]] else { return [] }
@@ -257,7 +266,8 @@ enum VertexColorAccumulator {
         // Frame source. Dev A/B "Color from 360° Faces": color EXCLUSIVELY from cube
         // faces cut from the scan's own 360° stills at their BAKED poses — a measurement
         // tool for cube-face pose quality (misplaced color = pose error). Faces carry
-        // is_keyframe=true and NO depth (occlusion off in that mode). face_frames/ is
+        // is_keyframe=true and depth RASTERIZED from the scan's own mesh, so the probe
+        // measures pose rather than bleed (see EquirectFaceExport). face_frames/ is
         // regenerated per run so re-solved poses always apply, and it lives inside
         // raw_data so it can never leak into an export.
         let useFaces = UserDefaults.standard.bool(forKey: AppConstants.Key.colorizeFrom360Faces)
@@ -298,10 +308,26 @@ enum VertexColorAccumulator {
 
         // Sample up to maxColorizationFrames, preferring sharp keyframes (see helper).
         phase?("Selecting frames…")
+        let stems = Self.keyframeStems(rawDir: rawDir)
         let sampledFiles = Self.selectColorizationFrames(
             from: cameraFiles, max: AppConstants.maxColorizationFrames,
-            keyframeStems: Self.keyframeStems(rawDir: rawDir)
+            keyframeStems: stems
         )
+        // What the selector actually picked, split by kind. "48 frames" alone cannot
+        // distinguish "all keyframes, motion frames dropped" from "a healthy mix", and that
+        // is precisely the question asked of this step.
+        if useFaces {
+            // Face records are cut from the 360° stills and carry their own stems, so a
+            // keyframe/motion split against the CAPTURE keyframe list is meaningless here —
+            // reporting it read as "0 keyframes", which looks like a fault and is not one.
+            PerfDiag.log("[VertexColor] frames: \(sampledFiles.count) cube faces "
+                + "from \(sampledFiles.count / max(1, EquirectFaceExport.faceCount)) still(s)")
+        } else {
+            let selectedKeyframes = sampledFiles.filter { stems.contains($0.deletingPathExtension().lastPathComponent) }.count
+            PerfDiag.log("[VertexColor] frames: \(sampledFiles.count) of \(cameraFiles.count) selected "
+                + "— \(selectedKeyframes) keyframes + \(sampledFiles.count - selectedKeyframes) motion "
+                + "(budget \(AppConstants.maxColorizationFrames), \(stems.count) keyframes available)")
+        }
 
         // ── Privacy: keep person pixels out of colors.bin ──
         // Colorize bakes sampled pixels into colors.bin, which exports as PLY vertex colors — a
@@ -315,6 +341,7 @@ enum VertexColorAccumulator {
         // depth==0 skip keeps protecting them; privacy-off captures have an empty masks/ → no-op.
         let masksDir = rawDir.appendingPathComponent("masks")
         let maskMode = Self.privacyMaskModeWouldApply(rawDir: rawDir)   // sample per-frame masks + skip unmasked frames
+        let maskSkipped = Mutex<Int>(0)
         if maskMode { Self.log.info("privacy mask mode ON (deferred-blur capture) — masking person regions") }
 
         // Per-vertex top-N observation buffers (flat, row = K entries per vertex).
@@ -459,8 +486,12 @@ enum VertexColorAccumulator {
                     depthWidth = cgDepth.width
                     depthHeight = cgDepth.height
                     depthBytesPerRow = cgDepth.bytesPerRow
-                    let info = cgDepth.bitmapInfo.rawValue
-                    isDepthLittleEndian = (info & CGBitmapInfo.byteOrder16Little.rawValue) != 0 || (info & CGBitmapInfo.byteOrder32Little.rawValue) != 0
+                    // NOT `bitmapInfo`: ImageIO reports byteOrder16Little for every decoded
+                    // 16-bit PNG regardless of what the writer declared, so this flag was a
+                    // constant `true` and the capture depth (written byte-swapped) came back
+                    // scrambled — 1000 mm read as 59395, which passes any occlusion test and
+                    // is why keyframe occlusion has never actually rejected anything. See DepthPNG.
+                    isDepthLittleEndian = DepthPNG.needsLittleEndianByteStream(cgDepth)
                 }
             }
             if depthPtr == nil {
@@ -482,7 +513,13 @@ enum VertexColorAccumulator {
                 guard let mData = try? Data(contentsOf: maskURL),
                       let mImg = UIImage(data: mData)?.cgImage,
                       mImg.bitsPerPixel == 8,   // fail closed: only the known 8bpp-gray layout is safe to index 1 byte/pixel
-                      let mProvider = mImg.dataProvider?.data else { return }   // missing/unreadable/unexpected mask → skip frame
+                      let mProvider = mImg.dataProvider?.data else {
+                    // Fail closed, but NOT silently: this drops the WHOLE frame, and with
+                    // masks written only for frames whose stencil had warmed up it can drop
+                    // most of a scan — including every motion frame — with no trace at all.
+                    maskSkipped.withLock { $0 += 1 }
+                    return
+                }
                 maskCGImage = mImg
                 maskDataBuffer = mProvider
                 maskPtr = CFDataGetBytePtr(mProvider)
@@ -505,7 +542,8 @@ enum VertexColorAccumulator {
                 depthImage: depthCGImage,
                 maskImage: maskCGImage,
                 distFloor: distFloor,
-                occlusionToleranceMM: AppConstants.colorizationOcclusionToleranceMM
+                occlusionToleranceMM: AppConstants.colorizationOcclusionToleranceMM,
+                depthIsRaster: useFaces
             ) {
                 // GPU path: accumulate observations from GPU results into top-K buffers (CPU).
                 var visibleCount = 0
@@ -562,12 +600,25 @@ enum VertexColorAccumulator {
                                 let b0 = UInt16(dPtr[o]), b1 = UInt16(dPtr[o + 1])
                                 return Float(isDepthLittleEndian ? (b1 << 8) | b0 : (b0 << 8) | b1)
                             }
-                            let depthMM = depthAt(dpx, dpy)
+                            var depthMM = depthAt(dpx, dpy)
                             let expectedMM = -camPos.z * 1000.0
 
-                            // If depth pixel is 0, it means no valid depth or privacy mask. Skip coloring.
-                            if depthMM == 0 { continue }
-
+                            // depth == 0 means OPPOSITE things per source: sensor no-data
+                            // (can't tell occluded from visible → skip) vs. a rasterized
+                            // hole (no mesh along the ray → nothing occludes → pass).
+                            if depthMM == 0 && !useFaces { continue }
+                            // Rasterized depth is a z-buffer of the very mesh being colored,
+                            // so silhouette vertices land a sub-pixel past their own edge and
+                            // self-occlude. Compare against the 3×3 max.
+                            if useFaces && depthMM > 0 {
+                                for sy in (dpy - 1)...(dpy + 1) {
+                                    for sx in (dpx - 1)...(dpx + 1) {
+                                        guard sx >= 0, sx < depthWidth, sy >= 0, sy < depthHeight else { continue }
+                                        depthMM = max(depthMM, depthAt(sx, sy))
+                                    }
+                                }
+                            }
+                            if depthMM > 0 {
                             // Occluded if expected distance exceeds stored depth + tolerance; the
                             // tolerance scales with range (LiDAR error grows) over a near-field floor.
                             let tolMM = max(AppConstants.colorizationOcclusionToleranceMM,
@@ -590,6 +641,7 @@ enum VertexColorAccumulator {
                                     }
                                 }
                                 if dMax - dMin > edgeFrac * depthMM { continue }
+                            }
                             }
                         }
                     }
@@ -704,6 +756,18 @@ enum VertexColorAccumulator {
         PerfDiag.log("[VertexColor] \(reducerName) resolve \(vertexCount) verts \(Int((CACurrentMediaTime() - medianStart) * 1000))ms")
         let elapsed = CACurrentMediaTime() - startTime
         Self.log.info("Colored \(coloredCount)/\(vertexCount) vertices from \(sampledFiles.count) frames (\(reducerName), K=\(K)) in \(String(format: "%.1f", elapsed))s")
+        // The single number that says whether a colorize run worked, and the one that was
+        // missing from every exported diagnostics bundle: gray fraction. `log.info` is
+        // memory-only in the unified log, so it never survived to a pulled bundle.
+        let skipped = maskSkipped.withLock { $0 }
+        if skipped > 0 {
+            PerfDiag.log("[VertexColor] ⚠️ \(skipped) of \(sampledFiles.count) frames dropped for a missing/unreadable "
+                + "person mask — privacy fails closed, but that much dropped coverage shows up as gray")
+        }
+        PerfDiag.log(String(format: "[VertexColor] colored %d/%d verts (%.1f%% gray) from %d frames, source=%@, %.1fs",
+                            coloredCount, vertexCount,
+                            vertexCount > 0 ? Double(vertexCount - coloredCount) / Double(vertexCount) * 100 : 0,
+                            sampledFiles.count, useFaces ? "360-faces" : "keyframes", elapsed))
         return data
     }
 

@@ -611,10 +611,7 @@ struct LocationDetailView: View {
             .disabled(selectedScans.isEmpty || isBulkExporting)
 
             Button(action: { requestBulkPostprocess() }, label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "wand.and.stars")
-                    Text("Process")
-                }
+                AdaptiveActionLabel(systemImage: "wand.and.stars", title: "Process")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -626,10 +623,7 @@ struct LocationDetailView: View {
 
             // Color — orange paintbrush, matching the scan card's primary action.
             Button(action: { requestBulkColorize() }, label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "paintbrush.fill")
-                    Text("Color")
-                }
+                AdaptiveActionLabel(systemImage: "paintbrush.fill", title: "Color")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -705,8 +699,9 @@ struct LocationDetailView: View {
                 }
                 Button("Cancel", role: .cancel) { continueAction = nil }
             } message: {
-                Text("The previous scan's tracking was disrupted while it was recorded (for example " +
-                     "by an interruption), so the ghost overlay and alignment may start offset — and " +
+                Text("The previous scan's relocalization map contains a detached clump of feature points " +
+                     "far from everything else — the signature of a tracking excursion merged back " +
+                     "into the map — so the ghost overlay and alignment may start offset, and " +
                      "a rescan that starts from an unreliable map usually inherits the problem. " +
                      "To clear it, delete the flagged scan so the most recent clean scan becomes " +
                      "the reference. Processing can still auto-align the result either way.")
@@ -809,9 +804,28 @@ struct LocationDetailView: View {
     /// Post-process pivot: processing is AUTOMATED — landing on a location kicks off every
     /// achievable pending structural step (incl. the equirect download sweep). The engine's
     /// per-scan in-flight claims make overlapping kicks no-ops.
-    private func autoProcessPending() {
+    private func autoProcessPending(retriesLeft: Int = 6) {
         guard !isBulkColoring else { return }
         let pending = ScanPostprocessor.scansNeedingPostprocess(in: location)
+
+        // The room arrives LATE. RoomBuilder runs as a post-save continuation and writes
+        // roomplan.json seconds after the scan is saved, but registration and proxy are
+        // both gated on that file existing. Landing here before it does means this pass
+        // runs masks and calibration, finds no room, and stops — and nothing re-runs, so
+        // the proxy waits for whatever the user taps next. Field log 2026-08-17: auto
+        // pass at 11:28 did masks+calibration, and proxy only ran at 11:36 when Color
+        // was pressed, which is why "Building proxy…" showed up under a colour button.
+        //
+        // So: while any scan is still waiting on its room, check back. Bounded, and it
+        // stops as soon as nothing is room-pending.
+        let awaitingRoom = location.scans.contains { ScanPostprocessor.roomPending($0) }
+        if awaitingRoom, retriesLeft > 0 {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(5))
+                autoProcessPending(retriesLeft: retriesLeft - 1)
+            }
+        }
+
         guard !pending.isEmpty else { return }
         bulkPostprocess(scans: pending)
     }

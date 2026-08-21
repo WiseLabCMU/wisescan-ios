@@ -1,4 +1,5 @@
 import AudioToolbox
+import AVFoundation
 import Foundation
 import NetworkExtension
 import Observation
@@ -90,7 +91,32 @@ final class ThetaCameraManager {
     /// Stills this scan whose phone moved beyond the sway bounds during the exposure
     /// window — their recorded pose may not match what the camera saw. Drives the
     /// capture-time warning + chip count; the Process-step solve prefers clean stills.
-    private(set) var swayedStillCount = 0
+    /// Setter is internal (not private) because the sway guard lives in the
+    /// +StillMotion file split; treat as read-only outside the manager's own files.
+    var swayedStillCount = 0
+    /// Set when the camera stops answering mid-scan. The chip goes amber and the still
+    /// path stops being attempted, so a dead camera taxes one keyframe rather than all
+    /// of them; cleared by a successful still or a reconnect.
+    private(set) var cameraUnresponsive = false
+    /// True only while the operator must actually stand still: from the trigger until
+    /// the 360° exposure has certainly closed. `isCapturing` outlives it by seconds
+    /// (stitch + transfer), and waiting on THAT is what used to cost ~4 s per still.
+    private(set) var isHoldingForExposure = false
+    /// Which path fired the last still. Recorded per still because an OSC fallback's
+    /// "ack" is a 3 s watchdog timeout plus an HTTP round trip, not a shutter time —
+    /// tuning data has to be able to exclude those.
+    private(set) var lastShutterPath = "unknown"
+    /// Consecutive unacknowledged BLE writes. The link can stay CONNECTED while its data
+    /// path degrades (RF congestion): characteristics are discovered, canShutterOverBLE
+    /// reports true, and writes simply go unanswered. Field run 2026-08-17: still 1 over
+    /// BLE at 262 ms, then three "write unacknowledged" fallbacks at ~3.2 s each.
+    private var bleWriteFailures = 0
+    /// Set after repeated write failures: BLE is skipped for the rest of the scan rather
+    /// than spending the 3 s watchdog on every still to reach the same fallback.
+    private(set) var bleShutterDegraded = false
+
+    /// The shutter path a still would take right now — what the chip reports.
+    var shutterPathIsBLE: Bool { ThetaBLEManager.shared.canShutterOverBLE && !bleShutterDegraded }
 
     /// One queued equirect transfer: the sidecar is already on disk; only the JPG bytes
     /// are outstanding on the camera.
@@ -110,6 +136,16 @@ final class ThetaCameraManager {
     /// Phone positions at each scan-still trigger — feeds the live calibration
     /// sufficiency meter (count + baseline spread).
     private(set) var scanStillPositions: [SIMD3<Float>] = []
+    /// Camera-side file URLs already claimed by a still this session, and the newest image
+    /// that existed before it started. Together they let a BLE capture whose confirmation
+    /// was lost be recovered from the camera's file list without ever attaching a
+    /// pre-existing frame to a fresh pose. See triggerStillPreferringBLE.
+    private var seenStillURLs: Set<String> = []
+    private var preScanLatestImageURL: String?
+    /// Camera-vs-phone clock offset measured at scan start (see measureCameraClockOffset).
+    /// Stamped into every still sidecar so shutter latency is recoverable from EXIF offline.
+    private var cameraClockOffsetMs: Int64?
+    private var cameraClockOffsetUncMs: Int?
 
     /// Max pairwise distance (m) between this scan's still positions: the calibration
     /// baseline. O(N²) over a handful of stills.
@@ -173,7 +209,8 @@ final class ThetaCameraManager {
     func log(_ kind: ThetaEvent.Kind, _ message: String) {
         events.insert(ThetaEvent(date: Date(), kind: kind, message: message), at: 0)
         if events.count > 100 { events.removeLast(events.count - 100) }
-        logger.info("[\(kind.rawValue, privacy: .public)] \(message, privacy: .public)")
+        // notice, not info — info never reaches disk; see PerfDiag.log.
+        logger.notice("[\(kind.rawValue, privacy: .public)] \(message, privacy: .public)")
     }
 
     /// Logs Wi‑Fi/network reachability transitions — the literal "Wi‑Fi connect/disconnect"
@@ -226,6 +263,74 @@ final class ThetaCameraManager {
     /// (e.g. "THETAYR14100112.ASC" → "14100112"; suffix varies by model/firmware).
     /// nil when the SSID doesn't look like a Theta AP. Prefills the Add Camera sheet;
     /// the security plan's P2 warning fires when the live password still equals this.
+    /// Ends the scan's still session: clears the per-scan counters and the ring
+    /// positions, so the AR floor markers are torn down with the scan they belonged to.
+    /// Called on every exit — save, discard, extend — because a discarded scan used to
+    /// leave its markers floating in the live scene (field report 360update5).
+    func endScanStillSession() {
+        scanStillPositions.removeAll()
+        scanStillCount = 0
+        swayedStillCount = 0
+    }
+
+    /// Verify the camera is actually there before a scan starts, and recover if it
+    /// isn't. The card can show "connected" long after the truth changed: the camera
+    /// naps, or — more often — the phone roams off its AP, and nothing notices until a
+    /// still fails mid-scan with the operator already walking.
+    ///
+    /// Cheap checks first: the stored SSID against the one iOS reports (no round trip
+    /// at all), then a BLE state read, which works even when Wi-Fi has dropped. Only a
+    /// real failure escalates to the full wake + rejoin.
+    ///
+    /// Returns true when the camera is ready; false means the operator should be told
+    /// the scan will be phone-only.
+    /// Settle which shutter path this scan actually has, BEFORE anything depends on the
+    /// answer. A present shutter characteristic on a ready link is not evidence: on
+    /// 2026-08-18 both held for the whole session while every control write was refused
+    /// at the ATT layer, so `canShutterOverBLE` said yes, the record-start prompt never
+    /// fired, and six stills silently ran OSC with a 3.4 s ack the sway window then
+    /// anchored on. One probe write, and at most one reconnect-and-retry.
+    func prepareShutterPath() async {
+        guard ThetaBLEManager.shared.chars[ThetaBLEManager.ccv2ShutterChar] != nil else { return }
+        if await ThetaBLEManager.shared.verifyControlWritable() { return }
+        _ = await ThetaBLEManager.shared.recoverControlPlane()
+    }
+
+    @discardableResult
+    func verifyReadyForCapture() async -> Bool {
+        guard isConnected else { return false }
+        cameraUnresponsive = false
+        bleWriteFailures = 0
+        bleShutterDegraded = false
+
+        let stored = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID)
+        let onCameraNetwork = await currentSSID().map { $0 == stored } ?? true
+        if onCameraNetwork, await ThetaBLEManager.shared.isCameraResponding() {
+            await prepareShutterPath()
+            return true
+        }
+        if onCameraNetwork, !ThetaBLEManager.shared.isLinkReady {
+            // No BLE link to ask over (Z1, or a dropped link) — trust the network check
+            // and let the first still surface any real failure.
+            return true
+        }
+
+        log(.connection, onCameraNetwork
+            ? "Camera didn't answer before recording — reconnecting…"
+            : "Phone left the camera's Wi-Fi — reconnecting…")
+        connect()
+        // connect() runs its own wake/join/probe budget; wait for it to settle rather
+        // than racing the scan's first still against it.
+        for _ in 0..<40 {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if isConnected { return true }
+            if case .failed = state { break }
+        }
+        cameraUnresponsive = true
+        log(.connection, "360° camera unavailable — this scan will be phone-only until it reconnects")
+        return false
+    }
+
     /// SSID the phone is on right now, when iOS will say. Needs the Access Wi-Fi
     /// Information entitlement plus one of: this app joined the network via
     /// NEHotspotConfiguration, location permission, or a VPN. Foreign networks
@@ -608,6 +713,15 @@ final class ThetaCameraManager {
                                       outcome.megabytes, outcome.elapsedMs, outcome.megabytesPerSecond))
                 // Downsample off the full JPEG so we never hold the ~60MP bitmap decoded.
                 previewImage = Self.downsampledImage(from: data, maxPixel: 1200)
+                // Same contract as a scan still: bytes verified on the device means the
+                // camera-side original goes. A test shot is a real photograph of a real
+                // room, and leaving it on an open AP with a serial-derived password
+                // because it came from the debug button is the kind of inconsistency
+                // that turns into a leak.
+                if !UserDefaults.standard.bool(forKey: AppConstants.Key.keepCameraOriginals),
+                   data.count > 0 {
+                    await deleteCameraFile(capture.fileURL)
+                }
             } catch {
                 let message = Self.describe(error)
                 lastError = message
@@ -619,7 +733,7 @@ final class ThetaCameraManager {
 
     /// ImageIO thumbnail decode — bounds peak memory to the preview size regardless of the
     /// source resolution (a full-res equirect decode would be hundreds of MB).
-    nonisolated private static func downsampledImage(from data: Data, maxPixel: CGFloat) -> UIImage? {
+    nonisolated static func downsampledImage(from data: Data, maxPixel: CGFloat) -> UIImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -670,7 +784,30 @@ final class ThetaCameraManager {
     func beginScanStillSession(rawDataDir: URL? = nil) {
         scanStillCount = 0
         swayedStillCount = 0
+        cameraUnresponsive = false
         scanStillPositions.removeAll()
+        // Baseline for confirmation-timeout recovery: anything newer than this on the
+        // camera, and not already claimed by a still this session, was shot by us.
+        seenStillURLs.removeAll()
+        cameraClockOffsetMs = nil
+        cameraClockOffsetUncMs = nil
+        Task { [weak self] in
+            guard let self else { return }
+            self.preScanLatestImageURL = try? await self.latestImageURL()
+            // Sequential, same Task: both are small OSC calls and the first still is
+            // seconds away — no reason to race two requests on the camera's AP.
+            if let clock = await self.measureCameraClockOffset() {
+                self.cameraClockOffsetMs = clock.offsetMs
+                self.cameraClockOffsetUncMs = clock.uncertaintyMs
+                self.log(.capture, String(format: "Camera clock offset %+.2f s ±%dms — EXIF times decode to true shutter times this scan",
+                                          Double(clock.offsetMs) / 1000, clock.uncertaintyMs))
+            } else {
+                // Say so — an absent offset in the sidecars must be distinguishable from
+                // a build that never measured. Not fatal: this scan's EXIF just stays
+                // latency-plus-offset, like every scan before it.
+                self.log(.capture, "Camera clock offset unavailable (tick never caught) — EXIF stays uncorrected this scan")
+            }
+        }
         if let dir = rawDataDir?.appendingPathComponent("equirect_stills"),
            let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) {
             let maxSeq = files.compactMap { file -> Int? in
@@ -697,37 +834,39 @@ final class ThetaCameraManager {
     func captureStillForScan(phoneTransform: simd_float4x4, timestamp: TimeInterval,
                              into rawDataDir: URL,
                              samplePose: (() -> simd_float4x4?)? = nil) -> Bool {
-        guard isConnected, !isCapturing else { return false }
+        // Fail-soft: once the camera has gone, don't stall every keyframe waiting for a
+        // trigger that can't succeed. Recovery is a reconnect, not a retry per still.
+        guard isConnected, !isCapturing, !cameraUnresponsive else { return false }
         let capturedAtEpochMs = Int64(Date().timeIntervalSince1970 * 1000)
         isCapturing = true
         lastError = nil
         Task {
             let start = Date()
-            // Trigger-window motion probe: the camera exposes well after the tap, so
-            // sample the phone pose every 250 ms until the camera reports the file and
-            // record the worst translation/rotation vs the tap pose. Measurement first —
-            // sidecar fields decide whether exposure-time pose compensation is warranted.
+            // Trigger-window motion probe: samples the phone pose every 250 ms until
+            // the camera reports the file. The sway verdict is applied afterwards over
+            // the exposure window — anchored at the shutter ack, per-model length —
+            // because that is the only stretch where motion corrupts the baked pose.
             let motionProbe = samplePose.map { makeStillMotionProbe(tapTransform: phoneTransform, sample: $0) }
+            let connectedModel: String = if case .connected(let model, _) = state { model } else { "unknown-360" }
             do {
-                let fileURL = try await triggerStillPreferringBLE()
+                var shutterAck: Date?
+                isHoldingForExposure = true
+                let fileURL = try await triggerStillPreferringBLE(onAck: { [weak self] in
+                    shutterAck = Date()
+                    // The camera has taken the shot; the pose-critical hold ends one
+                    // shutter-latency + exposure later. Release the operator THERE, not
+                    // when the file lands — stitch and transfer are the camera's problem
+                    // and the download drains lazily in the background.
+                    self?.scheduleHoldRelease(model: connectedModel)
+                })
                 let triggerMs = Int(Date().timeIntervalSince(start) * 1000)
                 motionProbe?.cancel()
-                let motion: StillMotion? = if let probe = motionProbe {
-                    await probe.value
-                } else { nil }
-                if let motion {
-                    PerfDiag.log(String(format: "[360Still] motion: exposure %.3f m / %.1f° · total %.3f m / %.1f° over %d ms",
-                                        motion.exposureM, motion.exposureDeg,
-                                        motion.totalM, motion.totalDeg, triggerMs))
-                }
                 let seq = scanStillCount + 1
-                if let motion, motion.swayed {
-                    swayedStillCount += 1
-                    playThetaSwayWarnCue()
-                    log(.capture, String(format: "⚠️ Still #%d: moved %.0f cm / %.1f° during the exposure "
-                        + "window — its pose may not match the pano. Hold still until the done tone.",
-                        seq, motion.exposureM * 100, motion.exposureDeg))
-                }
+                let motion = await resolveStillMotion(
+                    probe: motionProbe,
+                    timing: TriggerTiming(start: start, shutterAck: shutterAck,
+                                          model: connectedModel, triggerMs: triggerMs),
+                    seq: seq)
                 // STOP-RACE GUARD: the trigger can still cross the scan's Stop — saveScan
                 // MOVES the capture dir, and a sidecar written to the stale path creates an
                 // orphaned equirect_stills/ the saved bundle never sees. Loud drop.
@@ -736,25 +875,28 @@ final class ThetaCameraManager {
                     isCapturing = false
                     return
                 }
-                let connectedModel: String = if case .connected(let model, _) = state { model } else { "unknown-360" }
                 let input = ScanStillInput(
                     sequence: seq, phoneTransform: phoneTransform,
                     frameTimestamp: timestamp, capturedAtEpochMs: capturedAtEpochMs,
                     sourceURL: fileURL, sourceModel: connectedModel, format: currentStillFormat,
                     triggerMs: triggerMs,
                     triggerMotionM: motion?.totalM, triggerMotionDeg: motion?.totalDeg,
-                    exposureMotionM: motion?.exposureM, exposureMotionDeg: motion?.exposureDeg)
+                    exposureMotionM: motion?.exposureM, exposureMotionDeg: motion?.exposureDeg,
+                    shutterPath: lastShutterPath,
+                    shutterAckMs: motion?.ackOffset.map { Int($0 * 1000) },
+                    cameraClockOffsetMs: cameraClockOffsetMs,
+                    cameraClockOffsetUncMs: cameraClockOffsetUncMs,
+                    exposureWindowMs: motion.map { Int($0.window * 1000) },
+                    motionSamples: motion?.samples)
                 // Sidecar NOW (phone pose can't be reconstructed later); JPG via the queue;
                 // cam_transform is baked by the Process step's calibration solve.
                 try Self.writeScanStillSidecar(input: input, into: rawDataDir)
-                // THIRD cue — "360° done, you can move." The cue sequence trains the
-                // operator: stillness chime → phone shutter click → (Theta exposes:
-                // chip shows hold) → THIS tone. Without it, the shutter click reads as
-                // "done" and the walk resumes mid-exposure (the trigger-motion probe
-                // exists to quantify exactly that). Conservative timing: fires when the
-                // camera lists the file, i.e. exposure + stitch are certainly over.
-                playThetaDoneCue()
+                // No cue here: "you can move" already fired at exposure close
+                // (scheduleHoldRelease). The file landing is bookkeeping — the operator
+                // should be walking by now.
+                releaseExposureHold(playCue: false)   // no-op unless the ack never came
                 scanStillCount = seq
+                cameraUnresponsive = false
                 scanStillPositions.append(SIMD3<Float>(phoneTransform.columns.3.x,
                                                        phoneTransform.columns.3.y,
                                                        phoneTransform.columns.3.z))
@@ -766,10 +908,15 @@ final class ThetaCameraManager {
                 drainStillDownloads()
                 return
             } catch {
+                releaseExposureHold(playCue: false)   // failed shot: release, but don't say "done"
                 let message = Self.describe(error)
                 lastError = message
                 log(.capture, "Scan still failed: \(message)")
-                if Self.isConnectivityError(error) { state = .failed(message) }
+                if Self.isConnectivityError(error) {
+                    state = .failed(message)
+                    cameraUnresponsive = true
+                    log(.capture, "360° stills paused — reconnect the camera to resume")
+                }
             }
             isCapturing = false
         }
@@ -780,18 +927,69 @@ final class ThetaCameraManager {
     /// as a NotifyState push — no OSC round-trip), OSC otherwise. Fallback rule from
     /// the probe rounds: only a failed WRITE falls back (the camera never fired); a
     /// confirmation timeout must NOT double-trigger, so it surfaces as the error.
-    private func triggerStillPreferringBLE() async throws -> String {
+    private func triggerStillPreferringBLE(onAck: (() -> Void)? = nil) async throws -> String {
         // Capability, not just link readiness: a Z1 link is ready for identity/state
         // but has no CCv2 shutter characteristic — asking anyway threw linkNotReady,
         // which the fallback below does not catch, failing the still outright.
-        guard ThetaBLEManager.shared.canShutterOverBLE else { return try await triggerStill() }
-        do {
-            let url = try await ThetaBLEManager.shared.triggerShutter()
-            log(.capture, "Shutter via BLE — file pushed")
+        guard shutterPathIsBLE else {
+            lastShutterPath = "osc"
+            let url = try await triggerStill(onAck: onAck)
+            seenStillURLs.insert(url)
             return url
+        }
+        do {
+            let url = try await ThetaBLEManager.shared.triggerShutter(onAck: onAck)
+            log(.capture, "Shutter via BLE — file pushed")
+            lastShutterPath = "ble"
+            bleWriteFailures = 0
+            seenStillURLs.insert(url)
+            return url
+        } catch ThetaBLEManager.BLEError.timeout(let what) {
+            // The WRITE was accepted; only the NotifyState push carrying _latestFileUrl
+            // never arrived — so the camera almost certainly took the picture, and
+            // re-triggering would double-shoot. That rule is why this used to surface as a
+            // hard failure, and on 2026-08-19 it cost a still outright.
+            //
+            // Ask the camera instead. A newer image than the one that existed when the scan
+            // began, which no still has already claimed, IS this shot. Both conditions
+            // matter: transferred stills are deleted camera-side as we go, but a camera with
+            // pre-existing files must never hand a stale frame to this still's pose.
+            let latest = try? await latestImageURL()
+            if let latest, latest != preScanLatestImageURL, !seenStillURLs.contains(latest) {
+                seenStillURLs.insert(latest)
+                lastShutterPath = "ble-unconfirmed"
+                log(.capture, "BLE shutter fired but the camera never pushed the file URL (\(what)) — "
+                    + "recovered it from the camera's file list")
+                return latest
+            }
+            throw ThetaBLEManager.BLEError.timeout(what)
+        } catch ThetaBLEManager.BLEError.controlRefused {
+            // ONE strike, and a separate counter. The 2-strike rule below exists to stop
+            // burning the 3 s write watchdog per still on a flaky link; a refusal costs
+            // nothing to attempt and has never once recovered on the same link (0/4 on
+            // 2026-08-18), so there is nothing to spend a second still learning. It also
+            // must not consume bleWriteFailures — the two failures need separate budgets.
+            if !bleShutterDegraded {
+                bleShutterDegraded = true
+                log(.connection, "The camera refused Bluetooth control — using Wi-Fi for the rest of this "
+                    + "scan. To fix it: Settings → Bluetooth → tap ⓘ next to the camera → Forget This "
+                    + "Device, then pair it again from Add Camera.")
+            }
+            lastShutterPath = "osc"
+            return try await triggerStill(onAck: onAck)
         } catch ThetaBLEManager.BLEError.writeFailed(let why) {
+            bleWriteFailures += 1
             log(.capture, "BLE shutter write failed (\(why)) — falling back to OSC")
-            return try await triggerStill()
+            // Two in a row means the link is up but its data path is not. Every further
+            // attempt costs the full watchdog before landing in the same place, so stop
+            // attempting and say so — 3 s per still is worth more than the hope.
+            if bleWriteFailures >= 2, !bleShutterDegraded {
+                bleShutterDegraded = true
+                log(.connection, "Bluetooth shutter unreliable (\(bleWriteFailures) unacknowledged writes) — "
+                    + "using Wi-Fi for the rest of this scan. Reconnect the camera to retry Bluetooth.")
+            }
+            lastShutterPath = "osc"
+            return try await triggerStill(onAck: onAck)
         }
     }
 
@@ -890,59 +1088,29 @@ final class ThetaCameraManager {
         }
     }
 
+    /// Ends the hold one shutter-latency + exposure after the camera acknowledged the
+    /// shutter — the measured moment the 360° exposure has certainly closed. Everything
+    /// after it (stitch, listing, download) happens while the operator walks.
+    private func scheduleHoldRelease(model: String) {
+        let remaining = AppConstants.thetaShutterLatencyAllowance
+            + Self.expectedExposureSeconds(forModel: model)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            self?.releaseExposureHold(playCue: true)
+        }
+    }
+
+    /// Idempotent: whichever of the ack timer, the completed still, or the failure path
+    /// arrives first ends the hold, and only the timer's path plays the tone.
+    private func releaseExposureHold(playCue: Bool) {
+        guard isHoldingForExposure else { return }
+        isHoldingForExposure = false
+        if playCue { playThetaDoneCue() }
+    }
+
     /// Distinct completion tone + success haptic when a 360° still finishes (audio
     /// gated by the same capture-audio setting as the shutter click; haptic always —
     /// people scan with the ringer off).
-    /// Samples the phone pose every 250 ms until cancelled (cancel = camera listed the
-    /// file), recording the worst motion vs the tap pose.
-    private func makeStillMotionProbe(tapTransform: simd_float4x4,
-                                      sample: @escaping () -> simd_float4x4?) -> Task<StillMotion, Never> {
-        Task { @MainActor in
-            let tapPos = SIMD3<Float>(tapTransform.columns.3.x,
-                                      tapTransform.columns.3.y,
-                                      tapTransform.columns.3.z)
-            let tapRot = simd_quatf(tapTransform)
-            var motion = StillMotion()
-            let probeStart = Date()
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                guard let pose = sample() else { continue }
-                let pos = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
-                let stepM = simd_distance(tapPos, pos)
-                let delta = (tapRot.inverse * simd_quatf(pose)).angle * 180 / .pi
-                let stepDeg = min(delta, 360 - delta)
-                motion.totalM = max(motion.totalM, stepM)
-                motion.totalDeg = max(motion.totalDeg, stepDeg)
-                // Only sway inside the exposure window corrupts the pose — the
-                // camera is done exposing well before stitch/transfer finish.
-                if Date().timeIntervalSince(probeStart) <= AppConstants.thetaExposureWindowSeconds {
-                    motion.exposureM = max(motion.exposureM, stepM)
-                    motion.exposureDeg = max(motion.exposureDeg, stepDeg)
-                }
-            }
-            return motion
-        }
-    }
-
-    /// Max phone motion vs the tap pose, split into the exposure window (pose-corrupting)
-    /// and the whole trigger window (context — includes harmless stitch/transfer time).
-    struct StillMotion {
-        var exposureM: Float = 0
-        var exposureDeg: Float = 0
-        var totalM: Float = 0
-        var totalDeg: Float = 0
-        var swayed: Bool {
-            exposureM > AppConstants.thetaSwayWarnMeters || exposureDeg > AppConstants.thetaSwayWarnDegrees
-        }
-    }
-
-    /// Warning cue for a swayed still — distinct from the done tone so the operator
-    /// learns the difference between "finished clean" and "finished but you moved".
-    private func playThetaSwayWarnCue() {
-        let audioOn = (UserDefaults.standard.object(forKey: AppConstants.Key.captureAudioEnabled) as? Bool) ?? true
-        UINotificationFeedbackGenerator().notificationOccurred(.warning)
-        if audioOn { AudioServicesPlaySystemSound(1073) }
-    }
 
     private func playThetaDoneCue() {
         let audioOn = (UserDefaults.standard.object(forKey: AppConstants.Key.captureAudioEnabled) as? Bool) ?? true
@@ -973,15 +1141,8 @@ final class ThetaCameraManager {
                     let ms = Int(Date().timeIntervalSince(dlStart) * 1000)
                     let stillsDir = item.dir.appendingPathComponent("equirect_stills")
                     if FileManager.default.fileExists(atPath: stillsDir.path) {
-                        // OFF-MAIN: this drain deliberately runs DURING a scan, and an
-                        // 8 MB write plus an 11K-equirect decode is 40-200 ms — landing
-                        // on main it would jank live ARKit at exactly the wrong moment.
-                        let dst = stillsDir.appendingPathComponent(
-                            String(format: "still_%04d.JPG", item.sequence))
-                        let preview = await Task.detached(priority: .utility) {
-                            try? data.write(to: dst)
-                            return Self.downsampledImage(from: data, maxPixel: 1200)
-                        }.value
+                        let preview = await Self.persistDrainedStill(
+                            data: data, stillsDir: stillsDir, sequence: item.sequence)
                         drainedDirs.insert(item.dir)
                         lastDownload = DownloadOutcome(bytes: data.count, elapsedMs: ms)
                         previewImage = preview

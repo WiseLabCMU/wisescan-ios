@@ -56,9 +56,17 @@ extension ThetaBLEManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        Self.log.info("link dropped\(error.map { " (\($0.localizedDescription))" } ?? "", privacy: .public)")
+        // `.notice` + onLog, not `.info`: `.info` is memory-only in the unified log, so a
+        // mid-scan link drop never reached a pulled diagnostics bundle. On 2026-08-18 the
+        // link dropped after one refused write and the remaining five stills quietly ran
+        // OSC — with nothing in the export saying the link had gone.
+        let detail = error.map { " (" + $0.localizedDescription + ")" } ?? ""
+        Self.log.notice("link dropped\(detail, privacy: .public)")
+        onLog?("BLE link dropped\(detail)")
+        noteUnproductiveLink(error)
         chars.removeAll()
         linkState = .idle
+        controlVerifiedForLink = false
         failAllPending(BLEError.linkNotReady)
     }
 }
@@ -93,6 +101,18 @@ extension ThetaBLEManager: CBPeripheralDelegate {
         if chars[Self.ccv2GetInfoChar] != nil, chars[Self.ccv2NotifyStateChar] != nil {
             clearWatchdog("link")
             linkState = .ready
+            controlVerifiedForLink = false
+            linkReadyAt = Date()
+            // Property bitmasks at link-ready settle the next refusal in one line: if a
+            // control characteristic still advertises .write when the camera answers ATT
+            // 0x03, the attribute table iOS cached has moved (stale GATT cache); if .write
+            // is gone, the camera itself withdrew the capability.
+            let controlProps = [Self.ccv2ShutterChar, Self.ccv2SetOptionsChar, Self.ccv2GetOptionsChar]
+                .compactMap { uuid -> String? in
+                    guard let char = chars[uuid] else { return nil }
+                    return "\(uuid.uuidString.prefix(8))=\(ThetaBLEProbe.describeProps(char.properties))"
+                }.joined(separator: " ")
+            onLog?("BLE link ready — control chars: \(controlProps.isEmpty ? "none" : controlProps)")
             // Seed lastFileUrl so the first shutter can't match a stale URL
             // (NotifyState only pushes CHANGES).
             if let state = chars[Self.ccv2GetStateChar] { peripheral.readValue(for: state) }
@@ -118,7 +138,11 @@ extension ThetaBLEManager: CBPeripheralDelegate {
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
         switch characteristic.uuid {
         case Self.ccv2GetInfoChar: resolveIdentity(obj)
-        case Self.ccv2GetStateChar: lastFileUrl = (obj["_latestFileUrl"] as? String) ?? lastFileUrl
+        case Self.ccv2GetStateChar:
+            lastStateReadAt = Date()
+            if let status = obj["_captureStatus"] as? String { lastCaptureStatus = status }
+            if let shots = obj["_capturedPictures"] as? Int { lastCapturedPictures = shots }
+            lastFileUrl = (obj["_latestFileUrl"] as? String) ?? lastFileUrl
         case Self.ccv2GetOptionsChar: resolveOptions(obj)
         case Self.ccv2NotifyStateChar: resolveNotifyState(obj)
         default: break
@@ -157,7 +181,24 @@ extension ThetaBLEManager: CBPeripheralDelegate {
         guard let pending = writePending.removeValue(forKey: characteristic.uuid) else { return }
         clearWatchdog(characteristic.uuid.uuidString)
         if let error {
-            pending.resume(throwing: BLEError.writeFailed(error.localizedDescription))
+            // Classify, don't stringify. An ATT refusal of a control write is a different
+            // disease from a link that went away: iOS escalates security and retries on
+            // 0x05/0x0F/0x0C, but on 0x03 (write-not-permitted) it does nothing at all —
+            // no passkey dialog, no retry, and the refusal repeats for the life of the
+            // bond. Only an operator re-pair clears it, so it must not be swallowed as a
+            // generic write failure or answered with a reconnect loop.
+            let attCodes: Set<CBATTError.Code> = [.writeNotPermitted, .insufficientAuthentication,
+                                                  .insufficientEncryption, .insufficientAuthorization,
+                                                  .invalidHandle]
+            let nsError = error as NSError
+            if nsError.domain == CBATTErrorDomain,
+               let code = CBATTError.Code(rawValue: nsError.code), attCodes.contains(code) {
+                Self.log.notice("control write REFUSED on \(characteristic.uuid.uuidString, privacy: .public): ATT 0x\(String(nsError.code, radix: 16), privacy: .public) \(error.localizedDescription, privacy: .public)")
+                controlVerifiedForLink = false
+                pending.resume(throwing: BLEError.controlRefused(code))
+            } else {
+                pending.resume(throwing: BLEError.writeFailed(error.localizedDescription))
+            }
         } else {
             pending.resume()
         }

@@ -149,17 +149,104 @@ extension ThetaCameraManager {
 
     /// Total files on the camera (`camera.listFiles` with entryCount 0 returns just
     /// the count — no entries, no thumbnails). fileType: "all" | "image" | "video".
+    /// NOTE the short timeout. `camera.listFiles` makes the camera enumerate its
+    /// storage, which grows with the number of files on it, and this runs at the END of
+    /// an already serial connect chain (info → leveling → shooting state → battery →
+    /// resolution → formats → this). It is the only purely informational call in that
+    /// chain, so it gets the shortest leash: a missing file count is a blank row, while
+    /// eight seconds of it is a card that feels hung.
     func fetchFileCount(fileType: String = "all") async throws -> Int {
         let body: [String: Any] = ["name": "camera.listFiles",
                                    "parameters": ["fileType": fileType, "entryCount": 0,
                                                   "maxThumbSize": 0, "startPosition": 0]]
-        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCListFilesResponse.self)
+        let started = Date()
+        defer {
+            PerfDiag.log(String(format: "[Theta] listFiles took %d ms",
+                                Int(Date().timeIntervalSince(started) * 1000)))
+        }
+        let response = try await postJSON("/osc/commands/execute", body: body,
+                                          as: OSCListFilesResponse.self, timeout: 4)
         if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "listFiles failed") }
         return response.results?.totalEntries ?? 0
     }
 
+    /// URL of the newest image on the camera, or nil if it has none. Used to recover a
+    /// still whose BLE capture CONFIRMATION never arrived: the shutter write was accepted,
+    /// so the picture almost certainly exists — only the NotifyState push was lost. One
+    /// entry, no thumbnail, so the camera enumerates as little as it can.
+    func latestImageURL() async throws -> String? {
+        let body: [String: Any] = ["name": "camera.listFiles",
+                                   "parameters": ["fileType": "image", "entryCount": 1,
+                                                  "maxThumbSize": 0, "startPosition": 0]]
+        let response = try await postJSON("/osc/commands/execute", body: body,
+                                          as: OSCListFilesResponse.self, timeout: 5)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "listFiles failed") }
+        return response.results?.entries?.first?.fileUrl
+    }
+
+    /// The camera's clock offset versus the phone, measured to poll-interval precision by
+    /// catching a SECOND TICK: poll `dateTimeZone` back-to-back until the returned second
+    /// increments — at that moment the camera's clock just crossed a whole-second
+    /// boundary, so cameraTime − phoneTime is known to roughly the gap between the last
+    /// two polls plus half the HTTP round trip.
+    ///
+    /// WHY IT EXISTS (measurement brief, 2026-08-19): the Theta stamps EXIF
+    /// DateTimeOriginal at 1 s resolution with no sub-second field, and its clock drifts
+    /// 1–7 s/day — so EXIF alone yields shutter-latency-plus-clock-offset, never latency.
+    /// With the offset stamped per scan, the ack→shutter latency λ falls out of every
+    /// scan's EXIF offline, for free, forever — replacing a bench session that the
+    /// archive analysis showed could never work anyway.
+    ///
+    /// Positive offset = the camera's clock is AHEAD of the phone's.
+    func measureCameraClockOffset() async -> (offsetMs: Int64, uncertaintyMs: Int)? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ssZZZZZ"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        func readClock() async -> (value: String, at: Date, rttMs: Int)? {
+            let sent = Date()
+            let body: [String: Any] = ["name": "camera.getOptions",
+                                       "parameters": ["optionNames": ["dateTimeZone"]]]
+            guard let response = try? await postJSON("/osc/commands/execute", body: body,
+                                                     as: OSCGetOptionsResponse.self, timeout: 3),
+                  let value = response.results?.options?.dateTimeZone else { return nil }
+            let now = Date()
+            return (value, now, Int(now.timeIntervalSince(sent) * 1000))
+        }
+        guard var previous = await readClock() else { return nil }
+        let deadline = Date().addingTimeInterval(2.6)   // a tick MUST land within ~1 s + margin
+        while Date() < deadline {
+            guard let current = await readClock() else { return nil }
+            if current.value != previous.value {
+                guard let cameraSecond = formatter.date(from: current.value) else { return nil }
+                // The tick happened between the two responses; take the midpoint of the
+                // window [previous response, current response] as the boundary estimate.
+                let windowMs = Int(current.at.timeIntervalSince(previous.at) * 1000)
+                let boundary = previous.at.addingTimeInterval(Double(windowMs) / 2000)
+                let offsetMs = Int64((cameraSecond.timeIntervalSince1970
+                                      - boundary.timeIntervalSince1970) * 1000)
+                return (offsetMs, windowMs / 2 + current.rttMs / 2)
+            }
+            previous = current
+            try? await Task.sleep(nanoseconds: 40_000_000)
+        }
+        return nil
+    }
+
     /// Bulk erase. The spec's special values ("all" / "image" / "video") must be sent
     /// ALONE in fileUrls. Not permitted during video recording.
+    /// Deletes ONE camera-side file by its URL — the single-file twin of the security
+    /// sweep that runs after scan stills transfer. Failures are logged, never fatal: the
+    /// bytes are already safe on the device, and a file we could not delete is a cleanup
+    /// problem rather than a data-loss one.
+    func deleteCameraFile(_ fileURL: String) async {
+        do {
+            _ = try await execute(name: "camera.delete", parameters: ["fileUrls": [fileURL]])
+            log(.transfer, "Deleted the camera-side original after download")
+        } catch {
+            log(.transfer, "Could not delete the camera-side original (\(Self.describe(error)))")
+        }
+    }
+
     func deleteAllFiles(fileType: String = "all") async throws {
         let body: [String: Any] = ["name": "camera.delete",
                                    "parameters": ["fileUrls": [fileType]]]
@@ -171,8 +258,10 @@ extension ThetaCameraManager {
     /// "CL" (joined someone else's network). CL is the field gotcha: the camera looks
     /// on and healthy but never advertises its SSID, so joining silently can't work.
         /// Fires `camera.takePicture` and resolves to the saved file URL (polls if async).
-    func triggerStill() async throws -> String {
-        switch try await execute(name: "camera.takePicture") {
+    func triggerStill(onAck: (() -> Void)? = nil) async throws -> String {
+        let result = try await execute(name: "camera.takePicture")
+        onAck?()   // command accepted — exposure starts about now (sway-window anchor)
+        switch result {
         case .done(let url): return url
         case .inProgress(let id): return try await pollUntilDone(commandID: id)
         }
@@ -231,11 +320,13 @@ extension ThetaCameraManager {
         return try await send(request, as: type)
     }
 
-    private func postJSON<T: Decodable>(_ path: String, body: [String: Any], as type: T.Type) async throws -> T {
+    private func postJSON<T: Decodable>(_ path: String, body: [String: Any], as type: T.Type,
+                                        timeout: TimeInterval? = nil) async throws -> T {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "POST"
         request.setValue("application/json;charset=utf-8", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        if let timeout { request.timeoutInterval = timeout }
         return try await send(request, as: type)
     }
 
@@ -341,8 +432,21 @@ private struct OSCCommandResponse: Decodable {
     let error: OSCErrorBody?
 }
 
+private struct OSCGetOptionsResponse: Decodable {
+    struct Options: Decodable {
+        let dateTimeZone: String?
+    }
+    struct Results: Decodable { let options: Options? }
+    let results: Results?
+    let error: OSCErrorBody?
+}
+
 private struct OSCListFilesResponse: Decodable {
-    struct Results: Decodable { let totalEntries: Int? }
+    struct Entry: Decodable { let fileUrl: String? }
+    struct Results: Decodable {
+        let totalEntries: Int?
+        let entries: [Entry]?
+    }
     let results: Results?
     let error: OSCErrorBody?
 }

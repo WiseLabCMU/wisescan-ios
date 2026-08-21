@@ -22,6 +22,9 @@ struct ARCoverageView: UIViewRepresentable {
     /// CaptureView observes this to halt the scan and prompt the user to save or rescan, since
     /// any data captured after VIO loss is corrupt.
     @Binding var vioCompromised: Bool
+    /// Set when a tracking correction made ARKit PURGE a large share of the live mesh —
+    /// the "benign" isolated jump's real cost. Carries a short operator-facing message.
+    @Binding var meshResetNotice: String?
     var scanStats: ScanStats
     var privacyFilter: Bool
     var activeMeshColor: String = AppConstants.activeMeshColor
@@ -44,6 +47,9 @@ struct ARCoverageView: UIViewRepresentable {
     var connectorAnchors: [ConnectorAnchor] = []
     /// RoomPlan: binding to receive the final CapturedRoom when recording stops.
     /// Written by the Coordinator in stopRoomPlanSession(); consumed by finishStopRecording for export.
+    /// World positions of the 360° stills taken this scan — one floor ring each, so
+    /// the operator can space the next one by eye (StillSpacingRings).
+    var stillRingPositions: [SIMD3<Float>] = []
     @Binding var finalCapturedRoom: CapturedRoom?
     /// Frame capture session, wired at record-start so sharp keyframe captures can mark
     /// mesh anchors as photo-covered in the coverage overlay (amber → clear).
@@ -103,12 +109,9 @@ struct ARCoverageView: UIViewRepresentable {
         // proxy ghost has no ICP target, so skip it — the "drop mesh-during-alignment" prize
         // (plane detection below is far cheaper and serves the plane auto-align instead).
         let alignmentMesh = PerfDiag.enabled && initialWorldMapURL != nil && !ghostIsProxy
-        // Rig calibration needs mesh anchors to extract edges for the solver's cost function.
-        // Enable mesh reconstruction pre-record when calibration is active.
-        let calibrationMesh = RigCalibrationManager.shared.isCalibrating
         // Plane detection ONLY when the ghost auto-align can actually engage (reference planes
         // loaded) — never as free-floating load on the already-sensitive alignment phase.
-        let config = Self.makeConfiguration(enableMeshReconstruction: alignmentMesh || calibrationMesh, worldMapURL: initialWorldMapURL,
+        let config = Self.makeConfiguration(enableMeshReconstruction: alignmentMesh, worldMapURL: initialWorldMapURL,
                                             enablePlaneDetection: initialWorldMapURL != nil && !ghostReferencePlanes.isEmpty)
         let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
         if PerfDiag.enabled, let m = config.initialWorldMap {
@@ -124,6 +127,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.isRecording.store(false, ordering: .relaxed)
         context.coordinator.isSessionReadyBinding = $isSessionReady
         context.coordinator.vioCompromisedBinding = $vioCompromised
+        context.coordinator.meshResetNoticeBinding = $meshResetNotice
         context.coordinator.finalCapturedRoomBinding = $finalCapturedRoom
         context.coordinator.hasWorldMap.store(config.initialWorldMap != nil, ordering: .relaxed)
         context.coordinator.scanStore = scanStore
@@ -189,6 +193,7 @@ struct ARCoverageView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.privacyFilter = privacyFilter
+        syncStillRings(uiView, coordinator: context.coordinator)
 
         // Battery: pause/resume the session when the capture tab goes idle / returns. ARKit keeps
         // the camera + sensors powered until paused. While paused, skip the rest of updateUIView
@@ -607,6 +612,95 @@ struct ARCoverageView: UIViewRepresentable {
         Coordinator()
     }
 
+    // MARK: - 360° Still Spacing Rings
+
+    /// Draws one floor ring per 360° still taken this scan. Append-only and diffed by
+    /// count, so a scan with N stills builds N rings total — no per-frame geometry work.
+    /// Cleared when the list empties (a new scan resets it).
+    ///
+    /// Opaque UnlitMaterial + procedural geometry, per the ghost-mesh rules below:
+    /// transparency and CustomMaterial are not viable in this ARView.
+    /// Clears rings whose floor was a guess when they were drawn, so the next sync
+    /// redraws them at the real floor. Early stills are placed before the mesh has
+    /// covered the spot, so without this a ring keeps a wrong height for the whole scan
+    /// — including a height guessed from the PREVIOUS operator, which is how a rig
+    /// handed to a seated user leaves buried rings behind.
+    /// Cheap: a dictionary lookup per ring, at most twice a second.
+    private func dropRingsPlacedOnAGuess(_ coordinator: Coordinator) {
+        guard stillRingPositions.count == coordinator.renderedStillRings,
+              Date().timeIntervalSince(coordinator.lastRingFloorCheck) > 0.5 else { return }
+        coordinator.lastRingFloorCheck = Date()
+        let stale = zip(stillRingPositions, coordinator.ringFloorUsed).contains { position, used in
+            guard let now = coordinator.estimatedFloorY(near: position) else { return false }
+            return abs(now + AppConstants.stillRingLiftMeters - used) > 0.05
+        }
+        guard stale else { return }
+        coordinator.stillRingAnchor?.removeFromParent()
+        coordinator.stillRingAnchor = nil
+        coordinator.renderedStillRings = 0
+        coordinator.ringFloorUsed.removeAll()
+    }
+
+    private func syncStillRings(_ uiView: ARView, coordinator: Coordinator) {
+        dropRingsPlacedOnAGuess(coordinator)
+        guard stillRingPositions.count != coordinator.renderedStillRings else { return }
+
+        // Scan reset (or stop): drop the anchor and start clean.
+        if stillRingPositions.count < coordinator.renderedStillRings {
+            coordinator.stillRingAnchor?.removeFromParent()
+            coordinator.stillRingAnchor = nil
+            coordinator.renderedStillRings = 0
+            coordinator.ringFloorUsed.removeAll()
+            coordinator.floorYByCell.removeAll()
+            if stillRingPositions.isEmpty { return }
+        }
+
+        let anchor: AnchorEntity
+        if let existing = coordinator.stillRingAnchor {
+            anchor = existing
+        } else {
+            anchor = AnchorEntity(world: .zero)
+            uiView.scene.addAnchor(anchor)
+            coordinator.stillRingAnchor = anchor
+        }
+
+        let planes = Array(coordinator.livePlaneAnchors.values)
+        // A CAPTURED spot wears the active mesh colour, so "done" reads the same here as
+        // it does on the live mesh. Suggested spots (future 360°/4D guidance) come in
+        // amber — the same before/after language the capture overlay already uses.
+        let takenMaterial = UnlitMaterial(rgb: activeMeshColor.toSIMD4Color)
+        let suggestedMaterial = UnlitMaterial(rgb: SIMD4<Float>(1.0, 0.72, 0.16, 1))
+        for position in stillRingPositions[coordinator.renderedStillRings...] {
+            let point = StillSpacingRings.Point(position: position, source: .taken)
+            let meshFloor = coordinator.estimatedFloorY(near: position)
+            if let meshFloor {
+                // A floor we actually observed also tells us how high THIS operator
+                // holds the device — the value that replaces the standing-height guess.
+                StillSpacingRings.learnCaptureHeight(capturePose: position, floorY: meshFloor)
+            }
+            let floorY = meshFloor
+                ?? StillSpacingRings.floorY(planes: planes, fallbackFrom: position)
+            coordinator.ringFloorUsed.append(floorY + AppConstants.stillRingLiftMeters)
+            // MeshResource generation must happen on main, one resource per descriptor
+            // (RealityKit's multi-part/background generation path crashes — see below).
+            // Lens height: the capture pose plus the measured rod. Unmeasured rig ⇒ no
+            // air ring rather than a guessed one, since a ring at the wrong height is
+            // worse than none (it reads as a real measurement).
+            let rodHeight = Float(UserDefaults.standard.double(forKey: AppConstants.Key.rigMeasuredDyMeters))
+            let cameraY: Float? = rodHeight > 0.1 ? position.y + rodHeight : nil
+            for desc in StillSpacingRings.descriptors(for: point, floorY: floorY, cameraY: cameraY) {
+                guard let resource = try? MeshResource.generate(from: [desc]) else { continue }
+                let model = ModelEntity(mesh: resource,
+                                        materials: [point.source == .taken ? takenMaterial : suggestedMaterial])
+                // Draw after the scene mesh: with the lift above, the ring then survives
+                // the mesh sweeping across it instead of being painted over.
+                model.components.set(ModelSortGroupComponent(group: coordinator.stillRingSortGroup, order: 1))
+                anchor.addChild(model)
+            }
+        }
+        coordinator.renderedStillRings = stillRingPositions.count
+    }
+
     // MARK: - Ghost Mesh Helper
 
     /// Loads ghost mesh OBJ data on a background queue, builds procedural wireframe geometry,
@@ -789,6 +883,11 @@ struct ARCoverageView: UIViewRepresentable {
         /// Once armed, a drop to `.notAvailable`/`.relocalizing` means the world frame is lost and
         /// everything captured afterward is corrupt — so we trip the guard (halt + prompt) once.
         var vioCompromisedBinding: Binding<Bool>?
+        var meshResetNoticeBinding: Binding<String?>?
+        /// Armed by an isolated tracking jump: (when, mesh-anchor count at that moment).
+        /// A few seconds later the count is compared — ARKit re-pins SOME anchors after a
+        /// correction and silently deletes the rest, and only the delta says which happened.
+        var pendingMeshResetCheck: (at: TimeInterval, anchors: Int)?
         /// RoomPlan: binding to push the final CapturedRoom snapshot back to CaptureView for export.
         var finalCapturedRoomBinding: Binding<CapturedRoom?>?
         private var vioGuardArmed = false
@@ -997,6 +1096,26 @@ struct ARCoverageView: UIViewRepresentable {
         var ghostReferencePlanes: [PlaneRegistration.Plane] = []
         var ghostIsProxy = false // mirrors the view flag; read at ghost build (main)
         var livePlaneAnchors: [UUID: ARPlaneAnchor] = [:]
+
+        /// Anchor holding the 360°-still floor rings, and how many are already drawn.
+        /// Rings are append-only within a scan, so a count is enough to diff — no
+        /// rebuild, no per-frame work.
+        var stillRingAnchor: AnchorEntity?
+        var renderedStillRings = 0
+        /// Lowest surface seen per 1 m XZ cell — a coarse floor field for the 360° rings.
+        /// Plane detection is OFF for a normal scan (it is only enabled for ghost
+        /// alignment), so ARPlaneAnchor floors do not exist here and the old fallback
+        /// (capture pose minus a constant) could place a ring UNDER the real floor,
+        /// where the mesh correctly occluded it — the "painted over" report.
+        /// Per-cell, not global: a room with a stairwell has more than one floor.
+        var floorYByCell: [SIMD2<Int>: Float] = [:]
+        /// Floor height each drawn ring was placed at, so a ring placed on a guess can
+        /// be corrected once the mesh reveals the real floor under it.
+        var ringFloorUsed: [Float] = []
+        var lastRingFloorCheck = Date.distantPast
+        /// Shared sort group so every ring draws in the same late pass, after the live
+        /// scene mesh (which otherwise paints over them — field report 360update5).
+        let stillRingSortGroup = ModelSortGroup()
         var ghostAutoAlign: simd_float4x4 = matrix_identity_float4x4
         private var ghostAutoAlignApplied = matrix_identity_float4x4
         private var lastGhostAutoAlignAt: TimeInterval = 0
@@ -1367,6 +1486,50 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
+        /// Folds a mesh anchor's world-space vertices into the coarse floor field.
+        /// Strided sampling: this runs per anchor rebuild (already throttled) and only
+        /// needs a floor height good to a few centimetres.
+        func noteFloorSamples(_ positions: [SIMD3<Float>]) {
+            guard !positions.isEmpty else { return }
+            let stride = max(1, positions.count / 64)
+            for idx in Swift.stride(from: 0, to: positions.count, by: stride) {
+                let point = positions[idx]
+                let cell = SIMD2<Int>(Int(floor(point.x)), Int(floor(point.z)))
+                if let known = floorYByCell[cell] {
+                    if point.y < known { floorYByCell[cell] = point.y }
+                } else {
+                    floorYByCell[cell] = point.y
+                }
+            }
+        }
+
+        /// Floor height near a world position.
+        ///
+        /// The CELL THE POINT IS IN WINS OUTRIGHT, and neighbours are only consulted
+        /// when that cell has no samples yet. Taking the minimum across a
+        /// neighbourhood would break exactly where floors change height: on a
+        /// staircase or a ramp the lowest surface within 3 m can be most of a storey
+        /// below the tread the operator is standing on, and the ring would sink
+        /// through the floor again. Per-cell means the field follows level changes at
+        /// 1 m granularity.
+        ///
+        /// A flat ring still cannot follow a slope or a stair within its own radius —
+        /// on those it reads as a guide that clips the surface, which is acceptable
+        /// for spacing, and rare (few operators take a 360° still mid-staircase).
+        func estimatedFloorY(near position: SIMD3<Float>) -> Float? {
+            let cell = SIMD2<Int>(Int(floor(position.x)), Int(floor(position.z)))
+            if let exact = floorYByCell[cell] { return exact }
+            var best: Float?
+            for offsetX in -1...1 {
+                for offsetZ in -1...1 {
+                    let neighbour = SIMD2<Int>(cell.x + offsetX, cell.y + offsetZ)
+                    guard let value = floorYByCell[neighbour] else { continue }
+                    best = min(best ?? value, value)
+                }
+            }
+            return best
+        }
+
         /// Builds or updates the wireframe entity for a single ARMeshAnchor.
         /// Extracts geometry data synchronously to avoid retaining ARFrame references,
         /// then runs wireframe generation on a background queue.
@@ -1418,6 +1581,8 @@ struct ARCoverageView: UIViewRepresentable {
                 let worldPos = anchorTransform * SIMD4<Float>(xyz[0], xyz[1], xyz[2], 1.0)
                 worldPositions.append(SIMD3<Float>(worldPos.x, worldPos.y, worldPos.z))
             }
+
+            noteFloorSamples(worldPositions)
 
             let faceStride = faces.bytesPerIndex * faces.indexCountPerPrimitive
             let safeFaceCount = min(faces.count, faces.buffer.length / max(faceStride, 1))
@@ -2380,6 +2545,19 @@ struct ARCoverageView: UIViewRepresentable {
             // repins-immune-to-snaps]]). But a STORM of them (self-similar-room relocalization oscillating
             // under nominal `.normal` tracking) is a real "session destabilized" collapse the VIO guard
             // misses. Only flag on the storm. Recording-only (when geometry is committed).
+            // Delayed verdict on an armed mesh-reset check (see the jump handler below).
+            if let pending = pendingMeshResetCheck, frame.timestamp - pending.at > 4 {
+                pendingMeshResetCheck = nil
+                let now = frame.anchors.lazy.filter { $0 is ARMeshAnchor }.count
+                if isRecording.load(ordering: .relaxed), Float(now) < Float(pending.anchors) * 0.6 {
+                    let lostPct = Int((1 - Float(now) / Float(pending.anchors)) * 100)
+                    PerfDiag.log("[TrackStab] mesh PURGED after the correction: \(pending.anchors) → \(now) anchors (−\(lostPct)%) — earlier coverage was discarded by ARKit")
+                    DispatchQueue.main.async { [weak self] in
+                        self?.meshResetNoticeBinding?.wrappedValue =
+                            "Tracking corrected itself and ~\(lostPct)% of the captured mesh was reset — re-sweep the areas you scanned first."
+                    }
+                }
+            }
             if isRecording.load(ordering: .relaxed),
                let snap = trackingStability.observe(frame.camera.transform,
                                                     tracking: frame.camera.trackingState,
@@ -2388,6 +2566,14 @@ struct ARCoverageView: UIViewRepresentable {
                 PerfDiag.log(String(format: "[TrackStab] jump #%d: Δpos=%.1fcm Δrot=%.2f° (%.1f m/s)%@",
                                     count, snap.dPosM * 100, snap.dRotDeg, snap.velocityMS,
                                     snap.stormActive ? " — STORM (session destabilizing)" : " — isolated (benign; mesh re-pins)"))
+                // "Benign" is only the POSE story. On 2026-08-19 a single isolated 32 cm
+                // correction made ARKit purge 34 of 46 mesh anchors — 677k faces down to
+                // 71k, most of the scan's early reconstruction gone with no message
+                // anywhere. Arm a delayed count check; the purge takes ARKit a beat.
+                if !snap.stormActive {
+                    let meshCount = frame.anchors.lazy.filter { $0 is ARMeshAnchor }.count
+                    if meshCount >= 8 { pendingMeshResetCheck = (frame.timestamp, meshCount) }
+                }
                 if snap.stormJustTriggered {
                     PerfDiag.log(String(format: "[TrackStab] SNAP STORM: ≥%d non-physical jumps within %.0fs under .normal tracking — relocalization oscillating / session destabilized (VIO guard misses this — tracking still reports normal)",
                                         TrackingStabilityMonitor.stormThreshold, TrackingStabilityMonitor.stormWindow))

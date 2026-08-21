@@ -364,10 +364,7 @@ struct ScansListView: View {
 
                 // Post-process: structural steps only (room build + registration + proxy).
                 Button(action: { requestBulkPostprocess() }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "wand.and.stars")
-                        Text("Process")
-                    }
+                    AdaptiveActionLabel(systemImage: "wand.and.stars", title: "Process")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -379,10 +376,7 @@ struct ScansListView: View {
 
                 // Color — orange paintbrush everywhere the verb appears (same as the card).
                 Button(action: { requestBulkColorize(scans: resolveTargetScans()) }, label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "paintbrush.fill")
-                        Text("Color")
-                    }
+                    AdaptiveActionLabel(systemImage: "paintbrush.fill", title: "Color")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -1262,8 +1256,10 @@ struct ScanCard: View {
                     .alert("Map May Be Unreliable", isPresented: $showSuspectMapAlert) {
                         Button("OK", role: .cancel) { }
                     } message: {
-                        Text("Tracking was disrupted while this scan was recorded (for example by " +
-                             "an interruption), so its relocalization map may be unreliable. " +
+                        Text("This scan's relocalization map contains a detached clump of feature " +
+                             "points far from everything else — the signature of a tracking " +
+                             "excursion being merged back into the map — so the map may be " +
+                             "unreliable. " +
                              "Rescan and Connect Adjacent will warn before using it, and a rescan " +
                              "seeded from it usually inherits the problem. To clear it, delete this " +
                              "scan so the most recent clean scan becomes the reference. The scan's " +
@@ -1441,11 +1437,8 @@ struct ScanCard: View {
     }
 
     private func processButtonLabel(disabled: Bool) -> some View {
-        HStack {
-            Image(systemName: "paintbrush.fill")
-            Text("Color")
-                .font(.subheadline).bold()
-        }
+        AdaptiveActionLabel(systemImage: "paintbrush.fill", title: "Color")
+        .font(.subheadline).bold()
         .frame(maxWidth: .infinity)
         .padding(.vertical, 10)
         .background(disabled ? Color.gray.opacity(0.3) : Color.orange.opacity(0.8))
