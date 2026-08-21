@@ -1720,23 +1720,14 @@ struct CaptureView: View {
 
             stormWarningBanner
 
-            let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
-            let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
             // LiDAR-gated: Lite devices never produce mesh vertices, so this cue would show
             // (and never clear) for a mesh that cannot exist (2026-07-22 Lite field report).
-            if isRecording && ARCoverageView.supportsLiDAR && needsLiveMeshCue &&
+            // The vertex-threshold half of the condition lives inside LiveMeshCueHost — reading
+            // `totalVertices` here would re-run this whole body at 10Hz for the whole recording.
+            if isRecording && ARCoverageView.supportsLiDAR &&
                scanStats.trackingStatus != .limited(reason: .relocalizing) &&
                !frameCaptureSession.isBlurWarningActive {
-                Text("📷 Move the camera to start the live mesh")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 12)
-                    .background(Color.indigo.opacity(0.85))
-                    .cornerRadius(20)
-                    .shadow(radius: 5)
-                    .transition(.scale.combined(with: .opacity))
-                    .animation(.easeInOut(duration: 0.2), value: needsLiveMeshCue)
+                LiveMeshCueHost(scanStats: scanStats, verticesAtRecordStart: verticesAtRecordStart)
             }
         }
         // Relocalization-timeout watchdog (item 3): arm/cancel whenever the inputs to the
@@ -2130,6 +2121,38 @@ struct CaptureView: View {
         while let presented = top.presentedViewController { top = presented }
         top.present(alert, animated: true)
         return true
+    }
+}
+
+/// Observation-scoping host for the "start the live mesh" cue: reads the 10 Hz
+/// `totalVertices` inside THIS small body so only the cue re-evaluates per tick —
+/// reading it in `centeredTrackingPills` kept `CaptureView.body` subscribed to the one
+/// stat that moves on essentially every tick, re-running the whole capture body at 10Hz
+/// for the duration of a recording (same reason `CaptureStatsHUD` exists).
+///
+/// The caller owns the conditions that don't depend on the vertex count (recording,
+/// LiDAR, tracking state, blur warning); this view owns only the threshold test.
+private struct LiveMeshCueHost: View {
+    let scanStats: ScanStats
+    /// Vertex count at record-start, so the cue measures THIS recording's mesh growth
+    /// (see `CaptureView.verticesAtRecordStart`).
+    let verticesAtRecordStart: Int
+
+    var body: some View {
+        let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
+        let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
+        if needsLiveMeshCue {
+            Text("📷 Move the camera to start the live mesh")
+                .font(.headline)
+                .foregroundColor(.white)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(Color.indigo.opacity(0.85))
+                .cornerRadius(20)
+                .shadow(radius: 5)
+                .transition(.scale.combined(with: .opacity))
+                .animation(.easeInOut(duration: 0.2), value: needsLiveMeshCue)
+        }
     }
 }
 
