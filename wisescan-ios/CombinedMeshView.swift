@@ -827,16 +827,19 @@ struct CombinedMeshView: UIViewRepresentable {
                 // own extent means the same physical height is a different color per map — actively
                 // misleading for judging whether two landings sit at the same level.
                 //
-                // The parse is HANDED to pass 2 rather than thrown away and redone. A held parse is
-                // NOT free — its vertex buffer keeps the parser's data.count/30 capacity reservation,
-                // so it weighs roughly the file on disk, about a third of one built geometry — but a
-                // geometry outweighs its own parse better than 2:1 for any mesh shape, and pass 2
-                // drops each parse as it consumes it, so the all-parses plateau at the start of
-                // pass 2 can never exceed the all-geometries tail that set the peak before. The peak
-                // actually falls: pass 2 no longer re-reads the file, so its transient `Data` is
-                // gone. Feeding both passes from ONE parse also closes a real window: mesh.obj
-                // rewrites are atomic, so the old double read could see pre-registration bytes in
-                // pass 1 and post-registration bytes in pass 2 and silently miscolor the union.
+                // The parse is HANDED to pass 2 rather than thrown away and redone, COMPACTED first:
+                // parseOBJ's vertex buffer keeps its data.count/30 capacity reservation (~the file
+                // on disk, about twice the live bytes), so each parse is copied to exact-count
+                // arrays before being held. That makes a held parse 16V + 12F bytes against a built
+                // geometry's 40V + 12F across its SceneKit sources (vertices + normals + colors +
+                // indices) — smaller by 24V for EVERY mesh shape, counting the geometry WITHOUT the
+                // 4x room-scale subdivision (gated above meshSubdivisionMaxFaces), which only widens
+                // the gap. Pass 2 drops each parse as it consumes it, so the all-parses plateau at
+                // the start of pass 2 stays under the all-geometries tail that set the peak before;
+                // the peak itself falls because pass 2 no longer re-reads the file. Feeding both
+                // passes from ONE parse also closes a real window: mesh.obj rewrites are atomic, so
+                // the old double read could see pre-registration bytes in pass 1 and
+                // post-registration bytes in pass 2 and silently miscolor the union.
                 var unionMin = Float.greatestFiniteMagnitude
                 var unionMax = -Float.greatestFiniteMagnitude
                 var parsedMeshes = [MeshParser.OBJData?](repeating: nil, count: items.count)
@@ -844,7 +847,9 @@ struct CombinedMeshView: UIViewRepresentable {
                     guard let data = try? Data(contentsOf: item.meshURL),
                           let parsed = MeshParser.parseOBJ(from: data)
                     else { continue }
-                    parsedMeshes[idx] = parsed
+                    parsedMeshes[idx] = MeshParser.OBJData(
+                        vertices: parsed.vertices.withUnsafeBufferPointer(Array.init),
+                        faces: parsed.faces.withUnsafeBufferPointer(Array.init))
                     guard let r = MeshPreviewView.worldHeightRange(parsed: parsed, transform: item.transform)
                     else { continue }
                     unionMin = min(unionMin, r.min)
