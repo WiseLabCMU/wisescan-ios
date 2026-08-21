@@ -684,6 +684,65 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
         XCTAssertGreaterThan(fitness, 0.9, "a straight wall explains its mesh, got \(fitness)")
     }
 
+    /// The floor family's tolerance is 3° — a MEAN tolerance, as its own documentation says and as the
+    /// support builder uses it. Graded per FACE it made a dead-flat floor's score a function of mesh
+    /// resolution instead of geometry: at device-scale 5 cm faces with 1 cm reconstruction noise nearly
+    /// every individual face tilts past 3°, so a perfectly level floor with no off-level mesh anywhere
+    /// scored 4% and every RoomPlan floor quad was demoted. The cell mean is what noise cancels in.
+    func testFloorQuadOnAJitteredFloor_scoresHighFitness() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-2)...2, z: (-2)...2, jitter: 0.01, cell: 0.05)
+
+        let floor = PlaneRegistration.Plane(
+            center: .zero, normal: SIMD3(0, 1, 0),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, 0, 1),
+            width: 4, height: 4, category: .floor)
+
+        let fitness = ARCoverageView.quadModelFitness(planes: [floor], verts: m.verts,
+                                                      faces: m.faces, faceClasses: m.classData)[0]
+        XCTAssertGreaterThan(fitness, 0.9, "a flat floor explains its own mesh, got \(fitness)")
+    }
+
+    /// The other side of the same boundary: the cell mean must not launder a real slope. A floor quad
+    /// laid over an 8° ramp explains none of it — every cell's mean normal is the ramp's, coherently
+    /// off-level — so the quad is still demoted and the ramp survives as mesh.
+    func testFloorQuadAcrossARamp_isStillDemoted() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-1.5)...1.5, z: 0...4, pitchDeg: 8, jitter: 0.01)
+
+        let floor = PlaneRegistration.Plane(
+            center: SIMD3(0, tan(8 * .pi / 180) * 2, 2), normal: SIMD3(0, 1, 0),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, 0, 1),
+            width: 3, height: 4, category: .floor)
+
+        let fitness = ARCoverageView.quadModelFitness(planes: [floor], verts: m.verts,
+                                                      faces: m.faces, faceClasses: m.classData)[0]
+        XCTAssertLessThan(fitness, ARCoverageView.quadModelMinExplainedRatio,
+                          "a floor quad over a ramp must be demoted, got \(fitness)")
+    }
+
+    /// The docstring's promise that thin scanning costs nothing has to survive per-cell grading. A cell
+    /// holding one stray face has no orientation to speak of, so it leaves BOTH sides of the ratio;
+    /// counting it as present-but-unexplained scored a decimated floor at 0.594 and demoted it for
+    /// being sparsely scanned rather than for being the wrong shape.
+    func testThinlyScannedFloor_isNotDemoted() {
+        var m = MeshBuilder()
+        m.addSurface(y: 0, x: (-3)...3, z: (-3)...3, jitter: 0.005, cell: 0.05)
+        // Keep every 4th face — and its class byte, which runs parallel to `faces`.
+        let kept = m.faces.indices.filter { $0 % 4 == 0 }
+        let faces = kept.map { m.faces[$0] }
+        let classes = Data(kept.map { m.classes[$0] })
+
+        let floor = PlaneRegistration.Plane(
+            center: .zero, normal: SIMD3(0, 1, 0),
+            xAxis: SIMD3(1, 0, 0), yAxis: SIMD3(0, 0, 1),
+            width: 6, height: 6, category: .floor)
+
+        let fitness = ARCoverageView.quadModelFitness(planes: [floor], verts: m.verts,
+                                                      faces: faces, faceClasses: classes)[0]
+        XCTAssertGreaterThan(fitness, 0.9, "a thinly scanned flat floor must not be demoted, got \(fitness)")
+    }
+
     // MARK: - Per-cell quad support
 
     /// Two floor patches at the same height with a gap between them are two SURFACES, not one level

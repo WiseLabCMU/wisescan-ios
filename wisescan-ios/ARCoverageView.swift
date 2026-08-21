@@ -4461,6 +4461,17 @@ struct ARCoverageView: UIViewRepresentable {
             guard !planeIdx.isEmpty else { return }
             let minDot = cos(toleranceDeg * .pi / 180)
             let presenceMinDot = cos(quadModelPresenceTiltDeg * .pi / 180)
+            // `explained` is decided per CELL on the cell's area-weighted mean normal, not per face.
+            // quadSupportFloorMeanTiltDeg / quadSupportWallMeanTiltDeg are MEAN tolerances by their own
+            // documentation, and this is how buildQuadSupport already reads them. Applied per face, the
+            // floor tolerance made a dead-flat floor's score a function of mesh resolution: at 5 cm
+            // faces with 1 cm reconstruction noise a single face tilts several degrees, so 4% of a
+            // perfectly level floor was "explained" with zero off-level mesh anywhere. Cells below the
+            // area bar leave BOTH sides of the ratio, so thin scanning costs nothing — the same
+            // benefit-of-the-doubt the docstring claims, which per-cell explaining would otherwise
+            // break (measured 0.594 instead of 0.990 on a decimated floor).
+            var cellNormal = [[SIMD2<Int32>: SIMD3<Float>]](repeating: [:], count: planes.count)
+            var cellArea = [[SIMD2<Int32>: Float]](repeating: [:], count: planes.count)
             for patch in patches {
                 for i in planeIdx {
                     let p = planes[i]
@@ -4479,19 +4490,41 @@ struct ARCoverageView: UIViewRepresentable {
                     // detector is intact; a corner does not.
                     guard abs(simd_dot(patch.n, p.normal)) >= presenceMinDot else { continue }
                     present[i] += patch.area
-                    if perp <= ghostProxyQuadCoverageMeters,
-                       abs(simd_dot(patch.n, p.normal)) >= minDot {
-                        explained[i] += patch.area
+                    guard perp <= ghostProxyQuadCoverageMeters else { continue }
+                    // Binned in the plane's OWN frame, unclamped — quadSupportCell would fold the
+                    // faces up to 0.2 m outside the rectangle (which fitness deliberately admits)
+                    // into the border cells and blend them with real border mesh.
+                    let key = SIMD2(Int32((simd_dot(d, p.xAxis) / quadSupportCellMeters).rounded(.down)),
+                                    Int32((simd_dot(d, p.yAxis) / quadSupportCellMeters).rounded(.down)))
+                    // Winding is untrusted, so orient toward the plane before summing, exactly as
+                    // buildQuadSupport does — opposite windings on one surface would cancel to nothing.
+                    let oriented = simd_dot(patch.n, p.normal) < 0 ? -patch.n : patch.n
+                    cellNormal[i][key, default: .zero] += oriented * patch.area
+                    cellArea[i][key, default: 0] += patch.area
+                }
+            }
+            for i in planeIdx {
+                let p = planes[i]
+                for (key, area) in cellArea[i] {
+                    guard area >= quadSupportCellMinAreaM2 else {
+                        present[i] -= area          // too little mesh to have an orientation: recuse it
+                        continue
                     }
+                    let mean = cellNormal[i][key]! / area
+                    let len = simd_length(mean)
+                    guard len > 1e-6, simd_dot(mean / len, p.normal) >= minDot else { continue }
+                    explained[i] += area
                 }
             }
         }
         tally(wallPatches, wallIdx, toleranceDeg: quadSupportWallMeanTiltDeg)
         tally(floorPatches, floorIdx, toleranceDeg: quadSupportFloorMeanTiltDeg)
         return planes.indices.map { i in
+            // Recusing sub-threshold cells can land present at -0.00 in float, so clamp before the bar.
+            let presentArea = max(0, present[i])
             // Too little mesh to judge either way → benefit of the doubt; with nothing to back it, the
             // cell masks keep it from baking anyway.
-            present[i] >= quadModelMinMeshAreaM2 ? explained[i] / present[i] : 1
+            return presentArea >= quadModelMinMeshAreaM2 ? explained[i] / presentArea : 1
         }
     }
 
@@ -5382,7 +5415,15 @@ struct ARCoverageView: UIViewRepresentable {
     /// mesh-derived planes subtract within a tight 8 cm band while RoomPlan quads keep 15 cm — a
     /// sub-riser step stays honest mesh instead of being silently flattened into its neighbouring
     /// floor.
-    static let ghostProxyVersionHeader = "# ghostproxy v23"
+    /// v24: fitness decides `explained` on each 0.25 m cell's area-weighted MEAN normal for both
+    /// families, matching how the mean-tilt tolerances are documented and used everywhere else — per
+    /// face, the floor tolerance made a dead-flat floor's score a function of mesh resolution (4% at
+    /// device-scale faces with 1 cm noise) — and cells with too little area to have an orientation
+    /// leave both sides of the ratio so thin scanning still costs nothing. Ramp end-snapping measures
+    /// its cap from the FITTED end, making it a total bound per end instead of a per-level hop that
+    /// several levels could walk out one step at a time. The dynamic mesh moves with it because the
+    /// demoted set feeds isInfrastructure.
+    static let ghostProxyVersionHeader = "# ghostproxy v24"
     /// Dynamic-mesh artifact version header (start of mesh_dynamic.obj line 1). Same staleness
     /// pattern as `ghostProxyVersionHeader` — ScanPostprocessor treats a dynamic mesh without
     /// the CURRENT version as not-yet-built. v1: initial content-only mesh (no walls/floors/
@@ -5390,7 +5431,9 @@ struct ARCoverageView: UIViewRepresentable {
     /// floor faces the proxy started keeping in v5 stay out of the change-detection artifact. v3:
     /// uncovered wall-family faces excluded too — they had always fallen through into the artifact
     /// (dynamic == kept − floorKept exactly), and quad demotion made the contamination wholesale.
-    static let dynamicMeshVersionHeader = "# dynamicmesh v3"
+    /// v4: the fitness change in ghostproxy v24 moves which quads are demoted, so the isInfrastructure
+    /// verdict — and these bytes — move with it.
+    static let dynamicMeshVersionHeader = "# dynamicmesh v4"
     /// Target grid cell size for the tessellated RoomPlan quads.
     static let ghostProxyQuadCellMeters: Float = 1.0
     /// How close a mesh face must be to a RoomPlan quad's PLANE for that quad to count as standing
