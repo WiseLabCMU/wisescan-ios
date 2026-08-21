@@ -4125,11 +4125,6 @@ struct ARCoverageView: UIViewRepresentable {
             .joined(separator: " ")
         if !rampSearch.groups.isEmpty {
             print("[GhostProxy] ramp groups: \(rampSearch.traceDescription)")
-            for (i, g) in rampSearch.groups.enumerated() {
-                if let map = g.shapeMap {
-                    print("[GhostProxy] ramp shape[\(i)] (\(g.verdict.rawValue), across × up-slope):\n\(map)")
-                }
-            }
         }
         let totalMs = Double(DispatchTime.now().uptimeNanoseconds - tStart.uptimeNanoseconds) / 1e6
         let lapDesc = laps.map { String(format: "%@ %.0fms", $0.0, $0.1) }.joined(separator: " ")
@@ -4824,10 +4819,6 @@ struct ARCoverageView: UIViewRepresentable {
             let fill: Float        // area / bounding rectangle, NaN before it is computed
             let boxM: SIMD2<Float> // bounding rectangle dims, .zero before computed
             let verdict: Verdict
-            /// In-plane occupancy map of the fitted component (rows of #/·), for the verdicts where the
-            /// SHAPE is the question — fill and box numbers alone cannot distinguish an L, a diagonal
-            /// band, or a strip with a speckle tail, and those call for different fixes.
-            let shapeMap: String?
         }
 
         var traceDescription: String {
@@ -4913,10 +4904,10 @@ struct ARCoverageView: UIViewRepresentable {
         /// that decided it either way.
         func fitRamp(_ patches: [Patch]) -> (plane: PlaneRegistration.Plane?, group: RampDerivation.Group) {
             func declined(_ v: RampDerivation.Verdict, area: Float, tilt: Float = .nan,
-                          rms: Float = .nan, fill: Float = .nan, box: SIMD2<Float> = .zero,
-                          shape: String? = nil) -> (PlaneRegistration.Plane?, RampDerivation.Group) {
+                          rms: Float = .nan, fill: Float = .nan, box: SIMD2<Float> = .zero)
+                -> (PlaneRegistration.Plane?, RampDerivation.Group) {
                 (nil, RampDerivation.Group(areaM2: area, tiltDeg: tilt, rmsM: rms, fill: fill,
-                                           boxM: box, verdict: v, shapeMap: shape))
+                                           boxM: box, verdict: v))
             }
             guard let rough = fit(patches), rough.area >= rampMinAreaM2 else {
                 return declined(.belowMinArea, area: patches.reduce(0) { $0 + $1.area })
@@ -5001,27 +4992,9 @@ struct ARCoverageView: UIViewRepresentable {
                                       Int32(((vs[i] - vMin) / fillCell).rounded(.down))))
             }
             let fill = min(1, Float(occupied.count) * fillCell * fillCell / (width * height))
-            // Occupancy map in the fitted frame: which 0.5 m in-plane cells the component actually
-            // touches. Downsampled toward ~24 columns for the log.
-            func shapeMap() -> String {
-                let cell = rampComponentCellMeters
-                let cols0 = max(1, Int((width / cell).rounded(.up)))
-                let rows0 = max(1, Int((height / cell).rounded(.up)))
-                let step = max(1, (max(cols0, rows0) + 23) / 24)
-                let cols = (cols0 + step - 1) / step, rows = (rows0 + step - 1) / step
-                var grid = [Bool](repeating: false, count: cols * rows)
-                for (i, u) in us.enumerated() {
-                    let c = min(cols - 1, max(0, Int((u - uMin) / cell) / step))
-                    let r = min(rows - 1, max(0, Int((vs[i] - vMin) / cell) / step))
-                    grid[r * cols + c] = true
-                }
-                return (0..<rows).map { r in
-                    String((0..<cols).map { grid[r * cols + $0] ? "#" : "·" })
-                }.joined(separator: "\n")
-            }
             guard fill >= rampMinFillRatio else {
                 return declined(.poorFill, area: f.area, tilt: tiltDeg, rms: f.rms, fill: fill,
-                                box: SIMD2(width, height), shape: shapeMap())
+                                box: SIMD2(width, height))
             }
             let plane = PlaneRegistration.Plane(
                 center: f.c + xAxis * ((uMin + uMax) / 2) + yAxis * ((vMin + vMax) / 2),
@@ -5029,7 +5002,7 @@ struct ARCoverageView: UIViewRepresentable {
                 width: width, height: height, category: .floor)
             return (plane, RampDerivation.Group(areaM2: f.area, tiltDeg: tiltDeg, rmsM: f.rms,
                                                 fill: fill, boxM: SIMD2(width, height),
-                                                verdict: .accepted, shapeMap: shapeMap()))
+                                                verdict: .accepted))
         }
 
         // Group by normal direction against each group's SEED (not a running mean, which would let a
