@@ -632,6 +632,7 @@ enum VertexColorAccumulator {
                     // Occlusion confidence: 1 = clean, <1 = admitted past tolerance at
                     // reduced weight (see the GPU kernel; keep in lockstep).
                     var occlusionConfidence: Float = 1
+                    var gradedExcessBand: UInt8 = 0
                     // Depth Occlusion Test (mirrors the GPU kernel exactly — keep in lockstep)
                     if let dPtr = depthPtr {
                         let dpx = px * downscaleFactor * depthWidth / max(imgW, 1)
@@ -671,9 +672,15 @@ enum VertexColorAccumulator {
                                             AppConstants.colorizationOcclusionToleranceFrac * depthMM)
                             if expectedMM > depthMM + tolMM {
                                 let excess = (expectedMM - depthMM - tolMM) / max(tolMM, 1)
-                                if excess < AppConstants.colorizationOcclusionGradedMultiple {
+                                // Two bounds — the multiple AND an absolute cap. See the
+                                // GPU kernel: the multiple alone compounded with an 8%-of-depth
+                                // tolerance into a ~1 m band at 3 m range.
+                                let excessMM = expectedMM - depthMM - tolMM
+                                if excess < AppConstants.colorizationOcclusionGradedMultiple,
+                                   excessMM < AppConstants.colorizationOcclusionGradedMaxMM {
                                     let fade = 1 - excess / AppConstants.colorizationOcclusionGradedMultiple
                                     occlusionConfidence = max(AppConstants.colorizationOcclusionGradedFloor, fade)
+                                    gradedExcessBand = UInt8(max(0, min(255, excess * 16)))
                                 } else {
                                     // Same diagnostic the GPU kernel records — keep in lockstep.
                                     let band = UInt8(max(0, min(255, excess * 16)))
@@ -738,6 +745,13 @@ enum VertexColorAccumulator {
                         continue
                     }
                     let angleWeight = abs(dotNV)                           // 1 = head-on, 0 = grazing
+                    // Facing gate on graded admission — mirrors the GPU kernel.
+                    if occlusionConfidence < 1,
+                       angleWeight < AppConstants.colorizationOcclusionGradedMinFacing {
+                        if gradedExcessBand < occlusionExcess[i] { occlusionExcess[i] = gradedExcessBand }
+                        if rejectReason[i] == 0 { rejectReason[i] = 1 }
+                        continue
+                    }
                     let clampedDist = max(dist, distFloor)
                     let distWeight = 1.0 / (clampedDist * clampedDist)     // inverse-square, floored
                     let weight = angleWeight * distWeight * frameWeight * occlusionConfidence

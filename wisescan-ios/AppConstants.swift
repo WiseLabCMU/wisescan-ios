@@ -373,11 +373,25 @@ enum AppConstants {
     /// those near-band rejections are the raster disagreeing with itself by centimetres,
     /// not geometry. 3x keeps the whole near band and most of the middle while still
     /// refusing the >4x tail, which on the keyframe path is genuine furniture and walls.
-    static let colorizationOcclusionGradedMultiple: Float = 3.0
+    static let colorizationOcclusionGradedMultiple: Float = 1.0
     /// Floor on a graded sample's weight multiplier, so an admitted marginal observation is
     /// worth something rather than being numerically ignored — it must lose to clean data,
     /// not vanish.
     static let colorizationOcclusionGradedFloor: Float = 0.02
+    /// ABSOLUTE cap (mm) on how far past the tolerance a sample may be admitted, whatever
+    /// the multiple works out to. This is the guard that was missing on the first attempt:
+    /// the tolerance itself is 8% of depth, so a 3x band came to ~960 mm at 3 m range and
+    /// the field verdict was immediate — rescued areas coloured "off by about 1 m", which
+    /// is precisely that number. The physical justification for grading at all is sensor
+    /// and mesh error (36 mm measured depth self-disagreement, a few cm of reconstruction),
+    /// and that is an ABSOLUTE quantity — it does not grow with range the way a percentage
+    /// tolerance does.
+    static let colorizationOcclusionGradedMaxMM: Float = 100
+    /// Grade only when the surface is reasonably head-on (|n·v| at or above this). At
+    /// head-on, depth excess IS how far behind the sampled surface lies, so the fade is
+    /// meaningful. At a grazing angle the same excess can put the sampled pixel metres
+    /// away along the surface — which is the other half of why the first attempt bled.
+    static let colorizationOcclusionGradedMinFacing: Float = 0.5
     static let colorizationOcclusionToleranceFrac: Float = 0.08 // distance-proportional tolerance part (LiDAR error grows with range, and the mesh the cube-face z-buffer is rasterized from IS the mesh being colored, so its own reconstruction error shows up here too). 0 = fixed floor only. Held at 0 while the depth reads were byte-scrambled — occlusion was inert then, so the knob measured nothing. Tuned on the same 64k-sample depth-vs-depth cross-check: against the unambiguously-occluded fraction (>500 mm behind) of each range band, max(80 mm, 8%) over-rejects by 4.2/4.9/1.7 points at <1.5 m / 1.5-3 m / >3 m, beating max(50 mm, 5%)'s 5.5/6.3/4.3 everywhere. The ~4 points that remain are sensor noise and pose error that no threshold can separate from a real occluder
     static let colorizationDepthEdgeMaxSpreadFrac: Float = 0  // reject observations whose 3×3 depth neighborhood spans > frac × depth (silhouette-straddle guard). 0 = disabled (legacy); 0.15 killed too much near ALL edges
     static let colorizationBackfaceDotMin: Float = -1          // reject observations with signed n·v below this (seen-through-own-surface guard). -1 = disabled (legacy abs() weighting); 0.0 also zeroed noisy-normal grazing coverage

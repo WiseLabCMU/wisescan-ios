@@ -79,6 +79,8 @@ enum VertexColorGPU {
         var depthIsRaster: UInt32
         var occlusionGradedMult: Float
         var occlusionGradedFloor: Float
+        var occlusionGradedMaxMM: Float
+        var occlusionGradedMinFacing: Float
     }
 
     // MARK: - Upload (once per colorize call)
@@ -192,7 +194,9 @@ enum VertexColorGPU {
             backfaceDotMin: AppConstants.colorizationBackfaceDotMin,
             depthIsRaster: depthIsRaster ? 1 : 0,
             occlusionGradedMult: AppConstants.colorizationOcclusionGradedMultiple,
-            occlusionGradedFloor: AppConstants.colorizationOcclusionGradedFloor
+            occlusionGradedFloor: AppConstants.colorizationOcclusionGradedFloor,
+            occlusionGradedMaxMM: AppConstants.colorizationOcclusionGradedMaxMM,
+            occlusionGradedMinFacing: AppConstants.colorizationOcclusionGradedMinFacing
         )
 
         // Output buffer

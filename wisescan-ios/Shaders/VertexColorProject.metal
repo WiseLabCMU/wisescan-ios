@@ -39,6 +39,8 @@ struct VertexColorParams {
     uint     depthIsRaster;      // 1 when depth was RASTERIZED from the mesh (cube faces), 0 for sensor depth
     float    occlusionGradedMult; // admit past-tolerance samples out to this multiple, fading to 0 (0 = hard reject)
     float    occlusionGradedFloor;// minimum weight multiplier for an admitted marginal sample
+    float    occlusionGradedMaxMM;// absolute cap (mm) on the graded band, whatever the multiple gives
+    float    occlusionGradedMinFacing; // grade only when |n·v| is at least this (depth excess is only a valid proxy head-on)
 };
 
 // Per-vertex output: packed (r, g, b, _) + weight
@@ -94,8 +96,11 @@ kernel void vertexColorProject(
     results[tid].rgba.w = 1;
 
     // Multiplier applied to this observation's weight by the occlusion test: 1 = cleanly
-    // visible, between 0 and 1 = past tolerance but admitted at reduced confidence.
+    // visible, between 0 and 1 = past tolerance but PROVISIONALLY admitted at reduced
+    // confidence. Provisional because the admission also needs the view angle, which is
+    // not known until further down — see the facing gate before the weight is formed.
     float occlusionConfidence = 1.0;
+    float gradedExcess16 = 0.0;   // diagnostic payload if this ends up rejected after all
 
     // Depth occlusion test
     if (params.hasDepth != 0 && params.depthW > 0) {
@@ -142,9 +147,16 @@ kernel void vertexColorProject(
                 // weight that fades to the floor — it loses to any clean observation of the
                 // same vertex (the reduce is a WEIGHTED median) but beats leaving the vertex
                 // gray. Past the band it is real geometry in the way: hard reject.
-                if (excess < params.occlusionGradedMult) {
+                // Two bounds, not one. The multiple alone compounded with a tolerance that
+                // is itself 8% of depth — at 3 m that admitted samples ~1 m behind the
+                // surface, and the field verdict was exactly that. The absolute cap is the
+                // physical one: grading is justified by sensor and mesh error, which does
+                // not grow with range.
+                float excessMM = expectedMM - depthMM - tolMM;
+                if (excess < params.occlusionGradedMult && excessMM < params.occlusionGradedMaxMM) {
                     float fade = 1.0 - (excess / params.occlusionGradedMult);
                     occlusionConfidence = max(params.occlusionGradedFloor, fade);
+                    gradedExcess16 = clamp(excess * 16.0, 0.0, 255.0);
                 } else {
                     // REJECTION DIAGNOSTIC. weight stays 0 so this is never colored, which
                     // frees r/g/b — the accumulator only reads them when weight > 0. r
@@ -213,6 +225,17 @@ kernel void vertexColorProject(
         return;
     }
     float angleWeight = abs(dotNV);                       // 1 = head-on, 0 = grazing
+
+    // FACING GATE on graded admission. Head-on, a depth excess of N mm means the sampled
+    // surface really is N mm behind — the fade is meaningful. At a grazing angle the same
+    // excess can put the sampled pixel metres away ALONG the surface, which is the other
+    // half of why the first attempt bled. Refuse to grade there; a clean sample at any
+    // angle is still fine, this only gates the marginal ones.
+    if (occlusionConfidence < 1.0 && angleWeight < params.occlusionGradedMinFacing) {
+        results[tid].rgba.r = uchar(gradedExcess16);
+        results[tid].rgba.g = 1;   // REASON_OCCLUSION (refused: too grazing to grade)
+        return;
+    }
     float clampedDist = max(dist, params.distFloor);
     float distWeight = 1.0 / (clampedDist * clampedDist); // inverse-square
     float w = angleWeight * distWeight * params.frameWeight * occlusionConfidence;
