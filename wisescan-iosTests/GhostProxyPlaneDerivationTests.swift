@@ -944,4 +944,21 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
                          "\(category) leaked into the registration plane decoder")
         }
     }
+
+    /// The rescan ghost outlines the auto-align REFERENCE planes, which still include the RoomPlan
+    /// floors the proxy builder replaced with derived levels — so a stairwell drew a bold rectangle
+    /// around a floor the ghost no longer contains. The suppression rule has to match the builder's
+    /// own dedupe band (0.15 m), not the tighter derived subtraction band, or the two disagree about
+    /// which floor was replaced.
+    func testOutlinedFloor_isSuppressedOnlyWhenALevelReplacedIt() {
+        let band = ARCoverageView.ghostProxyQuadCoverageMeters
+        XCTAssertTrue(ARCoverageView.outlinedFloorIsReplaced(floorY: 0, levelYs: [0.02]),
+                      "a level at the floor's height replaced it")
+        XCTAssertTrue(ARCoverageView.outlinedFloorIsReplaced(floorY: 1.5, levelYs: [0, 1.5 - band * 0.9]),
+                      "any one matching level is enough")
+        XCTAssertFalse(ARCoverageView.outlinedFloorIsReplaced(floorY: 0, levelYs: [band * 1.1, 1.5]),
+                       "a level just outside the dedupe band is a different surface")
+        XCTAssertFalse(ARCoverageView.outlinedFloorIsReplaced(floorY: 0, levelYs: []),
+                       "no sidecar means nothing was replaced")
+    }
 }

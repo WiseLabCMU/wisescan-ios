@@ -36,6 +36,11 @@ struct ARCoverageView: UIViewRepresentable {
     /// the ghost ENTITY visually seated on reality (user-confidence; never touches the world origin
     /// or the recording frame — save-time registration stays the authority). Empty = feature off.
     var ghostReferencePlanes: [PlaneRegistration.Plane] = []
+    /// Heights of the ghost's DERIVED levels, in the same raw capture frame as
+    /// `ghostReferencePlanes`. The proxy build replaced the RoomPlan floor quads these matched, so
+    /// the room outline must skip those floors — the rectangle would enclose geometry the ghost
+    /// no longer contains. Outline-only; never touches the auto-align fit.
+    var ghostDerivedLevelYs: [Float] = []
     /// True when `initialGhostMeshData` is the wall-subtracted proxy (DECISION 2): the ghost
     /// renderer then draws `ghostReferencePlanes` as wall/floor quads in the SAME wireframe style
     /// (one material → reads as one ghost). False for the full mesh (quads would double-draw).
@@ -131,7 +136,8 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.finalCapturedRoomBinding = $finalCapturedRoom
         context.coordinator.hasWorldMap.store(config.initialWorldMap != nil, ordering: .relaxed)
         context.coordinator.scanStore = scanStore
-        context.coordinator.resetGhostAutoAlign(referencePlanes: ghostReferencePlanes)
+        context.coordinator.resetGhostAutoAlign(referencePlanes: ghostReferencePlanes,
+                                               derivedLevelYs: ghostDerivedLevelYs)
         context.coordinator.ghostIsProxy = ghostIsProxy
         // Let the stop flow end the recording-mode RoomPlan session promptly (see ScanStore). Weak
         // coordinator capture → no retain cycle; stopRoomPlanSession is idempotent + main-thread-only,
@@ -331,7 +337,8 @@ struct ARCoverageView: UIViewRepresentable {
             context.coordinator.ghostAnchorEntity = nil
             context.coordinator.hasAddedGhostMesh.store(false, ordering: .relaxed)
             context.coordinator.resetGhostAutoAlign(
-                referencePlanes: initialGhostMeshData != nil ? ghostReferencePlanes : [])
+                referencePlanes: initialGhostMeshData != nil ? ghostReferencePlanes : [],
+                derivedLevelYs: initialGhostMeshData != nil ? ghostDerivedLevelYs : [])
             context.coordinator.ghostIsProxy = ghostIsProxy
 
             if let ghostData = initialGhostMeshData {
@@ -742,13 +749,24 @@ struct ARCoverageView: UIViewRepresentable {
         // Room-outline source: the ghost's plane rectangles (already de-registered into the
         // ghost's raw frame — same frame as the proxy OBJ; set by resetGhostAutoAlign before
         // every loadGhostMesh call site). Captured on main here, used on the build queue below.
-        let outlinePlanes = coordinator.ghostIsProxy ? coordinator.ghostReferencePlanes : []
+        // Floors a derived level REPLACED are dropped: the builder swapped that quad for the
+        // level's own rectangle, so outlining the floor draws a border around geometry the proxy
+        // does not contain.
+        let derivedLevelYs = coordinator.ghostDerivedLevelYs
+        let outlinePlanes = (coordinator.ghostIsProxy ? coordinator.ghostReferencePlanes : [])
+            .filter { p in
+                !(p.category == .floor && Self.outlinedFloorIsReplaced(floorY: p.center.y,
+                                                                       levelYs: derivedLevelYs))
+            }
         DispatchQueue.global(qos: .userInitiated).async {
             // Build procedural wireframe: thin 3D quads for each unique edge. A proxy ghost's
             // RoomPlan quads are already baked INTO the OBJ at save (coordinate-locked with the
-            // mesh remainder), so there is deliberately no dynamic assembly here — but the
-            // TRAILING lattice faces (count in the v4 header) render with thick lines: the sparse
-            // 1 m grid is sub-pixel at the mesh's 1 mm default beyond ~1.5 m and visually vanishes.
+            // mesh remainder), so the LATTICE needs no dynamic assembly — but the TRAILING lattice
+            // faces (count in the v4 header) render with thick lines: the sparse 1 m grid is
+            // sub-pixel at the mesh's 1 mm default beyond ~1.5 m and visually vanishes. The room
+            // OUTLINE below IS assembled here, and deliberately from the AUTO-ALIGN REFERENCE set
+            // (the very planes handed to PlaneRegistration.register) minus the floors a derived
+            // level replaced — not from the set the builder actually baked.
             var descriptors: [MeshDescriptor]
             if coordinator.ghostIsProxy,
                let quadFaces = Self.ghostProxyQuadFaceCount(from: data), quadFaces > 0,
@@ -1094,6 +1112,10 @@ struct ARCoverageView: UIViewRepresentable {
         // state are delegate-queue-owned; `ghostAutoAlign` is main-owned (applied to the entity and
         // read by updateUIView). Manual-slider state crosses main→delegate, so it's atomic.
         var ghostReferencePlanes: [PlaneRegistration.Plane] = []
+        /// Derived-level heights alongside the reference planes, same write-on-main-at-ghost-load
+        /// discipline. Read only at ghost build (main), to drop outlines for the RoomPlan floors a
+        /// derived level replaced.
+        var ghostDerivedLevelYs: [Float] = []
         var ghostIsProxy = false // mirrors the view flag; read at ghost build (main)
         var livePlaneAnchors: [UUID: ARPlaneAnchor] = [:]
 
@@ -1135,9 +1157,11 @@ struct ARCoverageView: UIViewRepresentable {
 
         /// Ghost (re)load reset — main thread; the session was just re-run with
         /// `.removeExistingAnchors`, so stale plane anchors are gone (didRemove also clears late ones).
-        func resetGhostAutoAlign(referencePlanes: [PlaneRegistration.Plane]) {
+        func resetGhostAutoAlign(referencePlanes: [PlaneRegistration.Plane],
+                                 derivedLevelYs: [Float] = []) {
             ghostAutoAlign = matrix_identity_float4x4
             ghostReferencePlanes = referencePlanes
+            ghostDerivedLevelYs = derivedLevelYs
             scanStore?.icpAlignReady = nil // stale chip from a prior ghost/alignment
             scanStore?.ghostAutoAlignFit = nil // stale pinA correction from a prior connect/ghost
             sessionDelegateQueue.async { [weak self] in
@@ -5480,6 +5504,15 @@ struct ARCoverageView: UIViewRepresentable {
     /// wall-floor seams, ceiling line) — bolder than the interior lattice so the structural box
     /// reads at a glance.
     static let ghostProxyOutlineThickness: Float = 0.02
+
+    /// Whether a RoomPlan floor was REPLACED by a derived level in the proxy the ghost is showing,
+    /// and so must not be outlined. Mirrors the builder's own dedupe rule — same
+    /// `ghostProxyQuadCoverageMeters` band, so a floor the builder swapped out is exactly the floor
+    /// this drops. The tight derived band does not apply here: this asks which quad the BUILDER kept,
+    /// not which mesh a plane may subtract.
+    static func outlinedFloorIsReplaced(floorY: Float, levelYs: [Float]) -> Bool {
+        levelYs.contains { abs($0 - floorY) <= ghostProxyQuadCoverageMeters }
+    }
 
     /// Parse the `quadFaces=N` count from a proxy OBJ's version header (nil for legacy/full-mesh
     /// ghosts or older proxy versions). Reads only the first line.

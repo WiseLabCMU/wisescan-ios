@@ -84,6 +84,10 @@ struct CaptureView: View {
     /// Ghost auto-align reference planes (ghost room, RAW capture frame) — loaded alongside the
     /// ghost mesh, fed to ARCoverageView's live plane fit. Empty when not rescanning.
     @State var ghostReferencePlanes: [PlaneRegistration.Plane] = []
+    /// Heights of the DERIVED levels in the ghost's `derived_surfaces.json`, in the same raw capture
+    /// frame as `ghostReferencePlanes` — the proxy builder replaced the matching RoomPlan floor quads
+    /// with these, so the renderer must not outline those floors. Empty when the scan has no sidecar.
+    @State var ghostDerivedLevelYs: [Float] = []
     /// True when `cachedGhostMeshData` holds the wall-subtracted proxy (DECISION 2) — the renderer
     /// then draws the RoomPlan wall/floor quads in the same wireframe style to complete the ghost.
     @State var ghostIsProxy = false
@@ -353,6 +357,7 @@ struct CaptureView: View {
               let scanId = scanStore.activeScanToExtend else {
             cachedGhostMeshData = nil
             ghostReferencePlanes = []
+            ghostDerivedLevelYs = []
             ghostLoadAttempted = true   // nothing to load — release the world-map gate now
             return
         }
@@ -361,6 +366,7 @@ struct CaptureView: View {
               let targetScan = location.scans.first(where: { $0.id == scanId }) else {
             cachedGhostMeshData = nil
             ghostReferencePlanes = []
+            ghostDerivedLevelYs = []
             ghostLoadAttempted = true
             return
         }
@@ -380,7 +386,7 @@ struct CaptureView: View {
         let foot0 = PerfDiag.enabled ? ScanStats.currentFootprintMB() : 0
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let (ghostData, isProxy, planes) = Self.readGhostArtifacts(
+            let (ghostData, isProxy, planes, levelYs) = Self.readGhostArtifacts(
                 activeScanCase: activeScanCase, scanDirectory: scanDirectory,
                 proxyCandidates: proxyCandidates, meshFileURL: meshFileURL, scanId: scanId)
 
@@ -392,6 +398,7 @@ struct CaptureView: View {
                 cachedGhostMeshData = ghostData
                 ghostIsProxy = isProxy
                 ghostReferencePlanes = planes
+                ghostDerivedLevelYs = levelYs
                 ghostLoadAttempted = true   // ghost + map now hand over together (body's gate)
                 if PerfDiag.enabled {
                     let blobMB = Double(ghostData?.count ?? 0) / (1024.0 * 1024.0)
@@ -407,7 +414,7 @@ struct CaptureView: View {
     /// (no SwiftData, no @State; everything arrives as plain values snapshotted on main).
     private static func readGhostArtifacts(activeScanCase: ScanCase, scanDirectory: URL,
                                            proxyCandidates: [URL], meshFileURL: URL, scanId: UUID)
-        -> (data: Data?, isProxy: Bool, planes: [PlaneRegistration.Plane]) {
+        -> (data: Data?, isProxy: Bool, planes: [PlaneRegistration.Plane], levelYs: [Float]) {
         // DECISION 2: rescans AND adjacent-connects load the light proxy (walls/floor/ceiling subtracted, RoomPlan
         // quads baked in) instead of the full 10⁵–10⁶-face mesh — killing the 2× mesh-
         // coexistence memory and most of the ghost render/parse cost. A proxy ghost also
@@ -455,7 +462,27 @@ struct CaptureView: View {
             // detection, and no [PlaneReg] output at all — this line is the only breadcrumb.
             print("[PlaneReg] auto-align DISABLED: no reference planes — roomplan.json missing/undecodable for scan \(scanId) (was a room built at its save?)")
         }
-        return (ghostData, isProxy, planes)
+        // Derived LEVEL heights, for the renderer's outline set: the proxy builder replaced the
+        // RoomPlan floor quads these matched, so outlining those floors draws a rectangle around
+        // geometry the ghost no longer contains. The sidecar is co-framed with mesh.obj — canonical
+        // for a registered scan — so its heights go through the SAME raw-frame undo the reference
+        // planes take above (skipping it puts them in the wrong frame on exactly those scans).
+        var levelYs: [Float] = []
+        if loadsGhost, let derived = DerivedSurfacesData.load(scanDirectory: scanDirectory) {
+            let undo = SaveRegistration.inverseForGhost(scanDirectory: scanDirectory)
+            levelYs = derived.surfaces
+                .filter { $0.category == DerivedSurfacesData.levelCategory }
+                .compactMap { s in
+                    guard let p = PlaneRegistration.plane(category: "floor", width: s.dimensions.width,
+                                                          height: s.dimensions.height,
+                                                          transform: s.transform) else { return nil }
+                    return (undo.map { PlaneRegistration.applying($0, to: p) } ?? p).center.y
+                }
+            if !levelYs.isEmpty {
+                print("[GhostProxy] ghost derived levels for outline suppression: \(levelYs.count)")
+            }
+        }
+        return (ghostData, isProxy, planes, levelYs)
     }
 
     /// Computes the connector anchors for the active location (Track C). Only populated when
@@ -591,6 +618,7 @@ struct CaptureView: View {
                                      && !ghostLoadAttempted) ? nil : scanStore.activeRelocalizationMap,
                 initialGhostMeshData: cachedGhostMeshData,
                 ghostReferencePlanes: ghostReferencePlanes,
+                ghostDerivedLevelYs: ghostDerivedLevelYs,
                 ghostIsProxy: ghostIsProxy,
                 scanStore: scanStore,
                 connectorAnchors: connectorAnchors,
