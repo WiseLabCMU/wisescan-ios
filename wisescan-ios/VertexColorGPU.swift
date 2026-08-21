@@ -42,7 +42,10 @@ enum VertexColorGPU {
         var r: UInt8
         var g: UInt8
         var b: UInt8
-        var _pad: UInt8
+        /// Frustum witness, not padding: 1 when the kernel had this vertex inside the
+        /// frame's image, whether or not it then survived occlusion / mask / backface.
+        /// Splits "no frame ever saw it" from "seen but always rejected".
+        var a: UInt8
         var weight: Float
     }
 
@@ -74,6 +77,10 @@ enum VertexColorGPU {
         var edgeSpreadFrac: Float
         var backfaceDotMin: Float
         var depthIsRaster: UInt32
+        var occlusionGradedMult: Float
+        var occlusionGradedFloor: Float
+        var occlusionGradedMaxMM: Float
+        var occlusionGradedMinFacing: Float
     }
 
     // MARK: - Upload (once per colorize call)
@@ -185,7 +192,11 @@ enum VertexColorGPU {
             occlusionFrac: AppConstants.colorizationOcclusionToleranceFrac,
             edgeSpreadFrac: AppConstants.colorizationDepthEdgeMaxSpreadFrac,
             backfaceDotMin: AppConstants.colorizationBackfaceDotMin,
-            depthIsRaster: depthIsRaster ? 1 : 0
+            depthIsRaster: depthIsRaster ? 1 : 0,
+            occlusionGradedMult: AppConstants.colorizationOcclusionGradedMultiple,
+            occlusionGradedFloor: AppConstants.colorizationOcclusionGradedFloor,
+            occlusionGradedMaxMM: AppConstants.colorizationOcclusionGradedMaxMM,
+            occlusionGradedMinFacing: AppConstants.colorizationOcclusionGradedMinFacing
         )
 
         // Output buffer

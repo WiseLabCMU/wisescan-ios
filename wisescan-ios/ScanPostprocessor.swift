@@ -579,6 +579,16 @@ enum ScanPostprocessor {
         guard !steps.isEmpty else { return outcome }
         log.notice("postprocess \(w.name, privacy: .public): steps=\(steps.map(\.rawValue).joined(separator: "+"), privacy: .public)")
 
+        // ONE read and ONE parse of mesh.obj for the whole pass. A scan that registers,
+        // rebuilds its proxy, colorizes and re-renders its preview used to read the same
+        // 16-45 MB file four times and parse it twice — including a write-then-read-back
+        // round trip inside the registration bake. See MeshCache: stages that need bytes
+        // (registration, proxy) share the Data, stages that need geometry (colorize,
+        // preview) share one OBJData, and the bake hands its new bytes straight to the
+        // cache instead of going through the filesystem.
+        let meshCache = MeshCache(url: dir.appendingPathComponent("mesh.obj"), name: w.name)
+        defer { meshCache.logSavings() }
+
         // Writes derived artifacts to BOTH the scan dir top level (viewer / ghost loader / gates)
         // and raw_data/ (export staging parity with the old save-time pipeline).
         func writeBoth(_ data: Data, _ name: String) {
@@ -687,9 +697,12 @@ enum ScanPostprocessor {
                 if let t = appliedT {
                     let meshURL = dir.appendingPathComponent("mesh.obj")
                     var baked = false
-                    if let mesh = try? Data(contentsOf: meshURL) {
+                    if let mesh = meshCache.data() {
                         let transformed = SaveRegistration.transformOBJ(mesh, by: t)
                         if (try? transformed.write(to: meshURL, options: .atomic)) != nil {
+                            // The bake replaced the file — hand the new bytes straight to the
+                            // cache instead of letting the next stage read them back off disk.
+                            meshCache.replace(with: transformed)
                             // Mesh is canonical; the clean roomplan must follow or roll back.
                             if SaveRegistration.retransformRoomPlanJSON(
                                 at: dir.appendingPathComponent("roomplan.json"), by: t) {
@@ -703,8 +716,14 @@ enum ScanPostprocessor {
                                 // Roomplan failed AND the mesh rollback failed: mesh is canonical,
                                 // roomplan raw. Keep applied=true (matches the mesh — the ghost/
                                 // colorize contract) and log loudly; only the outlines are stale.
+                                // The cache already holds those canonical bytes.
                                 log.error("registration bake: roomplan retransform failed and mesh rollback failed for \(w.name, privacy: .public) — mesh canonical, roomplan RAW (outlines stale)")
                                 baked = true
+                            } else {
+                                // Rollback SUCCEEDED — the file is raw again, so the cache must
+                                // revert with it or every later stage would read canonical
+                                // geometry from a scan the sidecar calls raw.
+                                meshCache.replace(with: mesh)
                             }
                         }
                     }
@@ -744,7 +763,7 @@ enum ScanPostprocessor {
             }
             if let classesURL = artifact("face_classes.bin"),
                let classes = try? Data(contentsOf: classesURL),
-               let mesh = try? Data(contentsOf: dir.appendingPathComponent("mesh.obj")),
+               let mesh = meshCache.data(),
                let planes = currentFramePlanes(scanDirectory: dir), !planes.isEmpty {
                 if let result = ARCoverageView.buildGhostProxyOBJ(objData: mesh, faceClasses: classes,
                                                                  roomPlanPlanes: planes) {
@@ -785,9 +804,9 @@ enum ScanPostprocessor {
         // ── 3. COLORIZE ──
         if steps.contains(.colorize) {
             report("Coloring…")
-            if let mesh = try? Data(contentsOf: dir.appendingPathComponent("mesh.obj")),
+            if let parsed = meshCache.parsed(),
                let colors = VertexColorAccumulator.colorizeFromSavedFrames(
-                   objData: mesh, rawDataDir: raw,
+                   parsed: parsed, rawDataDir: raw,
                    progress: { p in report("Coloring \(Int(p * 100))%") },
                    phase: { step in report(step) }) {
                 try? colors.write(to: dir.appendingPathComponent("colors.bin"), options: .atomic)
@@ -798,8 +817,9 @@ enum ScanPostprocessor {
         // ── Preview regen (mesh moved and/or got colors) ──
         if outcome.didStructural || outcome.didColorize {
             report("Rendering preview…")
-            if let img = MeshPreviewView.generateSnapshot(
-                meshURL: dir.appendingPathComponent("mesh.obj"),
+            if let parsed = meshCache.parsed(),
+               let img = MeshPreviewView.generateSnapshot(
+                parsed: parsed,
                 colorsURL: dir.appendingPathComponent("colors.bin"),
                 poseMatrix: w.pose, frameCenter: w.frameCenter),
                let data = img.jpegData(compressionQuality: 0.8) {
@@ -909,5 +929,66 @@ enum ScanPostprocessor {
             log.warning("BAD SCAN: \(scan.name, privacy: .public) has no room and no build in flight after the grace window — RoomPlan produced nothing (or the build failed); prompting redo")
             scanStore.badScanWarning = scan.name
         }
+    }
+}
+
+/// One read and one parse of a scan's `mesh.obj` for a whole `processOne` pass.
+///
+/// The postprocess stages each used to fetch the mesh independently: the registration bake
+/// read it, transformed it, wrote it, and the proxy builder read those same bytes back off
+/// disk seventeen lines later; colorize read it a third time and the preview render a
+/// fourth. On a 16-45 MB OBJ that is ~65-180 MB of redundant reads plus two independent
+/// full parses, all serial, once per scan.
+///
+/// Not thread-safe by design — `processOne` is one serial pass on one queue, and making it
+/// safe would mean a lock on the hot path for no benefit. Bytes and geometry are cached
+/// separately because the two parsers are not interchangeable: the registration bake and
+/// the ghost-proxy builder need the raw text (the proxy builder pairs faces positionally
+/// with `face_classes.bin`, which `MeshParser.parseOBJ` would break by filtering malformed
+/// faces), while colorize and the preview need `OBJData`.
+private final class MeshCache {
+    private let url: URL
+    private let name: String
+    private var cachedData: Data?
+    private var cachedParsed: MeshParser.OBJData?
+    private var reads = 0
+    private var parses = 0
+    private var hits = 0
+
+    init(url: URL, name: String) {
+        self.url = url
+        self.name = name
+    }
+
+    /// The mesh bytes, read at most once.
+    func data() -> Data? {
+        if let cachedData { hits += 1; return cachedData }
+        guard let loaded = try? Data(contentsOf: url) else { return nil }
+        reads += 1
+        cachedData = loaded
+        return loaded
+    }
+
+    /// The parsed geometry, parsed at most once.
+    func parsed() -> MeshParser.OBJData? {
+        if let cachedParsed { hits += 1; return cachedParsed }
+        guard let bytes = data() else { return nil }
+        let result = PerfDiag.timed("pp_obj_parse") { MeshParser.parseOBJ(from: bytes) }
+        parses += 1
+        cachedParsed = result
+        return result
+    }
+
+    /// The file was rewritten in place (registration bake, or its rollback) — adopt the new
+    /// bytes directly rather than re-reading them, and drop the stale geometry.
+    func replace(with newData: Data) {
+        cachedData = newData
+        cachedParsed = nil
+    }
+
+    func logSavings() {
+        guard reads > 0 || parses > 0 else { return }
+        PerfDiag.log("[Postprocess] mesh.obj: \(reads) read(s), \(parses) parse(s), "
+            + "\(hits) cache hit(s) — \(String(format: "%.1f", Double(cachedData?.count ?? 0) / 1_048_576)) MB")
     }
 }

@@ -221,17 +221,28 @@ enum VertexColorAccumulator {
     /// fraction once projection starts. The setup work before the first frame is not
     /// instant on a large scan — mesh parse, normals, and (faces probe) a ~20 s cube-face
     /// cut — so a bare "Coloring…" looked stalled. Callers show whichever arrives last.
+    /// Data overload — parses and forwards. Callers that already hold parsed geometry
+    /// should pass it instead (see the `parsed:` overload) so one `processOne` pass does
+    /// not re-tokenize the same 16-45 MB file for each stage.
     static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?,
+                                        progress: ((Double) -> Void)? = nil,
+                                        phase: ((String) -> Void)? = nil) -> Data? {
+        let parsedOrNil: MeshParser.OBJData? = PerfDiag.timed("vc_obj_parse") {
+            MeshParser.parseOBJ(from: objData)
+        }
+        guard let parsed = parsedOrNil else { return nil }
+        return colorizeFromSavedFrames(parsed: parsed, rawDataDir: rawDataDir,
+                                       progress: progress, phase: phase)
+    }
+
+    static func colorizeFromSavedFrames(parsed: MeshParser.OBJData, rawDataDir: URL?,
                                         progress: ((Double) -> Void)? = nil,
                                         phase: ((String) -> Void)? = nil) -> Data? {
         guard let rawDir = rawDataDir else { return nil }
         let startTime = CACurrentMediaTime()
         let fm = FileManager.default
 
-        // Parse OBJ vertices using shared parser
         phase?("Reading mesh…")
-        let parsed: MeshParser.OBJData? = PerfDiag.timed("vc_obj_parse") { MeshParser.parseOBJ(from: objData) }
-        guard let parsed else { return nil }
         var vertices = parsed.vertices
         guard !vertices.isEmpty else { return nil }
 
@@ -353,6 +364,23 @@ enum VertexColorAccumulator {
         var obsB = [UInt8](repeating: 0, count: vertexCount * K)
         var obsW = [Float](repeating: 0, count: vertexCount * K)
         var obsCount = [UInt8](repeating: 0, count: vertexCount)
+        // Diagnostic only (1 byte/vertex): was this vertex ever inside ANY frame's image,
+        // regardless of whether it survived the tests? Splits the gray fraction into
+        // "nothing ever looked at it" (a sweep/coverage problem the operator can fix) and
+        // "looked at and always rejected" (an occlusion/mask/backface problem we can).
+        var everInFrustum = [UInt8](repeating: 0, count: vertexCount)
+        // Per gray vertex, the LEAST severe rejection it ever received, and for occlusion
+        // how far past tolerance that best case was (sixteenths of a tolerance width, 255 =
+        // never occlusion-rejected). "Least severe" is the decision-relevant one: if some
+        // frame rejected a vertex by only a hair, a slightly wider tolerance rescues it —
+        // whereas the worst case tells us nothing we can act on.
+        // Provenance of the observations that DID land: a vertex coloured only by graded
+        // (past-tolerance) samples exists solely because of the graded band, and is the
+        // population to eyeball for bleed.
+        var hadClean = [UInt8](repeating: 0, count: vertexCount)
+        var hadGraded = [UInt8](repeating: 0, count: vertexCount)
+        var rejectReason = [UInt8](repeating: 0, count: vertexCount)
+        var occlusionExcess = [UInt8](repeating: 255, count: vertexCount)
         let distFloor = max(AppConstants.colorizationMinDistanceM, 0.001)
 
         // Downscale factor — vertex coloring doesn't need full-res images
@@ -549,7 +577,18 @@ enum VertexColorAccumulator {
                 var visibleCount = 0
                 for i in 0..<vertexCount {
                     let obs = gpuResults[i]
-                    guard obs.weight > 0 else { continue }
+                    // The kernel's frustum witness (see VertexColorProject.metal): this frame
+                    // had the vertex inside its image, whether or not it survived the tests.
+                    if obs.a != 0 { everInFrustum[i] = 1 }
+                    guard obs.weight > 0 else {
+                        // Rejected here: r/g carry the diagnostic the kernel packed in
+                        // (see VertexColorProject.metal). Keep the gentlest occlusion
+                        // margin seen, and remember the reason if we have none yet.
+                        if obs.g == 1, obs.r < occlusionExcess[i] { occlusionExcess[i] = obs.r }
+                        if rejectReason[i] == 0 { rejectReason[i] = obs.g }
+                        continue
+                    }
+                    if obs.a == 2 { hadGraded[i] = 1 } else { hadClean[i] = 1 }
                     visibleCount += 1
 
                     let base = i * K
@@ -588,7 +627,12 @@ enum VertexColorAccumulator {
 
                     guard px >= 0 && px < scaledW && py >= 0 && py < scaledH else { continue }
                     guard px < width && py < height else { continue }
+                    everInFrustum[i] = 1   // frustum witness — see the GPU path
 
+                    // Occlusion confidence: 1 = clean, <1 = admitted past tolerance at
+                    // reduced weight (see the GPU kernel; keep in lockstep).
+                    var occlusionConfidence: Float = 1
+                    var gradedExcessBand: UInt8 = 0
                     // Depth Occlusion Test (mirrors the GPU kernel exactly — keep in lockstep)
                     if let dPtr = depthPtr {
                         let dpx = px * downscaleFactor * depthWidth / max(imgW, 1)
@@ -606,7 +650,10 @@ enum VertexColorAccumulator {
                             // depth == 0 means OPPOSITE things per source: sensor no-data
                             // (can't tell occluded from visible → skip) vs. a rasterized
                             // hole (no mesh along the ray → nothing occludes → pass).
-                            if depthMM == 0 && !useFaces { continue }
+                            if depthMM == 0 && !useFaces {
+                                if rejectReason[i] == 0 { rejectReason[i] = 5 }
+                                continue
+                            }
                             // Rasterized depth is a z-buffer of the very mesh being colored,
                             // so silhouette vertices land a sub-pixel past their own edge and
                             // self-occlude. Compare against the 3×3 max.
@@ -623,7 +670,25 @@ enum VertexColorAccumulator {
                             // tolerance scales with range (LiDAR error grows) over a near-field floor.
                             let tolMM = max(AppConstants.colorizationOcclusionToleranceMM,
                                             AppConstants.colorizationOcclusionToleranceFrac * depthMM)
-                            if expectedMM > depthMM + tolMM { continue }
+                            if expectedMM > depthMM + tolMM {
+                                let excess = (expectedMM - depthMM - tolMM) / max(tolMM, 1)
+                                // Two bounds — the multiple AND an absolute cap. See the
+                                // GPU kernel: the multiple alone compounded with an 8%-of-depth
+                                // tolerance into a ~1 m band at 3 m range.
+                                let excessMM = expectedMM - depthMM - tolMM
+                                if excess < AppConstants.colorizationOcclusionGradedMultiple,
+                                   excessMM < AppConstants.colorizationOcclusionGradedMaxMM {
+                                    let fade = 1 - excess / AppConstants.colorizationOcclusionGradedMultiple
+                                    occlusionConfidence = max(AppConstants.colorizationOcclusionGradedFloor, fade)
+                                    gradedExcessBand = UInt8(max(0, min(255, excess * 16)))
+                                } else {
+                                    // Same diagnostic the GPU kernel records — keep in lockstep.
+                                    let band = UInt8(max(0, min(255, excess * 16)))
+                                    if band < occlusionExcess[i] { occlusionExcess[i] = band }
+                                    if rejectReason[i] == 0 { rejectReason[i] = 1 }
+                                    continue
+                                }
+                            }
 
                             // Silhouette guard: reject observations straddling a depth discontinuity,
                             // where the coarse depth raster and the color raster disagree about which
@@ -661,7 +726,10 @@ enum VertexColorAccumulator {
                                    mPtr[sy * maskBytesPerRow + sx] > 0 { person = true; break }
                             }
                         }
-                        if person { continue }
+                        if person {
+                            if rejectReason[i] == 0 { rejectReason[i] = 2 }
+                            continue
+                        }
                     }
 
                     // Quality weight: head-on views and closer frames win.
@@ -672,13 +740,27 @@ enum VertexColorAccumulator {
                     // Back-face rejection: a vertex whose normal points away from the camera is
                     // being seen THROUGH its own surface — abs() used to give it full weight.
                     let dotNV = simd_dot(normals[i], viewDir)
-                    guard dotNV >= AppConstants.colorizationBackfaceDotMin else { continue }
+                    guard dotNV >= AppConstants.colorizationBackfaceDotMin else {
+                        if rejectReason[i] == 0 { rejectReason[i] = 3 }
+                        continue
+                    }
                     let angleWeight = abs(dotNV)                           // 1 = head-on, 0 = grazing
+                    // Facing gate on graded admission — mirrors the GPU kernel.
+                    if occlusionConfidence < 1,
+                       angleWeight < AppConstants.colorizationOcclusionGradedMinFacing {
+                        if gradedExcessBand < occlusionExcess[i] { occlusionExcess[i] = gradedExcessBand }
+                        if rejectReason[i] == 0 { rejectReason[i] = 1 }
+                        continue
+                    }
                     let clampedDist = max(dist, distFloor)
                     let distWeight = 1.0 / (clampedDist * clampedDist)     // inverse-square, floored
-                    let weight = angleWeight * distWeight * frameWeight    // keyframes get a sharpness bonus
-                    guard weight > 1e-6 else { continue }
+                    let weight = angleWeight * distWeight * frameWeight * occlusionConfidence
+                    guard weight > 1e-6 else {
+                        if rejectReason[i] == 0 { rejectReason[i] = 4 }
+                        continue
+                    }
 
+                    if occlusionConfidence < 1 { hadGraded[i] = 1 } else { hadClean[i] = 1 }
                     let offset = py * bytesPerRow + px * bytesPerPixel
                     let r = ptr[offset]
                     let g = ptr[offset + 1]
@@ -768,6 +850,62 @@ enum VertexColorAccumulator {
                             coloredCount, vertexCount,
                             vertexCount > 0 ? Double(vertexCount - coloredCount) / Double(vertexCount) * 100 : 0,
                             sampledFiles.count, useFaces ? "360-faces" : "keyframes", elapsed))
+        // WHERE the gray is, which decides whose problem it is. On 2026-08-21 the two
+        // sources differed 1.4% vs 10.6% on the same mesh with dense LiDAR depth (measured:
+        // ZERO no-data pixels across 52 maps), so the gap is not sensor holes — this split
+        // says whether it is coverage (a 360 camera sees the ceiling the iPad never pointed
+        // at) or rejection (a test we control being too strict).
+        if vertexCount > 0 {
+            var grayUnseen = 0, graySeen = 0
+            var byReason = [Int](repeating: 0, count: 6)
+            // Buckets of "how much wider would the tolerance have to be to rescue this?"
+            var within1x = 0, within2x = 0, within4x = 0, beyond4x = 0
+            for i in 0..<vertexCount where obsCount[i] == 0 {
+                if everInFrustum[i] == 0 { grayUnseen += 1; continue }
+                graySeen += 1
+                let reason = Int(rejectReason[i])
+                if reason < byReason.count { byReason[reason] += 1 }
+                guard occlusionExcess[i] != 255 else { continue }
+                // r was excess × 16, so 16 == one full tolerance width past the limit.
+                switch occlusionExcess[i] {
+                case 0..<16: within1x += 1
+                case 16..<32: within2x += 1
+                case 32..<64: within4x += 1
+                default: beyond4x += 1
+                }
+            }
+            let total = Double(vertexCount)
+            PerfDiag.log(String(format: "[VertexColor] gray breakdown: %.1f%% never in any frustum (coverage), "
+                                + "%.1f%% seen but always rejected (occlusion/mask/backface)",
+                                Double(grayUnseen) / total * 100, Double(graySeen) / total * 100))
+            var rescued = 0
+            for i in 0..<vertexCount where obsCount[i] > 0 && hadClean[i] == 0 && hadGraded[i] == 1 {
+                rescued += 1
+            }
+            if rescued > 0 {
+                PerfDiag.log(String(format: "[VertexColor] graded occlusion rescued %d verts (%.1f%% of mesh) "
+                                    + "that had NO clean observation — these were gray before",
+                                    rescued, Double(rescued) / total * 100))
+            }
+            if graySeen > 0 {
+                let pct = { (n: Int) in Double(n) / Double(graySeen) * 100 }
+                PerfDiag.log(String(format: "[VertexColor] rejected-gray reasons: occlusion %.0f%%, person-mask %.0f%%, "
+                                    + "backface %.0f%%, weight-floor %.0f%%, depth-no-data %.0f%%, unattributed %.0f%%",
+                                    pct(byReason[1]), pct(byReason[2]), pct(byReason[3]),
+                                    pct(byReason[4]), pct(byReason[5]), pct(byReason[0])))
+                // The actionable one: how much of the occlusion-rejected gray sits just
+                // past the limit? A large ≤2× bucket means the tolerance is the problem;
+                // a large >4× bucket means the mesh really is behind something and no
+                // threshold change is honest.
+                let occluded = within1x + within2x + within4x + beyond4x
+                if occluded > 0 {
+                    let opct = { (n: Int) in Double(n) / Double(occluded) * 100 }
+                    PerfDiag.log(String(format: "[VertexColor] occlusion margin (best case per vertex): "
+                                        + "≤1× tol %.0f%%, ≤2× %.0f%%, ≤4× %.0f%%, >4× %.0f%% — of %d verts",
+                                        opct(within1x), opct(within2x), opct(within4x), opct(beyond4x), occluded))
+                }
+            }
+        }
         return data
     }
 

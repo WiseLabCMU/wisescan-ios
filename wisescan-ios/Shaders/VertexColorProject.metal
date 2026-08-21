@@ -37,6 +37,10 @@ struct VertexColorParams {
     float    edgeSpreadFrac;     // reject if 3×3 depth spread > frac × depth (0 disables)
     float    backfaceDotMin;     // reject if signed n·v below this (-1 disables)
     uint     depthIsRaster;      // 1 when depth was RASTERIZED from the mesh (cube faces), 0 for sensor depth
+    float    occlusionGradedMult; // admit past-tolerance samples out to this multiple, fading to 0 (0 = hard reject)
+    float    occlusionGradedFloor;// minimum weight multiplier for an admitted marginal sample
+    float    occlusionGradedMaxMM;// absolute cap (mm) on the graded band, whatever the multiple gives
+    float    occlusionGradedMinFacing; // grade only when |n·v| is at least this (depth excess is only a valid proxy head-on)
 };
 
 // Per-vertex output: packed (r, g, b, _) + weight
@@ -83,6 +87,21 @@ kernel void vertexColorProject(
     int texH = int(colorTex.get_height());
     if (px >= texW || py >= texH) return;
 
+    // FRUSTUM WITNESS. From here the vertex is inside this frame's image — whatever
+    // happens next (occlusion, person mask, backface) is a REJECTION, not a coverage
+    // gap. The alpha channel of the packed color is otherwise unused (always 0), so this
+    // costs nothing and lets the accumulator split "never seen by any frame" from "seen
+    // and always rejected" — the difference between needing more sweep and needing a
+    // looser test.
+    results[tid].rgba.w = 1;
+
+    // Multiplier applied to this observation's weight by the occlusion test: 1 = cleanly
+    // visible, between 0 and 1 = past tolerance but PROVISIONALLY admitted at reduced
+    // confidence. Provisional because the admission also needs the view angle, which is
+    // not known until further down — see the facing gate before the weight is formed.
+    float occlusionConfidence = 1.0;
+    float gradedExcess16 = 0.0;   // diagnostic payload if this ends up rejected after all
+
     // Depth occlusion test
     if (params.hasDepth != 0 && params.depthW > 0) {
         int dpx = px * params.downscaleFactor * params.depthW / max(params.imgW, 1);
@@ -98,7 +117,10 @@ kernel void vertexColorProject(
             // skip. Rasterized depth: no mesh lies along this ray, so nothing can be
             // occluding — pass. Treating a raster hole as sensor no-data painted every
             // mesh gap gray on the cube-face path.
-            if (depthMM == 0.0 && params.depthIsRaster == 0) return;
+            if (depthMM == 0.0 && params.depthIsRaster == 0) {
+                results[tid].rgba.g = 5;   // REASON_DEPTH_NODATA
+                return;
+            }
 
             if (depthMM > 0.0) {
             // Rasterized depth is a hard-edged z-buffer of the very mesh being colored, so
@@ -119,7 +141,32 @@ kernel void vertexColorProject(
             // Tolerance scales with range (LiDAR error grows with distance) with a
             // near-field floor, so close occluders no longer bleed through 50 mm.
             float tolMM = max(params.occlusionMM, params.occlusionFrac * depthMM);
-            if (expectedMM > depthMM + tolMM) return;
+            if (expectedMM > depthMM + tolMM) {
+                float excess = (expectedMM - depthMM - tolMM) / max(tolMM, 1.0);
+                // GRADED, not binary. Inside the graded band the sample is admitted with a
+                // weight that fades to the floor — it loses to any clean observation of the
+                // same vertex (the reduce is a WEIGHTED median) but beats leaving the vertex
+                // gray. Past the band it is real geometry in the way: hard reject.
+                // Two bounds, not one. The multiple alone compounded with a tolerance that
+                // is itself 8% of depth — at 3 m that admitted samples ~1 m behind the
+                // surface, and the field verdict was exactly that. The absolute cap is the
+                // physical one: grading is justified by sensor and mesh error, which does
+                // not grow with range.
+                float excessMM = expectedMM - depthMM - tolMM;
+                if (excess < params.occlusionGradedMult && excessMM < params.occlusionGradedMaxMM) {
+                    float fade = 1.0 - (excess / params.occlusionGradedMult);
+                    occlusionConfidence = max(params.occlusionGradedFloor, fade);
+                    gradedExcess16 = clamp(excess * 16.0, 0.0, 255.0);
+                } else {
+                    // REJECTION DIAGNOSTIC. weight stays 0 so this is never colored, which
+                    // frees r/g/b — the accumulator only reads them when weight > 0. r
+                    // carries how far past tolerance we were in sixteenths of a tolerance
+                    // width; g names the reason.
+                    results[tid].rgba.r = uchar(clamp(excess * 16.0, 0.0, 255.0));
+                    results[tid].rgba.g = 1;   // REASON_OCCLUSION
+                    return;
+                }
+            }
 
             // Silhouette guard: near a depth discontinuity the coarse depth raster and
             // the color raster disagree about which side of the edge a pixel is on, so
@@ -152,7 +199,10 @@ kernel void vertexColorProject(
                 int sx = mpx + dx, sy = mpy + dy;
                 if (sx >= 0 && sx < params.maskW && sy >= 0 && sy < params.maskH) {
                     half maskVal = maskTex.read(uint2(sx, sy)).r;
-                    if (maskVal > 0.0h) return;  // person detected
+                    if (maskVal > 0.0h) {        // person detected
+                        results[tid].rgba.g = 2; // REASON_PERSON_MASK
+                        return;
+                    }
                 }
             }
         }
@@ -170,12 +220,29 @@ kernel void vertexColorProject(
     // seen THROUGH its own surface (e.g. a tabletop's color landing on the underside) —
     // and abs() used to give it full head-on weight. backfaceDotMin = -1 restores that.
     float dotNV = dot(normal, viewDir);
-    if (dotNV < params.backfaceDotMin) return;
+    if (dotNV < params.backfaceDotMin) {
+        results[tid].rgba.g = 3;   // REASON_BACKFACE
+        return;
+    }
     float angleWeight = abs(dotNV);                       // 1 = head-on, 0 = grazing
+
+    // FACING GATE on graded admission. Head-on, a depth excess of N mm means the sampled
+    // surface really is N mm behind — the fade is meaningful. At a grazing angle the same
+    // excess can put the sampled pixel metres away ALONG the surface, which is the other
+    // half of why the first attempt bled. Refuse to grade there; a clean sample at any
+    // angle is still fine, this only gates the marginal ones.
+    if (occlusionConfidence < 1.0 && angleWeight < params.occlusionGradedMinFacing) {
+        results[tid].rgba.r = uchar(gradedExcess16);
+        results[tid].rgba.g = 1;   // REASON_OCCLUSION (refused: too grazing to grade)
+        return;
+    }
     float clampedDist = max(dist, params.distFloor);
     float distWeight = 1.0 / (clampedDist * clampedDist); // inverse-square
-    float w = angleWeight * distWeight * params.frameWeight;
-    if (w <= 1e-6) return;
+    float w = angleWeight * distWeight * params.frameWeight * occlusionConfidence;
+    if (w <= 1e-6) {
+        results[tid].rgba.g = 4;   // REASON_WEIGHT_FLOOR (grazing/far to the point of nothing)
+        return;
+    }
 
     // Sample color from downsampled image texture (nearest-neighbor, matching CPU path)
     constexpr sampler nearestSampler(filter::nearest);
@@ -183,9 +250,12 @@ kernel void vertexColorProject(
                         (float(py) + 0.5) / float(texH));
     half4 color = colorTex.sample(nearestSampler, uv);
 
+    // Alpha doubles as provenance: 1 = cleanly visible, 2 = admitted by the graded
+    // occlusion band. Both mean "in frustum", so the coverage split still works, and the
+    // accumulator can report how many vertices only exist because of grading.
     results[tid].rgba = uchar4(uchar(color.r * 255.0h),
                                 uchar(color.g * 255.0h),
                                 uchar(color.b * 255.0h),
-                                0);
+                                occlusionConfidence < 1.0 ? 2 : 1);
     results[tid].weight = w;
 }

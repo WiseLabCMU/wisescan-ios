@@ -587,6 +587,21 @@ struct ARCoverageView: UIViewRepresentable {
                     ghostAnchor.removeFromParent()
                 }
 
+                // …and the 360° spacing rings, which used to outlive everything else here.
+                // They are cleared when the still session ends, but that happens when the
+                // SAVE completes — so through the whole "Name this Space" dialog the rings
+                // hung in an otherwise bare passthrough scene, and a Discard from that
+                // dialog left them behind entirely (field report 2026-08-21). Teardown is
+                // the honest place: the rings belong to the recording, and the recording is
+                // over. syncStillRings rebuilds them from scratch on the next scan.
+                if context.coordinator.stillRingAnchor != nil {
+                    context.coordinator.stillRingAnchor?.removeFromParent()
+                    context.coordinator.stillRingAnchor = nil
+                    context.coordinator.renderedStillRings = 0
+                    context.coordinator.ringFloorUsed.removeAll()
+                    context.coordinator.floorYByCell.removeAll()
+                }
+
                 let config = Self.makeConfiguration()
                 if scanStore?.needsTrackingReset == true {
                     // VIO-compromised halt: re-bootstrap tracking with the nominal downgrade —
