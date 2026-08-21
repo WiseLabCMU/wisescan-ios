@@ -471,12 +471,16 @@ enum AppConstants {
     // MARK: - Mesh Preview Geometry
 
     /// Above this many input faces the viewer skips the 4:1 triangle subdivision it otherwise
-    /// applies for smoother vertex-color interpolation. The split is cosmetic only, and at
-    /// room-scale density (the team's device logs put a full mesh at 413k-790k faces) it
-    /// quadruples vertices, indices and the normal-accumulation pass to smooth a gradient
-    /// whose bands are already under a pixel. Small artifacts — proxy quads, single-room
-    /// dynamic meshes — stay under the gate and keep the smoothing.
-    static let meshSubdivisionMaxFaces = 50_000
+    /// applies before rendering. The split never changed the color gradient — a midpoint's
+    /// stored color is the average of its edge's endpoints, exactly what GPU interpolation
+    /// already produces there — so its only visible effect is slightly sharper edge-midpoint
+    /// shading normals under the physically-based height-ramp material (~8° on non-planar
+    /// edges). At room-scale density every source variant lands above the gate (device logs:
+    /// full mesh 413k-790k faces, proxy 130k, dynamic derived from the proxy), so real scans
+    /// skip the split uniformly and save 4x the geometry, index and normal-accumulation cost;
+    /// only small synthetic or single-object meshes keep it.
+    /// `nonisolated`: read from `buildGeometry`, which runs off the main actor.
+    nonisolated static let meshSubdivisionMaxFaces = 50_000
 
     // MARK: - Scan Timeline (mesh-preview time scrubber)
     /// A/B auto-blink cadence. ~1 s is long enough to read the geometry and short enough that the

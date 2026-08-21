@@ -1061,10 +1061,10 @@ struct MeshPreviewView: UIViewRepresentable {
         } else {
             colors = heightGradientColors(vertices: vertices, minY: minY, maxY: maxY)
         }
-        // Subdivide mesh for smoother vertex color interpolation
-        // Each triangle → 4 sub-triangles via edge midpoints. Gated on input face count: the
-        // split is purely cosmetic gradient smoothing, and on a room-scale mesh the extra
-        // vertices land inside a pixel while costing 4x the geometry, normals and index buffer.
+        // Subdivide mesh: each triangle → 4 sub-triangles via edge midpoints, gated on input
+        // face count. The split is cosmetic — midpoint colors equal what GPU interpolation
+        // already produces, so its only effect is sharper edge-midpoint shading normals —
+        // and on a room-scale mesh that isn't worth 4x the geometry, normals and index buffer.
         let subdivide = indices.count / 3 <= AppConstants.meshSubdivisionMaxFaces
         var subVertices = vertices
         var subColors = colors
