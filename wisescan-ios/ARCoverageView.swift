@@ -4376,10 +4376,12 @@ struct ARCoverageView: UIViewRepresentable {
     /// backed by the wall family, floors/levels/ramps by floor-class faces.
     static func buildQuadSupport(planes: [PlaneRegistration.Plane], verts: [SIMD3<Float>],
                                  faces: [(Int, Int, Int)], faceClasses: Data,
-                                 dilateBy: Int = quadSupportDilateCells) -> [QuadSupport] {
+                                 dilateBy: Int = quadSupportDilateCells,
+                                 tolerances: [Float]? = nil) -> [QuadSupport] {
         let patches = classifyPatches(verts: verts, faces: faces, faceClasses: faceClasses)
         return buildQuadSupport(planes: planes, wallPatches: patches.walls,
-                                floorPatches: patches.floors, dilateBy: dilateBy)
+                                floorPatches: patches.floors, dilateBy: dilateBy,
+                                tolerances: tolerances)
     }
 
     /// Patch-based core — the builder computes the class partition once and every mask consumer
@@ -4931,9 +4933,11 @@ struct ARCoverageView: UIViewRepresentable {
 
     static func deriveRampPlanes(verts: [SIMD3<Float>], faces: [(Int, Int, Int)], faceClasses: Data,
                                  explainedBy explained: [PlaneRegistration.Plane],
-                                 support: [QuadSupport]? = nil) -> RampDerivation {
+                                 support: [QuadSupport]? = nil,
+                                 explainedTolerances: [Float]? = nil) -> RampDerivation {
         let patches = classifyPatches(verts: verts, faces: faces, faceClasses: faceClasses)
-        return deriveRampPlanes(floorPatches: patches.floors, explainedBy: explained, support: support)
+        return deriveRampPlanes(floorPatches: patches.floors, explainedBy: explained, support: support,
+                                explainedTolerances: explainedTolerances)
     }
 
     /// Patch-based core — the builder computes the class partition once and every consumer reuses it.

@@ -591,12 +591,14 @@ final class GhostProxyPlaneDerivationTests: XCTestCase {
         let floor = try XCTUnwrap(out.first)
         XCTAssertEqual(floor.center.y, 0, accuracy: 0.03)
 
-        let masks = ARCoverageView.buildQuadSupport(planes: out, verts: m.verts, faces: m.faces,
-                                                    faceClasses: m.classData,
-                                                    dilateBy: 0)
         // Derived-plane tolerance: the platform's surface is 12 cm off the floor plane — outside the
         // 8 cm band, so it must NOT be covered (old behaviour: inside 15 cm, silently subtracted).
         let tight = [ARCoverageView.derivedQuadCoverageMeters]
+        // The mask is built at the SAME tight band the coverage test below uses, mirroring
+        // production: a derived floor's support mask is built at 0.08, not at the RoomPlan default.
+        let masks = ARCoverageView.buildQuadSupport(planes: out, verts: m.verts, faces: m.faces,
+                                                    faceClasses: m.classData,
+                                                    dilateBy: 0, tolerances: tight)
         let onPlatform = SIMD3<Float>(0, 0.12, 1.9)
         XCTAssertEqual(ARCoverageView.quadCoverage(out, support: masks, tolerances: tight, onPlatform),
                        .offPlane, "the platform was absorbed by its neighbouring floor")
