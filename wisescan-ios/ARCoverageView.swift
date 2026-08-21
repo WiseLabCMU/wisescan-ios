@@ -940,6 +940,15 @@ struct ARCoverageView: UIViewRepresentable {
         /// delivery (the signature of ARKit VIO being starved). Touched only on the delegate queue.
         private var lastFrameTimestamp: TimeInterval = 0
 
+        /// Last sweep-yaw value published to `ScanStats`, as SpaceAnalyzer's own 1° bucket, and when.
+        /// `CaptureView.body` reads `scanStats.analysisYaw` (the `onChange(of:)` operand), so every
+        /// write re-evaluates the whole capture UI — and the analyzer quantizes the value to 1°
+        /// anyway, so a frame that cannot move the bucket has nothing to say. Touched only on the
+        /// delegate queue. `nil` = nothing published yet this session.
+        private var lastPublishedYawBucket: Int?
+        /// ARFrame timestamp (monotonic, boot-relative) of that publish.
+        private var lastYawPublishTime: TimeInterval = 0
+
         /// Wall-clock (ms) of the most recent ARFrame delivery, readable from any thread.
         /// 0 = no frame yet. Drives `reviveSessionIfStalled` — the record button's escape from a
         /// dead capture graph (2026-07-24 run 3: after a battery-idle resume the Fig capture
@@ -2680,6 +2689,19 @@ struct ARCoverageView: UIViewRepresentable {
                     hasPerson = Self.hasPersonPixels(in: seg)
                 }
                 let yaw = frame.camera.eulerAngles.y // radians, ±π
+                // Publish the yaw only when it crosses one of SpaceAnalyzer's 1° buckets — the
+                // analyzer floors this value to whole degrees, so a sub-degree change cannot alter
+                // its coverage, but it does invalidate all of CaptureView.body. The republish timer
+                // is not cosmetic: the analyzer's fallback timeout is evaluated inside updateYaw, so
+                // a stationary operator still needs samples to reach it. The value itself stays RAW
+                // radians, so the analyzer's arithmetic is unchanged on every sample it does see.
+                let yawBucket = Int((yaw * (180 / Float.pi)).rounded(.down))
+                let publishYaw = yawBucket != lastPublishedYawBucket
+                    || frame.timestamp - lastYawPublishTime >= AppConstants.analysisYawRepublishSeconds
+                if publishYaw {
+                    lastPublishedYawBucket = yawBucket
+                    lastYawPublishTime = frame.timestamp
+                }
                 DispatchQueue.main.async { [weak self] in
                     guard let stats = self?.scanStats else { return }
                     stats.ambientIntensity = intensity
@@ -2690,7 +2712,7 @@ struct ARCoverageView: UIViewRepresentable {
                     // Person detection: latch true if ANY frame has person pixels
                     if hasPerson { stats.personDetectedDuringAnalysis = true }
                     // Yaw for 360° progress (stored as raw radians, SpaceAnalyzer tracks coverage)
-                    stats.analysisYaw = yaw
+                    if publishYaw { stats.analysisYaw = yaw }
                 }
             }
 

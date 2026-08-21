@@ -467,6 +467,7 @@ enum AppConstants {
     static let analysisTimeoutSeconds: TimeInterval = 30          // fallback timeout if 360° not reached
     static let analysisYawCompletionDeg: Float = 330              // yaw coverage (degrees) to count as "360°" (allow slight gap)
     static let analysisYawMaxFillDeg = 45                         // max per-frame yaw delta credited as swept rotation (beyond = tracking snap, credit nothing)
+    static let analysisYawRepublishSeconds: TimeInterval = 0.5    // republish an unchanged sweep yaw this often — SpaceAnalyzer evaluates its fallback timeout inside updateYaw
 
     // MARK: - Scan Timeline (mesh-preview time scrubber)
     /// A/B auto-blink cadence. ~1 s is long enough to read the geometry and short enough that the
