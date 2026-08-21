@@ -37,6 +37,8 @@ struct VertexColorParams {
     float    edgeSpreadFrac;     // reject if 3×3 depth spread > frac × depth (0 disables)
     float    backfaceDotMin;     // reject if signed n·v below this (-1 disables)
     uint     depthIsRaster;      // 1 when depth was RASTERIZED from the mesh (cube faces), 0 for sensor depth
+    float    occlusionGradedMult; // admit past-tolerance samples out to this multiple, fading to 0 (0 = hard reject)
+    float    occlusionGradedFloor;// minimum weight multiplier for an admitted marginal sample
 };
 
 // Per-vertex output: packed (r, g, b, _) + weight
@@ -91,6 +93,10 @@ kernel void vertexColorProject(
     // looser test.
     results[tid].rgba.w = 1;
 
+    // Multiplier applied to this observation's weight by the occlusion test: 1 = cleanly
+    // visible, between 0 and 1 = past tolerance but admitted at reduced confidence.
+    float occlusionConfidence = 1.0;
+
     // Depth occlusion test
     if (params.hasDepth != 0 && params.depthW > 0) {
         int dpx = px * params.downscaleFactor * params.depthW / max(params.imgW, 1);
@@ -131,15 +137,23 @@ kernel void vertexColorProject(
             // near-field floor, so close occluders no longer bleed through 50 mm.
             float tolMM = max(params.occlusionMM, params.occlusionFrac * depthMM);
             if (expectedMM > depthMM + tolMM) {
-                // REJECTION DIAGNOSTIC. weight stays 0 so this is never colored, which
-                // frees r/g/b — the accumulator only reads them when weight > 0. r carries
-                // how far past tolerance we were, in sixteenths of a tolerance-width,
-                // clamped: that turns "would a wider tolerance rescue this vertex?" into a
-                // measurement instead of an argument. g names the reason.
                 float excess = (expectedMM - depthMM - tolMM) / max(tolMM, 1.0);
-                results[tid].rgba.r = uchar(clamp(excess * 16.0, 0.0, 255.0));
-                results[tid].rgba.g = 1;   // REASON_OCCLUSION
-                return;
+                // GRADED, not binary. Inside the graded band the sample is admitted with a
+                // weight that fades to the floor — it loses to any clean observation of the
+                // same vertex (the reduce is a WEIGHTED median) but beats leaving the vertex
+                // gray. Past the band it is real geometry in the way: hard reject.
+                if (excess < params.occlusionGradedMult) {
+                    float fade = 1.0 - (excess / params.occlusionGradedMult);
+                    occlusionConfidence = max(params.occlusionGradedFloor, fade);
+                } else {
+                    // REJECTION DIAGNOSTIC. weight stays 0 so this is never colored, which
+                    // frees r/g/b — the accumulator only reads them when weight > 0. r
+                    // carries how far past tolerance we were in sixteenths of a tolerance
+                    // width; g names the reason.
+                    results[tid].rgba.r = uchar(clamp(excess * 16.0, 0.0, 255.0));
+                    results[tid].rgba.g = 1;   // REASON_OCCLUSION
+                    return;
+                }
             }
 
             // Silhouette guard: near a depth discontinuity the coarse depth raster and
@@ -201,7 +215,7 @@ kernel void vertexColorProject(
     float angleWeight = abs(dotNV);                       // 1 = head-on, 0 = grazing
     float clampedDist = max(dist, params.distFloor);
     float distWeight = 1.0 / (clampedDist * clampedDist); // inverse-square
-    float w = angleWeight * distWeight * params.frameWeight;
+    float w = angleWeight * distWeight * params.frameWeight * occlusionConfidence;
     if (w <= 1e-6) {
         results[tid].rgba.g = 4;   // REASON_WEIGHT_FLOOR (grazing/far to the point of nothing)
         return;
@@ -213,9 +227,12 @@ kernel void vertexColorProject(
                         (float(py) + 0.5) / float(texH));
     half4 color = colorTex.sample(nearestSampler, uv);
 
+    // Alpha doubles as provenance: 1 = cleanly visible, 2 = admitted by the graded
+    // occlusion band. Both mean "in frustum", so the coverage split still works, and the
+    // accumulator can report how many vertices only exist because of grading.
     results[tid].rgba = uchar4(uchar(color.r * 255.0h),
                                 uchar(color.g * 255.0h),
                                 uchar(color.b * 255.0h),
-                                1);   // keep the frustum witness set on the success path
+                                occlusionConfidence < 1.0 ? 2 : 1);
     results[tid].weight = w;
 }

@@ -374,6 +374,11 @@ enum VertexColorAccumulator {
         // never occlusion-rejected). "Least severe" is the decision-relevant one: if some
         // frame rejected a vertex by only a hair, a slightly wider tolerance rescues it —
         // whereas the worst case tells us nothing we can act on.
+        // Provenance of the observations that DID land: a vertex coloured only by graded
+        // (past-tolerance) samples exists solely because of the graded band, and is the
+        // population to eyeball for bleed.
+        var hadClean = [UInt8](repeating: 0, count: vertexCount)
+        var hadGraded = [UInt8](repeating: 0, count: vertexCount)
         var rejectReason = [UInt8](repeating: 0, count: vertexCount)
         var occlusionExcess = [UInt8](repeating: 255, count: vertexCount)
         let distFloor = max(AppConstants.colorizationMinDistanceM, 0.001)
@@ -583,6 +588,7 @@ enum VertexColorAccumulator {
                         if rejectReason[i] == 0 { rejectReason[i] = obs.g }
                         continue
                     }
+                    if obs.a == 2 { hadGraded[i] = 1 } else { hadClean[i] = 1 }
                     visibleCount += 1
 
                     let base = i * K
@@ -623,6 +629,9 @@ enum VertexColorAccumulator {
                     guard px < width && py < height else { continue }
                     everInFrustum[i] = 1   // frustum witness — see the GPU path
 
+                    // Occlusion confidence: 1 = clean, <1 = admitted past tolerance at
+                    // reduced weight (see the GPU kernel; keep in lockstep).
+                    var occlusionConfidence: Float = 1
                     // Depth Occlusion Test (mirrors the GPU kernel exactly — keep in lockstep)
                     if let dPtr = depthPtr {
                         let dpx = px * downscaleFactor * depthWidth / max(imgW, 1)
@@ -661,12 +670,17 @@ enum VertexColorAccumulator {
                             let tolMM = max(AppConstants.colorizationOcclusionToleranceMM,
                                             AppConstants.colorizationOcclusionToleranceFrac * depthMM)
                             if expectedMM > depthMM + tolMM {
-                                // Same diagnostic the GPU kernel records — keep in lockstep.
                                 let excess = (expectedMM - depthMM - tolMM) / max(tolMM, 1)
-                                let band = UInt8(max(0, min(255, excess * 16)))
-                                if band < occlusionExcess[i] { occlusionExcess[i] = band }
-                                if rejectReason[i] == 0 { rejectReason[i] = 1 }
-                                continue
+                                if excess < AppConstants.colorizationOcclusionGradedMultiple {
+                                    let fade = 1 - excess / AppConstants.colorizationOcclusionGradedMultiple
+                                    occlusionConfidence = max(AppConstants.colorizationOcclusionGradedFloor, fade)
+                                } else {
+                                    // Same diagnostic the GPU kernel records — keep in lockstep.
+                                    let band = UInt8(max(0, min(255, excess * 16)))
+                                    if band < occlusionExcess[i] { occlusionExcess[i] = band }
+                                    if rejectReason[i] == 0 { rejectReason[i] = 1 }
+                                    continue
+                                }
                             }
 
                             // Silhouette guard: reject observations straddling a depth discontinuity,
@@ -726,12 +740,13 @@ enum VertexColorAccumulator {
                     let angleWeight = abs(dotNV)                           // 1 = head-on, 0 = grazing
                     let clampedDist = max(dist, distFloor)
                     let distWeight = 1.0 / (clampedDist * clampedDist)     // inverse-square, floored
-                    let weight = angleWeight * distWeight * frameWeight    // keyframes get a sharpness bonus
+                    let weight = angleWeight * distWeight * frameWeight * occlusionConfidence
                     guard weight > 1e-6 else {
                         if rejectReason[i] == 0 { rejectReason[i] = 4 }
                         continue
                     }
 
+                    if occlusionConfidence < 1 { hadGraded[i] = 1 } else { hadClean[i] = 1 }
                     let offset = py * bytesPerRow + px * bytesPerPixel
                     let r = ptr[offset]
                     let g = ptr[offset + 1]
@@ -849,6 +864,15 @@ enum VertexColorAccumulator {
             PerfDiag.log(String(format: "[VertexColor] gray breakdown: %.1f%% never in any frustum (coverage), "
                                 + "%.1f%% seen but always rejected (occlusion/mask/backface)",
                                 Double(grayUnseen) / total * 100, Double(graySeen) / total * 100))
+            var rescued = 0
+            for i in 0..<vertexCount where obsCount[i] > 0 && hadClean[i] == 0 && hadGraded[i] == 1 {
+                rescued += 1
+            }
+            if rescued > 0 {
+                PerfDiag.log(String(format: "[VertexColor] graded occlusion rescued %d verts (%.1f%% of mesh) "
+                                    + "that had NO clean observation — these were gray before",
+                                    rescued, Double(rescued) / total * 100))
+            }
             if graySeen > 0 {
                 let pct = { (n: Int) in Double(n) / Double(graySeen) * 100 }
                 PerfDiag.log(String(format: "[VertexColor] rejected-gray reasons: occlusion %.0f%%, person-mask %.0f%%, "
