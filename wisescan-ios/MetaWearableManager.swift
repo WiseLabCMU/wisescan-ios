@@ -105,6 +105,33 @@ class MetaWearableManager {
     }
     private let throttle = FrameThrottle()
 
+    // Admission cap for the per-frame decode/segment/encode job (thread-safe for the background
+    // video publisher). The privacy pass runs two Vision requests plus a pixelate and an encode,
+    // which can take longer than the frame interval, so an uncapped Task per frame queues a
+    // backlog instead of dropping. Mirrors the phone path's cap (FrameCaptureSession's
+    // inFlightSaves / AppConstants.maxFramesInFlight): admit up to the cap, drop the rest.
+    private final class InFlightGate: @unchecked Sendable {
+        private var lock = os_unfair_lock()
+        private var count = 0
+        private let limit: Int
+        init(limit: Int) { self.limit = limit }
+        /// True when this frame was admitted — the caller MUST then call `release()` exactly once
+        /// when its work finishes (use `defer`), or the pipeline latches shut.
+        func tryAcquire() -> Bool {
+            os_unfair_lock_lock(&lock)
+            defer { os_unfair_lock_unlock(&lock) }
+            guard count < limit else { return false }
+            count += 1
+            return true
+        }
+        func release() {
+            os_unfair_lock_lock(&lock)
+            count -= 1
+            os_unfair_lock_unlock(&lock)
+        }
+    }
+    private let inFlightFrames = InFlightGate(limit: AppConstants.wearableFramesInFlight)
+
     private final class TokenBox: @unchecked Sendable {
         var token: (any AnyListenerToken)?
     }
@@ -655,6 +682,7 @@ class MetaWearableManager {
 
             // Subscribe to actual camera frame output
             let localThrottle = self.throttle
+            let localGate = self.inFlightFrames
             self.frameToken = session.videoFramePublisher.listen { [weak self] frame in
                 guard let self = self else { return }
                 // Throttle to ~7 FPS
@@ -676,6 +704,15 @@ class MetaWearableManager {
 
                 if let pixelBuffer = CMSampleBufferGetImageBuffer(frame.sampleBuffer) {
 
+                    // Drop rather than queue when a previous frame's job is still running. Checked
+                    // BEFORE the decode so a dropped frame costs nothing; released in the Task's
+                    // defer below. The SDK recycles its buffers, so a queued frame would be stale
+                    // anyway — the newest frame is the only one worth the segmentation pass.
+                    guard localGate.tryAcquire() else {
+                        if PerfDiag.enabled { PerfDiag.log("[MetaWearable] frame DROPPED — job already in flight (cap \(AppConstants.wearableFramesInFlight))") }
+                        return
+                    }
+
                     // Decode the frame here (the SDK `frame` is not Sendable, so don't capture
                     // it in the Task). Read settings directly — UserDefaults is thread-safe and
                     // AppConstants is a plain constant, so no MainActor hop is needed.
@@ -693,6 +730,7 @@ class MetaWearableManager {
                         : nil
 
                     Task {
+                        defer { localGate.release() }
                         var finalJpegData: Data?
                         var finalUIImage: UIImage?
 
