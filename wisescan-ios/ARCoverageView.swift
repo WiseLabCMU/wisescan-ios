@@ -5730,9 +5730,7 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
-        if let mapURL = worldMapURL,
-           let data = try? Data(contentsOf: mapURL),
-           let worldMap = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data) {
+        if let mapURL = worldMapURL, let worldMap = WorldMapCache.shared.map(for: mapURL) {
             config.initialWorldMap = worldMap
             LocalizationDiag.logMapStats(worldMap, context: mapURL.lastPathComponent) // 0.1: prove compounding/map growth
         }
@@ -5747,6 +5745,49 @@ struct ARCoverageView: UIViewRepresentable {
         return config
     }
 
+}
+
+// MARK: - World-Map Cache
+
+/// The last `ARWorldMap` `makeConfiguration` deserialized, keyed by the file it came from.
+///
+/// A rescan calls `makeConfiguration(worldMapURL:)` at capture bring-up and again on the record tap
+/// (a third time when the ghost data arrives), always with the same URL — so the same archive,
+/// budgeted at 50 MB, was read off disk and keyed-unarchived two or three times in a row,
+/// synchronously, on the main actor. Serving the repeats from here leaves only the first to pay.
+///
+/// **Eviction: capacity ONE.** A key other than the held one replaces the entry, so at most a single
+/// `ARWorldMap` is ever retained here. The key is the file's path, byte size and modification date,
+/// so a map rewritten at a path already seen is re-read rather than served stale.
+private final class WorldMapCache: @unchecked Sendable {
+    static let shared = WorldMapCache()
+
+    private let lock = NSLock()
+    private var cachedKey = ""
+    private var cachedMap: ARWorldMap?
+
+    /// The map archived at `url`, deserializing it on a miss. `nil` for an unreadable file or a blob
+    /// that isn't an `ARWorldMap` — the same failure mode as the inline load this replaces.
+    func map(for url: URL) -> ARWorldMap? {
+        let attrs = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let size = attrs.flatMap { $0.fileSize } ?? -1
+        let modified = attrs.flatMap { $0.contentModificationDate }?.timeIntervalSinceReferenceDate ?? -1
+        let key = "\(url.standardizedFileURL.path)|\(size)|\(modified)"
+
+        if let hit = lock.withLock({ cachedKey == key ? cachedMap : nil }) { return hit }
+
+        let loaded = PerfDiag.timed("worldmap_load", warnOverMs: 100) { () -> ARWorldMap? in
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data)
+        }
+        guard let loaded else { return nil }
+
+        lock.withLock {
+            cachedKey = key
+            cachedMap = loaded
+        }
+        return loaded
+    }
 }
 
 // MARK: - Deferred RoomPlan Build  [DEFERRED-ROOMPLAN]
