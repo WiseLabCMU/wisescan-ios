@@ -106,7 +106,10 @@ kernel void vertexColorProject(
             // skip. Rasterized depth: no mesh lies along this ray, so nothing can be
             // occluding — pass. Treating a raster hole as sensor no-data painted every
             // mesh gap gray on the cube-face path.
-            if (depthMM == 0.0 && params.depthIsRaster == 0) return;
+            if (depthMM == 0.0 && params.depthIsRaster == 0) {
+                results[tid].rgba.g = 5;   // REASON_DEPTH_NODATA
+                return;
+            }
 
             if (depthMM > 0.0) {
             // Rasterized depth is a hard-edged z-buffer of the very mesh being colored, so
@@ -127,7 +130,17 @@ kernel void vertexColorProject(
             // Tolerance scales with range (LiDAR error grows with distance) with a
             // near-field floor, so close occluders no longer bleed through 50 mm.
             float tolMM = max(params.occlusionMM, params.occlusionFrac * depthMM);
-            if (expectedMM > depthMM + tolMM) return;
+            if (expectedMM > depthMM + tolMM) {
+                // REJECTION DIAGNOSTIC. weight stays 0 so this is never colored, which
+                // frees r/g/b — the accumulator only reads them when weight > 0. r carries
+                // how far past tolerance we were, in sixteenths of a tolerance-width,
+                // clamped: that turns "would a wider tolerance rescue this vertex?" into a
+                // measurement instead of an argument. g names the reason.
+                float excess = (expectedMM - depthMM - tolMM) / max(tolMM, 1.0);
+                results[tid].rgba.r = uchar(clamp(excess * 16.0, 0.0, 255.0));
+                results[tid].rgba.g = 1;   // REASON_OCCLUSION
+                return;
+            }
 
             // Silhouette guard: near a depth discontinuity the coarse depth raster and
             // the color raster disagree about which side of the edge a pixel is on, so
@@ -160,7 +173,10 @@ kernel void vertexColorProject(
                 int sx = mpx + dx, sy = mpy + dy;
                 if (sx >= 0 && sx < params.maskW && sy >= 0 && sy < params.maskH) {
                     half maskVal = maskTex.read(uint2(sx, sy)).r;
-                    if (maskVal > 0.0h) return;  // person detected
+                    if (maskVal > 0.0h) {        // person detected
+                        results[tid].rgba.g = 2; // REASON_PERSON_MASK
+                        return;
+                    }
                 }
             }
         }
@@ -178,12 +194,18 @@ kernel void vertexColorProject(
     // seen THROUGH its own surface (e.g. a tabletop's color landing on the underside) —
     // and abs() used to give it full head-on weight. backfaceDotMin = -1 restores that.
     float dotNV = dot(normal, viewDir);
-    if (dotNV < params.backfaceDotMin) return;
+    if (dotNV < params.backfaceDotMin) {
+        results[tid].rgba.g = 3;   // REASON_BACKFACE
+        return;
+    }
     float angleWeight = abs(dotNV);                       // 1 = head-on, 0 = grazing
     float clampedDist = max(dist, params.distFloor);
     float distWeight = 1.0 / (clampedDist * clampedDist); // inverse-square
     float w = angleWeight * distWeight * params.frameWeight;
-    if (w <= 1e-6) return;
+    if (w <= 1e-6) {
+        results[tid].rgba.g = 4;   // REASON_WEIGHT_FLOOR (grazing/far to the point of nothing)
+        return;
+    }
 
     // Sample color from downsampled image texture (nearest-neighbor, matching CPU path)
     constexpr sampler nearestSampler(filter::nearest);
