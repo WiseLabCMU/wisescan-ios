@@ -2689,15 +2689,26 @@ struct ARCoverageView: UIViewRepresentable {
                     hasPerson = Self.hasPersonPixels(in: seg)
                 }
                 let yaw = frame.camera.eulerAngles.y // radians, ±π
-                // Publish the yaw only when it crosses one of SpaceAnalyzer's 1° buckets — the
-                // analyzer floors this value to whole degrees, so a sub-degree change cannot alter
-                // its coverage, but it does invalidate all of CaptureView.body. The republish timer
-                // is not cosmetic: the analyzer's fallback timeout is evaluated inside updateYaw, so
-                // a stationary operator still needs samples to reach it. The value itself stays RAW
-                // radians, so the analyzer's arithmetic is unchanged on every sample it does see.
-                let yawBucket = Int((yaw * (180 / Float.pi)).rounded(.down))
-                let publishYaw = yawBucket != lastPublishedYawBucket
-                    || frame.timestamp - lastYawPublishTime >= AppConstants.analysisYawRepublishSeconds
+                // Publish the yaw only when it crosses one of SpaceAnalyzer's 1° buckets — every
+                // write invalidates all of CaptureView.body via the onChange operand. The bucket
+                // expression REPLICATES the analyzer's own quantization (updateYaw: normalize to
+                // [0,360), then truncate), so an unchanged bucket here is by construction a sample
+                // updateYaw coalesces anyway; a floor-of-signed-degrees gate would disagree with
+                // the analyzer in 1-ulp windows around each negative degree boundary. The value
+                // published stays RAW radians, so the analyzer's arithmetic is unchanged on every
+                // sample it does see. The republish timer keeps the analyzer's fallback timeout
+                // evaluated during a stationary hold (it is checked inside updateYaw) — with the
+                // pre-existing caveat that delivery rides onChange, so a bit-identical Float at the
+                // republish instant delivers nothing; the ungated write-every-frame code had the
+                // same property. isFinite: Int(non-finite) traps, and this runs on every frame of
+                // every scan, not just analysis — a non-finite yaw publishes nothing (the analyzer
+                // could only have trapped on it anyway).
+                var yawDeg = yaw * (180 / Float.pi)
+                if yawDeg < 0 { yawDeg += 360 }
+                let yawBucket: Int? = yaw.isFinite ? Int(yawDeg.truncatingRemainder(dividingBy: 360)) : nil
+                let publishYaw = yawBucket != nil
+                    && (yawBucket != lastPublishedYawBucket
+                        || frame.timestamp - lastYawPublishTime >= AppConstants.analysisYawRepublishSeconds)
                 if publishYaw {
                     lastPublishedYawBucket = yawBucket
                     lastYawPublishTime = frame.timestamp
