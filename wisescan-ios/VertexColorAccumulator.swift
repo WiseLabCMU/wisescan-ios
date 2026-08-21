@@ -221,17 +221,28 @@ enum VertexColorAccumulator {
     /// fraction once projection starts. The setup work before the first frame is not
     /// instant on a large scan — mesh parse, normals, and (faces probe) a ~20 s cube-face
     /// cut — so a bare "Coloring…" looked stalled. Callers show whichever arrives last.
+    /// Data overload — parses and forwards. Callers that already hold parsed geometry
+    /// should pass it instead (see the `parsed:` overload) so one `processOne` pass does
+    /// not re-tokenize the same 16-45 MB file for each stage.
     static func colorizeFromSavedFrames(objData: Data, rawDataDir: URL?,
+                                        progress: ((Double) -> Void)? = nil,
+                                        phase: ((String) -> Void)? = nil) -> Data? {
+        let parsedOrNil: MeshParser.OBJData? = PerfDiag.timed("vc_obj_parse") {
+            MeshParser.parseOBJ(from: objData)
+        }
+        guard let parsed = parsedOrNil else { return nil }
+        return colorizeFromSavedFrames(parsed: parsed, rawDataDir: rawDataDir,
+                                       progress: progress, phase: phase)
+    }
+
+    static func colorizeFromSavedFrames(parsed: MeshParser.OBJData, rawDataDir: URL?,
                                         progress: ((Double) -> Void)? = nil,
                                         phase: ((String) -> Void)? = nil) -> Data? {
         guard let rawDir = rawDataDir else { return nil }
         let startTime = CACurrentMediaTime()
         let fm = FileManager.default
 
-        // Parse OBJ vertices using shared parser
         phase?("Reading mesh…")
-        let parsed: MeshParser.OBJData? = PerfDiag.timed("vc_obj_parse") { MeshParser.parseOBJ(from: objData) }
-        guard let parsed else { return nil }
         var vertices = parsed.vertices
         guard !vertices.isEmpty else { return nil }
 

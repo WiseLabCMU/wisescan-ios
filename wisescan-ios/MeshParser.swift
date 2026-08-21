@@ -68,8 +68,14 @@ enum MeshParser {
         vertices.reserveCapacity(data.count / 30)
         faces.reserveCapacity(data.count / 30)
 
-        var bytes = [UInt8](data)
-        bytes.append(0) // sentinel so strtof/strtol always terminate
+        // Sentinel so strtof/strtol always terminate. Reserve FIRST: `[UInt8](data)` sizes
+        // the buffer exactly to data.count, so the append exceeded capacity and triggered
+        // geometric growth — a second allocation plus a full memcpy of a 16-45 MB file, on
+        // every one of this function's nine call sites.
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(data.count + 1)
+        bytes.append(contentsOf: data)
+        bytes.append(0)
 
         bytes.withUnsafeMutableBufferPointer { rawBuf in
             guard let base = rawBuf.baseAddress else { return }

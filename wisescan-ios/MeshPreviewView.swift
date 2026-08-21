@@ -783,6 +783,14 @@ struct MeshPreviewView: UIViewRepresentable {
                                           heightRange: (min: Float, max: Float)? = nil,
                                           heightTransform: simd_float4x4? = nil) -> (SCNGeometry, Int)? {
         guard let parsed = MeshParser.parseOBJ(from: data) else { return nil }
+        return buildGeometry(parsed: parsed, vertexColors: vertexColors,
+                             heightRange: heightRange, heightTransform: heightTransform)
+    }
+
+    /// Parsed overload — for callers that already hold the geometry.
+    nonisolated static func buildGeometry(parsed: MeshParser.OBJData, vertexColors: Data?,
+                                          heightRange: (min: Float, max: Float)? = nil,
+                                          heightTransform: simd_float4x4? = nil) -> (SCNGeometry, Int)? {
 
         let vertices: [SCNVector3] = parsed.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
         var indices: [UInt32] = []
@@ -981,9 +989,18 @@ struct MeshPreviewView: UIViewRepresentable {
     /// for one pose to mean the same view across rescans.
     nonisolated static func generateSnapshot(meshURL: URL, colorsURL: URL?, poseMatrix: [Float]? = nil,
                                              frameCenter: SIMD3<Float>? = nil) -> UIImage? {
-        guard let meshData = try? Data(contentsOf: meshURL) else { return nil }
+        guard let meshData = try? Data(contentsOf: meshURL),
+              let parsed = MeshParser.parseOBJ(from: meshData) else { return nil }
+        return generateSnapshot(parsed: parsed, colorsURL: colorsURL,
+                                poseMatrix: poseMatrix, frameCenter: frameCenter)
+    }
+
+    /// Parsed overload — `processOne` renders the preview from geometry it already holds.
+    nonisolated static func generateSnapshot(parsed: MeshParser.OBJData, colorsURL: URL?,
+                                             poseMatrix: [Float]? = nil,
+                                             frameCenter: SIMD3<Float>? = nil) -> UIImage? {
         let colorsData = colorsURL.flatMap { try? Data(contentsOf: $0) }
-        guard let (geometry, _) = buildGeometry(from: meshData, vertexColors: colorsData) else { return nil }
+        guard let (geometry, _) = buildGeometry(parsed: parsed, vertexColors: colorsData) else { return nil }
 
         let node = SCNNode(geometry: geometry)
         let (minBound, maxBound) = node.boundingBox

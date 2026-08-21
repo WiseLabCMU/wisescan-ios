@@ -1,4 +1,5 @@
 import CoreGraphics
+import CryptoKit
 import ImageIO
 import UIKit
 import simd
@@ -106,6 +107,28 @@ enum EquirectFaceExport {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard !jpgs.isEmpty else { return nil }
         let depthDir = root.appendingPathComponent("depth")
+
+        // CACHE. Regeneration exists so a re-solved pose is always reflected — but the field
+        // loop re-runs Color constantly (ON/OFF comparisons, re-runs after a re-solve), and
+        // one 2026-08-19 session regenerated these faces five times over. Each pass costs a
+        // ~0.3 s equirect decode plus five GPU reprojects, a mask cut, a depth raster and a
+        // JPEG encode PER STILL — roughly half of a 12-27 s colorize.
+        //
+        // So key the cache on everything that changes what a face contains: each still's
+        // baked pose and elevation offset, the solver version that produced them, the face
+        // size, and the registration transform the depth raster is un-applied by. A re-solve
+        // moves the fingerprint and the faces rebuild; a plain re-run hits.
+        let stamp = faceCacheFingerprint(jpgs: jpgs, rawDataDir: rawDataDir)
+        let stampURL = root.appendingPathComponent("fingerprint.txt")
+        if let stamp, let existing = try? String(contentsOf: stampURL, encoding: .utf8),
+           existing == stamp,
+           let cameraCount = try? fileManager.contentsOfDirectory(at: camerasDir,
+                                                                  includingPropertiesForKeys: nil).count,
+           cameraCount == jpgs.count * faceCount {
+            PerfDiag.log("[Colorize] face_frames CACHE HIT: \(cameraCount) faces from \(jpgs.count) still(s) — poses unchanged")
+            return (camerasDir, imagesDir)
+        }
+
         try? fileManager.removeItem(at: root)
         try? fileManager.createDirectory(at: camerasDir, withIntermediateDirectories: true)
         try? fileManager.createDirectory(at: imagesDir, withIntermediateDirectories: true)
@@ -169,7 +192,43 @@ enum EquirectFaceExport {
             }
         }
         PerfDiag.log("[Colorize] face_frames regenerated: \(written) faces from \(jpgs.count) still(s)")
+        // Stamp LAST, and only on a complete pass: a fingerprint written beside a partial
+        // face set would make the next run trust the gap.
+        if written == jpgs.count * faceCount, let stamp {
+            try? stamp.write(to: stampURL, atomically: true, encoding: .utf8)
+        }
         return written > 0 ? (camerasDir, imagesDir) : nil
+    }
+
+    /// Everything that changes what a generated face CONTAINS, hashed into one short string:
+    /// per still its baked `cam_transform`, `elevation_offset_deg` and solver version, plus
+    /// the face-size cap and the registration transform (which the depth raster is
+    /// un-applied by). Nil when a still lacks a baked pose — that scan is not cacheable and
+    /// should regenerate every time.
+    private static func faceCacheFingerprint(jpgs: [URL], rawDataDir: URL) -> String? {
+        // SHA256, not Hasher: Swift's Hasher is seeded per PROCESS, so its output would
+        // differ across app launches and the cache would miss every cold start — the exact
+        // case a field session hits most.
+        var canonical = "v1|size=\(AppConstants.equirectFaceSizeMax)|faces=\(faceCount)"
+        if let reg = SaveRegistration.loadSidecar(scanDirectory: rawDataDir.deletingLastPathComponent()),
+           reg.applied, let transform = reg.transformMatrix {
+            for column in 0..<4 {
+                for row in 0..<4 { canonical += String(format: "|%.6f", transform[column][row]) }
+            }
+        }
+        for jpg in jpgs {
+            let sidecarURL = jpg.deletingPathExtension().appendingPathExtension("json")
+            guard let data = try? Data(contentsOf: sidecarURL),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let cam = obj["cam_transform"] as? [Double], cam.count == 16 else { return nil }
+            canonical += "|\(jpg.lastPathComponent)"
+            for value in cam { canonical += String(format: ":%.6f", value) }
+            canonical += String(format: "|e=%.4f", (obj["elevation_offset_deg"] as? Double) ?? 0)
+            canonical += "|sv=\((obj["rig_calibration_solver_version"] as? Int) ?? 0)"
+            canonical += "|src=\((obj["rig_calibration_source"] as? String) ?? "")"
+        }
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        return digest.compactMap { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Entry
