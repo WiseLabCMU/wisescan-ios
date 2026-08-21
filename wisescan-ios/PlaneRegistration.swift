@@ -137,15 +137,36 @@ enum PlaneRegistration {
                                     SIMD3(m.columns.1.x, m.columns.1.y, m.columns.1.z),
                                     SIMD3(m.columns.2.x, m.columns.2.y, m.columns.2.z))
             let spin = simd_quatf(angle: ext.rotationOnYAxis, axis: SIMD3(0, 1, 0))
+            let normal = simd_normalize(rot * SIMD3(0, 1, 0))
+            // Orientation must agree with the classification. RoomPlan surfaces are gravity-aligned by
+            // construction, but a live anchor's classification is a guess about a real surface: a
+            // sloped ceiling, a ramp or a leaning board can arrive classified `.wall`, and a ramp can
+            // arrive classified `.floor`. Either is actively harmful rather than merely weak, because
+            // the solve reads FULL 3D normals — a tilted "wall" injects a vertical component into a
+            // translation meant to be horizontal, and a tilted "floor" corrupts the only constraint
+            // `ty` has. Neither shows up in the residual, which is perfectly consistent with the bad
+            // plane it came from.
+            guard orientationMatches(category: cat, normal: normal) else { return nil }
             let c = m * SIMD4<Float>(a.center.x, a.center.y, a.center.z, 1)
             return Plane(center: SIMD3(c.x, c.y, c.z),
-                         normal: simd_normalize(rot * SIMD3(0, 1, 0)),
+                         normal: normal,
                          xAxis: simd_normalize(rot * spin.act(SIMD3(1, 0, 0))),
                          yAxis: simd_normalize(rot * spin.act(SIMD3(0, 0, 1))),
                          width: ext.width, height: ext.height, category: cat)
         }
     }
     #endif
+
+    /// Whether a plane's orientation agrees with the category it claims: a wall's normal lies near the
+    /// horizon, a floor's points near straight up. Lives in the pure core (not behind the ARKit
+    /// conditional) so it can be exercised without a live anchor.
+    static func orientationMatches(category: Category, normal: SIMD3<Float>) -> Bool {
+        let tolerance = anchorOrientationToleranceDeg * .pi / 180
+        switch category {
+        case .wall:  return abs(normal.y) <= sin(tolerance)
+        case .floor: return abs(normal.y) >= cos(tolerance)
+        }
+    }
 
     /// Rigidly transform a plane — rotate its frame vectors, move its center (e.g. between the
     /// raw capture frame and the canonical frame).
@@ -248,6 +269,12 @@ enum PlaneRegistration {
     /// Correspondence gates. One fixed level (no coarse-to-fine schedule needed: ~10 planes a
     /// side, re-matched every iteration for the cost of a few hundred dot products).
     static let matchAngleDeg: Float = 25      // undirected normal agreement (ε yaw is sub-2°; generous)
+    /// How far a live plane anchor's normal may sit from the orientation its classification implies —
+    /// horizontal for a wall, vertical for a floor. Generous, since the point is to exclude surfaces
+    /// that are the wrong KIND of thing (a ramp, a sloped ceiling, a leaning board), not to police
+    /// tracking noise on a genuine wall.
+    static let anchorOrientationToleranceDeg: Float = 15
+
     static let matchOffsetM: Float = 0.6      // perpendicular plane-to-plane gap (covers maxTransM + noise)
     /// Floor-specific perpendicular offset gate — much tighter than `matchOffsetM` because floor
     /// normals are near-vertical, so `perp` is effectively the **Y gap** between two floor planes.

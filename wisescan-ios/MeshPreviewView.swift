@@ -42,6 +42,46 @@ struct MeshPreviewContainer: View {
     @State private var canonicalFrame: (center: SIMD3<Float>, span: Float)?
     @Environment(\.modelContext) private var modelContext
 
+    // MARK: Time scrubber (multi-generation timeline — see MeshPreviewView+Timeline)
+
+    /// The location's generations, oldest first. Resolved once on appear (main actor — SwiftData).
+    /// Fewer than two entries means no scrubber and no behaviour change at all.
+    @State private var timeline: [TimelineScan] = []
+    @State private var primaryIndex = 0
+    @State private var visibleIndex = 0
+    @StateObject private var timelineState = ScanTimelineState()
+    /// Non-nil once two generations are pinned for A/B comparison.
+    @State private var comparison: ABComparison?
+    /// While arming a comparison: the index pinned as side A (nil = not arming). A stays put while
+    /// the cursor moves to find B.
+    @State private var pendingA: Int?
+    @State private var isBlinking = false
+    /// Auto-blink driver. Held so it can be invalidated on exit/disappear — a live timer flipping
+    /// a dismissed view's state is the classic leak here.
+    @State private var blinkTimer: Timer?
+
+    /// True when the location has more than one generation to scrub through.
+    private var isTimelineActive: Bool { timeline.count > 1 }
+
+    /// The generation on screen: the scrubber's when it's active, else the scan the viewer opened.
+    private var visibleScan: TimelineScan? {
+        timeline.indices.contains(visibleIndex) ? timeline[visibleIndex] : nil
+    }
+
+    /// Which geometry is ACTUALLY on screen. Not always `meshSourceMode`: proxy/dynamic are
+    /// per-scan postprocess outputs, so a generation that lacks the requested one is drawn from its
+    /// full mesh and says so (see `sourceFallbackNote`).
+    private var effectiveSource: MeshSourceMode {
+        isTimelineActive ? timelineState.visibleSource : meshSourceMode
+    }
+
+    /// Set when the visible generation could not honor the current source mode.
+    private var sourceFallbackNote: String? {
+        guard isTimelineActive, meshSourceMode != .full, effectiveSource != meshSourceMode,
+              let tag = meshSourceMode.titleTag else { return nil }
+        return "No \(tag) mesh for this scan — showing full mesh"
+    }
+
     var body: some View {
         ZStack {
             if isViewerReady {
@@ -68,7 +108,11 @@ struct MeshPreviewContainer: View {
                         sceneBox: sceneBox,
                         meshSourceMode: $meshSourceMode,
                         hasProxyMesh: $hasProxyMesh,
-                        hasDynamicMesh: $hasDynamicMesh
+                        hasDynamicMesh: $hasDynamicMesh,
+                        timeline: timeline,
+                        primaryIndex: primaryIndex,
+                        visibleIndex: $visibleIndex,
+                        timelineState: timelineState
                     )
 
                     // 2D overlay icons projected from 3D face anchor positions
@@ -89,9 +133,17 @@ struct MeshPreviewContainer: View {
 
                 // Bottom-left legend (semantic classes + privacy + capture markers)
                 let showSemanticLegend = detectedClasses.count > 0 && semanticViewMode != .meshOnly
-                let showPrivacyLegend = hasPrivacyMarkers && showPrivacyMarkers
-                let showStillsLegend = keyframeMarkerMode.showStills && hasKeyframeMarkers
-                let showEquirectLegend = keyframeMarkerMode.showEquirectFaces && hasEquirects
+                // Privacy markers belong to one generation, so the legend row follows the scan on
+                // screen (the toolbar toggle is gated on the union — see the toolbar comment).
+                let visibleHasPrivacy = isTimelineActive ? timelineState.visibleHasPrivacy : hasPrivacyMarkers
+                let showPrivacyLegend = visibleHasPrivacy && showPrivacyMarkers
+                // Capture markers belong to one generation too: `hasKeyframeMarkers`/`hasEquirects`
+                // are the PRIMARY load's answer, so scrubbing has to read the visible slot's or the
+                // legend claims markers a sibling doesn't draw (and stays silent about ones it does).
+                let visibleHasKeyframes = isTimelineActive ? timelineState.visibleHasKeyframes : hasKeyframeMarkers
+                let visibleHasEquirects = isTimelineActive ? timelineState.visibleHasEquirects : hasEquirects
+                let showStillsLegend = keyframeMarkerMode.showStills && visibleHasKeyframes
+                let showEquirectLegend = keyframeMarkerMode.showEquirectFaces && visibleHasEquirects
                 if showSemanticLegend || showPrivacyLegend || showStillsLegend || showEquirectLegend {
                     VStack(alignment: .leading, spacing: 4) {
                         if showSemanticLegend {
@@ -131,7 +183,43 @@ struct MeshPreviewContainer: View {
                     .cornerRadius(8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                     .padding(.leading, 12)
-                    .padding(.bottom, 12)
+                    // Clear the scrubber bar when it's docked below (it owns the bottom strip).
+                    // A/B mode adds the flip/blink row above the notch strip, so the bar grows.
+                    .padding(.bottom, isTimelineActive ? (comparison != nil ? 176 : 138) : 12)
+                }
+
+                if isTimelineActive {
+                    ScanTimelineBar(
+                        timeline: timeline,
+                        state: timelineState,
+                        visibleIndex: $visibleIndex,
+                        comparison: $comparison,
+                        pendingA: $pendingA,
+                        isBlinking: $isBlinking
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                }
+            }
+
+            // Scrubbed onto a generation with nothing drawn yet — either its slot hasn't loaded or
+            // the variant the current source mode needs hasn't. Say what is being waited on
+            // instead of leaving a blank scene (or, worse, leaving the previous generation up and
+            // letting it read as this one).
+            if isTimelineActive, isMeshLoaded, let visible = visibleScan {
+                if timelineState.failedIDs.contains(visible.id) {
+                    Text("No mesh on disk for \(visible.name)")
+                        .font(.subheadline)
+                        .foregroundColor(.orange)
+                        .allowsHitTesting(false)
+                } else if !timelineState.readyIDs.contains(visible.id) || timelineState.visibleIsBlank {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white.opacity(0.7)))
+                        Text("Loading \(visible.name)…")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+                    .allowsHitTesting(false)
                 }
             }
 
@@ -171,7 +259,9 @@ struct MeshPreviewContainer: View {
             // nav bar, so top-alignment sits just BELOW the toolbar buttons and clear of the
             // Dynamic Island / camera array. Last in the ZStack so it stays legible over both
             // the mesh and the loading screen.
-            if let scanName = scanName {
+            // The title names the generation that's showing, not the one the viewer was opened
+            // with — scrubbing changes which scan you're looking at.
+            if let scanName = (isTimelineActive ? visibleScan?.name : scanName) {
                 previewTitle(scanName: scanName)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .padding(.top, 8)
@@ -179,7 +269,7 @@ struct MeshPreviewContainer: View {
             }
         }
         .toolbar {
-            if hasPrivacyMarkers {
+            if hasPrivacyMarkers || timelineState.offers.privacy {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showPrivacyMarkers.toggle()
@@ -189,7 +279,11 @@ struct MeshPreviewContainer: View {
                     }
                 }
             }
-            if !detectedClasses.isEmpty {
+            // The mode gates are OR'd with the timeline's union (`TimelineOffers`, populated only
+            // for multi-scan locations) so a toggle can't disappear under the user's finger when
+            // they scrub onto a generation that lacks that artifact. Per-scan absence is handled by
+            // falling THAT slot back and captioning it, not by removing the control.
+            if !detectedClasses.isEmpty || timelineState.offers.semantics {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         semanticViewMode = semanticViewMode.next
@@ -198,17 +292,19 @@ struct MeshPreviewContainer: View {
                     }
                 }
             }
-            if hasKeyframeMarkers {
+            if hasKeyframeMarkers || timelineState.offers.keyframes {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        keyframeMarkerMode = keyframeMarkerMode.next(hasEquirects: hasEquirects)
+                        keyframeMarkerMode = keyframeMarkerMode.next(
+                            hasEquirects: hasEquirects || timelineState.offers.equirects
+                        )
                     } label: {
                         Image(systemName: keyframeMarkerMode.iconName)
                             .foregroundColor(keyframeMarkerMode == .none ? .gray : .cyan)
                     }
                 }
             }
-            if hasProxyMesh || hasDynamicMesh {
+            if hasProxyMesh || hasDynamicMesh || timelineState.offers.proxy || timelineState.offers.dynamic {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         meshSourceMode = meshSourceMode.next
@@ -249,6 +345,8 @@ struct MeshPreviewContainer: View {
             Text("Save the current view angle as this location's default preview pose, then regenerate every scan's thumbnail from this viewpoint.")
         }
         .onAppear {
+            // A re-presented viewer must never inherit the previous dismissal's cancellation.
+            timelineState.isCancelled = false
             // Defer the heavy OBJ parsing to ensure the fullScreenCover animation completes smoothly
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 // Resolve the location's canonical frame from its ORIGINAL (earliest) scan before
@@ -257,8 +355,61 @@ struct MeshPreviewContainer: View {
                 if let original = location?.scans.min(by: CapturedScan.canonicalOrder) {
                     canonicalFrame = MeshPreviewView.canonicalRoomFrame(scanDirectoryURL: original.scanDirectory)
                 }
+                buildTimeline()
                 isViewerReady = true
             }
+        }
+        .onChange(of: isBlinking) { _, blinking in
+            blinkTimer?.invalidate()
+            blinkTimer = nil
+            guard blinking, comparison != nil else { return }
+            blinkTimer = Timer.scheduledTimer(withTimeInterval: AppConstants.timelineBlinkInterval,
+                                              repeats: true) { _ in
+                Task { @MainActor in
+                    guard let pair = comparison else { return }
+                    visibleIndex = pair.other(than: visibleIndex)
+                }
+            }
+        }
+        .onDisappear {
+            // A repeating timer outlives the view it drives unless it's cut here.
+            blinkTimer?.invalidate()
+            blinkTimer = nil
+            isBlinking = false
+            // Stop the sibling prefetch: it re-arms itself from its own completion, so nothing else
+            // would end it — it would keep parsing the rest of the location's meshes and writing
+            // into state this view no longer owns.
+            timelineState.isCancelled = true
+        }
+    }
+
+    /// Snapshots the location's generations for the scrubber, oldest first (`canonicalOrder` — the
+    /// same deterministic ordering postprocess and the canonical-frame lookup use). Main actor: it
+    /// reads `@Model` properties, which the background slot loads must never do.
+    ///
+    /// Bails out (leaving `timeline` empty, hence the scrubber unmounted and every code path exactly
+    /// as it was) unless the location has more than one scan AND the scan being previewed is one of
+    /// them — the primary slot has to be identifiable, or the timeline would load the displayed
+    /// generation a second time.
+    private func buildTimeline() {
+        guard let scans = location?.scans, scans.count > 1, let directory = scanDirectoryURL else { return }
+        let ordered = scans.sorted(by: CapturedScan.canonicalOrder)
+        guard let index = ordered.firstIndex(where: {
+            $0.scanDirectory.standardizedFileURL == directory.standardizedFileURL
+        }) else { return }
+        timeline = ordered.map { TimelineScan($0) }
+        primaryIndex = index
+        visibleIndex = index
+        // Seed the proxy/dynamic union from artifact PRESENCE across the timeline. Those two modes
+        // are the ones whose toggle would otherwise be unreachable when the opened generation
+        // happens to lack the artifact and a sibling has it — a slot only builds an alternate once
+        // the mode asks it to. Existence, not a parse: a file that then fails to build falls that
+        // slot back to its full mesh and captions it. A handful of stats; fine on main.
+        timelineState.offers.proxy = timeline.contains {
+            MeshPreviewView.proxyMeshURL(scanDirectoryURL: $0.scanDirectory) != nil
+        }
+        timelineState.offers.dynamic = timeline.contains {
+            MeshPreviewView.dynamicMeshURL(scanDirectoryURL: $0.scanDirectory) != nil
         }
     }
 
@@ -281,18 +432,27 @@ struct MeshPreviewContainer: View {
             // Proxy/dynamic take over the note: their colors are never the photo colorize
             // (colors.bin is aligned to mesh.obj's vertices, which both compact), and their
             // dropped faces are by design — say so rather than let it read as a bad scan.
-            if meshSourceMode == .dynamic {
+            // Driven by what is ACTUALLY drawn (see `effectiveSource`), so a generation that fell
+            // back to its full mesh can't be described as a proxy.
+            // Colorization is per-scan, so the color note follows the visible generation too.
+            let colored = (isTimelineActive ? visibleScan?.isColored : isColored) ?? isColored
+            if effectiveSource == .dynamic {
                 Text("Preview · dynamic · content only, no walls/floor/ceiling")
                     .font(.caption2)
                     .foregroundColor(.yellow)
-            } else if let tag = meshSourceMode.titleTag {
+            } else if let tag = effectiveSource.titleTag {
                 Text("Preview · \(tag) · height shading, faces dropped by design")
                     .font(.caption2)
                     .foregroundColor(.yellow)
             } else {
-                Text(isColored ? "Preview · colored mesh" : "Preview · shading only, colors not final")
+                Text(colored ? "Preview · colored mesh" : "Preview · shading only, colors not final")
                     .font(.caption2)
-                    .foregroundColor(isColored ? .green : .orange)
+                    .foregroundColor(colored ? .green : .orange)
+            }
+            if let note = sourceFallbackNote {
+                Text(note)
+                    .font(.caption2)
+                    .foregroundColor(.yellow)
             }
         }
         .padding(.horizontal, 12)
@@ -363,8 +523,20 @@ class MarkerProjectionState: ObservableObject {
 
     @Published var screenPositions: [MarkerScreenPos] = []
 
-    /// 3D anchor positions in scene-local coordinates (with center offset applied)
-    var anchorPositions: [SCNVector3] = []
+    /// 3D anchor positions in scene-local coordinates (with center offset applied).
+    ///
+    /// LOCKED because it has two writers on different threads: the mesh load sets it once, and the
+    /// timeline scrubber REPLACES it every time another generation becomes visible (markers belong
+    /// to one scan) — while `updateProjections` reads it from the SceneKit render thread at frame
+    /// rate. An unguarded array reassignment under a live reader is a use-after-free of the old
+    /// buffer, not merely a stale read. Uncontended lock/unlock is nanoseconds; the read is twice
+    /// per frame.
+    var anchorPositions: [SCNVector3] {
+        get { anchorLock.lock(); defer { anchorLock.unlock() }; return storedAnchorPositions }
+        set { anchorLock.lock(); storedAnchorPositions = newValue; anchorLock.unlock() }
+    }
+    private var storedAnchorPositions: [SCNVector3] = []
+    private let anchorLock = NSLock()
     /// Reference to the SCNView for projection
     weak var scnView: SCNView?
     /// Tracks whether the last update had no markers, so the common (no-marker) case
@@ -461,11 +633,22 @@ struct MeshPreviewView: UIViewRepresentable {
     @Binding var meshSourceMode: MeshSourceMode
     @Binding var hasProxyMesh: Bool
     @Binding var hasDynamicMesh: Bool
+    /// Every generation of this location's room, oldest first (`CapturedScan.canonicalOrder`), as
+    /// main-actor snapshots. EMPTY (or single-entry) for a single-scan location, which is what keeps
+    /// that case on exactly the code path it had before the scrubber existed. See
+    /// MeshPreviewView+Timeline.
+    var timeline: [TimelineScan] = []
+    /// Index of the generation the viewer opened on — loaded first, in `makeUIView`, so the screen
+    /// appears as fast as it always did; the siblings stream in behind it.
+    var primaryIndex: Int = 0
+    /// Index of the generation currently on screen (the scrub position).
+    @Binding var visibleIndex: Int
+    var timelineState: ScanTimelineState
 
     /// The ghost proxy artifact for a scan directory, if present — scan-dir top level then
     /// `raw_data/` (the same two-candidate resolution the metadata/roomplan readers use, since
     /// `writeBoth` mirrors the proxy into both).
-    static func proxyMeshURL(scanDirectoryURL: URL?) -> URL? {
+    nonisolated static func proxyMeshURL(scanDirectoryURL: URL?) -> URL? {
         guard let dir = scanDirectoryURL else { return nil }
         let candidates = [
             dir.appendingPathComponent("mesh_proxy.obj"),
@@ -474,9 +657,37 @@ struct MeshPreviewView: UIViewRepresentable {
         return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
+    /// Privacy (face-anchor) positions from a scan's `scan4d_metadata.json`, in the mesh's own
+    /// frame — the centering offset is applied by the caller. Checks both the raw_data/
+    /// subdirectory and the scan root (mirrors export logic). Shared by the primary load and the
+    /// timeline's sibling loads, which need the same list per generation.
+    nonisolated static func faceAnchorPositions(scanDirectoryURL: URL?) -> [SCNVector3] {
+        guard let scanDir = scanDirectoryURL else { return [] }
+        let candidates = [
+            scanDir.appendingPathComponent("raw_data").appendingPathComponent("scan4d_metadata.json"),
+            scanDir.appendingPathComponent("scan4d_metadata.json")
+        ]
+        var faceAnchors: [SCNVector3] = []
+        for jsonURL in candidates {
+            if let data = try? Data(contentsOf: jsonURL),
+               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let anchors = dict["face_anchors"] as? [[String: NSNumber]] {
+                for a in anchors {
+                    if let x = a["x"]?.floatValue,
+                       let y = a["y"]?.floatValue,
+                       let z = a["z"]?.floatValue {
+                        faceAnchors.append(SCNVector3(x, y, z))
+                    }
+                }
+                break // found it, stop searching
+            }
+        }
+        return faceAnchors
+    }
+
     /// The dynamic mesh artifact for a scan directory, if present — same two-candidate resolution
     /// as `proxyMeshURL`.
-    static func dynamicMeshURL(scanDirectoryURL: URL?) -> URL? {
+    nonisolated static func dynamicMeshURL(scanDirectoryURL: URL?) -> URL? {
         guard let dir = scanDirectoryURL else { return nil }
         let candidates = [
             dir.appendingPathComponent("mesh_dynamic.obj"),
@@ -568,28 +779,7 @@ struct MeshPreviewView: UIViewRepresentable {
                 dynamicGeometry = Self.buildGeometry(from: dynamicData, vertexColors: nil)?.0
             }
 
-            var faceAnchors: [SCNVector3] = []
-            if let scanDir = self.scanDirectoryURL {
-                // Check both raw_data/ subdirectory and scan root (mirrors export logic)
-                let candidates = [
-                    scanDir.appendingPathComponent("raw_data").appendingPathComponent("scan4d_metadata.json"),
-                    scanDir.appendingPathComponent("scan4d_metadata.json")
-                ]
-                for jsonURL in candidates {
-                    if let data = try? Data(contentsOf: jsonURL),
-                       let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let anchors = dict["face_anchors"] as? [[String: NSNumber]] {
-                        for a in anchors {
-                            if let x = a["x"]?.floatValue,
-                               let y = a["y"]?.floatValue,
-                               let z = a["z"]?.floatValue {
-                                faceAnchors.append(SCNVector3(x, y, z))
-                            }
-                        }
-                        break // found it, stop searching
-                    }
-                }
-            }
+            let faceAnchors = Self.faceAnchorPositions(scanDirectoryURL: self.scanDirectoryURL)
 
             if let md = meshData, let (geometry, _) = Self.buildGeometry(from: md, vertexColors: colorsData) {
                 // Build semantic outlines from RoomPlan data (roomplan.json)
@@ -696,6 +886,13 @@ struct MeshPreviewView: UIViewRepresentable {
                     context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
                     context.coordinator.semanticFillsNode?.isHidden = !mode.showFills
 
+                    // Adopt the generation just built as the timeline's first slot (and publish the
+                    // centering offset every later slot must reuse). No-op for a single-scan
+                    // location beyond recording the center.
+                    self.registerPrimaryTimelineSlot(container: containerNode,
+                                                     coordinator: context.coordinator, center: center)
+                    if self.timeline.count > 1 { self.applyTimelineVisibility(context.coordinator) }
+
                     // Position camera from the canonical span when provided (fixed zoom across
                     // a location's scans; the angle below is already fixed), else this model's size.
                     let size = SCNVector3(
@@ -732,6 +929,14 @@ struct MeshPreviewView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
+        if timeline.count > 1 {
+            // Multi-generation timeline: visibility is per-slot (exactly one generation shown) and
+            // the sibling loads are pumped from here. A single-scan location never enters this
+            // branch, so its behaviour is byte-for-byte what it was before the scrubber existed.
+            applyTimelineVisibility(context.coordinator)
+            pumpTimelineLoads(context.coordinator, scene: uiView.scene)
+            return
+        }
         let mode = semanticViewMode
         applyMeshVisibility(context.coordinator)
         context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
@@ -763,6 +968,30 @@ struct MeshPreviewView: UIViewRepresentable {
         weak var keyframeMotionNode: SCNNode?
         /// Reference to the equirect cube-face frustum container for toggling visibility.
         weak var equirectFacesNode: SCNNode?
+
+        // MARK: Timeline (multi-generation scrubbing — see MeshPreviewView+Timeline)
+
+        /// Every loaded generation keyed by scan id, the displayed one included. Empty for a
+        /// single-scan location apart from the primary entry.
+        var timelineSlots: [UUID: TimelineSlot] = [:]
+        /// The centering offset the displayed generation resolved (canonical frame center, or its
+        /// own bbox center when the location has no RoomPlan frame). EVERY slot reuses it — a
+        /// per-slot bbox center would absorb the very misalignment the timeline exists to show.
+        var resolvedCenter: SCNVector3?
+        /// One slot load at a time: N concurrent OBJ parses is the memory spike this avoids.
+        var timelineLoadInFlight = false
+        /// Last generation made visible, so the per-generation publishes (privacy anchors, legend
+        /// classes) happen on an actual scrub rather than on every `updateUIView`.
+        var lastVisibleScanID: UUID?
+        /// Last values ENQUEUED to `ScanTimelineState` for the visible generation. Not the last
+        /// PUBLISHED ones: those publishes are deferred out of the view update, so comparing
+        /// against the state object would skip an enqueue that undoes one still in flight.
+        var enqueuedVisibleSource: MeshSourceMode?
+        var enqueuedVisibleBlank: Bool?
+        /// The scan id every generation must be registered to for the timeline to be in one frame
+        /// (`timelineFrameTarget`) — resolved once by the primary load, read by every pump.
+        var timelineFrameTarget: String?
+        let timelineQueue = DispatchQueue(label: "org.arenaxr.scan4d.timeline", qos: .userInitiated)
 
         init(markerState: MarkerProjectionState) {
             self.markerState = markerState
@@ -885,13 +1114,19 @@ struct MeshPreviewView: UIViewRepresentable {
             let v1 = SIMD3<Float>(finalVertices[i1].x, finalVertices[i1].y, finalVertices[i1].z)
             let v2 = SIMD3<Float>(finalVertices[i2].x, finalVertices[i2].y, finalVertices[i2].z)
 
-            let normal = simd_normalize(simd_cross(v1 - v0, v2 - v0))
+            // A collinear triangle's cross product is zero, and normalizing it yields NaN that
+            // spreads into all three vertices — one sliver is enough to garbage the shading of
+            // everything it touches. Same length gate the other normal sites use.
+            let faceNormal = simd_cross(v1 - v0, v2 - v0)
+            guard simd_length(faceNormal) > 1e-8 else { continue }
+            let normal = simd_normalize(faceNormal)
             vertexNormals[i0] += normal
             vertexNormals[i1] += normal
             vertexNormals[i2] += normal
         }
-        // Normalize
-        let normals = vertexNormals.map { simd_normalize($0) }
+        // Normalize. A vertex whose every face was degenerate accumulated nothing, so it needs the
+        // same arbitrary-but-finite fallback the other accumulation consumers use.
+        let normals = vertexNormals.map { simd_length($0) > 0 ? simd_normalize($0) : SIMD3<Float>(0, 0, 1) }
             .map { SCNVector3($0.x, $0.y, $0.z) }
 
         let vertexSource = SCNGeometrySource(vertices: finalVertices)
@@ -1169,10 +1404,26 @@ struct MeshPreviewView: UIViewRepresentable {
         var outlineNodes: [SemanticOutlineResult.OutlineNode] = []
         var detectedSet = Set<SemanticClass>()
 
+        // Levels and ramps recovered from the classified mesh at post-process. RoomPlan gives exactly
+        // one floor plane per room, spanning the whole plan-view footprint, so without these a
+        // stairwell draws as a single orange slab across the entire staircase.
+        let derived = DerivedSurfacesData.load(scanDirectory: scanDir)
+
         // Build outlines for surfaces
         for surface in roomData.surfaces {
             let cls = SemanticClass.fromSurfaceCategory(surface.category)
             guard cls != .none else { continue }
+            // A derived level at the same height is the same physical surface measured better: its
+            // extent comes from where floor faces actually are, not from the room footprint. Prefer it
+            // and skip RoomPlan's, or the two draw on top of each other.
+            if cls == .floor, let derived,
+               let floorY = surface.transform.count == 16 ? surface.transform[13] : nil,
+               derived.surfaces.contains(where: {
+                   $0.category == DerivedSurfacesData.levelCategory
+                       && abs(($0.centerY ?? .infinity) - floorY) <= ARCoverageView.ghostProxyQuadCoverageMeters
+               }) {
+                continue
+            }
             detectedSet.insert(cls)
 
             let dims = SIMD3<Float>(surface.dimensions.width, surface.dimensions.height, surface.dimensions.depth)
@@ -1201,6 +1452,21 @@ struct MeshPreviewView: UIViewRepresentable {
             )
             let fill = buildOrientedBoxFillGeometry(
                 dimensions: dims, transform: transform, color: cls.color, opacity: 0.75
+            )
+            outlineNodes.append(SemanticOutlineResult.OutlineNode(geometry: wireframe, fillGeometry: fill))
+        }
+
+        // Derived levels and ramps draw as flat quads in the floor class — they ARE floor surfaces, and
+        // reusing the class keeps the legend and its palette untouched.
+        for surface in derived?.surfaces ?? [] {
+            guard let transform = surface.matrix else { continue }
+            detectedSet.insert(.floor)
+            let dims = SIMD3<Float>(surface.dimensions.width, surface.dimensions.height, 0)
+            let wireframe = buildOrientedBoxLineGeometry(
+                dimensions: dims, transform: transform, color: SemanticClass.floor.color
+            )
+            let fill = buildOrientedBoxFillGeometry(
+                dimensions: dims, transform: transform, color: SemanticClass.floor.color, opacity: 0.75
             )
             outlineNodes.append(SemanticOutlineResult.OutlineNode(geometry: wireframe, fillGeometry: fill))
         }

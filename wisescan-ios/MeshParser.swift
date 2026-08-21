@@ -55,14 +55,37 @@ enum MeshParser {
     /// Parses an OBJ file from raw data into vertices and triangle faces.
     /// Face indices are converted from 1-based to 0-based.
     ///
+    /// The byte-level core plus the out-of-range face filter — the combination every
+    /// consumer that indexes `vertices` directly needs. Callers that must preserve a
+    /// one-record-per-face alignment with an external sidecar want `parseOBJRaw` instead,
+    /// since a silently dropped face breaks that contract.
+    static func parseOBJ(from data: Data) -> OBJData? {
+        let parsed = parseOBJRaw(from: data)
+        guard !parsed.vertices.isEmpty, !parsed.faces.isEmpty else { return nil }
+
+        // Drop faces referencing out-of-range vertices (malformed/truncated OBJ) so every
+        // downstream consumer can index `vertices` without its own bounds check.
+        let validFaces = parsed.faces.filter {
+            Int($0.0) < parsed.vertices.count && Int($0.1) < parsed.vertices.count
+                && Int($0.2) < parsed.vertices.count
+        }
+        guard !validFaces.isEmpty else { return nil }
+        return OBJData(vertices: parsed.vertices, faces: validFaces)
+    }
+
+    /// UNFILTERED parse: every well-formed `v `/`f ` line, faces included whose indices point
+    /// past the vertex list. Callers must bounds-check before indexing `vertices`; in exchange
+    /// the emitted face count matches the file's face-line count exactly, which is what a
+    /// face-aligned sidecar (face_classes.bin) is checked against.
+    ///
     /// Parses the raw bytes directly (no whole-file String, no per-line/per-token
     /// Substring allocations), which is the dominant cost for large meshes. A trailing NUL
     /// is appended and each line is temporarily NUL-terminated so the C numeric parsers
-    /// (strtof/strtol) always stop at the line boundary. Semantics match the previous
-    /// String-based parser: only `v ` lines become vertices (not `vn`/`vt`), only `f ` lines
-    /// become faces, the first three face tokens are used (handles `a`, `a/b`, `a/b/c`),
-    /// indices are 1-based→0-based, and malformed lines are skipped.
-    static func parseOBJ(from data: Data) -> OBJData? {
+    /// (strtof/strtol) always stop at the line boundary. Only `v ` lines become vertices (not
+    /// `vn`/`vt`), only `f ` lines become faces, the first three face tokens are used (handles
+    /// `a`, `a/b`, `a/b/c`), indices are 1-based→0-based, and malformed lines — including any
+    /// face token that is not a positive integer — are skipped.
+    static func parseOBJRaw(from data: Data) -> OBJData {
         var vertices: [SIMD3<Float>] = []
         var faces: [(UInt32, UInt32, UInt32)] = []
         vertices.reserveCapacity(data.count / 30)
@@ -128,15 +151,7 @@ enum MeshParser {
             }
         }
 
-        guard !vertices.isEmpty, !faces.isEmpty else { return nil }
-
-        // Drop faces referencing out-of-range vertices (malformed/truncated OBJ) so every
-        // downstream consumer can index `vertices` without its own bounds check.
-        let validFaces = faces.filter {
-            Int($0.0) < vertices.count && Int($0.1) < vertices.count && Int($0.2) < vertices.count
-        }
-        guard !validFaces.isEmpty else { return nil }
-        return OBJData(vertices: vertices, faces: validFaces)
+        return OBJData(vertices: vertices, faces: faces)
     }
 
     /// Reconstructs a MeshResource from an `.obj` file format string.

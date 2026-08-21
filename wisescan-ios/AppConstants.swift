@@ -49,6 +49,7 @@ enum AppConstants {
         static let vrBloomEnabled = "vrBloomEnabled"
         static let semanticLabeling = "semanticLabeling"
         static let memDiagForceReclaim = "memDiagForceReclaim"
+        static let forceRebuildArtifacts = "forceRebuildArtifacts"
         static let meshClassifier = "meshClassifier"
         static let scanCoachingEnabled = "scanCoachingEnabled"
         static let registerLegacyScans = "registerLegacyScans"
@@ -113,6 +114,10 @@ enum AppConstants {
     /// an attribution session, never leave it on. Doesn't reclaim Metal/GPU buffers (those free on
     /// RealityKit's schedule), so the delta is a floor on what a subsystem releases.
     static let memDiagForceReclaim: Bool = false
+    /// Developer: re-run the derived-artifact builders even when their output is already at the current
+    /// version. Their diagnostics are computed during the build, so an up-to-date scan otherwise prints
+    /// nothing and the only way to re-examine it is to bump a version header.
+    static let forceRebuildArtifacts: Bool = false
     /// Use `.meshWithClassification` scene reconstruction instead of plain `.mesh`. Default ON:
     /// benched 2026-07 (same room, on vs off, AR and VR modes) at no measurable CPU delta and
     /// ~70–100 MB memory — affordable, and the per-face labels are what lets us split wall vs
@@ -462,6 +467,14 @@ enum AppConstants {
     static let analysisTimeoutSeconds: TimeInterval = 30          // fallback timeout if 360° not reached
     static let analysisYawCompletionDeg: Float = 330              // yaw coverage (degrees) to count as "360°" (allow slight gap)
     static let analysisYawMaxFillDeg = 45                         // max per-frame yaw delta credited as swept rotation (beyond = tracking snap, credit nothing)
+
+    // MARK: - Scan Timeline (mesh-preview time scrubber)
+    /// A/B auto-blink cadence. ~1 s is long enough to read the geometry and short enough that the
+    /// difference between two generations pops as motion rather than as two separate pictures.
+    static let timelineBlinkInterval: TimeInterval = 1.0
+    /// Above this many generations the per-tick date labels overlap into noise, so only the
+    /// selected tick keeps its label (the readout above the bar always names the selected scan).
+    static let timelineMaxTickLabels = 6
 
     // MARK: - 360° Still Source (Theta OSC spike — feat/still-source-360)
     static let thetaCaptureTimeout: TimeInterval = 20            // max wait for a takePicture command to reach "done"

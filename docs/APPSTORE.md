@@ -55,6 +55,7 @@ TIME-SERIES SCANNING
 • On-device Process step finishes each scan: room layout, plane-based registration, ghost proxy, and vertex coloring
 • Automatic plane registration aligns every rescan into the location's shared coordinate frame — walls and floors matched, unreliable fits refused rather than guessed
 • Rescan Space and Link Adjacent Space load a configurable ghost overlay of previous captures, with live auto-alignment against detected planes
+• Multi-level spaces: steps, landings, and ramps that room modelling misses are recovered from the scan's own mesh and shown in the 3D preview
 • Adjacent stitching: scan neighboring areas with shared coordinate frames
 • ARWorldMap relocalization with rejection and manual ghost mesh alignment
 • Bad-scan warning right after save, so a failed capture can be redone on the spot
@@ -95,6 +96,7 @@ Requires a LiDAR-equipped iPhone or iPad Pro. Meta Ray-Ban Smart Glasses support
 ```
 • Process step: finish scans on-device — room layout, plane-based registration into a shared per-location frame, rescan ghost, and vertex coloring — with upload/export gated until complete
 • Automatic rescan alignment: walls and floors register each rescan into the location's canonical coordinate frame; unreliable fits are refused, never guessed
+• Multi-level rooms: steps, landings, and ramps are recovered from the scan mesh, and curved walls keep their real geometry instead of being flattened
 • Hi-res tap stills: hold still until the reticle locks, tap to capture a native-resolution photo; amber coverage overlay shows where photos are still needed
 • Photo coverage tracking: occlusion-correct world-space coverage grid with overlap and parallax coaching, exported for dataset triage
 • Stop safety: the stop button always asks — Save & End, Save & Scan Adjacent, Discard, or Cancel

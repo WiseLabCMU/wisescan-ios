@@ -129,7 +129,14 @@ enum ScanPostprocessor {
     /// The achievable-but-not-done steps for a scan, in execution order. Empty = complete to the
     /// tier this scan's raw inputs allow (which for a roomless scan is "nothing room-derived").
     /// Room-derived steps become achievable only once the deferred build has landed roomplan.json.
-    static func pendingSteps(for scan: CapturedScan, includeColorize: Bool) -> [Step] {
+    /// `forceRebuild` bypasses the "already at the current builder version" shortcuts, so a step whose
+    /// output is up to date runs anyway. This is a DEVELOPER affordance: the derived-artifact builders
+    /// compute their diagnostics during the build, so a scan already at the current version prints
+    /// nothing and there is otherwise no way to re-examine it short of bumping a version header. It
+    /// deliberately does NOT force registration — that bakes a transform into mesh.obj in place, and
+    /// re-running it against already-canonical artifacts would double-bake.
+    static func pendingSteps(for scan: CapturedScan, includeColorize: Bool,
+                             forceRebuild: Bool = false) -> [Step] {
         var steps: [Step] = []
         let fm = FileManager.default
         let roomDone = artifactURL("roomplan.json", in: scan) != nil
@@ -186,7 +193,7 @@ enum ScanPostprocessor {
         // quads, invisible as wireframe).
         let proxyCurrent = artifactURL("mesh_proxy.obj", in: scan).map(proxyIsCurrent) ?? false
         let dynamicCurrent = artifactURL("mesh_dynamic.obj", in: scan).map(dynamicIsCurrent) ?? false
-        if (!proxyCurrent || !dynamicCurrent), roomDone,
+        if (forceRebuild || !proxyCurrent || !dynamicCurrent), roomDone,
            artifactURL("face_classes.bin", in: scan) != nil {
             steps.append(.proxy)
         }
@@ -476,6 +483,7 @@ enum ScanPostprocessor {
     /// that scan); `completion` fires on main after the whole batch.
     static func run(scans: [CapturedScan],
                     colorize: Bool = false,
+                    forceRebuild: Bool = false,
                     modelContext: ModelContext,
                     progress: ((CapturedScan, String?) -> Void)? = nil,
                     completion: (() -> Void)? = nil) {
@@ -523,7 +531,7 @@ enum ScanPostprocessor {
                 raw: scan.rawDataPath,
                 name: scan.name,
                 previewURL: scan.modelPreviewURL,
-                steps: pendingSteps(for: scan, includeColorize: colorize),
+                steps: pendingSteps(for: scan, includeColorize: colorize, forceRebuild: forceRebuild),
                 origRoomPlanURL: orig.flatMap { artifactURL("roomplan.json", in: $0) },
                 origId: orig?.id,
                 pose: scan.location?.imagingPoseMatrix,
@@ -586,6 +594,10 @@ enum ScanPostprocessor {
         func writeBoth(_ data: Data, _ name: String) {
             try? data.write(to: dir.appendingPathComponent(name), options: .atomic)
             try? data.write(to: raw.appendingPathComponent(name), options: .atomic)
+        }
+        func removeBoth(_ name: String) {
+            try? fm.removeItem(at: dir.appendingPathComponent(name))
+            try? fm.removeItem(at: raw.appendingPathComponent(name))
         }
         func mirrorToRaw(_ name: String) {
             let src = dir.appendingPathComponent(name)
@@ -737,6 +749,18 @@ enum ScanPostprocessor {
         // out from under a version-current proxy — rebuild it even though its header says current.
         if steps.contains(.proxy) || appliedT != nil {
             report("Building proxy…")
+            // A registration was just baked into mesh.obj, so every derived artifact sitting on disk
+            // describes the OLD raw frame — and the ghost loader would de-register it a second time.
+            // Delete first: an interrupted or failing rebuild then leaves ABSENCE, which consumers
+            // handle (fall back to the full mesh, and pendingSteps re-offers .proxy), rather than a
+            // version-current artifact in the wrong frame, which nothing detects. Only on a bake —
+            // a .proxy-only run's artifacts are already frame-correct and must survive a failure.
+            if appliedT != nil {
+                removeBoth("mesh_proxy.obj")
+                removeBoth("mesh_dynamic.obj")
+                removeBoth(DerivedSurfacesData.filename)
+                log.notice("[GhostProxy] cleared raw-frame artifacts before re-framed rebuild for \(w.name, privacy: .public)")
+            }
             if let classesURL = artifact("face_classes.bin"),
                let classes = try? Data(contentsOf: classesURL),
                let mesh = meshCache.data(),
@@ -745,11 +769,35 @@ enum ScanPostprocessor {
                                                                  roomPlanPlanes: planes) {
                     writeBoth(result.proxy.data, "mesh_proxy.obj")
                     writeBoth(result.dynamic.data, "mesh_dynamic.obj")
+                    // The levels/ramps the proxy just recovered, as data for the consumers that need
+                    // the plane list without re-parsing the mesh. A rebuild that finds NOTHING must
+                    // clear the file rather than leave the previous run's answer standing: coverage
+                    // changes between generations, so a level found once can legitimately disappear.
+                    if result.levels.isEmpty && result.ramps.isEmpty {
+                        removeBoth(DerivedSurfacesData.filename)
+                        log.info("[GhostProxy] derived surfaces: none found — sidecar cleared")
+                    } else if let json = try? JSONEncoder().encode(
+                                  DerivedSurfacesData(levels: result.levels, ramps: result.ramps)) {
+                        writeBoth(json, DerivedSurfacesData.filename)
+                        log.info("[GhostProxy] derived surfaces: \(result.levels.count) level(s), \(result.ramps.count) ramp(s)")
+                    } else {
+                        removeBoth(DerivedSurfacesData.filename)
+                        log.warning("[GhostProxy] derived surfaces ENCODE FAILED (\(result.levels.count) level(s), \(result.ramps.count) ramp(s)) — sidecar cleared")
+                    }
                     outcome.didStructural = true
                     log.info("[GhostProxy] built at postprocess: proxy \(result.proxy.faceCount) faces (\(result.proxy.data.count / 1024) KB), dynamic \(result.dynamic.faceCount) faces (\(result.dynamic.data.count / 1024) KB)")
                 } else {
                     log.warning("[GhostProxy] skipped at postprocess: no RoomPlan walls or face/class mismatch")
                 }
+            } else {
+                // Which input was missing. Diagnosed with existence checks rather than by hoisting the
+                // reads into eager locals — that would pull the whole mesh.obj off disk on every run
+                // where face_classes.bin is the piece that is absent. A plane count of -1 means the
+                // planes could not be decoded at all, which zero does not distinguish.
+                let planeCount = currentFramePlanes(scanDirectory: dir)?.count ?? -1
+                let hasClasses = artifact("face_classes.bin") != nil
+                let hasMesh = fm.fileExists(atPath: dir.appendingPathComponent("mesh.obj").path)
+                log.warning("[GhostProxy] no proxy build for \(w.name, privacy: .public): face_classes.bin=\(hasClasses, privacy: .public) mesh.obj=\(hasMesh, privacy: .public) planes=\(planeCount, privacy: .public) (-1 = undecodable)")
             }
         }
 
