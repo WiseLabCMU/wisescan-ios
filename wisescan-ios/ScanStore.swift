@@ -1076,7 +1076,12 @@ class ScanFileManager {
             do { try colors.write(to: newScan.colorsFileURL) } catch { print("[ScanFileManager] Failed to write colors: \(error)") }
         }
         if let map = worldMapURL {
-            do { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) } catch { print("[ScanFileManager] Failed to copy worldmap: \(error)") }
+            // Hard-link rather than copy: the map is up to 50 MB, is immutable once exported, and
+            // raw_data/relocalization.worldmap already links the same temp file. Fall back to a
+            // real copy when linking can't work (source on another volume).
+            if (try? FileManager.default.linkItem(at: map, to: newScan.worldMapURL)) == nil {
+                do { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) } catch { print("[ScanFileManager] Failed to copy worldmap: \(error)") }
+            }
         }
         if let thumb = thumbnailData {
             do { try thumb.write(to: newScan.thumbnailURL) } catch { print("[ScanFileManager] Failed to write thumbnail: \(error)") }
@@ -1087,6 +1092,17 @@ class ScanFileManager {
             try? FileManager.default.removeItem(at: newScan.rawDataPath)
             do {
                 try FileManager.default.moveItem(at: raw, to: newScan.rawDataPath)
+
+                // raw_data/mesh.obj is the schema's raw-dir mirror of the mesh written above (top
+                // level stays authoritative; export stages from the top-level copy, and the one
+                // raw-first reader, EquirectFaceExport, falls back to top level). Hard-link it
+                // instead of writing the same tens of MB a second time — every later rewrite of
+                // either path is atomic (ScanPostprocessor's registration bake replaces the inode
+                // via rename), so the shared inode can never be mutated underneath one name.
+                let rawMeshURL = newScan.rawDataPath.appendingPathComponent("mesh.obj")
+                if (try? FileManager.default.linkItem(at: newScan.meshFileURL, to: rawMeshURL)) == nil {
+                    try? meshData.write(to: rawMeshURL, options: .atomic)
+                }
 
                 // Extract first RGB frame to thumbnailURL
                 let imagesDir = newScan.rawDataPath.appendingPathComponent("images")
@@ -1111,7 +1127,12 @@ class ScanFileManager {
                 let src = newScan.rawDataPath.appendingPathComponent(rpFile)
                 let dst = newScan.scanDirectory.appendingPathComponent(rpFile)
                 if FileManager.default.fileExists(atPath: src.path) {
-                    try? FileManager.default.copyItem(at: src, to: dst)
+                    // Link, don't copy: every writer of these two names replaces the file
+                    // atomically (ScanPostprocessor.writeBoth / mirrorToRaw), so sharing bytes
+                    // cannot alias a later rewrite.
+                    if (try? FileManager.default.linkItem(at: src, to: dst)) == nil {
+                        try? FileManager.default.copyItem(at: src, to: dst)
+                    }
                 }
             }
         }
