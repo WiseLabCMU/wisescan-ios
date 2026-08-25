@@ -927,6 +927,20 @@ final class ThetaCameraManager {
     /// as a NotifyState push — no OSC round-trip), OSC otherwise. Fallback rule from
     /// the probe rounds: only a failed WRITE falls back (the camera never fired); a
     /// confirmation timeout must NOT double-trigger, so it surfaces as the error.
+    /// Recovery for a shutter whose fate is UNKNOWN — the write may have been accepted and
+    /// the picture already taken, so re-triggering blind both double-shoots and (2026-08-25)
+    /// draws a 503 from a camera busy with the shot it is still writing. A newer image than
+    /// the one the scan started with, unclaimed by any other still, IS this shot. Both
+    /// conditions matter: transferred stills are deleted camera-side as we go, but a camera
+    /// holding pre-existing files must never hand a stale frame to this still's pose.
+    private func recoverUnconfirmedShot() async -> String? {
+        guard let latest = try? await latestImageURL(),
+              latest != preScanLatestImageURL,
+              !seenStillURLs.contains(latest) else { return nil }
+        seenStillURLs.insert(latest)
+        return latest
+    }
+
     private func triggerStillPreferringBLE(onAck: (() -> Void)? = nil) async throws -> String {
         // Capability, not just link readiness: a Z1 link is ready for identity/state
         // but has no CCv2 shutter characteristic — asking anyway threw linkNotReady,
@@ -954,15 +968,38 @@ final class ThetaCameraManager {
             // began, which no still has already claimed, IS this shot. Both conditions
             // matter: transferred stills are deleted camera-side as we go, but a camera with
             // pre-existing files must never hand a stale frame to this still's pose.
-            let latest = try? await latestImageURL()
-            if let latest, latest != preScanLatestImageURL, !seenStillURLs.contains(latest) {
-                seenStillURLs.insert(latest)
+            if let latest = await recoverUnconfirmedShot() {
                 lastShutterPath = "ble-unconfirmed"
                 log(.capture, "BLE shutter fired but the camera never pushed the file URL (\(what)) — "
                     + "recovered it from the camera's file list")
                 return latest
             }
             throw ThetaBLEManager.BLEError.timeout(what)
+        } catch ThetaBLEManager.BLEError.linkNotReady {
+            // The link died WHILE the shutter was in flight — the ~30 s ATT indication
+            // timeout (#49), which on 2026-08-25 killed the link 29.3 s after ready and
+            // failed the very next still outright with the camera reachable on Wi-Fi the
+            // whole time (it had downloaded 11 MB seconds earlier).
+            //
+            // Do NOT re-trigger blind: failAllPending resolves every pending continuation,
+            // including one whose write the camera already accepted, so a blind retry
+            // double-shoots — the same hazard the .timeout branch exists to avoid. Ask the
+            // camera first; a newer image than the scan started with, unclaimed by another
+            // still, IS this shot.
+            if let latest = await recoverUnconfirmedShot() {
+                lastShutterPath = "ble-unconfirmed"
+                log(.capture, "BLE link dropped mid-shutter — the camera had already taken it; "
+                    + "recovered the file from its list")
+                return latest
+            }
+            // Nothing new on the camera: the write never landed. Wi-Fi is a separate path
+            // and still up, so take the shot there rather than lose it. Deliberately does
+            // NOT set bleShutterDegraded — this is a transient drop, not a broken control
+            // plane, and BLE's tighter exposure window is worth reclaiming if the link
+            // returns.
+            lastShutterPath = "osc"
+            log(.capture, "BLE link dropped mid-shutter — taking this still over Wi-Fi")
+            return try await triggerStill(onAck: onAck)
         } catch ThetaBLEManager.BLEError.controlRefused {
             // ONE strike, and a separate counter. The 2-strike rule below exists to stop
             // burning the 3 s write watchdog per still on a flaky link; a refusal costs
@@ -987,6 +1024,16 @@ final class ThetaCameraManager {
                 bleShutterDegraded = true
                 log(.connection, "Bluetooth shutter unreliable (\(bleWriteFailures) unacknowledged writes) — "
                     + "using Wi-Fi for the rest of this scan. Reconnect the camera to retry Bluetooth.")
+            }
+            // An unacknowledged write is UNKNOWN, not failed: on 2026-08-25 the camera had
+            // taken the shot anyway and answered the blind OSC retry 52 ms later with
+            // "Service Unavailable" — busy writing the very image we were re-requesting —
+            // and the still was lost. Ask before re-triggering, exactly as .timeout does.
+            if let latest = await recoverUnconfirmedShot() {
+                lastShutterPath = "ble-unconfirmed"
+                log(.capture, "BLE shutter write went unacknowledged but the camera took it — "
+                    + "recovered the file from its list")
+                return latest
             }
             lastShutterPath = "osc"
             return try await triggerStill(onAck: onAck)
