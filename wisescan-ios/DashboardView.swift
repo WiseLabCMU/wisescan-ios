@@ -885,7 +885,18 @@ struct ThetaCameraCard: View {
                             .foregroundColor(.white.opacity(0.7))
                             .lineLimit(1)
                         if let battery = manager.batteryLevel {
-                            Text("· 🔋 \(Int(battery * 100))%")
+                            // SF Symbol, not an emoji: the 🔋 that used to sit here was the
+                            // first emoji rendered each session, and CoreText's first emoji
+                            // layout paid an ~18 s MobileGestalt XPC wait on main (#71) —
+                            // exactly at connect, where it also froze the BLE link window.
+                            Text("·")
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.7))
+                            Image(systemName: battery > 0.875 ? "battery.100" : battery > 0.625 ? "battery.75"
+                                  : battery > 0.375 ? "battery.50" : battery > 0.125 ? "battery.25" : "battery.0")
+                                .font(.caption)
+                                .foregroundColor(battery > 0.2 ? .white.opacity(0.7) : .orange)
+                            Text("\(Int(battery * 100))%")
                                 .font(.caption)
                                 .foregroundColor(.white.opacity(0.7))
                         }

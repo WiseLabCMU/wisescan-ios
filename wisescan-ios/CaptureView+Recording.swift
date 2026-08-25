@@ -803,8 +803,8 @@ extension CaptureView {
                 alert.addAction(UIAlertAction(title: "Try Again", style: .default) { _ in
                     self.saveMessage = "Saving World Map..."
                     // Keep the full-screen extend overlay text honest during the retry (otherwise it
-                    // keeps showing the stale "📍 Saving scan..." behind the alert).
-                    if isExtendFlow { self.extendPhaseText = "📍 Retrying world map…" }
+                    // keeps showing the stale "Saving scan..." behind the alert).
+                    if isExtendFlow { self.extendPhaseText = "Retrying world map…" }
                     self.exportWorldMapThenContinue(
                         isExtendFlow: isExtendFlow, completion: completion, proceed: proceed
                     )
@@ -888,7 +888,7 @@ extension CaptureView {
         guard let sourceScan = try? modelContext.fetch(srcDescriptor).first,
               let targetScan = try? modelContext.fetch(tgtDescriptor).first else {
             stitchLog.error("could not resolve endpoint scans (source=\(srcId.uuidString.prefix(8), privacy: .public) target=\(targetScanId.uuidString.prefix(8), privacy: .public))")
-            self.showTransientMessage("⚠️ Scan saved but spatial link failed to write", duration: 5)
+            self.showTransientMessage("Scan saved but spatial link failed to write", duration: 5, systemImage: "exclamationmark.triangle.fill", tint: .orange)
             scanStore.pendingStitchLink = nil
             return
         }
@@ -909,7 +909,7 @@ extension CaptureView {
             stitchLog.info("created link source=\(srcId.uuidString.prefix(8), privacy: .public) target=\(targetScanId.uuidString.prefix(8), privacy: .public)")
         } catch {
             stitchLog.error("failed to save link: \(error.localizedDescription, privacy: .public)")
-            self.showTransientMessage("⚠️ Scan saved but spatial link failed to write", duration: 5)
+            self.showTransientMessage("Scan saved but spatial link failed to write", duration: 5, systemImage: "exclamationmark.triangle.fill", tint: .orange)
         }
         scanStore.pendingStitchLink = nil
     }
@@ -926,10 +926,12 @@ extension CaptureView {
 
     /// Shows a transient message that auto-clears after `duration` seconds.
     /// Uses a version counter to avoid clearing a newer message.
-    func showTransientMessage(_ text: String, duration: TimeInterval) {
+    func showTransientMessage(_ text: String, duration: TimeInterval,
+                              systemImage: String? = nil, tint: Color = .white) {
         messageVersion += 1
         let currentVersion = messageVersion
         saveMessage = text
+        saveMessageIcon = systemImage.map { (name: $0, tint: tint) }
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
             if messageVersion == currentVersion {
                 saveMessage = nil

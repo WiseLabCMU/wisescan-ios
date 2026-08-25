@@ -371,7 +371,9 @@ struct SettingsView: View {
             Text("DEVELOPER MODE")
         } footer: {
             if developerMode {
-                Text("⚠️ Developer mode is active. Some features may behave differently than in production.")
+                Label("Developer mode is active. Some features may behave differently than in production.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .labelStyle(.tintedIcon(.orange))
                     .font(.caption2)
                     .foregroundColor(.orange)
             }
