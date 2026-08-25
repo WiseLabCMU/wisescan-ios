@@ -99,6 +99,34 @@ extension ThetaBLEManager: CBCentralManagerDelegate {
 // MARK: - CBPeripheralDelegate
 
 extension ThetaBLEManager: CBPeripheralDelegate {
+    /// The camera told iOS its GATT layout changed (a Service Changed indication —
+    /// CoreBluetooth surfaces it here, having already invalidated the affected CBService
+    /// objects). The characteristics we cached for those services are now dangling, so
+    /// drop them and re-discover from a clean slate. This is the ONE supported way to
+    /// recover from an attribute-table change without the operator forgetting and
+    /// re-pairing by hand — the resilience slice #49 is about.
+    ///
+    /// Its reach is bounded, and honestly so: this fires only when the CAMERA knows it
+    /// changed (a firmware update, a mode switch). A purely iOS-side stale cache on an
+    /// otherwise-unchanged device emits no Service Changed, so it cannot be caught here —
+    /// that case is the empty-characteristics path in didDiscoverCharacteristicsFor, which
+    /// detects it and guides the operator to the re-pair that IS the only fix.
+    func peripheral(_ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]) {
+        guard isTracked(peripheral) else { return }
+        let invalidated = Set(invalidatedServices.map(\.uuid))
+        Self.log.notice("BLE step: camera changed its services (\(invalidatedServices.count, privacy: .public) invalidated) — re-discovering")
+        // Forget characteristics from the invalidated services; their CBCharacteristic
+        // objects are dead, and handing one to CoreBluetooth is the class of crash this
+        // whole area has been about.
+        chars = chars.filter { $0.value.service.map { !invalidated.contains($0.uuid) } ?? false }
+        // Re-discover only if the CCv2 service is among the affected — that is the only
+        // one we drive. Scoped, never nil (see didConnect).
+        if invalidated.contains(Self.ccv2Service) || invalidatedServices.isEmpty {
+            pendingCharDiscoveries = 0
+            peripheral.discoverServices([Self.ccv2Service])
+        }
+    }
+
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         // Only act on the peripheral this manager is actually driving, and only when the
         // discovery SUCCEEDED. Discovering characteristics against a service from a

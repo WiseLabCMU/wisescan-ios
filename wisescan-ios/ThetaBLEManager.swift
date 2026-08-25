@@ -428,6 +428,10 @@ final class ThetaBLEManager: NSObject {
             + "own screen. 3) Forget This Camera here, then Add Camera → Find Camera via "
             + "Bluetooth and enter the passkey."
         onLog?(advice)
+        // Same channel as the stale-cache guidance: this is a blocking condition the
+        // operator can only fix in iOS Settings, so it belongs in the Dashboard alert, not
+        // buried in the event log where it went unread through the 2026-08-19/20 runs.
+        actionRequired = advice
         Self.log.notice("unproductive link cycle \(self.unproductiveLinkCycles, privacy: .public) — pairing out of sync (camera still bonded, phone is not)")
         unproductiveLinkCycles = 0
     }
