@@ -55,7 +55,6 @@ struct CaptureView: View {
     /// Opacity of the white shutter-flash overlay shown when a sharp keyframe is captured.
     @State private var captureFlashOpacity: Double = 0
     // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
-    @State private var mainThreadWatchdog = MainThreadWatchdog()
     /// [MemDiag] logs a MEM-PRESSURE marker (footprint + headroom) when the OS flags the app near its
     /// jetsam limit — the redline trip-flag. No-op unless Perf Diagnostics is on.
     @State private var memoryPressureMonitor = MemoryPressureMonitor {
@@ -1554,7 +1553,10 @@ struct CaptureView: View {
                 PerfDiag.log("[PerfDiag] capture view open took \(openMs)ms (tab tap → onAppear)"
                     + (openMs > 1000 ? " ⚠️ user-visible stall — main-thread work before the view exists" : ""))
             }
-            mainThreadWatchdog.start()
+            // Arm the shared watchdog if launch skipped it (Perf Diagnostics toggled on
+            // this session); idempotent when already running. Never stopped on leave —
+            // the save-flow and tab-tap stalls it exists to catch happen outside capture.
+            MainThreadWatchdog.shared.start()
             memoryPressureMonitor.start()
 
             // Battery: returning to the capture tab — cancel any pending idle teardown and resume
@@ -1642,7 +1644,6 @@ struct CaptureView: View {
             }
         }
         .onDisappear {
-            mainThreadWatchdog.stop()
             memoryPressureMonitor.stop()
             // Next appearance must re-load the ghost before the world map is handed over (the
             // makeUIView-vs-onAppear race gate in body).

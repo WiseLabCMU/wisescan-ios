@@ -41,6 +41,10 @@ struct Scan4DApp: App {
             AppConstants.Key.robustColorMedian: AppConstants.robustColorMedian
         ])
         print("Application directory: \(NSHomeDirectory())")
+        // Main-thread stall watchdog, app-wide from first frame (no-op unless Perf
+        // Diagnostics is on). Capture-scoped arming structurally missed the #71 class:
+        // the freeze happens BEFORE CaptureView.onAppear, exactly where it used to start.
+        MainThreadWatchdog.shared.start()
         do {
             try Wearables.configure()
         } catch {
