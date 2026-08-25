@@ -264,11 +264,24 @@ class FrameCaptureSession {
     /// shared ioQueue so a >1s native-res encode can't head-of-line-block stream saves and
     /// starve ARKit's frame pool. Only one hi-res request is in flight at a time, so serial.
     private let keyframeEncodeQueue = DispatchQueue(label: "com.scan4d.capture.keyframe", qos: .utility)
-    private let ciContext = CIContext()  // Reuse across frames to avoid GPU pipeline re-init
+    // Lazily materialized behind a lock, NOT stored-property defaults: FrameCaptureSession
+    // is constructed at APP LAUNCH inside ContentView.body (CaptureView's @State default —
+    // TabView builds every tab eagerly), and CIContext() there dragged the CoreImage/Metal
+    // dylib load onto the main thread mid-body — the launch stall the mid-stall sampler
+    // caught on 2026-08-25 (mach_msg XPC wait under dyld notifyLoad, our frame:
+    // FrameCaptureSession.init). First touch now happens on the encode queues during a
+    // recording; the lock makes cross-queue first-touch safe without assuming an owner.
+    private let ciContextStore = OSAllocatedUnfairLock<CIContext?>(initialState: nil)
+    private var ciContext: CIContext {  // Reuse across frames to avoid GPU pipeline re-init
+        ciContextStore.withLock { if $0 == nil { $0 = CIContext() }; return $0! }
+    }
     // Separate context for ~12MP keyframe encodes: sharing `ciContext` would serialize the
     // 0.5-1s hi-res render against concurrent stream encodes on ioQueue, and priorityRequestLow
     // keeps its GPU work from contending with the live AR render.
-    private let hiResCIContext = CIContext(options: [.priorityRequestLow: true])
+    private let hiResCIContextStore = OSAllocatedUnfairLock<CIContext?>(initialState: nil)
+    private var hiResCIContext: CIContext {
+        hiResCIContextStore.withLock { if $0 == nil { $0 = CIContext(options: [.priorityRequestLow: true]) }; return $0! }
+    }
     /// Reusable 16-bit depth conversion buffer (depth resolution is fixed per session).
     /// Only touched inside depthMapToPNG16 on ioQueue, so no synchronization needed.
     private var depthScratch: [UInt16] = []

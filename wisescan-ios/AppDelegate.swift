@@ -8,6 +8,8 @@
 import SwiftUI
 import SwiftData
 import UIKit
+import CoreText
+import QuartzCore
 import MWDATCore
 
 /// UIApplicationDelegate for orientation locking support.
@@ -45,6 +47,26 @@ struct Scan4DApp: App {
         // Diagnostics is on). Capture-scoped arming structurally missed the #71 class:
         // the freeze happens BEFORE CaptureView.onAppear, exactly where it used to start.
         MainThreadWatchdog.shared.start()
+        // Warm CoreText's device-capability lookup OFF the main thread. The mid-stall
+        // sampler (2026-08-25, 4th occurrence, 18090 ms) caught the ~18 s freeze family:
+        // SwiftUI lays out a Text → CoreText's dispatch_once asks MobileGestalt →
+        // MobileGestalt's OWN dispatch_once loads its extensions and makes a SYNCHRONOUS
+        // XPC call (xpc_connection_send_message_with_reply_sync) that waited ~18 s on
+        // main, every time, starting the instant "Connected" logged — i.e. the first
+        // render of the battery-emoji status line. The daemon wait is Apple's; where
+        // it happens is ours. Rendering an equivalent line here, on a utility queue,
+        // takes both once-tokens before any main-thread Text ever needs them. Timed
+        // and logged so the next diagnostics export proves whether the wait is
+        // inherent (~18 s here too, but invisible) or transition-related (fast here).
+        DispatchQueue.global(qos: .utility).async {
+            let t0 = CACurrentMediaTime()
+            let probe = NSAttributedString(string: "Connected · v1.0.0 · 🔋 88% ⚠️ ✓",
+                                           attributes: [.font: UIFont.preferredFont(forTextStyle: .caption1)])
+            let line = CTLineCreateWithAttributedString(probe)
+            _ = CTLineGetTypographicBounds(line, nil, nil, nil)
+            PerfDiag.log(String(format: "[PerfDiag] CoreText/MobileGestalt warm-up took %.0f ms (off main)",
+                                (CACurrentMediaTime() - t0) * 1000))
+        }
         do {
             try Wearables.configure()
         } catch {
