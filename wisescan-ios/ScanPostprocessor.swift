@@ -360,7 +360,7 @@ enum ScanPostprocessor {
                   obj["camera_file_deleted"] == nil,
                   FileManager.default.fileExists(atPath: jpgPath)
             else { continue }
-            switch syncCameraDelete(fileUrl: fileUrl) {
+            switch syncCameraDelete(fileUrl: ThetaCameraManager.absoluteCameraURLString(fileUrl)) {
             case .unreachable:
                 log.info("camera delete sweep: camera unreachable — \(deleted) deleted, rest deferred")
                 return deleted
@@ -623,7 +623,9 @@ enum ScanPostprocessor {
             var fetched = 0
             for (idx, item) in pending.enumerated() {
                 report("360° still \(idx + 1)/\(pending.count)…")
-                guard let url = URL(string: item.url), let data = syncDownload(url) else { continue }
+                // Sidecars written before 2026-08-25 from a Z1 BLE shutter hold a bare path.
+                guard let url = URL(string: ThetaCameraManager.absoluteCameraURLString(item.url)),
+                      let data = syncDownload(url) else { continue }
                 let dst = stillsDir.appendingPathComponent(String(format: "still_%04d.JPG", item.sequence))
                 if (try? data.write(to: dst, options: .atomic)) != nil {
                     fetched += 1

@@ -55,6 +55,20 @@ extension ThetaBLEManager: CBCentralManagerDelegate {
         // recovery end-to-end. BLE is this app's most failure-prone subsystem and this
         // costs nothing per frame, so the trail stays. `.notice` to survive an export.
         Self.log.notice("BLE step: connected, discovering the CCv2 service on \(peripheral.identifier.uuidString, privacy: .public)")
+        // The connection is up: the connect budget is spent, discovery gets its own. Without
+        // this the single watchdog spanned both phases and fired 0.77 s after a 9.5 s
+        // connect, cancelling a healthy link mid-discovery (2026-08-25 Release run).
+        if linkPending != nil {
+            armWatchdog("link", 8) { [weak self] in
+                guard let self, let pending = self.linkPending else { return }
+                self.linkPending = nil
+                self.linkState = .failed("discovery timed out")
+                if let current = self.peripheral, current.identifier == peripheral.identifier {
+                    self.central?.cancelPeripheralConnection(current)
+                }
+                pending.resume(throwing: BLEError.timeout("camera connected but never finished discovery"))
+            }
+        }
         // Scoped, NOT nil. Discovering all services made CoreBluetooth reconcile the whole
         // cached attribute table — 10 services on a device that exposes far fewer, i.e. a
         // stale/duplicated GATT cache (#49) — and it crashed dispatching an internal service
@@ -62,7 +76,7 @@ extension ThetaBLEManager: CBCentralManagerDelegate {
         // the CCv2 service, so ask for only it: CoreBluetooth then reconciles one handle,
         // not ten, and the corrupt cached extras are never touched. Correct production
         // practice regardless of the crash — nil-discovery never belonged here.
-        peripheral.discoverServices([Self.ccv2Service])
+        peripheral.discoverServices(linkServices)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -121,9 +135,9 @@ extension ThetaBLEManager: CBPeripheralDelegate {
         chars = chars.filter { $0.value.service.map { !invalidated.contains($0.uuid) } ?? false }
         // Re-discover only if the CCv2 service is among the affected — that is the only
         // one we drive. Scoped, never nil (see didConnect).
-        if invalidated.contains(Self.ccv2Service) || invalidatedServices.isEmpty {
+        if !invalidated.isDisjoint(with: linkServices) || invalidatedServices.isEmpty {
             pendingCharDiscoveries = 0
-            peripheral.discoverServices([Self.ccv2Service])
+            peripheral.discoverServices(linkServices)
         }
     }
 
@@ -145,9 +159,9 @@ extension ThetaBLEManager: CBPeripheralDelegate {
             failLink("this camera exposed no BLE services")
             return
         }
-        Self.log.notice("BLE step: \(services.count, privacy: .public) service(s) found, discovering CCv2 characteristics")
+        Self.log.notice("BLE step: \(services.count, privacy: .public) service(s) found, discovering characteristics")
         for service in services {
-            peripheral.discoverCharacteristics(Self.ccv2Characteristics, for: service)
+            peripheral.discoverCharacteristics(Self.characteristics(for: service.uuid), for: service)
         }
     }
 
@@ -188,7 +202,8 @@ extension ThetaBLEManager: CBPeripheralDelegate {
             // control characteristic still advertises .write when the camera answers ATT
             // 0x03, the attribute table iOS cached has moved (stale GATT cache); if .write
             // is gone, the camera itself withdrew the capability.
-            let controlProps = [Self.ccv2ShutterChar, Self.ccv2SetOptionsChar, Self.ccv2GetOptionsChar]
+            let controlProps = [Self.ccv2ShutterChar, Self.ccv2SetOptionsChar, Self.ccv2GetOptionsChar,
+                                Self.v1AuthChar, Self.v1TakePictureChar, Self.v1CameraPowerChar]
                 .compactMap { uuid -> String? in
                     guard let char = chars[uuid] else { return nil }
                     return "\(uuid.uuidString.prefix(8))=\(ThetaBLEProbe.describeProps(char.properties))"
@@ -254,6 +269,14 @@ extension ThetaBLEManager: CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard isTracked(peripheral) else { return }
+        // v1 characteristics (Z1) speak sint8, not JSON — surface their state changes
+        // before the JSON guard would silently drop them (take-picture 0/1 transitions
+        // and camera power 0/1/2 are the increment's field evidence).
+        if characteristic.uuid == Self.v1TakePictureChar || characteristic.uuid == Self.v1CameraPowerChar {
+            let value = characteristic.value?.first.map(String.init) ?? "?"
+            Self.log.notice("v1 \(characteristic.uuid == Self.v1TakePictureChar ? "take-picture" : "camera-power", privacy: .public) state → \(value, privacy: .public)")
+            return
+        }
         guard error == nil, let data = characteristic.value,
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
         switch characteristic.uuid {

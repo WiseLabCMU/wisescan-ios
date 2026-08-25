@@ -1942,7 +1942,7 @@ struct CaptureView: View {
                 Color.black.opacity(0.5).ignoresSafeArea()
                 VStack(spacing: 16) {
                     ProgressView().scaleEffect(1.5).tint(.green)
-                    Text("📐 Finalizing alignment…")
+                    Label("Finalizing alignment…", systemImage: "ruler")
                         .font(.headline)
                         .foregroundColor(.white)
                     Text("Holding for the auto-align correction")
@@ -1988,7 +1988,7 @@ struct CaptureView: View {
                 HStack {
                     HStack(spacing: 6) {
                         ProgressView().scaleEffect(0.7).tint(.white)
-                        Text("📐 Aligning — wait for green before recording")
+                        Label("Aligning — wait for green before recording", systemImage: "ruler")
                             .font(.caption2.bold())
                     }
                     .foregroundColor(.white)
@@ -2029,7 +2029,7 @@ struct CaptureView: View {
     /// Extracted from `body` (with `relocTimeoutPanel`) to keep the body expression type-checkable.
     private var relocalizingPrompt: some View {
         HStack(spacing: 8) {
-            Text("🔄 Move camera to relocalize with previous scan")
+            Label("Move camera to relocalize with previous scan", systemImage: "arrow.triangle.2.circlepath")
             OctahedronIcon(color: ghostMeshColor.swiftUIColor)
         }
         .font(.headline)
@@ -2048,7 +2048,7 @@ struct CaptureView: View {
     /// escape routes so the user is never stuck.
     private var relocTimeoutPanel: some View {
         VStack(spacing: 12) {
-            Text("🔄 Having trouble recognizing this spot")
+            Label("Having trouble recognizing this spot", systemImage: "arrow.triangle.2.circlepath")
                 .font(.headline)
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)

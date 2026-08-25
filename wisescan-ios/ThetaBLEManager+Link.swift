@@ -94,6 +94,11 @@ extension ThetaBLEManager {
     }
 
     func writeJSON(_ json: String, to uuid: CBUUID, timeout: TimeInterval) async throws {
+        try await writeData(Data(json.utf8), to: uuid, timeout: timeout)
+    }
+
+    /// Raw acknowledged write — the v1 characteristic family (Z1) speaks sint8, not JSON.
+    func writeData(_ data: Data, to uuid: CBUUID, timeout: TimeInterval) async throws {
         guard let peripheral, let char = liveCharacteristic(uuid) else { throw BLEError.linkNotReady }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             writePending[uuid] = cont
@@ -101,7 +106,7 @@ extension ThetaBLEManager {
                 self?.writePending.removeValue(forKey: uuid)?
                     .resume(throwing: BLEError.writeFailed("no acknowledgment"))
             }
-            peripheral.writeValue(Data(json.utf8), for: char, type: .withResponse)
+            peripheral.writeValue(data, for: char, type: .withResponse)
         }
     }
 }

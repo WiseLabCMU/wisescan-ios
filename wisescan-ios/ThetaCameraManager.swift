@@ -166,6 +166,20 @@ final class ThetaCameraManager {
     var host = "192.168.1.1"
     var baseURL: URL { URL(string: "http://\(host)")! }
 
+    /// Camera file URLs arrive in two shapes: the X pushes/lists them ABSOLUTE
+    /// (`http://192.168.1.1/files/…`), the Z1 pushes `_latestFileUrl` over BLE as a bare
+    /// PATH (`/files/…/R0010194.JPG`). URLSession rejects the latter ("unsupported URL") —
+    /// field 2026-08-25: three BLE-triggered Z1 stills captured perfectly and all three
+    /// downloads failed, then the Process-time sweep failed again off the persisted
+    /// sidecars. Normalize at every consumer; camera.delete wants the absolute form too.
+    /// `nonisolated static` so the background postprocessor can call it; the camera AP is
+    /// always 192.168.1.1 (a CL-mode camera, #84, will need the real host threaded in).
+    nonisolated static func absoluteCameraURLString(_ raw: String, host: String = "192.168.1.1") -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://") { return trimmed }
+        return "http://\(host)" + (trimmed.hasPrefix("/") ? trimmed : "/" + trimmed)
+    }
+
     /// Ephemeral, Wi‑Fi-only session (used by the OSC extension too). Cellular is forbidden
     /// since the camera AP has no internet; resource timeout accommodates tens-of-MB stills.
     let session: URLSession = {
@@ -291,7 +305,14 @@ final class ThetaCameraManager {
     /// fired, and six stills silently ran OSC with a 3.4 s ack the sway window then
     /// anchored on. One probe write, and at most one reconnect-and-retry.
     func prepareShutterPath() async {
-        guard ThetaBLEManager.shared.chars[ThetaBLEManager.ccv2ShutterChar] != nil else { return }
+        // Either shutter surface counts: the X's CCv2 command or the Z1's v1 Take Picture.
+        // Guarding on the X's alone made every Z1 record-start skip verification and fall
+        // straight to the Reconnect prompt (2026-08-25). For a Z1 the verification is the
+        // auth write itself, and recovery coalesces with any link already in flight.
+        let ble = ThetaBLEManager.shared
+        guard ble.chars[ThetaBLEManager.ccv2ShutterChar] != nil
+                || ble.chars[ThetaBLEManager.v1TakePictureChar] != nil
+                || (ble.linkIsZ1 && ble.z1Registered) else { return }
         if await ThetaBLEManager.shared.verifyControlWritable() { return }
         _ = await ThetaBLEManager.shared.recoverControlPlane()
     }
@@ -402,6 +423,60 @@ final class ThetaCameraManager {
         }
     }
 
+    /// Z1 BLE unlock, step 1 of 2 (#50): register this app's UUID with the camera over
+    /// the Wi-Fi we are connected to right now (camera._setBluetoothDevice — Z1/V only;
+    /// registration persists camera-side). Step 2 — writing that UUID to the BLE auth
+    /// characteristic — runs inside every ensureLinkReady. Ride-along here because the
+    /// first Wi-Fi connect is the one moment both transports' prerequisites are met, and
+    /// it makes the unlock zero-touch: add a Z1, connect once, BLE wake works after.
+    private func registerZ1BluetoothIfNeeded(model: String, oscSerial: String?) async {
+        guard model.contains("Z1") else { return }
+        let ble = ThetaBLEManager.shared
+        // The BLE-advertised serial is the 8-digit tail; OSC may report a prefixed form.
+        let digits = (oscSerial ?? "").drop { !$0.isNumber }.filter(\.isNumber)
+        if UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial) == nil, digits.count == 8 {
+            UserDefaults.standard.set(String(digits), forKey: AppConstants.Key.thetaBLESerial)
+        }
+        UserDefaults.standard.set(model, forKey: AppConstants.Key.thetaBLEModel)
+        guard !ble.z1Registered else { return }
+        do {
+            let deviceName = try await registerBluetoothDevice(uuid: ble.z1AuthUUID)
+            try? await setBluetoothPower(on: true)
+            if let serial = UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial) {
+                UserDefaults.standard.set(serial, forKey: AppConstants.Key.thetaZ1RegisteredSerial)
+            }
+            log(.connection, "Z1 Bluetooth control registered (deviceName \(deviceName ?? "?")) — "
+                + "BLE wake and shutter engage from the next connect")
+        } catch {
+            // Non-fatal: Wi-Fi capture is unaffected; retried on every connect until it lands.
+            log(.connection, "Z1 Bluetooth registration failed (\(Self.describe(error))) — will retry next connect")
+        }
+    }
+
+    /// Z1: bring the BLE link up AFTER Wi-Fi connect, in the background. The X links
+    /// during the wake that precedes the join, but a SLEEPING Z1 does not answer BLE
+    /// connects at all (field 2026-08-25: two wake attempts timed out asleep, and the
+    /// link was never retried once Wi-Fi proved the camera awake — so the per-session
+    /// auth never ran and BLE shutter stayed unavailable all session while the probe
+    /// connected fine). Post-connect is the one moment the camera is provably awake:
+    /// link, authenticate (v1 per-session unlock), and let the post-auth re-discovery
+    /// surface the auth-gated shooting service. Fire-and-forget — capture rides OSC
+    /// until it lands, and a failure here costs nothing.
+    private func ensureZ1LinkAfterConnect(model: String) {
+        let ble = ThetaBLEManager.shared
+        guard model.contains("Z1"), ble.z1Registered else { return }
+        // "Ready" is not enough: the link that woke the camera is typically left ready
+        // over a stripped control surface (didModifyServices on wake, re-discovery never
+        // completing). Only a fresh scan-find sees the awake camera's 4 services — so if
+        // the shutter path is not in hand now that Wi-Fi proves the camera awake, tear
+        // down and re-link, rather than paying for it at the first still.
+        if ble.isLinkReady, ble.hasZ1ControlSurface { return }
+        Task {
+            if ble.isLinkReady { ble.teardown() }
+            try? await ble.ensureLinkReady()
+        }
+    }
+
     /// The roster entry matching the ACTIVE single-camera keys (which every existing
     /// code path — join, wake, factory password — continues to read unchanged).
     var activeProfile: CameraProfile? {
@@ -442,6 +517,7 @@ final class ThetaCameraManager {
         UserDefaults.standard.set(profile.blePeripheralID != nil ? profile.serial : nil,
                                   forKey: AppConstants.Key.thetaBLESerial)
         UserDefaults.standard.set(profile.blePeripheralID, forKey: AppConstants.Key.thetaBLEPeripheralID)
+        UserDefaults.standard.set(profile.model, forKey: AppConstants.Key.thetaBLEModel)
         log(.connection, "Switched camera → \(profile.displayName)")
         connect()
     }
@@ -661,6 +737,8 @@ final class ThetaCameraManager {
             logLevelingSupport(model: info.model)
             currentStillFormat = try? await fetchStillResolution()
             await refreshSupportedStillFormats()
+            await registerZ1BluetoothIfNeeded(model: info.model, oscSerial: info.serial)
+            ensureZ1LinkAfterConnect(model: info.model)
         } catch {
             batteryLevel = nil
             serialNumber = nil
@@ -965,7 +1043,9 @@ final class ThetaCameraManager {
             return url
         }
         do {
-            let url = try await ThetaBLEManager.shared.triggerShutter(onAck: onAck)
+            // Absolutize at ingestion: the sidecar persists this string and the download,
+            // delete sweep and seen-set comparisons (OSC lists absolute URLs) all read it.
+            let url = Self.absoluteCameraURLString(try await ThetaBLEManager.shared.triggerShutter(onAck: onAck), host: host)
             log(.capture, "Shutter via BLE — file pushed")
             lastShutterPath = "ble"
             bleWriteFailures = 0
@@ -1153,6 +1233,13 @@ final class ThetaCameraManager {
         if let forgotten {
             profiles.removeAll { $0.id == forgotten.id }
             persistProfiles()
+        } else if let bleSerial = UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial) {
+            // Half-state (field, 2026-08-25): a BLE-found camera whose Wi-Fi setup never
+            // finished has a roster entry and BLE keys but NO active SSID — activeProfile
+            // is nil, so the roster entry survived every forget and there was no way to
+            // start again. Match it by the stored BLE serial instead.
+            profiles.removeAll { $0.serial == bleSerial }
+            persistProfiles()
         }
         // Adopt the next camera ONLY if we actually removed the active one — with no
         // match (roster/keys out of sync) adopting profiles.first would silently
@@ -1162,12 +1249,18 @@ final class ThetaCameraManager {
             UserDefaults.standard.set(next.passphrase, forKey: AppConstants.Key.thetaPassphrase)
             UserDefaults.standard.set(next.serial, forKey: AppConstants.Key.thetaBLESerial)
             UserDefaults.standard.set(next.blePeripheralID, forKey: AppConstants.Key.thetaBLEPeripheralID)
+            UserDefaults.standard.set(next.model, forKey: AppConstants.Key.thetaBLEModel)
+            if UserDefaults.standard.string(forKey: AppConstants.Key.thetaZ1RegisteredSerial) != next.serial {
+                UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaZ1RegisteredSerial)
+            }
             log(.connection, "Camera forgotten — \(next.displayName) is now active")
         } else {
             UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaSSID)
             UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaPassphrase)
             UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaBLESerial)
             UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaBLEPeripheralID)
+            UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaBLEModel)
+            UserDefaults.standard.removeObject(forKey: AppConstants.Key.thetaZ1RegisteredSerial)
             log(.connection, "Camera forgotten — to fully reset, also remove it in iOS Settings → Bluetooth")
         }
     }
@@ -1215,7 +1308,7 @@ final class ThetaCameraManager {
             var drainedDirs = Set<URL>()   // scans whose bytes landed — security-P1 sweep targets
             while !pendingStillDownloads.isEmpty && !isCapturing {
                 let item = pendingStillDownloads[0]
-                guard let url = URL(string: item.fileURL) else {
+                guard let url = URL(string: Self.absoluteCameraURLString(item.fileURL, host: host)) else {
                     pendingStillDownloads.removeFirst()
                     continue
                 }

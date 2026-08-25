@@ -594,7 +594,11 @@ struct ThetaCameraCard: View {
     private var statusLabel: String {
         switch manager.state {
         case .disconnected:
-            return manager.hasStoredNetwork ? "Saved — tap Connect" : "Not set up"
+            if manager.hasStoredNetwork { return "Saved — tap Connect" }
+            // BLE identity stored but no Wi-Fi yet (a hand-off that didn't finish):
+            // "Not set up" was a lie sitting right above live BLE link events.
+            return UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial) != nil
+                ? "Bluetooth paired — finish Wi-Fi in Add Camera" : "Not set up"
         case .connecting: return "Checking…"
         // The header already names the camera (model · serial) — repeating the model
         // here was redundant; the status line carries what the header doesn't.
@@ -660,15 +664,30 @@ struct ThetaCameraCard: View {
             eventsExpanded = true
             manager.connect()
         } catch ThetaBLEManager.BLEError.needsWiFiSetup(let model, let serial) {
-            // Not a failure: BLE identified the camera for free. Hand off to manual
-            // setup prefilled with what we learned (SSID form is derived — the user
-            // should confirm it against the camera's own Wi-Fi screen).
-            sheetSSID = ThetaCameraManager.factorySSID(model: model, serial: serial) ?? ""
-            sheetPassphrase = serial
-            sheetPassAutoFill = serial
-            bleAddStatus = "Found \(model) · \(serial). Bluetooth setup is THETA X only for now — "
-                + "press the camera's power button so its Wi-Fi is awake, check the SSID against "
-                + "the camera's screen, then Save & Connect."
+            // Not a failure: BLE identified the camera for free. When the model is one
+            // whose factory SSID we can derive (Z1: THETAYN<serial>.OSC, SDK-confirmed),
+            // finish the add automatically — the X path already auto-saves its derived
+            // SSID without a confirm, and the field showed the manual hand-off dead-ends
+            // ("Save & Connect… back at the Add button, no feedback", 2026-08-25). A
+            // wrong suffix just fails the join visibly, editable in Camera & Network.
+            if let ssid = ThetaCameraManager.factorySSID(model: model, serial: serial) {
+                manager.saveNetwork(ssid: ssid, passphrase: serial)
+                manager.upsertProfile(model: model, serial: serial, ssid: ssid, passphrase: serial,
+                                      bleID: UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLEPeripheralID))
+                bleAddStatus = nil
+                showNetworkSheet = false
+                hasAttemptedConnect = true
+                eventsExpanded = true
+                manager.connect()
+            } else {
+                // Unknown model: prefilled manual hand-off, the user confirms the SSID
+                // against the camera's own screen.
+                sheetSSID = ""
+                sheetPassphrase = serial
+                sheetPassAutoFill = serial
+                bleAddStatus = "Found \(model) · \(serial). Type the SSID shown on the camera's "
+                    + "Wi-Fi screen, then Save & Connect."
+            }
         } catch {
             // A stale GATT cache surfaces here as a terse technical linkState error. The
             // BLE manager has already composed the real, actionable guidance for exactly
@@ -789,7 +808,8 @@ struct ThetaCameraCard: View {
                     .disabled(sheetSSID.trimmingCharacters(in: .whitespaces).isEmpty || sheetPassphrase.isEmpty)
                 }
 
-                if manager.hasStoredNetwork {
+                if manager.hasStoredNetwork || !manager.profiles.isEmpty
+                    || UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial) != nil {
                     Section {
                         Button("Forget This Camera", role: .destructive) {
                             manager.forgetCamera()
