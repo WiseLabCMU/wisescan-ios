@@ -1153,7 +1153,13 @@ struct ScanCard: View {
                 let dCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("depth").path))?.count ?? 0
                 let confCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("confidence").path))?.count ?? 0
                 let cCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("cameras").path))?.count ?? 0
-                let eCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("equirect_stills").path))?.filter { $0.lowercased().hasSuffix(".jpg") }.count ?? 0
+                // Count CAPTURED stills (sidecars), not transferred JPGs: a scan whose stills
+                // never downloaded (Z1 relative-URL bug, 2026-08-25) showed "0 × 360°" and hid
+                // "Redo 360° Calibration" — the recovery tool — exactly when it was needed.
+                // The JPG count remains a floor for pre-sidecar scans.
+                let eFiles = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("equirect_stills").path)) ?? []
+                let eCount = max(eFiles.filter { $0.hasPrefix("still_") && $0.hasSuffix(".json") }.count,
+                                 eFiles.filter { $0.lowercased().hasSuffix(".jpg") }.count)
 
                 let relocMissing = !fm.fileExists(atPath: worldMapPath)
 

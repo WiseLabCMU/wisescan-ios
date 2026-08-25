@@ -656,6 +656,8 @@ struct ThetaCameraCard: View {
                                   bleID: UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLEPeripheralID))
             bleAddStatus = nil
             showNetworkSheet = false
+            hasAttemptedConnect = true
+            eventsExpanded = true
             manager.connect()
         } catch ThetaBLEManager.BLEError.needsWiFiSetup(let model, let serial) {
             // Not a failure: BLE identified the camera for free. Hand off to manual
@@ -772,6 +774,11 @@ struct ThetaCameraCard: View {
                                               serial: ThetaCameraManager.factoryPassphrase(fromSSID: ssid),
                                               ssid: ssid, passphrase: sheetPassphrase, bleID: nil)
                         showNetworkSheet = false
+                        // The card mounts AFTER this action's state transitions, so its
+                        // onChange(of: state) can miss them — open the events feed here
+                        // so the first connect narrates instead of running silently.
+                        hasAttemptedConnect = true
+                        eventsExpanded = true
                         if sheetIsAdding, let added = manager.profiles.first(where: { $0.ssid == ssid }) {
                             manager.activateProfile(added)
                         } else {
@@ -814,7 +821,11 @@ struct ThetaCameraCard: View {
         // State machine per field spec: (1) not set up → a single Meta-style add
         // button; (2) saved → identity + connect; (3) events appear only once
         // Connect has been attempted; (4) Test Shutter appears once Wi-Fi completes.
-        if !manager.hasStoredNetwork {
+        // `profiles` is the observable read that makes this branch re-evaluate the
+        // moment Save & Connect registers a camera. hasStoredNetwork alone reads
+        // UserDefaults — invisible to @Observable — so the card sat frozen on the Add
+        // button through the Z1's whole first connect (field, 2026-08-25).
+        if manager.profiles.isEmpty, !manager.hasStoredNetwork {
             Button(action: { openSheet(adding: true) }, label: {
                 HStack {
                     Image(systemName: "plus")
