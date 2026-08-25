@@ -18,6 +18,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.mockWearable) private var mockWearable: Bool = AppConstants.mockWearable
     @AppStorage(AppConstants.Key.hideLivePoints) private var hideLivePoints: Bool = AppConstants.hideLivePoints
     @AppStorage(AppConstants.Key.perfDiagnostics) private var perfDiagnostics: Bool = AppConstants.perfDiagnostics
+    @AppStorage(AppConstants.Key.perfSampleUnderDebugger) private var perfSampleUnderDebugger: Bool = AppConstants.perfSampleUnderDebugger
     @AppStorage(AppConstants.Key.pauseVRCompute) private var pauseVRCompute: Bool = AppConstants.pauseVRCompute
     @AppStorage(AppConstants.Key.vrBloomEnabled) private var vrBloomEnabled: Bool = AppConstants.vrBloomEnabled
     @AppStorage(AppConstants.Key.memDiagForceReclaim) private var memDiagForceReclaim: Bool = AppConstants.memDiagForceReclaim
@@ -256,6 +257,20 @@ struct SettingsView: View {
                 .tint(.orange)
                 .padding(.vertical, 4)
 
+                if perfDiagnostics {
+                    Toggle(isOn: $perfSampleUnderDebugger) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Sample Stalls Under Debugger")
+                                .foregroundColor(.white)
+                            Text("Off: when Xcode is attached the sampler stays quiet, because lldb pauses the app on its SIGUSR1 (the pause itself shows the stack). On: it fires anyway and logs frames — first run `process handle SIGUSR1 -n false -p true -s false` in the lldb console (or add it to ~/.lldbinit), or every stall over 2 s will pause the debugger.")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                    }
+                    .tint(.orange)
+                    .padding(.vertical, 4)
+                }
+
                 Toggle(isOn: $pauseVRCompute) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Pause VR Compute")
@@ -356,7 +371,9 @@ struct SettingsView: View {
             Text("DEVELOPER MODE")
         } footer: {
             if developerMode {
-                Text("⚠️ Developer mode is active. Some features may behave differently than in production.")
+                Label("Developer mode is active. Some features may behave differently than in production.",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .labelStyle(.tintedIcon(.orange))
                     .font(.caption2)
                     .foregroundColor(.orange)
             }

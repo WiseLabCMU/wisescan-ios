@@ -33,6 +33,8 @@ struct CaptureView: View {
     /// Free storage, sampled once per recording (not per coach evaluation).
     @State var freeStorageBytes: Int64?
     @State var saveMessage: String?
+    /// Optional tinted SF Symbol shown before `saveMessage` (set via showTransientMessage).
+    @State var saveMessageIcon: (name: String, tint: Color)?
     /// Save-failure modal: the capture is still in `pendingScan` and retryable.
     @State var showSaveFailedAlert = false
     @State var saveFailedReason = ""
@@ -55,7 +57,6 @@ struct CaptureView: View {
     /// Opacity of the white shutter-flash overlay shown when a sharp keyframe is captured.
     @State private var captureFlashOpacity: Double = 0
     // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
-    @State private var mainThreadWatchdog = MainThreadWatchdog()
     /// [MemDiag] logs a MEM-PRESSURE marker (footprint + headroom) when the OS flags the app near its
     /// jetsam limit — the redline trip-flag. No-op unless Perf Diagnostics is on.
     @State private var memoryPressureMonitor = MemoryPressureMonitor {
@@ -196,7 +197,7 @@ struct CaptureView: View {
             samplePose: { session?.currentFrame?.camera.transform }
         ) {
             let stillNumber = thetaManager.scanStillCount + 1
-            showTransientMessage("📸 360° still #\(stillNumber)…", duration: 2)
+            showTransientMessage("360° still #\(stillNumber)…", duration: 2, systemImage: "camera.aperture", tint: .cyan)
             let swayedBefore = thetaManager.swayedStillCount
             Task { @MainActor in
                 // The sway verdict lands when the camera lists the file (seconds after
@@ -206,8 +207,9 @@ struct CaptureView: View {
                     try? await Task.sleep(for: .milliseconds(500))
                 }
                 if thetaManager.swayedStillCount > swayedBefore {
-                    showTransientMessage("⚠️ Moved during the 360° exposure — still #\(stillNumber)'s "
-                        + "pose may be off. Hold still until the done tone.", duration: 4)
+                    showTransientMessage("Moved during the 360° exposure — still #\(stillNumber)'s "
+                        + "pose may be off. Hold still until the done tone.", duration: 4,
+                        systemImage: "exclamationmark.triangle.fill", tint: .orange)
                 }
             }
             // Post-process pivot: no first-still spot-check / session-yaw solve here —
@@ -252,18 +254,44 @@ struct CaptureView: View {
     /// Live spacing verdict against the rings already on the floor: how far the operator
     /// is from the nearest still they've taken. Recomputed from the AR pose each time
     /// the chip redraws — ≤20 points, so a distance test, not a grid lookup.
-    private var spacingSuffix: String {
+    /// Text, not String: the "on spot" state carries a green check — SF Symbols
+    /// interpolate into Text and take their own tint, unlike emoji (CONTRIBUTING).
+    private var spacingSuffixText: Text {
         guard isRecording, thetaManager.isConnected,
-              let pose = currentARSession?.currentFrame?.camera.transform else { return "" }
+              let pose = currentARSession?.currentFrame?.camera.transform else { return Text("") }
         let here = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
         switch StillSpacingRings.spacing(at: here, points: thetaManager.scanStillPositions) {
         case .first:
-            return ""
+            return Text("")
         case .tooClose(let distance):
-            return String(format: " · %.1f m from last — move on", distance)
+            return Text(String(format: " · %.1f m from last — move on", distance))
         case .good:
-            return " · ✓ spot"
+            return Text(" · ") + Text(Image(systemName: "checkmark.circle.fill")).foregroundColor(.green) + Text(" on spot")
         }
+    }
+
+    /// The chip's text with inline tinted SF Symbols for the states that used to be emoji.
+    private func chipText(count: Int, spread: Float, pending: Int) -> Text {
+        if thetaManager.cameraUnresponsive {
+            return Text(Image(systemName: "antenna.radiowaves.left.and.right.slash")).foregroundColor(.red)
+                + Text(" 360° camera lost — reconnect to resume")
+        }
+        if thetaManager.isHoldingForExposure {
+            return Text(Image(systemName: "camera.aperture")).foregroundColor(.orange) + Text(" exposing — hold still…")
+        }
+        if count == 0 {
+            return Text(thetaManager.shutterPathIsBLE ? "No 360° stills yet · BLE" : "No 360° stills yet · Wi-Fi (slower)")
+        }
+        var text = Text(String(format: "%d still%@ · spread %.1f m", count, count == 1 ? "" : "s", spread))
+            + spacingSuffixText
+        if pending > 0 {
+            text = text + Text(" · ") + Text(Image(systemName: "arrow.down.circle")).foregroundColor(.cyan) + Text("\(pending)")
+        }
+        if thetaManager.swayedStillCount > 0 {
+            text = text + Text(" · ") + Text(Image(systemName: "exclamationmark.triangle.fill")).foregroundColor(.orange)
+                + Text(" \(thetaManager.swayedStillCount) swayed")
+        }
+        return text
     }
 
     /// Rig-height state on the 360° chip: the tape-measured value when set (the solve's
@@ -314,20 +342,7 @@ struct CaptureView: View {
                       : thetaManager.isHoldingForExposure ? Color.orange
                       : count == 0 ? Color.gray : sufficient ? Color.green : Color.yellow)
                 .frame(width: 7, height: 7)
-            Text(thetaManager.cameraUnresponsive
-                 ? "360° camera lost — reconnect to resume"
-                 : thetaManager.isHoldingForExposure
-                 ? "📸 exposing — hold still…"
-                 : count == 0
-                 ? (thetaManager.shutterPathIsBLE
-                    ? "No 360° stills yet · BLE"
-                    : "No 360° stills yet · Wi-Fi (slower)")
-                 : String(format: "%d still%@ · spread %.1f m%@%@%@",
-                          count, count == 1 ? "" : "s", spread,
-                          spacingSuffix,
-                          pending > 0 ? " · ↓\(pending)" : "",
-                          thetaManager.swayedStillCount > 0
-                          ? " · ⚠️\(thetaManager.swayedStillCount) swayed" : ""))
+            chipText(count: count, spread: spread, pending: pending)
         }
         .font(.caption2).bold()
         .foregroundColor(.white)
@@ -671,8 +686,9 @@ struct CaptureView: View {
             // a walking operator finds out now rather than at Process. Lives here, not
             // in `body`: that modifier chain is already at the type checker's limit.
             guard lost else { return }
-            showTransientMessage("⚠️ 360° camera unavailable — recording phone-only. "
-                + "Reconnect from the Dashboard to resume stills.", duration: 5)
+            showTransientMessage("360° camera unavailable — recording phone-only. "
+                + "Reconnect from the Dashboard to resume stills.", duration: 5,
+                systemImage: "exclamationmark.triangle.fill", tint: .orange)
         }
     }
 
@@ -714,8 +730,11 @@ struct CaptureView: View {
                 .onChange(of: vioCompromised) { _, lost in
                     if lost { handleVIOCompromised() }
                 }
-                // ARKit purged mesh after a tracking correction — recoverable by re-sweeping,
-                // but only if the operator finds out NOW rather than at Process.
+                // The AR view's mid-recording notice channel: message only, never capture state.
+                // Carries ARKit purging the mesh after a tracking correction (recoverable by
+                // re-sweeping, but only if the operator finds out NOW rather than at Process) and a
+                // record-start world-map load failure. Both are things the operator can only act on
+                // while still holding the device up.
                 .onChange(of: meshResetNotice) { _, notice in
                     guard let notice else { return }
                     showTransientMessage("⚠️ \(notice)", duration: 8)
@@ -1081,7 +1100,12 @@ struct CaptureView: View {
                                     }
 
                                     if let msg = saveMessage {
-                                        Text(msg)
+                                        HStack(spacing: 4) {
+                                            if let icon = saveMessageIcon {
+                                                Image(systemName: icon.name).foregroundColor(icon.tint)
+                                            }
+                                            Text(msg)
+                                        }
                                             .font(.caption2).bold()
                                             .foregroundColor(.white)
                                             .offset(y: 50)
@@ -1163,7 +1187,8 @@ struct CaptureView: View {
                         ProgressView()
                             .scaleEffect(1.5)
                             .tint(.green)
-                        Text(extendPhaseText)
+                        Label(extendPhaseText, systemImage: "mappin.and.ellipse")
+                            .labelStyle(.tintedIcon(.green))
                             .font(.headline)
                             .foregroundColor(.white)
                             .multilineTextAlignment(.center)
@@ -1421,7 +1446,10 @@ struct CaptureView: View {
                 PerfDiag.log("[PerfDiag] capture view open took \(openMs)ms (tab tap → onAppear)"
                     + (openMs > 1000 ? " ⚠️ user-visible stall — main-thread work before the view exists" : ""))
             }
-            mainThreadWatchdog.start()
+            // Arm the shared watchdog if launch skipped it (Perf Diagnostics toggled on
+            // this session); idempotent when already running. Never stopped on leave —
+            // the save-flow and tab-tap stalls it exists to catch happen outside capture.
+            MainThreadWatchdog.shared.start()
             memoryPressureMonitor.start()
 
             // Battery: returning to the capture tab — cancel any pending idle teardown and resume
@@ -1509,7 +1537,6 @@ struct CaptureView: View {
             }
         }
         .onDisappear {
-            mainThreadWatchdog.stop()
             memoryPressureMonitor.stop()
             // Next appearance must re-load the ghost before the world map is handed over (the
             // makeUIView-vs-onAppear race gate in body).
@@ -1574,6 +1601,37 @@ struct CaptureView: View {
                 scanStore.resetCaptureState()
                 scanStore.pendingStitchLink = inflightStitchLink
                 cachedGhostMeshData = nil
+                // Release the ~50 MB relocalization ARWorldMap on the way out of capture. The
+                // stop/save teardown in ARCoverageView hangs its purge off the isRecording
+                // true→false edge, so a rescan the user never RECORDED — relocalization never locks
+                // and they "Go Back" (exitCaptureFromRelocTimeout), or they simply leave the tab —
+                // never reaches it and the map stays resident for the app's lifetime. Cost-only: the
+                // next bring-up re-reads the archive from disk.
+                ARCoverageView.releaseCachedWorldMap()
+                // The cache is only ONE of the two strong references. The live session's
+                // configuration holds the same map in `initialWorldMap` (makeUIView ran it at
+                // bring-up), so purging the cache alone frees nothing on that path — swapping the
+                // session onto a fresh map-less nominal config is what actually drops it. Same move
+                // the stop/save teardown in ARCoverageView makes on its nominal-downgrade run
+                // (`uiView.session.run(Self.makeConfiguration())` on the isRecording true→false edge).
+                //
+                // Deliberately NOT `currentARSession = nil`: CaptureView is an always-instantiated
+                // TabView page that is never destroyed, so ARCoverageView.makeUIView — the ONLY
+                // writer of this binding — does not run again when the user comes back (that is also
+                // why the idle teardown pauses the session instead of dropping it). A nil here is
+                // therefore permanent, and it would silently no-op every reader: the in-flight save
+                // path (exportWorldMap(from: currentARSession), which runs asynchronously AFTER this
+                // onDisappear on the force-stop path above), the extend/alignment flows, and frame
+                // capture at the next record-start. Keeping the session and dropping its map frees
+                // the same bytes and breaks nothing.
+                //
+                // Gated on nothing being in flight, mirroring the idle-teardown timer above: a save
+                // still reads the live session's mesh anchors and exports its world map, and this
+                // config swap drops scene reconstruction. When something IS in flight the recording
+                // ends normally, and the stop/save teardown's purge covers it.
+                if !isRecording && !isProcessingMesh && pendingScan == nil && !scanStore.isProcessingScan {
+                    currentARSession?.run(ARCoverageView.makeConfiguration())
+                }
                 showExtendOverlay = false
                 isARSessionReady = false
                 sessionStabilizationTask?.cancel()
@@ -1602,6 +1660,7 @@ struct CaptureView: View {
             Button("Save", action: {
                 if isProcessingMesh {
                     isWaitingToSave = true
+                    saveMessageIcon = nil
                     saveMessage = "Adding location details..."
                 } else {
                     savePendingScan()
@@ -1747,7 +1806,7 @@ struct CaptureView: View {
     // benign snap (the mesh re-pins). The flag is only set on a storm, and latches for the scan.
     @ViewBuilder private var stormWarningBanner: some View {
         if isRecording, PerfDiag.enabled, let unreliable = scanStore.trackingUnreliable {
-            Text(String(format: "⚠️ Tracking unstable — %d sudden jumps mid-scan; relocalization may be failing", unreliable.snapCount))
+            Label(String(format: "Tracking unstable — %d sudden jumps mid-scan; relocalization may be failing", unreliable.snapCount), systemImage: "exclamationmark.triangle.fill").labelStyle(.tintedIcon(.orange))
                 .font(.headline)
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)
@@ -1769,7 +1828,7 @@ struct CaptureView: View {
                 Color.black.opacity(0.5).ignoresSafeArea()
                 VStack(spacing: 16) {
                     ProgressView().scaleEffect(1.5).tint(.green)
-                    Text("📐 Finalizing alignment…")
+                    Label("Finalizing alignment…", systemImage: "ruler").labelStyle(.tintedIcon(.cyan))
                         .font(.headline)
                         .foregroundColor(.white)
                     Text("Holding for the auto-align correction")
@@ -1815,7 +1874,7 @@ struct CaptureView: View {
                 HStack {
                     HStack(spacing: 6) {
                         ProgressView().scaleEffect(0.7).tint(.white)
-                        Text("📐 Aligning — wait for green before recording")
+                        Label("Aligning — wait for green before recording", systemImage: "ruler").labelStyle(.tintedIcon(.yellow))
                             .font(.caption2.bold())
                     }
                     .foregroundColor(.white)
@@ -1856,7 +1915,7 @@ struct CaptureView: View {
     /// Extracted from `body` (with `relocTimeoutPanel`) to keep the body expression type-checkable.
     private var relocalizingPrompt: some View {
         HStack(spacing: 8) {
-            Text("🔄 Move camera to relocalize with previous scan")
+            Label("Move camera to relocalize with previous scan", systemImage: "arrow.triangle.2.circlepath").labelStyle(.tintedIcon(.cyan))
             OctahedronIcon(color: ghostMeshColor.swiftUIColor)
         }
         .font(.headline)
@@ -1875,7 +1934,7 @@ struct CaptureView: View {
     /// escape routes so the user is never stuck.
     private var relocTimeoutPanel: some View {
         VStack(spacing: 12) {
-            Text("🔄 Having trouble recognizing this spot")
+            Label("Having trouble recognizing this spot", systemImage: "arrow.triangle.2.circlepath").labelStyle(.tintedIcon(.orange))
                 .font(.headline)
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)
@@ -2142,7 +2201,7 @@ private struct LiveMeshCueHost: View {
         let capturedSinceStart = scanStats.totalVertices - verticesAtRecordStart
         let needsLiveMeshCue = capturedSinceStart < AppConstants.liveMeshCueVertexThreshold
         if needsLiveMeshCue {
-            Text("📷 Move the camera to start the live mesh")
+            Label("Move the camera to start the live mesh", systemImage: "camera").labelStyle(.tintedIcon(.cyan))
                 .font(.headline)
                 .foregroundColor(.white)
                 .padding(.horizontal, 20)

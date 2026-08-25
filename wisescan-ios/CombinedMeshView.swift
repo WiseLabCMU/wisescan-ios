@@ -827,15 +827,30 @@ struct CombinedMeshView: UIViewRepresentable {
                 // own extent means the same physical height is a different color per map — actively
                 // misleading for judging whether two landings sit at the same level.
                 //
-                // Deliberately re-parses in pass 2 rather than holding every parsed mesh in memory
-                // at once: N large meshes resident is the worse trade on device, and this runs
-                // off-main behind the existing "Loading N meshes…" overlay.
+                // The parse is HANDED to pass 2 rather than thrown away and redone, COMPACTED first:
+                // parseOBJ's vertex buffer keeps its data.count/30 capacity reservation (~the file
+                // on disk, about twice the live bytes), so each parse is copied to exact-count
+                // arrays before being held. That makes a held parse 16V + 12F bytes against a built
+                // geometry's 40V + 12F across its SceneKit sources (vertices + normals + colors +
+                // indices) — smaller by 24V for EVERY mesh shape, counting the geometry WITHOUT the
+                // 4x room-scale subdivision (gated above meshSubdivisionMaxFaces), which only widens
+                // the gap. Pass 2 drops each parse as it consumes it, so the all-parses plateau at
+                // the start of pass 2 stays under the all-geometries tail that set the peak before;
+                // the peak itself falls because pass 2 no longer re-reads the file. Feeding both
+                // passes from ONE parse also closes a real window: mesh.obj rewrites are atomic, so
+                // the old double read could see pre-registration bytes in pass 1 and
+                // post-registration bytes in pass 2 and silently miscolor the union.
                 var unionMin = Float.greatestFiniteMagnitude
                 var unionMax = -Float.greatestFiniteMagnitude
-                for item in items {
+                var parsedMeshes = [MeshParser.OBJData?](repeating: nil, count: items.count)
+                for (idx, item) in items.enumerated() {
                     guard let data = try? Data(contentsOf: item.meshURL),
-                          let parsed = MeshParser.parseOBJ(from: data),
-                          let r = MeshPreviewView.worldHeightRange(parsed: parsed, transform: item.transform)
+                          let parsed = MeshParser.parseOBJ(from: data)
+                    else { continue }
+                    parsedMeshes[idx] = MeshParser.OBJData(
+                        vertices: parsed.vertices.withUnsafeBufferPointer(Array.init),
+                        faces: parsed.faces.withUnsafeBufferPointer(Array.init))
+                    guard let r = MeshPreviewView.worldHeightRange(parsed: parsed, transform: item.transform)
                     else { continue }
                     unionMin = min(unionMin, r.min)
                     unionMax = max(unionMax, r.max)
@@ -853,12 +868,19 @@ struct CombinedMeshView: UIViewRepresentable {
                 var proxyMissing = 0
                 var dynamicAvailable = 0
                 var dynamicMissing = 0
-                for item in items {
-                    guard let data = try? Data(contentsOf: item.meshURL) else { continue }
+                for (idx, item) in items.enumerated() {
+                    guard let parsed = parsedMeshes[idx] else { continue }
+                    parsedMeshes[idx] = nil   // one parse resident at a time from here: the slot
+                                              // clears now, the local lasts to the end of this pass
                     let colors = item.colorsURL.flatMap { try? Data(contentsOf: $0) }
+                    // Incidental fix riding the parse handoff: only items that PARSED can reach this
+                    // line now, where the old pass 2 re-read the file itself — so a mesh whose parse
+                    // fails can no longer flip the flag and summon a height legend for a map that
+                    // never rendered. Matches the "only when something actually rendered" intent
+                    // documented at the legend publish below.
                     if colors == nil { usedHeightRamp = true }
                     guard let (geometry, _) = MeshPreviewView.buildGeometry(
-                        from: data, vertexColors: colors,
+                        parsed: parsed, vertexColors: colors,
                         heightRange: sharedRange, heightTransform: item.transform
                     ) else { continue }
 

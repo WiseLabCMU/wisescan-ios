@@ -558,9 +558,9 @@ extension MeshPreviewView {
     ///
     /// CAPACITY (future work — deliberately no eviction code here). N resident generations is fine
     /// for the handful of rescans a room accumulates in practice, and NOT fine indefinitely: each
-    /// slot holds a full `buildGeometry` result, which subdivides every triangle into four for
-    /// smooth vertex-color interpolation. When a location's history outgrows memory, this is the
-    /// place to bound it:
+    /// slot holds a full `buildGeometry` result (4x that when the mesh is small enough that
+    /// `AppConstants.meshSubdivisionMaxFaces` lets the triangle subdivision run). When a
+    /// location's history outgrows memory, this is the place to bound it:
     ///   - unload slots far from the scrub position (drop the container, keep the snapshot, and
     ///     reload on approach — the `attempted` set already makes a reload idempotent);
     ///   - cap the resident geometry variants per slot (e.g. keep the current source only, dropping
