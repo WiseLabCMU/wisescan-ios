@@ -279,6 +279,12 @@ final class ThetaBLEManager: NSObject {
                 return false
             }
             try await writeJSON("{\"cameraPower\":\"on\"}", to: Self.ccv2SetOptionsChar, timeout: 8)
+            // The wake write IS the control probe — same characteristic, same payload
+            // verifyControlWritable uses as proof. Without recording it, a Wi-Fi failure
+            // after a successful wake let noteUnproductiveLink claim the camera "never
+            // accepted a command" (2026-08-25: CL-mode boot — camera accepted the wake,
+            // Wi-Fi probes failed for an unrelated reason, desync advice misfired).
+            controlVerifiedForLink = true
             onLog?("BLE wake sent — waiting for the camera's Wi-Fi")
             try? await Task.sleep(nanoseconds: 3_000_000_000)   // AP rise headstart
             return true
@@ -356,6 +362,22 @@ final class ThetaBLEManager: NSObject {
             }
             peripheral.writeValue(Data("{\"optionNames\":[\"_networkType\"]}".utf8),
                                   for: char, type: .withResponse)
+        }
+    }
+
+    /// Switch the camera's WLAN back to AP/Direct mode over BLE — the remedy when a
+    /// camera boots into CLIENT mode (observed 2026-08-25: X firmware 2.93.1 update left
+    /// CL active by default) and so never raises the AP the stored profile joins. Uses the
+    /// same CCv2 SetOptions write path as wake; the camera changes mode on acceptance.
+    func restoreAPMode() async -> Bool {
+        guard (try? await ensureLinkReady()) != nil, isLinkReady else { return false }
+        do {
+            try await writeJSON("{\"_networkType\":\"AP\"}", to: Self.ccv2SetOptionsChar, timeout: 5)
+            onLog?("Switched the camera back to AP Wi-Fi mode over Bluetooth")
+            return true
+        } catch {
+            Self.log.notice("AP-mode restore over BLE failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 

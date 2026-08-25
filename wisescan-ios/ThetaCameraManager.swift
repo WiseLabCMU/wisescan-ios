@@ -485,6 +485,19 @@ final class ThetaCameraManager {
                 guard attempt < 5,
                       case .failed(let message) = state, message.hasPrefix("Can't reach") else { break }
                 log(.connection, "Probe \(attempt) failed — link may still be settling, retrying…")
+                // A failed probe after a SUCCESSFUL BLE wake is the client-mode signature
+                // (camera awake, hosting no AP) — ask over BLE NOW, not after the loop.
+                // First field exercise (2026-08-25, theta-comms2): the post-loop version
+                // detected CL 61 s after the tap and connected at 76 s; checking on the
+                // first failure moves detection to ~20 s. Once is enough — the answer
+                // doesn't change while the loop runs, and a nil read (BLE momentarily
+                // down) self-heals inside via ensureLinkReady. If the handler restores
+                // AP and its own probe misses (AP still rising), the remaining loop
+                // attempts keep probing the now-correct network.
+                if attempt == 1, wokeOverBLE {
+                    await handleClientModeIfDetected()
+                    if isConnected { return }
+                }
                 state = .connecting
                 lastError = nil
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -1098,11 +1111,35 @@ final class ThetaCameraManager {
     /// perfectly healthy. Only BLE can ask while Wi-Fi is unreachable, so this runs
     /// off the bonded link when there is one, and stays silent otherwise.
     private func warnIfClientMode() async {
-        guard let mode = await ThetaBLEManager.shared.readNetworkType() else { return }
-        if mode.uppercased().hasPrefix("CL") {
-            log(.connection, "⚠️ The camera is in CLIENT (CL) Wi-Fi mode — it joined another "
-                + "network and isn't broadcasting its own. Switch it to AP/Direct mode on the "
-                + "camera, or use Wake Camera to bring its access point back.")
+        await handleClientModeIfDetected()
+    }
+
+    /// CL-mode detection AND remedy. A stored AP profile is an explicit statement of
+    /// intent — this flow exists to join the camera's own network — so when the camera
+    /// reports CLIENT mode, switch it back to AP over BLE (the same CCv2 SetOptions path
+    /// as wake) and rejoin, rather than telling the operator to dig through camera menus.
+    /// Falls back to the Dashboard alert with the on-camera steps when the write fails.
+    private func handleClientModeIfDetected() async {
+        guard let mode = await ThetaBLEManager.shared.readNetworkType(),
+              mode.uppercased().hasPrefix("CL") else { return }
+        log(.connection, "⚠️ The camera is in CLIENT (CL) Wi-Fi mode — it isn't broadcasting "
+            + "its own network (firmware updates can boot into CL). Switching it back over Bluetooth…")
+        if await ThetaBLEManager.shared.restoreAPMode() {
+            // AP takes a few seconds to rise after the mode flip — same rhythm as wake.
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if await joinStoredNetworkIfNeeded() {
+                state = .connecting
+                lastError = nil
+                await probe()
+                if isConnected { return }
+            }
+            log(.connection, "Camera switched to AP mode — tap Connect again if it didn't come up.")
+        } else {
+            ThetaBLEManager.shared.actionRequired =
+                "The camera is in CLIENT (CL) Wi-Fi mode, so it isn't broadcasting the network "
+                + "this app joins — and switching it back over Bluetooth didn't work.\n\n"
+                + "On the camera: Settings → Wi-Fi icon → select AP (Direct) mode. Firmware "
+                + "updates can reset this to CL."
         }
     }
 
