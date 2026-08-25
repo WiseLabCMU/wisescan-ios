@@ -7,6 +7,7 @@ struct DashboardView: View {
     @State private var serverStatus: ServerStatus = .unknown
     @State private var wearableManager = MetaWearableManager.shared
     @State private var thetaManager = ThetaCameraManager.shared
+    @State private var bleManager = ThetaBLEManager.shared
 
     enum ServerStatus {
         case unknown, checking, available, unavailable
@@ -229,6 +230,15 @@ struct DashboardView: View {
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView()
+            }
+            // Blocking BLE condition the operator must resolve in iOS Settings (corrupt
+            // GATT cache) — raised prominently rather than left in the event log.
+            .alert("Re-pair the 360° camera",
+                   isPresented: Binding(get: { bleManager.actionRequired != nil },
+                                        set: { if !$0 { bleManager.actionRequired = nil } })) {
+                Button("OK", role: .cancel) { bleManager.actionRequired = nil }
+            } message: {
+                Text(bleManager.actionRequired ?? "")
             }
             .preferredColorScheme(.dark)
             .onAppear {
@@ -658,7 +668,12 @@ struct ThetaCameraCard: View {
                 + "press the camera's power button so its Wi-Fi is awake, check the SSID against "
                 + "the camera's screen, then Save & Connect."
         } catch {
-            bleAddStatus = "Bluetooth setup failed: \(error.localizedDescription)"
+            // A stale GATT cache surfaces here as a terse technical linkState error. The
+            // BLE manager has already composed the real, actionable guidance for exactly
+            // this case — prefer it over the raw string so this inline status says what to
+            // DO, not just that it failed.
+            bleAddStatus = ThetaBLEManager.shared.actionRequired
+                ?? "Bluetooth setup failed: \(error.localizedDescription)"
         }
     }
 

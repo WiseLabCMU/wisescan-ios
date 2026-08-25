@@ -80,7 +80,9 @@ final class ThetaBLEManager: NSObject {
         var rssi: Int
     }
 
-    // X-native v2 characteristics (see ThetaBLEProbe for the full discovery map).
+    // X-native v2 service + characteristics (see ThetaBLEProbe for the full discovery map).
+    // The manager needs ONLY this one service: every characteristic below lives in it.
+    static let ccv2Service = CBUUID(string: "B6AC7A7E-8C01-4A52-B188-68D53DF53EA2")
     static let ccv2GetInfoChar = CBUUID(string: "A0452E2D-C7D8-4314-8CD6-7B8BBAB4D523")
     static let ccv2GetStateChar = CBUUID(string: "083D92B0-21E0-4FB2-9503-7D8B2C2BB1D1")
     static let ccv2NotifyStateChar = CBUUID(string: "D32CE140-B0C2-4C07-AF15-2301B5057B8C")
@@ -106,6 +108,10 @@ final class ThetaBLEManager: NSObject {
     static let ccv2SetOptionsChar = CBUUID(string: "F0BCD2F9-5862-4653-B50D-80DC51E8CB82")
     static let ccv2ShutterChar = CBUUID(string: "6E2DEEBE-88B0-42A5-829D-1B2C6ABCE750")
     static let ccv2GetOptionsChar = CBUUID(string: "7CFFAAE3-8467-4D0C-A9DD-7F70B4F52863")
+    /// The exact characteristics the manager consumes — passed to discoverCharacteristics
+    /// so CoreBluetooth reconciles only these, never the full cached attribute table.
+    static let ccv2Characteristics = [ccv2GetInfoChar, ccv2GetStateChar, ccv2NotifyStateChar,
+                                      ccv2SetOptionsChar, ccv2ShutterChar, ccv2GetOptionsChar]
 
     /// Cameras currently advertising (discovery mode only, strongest signal first).
     var discovered: [Discovered] = []
@@ -140,8 +146,18 @@ final class ThetaBLEManager: NSObject {
     /// `noteUnproductiveLink` — that pattern is the half-cleared-pairing signature.
     var linkReadyAt: Date?
     var unproductiveLinkCycles = 0
+    /// Consecutive connects where the CCv2 service was present but returned no
+    /// characteristics — the corrupt-cache signature. Two ⇒ stop auto-retrying; the cache
+    /// cannot self-heal and only an operator re-pair fixes it. Reset on a clean link and
+    /// on establishLink.
+    var staleCacheStrikes = 0
     /// Mirrors key events into ThetaCameraManager's card log (wired at its init).
     var onLog: ((String) -> Void)?
+    /// A blocking condition the operator must resolve OUTSIDE the app — currently only the
+    /// corrupt iOS GATT cache (Forget This Device in iOS Settings). Observable so the UI
+    /// can raise a prominent alert rather than leaving the fix buried in the event log.
+    /// nil = nothing to act on. Cleared automatically on the next clean link.
+    var actionRequired: String?
 
     var central: CBCentralManager?
     var peripheral: CBPeripheral?
@@ -151,6 +167,36 @@ final class ThetaBLEManager: NSObject {
     /// so an unsupported camera fails with the TRUTH instead of eating the link
     /// watchdog and reporting "camera did not answer" (which it plainly did).
     var pendingCharDiscoveries = 0
+
+    /// A stored characteristic, but ONLY if it still belongs to the peripheral we are
+    /// driving. Belt to `establishLink`'s braces: any path that reaches a stale
+    /// characteristic and hands it to CoreBluetooth crashes the process from inside
+    /// CoreBluetooth, where nothing in Swift can intervene — so every use goes through
+    /// here rather than subscripting `chars` directly.
+    func liveCharacteristic(_ uuid: CBUUID) -> CBCharacteristic? {
+        guard let char = chars[uuid], let peripheral else { return nil }
+        guard char.service?.peripheral?.identifier == peripheral.identifier else {
+            Self.log.notice("dropped a stale characteristic \(uuid.uuidString, privacy: .public) from a previous link")
+            chars.removeValue(forKey: uuid)
+            return nil
+        }
+        return char
+    }
+
+    /// Is this the peripheral this manager is currently driving?
+    ///
+    /// Every delegate callback checks it. CoreBluetooth keeps delivering callbacks for a
+    /// peripheral after we have moved on — a superseded connect attempt, a camera switch,
+    /// a teardown that raced an in-flight discovery — and acting on those means driving
+    /// discovery against objects from a connection that no longer exists. On 2026-08-21
+    /// that produced a hard crash:
+    /// `-[CBCharacteristic handleCharacteristicsDiscovered:]: unrecognized selector`,
+    /// CoreBluetooth's own internals dispatching a service callback onto a reused object,
+    /// after a day of reconnect churn and a stale GATT cache. An NSException from inside
+    /// CoreBluetooth cannot be caught in Swift, so the only defence is not provoking it.
+    func isTracked(_ candidate: CBPeripheral) -> Bool {
+        candidate.identifier == peripheral?.identifier
+    }
     var lastFileUrl = ""
     static let log = Logger(subsystem: "org.arenaxr.scan4d", category: "thetaBLE")
 
@@ -258,7 +304,7 @@ final class ThetaBLEManager: NSObject {
     /// ms of shutter-open (the X fires immediately; fixed focus, no hunt). This is the
     /// sway guard's exposure-window anchor.
     func triggerShutter(timeout: TimeInterval = 15, onAck: (() -> Void)? = nil) async throws -> String {
-        guard isLinkReady, let peripheral, let shutter = chars[Self.ccv2ShutterChar] else {
+        guard isLinkReady, let peripheral, let shutter = liveCharacteristic(Self.ccv2ShutterChar) else {
             throw BLEError.linkNotReady
         }
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
@@ -283,7 +329,7 @@ final class ThetaBLEManager: NSObject {
     /// cheapest truth available, and the only one that works when the phone has left
     /// the camera's Wi-Fi. Does not wake, join, or reconfigure anything.
     func isCameraResponding(timeout: TimeInterval = 3) async -> Bool {
-        guard isLinkReady, let peripheral, let char = chars[Self.ccv2GetStateChar] else { return false }
+        guard isLinkReady, let peripheral, let char = liveCharacteristic(Self.ccv2GetStateChar) else { return false }
         peripheral.readValue(for: char)
         let deadline = Date().addingTimeInterval(timeout)
         let before = lastStateReadAt
@@ -300,7 +346,7 @@ final class ThetaBLEManager: NSObject {
     /// so the response arrives via didUpdateValueFor. nil when unavailable.
     func readNetworkType() async -> String? {
         guard (try? await ensureLinkReady()) != nil, isLinkReady,
-              let peripheral, let char = chars[Self.ccv2GetOptionsChar] else { return nil }
+              let peripheral, let char = liveCharacteristic(Self.ccv2GetOptionsChar) else { return nil }
         if char.properties.contains(.notify) { peripheral.setNotifyValue(true, for: char) }
         return await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
             optionsPending = cont
@@ -414,14 +460,55 @@ final class ThetaBLEManager: NSObject {
     }
 
     /// Drop the link (scan stop + disconnect). Pending operations fail immediately.
+    /// Peripherals whose disconnect we have REQUESTED but which CoreBluetooth has not
+    /// finished with yet.
+    ///
+    /// `cancelPeripheralConnection` is asynchronous. CoreBluetooth does NOT retain the
+    /// CBPeripheral for you — if the last strong reference goes away while it still has
+    /// operations in flight, its internal attribute bookkeeping is left pointing at freed
+    /// memory. That is the 2026-08-21/25 launch crash: `-[CBCharacteristic
+    /// handleCharacteristicsDiscovered:]: unrecognized selector` — an internal SERVICE
+    /// callback dispatched onto whatever object now occupies the reused allocation. It
+    /// reproduced immediately after "Camera forgotten", the one path that runs disconnect()
+    /// and teardown() back to back, and it throws from inside CoreBluetooth where no Swift
+    /// guard or catch can reach it.
+    ///
+    /// So the peripheral stays alive here until `didDisconnectPeripheral` confirms
+    /// CoreBluetooth is done with it, or the backstop expires.
+    private var retiring: [CBPeripheral] = []
+
     func teardown() {
         failAllPending(BLEError.linkNotReady)
         central?.stopScan()
-        if let peripheral { central?.cancelPeripheralConnection(peripheral) }
+        if let peripheral {
+            // Hold a strong reference across the async cancel — see `retiring`.
+            retiring.append(peripheral)
+            central?.cancelPeripheralConnection(peripheral)
+            // Backstop: if the disconnect callback never arrives (peripheral already gone,
+            // Bluetooth toggled), release after a grace period rather than leaking. Long
+            // enough that a real disconnect callback always wins the race.
+            let identifier = peripheral.identifier
+            armWatchdog("retire-\(identifier.uuidString)", 10) { [weak self] in
+                self?.releaseRetired(identifier)
+            }
+        }
         peripheral = nil
         chars.removeAll()
         pendingCharDiscoveries = 0
         linkState = .idle
+    }
+
+    /// Drop the strong reference held across a requested disconnect.
+    func releaseRetired(_ identifier: UUID) {
+        guard retiring.contains(where: { $0.identifier == identifier }) else { return }
+        // Stop delegate traffic before the object goes: CoreBluetooth's `delegate` is an
+        // unsafe-unretained reference, so a callback arriving after we are gone is its own
+        // hazard, separate from the peripheral's lifetime.
+        for peripheral in retiring where peripheral.identifier == identifier {
+            peripheral.delegate = nil
+        }
+        retiring.removeAll { $0.identifier == identifier }
+        clearWatchdog("retire-\(identifier.uuidString)")
     }
 
     // MARK: - Plumbing
