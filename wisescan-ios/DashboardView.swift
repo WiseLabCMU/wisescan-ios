@@ -7,6 +7,7 @@ struct DashboardView: View {
     @State private var serverStatus: ServerStatus = .unknown
     @State private var wearableManager = MetaWearableManager.shared
     @State private var thetaManager = ThetaCameraManager.shared
+    @State private var bleManager = ThetaBLEManager.shared
 
     enum ServerStatus {
         case unknown, checking, available, unavailable
@@ -229,6 +230,15 @@ struct DashboardView: View {
             }
             .sheet(isPresented: $showSettings) {
                 SettingsView()
+            }
+            // Blocking BLE condition the operator must resolve in iOS Settings (corrupt
+            // GATT cache) — raised prominently rather than left in the event log.
+            .alert("Re-pair the 360° camera",
+                   isPresented: Binding(get: { bleManager.actionRequired != nil },
+                                        set: { if !$0 { bleManager.actionRequired = nil } })) {
+                Button("OK", role: .cancel) { bleManager.actionRequired = nil }
+            } message: {
+                Text(bleManager.actionRequired ?? "")
             }
             .preferredColorScheme(.dark)
             .onAppear {
@@ -584,7 +594,11 @@ struct ThetaCameraCard: View {
     private var statusLabel: String {
         switch manager.state {
         case .disconnected:
-            return manager.hasStoredNetwork ? "Saved — tap Connect" : "Not set up"
+            if manager.hasStoredNetwork { return "Saved — tap Connect" }
+            // BLE identity stored but no Wi-Fi yet (a hand-off that didn't finish):
+            // "Not set up" was a lie sitting right above live BLE link events.
+            return UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial) != nil
+                ? "Bluetooth paired — finish Wi-Fi in Add Camera" : "Not set up"
         case .connecting: return "Checking…"
         // The header already names the camera (model · serial) — repeating the model
         // here was redundant; the status line carries what the header doesn't.
@@ -646,19 +660,41 @@ struct ThetaCameraCard: View {
                                   bleID: UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLEPeripheralID))
             bleAddStatus = nil
             showNetworkSheet = false
+            hasAttemptedConnect = true
+            eventsExpanded = true
             manager.connect()
         } catch ThetaBLEManager.BLEError.needsWiFiSetup(let model, let serial) {
-            // Not a failure: BLE identified the camera for free. Hand off to manual
-            // setup prefilled with what we learned (SSID form is derived — the user
-            // should confirm it against the camera's own Wi-Fi screen).
-            sheetSSID = ThetaCameraManager.factorySSID(model: model, serial: serial) ?? ""
-            sheetPassphrase = serial
-            sheetPassAutoFill = serial
-            bleAddStatus = "Found \(model) · \(serial). Bluetooth setup is THETA X only for now — "
-                + "press the camera's power button so its Wi-Fi is awake, check the SSID against "
-                + "the camera's screen, then Save & Connect."
+            // Not a failure: BLE identified the camera for free. When the model is one
+            // whose factory SSID we can derive (Z1: THETAYN<serial>.OSC, SDK-confirmed),
+            // finish the add automatically — the X path already auto-saves its derived
+            // SSID without a confirm, and the field showed the manual hand-off dead-ends
+            // ("Save & Connect… back at the Add button, no feedback", 2026-08-25). A
+            // wrong suffix just fails the join visibly, editable in Camera & Network.
+            if let ssid = ThetaCameraManager.factorySSID(model: model, serial: serial) {
+                manager.saveNetwork(ssid: ssid, passphrase: serial)
+                manager.upsertProfile(model: model, serial: serial, ssid: ssid, passphrase: serial,
+                                      bleID: UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLEPeripheralID))
+                bleAddStatus = nil
+                showNetworkSheet = false
+                hasAttemptedConnect = true
+                eventsExpanded = true
+                manager.connect()
+            } else {
+                // Unknown model: prefilled manual hand-off, the user confirms the SSID
+                // against the camera's own screen.
+                sheetSSID = ""
+                sheetPassphrase = serial
+                sheetPassAutoFill = serial
+                bleAddStatus = "Found \(model) · \(serial). Type the SSID shown on the camera's "
+                    + "Wi-Fi screen, then Save & Connect."
+            }
         } catch {
-            bleAddStatus = "Bluetooth setup failed: \(error.localizedDescription)"
+            // A stale GATT cache surfaces here as a terse technical linkState error. The
+            // BLE manager has already composed the real, actionable guidance for exactly
+            // this case — prefer it over the raw string so this inline status says what to
+            // DO, not just that it failed.
+            bleAddStatus = ThetaBLEManager.shared.actionRequired
+                ?? "Bluetooth setup failed: \(error.localizedDescription)"
         }
     }
 
@@ -757,6 +793,11 @@ struct ThetaCameraCard: View {
                                               serial: ThetaCameraManager.factoryPassphrase(fromSSID: ssid),
                                               ssid: ssid, passphrase: sheetPassphrase, bleID: nil)
                         showNetworkSheet = false
+                        // The card mounts AFTER this action's state transitions, so its
+                        // onChange(of: state) can miss them — open the events feed here
+                        // so the first connect narrates instead of running silently.
+                        hasAttemptedConnect = true
+                        eventsExpanded = true
                         if sheetIsAdding, let added = manager.profiles.first(where: { $0.ssid == ssid }) {
                             manager.activateProfile(added)
                         } else {
@@ -767,7 +808,8 @@ struct ThetaCameraCard: View {
                     .disabled(sheetSSID.trimmingCharacters(in: .whitespaces).isEmpty || sheetPassphrase.isEmpty)
                 }
 
-                if manager.hasStoredNetwork {
+                if manager.hasStoredNetwork || !manager.profiles.isEmpty
+                    || UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial) != nil {
                     Section {
                         Button("Forget This Camera", role: .destructive) {
                             manager.forgetCamera()
@@ -799,7 +841,11 @@ struct ThetaCameraCard: View {
         // State machine per field spec: (1) not set up → a single Meta-style add
         // button; (2) saved → identity + connect; (3) events appear only once
         // Connect has been attempted; (4) Test Shutter appears once Wi-Fi completes.
-        if !manager.hasStoredNetwork {
+        // `profiles` is the observable read that makes this branch re-evaluate the
+        // moment Save & Connect registers a camera. hasStoredNetwork alone reads
+        // UserDefaults — invisible to @Observable — so the card sat frozen on the Add
+        // button through the Z1's whole first connect (field, 2026-08-25).
+        if manager.profiles.isEmpty, !manager.hasStoredNetwork {
             Button(action: { openSheet(adding: true) }, label: {
                 HStack {
                     Image(systemName: "plus")
@@ -839,7 +885,18 @@ struct ThetaCameraCard: View {
                             .foregroundColor(.white.opacity(0.7))
                             .lineLimit(1)
                         if let battery = manager.batteryLevel {
-                            Text("· 🔋 \(Int(battery * 100))%")
+                            // SF Symbol, not an emoji: the 🔋 that used to sit here was the
+                            // first emoji rendered each session, and CoreText's first emoji
+                            // layout paid an ~18 s MobileGestalt XPC wait on main (#71) —
+                            // exactly at connect, where it also froze the BLE link window.
+                            Text("·")
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.7))
+                            Image(systemName: battery > 0.875 ? "battery.100" : battery > 0.625 ? "battery.75"
+                                  : battery > 0.375 ? "battery.50" : battery > 0.125 ? "battery.25" : "battery.0")
+                                .font(.caption)
+                                .foregroundColor(battery > 0.2 ? .white.opacity(0.7) : .orange)
+                            Text("\(Int(battery * 100))%")
                                 .font(.caption)
                                 .foregroundColor(.white.opacity(0.7))
                         }

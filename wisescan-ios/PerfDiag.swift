@@ -2,6 +2,7 @@ import Foundation
 import QuartzCore
 import os
 import Synchronization
+import Darwin
 
 /// Lightweight performance diagnostics for investigating mid-scan ARKit VIO starvation
 /// (the 1–2s freeze + tracking drift). Everything here is a **no-op unless the
@@ -106,6 +107,97 @@ enum PerfDiag {
 /// during the episode (accurate to within the ~250 ms sampling interval). Start/stop on the
 /// main thread (tied to the capture-view lifecycle).
 final class MainThreadWatchdog: NSObject, @unchecked Sendable {
+    /// One app-wide instance, started at launch when Perf Diagnostics is on. It was
+    /// capture-view-scoped, which is why #71's 79.5 s tab-tap freeze produced a total
+    /// blackout (the watchdog started at the END of the stall, in onAppear) and why the
+    /// 2026-08-25 18 s save-flow stall was caught only by luck (capture still open).
+    /// A display-link tick + a 4 Hz timestamp compare is negligible to keep running.
+    static let shared = MainThreadWatchdog()
+
+    // MARK: Mid-stall main-thread sampler (#71)
+    //
+    // Three field stalls of ~18.0 s each (17989 / 18087 / 17953 ms, 2026-08-25) at two
+    // different call sites, with every app-side path verified async — reading the code
+    // cannot name the owner, so the watchdog captures the main thread's backtrace WHILE
+    // it is stalled: a SIGUSR1 is directed at the main thread (SA_RESTART, so interrupted
+    // syscalls resume), and the handler — kept async-signal-safe — fills a preallocated
+    // buffer via backtrace(3), resolved through dlsym at start(). The monitor queue then
+    // symbolizes with dladdr OUTSIDE the handler and logs one frame per line.
+    private typealias BacktraceFn = @convention(c) (UnsafeMutablePointer<UnsafeMutableRawPointer?>, Int32) -> Int32
+    private nonisolated(unsafe) static var backtraceFn: BacktraceFn?
+    private nonisolated(unsafe) static var sampleBuf = [UnsafeMutableRawPointer?](repeating: nil, count: 64)
+    private nonisolated(unsafe) static var sampleCount: Int32 = 0
+    private nonisolated(unsafe) static var mainPthread: pthread_t?
+    /// Set true once per stall when the sample request is sent; cleared at stall END.
+    private var sampledThisStall = false
+
+    private static let installSampler: Void = {
+        mainPthread = pthread_self()   // start() runs on main at app launch
+        if let sym = dlsym(dlopen(nil, RTLD_NOW), "backtrace") {
+            backtraceFn = unsafeBitCast(sym, to: BacktraceFn.self)
+        }
+        var action = sigaction()
+        action.__sigaction_u.__sa_handler = { _ in
+            // Async-signal-safe only: one C call into a static buffer, two stores.
+            if let bt = MainThreadWatchdog.backtraceFn {
+                MainThreadWatchdog.sampleBuf.withUnsafeMutableBufferPointer { buf in
+                    MainThreadWatchdog.sampleCount = bt(buf.baseAddress!, 64)
+                }
+            }
+        }
+        action.sa_flags = SA_RESTART
+        sigemptyset(&action.sa_mask)
+        sigaction(SIGUSR1, &action, nil)
+    }()
+
+    /// lldb intercepts SIGUSR1 before our handler and PAUSES the process — under Xcode,
+    /// where a Debug build trips the 2 s threshold constantly, that made the app unusable
+    /// (field, 2026-08-25). When a debugger is attached the pause itself is the sample
+    /// (Xcode shows the full stack), so the signal is pointless: skip it and say so.
+    private static var isDebuggerAttached: Bool {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        let rc = sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0)
+        return rc == 0 && (info.kp_proc.p_flag & P_TRACED) != 0
+    }
+
+    /// Fire one sample at the stalled main thread, then symbolize what came back.
+    private func sampleMainThread(gapMs: Int) {
+        guard let main = Self.mainPthread, Self.backtraceFn != nil else { return }
+        // Under a debugger the signal pauses the process unless lldb is told to pass it —
+        // the app cannot see lldb's settings, so the operator opts in explicitly.
+        if Self.isDebuggerAttached,
+           !UserDefaults.standard.bool(forKey: AppConstants.Key.perfSampleUnderDebugger) {
+            PerfDiag.log("[PerfDiag] stall sample skipped — debugger attached (lldb pauses on the signal). Pause Xcode to read the main-thread stack, or run `process handle SIGUSR1 -n false -p true -s false` in lldb AND enable Developer Settings → Sample Stalls Under Debugger")
+            return
+        }
+        Self.sampleCount = 0
+        pthread_kill(main, SIGUSR1)
+        // The handler runs on the main thread more or less immediately, even mid-block
+        // (SA_RESTART resumes the interrupted call). Give it a beat, then symbolize here
+        // on the monitor queue where malloc is safe again.
+        usleep(50_000)
+        let n = Int(Self.sampleCount)
+        guard n > 0 else {
+            PerfDiag.log("[PerfDiag] stall sample: no frames captured (handler did not run — thread may be in an uninterruptible wait)")
+            return
+        }
+        PerfDiag.log("[PerfDiag] main-thread sample \(gapMs)ms into the stall — \(n) frame(s):")
+        for i in 0..<n {
+            guard let addr = Self.sampleBuf[i] else { continue }
+            var info = Dl_info()
+            if dladdr(addr, &info) != 0 {
+                let image = info.dli_fname.map { (String(cString: $0) as NSString).lastPathComponent } ?? "?"
+                let symbol = info.dli_sname.map { String(cString: $0) } ?? "?"
+                let offset = info.dli_saddr.map { UInt(bitPattern: addr) - UInt(bitPattern: $0) } ?? 0
+                PerfDiag.log("[PerfDiag]   #\(i) \(image) \(symbol) + \(offset)")
+            } else {
+                PerfDiag.log("[PerfDiag]   #\(i) \(String(describing: addr))")
+            }
+        }
+    }
+
     private var displayLink: CADisplayLink?
     private let lastTick = OSAllocatedUnfairLock<CFTimeInterval>(initialState: 0)
     private var monitor: DispatchSourceTimer?
@@ -122,6 +214,7 @@ final class MainThreadWatchdog: NSObject, @unchecked Sendable {
 
     func start() {
         guard PerfDiag.enabled, displayLink == nil else { return }
+        _ = Self.installSampler   // main pthread + SIGUSR1 handler + backtrace symbol, once
         lastTick.withLock { $0 = CACurrentMediaTime() }
 
         let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
@@ -153,8 +246,15 @@ final class MainThreadWatchdog: NSObject, @unchecked Sendable {
             } else {
                 stallMaxGap = max(stallMaxGap, gap)
             }
+            // 2 s in: this is a real freeze, not a frame hiccup — sample the main thread
+            // while it is still inside the blocking work. Once per stall.
+            if gap > 2.0, !sampledThisStall {
+                sampledThisStall = true
+                sampleMainThread(gapMs: Int(gap * 1000))
+            }
         } else if stallActive {
             stallActive = false
+            sampledThisStall = false
             PerfDiag.log("[PerfDiag] ✓ main-thread stall END (max no-frame gap \(Int(stallMaxGap * 1000))ms)")
         }
     }

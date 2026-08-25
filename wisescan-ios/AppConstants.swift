@@ -45,6 +45,7 @@ enum AppConstants {
         static let captureMode = "captureMode"
         static let hideLivePoints = "hideLivePoints"
         static let perfDiagnostics = "perfDiagnostics"
+        static let perfSampleUnderDebugger = "perfSampleUnderDebugger"  // Developer Mode: let the stall sampler send SIGUSR1 even when lldb is attached (requires lldb set to pass the signal)
         static let pauseVRCompute = "pauseVRCompute"
         static let vrBloomEnabled = "vrBloomEnabled"
         static let semanticLabeling = "semanticLabeling"
@@ -65,6 +66,9 @@ enum AppConstants {
         static let keepCameraOriginals = "keepCameraOriginals"        // Developer Mode: skip the security-P1 sweep that deletes each 360° still from the camera after verified transfer
         static let thetaBLESerial = "thetaBLESerial"                  // 8-digit serial of the paired camera (BLE identity + factory password)
         static let thetaBLEPeripheralID = "thetaBLEPeripheralID"      // CBPeripheral identifier for scan-free reconnects
+        static let thetaBLEModel = "thetaBLEModel"                    // model of the active camera, for link-time decisions (Z1 rides the v1 auth family; X rides bonded CCv2)
+        static let thetaZ1AuthUUID = "thetaZ1AuthUUID"                // app-generated UUID for the Z1/V v1 BLE auth scheme (registered over Wi-Fi, written to the auth char each session)
+        static let thetaZ1RegisteredSerial = "thetaZ1RegisteredSerial" // serial whose camera has accepted camera._setBluetoothDevice for thetaZ1AuthUUID — self-invalidates on camera switch
         static let thetaCameraProfiles = "thetaCameraProfiles"
         /// Longest EXIF exposure observed per camera model ("thetaObservedExposure.<model>"),
         /// learned from downloaded stills — widens the sway window in dim rooms.
@@ -104,6 +108,7 @@ enum AppConstants {
     static let captureMode: String = CaptureMode.ar.rawValue
     static let hideLivePoints: Bool = false
     static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
+    static let perfSampleUnderDebugger: Bool = false   // Developer Mode: stall sampler fires under a debugger too (lldb must pass SIGUSR1, else it pauses)
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
     static let vrBloomEnabled: Bool = false     // Developer Mode: VR point-cloud bloom post-process (off by default — device A/B found it unmissed with live points visible; helps most when Hide Live Points is on)
     static let semanticLabeling: Bool = true    // Developer Mode: disable entire RoomPlan pipeline to reduce memory

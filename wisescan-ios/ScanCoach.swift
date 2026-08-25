@@ -327,7 +327,7 @@ class ScanCoach {
         // a total loss — no other coaching matters if the session dies.
         if thermalState == .critical {
             return tip("critical.thermalCritical",
-                       "🌡️ Device critically hot — save the scan NOW",
+                       "Device critically hot — save the scan NOW",
                        icon: "thermometer.high",
                        priority: .critical, now: now)
         }
@@ -338,17 +338,17 @@ class ScanCoach {
             switch reason {
             case .excessiveMotion:
                 return tip("critical.excessiveMotion",
-                           "⚠️ Hold steady — excessive motion detected",
+                           "Hold steady — excessive motion detected",
                            priority: .critical, now: now)
             case .insufficientFeatures:
                 return tip("critical.insufficientFeatures",
-                           "⚠️ Hold steady — not enough visual features",
+                           "Hold steady — not enough visual features",
                            priority: .critical, now: now)
             default: break
             }
         case .notAvailable:
             return tip("critical.notAvailable",
-                       "⚠️ Tracking unavailable — hold device steady",
+                       "Tracking unavailable — hold device steady",
                        priority: .critical, now: now)
         default: break
         }
@@ -361,7 +361,7 @@ class ScanCoach {
         if let freeBytes = freeStorageBytes, freeBytes < AppConstants.lowStorageWarnBytes {
             let gigabytes = Double(freeBytes) / 1_000_000_000
             if let lowTip = tip("warning.lowStorage",
-                                String(format: "💾 Only %.1f GB free — free space before a long scan", gigabytes),
+                                String(format: "Only %.1f GB free — free space before a long scan", gigabytes),
                                 icon: "internaldrive",
                                 priority: .warning, now: now) { return lowTip }
         }
@@ -372,7 +372,7 @@ class ScanCoach {
         // stays credible for exactly this moment.
         if thermalState == .serious {
             return tip("warning.thermalSerious",
-                       "🌡️ Device hot — wrap up and save",
+                       "Device hot — wrap up and save",
                        icon: "thermometer.high",
                        priority: .warning, now: now)
         }
@@ -384,8 +384,8 @@ class ScanCoach {
         // is never normal operation. The sustain gate keeps passing hands silent.
         if nearDepthSustained >= AppConstants.coachNearDepthSustainSeconds {
             return tip("warning.nearDepthObstruction",
-                       rigMode ? "🔧 Something is right in front of the camera — check the rig clamp/knob"
-                               : "🔧 Something is right in front of the camera — check your grip",
+                       rigMode ? "Something is right in front of the camera — check the rig clamp/knob"
+                               : "Something is right in front of the camera — check your grip",
                        icon: "eye.trianglebadge.exclamationmark",
                        priority: .warning, now: now)
         }
@@ -414,15 +414,15 @@ class ScanCoach {
         if let census = meshGapCensus, sessionDuration > AppConstants.coachRigGapSeconds {
             if census.floor < AppConstants.coachFloorMinFaces {
                 if let gapTip = tip("warning.rigFloorGap",
-                                    rigMode ? "⬇️ Floor gaps — tilt the rig down briefly"
-                                            : "⬇️ Floor not meshed — sweep the floor",
+                                    rigMode ? "Floor gaps — tilt the rig down briefly"
+                                            : "Floor not meshed — sweep the floor",
                                     icon: "arrow.down.to.line",
                                     priority: .warning, now: now) { return gapTip }
             }
             if census.ceiling < AppConstants.coachCeilingMinFaces, coachingEnabled {
                 if let gapTip = tip("guidance.rigCeilingGap",
-                                    rigMode ? "⬆️ Ceiling not meshed — tilt the rig up briefly"
-                                            : "⬆️ Ceiling not meshed — sweep the ceiling",
+                                    rigMode ? "Ceiling not meshed — tilt the rig up briefly"
+                                            : "Ceiling not meshed — sweep the ceiling",
                                     icon: "arrow.up.to.line",
                                     priority: .guidance, now: now) { return gapTip }
             }
@@ -441,7 +441,7 @@ class ScanCoach {
         if fastMotionSustained >= AppConstants.coachFastMotionSustainSeconds,
            tipShowCounts["guidance.fastMotion", default: 0] < AppConstants.coachFastMotionMaxShows {
             if let hint = tip("guidance.fastMotion",
-                              "⚡ Moving fast — depth only (pause for photos)",
+                              "Moving fast — depth only (pause for photos)",
                               icon: "hare.fill",
                               priority: .guidance, now: now) { return hint }
         }
@@ -453,7 +453,7 @@ class ScanCoach {
             let extent = cameraSpatialExtent(recentTransforms)
             if extent < 3.0 { // Less than 3m extent — haven't moved around much
                 if let t = tip("guidance.scanWalls",
-                               "🏠 Scan all 4 walls quickly for layout context",
+                               "Scan all 4 walls quickly for layout context",
                                priority: .guidance, now: now) { return t }
             }
         }
@@ -474,7 +474,7 @@ class ScanCoach {
             let facesPerAnchor = Double(totalFaces) / Double(anchorCount)
             if facesPerAnchor < 200 { // Very coarse geometry
                 if let t = tip("guidance.moveCloser",
-                               "🔍 Move closer to capture fine details",
+                               "Move closer to capture fine details",
                                icon: "magnifyingglass",
                                priority: .guidance, now: now) { return t }
             }
@@ -497,7 +497,7 @@ class ScanCoach {
             // Walls detected but no floor
             if hasWalls && !hasFloors {
                 if let t = tip("guidance.semantic.scanFloor",
-                               "🪟 Walls detected, try scanning the floor",
+                               "Walls detected, try scanning the floor",
                                icon: "square.bottomhalf.filled",
                                priority: .guidance, now: now) { return t }
             }
@@ -505,7 +505,7 @@ class ScanCoach {
             // Surfaces detected but few objects
             if surfaceCount >= 3 && objectCount == 0 {
                 if let t = tip("guidance.semantic.scanObjects",
-                               "🛋️ Don't forget furniture — scan objects up close",
+                               "Don't forget furniture — scan objects up close",
                                icon: "sofa.fill",
                                priority: .guidance, now: now) { return t }
             }
@@ -513,7 +513,7 @@ class ScanCoach {
             // Floor detected but objects only at height (low object count relative to surface area)
             if hasFloors && objectCount > 0 && objectCount < 3 {
                 if let t = tip("guidance.semantic.lowerAngle",
-                               "🔽 Try scanning from a lower angle for floor objects",
+                               "Try scanning from a lower angle for floor objects",
                                icon: "arrow.down.to.line",
                                priority: .guidance, now: now) { return t }
             }
@@ -524,7 +524,7 @@ class ScanCoach {
         // Sharp photo captured — positive reinforcement when the user pauses and captures
         if isCurrentlyStill && sharpFrameCount > 0 && sharpFrameCount % 5 == 0 {
             if let t = tip("info.sharpCapture",
-                           "📸 Sharp photo captured!",
+                           "Sharp photo captured!",
                            icon: "camera.fill",
                            priority: .info, now: now) { return t }
         }
@@ -532,7 +532,7 @@ class ScanCoach {
         // Good coverage encouragement
         if !isEarlyScan && anchorCount >= 15 && capacityScore < 0.5 {
             if let t = tip("info.goodCoverage",
-                           "⭐ Coverage looking good!",
+                           "Coverage looking good!",
                            priority: .info, now: now) { return t }
         }
 
@@ -545,7 +545,7 @@ class ScanCoach {
            photoCoverageOccupied >= AppConstants.photoCoverageDebtMinVoxels &&
            photoCoverageFraction < AppConstants.photoCoverageDebtFraction {
             if let t = tip("guidance.pauseForPhoto",
-                           "📸 Hold still on amber areas, then tap for a photo",
+                           "Hold still on amber areas, then tap for a photo",
                            icon: "camera.fill",
                            priority: .guidance, now: now) { return t }
         }
@@ -556,7 +556,7 @@ class ScanCoach {
             // ~60% shared content between neighboring photos, not isolated islands.
             if meanStillOverlap < AppConstants.stillOverlapFloor {
                 if let overlapTip = tip("guidance.stillOverlap",
-                                        "📸 Overlap your photos — shoot the next one closer to the last",
+                                        "Overlap your photos — shoot the next one closer to the last",
                                         icon: "square.on.square",
                                         priority: .guidance, now: now) { return overlapTip }
             }
@@ -564,7 +564,7 @@ class ScanCoach {
             // photos) matters more than re-aiming from the same spot.
             if standpointDiversity < AppConstants.stillParallaxDiversityFloor {
                 if let parallaxTip = tip("guidance.stillParallax",
-                                         "↔️ Step sideways and photograph covered areas again",
+                                         "Step sideways and photograph covered areas again",
                                          icon: "figure.walk",
                                          priority: .guidance, now: now) { return parallaxTip }
             }
@@ -576,7 +576,7 @@ class ScanCoach {
             let facesPerSecond = Double(totalFaces) / max(sessionDuration, 1)
             if facesPerSecond < 500 { // Growth has slowed
                 if let t = tip("info.considerFinishing",
-                               "✅ Great coverage — consider finishing",
+                               "Great coverage — consider finishing",
                                priority: .info, now: now) { return t }
             }
         }
