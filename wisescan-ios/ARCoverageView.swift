@@ -999,6 +999,15 @@ struct ARCoverageView: UIViewRepresentable {
         /// delivery (the signature of ARKit VIO being starved). Touched only on the delegate queue.
         private var lastFrameTimestamp: TimeInterval = 0
 
+        /// Last sweep-yaw value published to `ScanStats`, as SpaceAnalyzer's own 1° bucket, and when.
+        /// `CaptureView.body` reads `scanStats.analysisYaw` (the `onChange(of:)` operand), so every
+        /// write re-evaluates the whole capture UI — and the analyzer quantizes the value to 1°
+        /// anyway, so a frame that cannot move the bucket has nothing to say. Touched only on the
+        /// delegate queue. `nil` = nothing published yet this session.
+        private var lastPublishedYawBucket: Int?
+        /// ARFrame timestamp (monotonic, boot-relative) of that publish.
+        private var lastYawPublishTime: TimeInterval = 0
+
         /// Wall-clock (ms) of the most recent ARFrame delivery, readable from any thread.
         /// 0 = no frame yet. Drives `reviveSessionIfStalled` — the record button's escape from a
         /// dead capture graph (2026-07-24 run 3: after a battery-idle resume the Fig capture
@@ -2739,6 +2748,30 @@ struct ARCoverageView: UIViewRepresentable {
                     hasPerson = Self.hasPersonPixels(in: seg)
                 }
                 let yaw = frame.camera.eulerAngles.y // radians, ±π
+                // Publish the yaw only when it crosses one of SpaceAnalyzer's 1° buckets — every
+                // write invalidates all of CaptureView.body via the onChange operand. The bucket
+                // expression REPLICATES the analyzer's own quantization (updateYaw: normalize to
+                // [0,360), then truncate), so an unchanged bucket here is by construction a sample
+                // updateYaw coalesces anyway; a floor-of-signed-degrees gate would disagree with
+                // the analyzer in 1-ulp windows around each negative degree boundary. The value
+                // published stays RAW radians, so the analyzer's arithmetic is unchanged on every
+                // sample it does see. The republish timer keeps the analyzer's fallback timeout
+                // evaluated during a stationary hold (it is checked inside updateYaw) — with the
+                // pre-existing caveat that delivery rides onChange, so a bit-identical Float at the
+                // republish instant delivers nothing; the ungated write-every-frame code had the
+                // same property. isFinite: Int(non-finite) traps, and this runs on every frame of
+                // every scan, not just analysis — a non-finite yaw publishes nothing (the analyzer
+                // could only have trapped on it anyway).
+                var yawDeg = yaw * (180 / Float.pi)
+                if yawDeg < 0 { yawDeg += 360 }
+                let yawBucket: Int? = yaw.isFinite ? Int(yawDeg.truncatingRemainder(dividingBy: 360)) : nil
+                let publishYaw = yawBucket != nil
+                    && (yawBucket != lastPublishedYawBucket
+                        || frame.timestamp - lastYawPublishTime >= AppConstants.analysisYawRepublishSeconds)
+                if publishYaw {
+                    lastPublishedYawBucket = yawBucket
+                    lastYawPublishTime = frame.timestamp
+                }
                 DispatchQueue.main.async { [weak self] in
                     guard let stats = self?.scanStats else { return }
                     stats.ambientIntensity = intensity
@@ -2749,7 +2782,7 @@ struct ARCoverageView: UIViewRepresentable {
                     // Person detection: latch true if ANY frame has person pixels
                     if hasPerson { stats.personDetectedDuringAnalysis = true }
                     // Yaw for 360° progress (stored as raw radians, SpaceAnalyzer tracks coverage)
-                    stats.analysisYaw = yaw
+                    if publishYaw { stats.analysisYaw = yaw }
                 }
             }
 
