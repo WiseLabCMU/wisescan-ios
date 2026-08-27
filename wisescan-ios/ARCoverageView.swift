@@ -205,6 +205,10 @@ struct ARCoverageView: UIViewRepresentable {
         // the camera + sensors powered until paused. While paused, skip the rest of updateUIView
         // (nothing to render). Resume re-runs the same nominal config makeUIView uses; the
         // "Initializing" overlay covers it, and it no longer freezes main now the delegate is off-main.
+        //
+        // `didResumeFromBatteryPause` is true for the ONE pass that performs the resume. The
+        // `currentFrame` re-signal further down has to skip that pass — see the comment there.
+        var didResumeFromBatteryPause = false
         if pauseARSession {
             if !context.coordinator.isSessionPausedForBattery {
                 PerfDiag.log("battery: pausing AR session (idle)")
@@ -215,17 +219,7 @@ struct ARCoverageView: UIViewRepresentable {
         } else if context.coordinator.isSessionPausedForBattery {
             context.coordinator.isSessionPausedForBattery = false
             PerfDiag.log("battery: resuming AR session (returned to capture)")
-            // Re-arm the session-readiness latch. `hasSetSessionReady` is set once (at the
-            // currentFrame re-signal below and in cameraDidChangeTrackingState) and was never
-            // cleared, while CaptureView clears `isARSessionReady` on every tab-leave — so after
-            // an idle pause the delegate could no longer re-signal readiness. That left only the
-            // `session.currentFrame != nil` re-signal further down, which runs in THIS same pass,
-            // before the resumed session can deliver a frame, so the black "Initializing AR
-            // Session…" overlay had nothing left to dismiss it. Clearing the latch is safe: its
-            // only reader is that delegate one-shot, and the action it guards is an idempotent
-            // `isSessionReadyBinding = true` write with no edge-triggered readers, so the worst
-            // case is publishing readiness twice.
-            context.coordinator.hasSetSessionReady = false
+            didResumeFromBatteryPause = true
             // Resume in the nominal (new-scan) configuration. The idle pause only fires after the
             // user has LEFT the capture tab, and leaving abandons any in-progress extend (CaptureView
             // .onDisappear clears the extend/ghost state, and the ghost overlay is removed on return)
@@ -242,6 +236,29 @@ struct ARCoverageView: UIViewRepresentable {
             // preserve (see above), so resume exactly the way the proven recovery path does.
             uiView.session.run(ARCoverageView.makeConfiguration(),
                                options: [.resetTracking, .removeExistingAnchors])
+        }
+
+        // Keep the delegate's readiness one-shot in lockstep with the flag it publishes.
+        // `Coordinator.hasSetSessionReady` gates ONLY the re-signal in
+        // cameraDidChangeTrackingState; it was set once and never cleared, while CaptureView
+        // clears `isARSessionReady` on every tab-leave (CaptureView.swift .onDisappear). So the
+        // delegate path went permanently dead after the first scan, leaving the
+        // `currentFrame != nil` retry below as the sole re-signal. That retry is NOT gated by the
+        // latch and runs on every non-paused pass, so it self-heals whenever frames are flowing —
+        // the un-cleared latch therefore costs a *transient* missed re-signal, not a permanently
+        // stuck overlay. It does cost a real one on the battery-resume pass, which reaches the
+        // retry with the session just reset (see the skip below), and it leaves the delegate
+        // unable to help at all if `updateUIView` stops being called.
+        //
+        // Deriving the re-arm from `isSessionReady` rather than clearing it in each teardown
+        // branch is what makes this complete: the latch only ever matters while the published
+        // flag is false, and any pass that observes it false re-arms — no enumeration of the
+        // seven `session.run(…, .resetTracking)` sites, and no way for the two to drift.
+        // Re-arming is safe: the only action behind the latch is an idempotent
+        // `isSessionReadyBinding = true` write, and no reader of the published flag is
+        // edge-triggered, so the worst case is publishing readiness twice.
+        if !isSessionReady && context.coordinator.hasSetSessionReady {
+            context.coordinator.hasSetSessionReady = false
         }
 
         // Live active mesh color update — recolor all existing wireframe entities
@@ -320,7 +337,18 @@ struct ARCoverageView: UIViewRepresentable {
 
         // If the session is already running (e.g. tab switch back) but isSessionReady
         // was reset in onDisappear, re-signal readiness immediately.
-        if !isSessionReady && uiView.session.currentFrame != nil {
+        //
+        // Skipped on the pass that just resumed from a battery pause: that pass called
+        // `session.run(…, [.resetTracking, .removeExistingAnchors])` ~80 lines up, and
+        // `currentFrame` is the LAST frame, not the next one — a reconfiguration is known to
+        // leave a stale frame behind (CaptureView+Recording's post-reset poll compares
+        // `currentFrame.timestamp` against a pre-reset timestamp for exactly this reason). So
+        // without the skip this branch would (a) publish readiness off a pre-pause frame for a
+        // session whose VIO is only just restarting and (b) immediately re-set the latch the
+        // re-arm above just cleared, making that re-arm a no-op. Readiness for the resumed
+        // session comes from cameraDidChangeTrackingState instead, which the reset guarantees
+        // will fire and which the re-arm has now un-gated.
+        if !isSessionReady && !didResumeFromBatteryPause && uiView.session.currentFrame != nil {
             DispatchQueue.main.async {
                 self.isSessionReady = true
             }
