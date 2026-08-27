@@ -928,6 +928,14 @@ struct CombinedMeshView: UIViewRepresentable {
                         for outline in result.outlineNodes {
                             let wire = SCNNode(geometry: outline.geometry)
                             let fill = SCNNode(geometry: outline.fillGeometry)
+                            // The rich RoomPlan category rides `SCNNode.name` here too, so the
+                            // combined view's boxes carry the same label as the single-scan
+                            // preview's. Nothing in this view reads it yet — the coarse/full
+                            // toggle, the legend filter and tap-to-identify are single-scan
+                            // preview features for now — but the boxes should not be the odd ones
+                            // out when that changes.
+                            wire.name = outline.category?.rawValue
+                            fill.name = outline.category?.rawValue
                             allOutlineNodes.append((item.id, wire, fill, item.transform))
                         }
                         for cls in result.detectedClasses { detectedSet.insert(cls) }

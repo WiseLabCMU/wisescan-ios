@@ -163,6 +163,9 @@ extension MeshPreviewView {
         /// This generation's RoomPlan classes — the legend follows the visible scan, so a class list
         /// borrowed from a sibling would be a lie about what's on screen.
         var detectedClasses: [SemanticClass] = []
+        /// The same generation's RICH RoomPlan categories, for the full-detail legend. Same rule:
+        /// per-generation, because the rows must name what is on screen.
+        var detectedCategories: [RoomPlanCategory] = []
         /// Sources whose artifact has already been resolved (successfully or not). A generation with
         /// no `mesh_dynamic.obj` must not be re-attempted on every `updateUIView`.
         var attempted: Set<MeshSourceMode> = []
@@ -386,11 +389,20 @@ extension MeshPreviewView {
             let semanticsNode = SCNNode()
             let fillsNode = SCNNode()
             for outline in outlines.outlineNodes {
+                // Same labelling as the primary load: the rich category rides `SCNNode.name`, so
+                // the detail toggle can recolour this generation without re-reading its
+                // roomplan.json. Styled at creation because a slot can attach long after the
+                // toggle was last flipped, and the incremental restyle only fires on a change.
+                let label = outline.category?.rawValue
                 let wireNode = SCNNode(geometry: outline.geometry)
+                wireNode.name = label
                 wireNode.position = offset
+                Self.styleSemanticNode(wireNode, detail: labelDetail, hiddenLabels: hiddenLabels)
                 semanticsNode.addChildNode(wireNode)
                 let fillNode = SCNNode(geometry: outline.fillGeometry)
+                fillNode.name = label
                 fillNode.position = offset
+                Self.styleSemanticNode(fillNode, detail: labelDetail, hiddenLabels: hiddenLabels)
                 fillsNode.addChildNode(fillNode)
             }
             container.addChildNode(semanticsNode)
@@ -398,6 +410,7 @@ extension MeshPreviewView {
             slot.semanticsNode = semanticsNode
             slot.semanticFillsNode = fillsNode
             slot.detectedClasses = outlines.detectedClasses
+            slot.detectedCategories = outlines.detectedCategories
         }
         if let markers = assets.markers {
             // Deliberately NOT `attachKeyframeMarkers`: that publishes hasKeyframeMarkers /
@@ -448,6 +461,7 @@ extension MeshPreviewView {
         slot.equirectFacesNode = coordinator.equirectFacesNode
         slot.faceAnchors = markerState.anchorPositions
         slot.detectedClasses = detectedClasses
+        slot.detectedCategories = detectedCategories
         // The primary load resolves all three variants up front (that's what makes hasProxyMesh /
         // hasDynamicMesh honest for the single-scan preview), so nothing here is left to attempt.
         slot.attempted = [.full, .proxy, .dynamic]
@@ -492,6 +506,7 @@ extension MeshPreviewView {
                 markerState.anchorPositions = []
                 DispatchQueue.main.async {
                     self.detectedClasses = []
+                    self.detectedCategories = []
                     self.timelineState.visibleHasPrivacy = false
                     self.timelineState.visibleHasKeyframes = false
                     self.timelineState.visibleHasEquirects = false
@@ -526,11 +541,13 @@ extension MeshPreviewView {
             coordinator.lastVisibleScanID = slot.scan.id
             markerState.anchorPositions = slot.faceAnchors
             let classes = slot.detectedClasses
+            let categories = slot.detectedCategories
             let hasPrivacy = !slot.faceAnchors.isEmpty
             let hasKeyframes = slot.hasKeyframeMarkers
             let hasEquirectFaces = slot.hasEquirectFaces
             DispatchQueue.main.async {
                 self.detectedClasses = classes
+                self.detectedCategories = categories
                 self.timelineState.visibleHasPrivacy = hasPrivacy
                 self.timelineState.visibleHasKeyframes = hasKeyframes
                 self.timelineState.visibleHasEquirects = hasEquirectFaces
