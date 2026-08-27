@@ -469,9 +469,11 @@ extension CaptureView {
             // anchors, and a relocalizing session's map is unreliable — preserve the raw
             // frames as a mesh-less, map-less scan below rather than discarding everything.
             // Extend flows need a co-framed mesh + world map either way, so those discard.
-            let rawFrameCount: Int = rawDataPath.map {
-                (try? FileManager.default.contentsOfDirectory(atPath: $0.appendingPathComponent("images").path).count) ?? 0
-            } ?? 0
+
+            // Counted as FRAME FILES (`images/frame_*.jpg`), not directory entries: this number is
+            // now the content floor's input as well as the "Saved N frames" message's, and a stray
+            // non-frame file must not read as content. Same answer (0) for a missing/unreadable dir.
+            let rawFrameCount = FrameCaptureSession.capturedFrameCount(in: rawDataPath)
 
             if completion == nil, !ARCoverageView.supportsLiDAR, rawFrameCount > 0 {
                 isRecording = false
@@ -504,9 +506,18 @@ extension CaptureView {
             isRecording = false
             isProcessingMesh = false  // release the re-entrancy claim from performStopRecording
 
-            if completion == nil, rawFrameCount > 0 {
+            if completion == nil, FrameCaptureSession.recoveryHasEnoughContent(frameCount: rawFrameCount) {
                 // Recover the raw capture: empty mesh (geometry comes from the frames downstream),
                 // no world map (a relocalizing session's map is unreliable / not extendable).
+                //
+                // CONTENT FLOOR (#81 defect 2): gated on `minRecoveryFrames`, not on
+                // `rawFrameCount > 0`. A two- or three-frame stub cleared the old gate and became a
+                // scan — and because it is the location's newest scan with no world map, it disabled
+                // Rescan Space and Connect Adjacent for the whole location (both read
+                // `sortedScans.first` and require its map file: LocationDetailView.swift:60, :126,
+                // :718, :743). The floor is frames only, never vertex count: the mesh is empty by
+                // construction here, and Lite devices legitimately save `vertexCount: 0` (the
+                // branch above). Below the floor we fall through and discard — see there.
                 let recoveredName = newLocationName.isEmpty ? "Recovered Scan" : newLocationName
                 let savedScan = ScanFileManager.shared.saveScan(
                     context: modelContext,
@@ -533,8 +544,26 @@ extension CaptureView {
                 return
             }
 
-            // Nothing usable to preserve (no frames), or a stitch/extend flow — discard.
-            saveMessage = "No Mesh Data"
+            // Below the content floor, or a stitch/extend flow — discard.
+            //
+            // The frames must be deleted HERE. This branch has never removed the capture directory,
+            // which was harmless while it was only reachable with zero frames, and is a leak in
+            // FileManager.temporaryDirectory now that a below-floor capture lands here too. Discard
+            // the way discardInProgressScan does (`frameCaptureSession.discardCapture()` below in
+            // this file): `stop()` returns captureDir WITHOUT clearing it
+            // (FrameCaptureSession.swift:431-450), so the session still owns this directory, and
+            // discardCapture (FrameCaptureSession.swift:465) removes it on ioQueue — after any
+            // in-flight frame writes drain — before the session is replaced two lines down.
+            // Non-extend flow only: unwinding an extend/stitch abort is the caller's job
+            // (`completion?(nil)` below) and is out of scope for the floor.
+            let discardedBelowFloor = completion == nil && rawFrameCount > 0
+            if completion == nil {
+                frameCaptureSession.discardCapture()
+            }
+
+            saveMessage = discardedBelowFloor
+                ? "Discarded — only \(rawFrameCount) frames captured"
+                : "No Mesh Data"
             frameCaptureSession = FrameCaptureSession()
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
 

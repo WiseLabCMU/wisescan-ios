@@ -472,6 +472,43 @@ class FrameCaptureSession {
         }
     }
 
+    // MARK: - Recovery content floor (issue #81, defect 2)
+
+    /// How many RGB frames a capture directory actually holds, counted from `images/frame_*.jpg`.
+    ///
+    /// Counts FRAME FILES, not directory entries: `contentsOfDirectory(...).count` on `images/`
+    /// answers "is there anything in here", which a stray non-frame file satisfies. `captureFrame`
+    /// is the only writer of that directory and always writes
+    /// `imagesDir.appendingPathComponent("frame_\(paddedIndex).jpg")`, on every device class
+    /// (Lite included), so the prefix/suffix pair is the exact frame set.
+    ///
+    /// `static` and directory-addressed on purpose: the caller asks about a FINALIZED capture — the
+    /// URL `stop()` returned — at a point where the owning session is about to be replaced.
+    /// Unreadable or missing `images/` answers 0, the same as the code this replaces.
+    static func capturedFrameCount(in captureDir: URL?) -> Int {
+        guard let captureDir else { return 0 }
+        let imagesPath = captureDir.appendingPathComponent("images").path
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: imagesPath) else { return 0 }
+        return names.filter { $0.hasPrefix("frame_") && $0.hasSuffix(".jpg") }.count
+    }
+
+    /// Whether a mesh-less, map-less tracking-loss recovery carries enough content to be worth
+    /// persisting as a scan (`AppConstants.minRecoveryFrames` — see there for why the floor exists
+    /// and why the number is a judgement call).
+    ///
+    /// The predicate is deliberately FRAME COUNT ONLY, never vertex count: Lite (no-LiDAR) devices
+    /// legitimately save `vertexCount: 0` scans and their frames are the whole payload, so a
+    /// vertex-based floor would reject every honest Lite capture. It is also the right predicate on
+    /// LiDAR devices, because on this branch the mesh is empty *by construction* (ARKit dropped its
+    /// mesh anchors on the tracking loss) — the raw frames are the only content the recovery can
+    /// carry, so they are the only thing there is to measure.
+    ///
+    /// Takes the count rather than the URL so the caller — which already needs `rawFrameCount` for
+    /// its user-facing message — does not read `images/` a second time on the main thread at Stop.
+    static func recoveryHasEnoughContent(frameCount: Int) -> Bool {
+        frameCount >= AppConstants.minRecoveryFrames
+    }
+
     private func captureFrame(from session: ARSession) {
         let fullyTest = isMockingIMU && isMockingImages && isMockingDepth
 

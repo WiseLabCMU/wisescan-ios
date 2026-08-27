@@ -197,6 +197,28 @@ enum AppConstants {
     static let vioHardFrameGapTripSeconds: TimeInterval = 4.0 // VIO guard belt: a gap this large trips REGARDLESS of how tracking presents on the recovery frame — covers OS actions (Control Center on iPadOS) that stall delivery without firing sessionWasInterrupted and resume via benign-looking .initializing (7.9s gap → silent SLAM reinit, 2026-07-24 M2 runs). Compute stalls on the marginal iPad top out well under 2s, so 4s is clear of false trips.
     static let meshStartWatchdogSeconds: TimeInterval = 10   // Recording on a LiDAR device with zero ARMeshAnchors for this long AFTER tracking settled = Recon3D is dead for this scan (60fps default-format fallback after RoomPlan's internal reconfigure; Fig err storm, 2026-07-24 runs) → halt via the VIO guard. NOT a live rebuild: re-running the session under active RoomPlan crashed ObjectUnderstanding at save (run 4).
     static let trackingSettleWatchdogSeconds: TimeInterval = 20 // Recording whose tracking NEVER reaches .normal (e.g. started mid-relocalization chase after an idle interruption) has both graduated guards unarmed — if it hasn't settled in this budget the capture is unusable → halt (2026-07-28 A12Z: indefinite degraded limbo, faces=0, no stillness settle).
+    /// Content floor for the tracking-loss recovery save (`CaptureView+Recording.swift`, the
+    /// mesh-less/map-less branch): a "Recovered Scan" is only worth persisting if the raw capture
+    /// holds at least this many RGB frames. Below the floor the capture is discarded instead —
+    /// such a stub is not merely useless, it is actively harmful: it becomes the location's NEWEST
+    /// scan, and both Rescan Space and Connect Adjacent take `sortedScans.first`
+    /// (`LocationDetailView.swift:60`, `:126`) and hard-gate on that scan's world map file existing
+    /// (`:718`, `:743`), which a recovery scan never has. A 2-frame stub therefore disables both
+    /// actions for the whole location while presenting as a legitimate 0 MB entry.
+    ///
+    /// JUDGEMENT CALL, NOT A MEASUREMENT: nothing committed states how many frames the
+    /// reconstruction backend needs, so this is deliberately set at the low end — the issue's own
+    /// guidance is to bias toward saving and treat "not sure" as save. The capture timer polls at
+    /// 10 Hz behind a movement gate (`FrameCaptureSession.swift:425-427`), so 10 frames is on the
+    /// order of a second of deliberate sweeping; any capture a user spent real time on clears it by
+    /// a wide margin. Raise it only against a real backend measurement.
+    ///
+    /// Isolation is the project default (MainActor, `SWIFT_DEFAULT_ACTOR_ISOLATION`), NOT
+    /// `nonisolated` like `meshSubdivisionMaxFaces` below: both readers are main-actor —
+    /// `FrameCaptureSession.recoveryHasEnoughContent(in:)` and, through it, `finishStopRecording`
+    /// in the `CaptureView` extension, which is entered via `DispatchQueue.main.async`
+    /// (`CaptureView+Recording.swift:386-388`). There is no off-main reader to serve.
+    static let minRecoveryFrames: Int = 10
 
     // MARK: - 360° Rig (mechanical-prior extrinsic — calibration plan step 1; the solved
     // hand–eye refinement replaces these per rig profile later)
