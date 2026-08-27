@@ -1374,9 +1374,28 @@ struct MeshPreviewView: UIViewRepresentable {
         struct OutlineNode {
             let geometry: SCNGeometry       // wireframe edges (.line)
             let fillGeometry: SCNGeometry   // filled box faces (.triangles, 75% opacity)
+            /// The ORIGINAL, unconsolidated RoomPlan category this box came from — the rich label
+            /// `roomplan.json` has always carried, kept alongside the consolidated class it was
+            /// drawn in. Carrying it out of the loader is what lets the preview be re-labelled,
+            /// re-coloured, filtered and tapped WITHOUT re-reading `roomplan.json`: the box's
+            /// single `SCNMaterial` is the only thing that has to change.
+            ///
+            /// Optional only defensively: every string that gets this far parses (the coarse
+            /// mapping would have returned `.none` otherwise, and the loop already skipped that),
+            /// and the derived levels/ramps are labelled `.floor` because that is what they are. A
+            /// box that somehow arrives unnamed keeps exactly the coarse colour the builder gave it,
+            /// which is today's behaviour.
+            let category: RoomPlanCategory?
+            /// RoomPlan's own confidence for the detection (`roomplan.json`'s `confidence`), for
+            /// the tap read-out. nil for the derived surfaces, which RoomPlan never scored.
+            let confidence: String?
         }
         let outlineNodes: [OutlineNode]
         let detectedClasses: [SemanticClass]
+        /// The rich categories actually present, in `RoomPlanCategory.allCases` order — the rows the
+        /// full-detail legend shows. Same contract as `detectedClasses`: what THIS scan contains and
+        /// nothing else, so the legend never names something that isn't on screen.
+        let detectedCategories: [RoomPlanCategory]
     }
 
     // MARK: - RoomPlan Outline Rendering
@@ -1408,6 +1427,10 @@ struct MeshPreviewView: UIViewRepresentable {
 
         var outlineNodes: [SemanticOutlineResult.OutlineNode] = []
         var detectedSet = Set<SemanticClass>()
+        // The rich label is in scope right here, next to the consolidated one — this loop IS the
+        // consolidation point. Collecting both is the whole widening: no second loader, no second
+        // decode of roomplan.json, and no new disk read on any later interaction.
+        var detectedCategorySet = Set<RoomPlanCategory>()
 
         // Levels and ramps recovered from the classified mesh at post-process. RoomPlan gives exactly
         // one floor plane per room, spanning the whole plan-view footprint, so without these a
@@ -1430,6 +1453,8 @@ struct MeshPreviewView: UIViewRepresentable {
                 continue
             }
             detectedSet.insert(cls)
+            let category = RoomPlanCategory(rawValue: surface.category)
+            if let category { detectedCategorySet.insert(category) }
 
             let dims = SIMD3<Float>(surface.dimensions.width, surface.dimensions.height, surface.dimensions.depth)
             let transform = reconstructMatrix(from: surface.transform)
@@ -1441,7 +1466,9 @@ struct MeshPreviewView: UIViewRepresentable {
             let fill = buildOrientedBoxFillGeometry(
                 dimensions: dims, transform: transform, color: cls.color, opacity: opacity
             )
-            outlineNodes.append(SemanticOutlineResult.OutlineNode(geometry: wireframe, fillGeometry: fill))
+            outlineNodes.append(SemanticOutlineResult.OutlineNode(
+                geometry: wireframe, fillGeometry: fill,
+                category: category, confidence: surface.confidence))
         }
 
         // Build outlines for objects
@@ -1449,6 +1476,8 @@ struct MeshPreviewView: UIViewRepresentable {
             let cls = SemanticClass.fromObjectCategory(object.category)
             guard cls != .none else { continue }
             detectedSet.insert(cls)
+            let category = RoomPlanCategory(rawValue: object.category)
+            if let category { detectedCategorySet.insert(category) }
 
             let dims = SIMD3<Float>(object.dimensions.width, object.dimensions.height, object.dimensions.depth)
             let transform = reconstructMatrix(from: object.transform)
@@ -1458,7 +1487,9 @@ struct MeshPreviewView: UIViewRepresentable {
             let fill = buildOrientedBoxFillGeometry(
                 dimensions: dims, transform: transform, color: cls.color, opacity: 0.75
             )
-            outlineNodes.append(SemanticOutlineResult.OutlineNode(geometry: wireframe, fillGeometry: fill))
+            outlineNodes.append(SemanticOutlineResult.OutlineNode(
+                geometry: wireframe, fillGeometry: fill,
+                category: category, confidence: object.confidence))
         }
 
         // Derived levels and ramps draw as flat quads in the floor class — they ARE floor surfaces, and
@@ -1473,12 +1504,21 @@ struct MeshPreviewView: UIViewRepresentable {
             let fill = buildOrientedBoxFillGeometry(
                 dimensions: dims, transform: transform, color: SemanticClass.floor.color, opacity: 0.75
             )
-            outlineNodes.append(SemanticOutlineResult.OutlineNode(geometry: wireframe, fillGeometry: fill))
+            // Labelled `.floor` at full detail too, for the same reason they're drawn in the floor
+            // class: they ARE floor surfaces. So they keep the floor colour exactly (floor is the
+            // only member of its group, hence index 0), and the Floor legend row filters them
+            // together with RoomPlan's own floor. No confidence — RoomPlan never scored these.
+            detectedCategorySet.insert(.floor)
+            outlineNodes.append(SemanticOutlineResult.OutlineNode(
+                geometry: wireframe, fillGeometry: fill,
+                category: .floor, confidence: nil))
         }
 
         guard !outlineNodes.isEmpty else { return nil }
         let detectedClasses = SemanticClass.allCases.filter { detectedSet.contains($0) && $0 != .none }
-        return SemanticOutlineResult(outlineNodes: outlineNodes, detectedClasses: detectedClasses)
+        let detectedCategories = RoomPlanCategory.allCases.filter { detectedCategorySet.contains($0) }
+        return SemanticOutlineResult(outlineNodes: outlineNodes, detectedClasses: detectedClasses,
+                                     detectedCategories: detectedCategories)
     }
 
     /// Builds a SceneKit line geometry for an oriented bounding box (12 edges).
