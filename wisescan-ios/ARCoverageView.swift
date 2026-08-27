@@ -215,6 +215,17 @@ struct ARCoverageView: UIViewRepresentable {
         } else if context.coordinator.isSessionPausedForBattery {
             context.coordinator.isSessionPausedForBattery = false
             PerfDiag.log("battery: resuming AR session (returned to capture)")
+            // Re-arm the session-readiness latch. `hasSetSessionReady` is set once (at the
+            // currentFrame re-signal below and in cameraDidChangeTrackingState) and was never
+            // cleared, while CaptureView clears `isARSessionReady` on every tab-leave — so after
+            // an idle pause the delegate could no longer re-signal readiness. That left only the
+            // `session.currentFrame != nil` re-signal further down, which runs in THIS same pass,
+            // before the resumed session can deliver a frame, so the black "Initializing AR
+            // Session…" overlay had nothing left to dismiss it. Clearing the latch is safe: its
+            // only reader is that delegate one-shot, and the action it guards is an idempotent
+            // `isSessionReadyBinding = true` write with no edge-triggered readers, so the worst
+            // case is publishing readiness twice.
+            context.coordinator.hasSetSessionReady = false
             // Resume in the nominal (new-scan) configuration. The idle pause only fires after the
             // user has LEFT the capture tab, and leaving abandons any in-progress extend (CaptureView
             // .onDisappear clears the extend/ghost state, and the ghost overlay is removed on return)
