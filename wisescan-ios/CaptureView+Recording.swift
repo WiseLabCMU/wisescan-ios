@@ -470,10 +470,15 @@ extension CaptureView {
             // frames as a mesh-less, map-less scan below rather than discarding everything.
             // Extend flows need a co-framed mesh + world map either way, so those discard.
 
-            // Counted as FRAME FILES (`images/frame_*.jpg`), not directory entries: this number is
-            // now the content floor's input as well as the "Saved N frames" message's, and a stray
-            // non-frame file must not read as content. Same answer (0) for a missing/unreadable dir.
-            let rawFrameCount = FrameCaptureSession.capturedFrameCount(in: rawDataPath)
+            // What this capture actually holds, off disk: `images/frame_*.jpg`,
+            // `proxy_images/frame_*.jpg` and `equirect_stills/`. Counted as FRAME FILES, not
+            // directory entries — this feeds the content floor as well as the "Saved N frames"
+            // message, and a stray non-frame file must not read as content. All three subdirectories
+            // matter because the floor decides the fate of the whole capture root, not just
+            // `images/`: see FrameCaptureSession.RecoveryContent. Same answer (0) for a
+            // missing/unreadable dir.
+            let content = FrameCaptureSession.recoveryContent(in: rawDataPath)
+            let rawFrameCount = content.frameCount
 
             if completion == nil, !ARCoverageView.supportsLiDAR, rawFrameCount > 0 {
                 isRecording = false
@@ -506,18 +511,19 @@ extension CaptureView {
             isRecording = false
             isProcessingMesh = false  // release the re-entrancy claim from performStopRecording
 
-            if completion == nil, FrameCaptureSession.recoveryHasEnoughContent(frameCount: rawFrameCount) {
+            // CONTENT FLOOR (#81 defect 2). The whole decision is one pure function so it can be
+            // tested (`finishStopRecording` is private to a SwiftUI View extension and cannot be):
+            // above the floor persist, below it refuse WITHOUT deleting anything, extend flows abort.
+            // A two- or three-frame stub cleared the old `rawFrameCount > 0` gate and became a scan —
+            // and because it is the location's newest scan with no world map, it disabled Rescan
+            // Space and Connect Adjacent for the whole location (both read `sortedScans.first` and
+            // require its map file: LocationDetailView.swift:60, :126, :718, :743).
+            let outcome = FrameCaptureSession.recoveryOutcome(content: content,
+                                                              isExtendFlow: completion != nil)
+
+            if outcome == .persistRecoveredScan {
                 // Recover the raw capture: empty mesh (geometry comes from the frames downstream),
                 // no world map (a relocalizing session's map is unreliable / not extendable).
-                //
-                // CONTENT FLOOR (#81 defect 2): gated on `minRecoveryFrames`, not on
-                // `rawFrameCount > 0`. A two- or three-frame stub cleared the old gate and became a
-                // scan — and because it is the location's newest scan with no world map, it disabled
-                // Rescan Space and Connect Adjacent for the whole location (both read
-                // `sortedScans.first` and require its map file: LocationDetailView.swift:60, :126,
-                // :718, :743). The floor is frames only, never vertex count: the mesh is empty by
-                // construction here, and Lite devices legitimately save `vertexCount: 0` (the
-                // branch above). Below the floor we fall through and discard — see there.
                 let recoveredName = newLocationName.isEmpty ? "Recovered Scan" : newLocationName
                 let savedScan = ScanFileManager.shared.saveScan(
                     context: modelContext,
@@ -533,10 +539,16 @@ extension CaptureView {
                     thumbnailData: thumbnailData,
                     scanCase: scanCase
                 )
+                // Retire the 360° floor markers with the scan, as savePendingScan does on the
+                // normal save (`:1058`) and discardInProgressScan does on a discard (`:879`) —
+                // endScanStillSession's contract is every exit, and this exit was missing it.
+                // Unconditional here: neither outcome of this branch is retryable (capture state is
+                // reset below either way), so markers left standing would float in the live scene.
+                ThetaCameraManager.shared.endScanStillSession()
                 frameCaptureSession = FrameCaptureSession()
                 MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
                 saveMessage = savedScan != nil
-                    ? "Saved \(rawFrameCount) frames (mesh lost to tracking interruption)"
+                    ? FrameCaptureSession.recoverySavedMessage(content: content)
                     : "Save failed"
                 scanStore.resetCaptureState()
                 clearMessage()
@@ -544,25 +556,36 @@ extension CaptureView {
                 return
             }
 
-            // Below the content floor, or a stitch/extend flow — discard.
+            // Below the content floor, or a stitch/extend flow. NO SCAN IS CREATED AND NOTHING IS
+            // DELETED — deliberately, and this is the one thing about the floor that must not drift:
             //
-            // The frames must be deleted HERE. This branch has never removed the capture directory,
-            // which was harmless while it was only reachable with zero frames, and is a leak in
-            // FileManager.temporaryDirectory now that a below-floor capture lands here too. Discard
-            // the way discardInProgressScan does (`frameCaptureSession.discardCapture()` below in
-            // this file): `stop()` returns captureDir WITHOUT clearing it
-            // (FrameCaptureSession.swift:431-450), so the session still owns this directory, and
-            // discardCapture (FrameCaptureSession.swift:465) removes it on ioQueue — after any
-            // in-flight frame writes drain — before the session is replaced two lines down.
-            // Non-extend flow only: unwinding an extend/stitch abort is the caller's job
-            // (`completion?(nil)` below) and is out of scope for the floor.
-            let discardedBelowFloor = completion == nil && rawFrameCount > 0
-            if completion == nil {
-                frameCaptureSession.discardCapture()
-            }
+            //  * Issue #81 states that today's failure mode is NON-DESTRUCTIVE (the frames survive
+            //    on disk) and that the predicate must therefore bias toward saving and treat "not
+            //    sure" as save. Documented false halts land exactly here: charging VIO init time
+            //    against the mesh budget false-halted a recoverable scan at 10s
+            //    (ARCoverageView.swift:2812-2817), and a false halt lands on a SHORT capture.
+            //  * `discardCapture()` / removing `rawDataPath` would unlink the whole capture root,
+            //    which also holds `equirect_stills/` and `proxy_images/`. The 360° stills are the
+            //    dangerous part: once the bytes are verified on disk the camera-side original is
+            //    swept (ThetaCameraManager.swift:1338-1345), so a still here can be the only copy in
+            //    existence. A judgement-call floor does not get to make that call.
+            //
+            // So the directory is left where `stop()` finalized it, in
+            // FileManager.temporaryDirectory (`scan4d_raw_<uuid>`, FrameCaptureSession.swift:351).
+            // Nothing in the app indexes it afterwards, so it is an orphan until iOS reclaims the
+            // temp directory under storage pressure — there is no `scan4d_raw_` sweep anywhere in
+            // the app, and adding one is a separate change. That is the pre-existing behaviour of
+            // this branch (it has never removed the capture directory) and it is the cheaper of the
+            // two mistakes: unreclaimed temp bytes versus destroyed irreplaceable ones.
+            //
+            // Same treatment for the extend/stitch abort, and NOT because the caller cleans up: the
+            // only completion handler (CaptureView+Extend.swift:56-64) shows a toast and returns,
+            // and could not delete the directory anyway — `frameCaptureSession` is replaced below
+            // before `completion?(nil)` runs, so the handler no longer holds the owning session.
+            ThetaCameraManager.shared.endScanStillSession()  // every exit retires the 360° floor markers
 
-            saveMessage = discardedBelowFloor
-                ? "Discarded — only \(rawFrameCount) frames captured"
+            saveMessage = outcome == .refuseKeepingCapture
+                ? FrameCaptureSession.recoveryRefusedMessage(content: content)
                 : "No Mesh Data"
             frameCaptureSession = FrameCaptureSession()
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession

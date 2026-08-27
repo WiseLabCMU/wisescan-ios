@@ -2106,6 +2106,33 @@ struct CaptureView: View {
         let capturedCount = frameCaptureSession.frameCount
         frameCaptureSession.pauseCapture()
 
+        // Would "Save Anyway" actually persist anything? The recovery save is now gated on a content
+        // floor (AppConstants.minRecoveryFrames), so offering the button on `capturedCount > 0` alone
+        // promised to save 1–9 frames that the pipeline then refused — the user was shown the count,
+        // told they could keep it, pressed the affirmative button and got a refusal. The two gates
+        // must be one predicate.
+        //
+        // Evaluated here, with the AR session still live, so it can see what finishStopRecording will
+        // do: the Lite branch (no floor), a surviving mesh (normal save, floor irrelevant), or the
+        // recovery floor. `capturedCount` is the in-memory `frames.count`, which tracks `images/`
+        // exactly — `frames` only grows after a successful atomic write, and a failed write unlinks
+        // the JPEG (FrameCaptureSession.swift:1293-1310) — while the other two streams are read off
+        // disk. Both sources can trail an in-flight ioQueue write by about a frame, which at a floor
+        // of ten cannot flip the decision. See FrameCaptureSession.recoverySaveWouldPersist.
+        let liveContent = FrameCaptureSession.RecoveryContent(
+            frameCount: capturedCount,
+            proxyFrameCount: FrameCaptureSession.proxyFrameCount(in: frameCaptureSession.captureDir),
+            equirectStillCount: thetaManager.scanStillCount)
+        let saveWouldPersist = FrameCaptureSession.recoverySaveWouldPersist(
+            content: liveContent,
+            supportsLiDAR: ARCoverageView.supportsLiDAR,
+            liveMeshVertexCount: scanStats.totalVertices)
+        // Stream frames this capture is holding, iPad + wearable. Used to choose between the
+        // below-floor arm (something was captured, keep it) and the nothing-at-all arm (which
+        // discards). 360° stills cannot appear here: any still clears the floor, so a capture
+        // holding one is always in the "Save Anyway" arm above.
+        let heldFrames = liveContent.frameCount + liveContent.proxyFrameCount
+
         let alert: UIAlertController
         if scanStore.pendingStitchLink != nil {
             // Stitch flow (mapB of a Pin & Extend / Link Adjacent link): the link pins pinB's pose
@@ -2123,7 +2150,7 @@ struct CaptureView: View {
             alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
                 self.discardInProgressScan(isExtendFlow: false, completion: nil)
             })
-        } else if capturedCount > 0 {
+        } else if saveWouldPersist {
             alert = UIAlertController(
                 title: "Tracking Lost",
                 message: "AR tracking was interrupted during this scan, so anything captured after that "
@@ -2137,6 +2164,26 @@ struct CaptureView: View {
             alert.addAction(UIAlertAction(title: "Save Anyway", style: .default) { _ in
                 // Our save pipeline tears down reconstruction itself and captures the world map
                 // co-framed with the OBJ; it flips isRecording = false once the map is grabbed.
+                self.performStopRecording()
+            })
+        } else if heldFrames > 0 {
+            // Below the recovery content floor: there ARE frames, but too few for the save pipeline
+            // to persist them as a scan, so "Save Anyway" would be a promise it cannot keep. Say what
+            // is true — the count, and that it is short of what a scan needs — and don't offer the
+            // button. The frames are NOT deleted: this arm routes through performStopRecording, whose
+            // below-floor branch refuses to persist while leaving the capture where stop() finalized
+            // it (see finishStopRecording). Deliberately NOT discardInProgressScan, which is what the
+            // arm below does — that would unlink the capture root on a judgement-call predicate. It
+            // also keeps both paths on one code path, so the banner the user ends up seeing is the
+            // pipeline's own accurate one.
+            alert = UIAlertController(
+                title: "Tracking Lost",
+                message: "AR tracking was interrupted after only \(heldFrames) "
+                    + "frame\(heldFrames == 1 ? "" : "s") — too little to save as a usable scan, so "
+                    + "this scan won't be saved. Reposition and rescan when ready.",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in
                 self.performStopRecording()
             })
         } else {
