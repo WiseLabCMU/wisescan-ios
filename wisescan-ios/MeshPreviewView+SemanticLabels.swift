@@ -16,6 +16,11 @@ import SceneKit
 /// this?", and tapping anything with the same label again dismisses it (as does tapping empty
 /// space). Per-detection identity would need a stable node reference in view state for no gain the
 /// read-out actually shows.
+///
+/// `Equatable` here is VALUE equality, confidence included, so it is deliberately not what the
+/// dismiss rule compares — that compares `category` alone (see `MeshPreviewView.updateUIView`).
+/// Two detections of one category can be scored differently, and comparing the values would
+/// replace the read-out where it should dismiss it.
 struct TappedSemanticLabel: Equatable {
     let category: RoomPlanCategory
     /// RoomPlan's own confidence for the detection (`roomplan.json`), when the box carried one.

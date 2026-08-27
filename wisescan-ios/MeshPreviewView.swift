@@ -1158,13 +1158,17 @@ struct MeshPreviewView: UIViewRepresentable {
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         // Label detail, legend filter and tap plumbing, refreshed ABOVE the timeline branch so both
-        // paths get them. The closure is rebuilt every pass so the handler can never write through
-        // a stale binding or decide with a stale filter.
+        // paths get them. The closure is rebuilt every pass so the handler can never write through a
+        // stale binding; the filter it DECIDES with is the coordinator's `appliedHiddenLabels`,
+        // which `applySemanticLabelStyling` (just below) keeps current.
         context.coordinator.semanticTapEnabled = labelInteractionEnabled
         context.coordinator.onSemanticTap = { [tapped = $tappedLabel] hit in
-            // Tapping empty space clears the read-out; tapping the same label again clears it too,
-            // which is the obvious "off" for a control with no close button.
-            tapped.wrappedValue = (hit == tapped.wrappedValue) ? nil : hit
+            // Tapping empty space clears the read-out; tapping the same LABEL again clears it too,
+            // which is the obvious "off" for a control with no close button. Compared on category
+            // alone rather than on the whole value: `TappedSemanticLabel` identifies a label, not a
+            // detection, and two detections of one category can carry different confidences — so
+            // comparing the values would REPLACE the read-out where it should dismiss it.
+            tapped.wrappedValue = (hit?.category == tapped.wrappedValue?.category) ? nil : hit
         }
         applySemanticLabelStyling(context.coordinator)
         if timeline.count > 1 {

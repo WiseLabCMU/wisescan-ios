@@ -771,10 +771,13 @@ enum SemanticClass: String, CaseIterable, Codable {
 /// Persisted (`AppConstants.Key.semanticLabelDetail`): someone who wants the rich vocabulary
 /// wants it on the next scan too, and re-picking it per preview would be busywork.
 ///
-/// `nonisolated`: `RoomPlanCategory` takes one of these in helpers that
-/// `MeshPreviewView.buildRoomPlanOutlines` (a `nonisolated static func`) reaches, and this project
-/// builds with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` — see the note on
-/// `AppConstants.meshSubdivisionMaxFaces`.
+/// `nonisolated`: this is a parameter type of `RoomPlanCategory`'s own `nonisolated` static
+/// helpers — `color(forCategory:detail:)`, `legendKey(forCategory:detail:)` and
+/// `isVisible(category:detail:hiddenLabels:)` — so it has to be readable from a non-isolated
+/// context whoever calls them, and this project builds with
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, which would otherwise make it implicitly
+/// `@MainActor`. See the note on `AppConstants.meshSubdivisionMaxFaces`. (Every caller today is on
+/// the main actor; `buildRoomPlanOutlines` reaches none of those three helpers.)
 nonisolated enum SemanticLabelDetail: String, CaseIterable {
     /// The consolidated display classes (`SemanticClass`) — what the preview has always shown.
     case coarse
@@ -826,10 +829,11 @@ nonisolated enum SemanticLabelDetail: String, CaseIterable {
 /// fallback — parses to nil. Nothing changes for those: their coarse class is `.none` and
 /// `buildRoomPlanOutlines` already skips `.none`.
 ///
-/// `nonisolated`: every member here is read from `MeshPreviewView.buildRoomPlanOutlines`, which is
-/// `nonisolated`, and this project builds with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` — so an
-/// unannotated declaration would be implicitly `@MainActor`. Same rationale as
-/// `AppConstants.meshSubdivisionMaxFaces`.
+/// `nonisolated`: `MeshPreviewView.buildRoomPlanOutlines` is a `nonisolated static func` and reads
+/// `init(rawValue:)`, `allCases` and `.floor` from there, and this project builds with
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` — so an unannotated declaration would be implicitly
+/// `@MainActor`. The remaining members are only reached on the main actor today; they are
+/// non-isolated because the type is. Same rationale as `AppConstants.meshSubdivisionMaxFaces`.
 nonisolated enum RoomPlanCategory: String, CaseIterable, Codable {
     // Surfaces — RoomPlanExporter.categoryString
     case wall, floor, door, window, opening
