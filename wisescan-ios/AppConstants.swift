@@ -805,10 +805,23 @@ nonisolated enum SemanticLabelDetail: String, CaseIterable {
         }
     }
 
-    var accessibilityLabel: String {
+    /// VoiceOver name for the toolbar toggle. Deliberately CONSTANT, and therefore per-TYPE rather
+    /// than per-case: the button is one control whose name does not change, and WHICH vocabulary is
+    /// showing right now is the `accessibilityValue` below. Naming the current state in the label is
+    /// what this used to do, and it made the control sound like it had been renamed on every press.
+    ///
+    /// The sibling `MeshSourceMode.accessibilityLabel` reaches the same place from the other side —
+    /// its label names the NEXT mode as an action ("Show ghost proxy mesh"), which is the useful
+    /// thing to say for a three-way cycle whose destination isn't guessable. For a two-state toggle
+    /// the label/value split is what the legend rows and `ScanTimelineBar` already do, and it is the
+    /// form that also reads the state out.
+    static let accessibilityLabel: String = "Semantic label detail"
+
+    /// VoiceOver value for the toolbar toggle — the vocabulary in use right now.
+    var accessibilityValue: String {
         switch self {
-        case .coarse: return "Semantic Labels: Grouped"
-        case .full:   return "Semantic Labels: Full RoomPlan Set"
+        case .coarse: return "Grouped"
+        case .full:   return "Full RoomPlan set"
         }
     }
 }

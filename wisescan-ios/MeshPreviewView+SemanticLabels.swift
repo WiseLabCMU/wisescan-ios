@@ -17,11 +17,16 @@ import SceneKit
 /// space). Per-detection identity would need a stable node reference in view state for no gain the
 /// read-out actually shows.
 ///
-/// `Equatable` here is VALUE equality, confidence included, so it is deliberately not what the
-/// dismiss rule compares — that compares `category` alone (see `MeshPreviewView.updateUIView`).
-/// Two detections of one category can be scored differently, and comparing the values would
-/// replace the read-out where it should dismiss it.
-struct TappedSemanticLabel: Equatable {
+/// `nonisolated`: a plain value referencing no actor-isolated state, matching the other new types
+/// in this change (`SemanticLabelDetail`, `RoomPlanCategory`) — this project builds with
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so an unannotated declaration would be implicitly
+/// `@MainActor`. Every use today is on the main actor (`resolveSemanticTap` is `@MainActor`); the
+/// annotation only keeps this type from being the one thing that pins a future non-isolated caller.
+///
+/// No `Equatable`: the dismiss rule compares `category` alone (see `MeshPreviewView.updateUIView`)
+/// because two detections of one category can carry different confidences — so value equality,
+/// confidence included, was never what anything wanted, and nothing else compares these values.
+nonisolated struct TappedSemanticLabel {
     let category: RoomPlanCategory
     /// RoomPlan's own confidence for the detection (`roomplan.json`), when the box carried one.
     let confidence: String?

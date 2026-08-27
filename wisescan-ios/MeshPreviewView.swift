@@ -358,7 +358,8 @@ struct MeshPreviewContainer: View {
                         Image(systemName: labelDetail.iconName)
                             .foregroundColor(labelDetail == .full ? .purple : .gray)
                     }
-                    .accessibilityLabel(labelDetail.accessibilityLabel)
+                    .accessibilityLabel(SemanticLabelDetail.accessibilityLabel)
+                    .accessibilityValue(labelDetail.accessibilityValue)
                 }
             }
             if hasKeyframeMarkers || timelineState.offers.keyframes {

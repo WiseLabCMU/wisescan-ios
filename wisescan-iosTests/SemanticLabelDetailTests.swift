@@ -368,8 +368,9 @@ final class SemanticLabelDetailTests: XCTestCase {
         for detail in SemanticLabelDetail.allCases {
             XCTAssertEqual(detail.next.next, detail)
             XCTAssertFalse(detail.iconName.isEmpty)
-            XCTAssertFalse(detail.accessibilityLabel.isEmpty)
+            XCTAssertFalse(detail.accessibilityValue.isEmpty)
         }
+        XCTAssertFalse(SemanticLabelDetail.accessibilityLabel.isEmpty)
     }
 
     /// The persisted default has to parse back, or every preview would silently fall back to coarse
