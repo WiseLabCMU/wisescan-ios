@@ -49,7 +49,6 @@ enum AppConstants {
         static let pauseVRCompute = "pauseVRCompute"
         static let vrBloomEnabled = "vrBloomEnabled"
         static let semanticLabeling = "semanticLabeling"
-        static let semanticLabelDetail = "semanticLabelDetail"   // mesh preview: coarse display classes vs the full RoomPlan label set
         static let memDiagForceReclaim = "memDiagForceReclaim"
         static let forceRebuildArtifacts = "forceRebuildArtifacts"
         static let meshClassifier = "meshClassifier"
@@ -86,6 +85,27 @@ enum AppConstants {
         static let thetaPassphrase = "thetaPassphrase"                // stored camera Wi-Fi passphrase. TODO(security P2): move to Keychain + default-credential warning — see design doc Security section
     }
 
+    /// Keys this build no longer reads, deleted from the user's defaults on launch.
+    ///
+    /// An orphaned key is inert — nothing reads it — but it outlives the feature that wrote it, and
+    /// a later key that happens to reuse the name would silently inherit a value chosen for
+    /// something else. Written as strings rather than `Key` constants BECAUSE the constants are
+    /// gone: the whole point is that these names exist nowhere else in the app.
+    ///
+    /// An entry can be removed again once no installed build could still be carrying it.
+    private static let retiredDefaultsKeys = [
+        // Retired 2026-08-28 with the coarse/full label toggle: the mesh preview now always names
+        // its RoomPlan boxes with the full vocabulary, so there is no granularity left to persist.
+        "semanticLabelDetail"
+    ]
+
+    /// Drop every retired key. Cheap, idempotent, and called once from the app's `init`.
+    static func pruneRetiredDefaults() {
+        for key in retiredDefaultsKeys {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
     // MARK: - Default Values
     static var isTestFlight: Bool {
         Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
@@ -116,7 +136,6 @@ enum AppConstants {
     /// Mesh preview: whether the semantic overlays are labelled with the consolidated display
     /// classes or with the full RoomPlan vocabulary `roomplan.json` already stores. Coarse by
     /// default — the richer set is opt-in, so nothing about an existing preview changes until asked.
-    static let semanticLabelDetail: String = SemanticLabelDetail.coarse.rawValue
     /// Developer Mode, OFF by default even in dev. When on, [MemDiag] teardown brackets call
     /// `malloc_zone_pressure_relief` before measuring footprint, forcing the allocator to return
     /// free-list pages to the OS so a teardown free-delta reflects actually-reclaimed memory rather
@@ -758,74 +777,6 @@ enum SemanticClass: String, CaseIterable, Codable {
     }
 }
 
-// MARK: - Semantic Label Detail (coarse vs full RoomPlan vocabulary)
-
-/// How finely the mesh preview's semantic overlays are NAMED and COLOURED.
-///
-/// Deliberately a separate axis from `SemanticViewMode`, which says what is DRAWN (mesh /
-/// outlines / fills). This says how the drawn boxes are labelled, so the two compose: any view
-/// mode can be read at either granularity. Folding it in as a fourth `SemanticViewMode` case
-/// would have made "floor plan at full detail" unreachable, for exactly the reason the
-/// `MeshSourceMode` doc comment gives for staying its own axis.
-///
-/// Persisted (`AppConstants.Key.semanticLabelDetail`): someone who wants the rich vocabulary
-/// wants it on the next scan too, and re-picking it per preview would be busywork.
-///
-/// `nonisolated`: this is a parameter type of `RoomPlanCategory`'s own `nonisolated` static
-/// helpers — `color(forCategory:detail:)`, `legendKey(forCategory:detail:)` and
-/// `isVisible(category:detail:hiddenLabels:)` — so it has to be readable from a non-isolated
-/// context whoever calls them, and this project builds with
-/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, which would otherwise make it implicitly
-/// `@MainActor`. See the note on `AppConstants.meshSubdivisionMaxFaces`. (Every caller today is on
-/// the main actor; `buildRoomPlanOutlines` reaches none of those three helpers.)
-nonisolated enum SemanticLabelDetail: String, CaseIterable {
-    /// The consolidated display classes (`SemanticClass`) — what the preview has always shown.
-    case coarse
-    /// The full, unconsolidated RoomPlan vocabulary exactly as `roomplan.json` stores it
-    /// (`RoomPlanCategory`). The export artifact has always carried it; this shows it on device.
-    case full
-
-    /// SF Symbol for the toolbar button. A tag glyph on purpose: it sits beside
-    /// `SemanticViewMode`'s cube/layers pair and `MeshSourceMode`'s pyramid, and both of those are
-    /// about GEOMETRY. This button is about the words attached to the geometry, so it needs to read
-    /// as "labels" rather than as a third overlay control.
-    var iconName: String {
-        switch self {
-        case .coarse: return "tag"
-        case .full:   return "tag.fill"
-        }
-    }
-
-    /// Advance to the other state (two-state, so `next` is just a flip — kept named `next` to
-    /// match the sibling cycle buttons).
-    var next: SemanticLabelDetail {
-        switch self {
-        case .coarse: return .full
-        case .full:   return .coarse
-        }
-    }
-
-    /// VoiceOver name for the toolbar toggle. Deliberately CONSTANT, and therefore per-TYPE rather
-    /// than per-case: the button is one control whose name does not change, and WHICH vocabulary is
-    /// showing right now is the `accessibilityValue` below. Naming the current state in the label is
-    /// what this used to do, and it made the control sound like it had been renamed on every press.
-    ///
-    /// The sibling `MeshSourceMode.accessibilityLabel` reaches the same place from the other side —
-    /// its label names the NEXT mode as an action ("Show ghost proxy mesh"), which is the useful
-    /// thing to say for a three-way cycle whose destination isn't guessable. For a two-state toggle
-    /// the label/value split is what the legend rows and `ScanTimelineBar` already do, and it is the
-    /// form that also reads the state out.
-    static let accessibilityLabel: String = "Semantic label detail"
-
-    /// VoiceOver value for the toolbar toggle — the vocabulary in use right now.
-    var accessibilityValue: String {
-        switch self {
-        case .coarse: return "Grouped"
-        case .full:   return "Full RoomPlan set"
-        }
-    }
-}
-
 // MARK: - Rich (Unconsolidated) RoomPlan Categories
 
 /// The RoomPlan category vocabulary EXACTLY as `roomplan.json` stores it — 5 surfaces and 16
@@ -835,8 +786,9 @@ nonisolated enum SemanticLabelDetail: String, CaseIterable {
 ///
 /// `SemanticClass` is the display-level CONSOLIDATION of this set (16 object categories collapse
 /// into 4 classes, 12 of them into `.fixture` alone). That consolidation is what the preview has
-/// always rendered; this enum is the original labelling the export has always carried, surfaced on
-/// device by `SemanticLabelDetail.full`.
+/// always rendered — the mesh preview draws and names boxes from THIS set, and the consolidation
+/// survives only as the palette's anchor (`fullDetailColor`) and as the coarse grouping the tap
+/// read-out names.
 ///
 /// A category this build does not know — a future RoomPlan release, or the exporter's `"unknown"`
 /// fallback — parses to nil. Nothing changes for those: their coarse class is `.none` and
@@ -887,7 +839,7 @@ nonisolated enum RoomPlanCategory: String, CaseIterable, Codable {
     ///
     /// Same mapping `SemanticClass.fromSurfaceCategory` / `fromObjectCategory` already apply to the
     /// same strings — stated here as well so the full vocabulary knows which base colour it hangs
-    /// off. The two are held to agreement by test (`SemanticLabelDetailTests`) rather than by one
+    /// off. The two are held to agreement by test (`RoomPlanLabelTests`) rather than by one
     /// calling the other, because those two functions are domain-scoped (a surface named "table" is
     /// `.none` to them) and routing them through this enum would quietly widen them.
     var coarseClass: SemanticClass {
@@ -1032,39 +984,32 @@ nonisolated enum RoomPlanCategory: String, CaseIterable, Codable {
             ?? raw.replacingOccurrences(of: "_", with: " ").capitalized
     }
 
-    /// Colour for a raw category string at the given detail. An unknown category falls back to
-    /// `SemanticClass.none`'s colour, which is already what the renderer means by "don't draw this".
-    static func color(forCategory raw: String, detail: SemanticLabelDetail) -> SIMD4<Float> {
+    /// Colour for a raw category string. An unknown category falls back to `SemanticClass.none`'s
+    /// colour, which is already what the renderer means by "don't draw this".
+    static func color(forCategory raw: String) -> SIMD4<Float> {
         guard let category = RoomPlanCategory(rawValue: raw) else { return SemanticClass.none.color }
-        switch detail {
-        case .coarse: return category.coarseClass.color
-        case .full:   return category.fullDetailColor
-        }
+        return category.fullDetailColor
     }
 
     // MARK: Legend filter
 
-    /// The legend row a stored category belongs to at the given detail — and therefore the key the
-    /// preview's transient label filter holds. nil for a category this build does not know: nothing
-    /// is drawn for those, so nothing can be filtered either.
+    /// The legend row a stored category belongs to — and therefore the key the preview's transient
+    /// label filter holds. nil for a category this build does not know: nothing is drawn for those,
+    /// so nothing can be filtered either.
     ///
-    /// Note the two vocabularies spell `wall`, `floor`, `door`, `window` and `table` identically,
-    /// which is exactly why the filter set is cleared whenever the detail flips — a kept selection
-    /// would filter the wrong rows without even looking wrong.
-    static func legendKey(forCategory raw: String?, detail: SemanticLabelDetail) -> String? {
+    /// One row per CATEGORY, since the preview names every box with the full RoomPlan vocabulary.
+    /// The consequence, deliberate: hiding all twelve fixtures is twelve taps, where the coarse
+    /// vocabulary this replaced could do it in one.
+    static func legendKey(forCategory raw: String?) -> String? {
         guard let raw, let category = RoomPlanCategory(rawValue: raw) else { return nil }
-        switch detail {
-        case .coarse: return category.coarseClass.rawValue
-        case .full:   return category.rawValue
-        }
+        return category.rawValue
     }
 
     /// Whether geometry carrying `raw` should be drawn, given the legend rows the user has switched
     /// off. A category with no legend row is never hidden: the filter can only speak about rows the
     /// legend actually shows.
-    static func isVisible(category raw: String?, detail: SemanticLabelDetail,
-                          hiddenLabels: Set<String>) -> Bool {
-        guard let key = legendKey(forCategory: raw, detail: detail) else { return true }
+    static func isVisible(category raw: String?, hiddenLabels: Set<String>) -> Bool {
+        guard let key = legendKey(forCategory: raw) else { return true }
         return !hiddenLabels.contains(key)
     }
 }

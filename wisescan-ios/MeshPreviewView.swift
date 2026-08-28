@@ -23,22 +23,21 @@ struct MeshPreviewContainer: View {
     @State private var showPrivacyMarkers = true
     @State private var detectedClasses: [SemanticClass] = []
     /// The RICH RoomPlan categories present in the visible scan — `roomplan.json`'s original,
-    /// unconsolidated labelling, published by the loader alongside `detectedClasses`. The
-    /// full-detail legend's rows.
+    /// unconsolidated labelling, published by the loader alongside `detectedClasses`. THE legend's
+    /// rows: the preview names every box with this vocabulary, with no coarse alternative to flip
+    /// to. `detectedClasses` survives beside it as the toolbar gate and as the palette's grouping.
     @State private var detectedCategories: [RoomPlanCategory] = []
-    /// Coarse (consolidated display classes) vs full (the whole RoomPlan vocabulary) labelling of
-    /// the semantic overlays. Persisted, so the choice survives leaving the preview.
-    @AppStorage(AppConstants.Key.semanticLabelDetail)
-    private var labelDetailRaw = AppConstants.semanticLabelDetail
     /// Legend rows the user has switched off, as `RoomPlanCategory.legendKey` strings.
     ///
-    /// TRANSIENT on purpose, unlike `labelDetailRaw`: hiding geometry is a "let me look at this one
-    /// thing" move, and a persisted filter would silently omit geometry from a preview opened days
-    /// later. Cleared whenever the vocabulary changes (the row identities change with it) or the
-    /// scan on screen changes.
+    /// TRANSIENT on purpose: hiding geometry is a "let me look at this one thing" move, and a
+    /// persisted filter would silently omit geometry from a preview opened days later. Cleared when
+    /// the scan on screen changes.
     @State private var hiddenLabels: Set<String> = []
     /// The label under the last tap in the 3D view (nil = no read-out showing).
     @State private var tappedLabel: TappedSemanticLabel?
+    /// Drives the legend card's sizing — its rows are tap targets, and a phone and an iPad want
+    /// visibly different ones. See `SemanticLegendMetrics`.
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var hasPrivacyMarkers = false
     @State private var isMeshLoaded = false
     @State private var keyframeMarkerMode: KeyframeMarkerMode = .none
@@ -80,19 +79,32 @@ struct MeshPreviewContainer: View {
     /// True when the location has more than one generation to scrub through.
     private var isTimelineActive: Bool { timeline.count > 1 }
 
-    /// How the semantic overlays are labelled right now.
-    private var labelDetail: SemanticLabelDetail {
-        SemanticLabelDetail(rawValue: labelDetailRaw) ?? .coarse
+    /// Whether a tap identifies. A tap on geometry nobody can see would be meaningless, so this
+    /// wants outlines drawn; the read-out additionally needs a generation actually on screen to
+    /// hit-test against, which the timeline path enforces by clearing
+    /// `Coordinator.semanticTapEnabled` when no slot is visible.
+    ///
+    /// The FILTER needs no equivalent gate: its rows only exist when outlines are drawn, and it
+    /// works across a timeline — `hiddenLabels` is applied to EVERY loaded generation
+    /// (`applySemanticLabelStyling` walks all slots) and the rows come from the timeline-wide
+    /// union, so hiding "Sofa" hides it in each generation you scrub to and the row stays there to
+    /// switch back on, including on a generation that has no sofa, where it hides nothing.
+    private var labelTapEnabled: Bool { semanticViewMode.showOutlines }
+
+    /// The legend's rows. A timeline prints the UNION over every loaded generation rather than the
+    /// visible one's list — see `ScanTimelineState.unionClasses` for why a filter control cannot be
+    /// allowed to appear and disappear as generations scroll past.
+    private var legendClasses: [SemanticClass] {
+        isTimelineActive ? timelineState.unionClasses : detectedClasses
+    }
+    private var legendCategories: [RoomPlanCategory] {
+        isTimelineActive ? timelineState.unionCategories : detectedCategories
     }
 
-    /// Whether the legend rows filter and a tap identifies. Both are single-scan-preview features:
-    /// a timeline's legend must follow the visible generation (see `TimelineSlot.detectedClasses`),
-    /// so a filter shared across slots — and a read-out that survives a scrub — need their own
-    /// design rather than being inherited here by accident. Also off when no outlines are drawn,
-    /// which is what keeps a `.meshOnly` preview from identifying invisible boxes.
-    private var labelInteractionEnabled: Bool {
-        !isTimelineActive && semanticViewMode.showOutlines
-    }
+    /// Every filter key the legend is currently offering — what "all" means for the bulk controls.
+    /// Empty when the rows are the unfilterable coarse fallback, which is what keeps the controls
+    /// off screen in exactly the case where they could do nothing.
+    private var legendFilterKeys: [String] { legendCategories.map(\.rawValue) }
 
     /// The generation on screen: the scrubber's when it's active, else the scan the viewer opened.
     private var visibleScan: TimelineScan? {
@@ -133,10 +145,9 @@ struct MeshPreviewContainer: View {
                         semanticViewMode: $semanticViewMode,
                         detectedClasses: $detectedClasses,
                         detectedCategories: $detectedCategories,
-                        labelDetail: labelDetail,
                         hiddenLabels: hiddenLabels,
                         tappedLabel: $tappedLabel,
-                        labelInteractionEnabled: labelInteractionEnabled,
+                        labelTapEnabled: labelTapEnabled,
                         hasPrivacyMarkers: $hasPrivacyMarkers,
                         keyframeMarkerMode: $keyframeMarkerMode,
                         hasKeyframeMarkers: $hasKeyframeMarkers,
@@ -168,7 +179,7 @@ struct MeshPreviewContainer: View {
                 .ignoresSafeArea()
 
                 // Bottom-left legend (semantic classes + privacy + capture markers)
-                let showSemanticLegend = detectedClasses.count > 0 && semanticViewMode != .meshOnly
+                let showSemanticLegend = !legendClasses.isEmpty && semanticViewMode != .meshOnly
                 // Privacy markers belong to one generation, so the legend row follows the scan on
                 // screen (the toolbar toggle is gated on the union — see the toolbar comment).
                 let visibleHasPrivacy = isTimelineActive ? timelineState.visibleHasPrivacy : hasPrivacyMarkers
@@ -185,24 +196,32 @@ struct MeshPreviewContainer: View {
                 // would be no way back to the geometry.
                 if showSemanticLegend || showPrivacyLegend || showStillsLegend
                     || showEquirectLegend || tappedLabel != nil {
-                    VStack(alignment: .leading, spacing: 4) {
+                    let metrics = SemanticLegendMetrics.forSizeClass(sizeClass)
+                    VStack(alignment: .leading, spacing: metrics.stackSpacing) {
                         if let tapped = tappedLabel {
-                            tappedLabelReadout(tapped)
+                            TappedSemanticLabelReadout(tapped: tapped)
                         }
                         if showSemanticLegend {
-                            // Full detail falls back to the coarse rows if the loader published no
-                            // rich categories at all, so the legend can never go silent about
-                            // geometry that IS drawn.
-                            if labelDetail == .full, !detectedCategories.isEmpty {
-                                ForEach(detectedCategories, id: \.rawValue) { category in
+                            if !legendCategories.isEmpty {
+                                SemanticLegendControls(
+                                    hiddenCount: hiddenLabels.count,
+                                    totalCount: legendFilterKeys.count,
+                                    showAll: { setAllLabelsHidden(false) },
+                                    hideAll: { setAllLabelsHidden(true) }
+                                )
+                                ForEach(legendCategories, id: \.rawValue) { category in
                                     semanticLegendRow(key: category.rawValue,
                                                       color: category.swiftUIFullDetailColor,
                                                       label: category.displayName)
                                 }
                             } else {
-                                ForEach(detectedClasses, id: \.rawValue) { cls in
-                                    semanticLegendRow(key: cls.rawValue,
-                                                      color: cls.swiftUIDisplayColor,
+                                // Geometry IS drawn but no box carried a category this build can
+                                // parse — a `roomplan.json` from a newer RoomPlan. The legend still
+                                // names what is on screen, by coarse class, but those rows are NOT
+                                // filter controls: the filter is keyed by category, and a row that
+                                // can never match one would be a control that does nothing.
+                                ForEach(legendClasses, id: \.rawValue) { cls in
+                                    SemanticLegendRow(color: cls.swiftUIDisplayColor,
                                                       label: cls.rawValue.capitalized)
                                 }
                             }
@@ -227,7 +246,7 @@ struct MeshPreviewContainer: View {
                             equirectLegendRow
                         }
                     }
-                    .padding(8)
+                    .padding(metrics.cardPadding)
                     .background(.ultraThinMaterial)
                     .cornerRadius(8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
@@ -341,27 +360,6 @@ struct MeshPreviewContainer: View {
                     }
                 }
             }
-            // Label GRANULARITY, gated on the same condition as the view-mode cycle so a mesh-only
-            // scan doesn't grow a second dead button. Separate control because it is a separate
-            // question: `SemanticViewMode` says what is drawn, this says how it is named.
-            if !detectedClasses.isEmpty || timelineState.offers.semantics {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button {
-                        labelDetailRaw = labelDetail.next.rawValue
-                        // The legend's row identities change with the vocabulary, and both
-                        // vocabularies spell "wall", "floor", "door", "window" and "table" the same
-                        // way — so a filter kept across the flip would hide the wrong rows without
-                        // even looking wrong. Same for a read-out naming the old row set.
-                        hiddenLabels.removeAll()
-                        tappedLabel = nil
-                    } label: {
-                        Image(systemName: labelDetail.iconName)
-                            .foregroundColor(labelDetail == .full ? .purple : .gray)
-                    }
-                    .accessibilityLabel(SemanticLabelDetail.accessibilityLabel)
-                    .accessibilityValue(labelDetail.accessibilityValue)
-                }
-            }
             if hasKeyframeMarkers || timelineState.offers.keyframes {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
@@ -429,11 +427,14 @@ struct MeshPreviewContainer: View {
                 isViewerReady = true
             }
         }
-        // The label filter names rows in ONE scan's legend, so it cannot outlive that scan: a
-        // rescan or a scrub brings a different set of detections, and a kept selection would hide
-        // rows that mean something else (or nothing at all). Same for the tap read-out.
+        // A different SCAN means a different legend — new detections, and a kept selection would
+        // hide rows that mean something else (or nothing at all). Both interactions go.
         .onChange(of: scanDirectoryURL) { _, _ in resetLabelInteractions() }
-        .onChange(of: visibleIndex) { _, _ in resetLabelInteractions() }
+        // A scrub does NOT clear the filter. Its rows are the timeline-wide union, so they mean the
+        // same thing in every generation, and carrying the selection is the whole point: hiding
+        // "Fixture" to compare two generations' walls is worthless if the next generation brings it
+        // back. The READ-OUT still goes — it names one box in the generation that just left.
+        .onChange(of: visibleIndex) { _, _ in tappedLabel = nil }
         // Turning the overlays off entirely (`.meshOnly`) leaves a read-out describing a box that is
         // no longer drawn.
         .onChange(of: semanticViewMode) { _, mode in
@@ -567,79 +568,27 @@ struct MeshPreviewContainer: View {
 
     /// One semantic legend row.
     ///
-    /// In the single-scan preview the row is also the FILTER: tapping it hides or shows that
-    /// label's geometry in the 3D view, dimmed-and-struck when hidden (the same "dimmed" language
-    /// the user guide's static legend already uses for a class that isn't in play). Plain toggle, so
-    /// it is self-evidently reversible, and the row stays on screen when hidden — the way back.
+    /// A legend row that is also the FILTER: tapping it hides or shows that label's geometry in the
+    /// 3D view, dimmed-and-struck when hidden (the same "dimmed" language the user guide's static
+    /// legend already uses for a class that isn't in play). Plain toggle, so it is self-evidently
+    /// reversible, and the row stays on screen when hidden — the way back.
     ///
-    /// Non-interactive while a timeline is active: those rows describe whichever generation is on
-    /// screen, and a filter shared across generations needs its own design (see
-    /// `labelInteractionEnabled`).
-    @ViewBuilder
+    /// Interactive in a timeline too, where the rows are the union over every loaded generation and
+    /// the filter applies to all of them.
     private func semanticLegendRow(key: String, color: Color, label: String) -> some View {
-        let isFiltered = hiddenLabels.contains(key)
-        let row = HStack(spacing: 6) {
-            Circle()
-                .fill(isFiltered ? color.opacity(0.25) : color)
-                .frame(width: 10, height: 10)
-            Text(label)
-                .font(.caption2)
-                .foregroundColor(isFiltered ? .gray : .white)
-                .strikethrough(isFiltered, color: .gray)
-        }
-        // A 10pt swatch and caption2 text is not a finger-sized target on its own.
-        .padding(.vertical, 2)
-        .contentShape(Rectangle())
-
-        if labelInteractionEnabled {
-            Button { toggleLabelFilter(key) } label: { row }
-                .buttonStyle(.plain)
-                .accessibilityLabel(label)
-                .accessibilityValue(isFiltered ? "Hidden" : "Shown")
-                .accessibilityHint("Shows or hides this label in the 3D view")
-        } else {
-            row
-        }
+        SemanticLegendRow(color: color, label: label,
+                          isFiltered: hiddenLabels.contains(key),
+                          toggle: { toggleLabelFilter(key) })
     }
 
-    /// The read-out for the last tapped box: what RoomPlan actually called it.
+    /// Hide or show EVERY row the legend is offering.
     ///
-    /// Sits above the colour key in the same card, so the swatch language matches and there is no
-    /// second floating panel to place around the scrubber and the toolbar.
-    @ViewBuilder
-    private func tappedLabelReadout(_ tapped: TappedSemanticLabel) -> some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(labelDetail == .full ? tapped.category.swiftUIFullDetailColor
-                                           : tapped.category.coarseClass.swiftUIDisplayColor)
-                .frame(width: 10, height: 10)
-            Text(tapped.category.displayName)
-                .font(.caption.weight(.semibold))
-                .foregroundColor(.white)
-            if let confidence = tapped.confidence {
-                // RoomPlan's own score for the detection, straight out of roomplan.json.
-                Text(confidence.capitalized)
-                    .font(.caption2)
-                    .foregroundColor(.gray)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(Color.white.opacity(0.12)))
-            }
-        }
-        // At coarse detail the rich name is NEW information, and it would otherwise contradict the
-        // colour on screen ("Sofa", drawn in the red that the legend calls "Seat"). Naming the group
-        // it is being drawn as reconciles the two.
-        if labelDetail == .coarse {
-            Text("Drawn as \(tapped.category.coarseClass.rawValue.capitalized)")
-                .font(.caption2)
-                .foregroundColor(.gray)
-        }
-        Text("Tap empty space to dismiss")
-            .font(.caption2)
-            .foregroundColor(.gray.opacity(0.7))
-        Divider()
-            .frame(width: 130)
-            .overlay(Color.white.opacity(0.25))
+    /// Hiding all is the useful half: it is how you get to "show me only the stairs" in two taps
+    /// instead of twenty. It leaves every row on screen, dimmed and struck through, which is both
+    /// the way back and the reason hiding everything is safe.
+    private func setAllLabelsHidden(_ hidden: Bool) {
+        hiddenLabels = hidden ? Set(legendFilterKeys) : []
+        clearReadoutIfHidden()
     }
 
     /// Hide or show one legend row's geometry.
@@ -649,11 +598,15 @@ struct MeshPreviewContainer: View {
         } else {
             hiddenLabels.insert(key)
         }
-        // A label that has just been filtered out must not still be named by the read-out — it is
-        // also the rule that keeps a hidden label unidentifiable.
+        clearReadoutIfHidden()
+    }
+
+    /// A label that has just been filtered out must not still be named by the read-out — it is also
+    /// the rule that keeps a hidden label unidentifiable.
+    private func clearReadoutIfHidden() {
         if let tapped = tappedLabel,
            !RoomPlanCategory.isVisible(category: tapped.category.rawValue,
-                                       detail: labelDetail, hiddenLabels: hiddenLabels) {
+                                       hiddenLabels: hiddenLabels) {
             tappedLabel = nil
         }
     }
@@ -807,14 +760,13 @@ struct MeshPreviewView: UIViewRepresentable {
     /// The rich RoomPlan categories the visible scan contains — published next to
     /// `detectedClasses` so the legend can list either vocabulary. See MeshPreviewView+SemanticLabels.
     @Binding var detectedCategories: [RoomPlanCategory]
-    /// Whether the overlays are labelled with the consolidated classes or the full RoomPlan set.
-    var labelDetail: SemanticLabelDetail = .coarse
     /// Legend rows the user has filtered out, as `RoomPlanCategory.legendKey` strings.
     var hiddenLabels: Set<String> = []
     /// The label under the last tap, written back by the tap handler.
     @Binding var tappedLabel: TappedSemanticLabel?
-    /// Whether taps identify geometry at all (single-scan preview, outlines drawn).
-    var labelInteractionEnabled: Bool = false
+    /// Whether taps identify geometry at all — outlines drawn. A timeline narrows it further, to
+    /// the generation on screen (`Coordinator.semanticTapRoot`).
+    var labelTapEnabled: Bool = false
     @Binding var hasPrivacyMarkers: Bool
     @Binding var keyframeMarkerMode: KeyframeMarkerMode
     @Binding var hasKeyframeMarkers: Bool
@@ -1077,7 +1029,8 @@ struct MeshPreviewView: UIViewRepresentable {
 
                             // Confidence is the one thing an SCNNode has nowhere to keep, and only
                             // the tap read-out wants it — so it rides a side table keyed by node
-                            // identity rather than being smuggled into the name.
+                            // identity rather than being smuggled into the name. Sibling
+                            // generations fill the same table (see `makeTimelineSlot`).
                             if let confidence = outline.confidence {
                                 context.coordinator.semanticConfidence[ObjectIdentifier(wireNode)] = confidence
                                 context.coordinator.semanticConfidence[ObjectIdentifier(fNode)] = confidence
@@ -1106,10 +1059,10 @@ struct MeshPreviewView: UIViewRepresentable {
 
                     // Apply initial visibility based on the current mode
                     let mode = self.semanticViewMode
-                    // …and the persisted label detail, before the first frame: the boxes were built
-                    // in their coarse colours, so a preview reopened at full detail would otherwise
-                    // flash the wrong palette. Forced, because the coordinator may already have
-                    // recorded this detail from an `updateUIView` that ran before any node existed.
+                    // …and the label filter, before the first frame. The boxes are built in their
+                    // final colours (see `buildRoomPlanOutlines`), so this pass exists for the
+                    // filter alone. Forced, because the coordinator may already have recorded an
+                    // empty filter from an `updateUIView` that ran before any node existed.
                     self.applySemanticLabelStyling(context.coordinator, force: true)
                     self.applyMeshVisibility(context.coordinator)
                     context.coordinator.semanticsNode?.isHidden = !mode.showOutlines
@@ -1162,7 +1115,10 @@ struct MeshPreviewView: UIViewRepresentable {
         // paths get them. The closure is rebuilt every pass so the handler can never write through a
         // stale binding; the filter it DECIDES with is the coordinator's `appliedHiddenLabels`,
         // which `applySemanticLabelStyling` (just below) keeps current.
-        context.coordinator.semanticTapEnabled = labelInteractionEnabled
+        context.coordinator.semanticTapEnabled = labelTapEnabled
+        // Unrestricted until a timeline says otherwise — a single-scan preview has exactly one
+        // generation in the scene, so there is nothing to confine the hit test to.
+        context.coordinator.semanticTapRoot = nil
         context.coordinator.onSemanticTap = { [tapped = $tappedLabel] hit in
             // Tapping empty space clears the read-out; tapping the same LABEL again clears it too,
             // which is the obvious "off" for a control with no close button. Compared on category
@@ -1214,9 +1170,10 @@ struct MeshPreviewView: UIViewRepresentable {
 
         // MARK: Semantic labels (detail / filter / tap — see MeshPreviewView+SemanticLabels)
 
-        /// Last label detail pushed onto the built boxes. `updateUIView` runs for every unrelated
-        /// state change, so the restyle is gated on this rather than repeated.
-        var appliedLabelDetail: SemanticLabelDetail?
+        /// Whether the boxes have been styled at all yet. `updateUIView` runs for every unrelated
+        /// state change, so the restyle is gated on this and `appliedHiddenLabels` rather than
+        /// repeated — and the first pass has to run even with an empty filter.
+        var hasStyledLabels = false
         /// Last legend filter pushed onto the built boxes, for the same reason. Also what the tap
         /// handler consults, so a filtered-out label can't be identified.
         var appliedHiddenLabels: Set<String> = []
@@ -1224,9 +1181,13 @@ struct MeshPreviewView: UIViewRepresentable {
         /// data that `SCNNode` has nowhere to store. Populated by the single-scan attach, which is
         /// the only path where taps identify anything.
         var semanticConfidence: [ObjectIdentifier: String] = [:]
-        /// False whenever a tap must identify nothing: no outlines drawn, or a multi-generation
-        /// timeline (out of scope — see `labelInteractionEnabled`).
+        /// False whenever a tap must identify nothing: no outlines drawn (`labelTapEnabled`), or
+        /// a timeline scrubbed onto a generation that has not loaded.
         var semanticTapEnabled = false
+        /// The subtree a tap may identify within, or nil for no restriction. Set to the visible
+        /// generation's container while a timeline is active, because the hit test cannot ignore
+        /// hidden nodes and would otherwise reach into the generations that are switched off.
+        weak var semanticTapRoot: SCNNode?
         /// Where a resolved tap goes. Re-set from `updateUIView` on every pass.
         var onSemanticTap: ((TappedSemanticLabel?) -> Void)?
 
@@ -1270,9 +1231,9 @@ struct MeshPreviewView: UIViewRepresentable {
             let hit = MeshPreviewView.resolveSemanticTap(
                 in: view,
                 at: gesture.location(in: view),
-                detail: appliedLabelDetail ?? .coarse,
                 hiddenLabels: appliedHiddenLabels,
-                confidence: semanticConfidence
+                confidence: semanticConfidence,
+                within: semanticTapRoot
             )
             onSemanticTap?(hit)
         }
@@ -1734,13 +1695,19 @@ struct MeshPreviewView: UIViewRepresentable {
 
             let dims = SIMD3<Float>(surface.dimensions.width, surface.dimensions.height, surface.dimensions.depth)
             let transform = reconstructMatrix(from: surface.transform)
+            // Built in the colour the preview actually shows — the category's shade, falling back
+            // to the coarse class's for a category this build cannot parse (whose nodes carry no
+            // name and are therefore never restyled, so this IS their final colour). The restyle
+            // pass would otherwise repaint every box on the first frame, which is a wrong palette
+            // for that frame and pointless work on every one after it.
+            let color = category?.fullDetailColor ?? cls.color
             let wireframe = buildOrientedBoxLineGeometry(
-                dimensions: dims, transform: transform, color: cls.color
+                dimensions: dims, transform: transform, color: color
             )
             // Mitigate z-fighting by lowering opacity for co-planar features
             let opacity: CGFloat = (cls == .door || cls == .window) ? 0.3 : 0.75
             let fill = buildOrientedBoxFillGeometry(
-                dimensions: dims, transform: transform, color: cls.color, opacity: opacity
+                dimensions: dims, transform: transform, color: color, opacity: opacity
             )
             outlineNodes.append(SemanticOutlineResult.OutlineNode(
                 geometry: wireframe, fillGeometry: fill,
@@ -1757,11 +1724,13 @@ struct MeshPreviewView: UIViewRepresentable {
 
             let dims = SIMD3<Float>(object.dimensions.width, object.dimensions.height, object.dimensions.depth)
             let transform = reconstructMatrix(from: object.transform)
+            // Same as the surfaces above: the shade the preview shows, not the group colour.
+            let color = category?.fullDetailColor ?? cls.color
             let wireframe = buildOrientedBoxLineGeometry(
-                dimensions: dims, transform: transform, color: cls.color
+                dimensions: dims, transform: transform, color: color
             )
             let fill = buildOrientedBoxFillGeometry(
-                dimensions: dims, transform: transform, color: cls.color, opacity: 0.75
+                dimensions: dims, transform: transform, color: color, opacity: 0.75
             )
             outlineNodes.append(SemanticOutlineResult.OutlineNode(
                 geometry: wireframe, fillGeometry: fill,

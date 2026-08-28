@@ -142,9 +142,10 @@ struct UserGuideView: View {
                     Text("Room-structure classes detected while scanning (with Semantic Labeling on), " +
                          "shown in these colors in the mesh preview's semantics view and listed on the " +
                          "scan HUD. All detected classes are always included in exports. " +
-                         "The preview's label toggle can also show RoomPlan's full label set " +
-                         "(sofa, stove, bathtub and the rest) as shades of these same colors, " +
-                         "and its legend rows hide or show one label at a time.")
+                         "The mesh preview names each box with RoomPlan's full label set " +
+                         "(sofa, stove, bathtub and the rest), drawn as shades of these same " +
+                         "colors — tap a legend row to hide or show that label, or tap a box " +
+                         "to identify it.")
                         .font(.caption2)
                         .foregroundColor(.gray)
                 }
