@@ -1005,8 +1005,11 @@ nonisolated enum RoomPlanCategory: String, CaseIterable, Codable {
 
     private static func hsvToRGB(_ hsv: SIMD3<Float>) -> SIMD3<Float> {
         let h = hsv.x * 6
-        let sector = Int(floor(h)) % 6
-        let f = h - floor(h)
+        // `.rounded(.down)`, not `floor(_:)`: this is a static member of an enum that has a
+        // `floor` case, so an unqualified `floor(h)` resolves to `Self.floor` and fails to compile.
+        let whole = h.rounded(.down)
+        let sector = Int(whole) % 6
+        let f = h - whole
         let p = hsv.z * (1 - hsv.y)
         let q = hsv.z * (1 - hsv.y * f)
         let t = hsv.z * (1 - hsv.y * (1 - f))
