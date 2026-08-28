@@ -42,6 +42,7 @@ struct Scan4DApp: App {
             AppConstants.Key.keyframeWeightBonus: AppConstants.keyframeWeightBonus,
             AppConstants.Key.robustColorMedian: AppConstants.robustColorMedian
         ])
+        AppConstants.pruneRetiredDefaults()
         print("Application directory: \(NSHomeDirectory())")
         // Main-thread stall watchdog, app-wide from first frame (no-op unless Perf
         // Diagnostics is on). Capture-scoped arming structurally missed the #71 class:

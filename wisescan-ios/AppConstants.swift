@@ -85,6 +85,27 @@ enum AppConstants {
         static let thetaPassphrase = "thetaPassphrase"                // stored camera Wi-Fi passphrase. TODO(security P2): move to Keychain + default-credential warning — see design doc Security section
     }
 
+    /// Keys this build no longer reads, deleted from the user's defaults on launch.
+    ///
+    /// An orphaned key is inert — nothing reads it — but it outlives the feature that wrote it, and
+    /// a later key that happens to reuse the name would silently inherit a value chosen for
+    /// something else. Written as strings rather than `Key` constants BECAUSE the constants are
+    /// gone: the whole point is that these names exist nowhere else in the app.
+    ///
+    /// An entry can be removed again once no installed build could still be carrying it.
+    private static let retiredDefaultsKeys = [
+        // Retired 2026-08-28 with the coarse/full label toggle: the mesh preview now always names
+        // its RoomPlan boxes with the full vocabulary, so there is no granularity left to persist.
+        "semanticLabelDetail"
+    ]
+
+    /// Drop every retired key. Cheap, idempotent, and called once from the app's `init`.
+    static func pruneRetiredDefaults() {
+        for key in retiredDefaultsKeys {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
     // MARK: - Default Values
     static var isTestFlight: Bool {
         Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
@@ -112,6 +133,9 @@ enum AppConstants {
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
     static let vrBloomEnabled: Bool = false     // Developer Mode: VR point-cloud bloom post-process (off by default — device A/B found it unmissed with live points visible; helps most when Hide Live Points is on)
     static let semanticLabeling: Bool = true    // Developer Mode: disable entire RoomPlan pipeline to reduce memory
+    /// Mesh preview: whether the semantic overlays are labelled with the consolidated display
+    /// classes or with the full RoomPlan vocabulary `roomplan.json` already stores. Coarse by
+    /// default — the richer set is opt-in, so nothing about an existing preview changes until asked.
     /// Developer Mode, OFF by default even in dev. When on, [MemDiag] teardown brackets call
     /// `malloc_zone_pressure_relief` before measuring footprint, forcing the allocator to return
     /// free-list pages to the OS so a teardown free-delta reflects actually-reclaimed memory rather
@@ -750,6 +774,243 @@ enum SemanticClass: String, CaseIterable, Codable {
         case "window":           return .window
         default:                 return .none
         }
+    }
+}
+
+// MARK: - Rich (Unconsolidated) RoomPlan Categories
+
+/// The RoomPlan category vocabulary EXACTLY as `roomplan.json` stores it — 5 surfaces and 16
+/// objects, unconsolidated. `RoomPlanExporter.categoryString` / `objectCategoryString` write these
+/// strings; the raw values here are those strings, so decoding is `init(rawValue:)` and nothing
+/// re-spells them.
+///
+/// `SemanticClass` is the display-level CONSOLIDATION of this set (16 object categories collapse
+/// into 4 classes, 12 of them into `.fixture` alone). That consolidation is what the preview has
+/// always rendered — the mesh preview draws and names boxes from THIS set, and the consolidation
+/// survives only as the palette's anchor (`fullDetailColor`) and as the coarse grouping the tap
+/// read-out names.
+///
+/// A category this build does not know — a future RoomPlan release, or the exporter's `"unknown"`
+/// fallback — parses to nil. Nothing changes for those: their coarse class is `.none` and
+/// `buildRoomPlanOutlines` already skips `.none`.
+///
+/// `nonisolated`: `MeshPreviewView.buildRoomPlanOutlines` is a `nonisolated static func` and reads
+/// `init(rawValue:)`, `allCases` and `.floor` from there, and this project builds with
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` — so an unannotated declaration would be implicitly
+/// `@MainActor`. The remaining members are only reached on the main actor today; they are
+/// non-isolated because the type is. Same rationale as `AppConstants.meshSubdivisionMaxFaces`.
+nonisolated enum RoomPlanCategory: String, CaseIterable, Codable {
+    // Surfaces — RoomPlanExporter.categoryString
+    case wall, floor, door, window, opening
+    // Objects — RoomPlanExporter.objectCategoryString
+    case table, chair, sofa, bed, storage, refrigerator, stove, sink
+    case washerDryer = "washer_dryer"
+    case dishwasher, oven, fireplace, television, bathtub, toilet, stairs
+
+    /// Human-readable name for the preview legend and the tap read-out. NOT
+    /// `rawValue.capitalized`: `washer_dryer` has to read as "Washer / Dryer", not "Washer_dryer".
+    var displayName: String {
+        switch self {
+        case .wall:         return "Wall"
+        case .floor:        return "Floor"
+        case .door:         return "Door"
+        case .window:       return "Window"
+        case .opening:      return "Opening"
+        case .table:        return "Table"
+        case .chair:        return "Chair"
+        case .sofa:         return "Sofa"
+        case .bed:          return "Bed"
+        case .storage:      return "Storage"
+        case .refrigerator: return "Refrigerator"
+        case .stove:        return "Stove"
+        case .sink:         return "Sink"
+        case .washerDryer:  return "Washer / Dryer"
+        case .dishwasher:   return "Dishwasher"
+        case .oven:         return "Oven"
+        case .fireplace:    return "Fireplace"
+        case .television:   return "Television"
+        case .bathtub:      return "Bathtub"
+        case .toilet:       return "Toilet"
+        case .stairs:       return "Stairs"
+        }
+    }
+
+    /// The display class this category consolidates into.
+    ///
+    /// Same mapping `SemanticClass.fromSurfaceCategory` / `fromObjectCategory` already apply to the
+    /// same strings — stated here as well so the full vocabulary knows which base colour it hangs
+    /// off. The two are held to agreement by test (`RoomPlanLabelTests`) rather than by one
+    /// calling the other, because those two functions are domain-scoped (a surface named "table" is
+    /// `.none` to them) and routing them through this enum would quietly widen them.
+    var coarseClass: SemanticClass {
+        switch self {
+        case .wall:            return .wall
+        case .floor:           return .floor
+        case .door, .opening:  return .door    // openings treated as door-like for rendering
+        case .window:          return .window
+        case .table:           return .table
+        case .chair, .sofa, .bed: return .seat
+        case .storage, .refrigerator, .stove, .sink, .washerDryer, .dishwasher,
+             .oven, .fireplace, .television, .bathtub, .toilet, .stairs: return .fixture
+        }
+    }
+
+    /// Every rich category consolidating into `cls`, in `allCases` order.
+    ///
+    /// A category's INDEX in this list drives its derived shade, so the order IS the palette:
+    /// reordering `allCases` reshuffles the shades within a group (index 0 keeps the base colour
+    /// either way). `.ceiling` returns empty — RoomPlan has no ceiling category at all, which is
+    /// what the user guide's dimmed "Not yet supported by RoomPlan" row already says.
+    static func categories(in cls: SemanticClass) -> [RoomPlanCategory] {
+        allCases.filter { $0.coarseClass == cls }
+    }
+
+    // MARK: Derived palette
+
+    /// Widest hue window (in 0…1 hue units, spread ±half) a coarse group may occupy. `.fixture`
+    /// holds 12 categories; unbounded widening would walk them out of purple and into the blue that
+    /// means "wall", so the window is capped and the remaining separation comes from saturation and
+    /// value instead.
+    static let fullDetailMaxHueSpan: Float = 0.24
+    /// Hue window for a two-member group.
+    static let fullDetailBaseHueSpan: Float = 0.06
+    /// Extra hue window per member beyond the second — the window WIDENS with group size rather
+    /// than the step being fixed, so a 12-way split is not reduced to invisible increments.
+    static let fullDetailHueSpanGrowth: Float = 0.02
+
+    /// This category's colour at full detail: the coarse class's colour as the anchor, with
+    /// same-group siblings fanned out around it.
+    ///
+    /// The anchor is the point. The user guide's static legend and every existing screenshot teach
+    /// "blue = wall, purple = fixture", so a fixture must still read purple at full detail — only
+    /// the shade separates a stove from a sink. 21 freshly invented colours would have broken that
+    /// language for no gain.
+    ///
+    /// Pure and deterministic: a function of the category's index within its coarse group, nothing
+    /// else. Index 0 returns the base colour byte for byte, so a single-member group (wall, floor,
+    /// table, window) is unchanged from what ships today, at either detail.
+    var fullDetailColor: SIMD4<Float> {
+        let cls = coarseClass
+        let group = Self.categories(in: cls)
+        guard let index = group.firstIndex(of: self) else { return cls.color }
+        return Self.derivedShade(base: cls.color, index: index, groupCount: group.count)
+    }
+
+    /// SwiftUI colour for the full-detail legend swatch and the tap read-out.
+    var swiftUIFullDetailColor: Color {
+        let rgba = fullDetailColor
+        return Color(red: Double(rgba.x), green: Double(rgba.y), blue: Double(rgba.z))
+    }
+
+    /// The ramp behind `fullDetailColor`, split out so it can be exercised directly.
+    ///
+    /// `index == 0` (or a group with nothing to separate) returns `base` unchanged. Otherwise the
+    /// group fans out in mirrored pairs around the anchor — steps 1, 1, 2, 2, 3, 3, … alternating
+    /// sides — so consecutive categories land on OPPOSITE sides of the base colour and the step
+    /// magnitude grows outwards:
+    ///
+    ///   * hue rotates by up to half the group's window (which grows with group size, capped by
+    ///     `fullDetailMaxHueSpan`),
+    ///   * saturation moves with the side (up on one, down on the other),
+    ///   * value falls with the distance from the anchor, less steeply on the "up" side.
+    ///
+    /// Three axes rather than one because a 12-way split leaves only a few degrees of hue per step.
+    /// Distinctness within a group is guaranteed by hue alone: the offset `side · reach` is unique
+    /// per index, the window is never wide enough to wrap, and only index 0 has zero offset.
+    ///
+    /// Colour is the GROUPING cue at full detail — it says "these two are both fixtures". The
+    /// legend row and the tap read-out are what actually NAME a box, and neither depends on a
+    /// viewer resolving a 7° hue step by eye.
+    static func derivedShade(base: SIMD4<Float>, index: Int, groupCount: Int) -> SIMD4<Float> {
+        guard index > 0, groupCount > 1 else { return base }
+        let span = min(fullDetailMaxHueSpan,
+                       fullDetailBaseHueSpan + fullDetailHueSpanGrowth * Float(groupCount - 2))
+        let step = (index + 1) / 2                      // 1, 1, 2, 2, 3, 3, …
+        let maxStep = max(1, groupCount / 2)
+        let reach = min(1, Float(step) / Float(maxStep)) // 0 < reach <= 1
+        let side: Float = index % 2 == 1 ? 1 : -1
+
+        var hsv = rgbToHSV(SIMD3<Float>(base.x, base.y, base.z))
+        hsv.x = (hsv.x + side * (span / 2) * reach).truncatingRemainder(dividingBy: 1)
+        if hsv.x < 0 { hsv.x += 1 }
+        hsv.y = min(1, max(0.30, hsv.y + side * 0.28 * reach))
+        hsv.z = min(1, max(0.35, hsv.z - 0.28 * reach + (side > 0 ? 0.12 * reach : 0)))
+        let rgb = hsvToRGB(hsv)
+        return SIMD4<Float>(rgb.x, rgb.y, rgb.z, base.w)
+    }
+
+    /// Straight HSV round-trip helpers, written out rather than borrowed from `UIColor` so the
+    /// derivation stays a pure function of numbers (deterministic, and testable without UIKit).
+    private static func rgbToHSV(_ rgb: SIMD3<Float>) -> SIMD3<Float> {
+        let maxC = max(rgb.x, max(rgb.y, rgb.z))
+        let minC = min(rgb.x, min(rgb.y, rgb.z))
+        let delta = maxC - minC
+        var hue: Float = 0
+        if delta > 0 {
+            if maxC == rgb.x        { hue = (rgb.y - rgb.z) / delta / 6 }
+            else if maxC == rgb.y   { hue = (2 + (rgb.z - rgb.x) / delta) / 6 }
+            else                    { hue = (4 + (rgb.x - rgb.y) / delta) / 6 }
+            if hue < 0 { hue += 1 }
+        }
+        return SIMD3<Float>(hue, maxC > 0 ? delta / maxC : 0, maxC)
+    }
+
+    private static func hsvToRGB(_ hsv: SIMD3<Float>) -> SIMD3<Float> {
+        let h = hsv.x * 6
+        // `.rounded(.down)`, not `floor(_:)`: this is a static member of an enum that has a
+        // `floor` case, so an unqualified `floor(h)` resolves to `Self.floor` and fails to compile.
+        let whole = h.rounded(.down)
+        let sector = Int(whole) % 6
+        let f = h - whole
+        let p = hsv.z * (1 - hsv.y)
+        let q = hsv.z * (1 - hsv.y * f)
+        let t = hsv.z * (1 - hsv.y * (1 - f))
+        switch sector {
+        case 0:  return SIMD3<Float>(hsv.z, t, p)
+        case 1:  return SIMD3<Float>(q, hsv.z, p)
+        case 2:  return SIMD3<Float>(p, hsv.z, t)
+        case 3:  return SIMD3<Float>(p, q, hsv.z)
+        case 4:  return SIMD3<Float>(t, p, hsv.z)
+        default: return SIMD3<Float>(hsv.z, p, q)
+        }
+    }
+
+    // MARK: Raw-string entry points (what the loader and the renderer actually hold)
+
+    /// Display name for a raw `roomplan.json` category string, including one this build does not
+    /// know (the exporter writes `"unknown"` for a category added after this app was built).
+    static func displayName(forCategory raw: String) -> String {
+        RoomPlanCategory(rawValue: raw)?.displayName
+            ?? raw.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
+    /// Colour for a raw category string. An unknown category falls back to `SemanticClass.none`'s
+    /// colour, which is already what the renderer means by "don't draw this".
+    static func color(forCategory raw: String) -> SIMD4<Float> {
+        guard let category = RoomPlanCategory(rawValue: raw) else { return SemanticClass.none.color }
+        return category.fullDetailColor
+    }
+
+    // MARK: Legend filter
+
+    /// The legend row a stored category belongs to — and therefore the key the preview's transient
+    /// label filter holds. nil for a category this build does not know: nothing is drawn for those,
+    /// so nothing can be filtered either.
+    ///
+    /// One row per CATEGORY, since the preview names every box with the full RoomPlan vocabulary.
+    /// The consequence, deliberate: hiding all twelve fixtures is twelve taps, where the coarse
+    /// vocabulary this replaced could do it in one.
+    static func legendKey(forCategory raw: String?) -> String? {
+        guard let raw, let category = RoomPlanCategory(rawValue: raw) else { return nil }
+        return category.rawValue
+    }
+
+    /// Whether geometry carrying `raw` should be drawn, given the legend rows the user has switched
+    /// off. A category with no legend row is never hidden: the filter can only speak about rows the
+    /// legend actually shows.
+    static func isVisible(category raw: String?, hiddenLabels: Set<String>) -> Bool {
+        guard let key = legendKey(forCategory: raw) else { return true }
+        return !hiddenLabels.contains(key)
     }
 }
 

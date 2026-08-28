@@ -107,6 +107,44 @@ final class ScanTimelineState: ObservableObject {
     @Published var visibleIsBlank = false
     @Published var offers = TimelineOffers()
 
+    /// Every RoomPlan class present in ANY loaded generation — the timeline legend's rows, and
+    /// therefore what the label filter can speak about while scrubbing.
+    ///
+    /// A UNION rather than the visible generation's own list, which is what the privacy and
+    /// capture-marker rows use. Those rows assert "this is on screen right now"; a filter row is a
+    /// CONTROL, and a control that appears and disappears under the finger as generations scroll
+    /// past is unusable — worse, the filter it drives is global, so a row vanishing would leave a
+    /// label hidden across the whole timeline with nothing left to switch it back on. A row for a
+    /// class the visible generation lacks simply hides nothing until you scrub to one that has it.
+    ///
+    /// Grows as siblings load, exactly like `offers` — the pump resolves every generation, so this
+    /// converges on the location's full vocabulary within a few hundred ms of opening the viewer.
+    @Published var unionClasses: [SemanticClass] = []
+    /// The same union over the RICH RoomPlan categories, for the full-detail legend.
+    @Published var unionCategories: [RoomPlanCategory] = []
+
+    /// Fold one generation's vocabulary into the timeline-wide union.
+    func addSemanticVocabulary(classes: [SemanticClass], categories: [RoomPlanCategory]) {
+        let mergedClasses = Self.mergedVocabulary(unionClasses, classes)
+        if mergedClasses != unionClasses { unionClasses = mergedClasses }
+        let mergedCategories = Self.mergedVocabulary(unionCategories, categories)
+        if mergedCategories != unionCategories { unionCategories = mergedCategories }
+    }
+
+    /// Union of two vocabularies, re-sorted into `allCases` order.
+    ///
+    /// The re-sort is the point, not tidiness: a generation loaded second can carry a class the
+    /// first did not, and appending would order the legend by LOAD ORDER — which is the pump's
+    /// distance-from-scrub-position, so the same location would print its rows differently
+    /// depending on which card you opened the viewer by. `allCases` order is what the single-scan
+    /// loader publishes (`buildRoomPlanOutlines`), so both paths print one legend.
+    static func mergedVocabulary<T: CaseIterable & Hashable>(_ existing: [T], _ incoming: [T]) -> [T]
+    where T.AllCases.Element == T {
+        guard !incoming.isEmpty else { return existing }
+        let present = Set(existing).union(incoming)
+        return T.allCases.filter { present.contains($0) }
+    }
+
     /// Set when the preview is dismissed. The prefetch chain re-arms itself from its own
     /// completion, so without this a dismissed viewer keeps parsing the rest of the location's
     /// meshes at `.userInitiated` and writing into torn-down view state. Read and written on MAIN
@@ -160,9 +198,13 @@ extension MeshPreviewView {
         /// This generation's privacy-marker anchors, already offset into scene coords. Swapped into
         /// `MarkerProjectionState` when the slot becomes visible.
         var faceAnchors: [SCNVector3] = []
-        /// This generation's RoomPlan classes — the legend follows the visible scan, so a class list
-        /// borrowed from a sibling would be a lie about what's on screen.
+        /// This generation's own RoomPlan classes. Folded into `ScanTimelineState.unionClasses`
+        /// when the slot attaches (that union is what the legend prints, so a filter row can't
+        /// vanish mid-scrub); kept per-generation here because the union is built from these and
+        /// because the scrub publish still reports what THIS scan detected.
         var detectedClasses: [SemanticClass] = []
+        /// The same generation's RICH RoomPlan categories, feeding `unionCategories` the same way.
+        var detectedCategories: [RoomPlanCategory] = []
         /// Sources whose artifact has already been resolved (successfully or not). A generation with
         /// no `mesh_dynamic.obj` must not be re-attempted on every `updateUIView`.
         var attempted: Set<MeshSourceMode> = []
@@ -339,7 +381,8 @@ extension MeshPreviewView {
         if let existing = coordinator.timelineSlots[scan.id] {
             slot = existing
         } else {
-            slot = makeTimelineSlot(scan: scan, assets: assets, center: center, scene: scene)
+            slot = makeTimelineSlot(scan: scan, assets: assets, center: center, scene: scene,
+                                    coordinator: coordinator)
             coordinator.timelineSlots[scan.id] = slot
         }
 
@@ -374,7 +417,8 @@ extension MeshPreviewView {
     /// scan (semantic outlines/fills, capture markers) plus its privacy anchors, all carrying the
     /// shared centering offset. Starts hidden — `applyTimelineVisibility` decides what shows.
     private func makeTimelineSlot(scan: TimelineScan, assets: TimelineSlotAssets,
-                                  center: SCNVector3, scene: SCNScene) -> TimelineSlot {
+                                  center: SCNVector3, scene: SCNScene,
+                                  coordinator: Coordinator) -> TimelineSlot {
         let offset = SCNVector3(-center.x, -center.y, -center.z)
         let container = SCNNode()
         container.name = "timelineSlot"
@@ -386,18 +430,45 @@ extension MeshPreviewView {
             let semanticsNode = SCNNode()
             let fillsNode = SCNNode()
             for outline in outlines.outlineNodes {
+                // Same labelling as the primary load: the rich category rides `SCNNode.name`, so
+                // the filter can hide this generation's boxes without re-reading its roomplan.json.
+                // Styled at creation because a slot can attach long after a row was switched off,
+                // and the incremental restyle only fires on a change.
+                //
+                // From the COORDINATOR's applied filter, not this struct's. `hiddenLabels` is a
+                // plain value on the representable (not a binding), so the copy of `self` this load
+                // closed over holds whatever it was when the parse STARTED — and the restyle would
+                // not repair it, since it is gated on a change and the applied filter already
+                // matches what the view holds. A slot attaching after the user hid a row would
+                // arrive with that row's geometry visible and its legend row still struck through.
+                let filter = coordinator.appliedHiddenLabels
+                let label = outline.category?.rawValue
                 let wireNode = SCNNode(geometry: outline.geometry)
+                wireNode.name = label
                 wireNode.position = offset
+                Self.styleSemanticNode(wireNode, hiddenLabels: filter)
                 semanticsNode.addChildNode(wireNode)
                 let fillNode = SCNNode(geometry: outline.fillGeometry)
+                fillNode.name = label
                 fillNode.position = offset
+                Self.styleSemanticNode(fillNode, hiddenLabels: filter)
                 fillsNode.addChildNode(fillNode)
+                // Same side table the primary load fills: confidence is the one thing an SCNNode
+                // has nowhere to keep, and the tap read-out prints it. Filled for SIBLING
+                // generations too now that a scrubbed-to generation is identifiable — without it
+                // the read-out would silently drop the score on every generation but the one the
+                // viewer was opened on.
+                if let confidence = outline.confidence {
+                    coordinator.semanticConfidence[ObjectIdentifier(wireNode)] = confidence
+                    coordinator.semanticConfidence[ObjectIdentifier(fillNode)] = confidence
+                }
             }
             container.addChildNode(semanticsNode)
             container.addChildNode(fillsNode)
             slot.semanticsNode = semanticsNode
             slot.semanticFillsNode = fillsNode
             slot.detectedClasses = outlines.detectedClasses
+            slot.detectedCategories = outlines.detectedCategories
         }
         if let markers = assets.markers {
             // Deliberately NOT `attachKeyframeMarkers`: that publishes hasKeyframeMarkers /
@@ -417,8 +488,11 @@ extension MeshPreviewView {
         return slot
     }
 
-    /// Folds one slot's artifacts into the OR-only toolbar union.
+    /// Folds one slot's artifacts into the OR-only toolbar union, and its RoomPlan vocabulary into
+    /// the timeline-wide legend union (`ScanTimelineState.unionClasses`).
     private func addToOffers(_ slot: TimelineSlot) {
+        timelineState.addSemanticVocabulary(classes: slot.detectedClasses,
+                                            categories: slot.detectedCategories)
         var offers = timelineState.offers
         offers.proxy = offers.proxy || slot.proxyMeshNode != nil
         offers.dynamic = offers.dynamic || slot.dynamicMeshNode != nil
@@ -448,6 +522,7 @@ extension MeshPreviewView {
         slot.equirectFacesNode = coordinator.equirectFacesNode
         slot.faceAnchors = markerState.anchorPositions
         slot.detectedClasses = detectedClasses
+        slot.detectedCategories = detectedCategories
         // The primary load resolves all three variants up front (that's what makes hasProxyMesh /
         // hasDynamicMesh honest for the single-scan preview), so nothing here is left to attempt.
         slot.attempted = [.full, .proxy, .dynamic]
@@ -481,17 +556,27 @@ extension MeshPreviewView {
         for (id, slot) in coordinator.timelineSlots {
             slot.container.isHidden = (id != visibleSlot?.scan.id)
         }
+        // The hit test runs with `ignoreHiddenNodes: false` (it has to — the fill boxes it aims at
+        // are hidden in `.meshWithOutlines`), so EVERY generation's boxes are tap targets, hidden
+        // container and all. Confining the tap to the visible slot is therefore not an optimization
+        // but the thing that stops a tap from naming a box belonging to a generation that is not on
+        // screen. Nil means UNRESTRICTED, which is right for a single-scan preview (this routine
+        // never runs there) and wrong here — so the nothing-visible case switches the tap off
+        // outright, in the guard below, rather than leaning on the root being nil.
+        coordinator.semanticTapRoot = visibleSlot?.container
 
         // Scrubbed onto a generation that hasn't loaded: nothing is drawn, so nothing may describe
         // it either. Without this the previous generation's privacy markers keep projecting over
         // an empty scene and the legend keeps naming its classes.
         guard let visibleSlot else {
+            coordinator.semanticTapEnabled = false
             if coordinator.lastVisibleScanID != nil {
                 coordinator.lastVisibleScanID = nil
                 coordinator.enqueuedVisibleBlank = true
                 markerState.anchorPositions = []
                 DispatchQueue.main.async {
                     self.detectedClasses = []
+                    self.detectedCategories = []
                     self.timelineState.visibleHasPrivacy = false
                     self.timelineState.visibleHasKeyframes = false
                     self.timelineState.visibleHasEquirects = false
@@ -526,11 +611,13 @@ extension MeshPreviewView {
             coordinator.lastVisibleScanID = slot.scan.id
             markerState.anchorPositions = slot.faceAnchors
             let classes = slot.detectedClasses
+            let categories = slot.detectedCategories
             let hasPrivacy = !slot.faceAnchors.isEmpty
             let hasKeyframes = slot.hasKeyframeMarkers
             let hasEquirectFaces = slot.hasEquirectFaces
             DispatchQueue.main.async {
                 self.detectedClasses = classes
+                self.detectedCategories = categories
                 self.timelineState.visibleHasPrivacy = hasPrivacy
                 self.timelineState.visibleHasKeyframes = hasKeyframes
                 self.timelineState.visibleHasEquirects = hasEquirectFaces
@@ -604,8 +691,10 @@ extension MeshPreviewView {
                     coordinator.timelineLoadInFlight = false
                     return
                 }
-                // `self` is a struct, but its bindings read live view state — so the modes applied
-                // here are the CURRENT ones even if the user changed them mid-load.
+                // `self` is a struct, but its BINDINGS read live view state — so the view modes
+                // applied here are the CURRENT ones even if the user changed them mid-load. The
+                // legend filter is a plain value, hence a snapshot: the attach reads it off the
+                // coordinator instead (see `makeTimelineSlot`).
                 if checkFrame, let frameTarget,
                    !Self.isCanonicalFramed(scanDirectory: scan.scanDirectory, frameTarget: frameTarget) {
                     self.timelineState.unregisteredIDs.insert(scan.id)
