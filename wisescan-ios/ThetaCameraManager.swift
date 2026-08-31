@@ -632,6 +632,11 @@ final class ThetaCameraManager {
         let ssid = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID)
         Task {
             try? await setSleepDelaySeconds(Self.kindSleepDelaySeconds)   // best-effort before dropping
+            // Power saving is restored HERE and nowhere else: putting it back when capture
+            // goes idle would re-arm it for the very next connect, which is exactly the
+            // link we need it off for. An explicit disconnect means the operator is done
+            // with the camera, so hand their battery setting back.
+            if powerSavingSupported { try? await setPowerSaving(on: true) }
             if let ssid, !ssid.isEmpty {
                 NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: ssid)
             }
@@ -664,19 +669,6 @@ final class ThetaCameraManager {
                                        : "Camera keep-awake off — auto-sleep restored (idle)")
             } catch {
                 log(.connection, "⚠️ sleepDelay change failed: \(Self.describe(error))")
-            }
-            // sleepDelay is not the whole story on an X: _powerSaving is a separate
-            // camera-UI mode, and #49's ~30 s BLE drops happen on the X only — the same
-            // model this option exists on — with keep-awake already ON. Suppress it for
-            // the capture window and restore it when idle, exactly as we do for sleep:
-            // it is the operator's camera and their battery.
-            guard powerSavingSupported else { return }
-            do {
-                try await setPowerSaving(on: !awake)
-                log(.connection, awake ? "Camera power saving OFF for capture (#49 test)"
-                                       : "Camera power saving restored (idle)")
-            } catch {
-                log(.connection, "⚠️ _powerSaving change failed: \(Self.describe(error))")
             }
         }
     }
@@ -762,6 +754,22 @@ final class ThetaCameraManager {
             // kills the theory rather than quietly surviving.
             if info.model.contains("THETA X"), let saving = await fetchPowerSaving() {
                 log(.connection, "Camera power saving is \(saving) at connect")
+                // Disable it HERE, the earliest moment OSC exists — not at capture start.
+                // First test run (2026-08-31): the capture-start write landed at +27.4 s
+                // and the link dropped at +29.3 s, 1.9 s later. An ATT transaction timeout
+                // runs from when the transaction STARTS (~link-ready), so a write that late
+                // can never rescue it; OSC simply is not reachable until the Wi-Fi join
+                // completes (+21.5 s that run). The setting persists camera-side, so the
+                // decisive observation is the NEXT connect reading "is OFF at connect" —
+                // that link runs power-saving-free from t=0.
+                if saving.uppercased() == "ON" {
+                    do {
+                        try await setPowerSaving(on: false)
+                        log(.connection, "Camera power saving turned OFF (#49 test) — persists for the next connect")
+                    } catch {
+                        log(.connection, "⚠️ _powerSaving change failed: \(Self.describe(error))")
+                    }
+                }
             }
             ensureZ1LinkAfterConnect(model: info.model)
         } catch {
