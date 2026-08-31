@@ -665,7 +665,26 @@ final class ThetaCameraManager {
             } catch {
                 log(.connection, "⚠️ sleepDelay change failed: \(Self.describe(error))")
             }
+            // sleepDelay is not the whole story on an X: _powerSaving is a separate
+            // camera-UI mode, and #49's ~30 s BLE drops happen on the X only — the same
+            // model this option exists on — with keep-awake already ON. Suppress it for
+            // the capture window and restore it when idle, exactly as we do for sleep:
+            // it is the operator's camera and their battery.
+            guard powerSavingSupported else { return }
+            do {
+                try await setPowerSaving(on: !awake)
+                log(.connection, awake ? "Camera power saving OFF for capture (#49 test)"
+                                       : "Camera power saving restored (idle)")
+            } catch {
+                log(.connection, "⚠️ _powerSaving change failed: \(Self.describe(error))")
+            }
         }
+    }
+
+    /// `_powerSaving` is X-only per the OSC spec; asking a Z1 just earns an error.
+    private var powerSavingSupported: Bool {
+        if case .connected(let model, _) = state { return model.contains("THETA X") }
+        return false
     }
 
     /// Leveling gate: the 360° face-pose export assumes zenith-corrected (level) panos.
@@ -738,6 +757,12 @@ final class ThetaCameraManager {
             currentStillFormat = try? await fetchStillResolution()
             await refreshSupportedStillFormats()
             await registerZ1BluetoothIfNeeded(model: info.model, oscSerial: info.serial)
+            // Baseline for the #49 power-saving hypothesis: record what the camera's own
+            // setting was BEFORE we touch it, so a drop that happens with it already OFF
+            // kills the theory rather than quietly surviving.
+            if info.model.contains("THETA X"), let saving = await fetchPowerSaving() {
+                log(.connection, "Camera power saving is \(saving) at connect")
+            }
             ensureZ1LinkAfterConnect(model: info.model)
         } catch {
             batteryLevel = nil
