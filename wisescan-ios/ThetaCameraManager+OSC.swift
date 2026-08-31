@@ -52,6 +52,27 @@ extension ThetaCameraManager {
         if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setOptions failed for sleepDelay") }
     }
 
+    /// `_powerSaving` is a SEPARATE knob from `sleepDelay` and **X-only** (spec: X All,
+    /// Z1/V/SC/S unsupported) — which is exactly the model #49's ~30 s BLE drops occur on.
+    /// Our keep-awake disables sleep and has never touched this, so the camera has been
+    /// free to enter power saving mid-capture ("Entering Power Saving mode" on its screen,
+    /// field-observed 2026-08-25) while Wi-Fi kept working. Hypothesis under test: that
+    /// state curtails the BLE radio and is what strands the ATT indication.
+    func setPowerSaving(on enabled: Bool) async throws {
+        let body: [String: Any] = ["name": "camera.setOptions",
+                                   "parameters": ["options": ["_powerSaving": enabled ? "ON" : "OFF"]]]
+        let response = try await postJSON("/osc/commands/execute", body: body, as: OSCCommandResponse.self)
+        if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "setOptions failed for _powerSaving") }
+    }
+
+    /// Current `_powerSaving` value, or nil if the camera doesn't support the option.
+    func fetchPowerSaving() async -> String? {
+        let body: [String: Any] = ["name": "camera.getOptions",
+                                   "parameters": ["optionNames": ["_powerSaving"]]]
+        let response = try? await postJSON("/osc/commands/execute", body: body, as: OSCOptionsResponse.self)
+        return response?.results?.options.powerSaving
+    }
+
     /// Sets the `_topBottomCorrection` option (e.g. "Apply" or "Disapply").
     func setTopBottomCorrection(to mode: String) async throws {
         let body: [String: Any] = ["name": "camera.setOptions",
@@ -460,11 +481,13 @@ private struct OSCOptionsResponse: Decodable {
         let networkType: String?
         let captureMode: String?
         let exposureDelay: Int?
+        let powerSaving: String?
         // RICOH's extension options are underscore-prefixed on the wire.
         enum CodingKeys: String, CodingKey {
             case fileFormat, fileFormatSupport, captureMode, exposureDelay
             case topBottomCorrection = "_topBottomCorrection"
             case networkType = "_networkType"
+            case powerSaving = "_powerSaving"
         }
     }
     struct FileFormat: Decodable { let type: String?; let width: Int?; let height: Int? }
