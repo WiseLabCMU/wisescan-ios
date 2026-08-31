@@ -1,5 +1,7 @@
 import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Single decoder for the pipeline's 16-bit depth PNGs.
 ///
@@ -46,6 +48,39 @@ enum DepthPNG {
             }
         }
         return littleVotes > bigVotes
+    }
+
+    /// Writes 16-bit greyscale millimetres with the byte order **declared correctly**, so
+    /// the sample values on disk are the values a spec-conforming reader gets back.
+    ///
+    /// This is the half `depthMapToPNG16` gets wrong: it hands CoreGraphics a host-order
+    /// (little-endian) `[UInt16]` under `CGBitmapInfo(rawValue: 0)`, which is
+    /// `byteOrderDefault` — big-endian for 16-bit components — so every sample is encoded
+    /// byte-swapped. Declaring `byteOrder16Little` for a little-endian buffer is what makes
+    /// the two agree. Matches `FaceDepthRender.encodePNG`, generalised off square rasters.
+    static func encode(_ values: [UInt16], width: Int, height: Int) -> Data? {
+        guard width > 0, height > 0, values.count == width * height else { return nil }
+        var bytes = values
+        return bytes.withUnsafeMutableBytes { raw -> Data? in
+            guard let base = raw.baseAddress,
+                  let provider = CGDataProvider(dataInfo: nil, data: base,
+                                                size: raw.count, releaseData: { _, _, _ in }),
+                  let image = CGImage(width: width, height: height,
+                                      bitsPerComponent: 16, bitsPerPixel: 16,
+                                      bytesPerRow: width * 2,
+                                      space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGBitmapInfo.byteOrder16Little.union(
+                                          CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)),
+                                      provider: provider, decode: nil,
+                                      shouldInterpolate: false, intent: .defaultIntent)
+            else { return nil }
+            let out = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(
+                out, UTType.png.identifier as CFString, 1, nil) else { return nil }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination) else { return nil }
+            return out as Data
+        }
     }
 
     /// Millimetre samples, byte order resolved. 0 = no data, the pipeline's contract.

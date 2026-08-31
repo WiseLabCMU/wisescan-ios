@@ -166,9 +166,11 @@ struct UserGuideView: View {
                               "(cameras/), and mesh_info.json. Zip archive."
                     )
                     formatRow(
-                        format: "RAW",
-                        desc: "Nerfstudio-compatible bundle: RGB images, 16-bit depth maps, " +
-                              "and camera poses (transforms.json). Use for NeRF/3DGS reconstruction."
+                        format: "Nerfstudio",
+                        desc: "Trains as-is in Nerfstudio and LichtFeld Studio — no conversion. " +
+                              "RGB images, camera poses (transforms.json), 16-bit depth, " +
+                              "operator masks for 360° frames, and a LiDAR seed point cloud " +
+                              "(sparse_pc.ply) that starts the splat on real surfaces."
                     )
                     formatRow(
                         format: "USDZ",

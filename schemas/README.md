@@ -27,13 +27,45 @@ Our native format. Includes relocalization data plus the full Polycam raw import
 Polycam's raw data import format only.
 - `images/`, `proxy_images/`, `depth/`, `confidence/`, `cameras/`, `mesh_info.json` — same as above, without Scan4D-specific files.
 
-### RAW (`.zip`)
-Nerfstudio-compatible format only.
-- `images/`: Time-aligned RGB frames.
+### Nerfstudio (`.zip`)
+Trains as-is in **Nerfstudio** and **LichtFeld Studio** — no conversion step. Both read the
+same `transforms.json` schema (LichtFeld's loader for it is its Blender/NeRF loader), so one
+bundle serves both. Built by `NerfstudioExport` from the staged Polycam payload; it does
+**not** copy capture's own `transforms.json`, which writes the pose matrix transposed.
+
+- `images/`: Time-aligned RGB frames, plus the 360° cube faces when a rig was used.
 - `proxy_images/`: Low-resolution or external camera proxy frames.
-- `depth/`: Time-aligned 16-bit depth maps.
+- `depth/`: 16-bit millimetre depth, resampled to each frame's **RGB resolution**.
 - `confidence/`: Time-aligned 8-bit confidence maps for depth.
-- `transforms.json`: Camera poses for all frames in Nerfstudio format.
+- `masks/`: Operator/rod keep-masks for the 360° faces (white = keep), at image resolution.
+- `transforms.json`: Camera poses and intrinsics for all frames (see schema below).
+- `sparse_pc.ply`: Metric seed point cloud unprojected from the LiDAR depth.
+
+Formerly named **RAW**. `ExportFormat.persisted(_:)` maps the old stored name forward.
+
+#### Why the sidecars look the way they do
+The two engines agree on the schema and disagree on the sidecars, so the bundle satisfies
+both at once:
+- **Nerfstudio** asserts `mask_path` / `depth_file_path` are present on *every* frame or on
+  none. Frames with no real mask get an all-white (keep-everything) one; frames the LiDAR
+  never covered (the 360° faces) get an all-zero depth map. Both are no-ops — Nerfstudio's
+  depth losses build `depth_mask = termination_depth > 0`, and LichtFeld's depth-anchor
+  collector and `pixel_active` both reject `!(t > 0)` — and a uniform image deflates to a
+  few KB even at 12 MP.
+- **LichtFeld** compares sidecar dimensions to the image for *exact equality* and aborts the
+  load with `DEPTH_SIZE_MISMATCH` otherwise, which is why depth is resampled up rather than
+  left at the LiDAR's native raster. Nearest-neighbour, never bilinear: interpolating across
+  a depth discontinuity invents a surface at a range nothing measured.
+- Intrinsics are written **per frame with no globals** whenever more than one intrinsic set
+  is present. Nerfstudio decides per key (`fx_fixed = "fl_x" in meta`) and never reads a
+  per-frame value when the global exists, so the two cannot coexist. ARKit refines focal
+  length continuously, so real captures always take this path.
+- `ply_file_path` points at `sparse_pc.ply`. LichtFeld loads it automatically; Nerfstudio
+  needs `ns-train splatfacto --data . nerfstudio-data --load-3D-points True`.
+
+The equirect originals are staged only so the cube faces can be reprojected from them, then
+dropped — at 6720×3360 they would dominate the archive and neither engine reads them from
+this layout. Use **Scan4D** when you want them kept.
 
 ### OBJ (`.obj`)
 Single mesh file export (no vertex colors).

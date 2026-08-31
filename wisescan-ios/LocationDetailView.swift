@@ -181,7 +181,7 @@ struct LocationDetailView: View {
                                     .tint(.cyan)
                                     .onChange(of: globalSelectedFormatStr) { _, newValue in
                                         for scan in location.scans {
-                                            scan.selectedFormat = ExportFormat(rawValue: newValue) ?? .scan4d
+                                            scan.selectedFormat = ExportFormat.persisted(newValue) ?? .scan4d
                                         }
                                         try? modelContext.save()
                                     }
@@ -491,7 +491,7 @@ struct LocationDetailView: View {
             return
         }
         isBulkExporting = true
-        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
+        let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         Task { @MainActor in
@@ -533,7 +533,7 @@ struct LocationDetailView: View {
         // selected scan's export/upload is already in flight.
         guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
         guard !scans.isEmpty, !uploadURL.isEmpty else { return }
-        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
+        let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         let locationIds = Set(scans.compactMap { $0.location?.id })
 

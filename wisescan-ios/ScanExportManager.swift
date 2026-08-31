@@ -817,21 +817,35 @@ struct ScanExportManager {
                 return zipStaging(stagingDir)
             }
 
-        case .raw:
-            // Nerfstudio format: images/, proxy_images/, depth/, confidence/, transforms.json
+        case .nerfstudio:
+            // A bundle Nerfstudio and LichtFeld Studio load as-is: images/, depth/,
+            // confidence/, masks/, transforms.json, sparse_pc.ply.
+            //
+            // Built from the staged Polycam payload rather than copying capture's own
+            // transforms.json, which emits the pose matrix transposed and has never
+            // actually loaded (see NerfstudioExport). Staging the Polycam payload also
+            // brings cameras/ — the correct per-frame poses this rebuilds from — plus the
+            // 360° cube faces that emitCubeFaces adds, so the rig stills come along.
             return withStagingDir { stagingDir in
-                let copyItems = [("images", "images"), ("proxy_images", "proxy_images"), ("depth", "depth"), ("confidence", "confidence"), ("transforms.json", "transforms.json")]
-                for (src, dst) in copyItems {
-                    do {
-                        try fm.copyItem(
-                            at: rawDataDir.appendingPathComponent(src),
-                            to: stagingDir.appendingPathComponent(dst)
-                        )
-                    } catch {
-                        print("[prepareExport] RAW: failed to copy \(src): \(error.localizedDescription)")
-                    }
+                // Order matters and mirrors .scan4d: the Polycam payload first (it runs the
+                // frame privacy pass itself), then the 360° stage, which is what emits the
+                // cube faces into images/ + cameras/ + masks/. Without that second call the
+                // rig cameras never reach the bundle at all.
+                stagePolycamPayload(to: stagingDir)
+                stageEquirectStills(rawDataDir: rawDataDir, stagingDir: stagingDir, phase: phase)
+
+                if !NerfstudioExport.build(stagingDir: stagingDir,
+                                           masksSourceDir: stagingDir.appendingPathComponent("masks"),
+                                           phase: phase) {
+                    print("[prepareExport] ✗ Nerfstudio build failed — shipping the staged payload as-is")
                 }
-                applyExportPrivacyPasses(rawDataDir: rawDataDir, stagedDir: stagingDir, phase: phase)
+
+                // The equirects were staged only so the cube faces could be reprojected off
+                // them. Neither engine reads an equirect from this layout, and at 6720×3360
+                // they would dominate the archive — the faces carry the same pixels. Scan4D
+                // remains the format that keeps the originals.
+                try? fm.removeItem(at: stagingDir.appendingPathComponent("equirect_stills"))
+                try? fm.removeItem(at: stagingDir.appendingPathComponent("equirect_masks"))
                 return zipStaging(stagingDir)
             }
 

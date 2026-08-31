@@ -65,7 +65,7 @@ class CapturedScan {
     }
 
     @Transient var selectedFormat: ExportFormat {
-        get { ExportFormat(rawValue: selectedFormatStr) ?? .scan4d }
+        get { ExportFormat.persisted(selectedFormatStr) ?? .scan4d }
         set { selectedFormatStr = newValue.rawValue }
     }
 
@@ -187,7 +187,7 @@ class CapturedScan {
 enum ExportFormat: String, CaseIterable, Codable {
     case scan4d = "Scan4D"
     case polycam = "Polycam"
-    case raw = "RAW"
+    case nerfstudio = "Nerfstudio"
     case usdz = "USDZ"
     case ply = "PLY"
     case obj = "OBJ"
@@ -197,7 +197,7 @@ enum ExportFormat: String, CaseIterable, Codable {
         case .usdz: return "usdz"
         case .ply: return "ply"
         case .obj: return "obj"
-        case .scan4d, .polycam, .raw: return "zip"
+        case .scan4d, .polycam, .nerfstudio: return "zip"
         }
     }
 
@@ -206,8 +206,20 @@ enum ExportFormat: String, CaseIterable, Codable {
         case .usdz: return "model/vnd.usdz+zip"
         case .ply: return "application/x-ply"
         case .obj: return "application/x-wavefront-obj"
-        case .scan4d, .polycam, .raw: return "application/zip"
+        case .scan4d, .polycam, .nerfstudio: return "application/zip"
         }
+    }
+
+    /// Decodes a persisted raw value, mapping names that have changed.
+    ///
+    /// This format was called "RAW" until it was rebuilt into a bundle that actually loads
+    /// (it had shipped transposed poses since it was introduced). The name is persisted in
+    /// SwiftData (`CapturedScan.selectedFormatStr`) and in `@AppStorage`, so without this
+    /// mapping every scan and preference holding "RAW" would silently fall back to Scan4D —
+    /// quietly switching the user to a different export.
+    static func persisted(_ rawValue: String) -> ExportFormat? {
+        if let format = ExportFormat(rawValue: rawValue) { return format }
+        return rawValue == "RAW" ? .nerfstudio : nil
     }
 }
 
