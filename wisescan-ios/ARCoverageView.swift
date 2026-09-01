@@ -208,6 +208,7 @@ struct ARCoverageView: UIViewRepresentable {
         if pauseARSession {
             if !context.coordinator.isSessionPausedForBattery {
                 PerfDiag.log("battery: pausing AR session (idle)")
+                context.coordinator.resetFrameGapBaseline("battery pause")
                 uiView.session.pause()
                 context.coordinator.isSessionPausedForBattery = true
             }
@@ -215,6 +216,7 @@ struct ARCoverageView: UIViewRepresentable {
         } else if context.coordinator.isSessionPausedForBattery {
             context.coordinator.isSessionPausedForBattery = false
             PerfDiag.log("battery: resuming AR session (returned to capture)")
+            context.coordinator.resetFrameGapBaseline("battery resume")
             // Resume in the nominal (new-scan) configuration. The idle pause only fires after the
             // user has LEFT the capture tab, and leaving abandons any in-progress extend (CaptureView
             // .onDisappear clears the extend/ghost state, and the ghost overlay is removed on return)
@@ -261,6 +263,7 @@ struct ARCoverageView: UIViewRepresentable {
             // PointCloudManager allocate their Metal buffers at capacity (350k voxels, 256×192×4
             // verts) up front, so this delta is the fixed VR footprint — independent of scene size.
             PerfDiag.log("[MemDiag] EVENT VR-ENTER \(context.coordinator.memMarker())")
+            context.coordinator.resetFrameGapBaseline("VR enter")
             // Keep cameraFeed() background during setup — switch to black
             // only after the first point cloud frame renders (see session(_:didUpdate:)).
             context.coordinator.vrBackgroundSet = false
@@ -288,6 +291,7 @@ struct ARCoverageView: UIViewRepresentable {
             // free on RealityKit's schedule, so defer one runloop turn + (dev-flag) force-reclaim
             // before measuring so the delta reflects reclaimed pages, not cached ones.
             PerfDiag.log("[MemDiag] EVENT VR-EXIT \(context.coordinator.memMarker())")
+            context.coordinator.resetFrameGapBaseline("VR exit")
             uiView.environment.background = .cameraFeed()
             context.coordinator.pointCloudManager?.destroy()
             context.coordinator.pointCloudManager = nil
@@ -552,6 +556,7 @@ struct ARCoverageView: UIViewRepresentable {
                 let meshClass = (config.sceneReconstruction == .meshWithClassification)
                 let mode = "mode(semanticLabeling=\(sl ? "on" : "off") meshClassifier=\(meshClass ? "on" : "off") liveConsume=deferred)"
                 PerfDiag.log("[MemDiag] EVENT RECORD-START \(context.coordinator.memMarker()) \(mode)")
+                context.coordinator.resetFrameGapBaseline("record start")
                 // Phase-0 diag: mark this run as recorded so stop emits a summary. A no-map run
                 // has nothing to relocalize → start the summary fresh (drops any stale map/settle).
                 if PerfDiag.enabled {
@@ -610,6 +615,7 @@ struct ARCoverageView: UIViewRepresentable {
                 // releases lazily), so we bracket the sum, which is the reliable number.
                 PerfDiag.log("[MemDiag] EVENT PRE-TEARDOWN \(context.coordinator.memMarker())")
                 context.coordinator.reportStatsPublishRate()
+                context.coordinator.resetFrameGapBaseline("scan teardown")
                 // Stop RoomPlan and capture final CapturedRoom BEFORE reset clears state
                 context.coordinator.stopRoomPlanSession()
                 context.coordinator.resetForNominal()
@@ -999,6 +1005,26 @@ struct ARCoverageView: UIViewRepresentable {
         /// Perf diagnostics: timestamp of the previous ARFrame, to detect gaps in frame
         /// delivery (the signature of ARKit VIO being starved). Touched only on the delegate queue.
         private var lastFrameTimestamp: TimeInterval = 0
+
+        /// Zero the frame-gap baseline at a DELIBERATE session discontinuity (#70).
+        ///
+        /// The gap is measured from ARFrame timestamps, which do not advance while the
+        /// session is intentionally not delivering to this path — VR mode, a battery
+        /// pause, a teardown. Without this the first frame afterwards reports the whole
+        /// span as one gap: 20,097 ms on a VR exit (2026-08-21) and 50,559 ms across a
+        /// discarded rescan's teardown (2026-09-01), both with a demonstrably healthy
+        /// main thread — the watchdog recorded no stall at either moment.
+        ///
+        /// That is not merely noisy. The VIO guard trips on this same `frameGap`, and
+        /// its `hardStalled` branch (>4 s) halts UNCONDITIONALLY "no matter how the
+        /// recovery frame presents". The guard is armed for the whole recording, so a VR
+        /// exit or a battery resume mid-recording could halt a perfectly healthy scan —
+        /// the reachability the issue asked us to confirm. It is reachable.
+        func resetFrameGapBaseline(_ reason: String) {
+            guard lastFrameTimestamp > 0 else { return }
+            lastFrameTimestamp = 0
+            PerfDiag.log("frame-gap baseline reset (\(reason)) — the next gap is measured from here (#70)")
+        }
 
         /// Last sweep-yaw value published to `ScanStats`, as SpaceAnalyzer's own 1° bucket, and when.
         /// `CaptureView.body` reads `scanStats.analysisYaw` (the `onChange(of:)` operand), so every
