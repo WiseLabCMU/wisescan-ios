@@ -124,6 +124,20 @@ Field-found 2026-08-25 (#71): the **first emoji laid out in a session** cost the
 - **Log strings are exempt:** `log(...)` / `PerfDiag.log(...)` lines may carry `⚠️` / `✓` — they exist for the diagnostics export, where they scan well. The events feed does render them, which is why `AppDelegate` **warms CoreText/MobileGestalt on a utility queue at launch** (`CoreText/MobileGestalt warm-up took N ms` in the log). That warm-up is the systemic fix; this rule is hygiene on top. Do not remove either.
 - **Audit:** `grep -n 'Text("[^"]*[\U0001F300-\U0001FAFF\u2600-\u27BF]' wisescan-ios/*.swift` — anything it finds is a bug.
 
+### Never benchmark a process Xcode launched
+Xcode injects its Metal debugging layer (`GPUToolsCapture`, `MetalTools`) into every app it launches, and once the Mac is disconnected those tools' XPC round-trips have nobody to answer them. On 2026-09-01 the same Release build, same device, same scans measured:
+
+| | Xcode-launched | icon-launched |
+|:--|:--|:--|
+| `capture view open` | **18,308 ms** | **192 ms** |
+| main-thread stalls | two, ~18 s each | none |
+
+**95x.** It cost several rounds of chasing a phantom (#71) — two *unrelated* call sites, a CoreText→MobileGestalt lookup and an `ARView.init` Metal blit, both stalling at the same fixed ~18.1 s, which is one tools timeout wearing two stacks.
+
+- **Any timing that will be quoted in an issue** comes from a **force-quit + icon relaunch**, with Perf Diagnostics on and the device off the tether. Xcode runs are for correctness and breakpoints, never for numbers.
+- A stall whose sampled backtrace contains `GPUToolsCapture` or `MetalTools` is an artifact — re-measure before filing anything.
+- Diagnostics exports stamp `build:`; they do **not** record how the process was launched, so say which it was when you post a measurement.
+
 ### Debugging with PerfDiag
 `PerfDiag` (in `PerfDiag.swift`) is the instrumentation for all of the above. It is a **no-op unless** Developer Mode → **Perf Diagnostics** is on, so its calls are safe to leave in hot paths. Output goes to `OSLog` (subsystem `org.arenaxr.scan4d`, category `perf`) — watch it live in Console.app/Xcode — and to `os_signpost` intervals for the Instruments timeline.
 - **`MainThreadWatchdog`** logs `main-thread stall BEGIN/END (max no-frame gap Nms)` — the visible freeze. It runs **app-wide from launch** (not just in capture — the tab-tap and save-flow freezes happen outside the capture view). 2 s into a stall it **samples the main thread's backtrace** and logs one frame per line (`main-thread sample Nms into the stall`); Swift frames arrive mangled — paste into `swift demangle`. Under Xcode it stays quiet by default because lldb pauses on the sampler's signal (that pause *is* the sample: read the stack); to get log samples while tethered, run `process handle SIGUSR1 -n false -p true -s false` in lldb **and** enable Developer Mode → *Sample Stalls Under Debugger*.

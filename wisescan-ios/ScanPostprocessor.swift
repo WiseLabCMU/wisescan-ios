@@ -683,9 +683,14 @@ enum ScanPostprocessor {
            let origId = w.origId {
             report("Registering…")
             let sourcePlanes = SaveRegistration.rawFramePlanes(scanDirectory: dir)
-            if let regOutcome = SaveRegistration.run(sourcePlanes: sourcePlanes,
-                                                     canonicalRoomPlanURL: targetURL,
-                                                     targetScanId: origId) {
+            // #47 verification: the mesh rewrite this drives used to materialize ~1.2M Swift
+            // Strings. Timing the whole registration step is the number that shows whether
+            // the streaming rewrite actually landed on a room-scale mesh.
+            if let regOutcome = PerfDiag.timed("registration_step", {
+                SaveRegistration.run(sourcePlanes: sourcePlanes,
+                                     canonicalRoomPlanURL: targetURL,
+                                     targetScanId: origId)
+            }) {
                 // TRANSACTIONAL ORDER: bake the artifacts FIRST, write the sidecar LAST — the
                 // sidecar is the commit record every consumer trusts (ghost de-registration,
                 // colorize un-apply, retry gating). The old order wrote `applied: true` before

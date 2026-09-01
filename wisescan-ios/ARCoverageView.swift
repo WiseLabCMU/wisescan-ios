@@ -208,6 +208,7 @@ struct ARCoverageView: UIViewRepresentable {
         if pauseARSession {
             if !context.coordinator.isSessionPausedForBattery {
                 PerfDiag.log("battery: pausing AR session (idle)")
+                context.coordinator.resetFrameGapBaseline("battery pause")
                 uiView.session.pause()
                 context.coordinator.isSessionPausedForBattery = true
             }
@@ -215,6 +216,7 @@ struct ARCoverageView: UIViewRepresentable {
         } else if context.coordinator.isSessionPausedForBattery {
             context.coordinator.isSessionPausedForBattery = false
             PerfDiag.log("battery: resuming AR session (returned to capture)")
+            context.coordinator.resetFrameGapBaseline("battery resume")
             // Resume in the nominal (new-scan) configuration. The idle pause only fires after the
             // user has LEFT the capture tab, and leaving abandons any in-progress extend (CaptureView
             // .onDisappear clears the extend/ghost state, and the ghost overlay is removed on return)
@@ -261,6 +263,7 @@ struct ARCoverageView: UIViewRepresentable {
             // PointCloudManager allocate their Metal buffers at capacity (350k voxels, 256×192×4
             // verts) up front, so this delta is the fixed VR footprint — independent of scene size.
             PerfDiag.log("[MemDiag] EVENT VR-ENTER \(context.coordinator.memMarker())")
+            context.coordinator.resetFrameGapBaseline("VR enter")
             // Keep cameraFeed() background during setup — switch to black
             // only after the first point cloud frame renders (see session(_:didUpdate:)).
             context.coordinator.vrBackgroundSet = false
@@ -288,6 +291,7 @@ struct ARCoverageView: UIViewRepresentable {
             // free on RealityKit's schedule, so defer one runloop turn + (dev-flag) force-reclaim
             // before measuring so the delta reflects reclaimed pages, not cached ones.
             PerfDiag.log("[MemDiag] EVENT VR-EXIT \(context.coordinator.memMarker())")
+            context.coordinator.resetFrameGapBaseline("VR exit")
             uiView.environment.background = .cameraFeed()
             context.coordinator.pointCloudManager?.destroy()
             context.coordinator.pointCloudManager = nil
@@ -552,6 +556,7 @@ struct ARCoverageView: UIViewRepresentable {
                 let meshClass = (config.sceneReconstruction == .meshWithClassification)
                 let mode = "mode(semanticLabeling=\(sl ? "on" : "off") meshClassifier=\(meshClass ? "on" : "off") liveConsume=deferred)"
                 PerfDiag.log("[MemDiag] EVENT RECORD-START \(context.coordinator.memMarker()) \(mode)")
+                context.coordinator.resetFrameGapBaseline("record start")
                 // Phase-0 diag: mark this run as recorded so stop emits a summary. A no-map run
                 // has nothing to relocalize → start the summary fresh (drops any stale map/settle).
                 if PerfDiag.enabled {
@@ -609,6 +614,8 @@ struct ARCoverageView: UIViewRepresentable {
                 // honestly measurable here (the frees hop across the delegate/main queues and Metal
                 // releases lazily), so we bracket the sum, which is the reliable number.
                 PerfDiag.log("[MemDiag] EVENT PRE-TEARDOWN \(context.coordinator.memMarker())")
+                context.coordinator.reportStatsPublishRate()
+                context.coordinator.resetFrameGapBaseline("scan teardown")
                 // Stop RoomPlan and capture final CapturedRoom BEFORE reset clears state
                 context.coordinator.stopRoomPlanSession()
                 context.coordinator.resetForNominal()
@@ -999,6 +1006,26 @@ struct ARCoverageView: UIViewRepresentable {
         /// delivery (the signature of ARKit VIO being starved). Touched only on the delegate queue.
         private var lastFrameTimestamp: TimeInterval = 0
 
+        /// Zero the frame-gap baseline at a DELIBERATE session discontinuity (#70).
+        ///
+        /// The gap is measured from ARFrame timestamps, which do not advance while the
+        /// session is intentionally not delivering to this path — VR mode, a battery
+        /// pause, a teardown. Without this the first frame afterwards reports the whole
+        /// span as one gap: 20,097 ms on a VR exit (2026-08-21) and 50,559 ms across a
+        /// discarded rescan's teardown (2026-09-01), both with a demonstrably healthy
+        /// main thread — the watchdog recorded no stall at either moment.
+        ///
+        /// That is not merely noisy. The VIO guard trips on this same `frameGap`, and
+        /// its `hardStalled` branch (>4 s) halts UNCONDITIONALLY "no matter how the
+        /// recovery frame presents". The guard is armed for the whole recording, so a VR
+        /// exit or a battery resume mid-recording could halt a perfectly healthy scan —
+        /// the reachability the issue asked us to confirm. It is reachable.
+        func resetFrameGapBaseline(_ reason: String) {
+            guard lastFrameTimestamp > 0 else { return }
+            lastFrameTimestamp = 0
+            PerfDiag.log("frame-gap baseline reset (\(reason)) — the next gap is measured from here (#70)")
+        }
+
         /// Last sweep-yaw value published to `ScanStats`, as SpaceAnalyzer's own 1° bucket, and when.
         /// `CaptureView.body` reads `scanStats.analysisYaw` (the `onChange(of:)` operand), so every
         /// write re-evaluates the whole capture UI — and the analyzer quantizes the value to 1°
@@ -1085,6 +1112,12 @@ struct ARCoverageView: UIViewRepresentable {
         /// the reduce passes + memory query here and the SwiftUI re-renders of CaptureView
         /// that every @Observable ScanStats write triggers.
         private var lastStatsUpdateTime: Date = .distantPast
+        /// #42/#43 verification: both fixes reduce how often — and how widely — the 10 Hz
+        /// stats publish invalidates the capture UI. Neither is visible in a log, so count
+        /// the publishes and report the rate at teardown. A rate at/below 10 Hz with a
+        /// steady frame rate is the evidence; the SwiftUI invalidation cost itself still
+        /// needs Instruments, which this number cannot replace.
+        private var statsPublishCount: Int = 0
         private let statsUpdateInterval: TimeInterval = 0.1
 
         // [MemDiag] RoomPlan memory profiling (perfDiagnostics-gated, log-only). Separate 1 Hz
@@ -2410,6 +2443,16 @@ struct ARCoverageView: UIViewRepresentable {
         /// Called on the main thread (keyframe-capture path), where ScanStats is written.
         /// Pass `standpointDiversity` when the caller already computed it (it walks the
         /// whole coverage grid).
+        /// #42/#43: publishes and rate for the scan just ended, then reset for the next one.
+        func reportStatsPublishRate() {
+            guard PerfDiag.enabled, statsPublishCount > 0 else { return }
+            let seconds = scanStats?.sessionDuration ?? 0
+            let rate = seconds > 0 ? Double(statsPublishCount) / seconds : 0
+            PerfDiag.log(String(format: "[Stats] %d publishes over %.0f s = %.1f Hz (#42/#43; cap %.0f Hz)",
+                                statsPublishCount, seconds, rate, 1.0 / statsUpdateInterval))
+            statsPublishCount = 0
+        }
+
         private func publishCoverageStats(standpointDiversity: Double? = nil) {
             var occupied = Set<SIMD3<Int32>>()
             for voxels in anchorVoxels.values { occupied.formUnion(voxels) }
@@ -3164,6 +3207,7 @@ struct ARCoverageView: UIViewRepresentable {
             let fpsElapsed = now.timeIntervalSince(lastStatsUpdateTime) // window since last publish
             guard fpsElapsed >= statsUpdateInterval else { return }
             lastStatsUpdateTime = now
+            statsPublishCount += 1   // #42/#43: publishes per scan, reported at teardown
 
             // PRODUCTION fps → capacity bar (ungated). Frames this window / elapsed, EMA-smoothed
             // (~sub-second) so a single stall doesn't slam the bar but a sustained drop does. updateStats
@@ -5923,14 +5967,27 @@ private nonisolated final class WorldMapCache: @unchecked Sendable {
         let modified = attrs.flatMap { $0.contentModificationDate }?.timeIntervalSinceReferenceDate ?? -1
         let key = "\(url.standardizedFileURL.path)|\(size)|\(modified)"
 
-        if let hit = lock.withLock({ cachedKey == key ? cachedMap : nil }) { return hit }
+        if let hit = lock.withLock({ cachedKey == key ? cachedMap : nil }) {
+            // The hit MUST announce itself. This early return sits above the worldmap_load
+            // timer, so without a line here a working cache and a loader that never ran
+            // produce identical silence — which is exactly what three field sessions
+            // showed (2026-09-01: the map demonstrably loaded, the timer printed nothing).
+            // A hit is #41's fix paying off; say so.
+            MainActor.assumeIsolated {
+                PerfDiag.log("[PerfTimer] worldmap_load 0ms (cache hit — \(url.lastPathComponent))")
+            }
+            return hit
+        }
 
         // `PerfDiag` is main-actor-bound (project default isolation) while this class is
         // deliberately nonisolated; every `map(for:)` caller is one of the three main-actor
         // config-build sites, so assume rather than hop — a future off-main caller traps here
         // instead of racing the diag state.
         let loaded = MainActor.assumeIsolated {
-            PerfDiag.timed("worldmap_load", warnOverMs: 100) { () -> ARWorldMap? in
+            // Log unconditionally: a warn threshold makes the FAST case — which is exactly
+            // what #41's cache was built to produce — indistinguishable from "never ran".
+            // Field 2026-09-01: a 4210-feature map loaded and the timer stayed silent.
+            PerfDiag.timed("worldmap_load") { () -> ARWorldMap? in
                 guard let data = try? Data(contentsOf: url) else { return nil }
                 return try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data)
             }
