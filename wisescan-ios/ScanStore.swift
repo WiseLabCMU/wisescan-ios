@@ -960,6 +960,25 @@ class ScanFileManager {
     /// capture had already stopped covering).
     private(set) var lastSaveFailureReason: String?
 
+    /// Artifacts that failed to write during the most recent `saveScan`, by filename (#58).
+    ///
+    /// The critical mesh write aborts and rolls back; everything after it is deliberately
+    /// best-effort, because a missing thumbnail must never cost the operator a scan. But
+    /// best-effort was also SILENT: these sites used `print`, which the codebase's own
+    /// comment nine lines up notes does not survive Release, so a bundle could ship
+    /// missing its colors, world map or raw-dir mesh mirror with nothing anywhere saying
+    /// so. Record them, log them on Logger, and stamp them into the bundle's metadata —
+    /// without changing the control flow, which is correct as it stands.
+    private(set) var lastSaveArtifactFailures: [String] = []
+
+    /// Run a best-effort artifact write, recording the artifact's name if it throws.
+    private func bestEffort(_ artifact: String, _ work: () throws -> Void) {
+        do { try work() } catch {
+            lastSaveArtifactFailures.append(artifact)
+            Self.log.error("saveScan artifact FAILED \(artifact, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     /// Free space on the Documents volume, in bytes ("important usage" = what iOS will
     /// actually let an app consume, after purgeable reclamation).
     static func freeDiskBytes() -> Int64? {
@@ -992,6 +1011,7 @@ class ScanFileManager {
         worldMapSuspect: Bool = false
     ) -> CapturedScan? {
         lastSaveFailureReason = nil
+        lastSaveArtifactFailures = []
         let targetLocation: ScanLocation
         // Track a location we create here so we can roll it back if the required mesh write fails
         // (otherwise a failed save would leave behind an empty, undeletable location).
@@ -1073,18 +1093,18 @@ class ScanFileManager {
 
         // Optional files — failures must not block the critical raw data move
         if let colors = vertexColors {
-            do { try colors.write(to: newScan.colorsFileURL) } catch { print("[ScanFileManager] Failed to write colors: \(error)") }
+            bestEffort("colors.bin") { try colors.write(to: newScan.colorsFileURL) }
         }
         if let map = worldMapURL {
             // Hard-link rather than copy: the map is up to 50 MB, is immutable once exported, and
             // raw_data/relocalization.worldmap already links the same temp file. Fall back to a
             // real copy when linking can't work (source on another volume).
             if (try? FileManager.default.linkItem(at: map, to: newScan.worldMapURL)) == nil {
-                do { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) } catch { print("[ScanFileManager] Failed to copy worldmap: \(error)") }
+                bestEffort("relocalization.worldmap") { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) }
             }
         }
         if let thumb = thumbnailData {
-            do { try thumb.write(to: newScan.thumbnailURL) } catch { print("[ScanFileManager] Failed to write thumbnail: \(error)") }
+            bestEffort("thumbnail.jpg") { try thumb.write(to: newScan.thumbnailURL) }
         }
 
         // Critical: move raw data directory (images, depth, cameras, metadata)
@@ -1101,7 +1121,7 @@ class ScanFileManager {
                 // via rename), so the shared inode can never be mutated underneath one name.
                 let rawMeshURL = newScan.rawDataPath.appendingPathComponent("mesh.obj")
                 if (try? FileManager.default.linkItem(at: newScan.meshFileURL, to: rawMeshURL)) == nil {
-                    try? meshData.write(to: rawMeshURL, options: .atomic)
+                    bestEffort("raw_data/mesh.obj") { try meshData.write(to: rawMeshURL, options: .atomic) }
                 }
 
                 // Extract first RGB frame to thumbnailURL
@@ -1133,6 +1153,24 @@ class ScanFileManager {
                     if (try? FileManager.default.linkItem(at: src, to: dst)) == nil {
                         try? FileManager.default.copyItem(at: src, to: dst)
                     }
+                }
+            }
+        }
+
+        // Bundle self-description (#58): if any optional artifact failed above, say so INSIDE
+        // the bundle. The save is deliberately not blocked — a missing thumbnail must never
+        // cost the operator a scan — but "shipped incomplete with no signal anywhere" is the
+        // failure mode this guards. Written after the raw-dir move so it lands at the final
+        // path, mirroring the worldmap_suspect patch above.
+        if !lastSaveArtifactFailures.isEmpty {
+            let missing = lastSaveArtifactFailures
+            Self.log.error("saveScan completed with \(missing.count, privacy: .public) missing artifact(s): \(missing.joined(separator: ", "), privacy: .public)")
+            let metaURL = newScan.rawDataPath.appendingPathComponent("scan4d_metadata.json")
+            if let data = try? Data(contentsOf: metaURL),
+               var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                json["incomplete_artifacts"] = missing
+                if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+                    try? out.write(to: metaURL)
                 }
             }
         }

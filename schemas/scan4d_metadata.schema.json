@@ -96,6 +96,11 @@
       "type": "boolean",
       "description": "Present and true when the saved relocalization world map's feature cloud carried a wandering outlier cluster (a tracking excursion baked into the session map, e.g. an OS interruption with device motion). Camera poses recorded before the excursion may disagree with the final mesh frame, and relocalizing later scans against this map can seat them with an offset — weight this dataset's poses/registration accordingly."
     },
+    "incomplete_artifacts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Present when one or more OPTIONAL bundle artifacts failed to write at save time, listing them by filename (e.g. \"colors.bin\", \"relocalization.worldmap\", \"thumbnail.jpg\", \"raw_data/mesh.obj\"). The scan itself is valid — the mesh write is critical and aborts the save on failure — but the named files are absent from this bundle, so a consumer expecting them should treat them as missing rather than corrupt. Absent on a complete save."
+    },
     "photo_coverage": {
       "type": "object",
       "description": "How much of the depth-scanned geometry was covered by sharp keyframe photos, measured on a coarse world-space voxel grid (occlusion-correct: only surfaces a keyframe's depth map actually measured are counted).",
