@@ -326,16 +326,16 @@ extension MeshPreviewView {
                     SIMD4<Float>(Float(flatCam[12]), Float(flatCam[13]), Float(flatCam[14]), Float(flatCam[15]))
                 ))
             } else if let profile = rigProfile, profile.isSolved {
-                camTransform = RigCalibrationSolver.composeRigTransform(
+                camTransform = RigModel.composeRigTransform(
                     phoneToWorld: phoneToWorld,
                     offsetPhone: profile.offsetPhone,
-                    yaw: profile.yaw, pitchResidual: profile.pitchResidual
+                    yaw: profile.yaw
                 )
             } else {
-                camTransform = RigCalibrationSolver.composeRigTransform(
+                camTransform = RigModel.composeRigTransform(
                     phoneToWorld: phoneToWorld,
                     offsetPhone: RigProfile.mechanicalPrior.offsetPhone,
-                    yaw: AppConstants.rigYawOffsetDegrees * .pi / 180, pitchResidual: 0
+                    yaw: AppConstants.rigYawOffsetDegrees * .pi / 180
                 )
             }
 
