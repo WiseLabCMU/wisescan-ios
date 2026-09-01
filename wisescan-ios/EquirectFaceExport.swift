@@ -289,10 +289,10 @@ enum EquirectFaceExport {
             // Pre-contract sidecar (no baked pose): mechanical prior only — nothing ties a
             // stored solved profile to the rig that actually shot this still.
             print("[prepareExport] \(equirectURL.lastPathComponent): no baked cam_transform (pre-contract still) — mechanical-prior pose")
-            camTransform = RigCalibrationSolver.composeRigTransform(
+            camTransform = RigModel.composeRigTransform(
                 phoneToWorld: phoneToWorld,
                 offsetPhone: RigProfile.mechanicalPrior.offsetPhone,
-                yaw: AppConstants.rigYawOffsetDegrees * .pi / 180, pitchResidual: 0
+                yaw: AppConstants.rigYawOffsetDegrees * .pi / 180
             )
         }
         let camRot = simd_float3x3(columns: (
@@ -374,7 +374,7 @@ enum EquirectFaceExport {
     }
 
     // NOTE: rigCameraRotation (mechanical-prior pose composition) has been superseded by
-    // RigCalibrationSolver.composeRigTransform, which handles both the mechanical prior
+    // RigModel.composeRigTransform, which handles both the mechanical prior
     // and solved calibration paths. See docs/design/still-source-360.md (Calibration).
 
     private static func yawRotation(_ angle: Float) -> simd_float3x3 {
