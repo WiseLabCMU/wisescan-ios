@@ -609,6 +609,7 @@ struct ARCoverageView: UIViewRepresentable {
                 // honestly measurable here (the frees hop across the delegate/main queues and Metal
                 // releases lazily), so we bracket the sum, which is the reliable number.
                 PerfDiag.log("[MemDiag] EVENT PRE-TEARDOWN \(context.coordinator.memMarker())")
+                context.coordinator.reportStatsPublishRate()
                 // Stop RoomPlan and capture final CapturedRoom BEFORE reset clears state
                 context.coordinator.stopRoomPlanSession()
                 context.coordinator.resetForNominal()
@@ -1085,6 +1086,12 @@ struct ARCoverageView: UIViewRepresentable {
         /// the reduce passes + memory query here and the SwiftUI re-renders of CaptureView
         /// that every @Observable ScanStats write triggers.
         private var lastStatsUpdateTime: Date = .distantPast
+        /// #42/#43 verification: both fixes reduce how often — and how widely — the 10 Hz
+        /// stats publish invalidates the capture UI. Neither is visible in a log, so count
+        /// the publishes and report the rate at teardown. A rate at/below 10 Hz with a
+        /// steady frame rate is the evidence; the SwiftUI invalidation cost itself still
+        /// needs Instruments, which this number cannot replace.
+        private var statsPublishCount: Int = 0
         private let statsUpdateInterval: TimeInterval = 0.1
 
         // [MemDiag] RoomPlan memory profiling (perfDiagnostics-gated, log-only). Separate 1 Hz
@@ -2410,6 +2417,16 @@ struct ARCoverageView: UIViewRepresentable {
         /// Called on the main thread (keyframe-capture path), where ScanStats is written.
         /// Pass `standpointDiversity` when the caller already computed it (it walks the
         /// whole coverage grid).
+        /// #42/#43: publishes and rate for the scan just ended, then reset for the next one.
+        func reportStatsPublishRate() {
+            guard PerfDiag.enabled, statsPublishCount > 0 else { return }
+            let seconds = scanStats?.sessionDuration ?? 0
+            let rate = seconds > 0 ? Double(statsPublishCount) / seconds : 0
+            PerfDiag.log(String(format: "[Stats] %d publishes over %.0f s = %.1f Hz (#42/#43; cap %.0f Hz)",
+                                statsPublishCount, seconds, rate, 1.0 / statsUpdateInterval))
+            statsPublishCount = 0
+        }
+
         private func publishCoverageStats(standpointDiversity: Double? = nil) {
             var occupied = Set<SIMD3<Int32>>()
             for voxels in anchorVoxels.values { occupied.formUnion(voxels) }
@@ -3164,6 +3181,7 @@ struct ARCoverageView: UIViewRepresentable {
             let fpsElapsed = now.timeIntervalSince(lastStatsUpdateTime) // window since last publish
             guard fpsElapsed >= statsUpdateInterval else { return }
             lastStatsUpdateTime = now
+            statsPublishCount += 1   // #42/#43: publishes per scan, reported at teardown
 
             // PRODUCTION fps → capacity bar (ungated). Frames this window / elapsed, EMA-smoothed
             // (~sub-second) so a single stall doesn't slam the bar but a sustained drop does. updateStats
@@ -5923,14 +5941,27 @@ private nonisolated final class WorldMapCache: @unchecked Sendable {
         let modified = attrs.flatMap { $0.contentModificationDate }?.timeIntervalSinceReferenceDate ?? -1
         let key = "\(url.standardizedFileURL.path)|\(size)|\(modified)"
 
-        if let hit = lock.withLock({ cachedKey == key ? cachedMap : nil }) { return hit }
+        if let hit = lock.withLock({ cachedKey == key ? cachedMap : nil }) {
+            // The hit MUST announce itself. This early return sits above the worldmap_load
+            // timer, so without a line here a working cache and a loader that never ran
+            // produce identical silence — which is exactly what three field sessions
+            // showed (2026-09-01: the map demonstrably loaded, the timer printed nothing).
+            // A hit is #41's fix paying off; say so.
+            MainActor.assumeIsolated {
+                PerfDiag.log("[PerfTimer] worldmap_load 0ms (cache hit — \(url.lastPathComponent))")
+            }
+            return hit
+        }
 
         // `PerfDiag` is main-actor-bound (project default isolation) while this class is
         // deliberately nonisolated; every `map(for:)` caller is one of the three main-actor
         // config-build sites, so assume rather than hop — a future off-main caller traps here
         // instead of racing the diag state.
         let loaded = MainActor.assumeIsolated {
-            PerfDiag.timed("worldmap_load", warnOverMs: 100) { () -> ARWorldMap? in
+            // Log unconditionally: a warn threshold makes the FAST case — which is exactly
+            // what #41's cache was built to produce — indistinguishable from "never ran".
+            // Field 2026-09-01: a 4210-feature map loaded and the timer stayed silent.
+            PerfDiag.timed("worldmap_load") { () -> ARWorldMap? in
                 guard let data = try? Data(contentsOf: url) else { return nil }
                 return try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: data)
             }

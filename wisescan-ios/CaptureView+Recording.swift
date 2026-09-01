@@ -959,6 +959,10 @@ extension CaptureView {
             locationId = nil // ScanFileManager will create a new location with this name
         }
 
+        // #40 verification: the fix moved the heavy write off main, but nothing logged how
+        // long the main-thread portion actually costs. This is the number that proves it —
+        // and the 18 s teardown stall of 2026-08-25 was caught only by luck, not by a timer.
+        let saveStart = CACurrentMediaTime()
         let savedScan = ScanFileManager.shared.saveScan(
             context: modelContext,
             locationId: locationId,
@@ -987,6 +991,9 @@ extension CaptureView {
             isWaitingToSave = false
             return
         }
+
+        PerfDiag.log(String(format: "[Save] saveScan returned in %.0f ms on the main thread (#40)",
+                            (CACurrentMediaTime() - saveStart) * 1000))
 
         // Write deferred stitching.json now that we have the real target scan ID
         writeStitchingLinkIfPending(targetScanId: savedScan.id)

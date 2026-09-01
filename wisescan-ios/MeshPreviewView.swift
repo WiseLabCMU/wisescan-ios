@@ -1303,6 +1303,11 @@ struct MeshPreviewView: UIViewRepresentable {
         // already produces, so its only effect is sharper edge-midpoint shading normals —
         // and on a room-scale mesh that isn't worth 4x the geometry, normals and index buffer.
         let subdivide = indices.count / 3 <= AppConstants.meshSubdivisionMaxFaces
+        // Verification line for #63: the gate is invisible in a log otherwise, so a device
+        // run cannot show whether a room-scale mesh actually skipped the 4x split.
+        PerfDiag.log("[Viewer] geometry \(indices.count / 3) faces — "
+            + (subdivide ? "subdivided 4x (under the \(AppConstants.meshSubdivisionMaxFaces) gate)"
+                         : "subdivision SKIPPED by the \(AppConstants.meshSubdivisionMaxFaces)-face gate"))
         var subVertices = vertices
         var subColors = colors
         var subIndices = subdivide ? [UInt32]() : indices
