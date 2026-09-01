@@ -375,6 +375,17 @@ final class ThetaCameraManager {
         return Self.factoryPassphrase(fromSSID: ssid)
     }
 
+    /// True when the ACTIVE camera's stored Wi-Fi passphrase is still the factory
+    /// default — the serial digits printed in its own SSID (#57 P2). Anyone in radio
+    /// range can derive that password from the beacon alone, join the camera's AP, and
+    /// read every image on it over plain OSC HTTP while it is powered on.
+    var activeCameraUsesFactoryPassword: Bool {
+        guard let ssid = UserDefaults.standard.string(forKey: AppConstants.Key.thetaSSID),
+              let pass = UserDefaults.standard.string(forKey: AppConstants.Key.thetaPassphrase),
+              let factory = Self.factoryPassphrase(fromSSID: ssid) else { return false }
+        return pass == factory
+    }
+
     static func factoryPassphrase(fromSSID ssid: String) -> String? {
         let trimmed = ssid.trimmingCharacters(in: .whitespaces).uppercased()
         guard trimmed.hasPrefix("THETA") else { return nil }
@@ -738,6 +749,12 @@ final class ThetaCameraManager {
             currentStillFormat = try? await fetchStillResolution()
             await refreshSupportedStillFormats()
             await registerZ1BluetoothIfNeeded(model: info.model, oscSerial: info.serial)
+            if activeCameraUsesFactoryPassword {
+                log(.connection, "Security: this camera still uses its factory Wi-Fi password (the "
+                    + "serial digits in its SSID). Anyone in range can join it and read its images "
+                    + "while it is on. Change it in the camera's settings or the RICOH app; scans "
+                    + "here keep working — the app stores whatever password you set.")
+            }
             ensureZ1LinkAfterConnect(model: info.model)
         } catch {
             batteryLevel = nil
