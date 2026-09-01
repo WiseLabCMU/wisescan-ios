@@ -53,7 +53,19 @@ struct LocationDetailView: View {
     @State private var exportItems: [ZipExportItem] = []
     @State private var showExportSheet = false
 
+    /// Composed from four independently type-checked pieces — same surgery as
+    /// CaptureView.body (#56): measured at **14,345 ms** to type-check, second only to
+    /// CaptureView, with the cost in the 13 modifiers chained on the root, not the
+    /// content. Each helper returns an opaque `some View`, so its chain is solved once.
+    /// Order is semantic — keep root, chrome, sheets, dialogs. Add new modifiers inside
+    /// the matching helper.
     var body: some View {
+        detailDialogs(detailSheets(detailChrome(detailRoot)))
+    }
+
+    /// The scan list itself (sorting statements included — hence @ViewBuilder).
+    @ViewBuilder
+    private var detailRoot: some View {
         // Sort once per body evaluation and reuse for both the scroll content and the
         // bottom toolbar (which is a sibling of the ScrollView). Previously this sort ran
         // twice per redraw — and redraws are frequent during uploads/selection toggles.
@@ -288,6 +300,11 @@ struct LocationDetailView: View {
                 }
             }
         }
+    }
+
+    /// Navigation title/mode, toolbar, and the appear hook.
+    private func detailChrome(_ content: some View) -> some View {
+        content
         .navigationTitle(location.name)
         .onAppear { autoProcessPending() }
         .navigationBarTitleDisplayMode(.inline)
@@ -325,6 +342,11 @@ struct LocationDetailView: View {
                 }
             }
         }
+    }
+
+    /// Settings and export sheets.
+    private func detailSheets(_ content: some View) -> some View {
+        content
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
@@ -334,6 +356,11 @@ struct LocationDetailView: View {
                 isBulkExporting = false
             }
         }
+    }
+
+    /// Rename/world-map alerts, the gate/bulk modifier stack, and the confirmation dialog.
+    private func detailDialogs(_ content: some View) -> some View {
+        content
         .alert("Rename Location", isPresented: $showRenameAlert) {
             TextField("New Name", text: $newLocationName)
             Button("Save") {
