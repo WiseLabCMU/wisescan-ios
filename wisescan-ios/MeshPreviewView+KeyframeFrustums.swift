@@ -94,11 +94,22 @@ extension MeshPreviewView {
         // format), so hundreds of wedges reuse 1-2 geometry sets instead of allocating three
         // SCNGeometries each.
         var geometryCache: [Int32: FrustumGeometry] = [:]
+        // Era detection (#92): files written with `transform_layout` are row-major as the
+        // Nerfstudio schema requires; files without it predate the fix and store the matrix
+        // columns as the four arrays. Both eras exist on devices, so read either.
+        let rowMajor = (root["transform_layout"] as? String) == "row-major"
         for frame in frames {
-            guard let cols = frame["transform_matrix"] as? [[NSNumber]], cols.count == 4 else { continue }
-            let pose = simd_float4x4(
-                columnVector(cols[0]), columnVector(cols[1]), columnVector(cols[2]), columnVector(cols[3])
-            )
+            guard let arrays = frame["transform_matrix"] as? [[NSNumber]], arrays.count == 4 else { continue }
+            let pose: simd_float4x4
+            if rowMajor {
+                pose = simd_float4x4(rows: [
+                    columnVector(arrays[0]), columnVector(arrays[1]), columnVector(arrays[2]), columnVector(arrays[3])
+                ])
+            } else {
+                pose = simd_float4x4(
+                    columnVector(arrays[0]), columnVector(arrays[1]), columnVector(arrays[2]), columnVector(arrays[3])
+                )
+            }
             let isStill = (frame["is_keyframe"] as? Bool) == true
             // Horizontal half-angle tangent from focal length: tan(hFov/2) = (imageWidth/2) / fx.
             // Keyframes may carry per-frame intrinsics; motion frames use the session globals.
