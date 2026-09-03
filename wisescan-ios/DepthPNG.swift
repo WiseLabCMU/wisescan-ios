@@ -10,8 +10,8 @@ import UniformTypeIdentifiers
 /// CoreGraphics under a big-endian `bitmapInfo`, so 1000 mm lands in the file as the
 /// sample value 59395. The bytes on disk are right; the sample values are not. Every
 /// reader that honoured `bitmapInfo` therefore got garbage, which is why keyframe
-/// occlusion has never actually run. Un-swapping the writer is a separate migration
-/// (see the depth-PNG byte-order issue) because the archive would have to be rewritten.
+/// occlusion has never actually run. The writer was fixed in #93; scans captured before
+/// it remain swapped on disk, so this reader stays era-tolerant rather than rewriting them.
 ///
 /// Face depth PNGs (`FaceDepthRender.encodePNG`) declare `byteOrder16Little` correctly and
 /// are NOT swapped, so a fixed rule cannot serve both. The plausible-range vote below
@@ -53,9 +53,9 @@ enum DepthPNG {
     /// Writes 16-bit greyscale millimetres with the byte order **declared correctly**, so
     /// the sample values on disk are the values a spec-conforming reader gets back.
     ///
-    /// This is the half `depthMapToPNG16` gets wrong: it hands CoreGraphics a host-order
-    /// (little-endian) `[UInt16]` under `CGBitmapInfo(rawValue: 0)`, which is
-    /// `byteOrderDefault` — big-endian for 16-bit components — so every sample is encoded
+    /// This is what `depthMapToPNG16` got wrong before #93: it handed CoreGraphics a
+    /// host-order (little-endian) `[UInt16]` under `CGBitmapInfo(rawValue: 0)`, which is
+    /// `byteOrderDefault` — big-endian for 16-bit components — so every sample was encoded
     /// byte-swapped. Declaring `byteOrder16Little` for a little-endian buffer is what makes
     /// the two agree. Matches `FaceDepthRender.encodePNG`, generalised off square rasters.
     static func encode(_ values: [UInt16], width: Int, height: Int) -> Data? {

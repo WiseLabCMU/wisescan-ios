@@ -1510,7 +1510,11 @@ class FrameCaptureSession {
             }
         }
 
-        // Create 16-bit grayscale CGImage
+        // Create 16-bit grayscale CGImage. The buffer is host-order (little-endian) UInt16, so
+        // the byte order must be DECLARED: `CGBitmapInfo(rawValue: 0)` is `byteOrderDefault`,
+        // which for 16-bit components means big-endian, and every sample came out swapped
+        // (#93 — 1000 mm on disk read as 59395). Same declaration as `DepthPNG.encode` and
+        // `FaceDepthRender.encodePNG`; `DepthPNG.millimetres` still reads the legacy files.
         let data = Data(bytes: depthScratch, count: count * 2)
         guard let provider = CGDataProvider(data: data as CFData),
               let cgImage = CGImage(
@@ -1520,7 +1524,8 @@ class FrameCaptureSession {
                   bitsPerPixel: 16,
                   bytesPerRow: width * 2,
                   space: CGColorSpaceCreateDeviceGray(),
-                  bitmapInfo: CGBitmapInfo(rawValue: 0),
+                  bitmapInfo: CGBitmapInfo.byteOrder16Little.union(
+                      CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)),
                   provider: provider,
                   decode: nil,
                   shouldInterpolate: false,
