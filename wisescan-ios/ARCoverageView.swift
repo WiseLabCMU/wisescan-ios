@@ -3593,10 +3593,20 @@ struct ARCoverageView: UIViewRepresentable {
             let height: Int
             let stride: Int
         }
+        /// LiDAR depth (Float32 metres) co-framed with `segmentation`, so the person test can
+        /// be depth-gated (#94): a vertex is "person" only if it sits at the person's range,
+        /// not merely somewhere along the same ray.
+        struct DepthMap: Sendable {
+            let metres: Data
+            let width: Int
+            let height: Int
+            let stride: Int
+        }
         let anchors: [Anchor]
         let viewMatrix: simd_float4x4
         let projMatrix: simd_float4x4
         let segmentation: Segmentation?     // non-nil only when privacy filtering is on
+        let depth: DepthMap?                // non-nil when segmentation is and sceneDepth was available
     }
 
     /// Snapshot the live mesh / segmentation / camera state on the main thread — fast memcpys only,
@@ -3622,6 +3632,26 @@ struct ARCoverageView: UIViewRepresentable {
                 )
             }
             CVPixelBufferUnlockBaseAddress(segBuffer, .readOnly)
+        }
+
+        // Same memcpy treatment for the LiDAR depth of the same frame (#94). Without it the
+        // projection below can only ask "is this pixel a person?", and every vertex along
+        // that ray — the table and wall behind the person — gets dropped with them.
+        var depth: RawMeshSnapshot.DepthMap?
+        if segmentation != nil, let depthBuffer = currentFrame.sceneDepth?.depthMap,
+           CVPixelBufferGetPixelFormatType(depthBuffer) == kCVPixelFormatType_DepthFloat32 {
+            CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
+            if let base = CVPixelBufferGetBaseAddress(depthBuffer) {
+                let height = CVPixelBufferGetHeight(depthBuffer)
+                let stride = CVPixelBufferGetBytesPerRow(depthBuffer)
+                depth = RawMeshSnapshot.DepthMap(
+                    metres: Data(bytes: base, count: height * stride),
+                    width: CVPixelBufferGetWidth(depthBuffer),
+                    height: height,
+                    stride: stride
+                )
+            }
+            CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly)
         }
 
         let camera = currentFrame.camera
@@ -3677,7 +3707,8 @@ struct ARCoverageView: UIViewRepresentable {
         guard totalVertices > 0 else { return nil }
 
         return RawMeshSnapshot(
-            anchors: anchors, viewMatrix: viewMatrix, projMatrix: projMatrix, segmentation: segmentation
+            anchors: anchors, viewMatrix: viewMatrix, projMatrix: projMatrix,
+            segmentation: segmentation, depth: depth
         )
     }
 
@@ -3691,6 +3722,24 @@ struct ARCoverageView: UIViewRepresentable {
         let viewMatrix = snapshot.viewMatrix
         let projMatrix = snapshot.projMatrix
         let seg = snapshot.segmentation
+        // #94: unpack the co-framed LiDAR depth once (256x192 floats) so the per-vertex person
+        // test can compare the vertex's range with the measured range at that pixel.
+        let depthMap = snapshot.depth
+        let depthMetres: [Float32]? = depthMap.map { d in
+            d.metres.withUnsafeBytes { raw -> [Float32] in
+                var out = [Float32](repeating: 0, count: d.width * d.height)
+                for y in 0..<d.height {
+                    for x in 0..<d.width {
+                        out[y * d.width + x] = raw.loadUnaligned(fromByteOffset: y * d.stride + x * 4, as: Float32.self)
+                    }
+                }
+                return out
+            }
+        }
+        /// A vertex counts as part of the person only within this much of the LiDAR range at
+        /// its pixel. Generous enough for segmentation-edge bleed and body thickness, far
+        /// smaller than the gap to whatever stands behind a person in a room.
+        let personDepthTolerance: Float = 0.3
 
         // Write OBJ directly to a Data buffer to avoid an intermediate [String] array and the large
         // joined String copy. For large meshes (~300K+ vertices) this roughly halves peak memory.
@@ -3729,10 +3778,27 @@ struct ARCoverageView: UIViewRepresentable {
                         let camPos = viewMatrix * worldPos
                         let clipPos = projMatrix * camPos
                         if clipPos.w > 0 {
-                            let px = Int((clipPos.x / clipPos.w * 0.5 + 0.5) * Float(seg.width))
-                            let py = Int((1.0 - (clipPos.y / clipPos.w * 0.5 + 0.5)) * Float(seg.height))
-                            if px >= 0 && px < seg.width && py >= 0 && py < seg.height {
-                                isPersonVertex[idx] = seg.pixels[py * seg.stride + px] > 128
+                            let nx = clipPos.x / clipPos.w * 0.5 + 0.5
+                            let ny = 1.0 - (clipPos.y / clipPos.w * 0.5 + 0.5)
+                            let px = Int(nx * Float(seg.width))
+                            let py = Int(ny * Float(seg.height))
+                            if px >= 0 && px < seg.width && py >= 0 && py < seg.height,
+                               seg.pixels[py * seg.stride + px] > 128 {
+                                // #94: the pixel is a person; is the *vertex*? Without the depth
+                                // test every vertex along this ray was dropped — a person-shaped
+                                // cone carved through the table and wall behind them. Keep the
+                                // old behaviour only when no depth is available to test against.
+                                var onPerson = true
+                                if let depthMetres, let d = depthMap {
+                                    let dx = min(max(Int(nx * Float(d.width)), 0), d.width - 1)
+                                    let dy = min(max(Int(ny * Float(d.height)), 0), d.height - 1)
+                                    let measured = depthMetres[dy * d.width + dx]
+                                    let vertexRange = -camPos.z   // ARKit camera looks down -Z
+                                    if measured.isFinite && measured > 0 {
+                                        onPerson = abs(vertexRange - measured) < personDepthTolerance
+                                    }
+                                }
+                                isPersonVertex[idx] = onPerson
                             }
                         }
                     }
@@ -5743,7 +5809,7 @@ struct ARCoverageView: UIViewRepresentable {
         )
         return RawMeshSnapshot(
             anchors: [anchor], viewMatrix: matrix_identity_float4x4,
-            projMatrix: matrix_identity_float4x4, segmentation: nil
+            projMatrix: matrix_identity_float4x4, segmentation: nil, depth: nil
         )
     }
 
