@@ -1184,21 +1184,23 @@ class FrameCaptureSession {
     private func writeTransformsJSON(to directory: URL) {
         guard let intrinsics = globalIntrinsics else { return }
 
-        // Convert ARKit camera poses to Nerfstudio convention (OpenGL: +X right, +Y up, +Z back)
-        // ARKit: +X right, +Y up, -Z forward (same as OpenGL)
+        // ARKit camera space is already the Nerfstudio/OpenGL convention (+X right, +Y up,
+        // -Z forward), so the camera-to-world matrix passes through unrotated. The schema is
+        // ROW-major: `transform_matrix[r][c]`, translation in the last column, last row
+        // [0,0,0,1]. simd_float4x4 is column-major, so the rows are gathered across columns.
+        // (Issue #92: earlier builds emitted the four columns as rows, i.e. transposed.
+        // `transform_layout` below lets readers tell the two eras apart.)
         var frameEntries: [[String: Any]] = []
         for frame in frames {
             let mat = frame.transform
-            // ARKit uses the same convention as OpenGL for camera space,
-            // but we need to ensure the transform_matrix is camera-to-world
             let paddedIndex = String(format: "%05d", frame.index)
             var entry: [String: Any] = [
                 "file_path": "images/frame_\(paddedIndex).jpg",
                 "transform_matrix": [
-                    [mat.columns.0.x, mat.columns.0.y, mat.columns.0.z, mat.columns.0.w],
-                    [mat.columns.1.x, mat.columns.1.y, mat.columns.1.z, mat.columns.1.w],
-                    [mat.columns.2.x, mat.columns.2.y, mat.columns.2.z, mat.columns.2.w],
-                    [mat.columns.3.x, mat.columns.3.y, mat.columns.3.z, mat.columns.3.w]
+                    [mat.columns.0.x, mat.columns.1.x, mat.columns.2.x, mat.columns.3.x],
+                    [mat.columns.0.y, mat.columns.1.y, mat.columns.2.y, mat.columns.3.y],
+                    [mat.columns.0.z, mat.columns.1.z, mat.columns.2.z, mat.columns.3.z],
+                    [mat.columns.0.w, mat.columns.1.w, mat.columns.2.w, mat.columns.3.w]
                 ]
             ]
             // Reference depth/confidence only when the file was actually written for this frame.
@@ -1231,6 +1233,9 @@ class FrameCaptureSession {
             "cy": intrinsics.cy,
             "w": imageWidth,
             "h": imageHeight,
+            // Era marker (#92): present => transform_matrix is row-major as the schema
+            // requires; absent => a legacy file whose arrays are the matrix columns.
+            "transform_layout": "row-major",
             "frames": frameEntries
         ]
 
@@ -1505,7 +1510,11 @@ class FrameCaptureSession {
             }
         }
 
-        // Create 16-bit grayscale CGImage
+        // Create 16-bit grayscale CGImage. The buffer is host-order (little-endian) UInt16, so
+        // the byte order must be DECLARED: `CGBitmapInfo(rawValue: 0)` is `byteOrderDefault`,
+        // which for 16-bit components means big-endian, and every sample came out swapped
+        // (#93 — 1000 mm on disk read as 59395). Same declaration as `DepthPNG.encode` and
+        // `FaceDepthRender.encodePNG`; `DepthPNG.millimetres` still reads the legacy files.
         let data = Data(bytes: depthScratch, count: count * 2)
         guard let provider = CGDataProvider(data: data as CFData),
               let cgImage = CGImage(
@@ -1515,7 +1524,8 @@ class FrameCaptureSession {
                   bitsPerPixel: 16,
                   bytesPerRow: width * 2,
                   space: CGColorSpaceCreateDeviceGray(),
-                  bitmapInfo: CGBitmapInfo(rawValue: 0),
+                  bitmapInfo: CGBitmapInfo.byteOrder16Little.union(
+                      CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)),
                   provider: provider,
                   decode: nil,
                   shouldInterpolate: false,

@@ -540,7 +540,7 @@ struct ScansListView: View {
         }
         isBulkExporting = true
         selectedLocations.removeAll()
-        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
+        let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
         let totalScans = scans.count
 
         bulkProgressMessage = "Preparing 1/\(totalScans)…"
@@ -584,7 +584,7 @@ struct ScansListView: View {
     private func bulkUpload(scans: [CapturedScan]) {
         guard !isBulkUploading else { return }   // re-entrancy: double-tap = concurrent export+upload batches
         guard !scans.isEmpty, !uploadURL.isEmpty else { return }
-        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
+        let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
 
         isBulkUploading = true
@@ -1018,7 +1018,7 @@ struct ScanCard: View {
     @State private var showPostprocessAlert = false
 
     private var selectedFormat: ExportFormat {
-        get { ExportFormat(rawValue: selectedFormatStr) ?? .polycam }
+        get { ExportFormat.persisted(selectedFormatStr) ?? .polycam }
         nonmutating set { selectedFormatStr = newValue.rawValue }
     }
 
