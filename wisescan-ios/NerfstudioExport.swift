@@ -66,6 +66,7 @@ enum NerfstudioExport {
         let depthDir = stagingDir.appendingPathComponent("depth")
         let masksDir = stagingDir.appendingPathComponent("masks")
         var frames: [[String: Any]] = []
+        var frameStems: [String] = []       // parallel to `frames`; fillers are keyed by stem
         var withRealDepth: [(CameraRecord, URL)] = []
         var needsDepthFiller: [CameraRecord] = []
         var needsMaskFiller: [CameraRecord] = []
@@ -129,6 +130,7 @@ enum NerfstudioExport {
             }
 
             frames.append(entry)
+            frameStems.append(cam.stem)
         }
 
         guard !frames.isEmpty else {
@@ -161,6 +163,21 @@ enum NerfstudioExport {
                                    into: masksDir) {
                     maskFillers += 1
                 }
+            }
+        }
+
+        // The fillers now exist on disk for every frame that lacked a real sidecar — so key
+        // those frames too. Without this the bundle had 394 depth files but only the 279
+        // real ones referenced, and Nerfstudio's `len(depth_filenames) == len(image_filenames)`
+        // assertion tripped on the count while LichtFeld (stem discovery) sailed through.
+        if resampled > 0 && depthFillers == needsDepthFiller.count {
+            for i in frames.indices where frames[i]["depth_file_path"] == nil {
+                frames[i]["depth_file_path"] = "depth/\(frameStems[i]).png"
+            }
+        }
+        if realMasks > 0 && maskFillers == needsMaskFiller.count {
+            for i in frames.indices where frames[i]["mask_path"] == nil {
+                frames[i]["mask_path"] = "masks/\(frameStems[i]).png"
             }
         }
 
