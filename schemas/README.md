@@ -39,7 +39,24 @@ bundle serves both. Built by `NerfstudioExport` from the staged Polycam payload;
 - `confidence/`: Time-aligned 8-bit confidence maps for depth.
 - `masks/`: Operator/rod keep-masks for the 360° faces (white = keep), at image resolution.
 - `transforms.json`: Camera poses and intrinsics for all frames (see schema below).
-- `sparse_pc.ply`: Metric seed point cloud unprojected from the LiDAR depth.
+- `cameras/`, `mesh_info.json`: The per-frame Polycam camera JSONs `transforms.json` was
+  built from — kept rather than deleted; the export never discards captured data.
+- `mesh.obj` (+ `face_classes.bin`): The ARKit scene-reconstruction mesh with its
+  face-aligned classification sidecar, in the location's **canonical** frame.
+- `roomplan.json`, `roomplan_raw.json`: RoomPlan surfaces and objects (canonical / raw frame).
+- `registration.json`: The raw→canonical transform relating mesh + RoomPlan to the cameras,
+  which stay in the raw capture frame.
+
+**The export changes representation, never information.** It renames, re-lays-out, fixes
+the matrix layout and byte order, resamples depth to the size an engine insists on, and
+adds the filler sidecars — all lossless or trivially invertible. Anything that encodes an
+opinion about *training* — the seed point cloud (voxel size, confidence weighting, mesh vs
+LiDAR), rendered normal maps, mesh debiasing and hole filling — is deliberately **not**
+done here: it is tuned against a specific engine version and iterates in minutes on the
+training box versus release cycles on the device. The bundle trains as-is at baseline
+quality; the optional training-side pipeline (`tools/`) consumes the raw artifacts above.
+There is therefore no `sparse_pc.ply` / `ply_file_path` in the export; both engines load
+without one and the pipeline adds its own.
 
 Formerly named **RAW**. `ExportFormat.persisted(_:)` maps the old stored name forward.
 
@@ -60,8 +77,9 @@ both at once:
   is present. Nerfstudio decides per key (`fx_fixed = "fl_x" in meta`) and never reads a
   per-frame value when the global exists, so the two cannot coexist. ARKit refines focal
   length continuously, so real captures always take this path.
-- `ply_file_path` points at `sparse_pc.ply`. LichtFeld loads it automatically; Nerfstudio
-  needs `ns-train splatfacto --data . nerfstudio-data --load-3D-points True`.
+- No `ply_file_path` is written (see above). When the training-side pipeline adds a seed
+  cloud it sets the key; LichtFeld then loads it automatically and Nerfstudio needs
+  `ns-train splatfacto --data . nerfstudio-data --load-3D-points True`.
 
 The equirect originals are staged only so the cube faces can be reprojected from them, then
 dropped — at 6720×3360 they would dominate the archive and neither engine reads them from

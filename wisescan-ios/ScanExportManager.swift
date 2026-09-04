@@ -834,6 +834,23 @@ struct ScanExportManager {
                 stagePolycamPayload(to: stagingDir)
                 stageEquirectStills(rawDataDir: rawDataDir, stagingDir: stagingDir, phase: phase)
 
+                // Raw geometry the downstream splat pipeline consumes as-is: the ARKit mesh
+                // (+ its face-aligned classification sidecar), RoomPlan, and the registration
+                // that relates mesh/RoomPlan (canonical frame) to the cameras (raw frame).
+                // Shipped unmodified — the export changes representation, never information;
+                // debiasing, hole filling, seeding and prior rendering are training-side.
+                for artifact in ["mesh.obj", "face_classes.bin", "roomplan.json",
+                                 "roomplan_raw.json", "registration.json"] {
+                    let src = scanDir.appendingPathComponent(artifact)
+                    guard fm.fileExists(atPath: src.path) else { continue }
+                    do {
+                        try fm.copyItem(at: src, to: stagingDir.appendingPathComponent(artifact))
+                        print("[prepareExport] ✓ included \(artifact)")
+                    } catch {
+                        print("[prepareExport] ✗ failed to copy \(artifact): \(error.localizedDescription)")
+                    }
+                }
+
                 if !NerfstudioExport.build(stagingDir: stagingDir,
                                            masksSourceDir: stagingDir.appendingPathComponent("masks"),
                                            phase: phase) {

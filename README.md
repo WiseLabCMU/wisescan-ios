@@ -149,7 +149,7 @@ Each export format includes **only** the data relevant to that format. The filen
 | :--- | :--- | :--- | :--- |
 | **Scan4D** | `.zip` | `scan4d_metadata.json`, `relocalization.worldmap`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
 | **Polycam** | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
-| **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `sparse_pc.ply` | Nerfstudio and LichtFeld Studio, as-is |
+| **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `cameras/`, + raw geometry: `mesh.obj`, `face_classes.bin`, `roomplan*.json`, `registration.json` | Nerfstudio and LichtFeld Studio, as-is; training-side pipeline in `tools/` |
 | **OBJ** | `.obj` | Single mesh file (no vertex colors) | MeshLab, Blender |
 | **PLY** | `.ply` | Converted mesh with embedded vertex colors | MeshLab, CloudCompare |
 | **USDZ** | `.usdz` | Converted mesh via ModelIO | iOS Quick Look (native) |

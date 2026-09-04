@@ -169,8 +169,8 @@ struct UserGuideView: View {
                         format: "Nerfstudio",
                         desc: "Trains as-is in Nerfstudio and LichtFeld Studio — no conversion. " +
                               "RGB images, camera poses (transforms.json), 16-bit depth, " +
-                              "operator masks for 360° frames, and a LiDAR seed point cloud " +
-                              "(sparse_pc.ply) that starts the splat on real surfaces."
+                              "operator masks for 360° frames, plus the raw ARKit mesh, " +
+                              "RoomPlan and registration for the training-side pipeline."
                     )
                     formatRow(
                         format: "USDZ",
