@@ -1066,7 +1066,7 @@ class ScanFileManager {
             if let data = try? Data(contentsOf: metaURL),
                var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
                 json["worldmap_suspect"] = true
-                if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+                if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
                     try? out.write(to: metaURL)
                 }
             }
@@ -1181,7 +1181,7 @@ class ScanFileManager {
             if let data = try? Data(contentsOf: metaURL),
                var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
                 json["incomplete_artifacts"] = missing
-                if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
+                if let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
                     try? out.write(to: metaURL)
                 }
             }

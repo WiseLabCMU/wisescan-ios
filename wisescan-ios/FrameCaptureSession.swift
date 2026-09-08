@@ -1174,7 +1174,8 @@ class FrameCaptureSession {
             print("[FrameCapture] ⚠️ \(label): replaced \(bad.count) non-finite value(s) — "
                 + bad.prefix(6).joined(separator: ", "))
         }
-        if let data = try? JSONSerialization.data(withJSONObject: safe, options: .prettyPrinted) {
+        if let data = try? JSONSerialization.data(withJSONObject: safe,
+                                                  options: [.prettyPrinted, .withoutEscapingSlashes]) {
             try? data.write(to: url)
         }
     }
