@@ -221,8 +221,11 @@ enum NerfstudioExport {
         // load without the key.
 
         transforms["frames"] = frames
+        // .withoutEscapingSlashes: Foundation otherwise writes "depth\/frame.png" — legal
+        // JSON, but a needless HTML-era escape that every other tool prints plainly.
         guard let data = try? JSONSerialization.data(withJSONObject: transforms,
-                                                     options: [.prettyPrinted, .sortedKeys]) else {
+                                                     options: [.prettyPrinted, .sortedKeys,
+                                                               .withoutEscapingSlashes]) else {
             print("[nerfstudio] ✗ failed to serialise transforms.json")
             return false
         }

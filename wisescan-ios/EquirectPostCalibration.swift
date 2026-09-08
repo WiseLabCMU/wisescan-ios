@@ -413,7 +413,7 @@ enum EquirectPostCalibration {
             obj["rig_rod_length_m"] = Double(profile.rodLengthM)
             obj["rig_yaw_deg"] = Double(profile.yaw * 180 / .pi)
             if let out = try? JSONSerialization.data(withJSONObject: obj,
-                                                     options: [.prettyPrinted, .sortedKeys]) {
+                                                     options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
                 try? out.write(to: still.sidecarURL, options: .atomic)
             }
         }

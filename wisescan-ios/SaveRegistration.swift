@@ -245,7 +245,7 @@ enum SaveRegistration {
                                                 confidence: $0.confidence)
             })
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         guard let out = try? encoder.encode(decoded),
               (try? out.write(to: url, options: .atomic)) != nil else { return false }
         return true
@@ -258,7 +258,7 @@ enum SaveRegistration {
     @discardableResult
     static func writeSidecar(_ sidecar: Sidecar, to directory: URL) -> Bool {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         guard let data = try? encoder.encode(sidecar),
               (try? data.write(to: directory.appendingPathComponent(sidecarName), options: .atomic)) != nil
         else { return false }

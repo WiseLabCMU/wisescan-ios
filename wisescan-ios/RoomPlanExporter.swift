@@ -102,7 +102,7 @@ enum RoomPlanExporter {
 
         let url = directory.appendingPathComponent("roomplan.json")
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         if let jsonData = try? encoder.encode(exportData) {
             try? jsonData.write(to: url, options: .atomic)
             print("[RoomPlanExporter] ✓ wrote roomplan.json (\(exportSurfaces.count) surfaces, \(exportObjects.count) objects)")
@@ -113,7 +113,7 @@ enum RoomPlanExporter {
     private static func writeRawJSON(_ room: CapturedRoom, to directory: URL) {
         let url = directory.appendingPathComponent("roomplan_raw.json")
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted]
+        encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
         if let jsonData = try? encoder.encode(room) {
             try? jsonData.write(to: url, options: .atomic)
             print("[RoomPlanExporter] ✓ wrote roomplan_raw.json")
