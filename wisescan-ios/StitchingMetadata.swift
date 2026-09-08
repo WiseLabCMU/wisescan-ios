@@ -153,7 +153,7 @@ enum StitchingMetadataManager {
         guard let locDir = locationDirectory(for: locationId) else { return false }
 
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(manifest) else { return false }
 
