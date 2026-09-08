@@ -226,7 +226,7 @@ enum AppConstants {
     // hand–eye refinement replaces these per rig profile later)
     static let rigRodHeightMeters: Float = 0.75    // rod length (m) from the phone camera to the 360° lens when the operator has NOT measured the rig. ALONG THE ROD, the same axis the operator tapes and the same axis RigProfile.offsetPhone stores — no frame conversion anywhere. 1.0 m was a guess no field rig has ever matched (every measured monopod: 0.70-0.79 m), which put the truth on the edge of the unmeasured search box
     static let rigYawOffsetDegrees: Float = 0      // pano-center (camera-body forward) yaw relative to the phone's horizontal forward; 0 = lenses aligned with the phone
-    static let equirectFaceSizeMax = 2048          // cube-face edge cap (native density is equirectWidth/4; 11K Theta X stills would yield 2752 — capped for JPEG size/memory)
+    static let equirectFaceSizeMax = 2752          // cube-face edge MEMORY cap (not the density target). The equator-matched size is equirectWidth/π (a gnomonic face's center sits on the equator, where equirect angular density W/2π px/rad is real detail; W/4 under-sampled it by ~21% linear). 2752 admits the Z1 (2139) and the X's real 8192-wide equirect (2608) in full and clamps only a hypothetical true-11K source (3504). Sized against the #65 headroom audit; faces are a transient off-hot-path export cost.
     static let equirectFaceDecodeMax = 8192        // staged-equirect decode cap for face sampling (8192×4096 RGBA ≈ 134 MB transient, per-still pooled; width/4 already saturates the face cap)
 
     // MARK: - 360° Rig Calibration (markerless mesh-edge solver — see docs/design/still-source-360.md)
@@ -320,9 +320,9 @@ enum AppConstants {
     ///
     /// Distribution of combined displacement over those 41: p50 7.8 mm, p90 14.5,
     /// p95 17.5, max 24.9. 18 mm flags 1 in 41 — about one warning every eight scans —
-    /// and is the old 2.0° gate re-expressed on a 0.72 m rod (1.42°), which is ~23 px
-    /// on a 2048 cube face at 1 m. Below that the sway is smaller than the pose error
-    /// the solve carries anyway.
+    /// and is the old 2.0° gate re-expressed on a 0.72 m rod (1.42°), which is ~29 px
+    /// on a 2608 cube face at 1 m (~23 px on the former 2048 face). Below that the sway
+    /// is smaller than the pose error the solve carries anyway.
     static let thetaSwayWarnCombinedMeters: Float = 0.018
     /// Solve-side rejection is deliberately far looser than the operator warning: a
     /// warning costs a re-shoot, but dropping a still costs the solve a whole viewpoint,

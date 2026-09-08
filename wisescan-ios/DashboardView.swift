@@ -901,6 +901,17 @@ struct ThetaCameraCard: View {
                                 .foregroundColor(.white.opacity(0.7))
                         }
                     }
+                    // #57 P2: the password is derivable from the SSID beacon itself, so the
+                    // exposure is continuous while the camera is on — a persistent quiet badge,
+                    // not a one-time nag. The remedy is in the connect log line.
+                    if manager.activeCameraUsesFactoryPassword {
+                        HStack(spacing: 3) {
+                            Image(systemName: "lock.open.fill")
+                            Text("factory Wi-Fi password")
+                        }
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                    }
                 }
                 Spacer()
             }
