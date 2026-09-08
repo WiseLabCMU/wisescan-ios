@@ -748,6 +748,7 @@ final class ThetaCameraManager {
             logLevelingSupport(model: info.model)
             currentStillFormat = try? await fetchStillResolution()
             await refreshSupportedStillFormats()
+            await forceMaxStillResolution()
             await registerZ1BluetoothIfNeeded(model: info.model, oscSerial: info.serial)
             if activeCameraUsesFactoryPassword {
                 log(.connection, "Security: this camera still uses its factory Wi-Fi password (the "
@@ -869,6 +870,31 @@ final class ThetaCameraManager {
         } catch {
             supportedStillFormats = []
             log(.config, "Couldn't read format list: \(Self.describe(error))")
+        }
+    }
+
+    /// Drive the camera to its largest supported still format on connect.
+    ///
+    /// The app never asserted a resolution — it read whatever the camera was left on
+    /// (`fetchStillResolution` above) and inherited it. A THETA X left in 15 MP mode
+    /// (5504×2752) therefore captured half-resolution equirects whose cube faces came out
+    /// SMALLER than a Z1's (1376 vs 1680 px; the Z1 has a single 6720-wide mode), the
+    /// inversion that surfaced this. `stillFormatMenu` is sorted largest-first from the
+    /// camera-reported list (or the model fallback), so its head is the max. No-op when
+    /// already there, and non-fatal — a scan at the inherited resolution still works.
+    private func forceMaxStillResolution() async {
+        guard let best = stillFormatMenu.first else { return }
+        if let current = currentStillFormat, current == best {
+            log(.config, "Still resolution \(best.label) (\(best.megapixels) MP) — already at max")
+            return
+        }
+        do {
+            try await applyStillResolution(best)
+            currentStillFormat = try await fetchStillResolution()
+            let landed = currentStillFormat ?? best
+            log(.config, "Still resolution set to max \(landed.label) (\(landed.megapixels) MP)")
+        } catch {
+            log(.config, "Couldn't raise still resolution to \(best.label): \(Self.describe(error)) — using the camera's current setting")
         }
     }
 
