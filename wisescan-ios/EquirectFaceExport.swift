@@ -187,7 +187,7 @@ enum EquirectFaceExport {
                 if let depthPath = obj["depth_path"] as? String, depthPath.hasPrefix("depth/") {
                     obj["depth_path"] = "face_frames/" + depthPath
                 }
-                if let out = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) {
+                if let out = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes]) {
                     try? out.write(to: cam)
                 }
             }
@@ -427,7 +427,7 @@ enum EquirectFaceExport {
         if let depthPath = rec.depthPath { json["depth_path"] = depthPath }
         if let stillSource = rec.stillSource { json["still_source"] = stillSource }
         guard JSONSerialization.isValidJSONObject(json),
-              let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+              let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         else { return }
         try? data.write(to: camerasDir.appendingPathComponent("\(rec.name).json"), options: .atomic)
     }

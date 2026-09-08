@@ -330,7 +330,7 @@ enum ScanPostprocessor {
             obj.removeValue(forKey: "rig_calibration_source")
             obj.removeValue(forKey: "rig_calibration_solver_version")
             guard let out = try? JSONSerialization.data(withJSONObject: obj,
-                                                        options: [.prettyPrinted, .sortedKeys]),
+                                                        options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
                   (try? out.write(to: url, options: .atomic)) != nil else { continue }
             cleared += 1
         }
@@ -369,7 +369,7 @@ enum ScanPostprocessor {
             case .deleted, .alreadyGone:
                 obj["camera_file_deleted"] = true
                 if let out = try? JSONSerialization.data(withJSONObject: obj,
-                                                         options: [.prettyPrinted, .sortedKeys]) {
+                                                         options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
                     try? out.write(to: sidecarURL, options: .atomic)
                 }
                 deleted += 1
