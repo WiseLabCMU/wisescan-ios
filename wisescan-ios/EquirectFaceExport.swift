@@ -210,7 +210,11 @@ enum EquirectFaceExport {
         // SHA256, not Hasher: Swift's Hasher is seeded per PROCESS, so its output would
         // differ across app launches and the cache would miss every cold start — the exact
         // case a field session hits most.
-        var canonical = "v1|size=\(AppConstants.equirectFaceSizeMax)|faces=\(faceCount)"
+        // v2: the face-size derivation changed from W/4 to W/π (2026-09-01), so every v1
+        // face was built at the wrong size — bump to regenerate them once. The cap value
+        // is included because it still bounds the result; the source width is fixed per
+        // still, so it need not be in the key.
+        var canonical = "v2|size=\(AppConstants.equirectFaceSizeMax)|faces=\(faceCount)"
         if let reg = SaveRegistration.loadSidecar(scanDirectory: rawDataDir.deletingLastPathComponent()),
            reg.applied, let transform = reg.transformMatrix {
             for column in 0..<4 {
@@ -304,7 +308,15 @@ enum EquirectFaceExport {
                                   camTransform.columns.3.y,
                                   camTransform.columns.3.z)
 
-        let faceSize = min(AppConstants.equirectFaceSizeMax, bitmap.width / 4)
+        // Equator-matched, not W/4. A gnomonic face is sparsest at its CENTRE (S/2 px/rad),
+        // which lands on the equator where the equirect's uniform angular density W/2π px/rad
+        // is real (undistorted) detail; matching there gives S = W/π. W/4 sat ~21% below it
+        // (78.5% of the equatorial detail). Rounded to even for the JPEG/PNG encoders; the
+        // memory cap still bounds it. Corners over-sample either way (inherent to cube maps),
+        // and polar faces take the SAME size — the equirect's polar density is redundant
+        // oversampling of the pole singularity, not recoverable detail.
+        let matched = Int((Double(bitmap.width) / Double.pi / 2).rounded()) * 2
+        let faceSize = min(AppConstants.equirectFaceSizeMax, matched)
         guard faceSize >= 256 else { return 0 }
         let baseName = equirectURL.deletingPathExtension().lastPathComponent
 
@@ -466,8 +478,9 @@ enum EquirectFaceExport {
     }
 
     /// Decode the staged equirect capped at `equirectFaceDecodeMax` wide — face resolution
-    /// is width/4, so an 8K decode already saturates the 2048 face cap while bounding the
-    /// transient bitmap (~8192×4096 RGBA ≈ 134 MB, inside the caller's per-still pool).
+    /// is width/π (equator-matched), so an 8K decode yields ~2608-px faces, at/under the
+    /// 2752 memory cap, while bounding the transient bitmap (~8192×4096 RGBA ≈ 134 MB,
+    /// inside the caller's per-still pool).
     private static func decodeBitmap(from url: URL) -> Bitmap? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -516,7 +529,7 @@ enum EquirectFaceExport {
     private static func renderFace(_ rotation: simd_float3x3, from bmp: Bitmap, side: Int,
                                    vOffsetFrac: Float = 0) -> Data? {
         var buf = [UInt8](repeating: 255, count: side * side * 4)
-        // Resolve the source pointer ONCE: the sampler runs side² times (4.2M at a 2048
+        // Resolve the source pointer ONCE: the sampler runs side² times (~6.8M at a 2608
         // face), so re-deriving it per pixel would dwarf the sampling itself.
         let ok: Bool? = bmp.withPixels { pixels in
         for row in 0..<side {
