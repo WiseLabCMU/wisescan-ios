@@ -18,11 +18,13 @@ struct CaptureView: View {
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.captureMode) private var captureModeStr: String = AppConstants.captureMode
+    @AppStorage(AppConstants.Key.stillSourceKind) private var stillSourceKindRaw: String = AppConstants.stillSourceKind
     // Stream mode removed — fixed to Capture (Stream is a future feature)
     // NOTE: capture/recording state is `internal` (not private) because the recording, alignment,
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession?
     @State private var thetaManager = ThetaCameraManager.shared
+    @State private var external360StillSource = External360StillSource.shared
     // Internal: the record-start pre-flight lives in the +Recording split.
     @AppStorage(AppConstants.Key.rigMeasuredDyMeters) var rigMeasuredDyMeters: Double = 0
     /// Calibration capture is settle-gated: true while waiting for rig stillness after a tap.
@@ -171,15 +173,43 @@ struct CaptureView: View {
         var worldMapSuspect = false
     }
 
-    /// Companion 360° still for an ACCEPTED shutter tap: capture a Theta equirect into the
+    private var selectedStillSourceKind: StillSourceKind {
+        StillSourceKind(rawValue: stillSourceKindRaw) ?? .thetaLive
+    }
+
+    private var activeStillSource: any ScanStillSource {
+        switch selectedStillSourceKind {
+        case .thetaLive:
+            return thetaManager
+        case .deferredExternal:
+            return external360StillSource
+        }
+    }
+
+    private var activeStillSourcePositions: [SIMD3<Float>] { activeStillSource.scanStillPositions }
+    private var activeStillSourceCount: Int { activeStillSource.scanStillCount }
+
+    private var shouldShow360SourceChip: Bool {
+        thetaManager.isConnected || selectedStillSourceKind == .deferredExternal
+    }
+
+    private var shouldShow360SourceChipLabel: String {
+        if selectedStillSourceKind == .deferredExternal {
+            return "\(external360StillSource.displayName) · deferred import"
+        }
+        return "\(thetaManager.model ?? "360° camera")\(thetaManager.serialNumber.map { " · \($0)" } ?? "")"
+    }
+
+    /// Companion 360° still for an ACCEPTED shutter tap: capture the active source's still or
+    /// deferred import ticket into the
     /// active scan, tagged with the phone's ARKit world pose + timestamp at tap time. Called
-    /// from the shutter-tap handler only when `requestStillCapture()` accepts, so the Theta
+    /// from the shutter-tap handler only when `requestStillCapture()` accepts, so the source
     /// inherits the phone still's one-per-stillness-pause gate — every pause yields a co-timed
     /// phone-hi-res + 360° pair, the raw material for the deferred rig hand–eye calibration.
-    /// Inert unless a Theta is connected and a raw-data dir is open; the pose is snapshotted
-    /// here (synchronously) before the ~seconds-long trigger/download.
-    private func captureThetaStill() {
-        guard isRecording, thetaManager.isConnected,
+    /// Inert unless the chosen source is available and a raw-data dir is open; the pose is
+    /// snapshotted here (synchronously) before the live trigger or deferred ticket write.
+    private func captureCompanionStill() {
+        guard isRecording, activeStillSource.isAvailableForCapture,
               let frame = currentARSession?.currentFrame,
               let rawDataDir = frameCaptureSession.captureDir else { return }
         // Toast only when the capture actually started — the manager refuses while the
@@ -190,23 +220,24 @@ struct CaptureView: View {
         let phonePose = frame.camera.transform
 
         let session = currentARSession
-        if thetaManager.captureStillForScan(
+        if activeStillSource.captureStillForScan(
             phoneTransform: phonePose,
             timestamp: frame.timestamp,
             into: rawDataDir,
             samplePose: { session?.currentFrame?.camera.transform }
         ) {
-            let stillNumber = thetaManager.scanStillCount + 1
-            showTransientMessage("360° still #\(stillNumber)…", duration: 2, systemImage: "camera.aperture", tint: .cyan)
-            let swayedBefore = thetaManager.swayedStillCount
+            let stillNumber = activeStillSourceCount + 1
+            let noun = selectedStillSourceKind == .deferredExternal ? "ticket" : "still"
+            showTransientMessage("360° \(noun) #\(stillNumber)…", duration: 2, systemImage: "camera.aperture", tint: .cyan)
+            let swayedBefore = activeStillSource.swayedStillCount
             Task { @MainActor in
                 // The sway verdict lands when the camera lists the file (seconds after
                 // the tap) — watch the counter briefly and coach the fix, not just the
                 // failure. The manager already played the warning cue.
-                for _ in 0..<24 where thetaManager.swayedStillCount == swayedBefore {
+                for _ in 0..<24 where activeStillSource.swayedStillCount == swayedBefore {
                     try? await Task.sleep(for: .milliseconds(500))
                 }
-                if thetaManager.swayedStillCount > swayedBefore {
+                if activeStillSource.swayedStillCount > swayedBefore {
                     showTransientMessage("Moved during the 360° exposure — still #\(stillNumber)'s "
                         + "pose may be off. Hold still until the done tone.", duration: 4,
                         systemImage: "exclamationmark.triangle.fill", tint: .orange)
@@ -230,6 +261,11 @@ struct CaptureView: View {
         let status: (color: Color, label: String) = {
             guard let profile = RigProfile.load(), profile.isSolved else {
                 return (.gray, "No rig prior — solves at Process")
+            }
+            if selectedStillSourceKind == .deferredExternal,
+               let profileModel = profile.cameraModel,
+               profileModel != external360StillSource.displayName {
+                return (.yellow, "New camera — fresh solve at Process")
             }
             // A prior is only "ready" for the camera it was solved on: a serial mismatch
             // means physically different hardware, so Process starts fresh.
@@ -257,10 +293,10 @@ struct CaptureView: View {
     /// Text, not String: the "on spot" state carries a green check — SF Symbols
     /// interpolate into Text and take their own tint, unlike emoji (CONTRIBUTING).
     private var spacingSuffixText: Text {
-        guard isRecording, thetaManager.isConnected,
+        guard isRecording, !activeStillSourcePositions.isEmpty,
               let pose = currentARSession?.currentFrame?.camera.transform else { return Text("") }
         let here = SIMD3<Float>(pose.columns.3.x, pose.columns.3.y, pose.columns.3.z)
-        switch StillSpacingRings.spacing(at: here, points: thetaManager.scanStillPositions) {
+        switch StillSpacingRings.spacing(at: here, points: activeStillSourcePositions) {
         case .first:
             return Text("")
         case .tooClose(let distance):
@@ -272,7 +308,7 @@ struct CaptureView: View {
 
     /// The chip's text with inline tinted SF Symbols for the states that used to be emoji.
     private func chipText(count: Int, spread: Float, pending: Int) -> Text {
-        if thetaManager.cameraUnresponsive {
+        if activeStillSource.cameraUnresponsive {
             return Text(Image(systemName: "antenna.radiowaves.left.and.right.slash")).foregroundColor(.red)
                 + Text(" 360° camera lost — reconnect to resume")
         }
@@ -280,16 +316,26 @@ struct CaptureView: View {
             return Text(Image(systemName: "camera.aperture")).foregroundColor(.orange) + Text(" exposing — hold still…")
         }
         if count == 0 {
+            if selectedStillSourceKind == .deferredExternal {
+                return Text("No 360° stills yet · import later")
+            }
             return Text(thetaManager.shutterPathIsBLE ? "No 360° stills yet · BLE" : "No 360° stills yet · Wi-Fi (slower)")
         }
         var text = Text(String(format: "%d still%@ · spread %.1f m", count, count == 1 ? "" : "s", spread))
             + spacingSuffixText
-        if pending > 0 {
+        if pending > 0, selectedStillSourceKind == .thetaLive {
             text = text + Text(" · ") + Text(Image(systemName: "arrow.down.circle")).foregroundColor(.cyan) + Text("\(pending)")
         }
-        if thetaManager.swayedStillCount > 0 {
+        if selectedStillSourceKind == .deferredExternal,
+           let rawDataDir = frameCaptureSession.captureDir {
+            let waiting = External360StillSource.pendingImportTickets(rawDataPath: rawDataDir).count
+            if waiting > 0 {
+                text = text + Text(" · import \(waiting)")
+            }
+        }
+        if activeStillSource.swayedStillCount > 0 {
             text = text + Text(" · ") + Text(Image(systemName: "exclamationmark.triangle.fill")).foregroundColor(.orange)
-                + Text(" \(thetaManager.swayedStillCount) swayed")
+                + Text(" \(activeStillSource.swayedStillCount) swayed")
         }
         return text
     }
@@ -331,14 +377,14 @@ struct CaptureView: View {
     /// with. Green when count and spread clear the floors. No solving happens live.
     @ViewBuilder
     private var thetaSufficiencyChip: some View {
-        let count = thetaManager.scanStillCount
-        let spread = thetaManager.scanStillSpreadMeters
-        let pending = thetaManager.pendingStillDownloads.count
+        let count = activeStillSourceCount
+        let spread = maxPairwiseDistance(activeStillSourcePositions)
+        let pending = selectedStillSourceKind == .thetaLive ? thetaManager.pendingStillDownloads.count : 0
         let sufficient = count >= AppConstants.calibrationMinStillsForSolve
             && spread >= AppConstants.calibrationMinSpreadMeters
         HStack(spacing: 5) {
             Circle()
-                .fill(thetaManager.cameraUnresponsive ? Color.red
+                .fill(activeStillSource.cameraUnresponsive ? Color.red
                       : thetaManager.isHoldingForExposure ? Color.orange
                       : count == 0 ? Color.gray : sufficient ? Color.green : Color.yellow)
                 .frame(width: 7, height: 7)
@@ -350,6 +396,17 @@ struct CaptureView: View {
         .padding(.vertical, 4)
         .background(.ultraThinMaterial)
         .cornerRadius(6)
+    }
+
+    private func maxPairwiseDistance(_ points: [SIMD3<Float>]) -> Float {
+        guard points.count >= 2 else { return 0 }
+        var best: Float = 0
+        for i in 0..<(points.count - 1) {
+            for j in (i + 1)..<points.count {
+                best = max(best, simd_distance(points[i], points[j]))
+            }
+        }
+        return best
     }
 
 
@@ -637,7 +694,7 @@ struct CaptureView: View {
                 ghostIsProxy: ghostIsProxy,
                 scanStore: scanStore,
                 connectorAnchors: connectorAnchors,
-                stillRingPositions: thetaManager.scanStillPositions as [SIMD3<Float>],
+                stillRingPositions: activeStillSourcePositions,
                 finalCapturedRoom: $finalCapturedRoom,
                 frameCaptureSession: frameCaptureSession,
                 ghostYRotation: ghostYRotation,
@@ -685,7 +742,7 @@ struct CaptureView: View {
             // first failed still. The chip carries the persistent state; this makes sure
             // a walking operator finds out now rather than at Process. Lives here, not
             // in `body`: that modifier chain is already at the type checker's limit.
-            guard lost else { return }
+            guard lost, selectedStillSourceKind == .thetaLive else { return }
             showTransientMessage("360° camera unavailable — recording phone-only. "
                 + "Reconnect from the Dashboard to resume stills.", duration: 5,
                 systemImage: "exclamationmark.triangle.fill", tint: .orange)
@@ -732,7 +789,7 @@ struct CaptureView: View {
                 guard isRecording else { return }
                 if frameCaptureSession.requestStillCapture() {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    captureThetaStill()
+                    captureCompanionStill()
                 } else {
                     UINotificationFeedbackGenerator().notificationOccurred(.warning)
                 }
@@ -805,7 +862,7 @@ struct CaptureView: View {
         // 360° capture cue: the visual half of the audio sequence, so a muted iPad
         // (no haptics either) still shows when to hold and when it's safe to move.
         // Hosted like the reticle so only its own body re-evaluates.
-        if isRecording, thetaManager.isConnected {
+        if isRecording, thetaManager.isConnected, selectedStillSourceKind == .thetaLive {
             ThetaCaptureCueHost(manager: thetaManager)
         }
 
@@ -1719,7 +1776,7 @@ struct CaptureView: View {
                         }
                     }
                 }
-            } else if thetaManager.isConnected {
+            } else if shouldShow360SourceChip {
                 // 360° source chip — same corner as the wearable PiP (the two capture
                 // sources are mutually exclusive): which camera feeds this scan, and
                 // whether its rig pose is calibrated. Turns orange for the rest of the
@@ -1728,7 +1785,7 @@ struct CaptureView: View {
                 HStack {
                     Spacer()
                     VStack(alignment: .trailing, spacing: 6) {
-                        Text("\(thetaManager.model ?? "360° camera")\(thetaManager.serialNumber.map { " · \($0)" } ?? "")")
+                        Text(shouldShow360SourceChipLabel)
                             .font(.caption2).bold()
                             .foregroundColor(.white)
                             .padding(.horizontal, 8)

@@ -323,6 +323,15 @@ struct ScanExportManager {
             return
         }
 
+        if let sidecars = try? fileMgr.contentsOfDirectory(at: dstDir, includingPropertiesForKeys: nil) {
+            for sidecar in sidecars where sidecar.pathExtension.lowercased() == "json" {
+                let jpgURL = sidecar.deletingPathExtension().appendingPathExtension("JPG")
+                if !fileMgr.fileExists(atPath: jpgURL.path) {
+                    try? fileMgr.removeItem(at: sidecar)
+                }
+            }
+        }
+
         let stills = ((try? fileMgr.contentsOfDirectory(at: dstDir, includingPropertiesForKeys: nil)) ?? [])
             .filter { $0.pathExtension.lowercased() == "jpg" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }

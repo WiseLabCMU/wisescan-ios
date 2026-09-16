@@ -1,9 +1,36 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import SwiftData
 
 enum LibraryViewMode {
     case grid
     case graph
+}
+
+private func handleManualImport(_ result: Result<[URL], Error>) {
+    guard case .success(let urls) = result else {
+        if case .failure(let error) = result {
+            manualImportAlertMessage = "Import failed: \(error.localizedDescription)"
+            showManualImportAlert = true
+        }
+        return
+    }
+    guard !urls.isEmpty else { return }
+    coloringMessage = "Importing 360° stills…"
+    let rawDir = scan.rawDataPath
+    DispatchQueue.global(qos: .userInitiated).async {
+        let outcome = External360StillSource.importPendingStills(rawDataPath: rawDir, from: urls)
+        DispatchQueue.main.async {
+            pendingManualImportCount = outcome.remaining
+            manualImportAlertMessage = outcome.message
+            showManualImportAlert = true
+            coloringMessage = nil
+            onUpdate(scan)
+            if outcome.imported > 0 {
+                reRunProcessing()
+            }
+        }
+    }
 }
 
 /// Controls whether bulk actions target only the latest scan per selected location
@@ -1000,6 +1027,7 @@ struct ScanCard: View {
     @State private var showExportError = false
     @State private var showDeleteConfirm = false
     @State private var itemCounts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int, equirect: Int)?
+    @State private var pendingManualImportCount = 0
     @State private var showDataIntegrityAlert = false
     @State private var showMeshPreview = false
     @State private var showMissingRelocAlert = false
@@ -1016,6 +1044,9 @@ struct ScanCard: View {
     @State private var exportPhase: ExportPhase?
     /// DECISION 3 hard gate: upload requires this scan post-processed.
     @State private var showPostprocessAlert = false
+    @State private var showManualImportPicker = false
+    @State private var showManualImportAlert = false
+    @State private var manualImportAlertMessage = ""
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat.persisted(selectedFormatStr) ?? .polycam }
@@ -1147,7 +1178,7 @@ struct ScanCard: View {
             let fm = FileManager.default
 
             let resolved = await Task.detached(priority: .utility) {
-                () -> (counts: (Int, Int, Int, Int, Int, Int), relocMissing: Bool, sizeMB: Double) in
+                () -> (counts: (Int, Int, Int, Int, Int, Int), relocMissing: Bool, sizeMB: Double, pendingManualImports: Int) in
                 let iCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("images").path))?.count ?? 0
                 let pCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("proxy_images").path))?.count ?? 0
                 let dCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("depth").path))?.count ?? 0
@@ -1162,18 +1193,20 @@ struct ScanCard: View {
                                  eFiles.filter { $0.lowercased().hasSuffix(".jpg") }.count)
 
                 let relocMissing = !fm.fileExists(atPath: worldMapPath)
+                let pendingManualImports = External360StillSource.pendingImportTickets(rawDataPath: rawDir).count
 
                 var bytes: Int64 = 0
                 if let attr = try? fm.attributesOfItem(atPath: meshPath) { bytes += attr[.size] as? Int64 ?? 0 }
                 if let attr = try? fm.attributesOfItem(atPath: colorsPath) { bytes += attr[.size] as? Int64 ?? 0 }
                 let sizeMB = (bytes > 0 ? Double(bytes) : Double(fallbackBytes)) / (1024.0 * 1024.0)
 
-                return ((iCount, pCount, dCount, confCount, cCount, eCount), relocMissing, sizeMB)
+                return ((iCount, pCount, dCount, confCount, cCount, eCount), relocMissing, sizeMB, pendingManualImports)
             }.value
 
             itemCounts = resolved.counts
             isRelocMissing = resolved.relocMissing
             sizeMB = resolved.sizeMB
+            pendingManualImportCount = resolved.pendingManualImports
         }
         // Load the preview as a downsampled, cached thumbnail. Keyed on the location's
         // updatedAt so it refreshes after (re)coloring rewrites model_preview.jpg.
@@ -1420,6 +1453,11 @@ struct ScanCard: View {
                     Button(action: { reRunProcessing() }, label: {
                         Label("Re-run Processing", systemImage: "wand.and.stars")
                     })
+                    if pendingManualImportCount > 0 {
+                        Button(action: { showManualImportPicker = true }, label: {
+                            Label("Import Deferred 360° Stills", systemImage: "square.and.arrow.down.on.square")
+                        })
+                    }
                     if (itemCounts?.equirect ?? 0) > 0 {
                         Button(action: { redoCalibration() }, label: {
                             Label("Redo 360° Calibration", systemImage: "arrow.triangle.2.circlepath")
@@ -1439,6 +1477,16 @@ struct ScanCard: View {
         } message: {
             Text("You haven't post-processed this scan — do it now. Uploading and exporting " +
                  "need the processed room data (room model, registration, and rescan reference).")
+        }
+        .alert("360° Still Import", isPresented: $showManualImportAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(manualImportAlertMessage)
+        }
+        .fileImporter(isPresented: $showManualImportPicker,
+                      allowedContentTypes: [.image],
+                      allowsMultipleSelection: true) { result in
+            handleManualImport(result)
         }
     }
 
@@ -1477,6 +1525,10 @@ struct ScanCard: View {
     /// after auto-process, calibration re-opened by a solver bump), then the (re)color.
     /// ONE path: the engine does both, exactly as the bulk Color buttons do.
     private func colorScan() {
+        if pendingManualImportCount > 0 {
+            showManualImportPicker = true
+            return
+        }
         coloringMessage = "Processing…"
         ScanPostprocessor.run(
             scans: [scan],
@@ -1493,6 +1545,10 @@ struct ScanCard: View {
     /// Long-press menu: STRUCTURAL re-run only, no coloring — the recovery tool for
     /// camera-gone downloads, late roomplans, and pipeline upgrades.
     private func reRunProcessing() {
+        if pendingManualImportCount > 0 {
+            showManualImportPicker = true
+            return
+        }
         // With Force Rebuild on, a scan already at the current builder version still re-runs — the
         // derived-artifact builders compute their diagnostics during the build, so "nothing to
         // process" is exactly the state you cannot inspect without it.
@@ -1591,6 +1647,11 @@ struct ScanCard: View {
         // Re-entrancy: an export/upload for this scan is already running — a second concurrent
         // prepareExport doubles the privacy-blur working set (OOM on phones; see UploadStatus.isInFlight).
         guard !scan.uploadStatus.isInFlight else { return }
+        guard pendingManualImportCount == 0 else {
+            manualImportAlertMessage = "This scan has \(pendingManualImportCount) deferred 360° still\(pendingManualImportCount == 1 ? "" : "s") waiting to be imported. Import them from the scan card before uploading."
+            showManualImportAlert = true
+            return
+        }
         // DECISION 3 hard gate: never upload a scan with pending structural post-process work
         // (its roomplan/registration/proxy artifacts would be missing from the export).
         guard !ScanPostprocessor.needsPostprocess(scan) else {
@@ -1684,6 +1745,11 @@ struct ScanCard: View {
         // CONCURRENT prepareExport whose doubled privacy-blur working set OOM-killed the app
         // (2026-07-23 iPhone 17 Pro field report; see UploadStatus.isInFlight).
         guard !scan.uploadStatus.isInFlight else { return }
+        guard pendingManualImportCount == 0 else {
+            manualImportAlertMessage = "This scan has \(pendingManualImportCount) deferred 360° still\(pendingManualImportCount == 1 ? "" : "s") waiting to be imported. Import them from the scan card before exporting."
+            showManualImportAlert = true
+            return
+        }
         // DECISION 3 hard gate: never export a scan with pending structural post-process work —
         // the zip would ship without its roomplan/registration/proxy artifacts (export is the
         // offline copy of the exact bundle upload sends; same gate, same rationale).

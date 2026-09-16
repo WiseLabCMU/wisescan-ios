@@ -199,9 +199,10 @@
       "enum": [
         "ble",
         "osc",
-        "ble-unconfirmed"
+        "ble-unconfirmed",
+        "manual-import"
       ],
-      "description": "How the shutter was triggered. 'ble' = write ack anchored the exposure window (ack is a true shutter time, tens of ms). 'osc' = HTTP round trip; the ack can be seconds late on a loaded device, so anything tuning sway windows must filter on this. 'ble-unconfirmed' = the BLE write was accepted but the file-URL push was lost; the file was recovered from the camera's file list."
+      "description": "How the shutter was triggered. 'ble' = write ack anchored the exposure window (ack is a true shutter time, tens of ms). 'osc' = HTTP round trip; the ack can be seconds late on a loaded device, so anything tuning sway windows must filter on this. 'ble-unconfirmed' = the BLE write was accepted but the file-URL push was lost; the file was recovered from the camera's file list. 'manual-import' = Scan4D recorded only the phone-side still ticket and the equirect JPG was imported later from an external camera."
     },
     "shutter_ack_ms": {
       "type": [

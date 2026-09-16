@@ -84,12 +84,13 @@ extension CaptureView {
     /// operator walks off (the chip reports the verdict — CaptureView observes
     /// `cameraUnresponsive`). Extracted to keep `startRecording` inside the body-length
     /// limit.
-    private func armThetaForRecording() {
-        if let cueWarning = CaptureCueAudibility.warningIfInaudible() {
+    private func armStillSourceForRecording() {
+        if selectedStillSourceKind == .thetaLive,
+           let cueWarning = CaptureCueAudibility.warningIfInaudible() {
             showTransientMessage(cueWarning, duration: 5)
         }
-        ThetaCameraManager.shared.beginScanStillSession(rawDataDir: frameCaptureSession.captureDir)
-        Task { await ThetaCameraManager.shared.verifyReadyForCapture() }
+        activeStillSource.beginScanStillSession(rawDataDir: frameCaptureSession.captureDir)
+        Task { _ = await activeStillSource.verifyReadyForCapture() }
     }
 
     /// Records only after the operator knows which shutter path they are getting.
@@ -111,14 +112,14 @@ extension CaptureView {
         // degrade the result — it produces confidently wrong poses, and the colour lands
         // wrong with a healthy-looking residual. Warning at the FIRST STILL (where this
         // used to live) is too late: the operator has already walked into the room.
-        if ThetaCameraManager.shared.isConnected, rigHeightImplausible {
+        if shouldShow360SourceChip, rigHeightImplausible {
             showRigHeightPrompt = true
             return
         }
         // Plausible but OLD: the number was right for SOME rig once — the question is
         // whether it is right for the rig standing here now. Confirming re-stamps the
         // date (one tap a week); a missing stamp counts as stale exactly once.
-        if ThetaCameraManager.shared.isConnected, rigHeightStale {
+        if shouldShow360SourceChip, rigHeightStale {
             // Logged because the alert itself leaves no trace: the 2026-08-20 field run
             // could not answer "did the nudge fire?" from its diagnostics.
             PerfDiag.log("[RigCal] rig-height staleness nudge shown at record start")
@@ -157,15 +158,15 @@ extension CaptureView {
     /// detached Task from `armThetaForRecording`, racing the first still it was meant to
     /// protect. One control write settles it in well under a second.
     func continueAfterRigHeightWarning() {
-        guard ThetaCameraManager.shared.isConnected else {
+        guard selectedStillSourceKind == .thetaLive, thetaManager.isConnected else {
             startRecording()
             return
         }
         isReconnectingBLE = true
         Task { @MainActor in
-            await ThetaCameraManager.shared.prepareShutterPath()
+            await thetaManager.prepareShutterPath()
             isReconnectingBLE = false
-            if ThetaCameraManager.shared.shutterPathIsBLE {
+            if thetaManager.shutterPathIsBLE {
                 startRecording()
             } else {
                 showBLEShutterPrompt = true
@@ -229,12 +230,12 @@ extension CaptureView {
         scanCoach.reset()
         sampleStorageHeadroom()
         // Reset the per-scan 360° still counter so equirect_stills/ numbering starts at 1.
-        armThetaForRecording()
+        armStillSourceForRecording()
 
         // Rod-stillness rig mode: with the 360° camera riding above the phone, tighten
         // the angular stillness gate by the lever arm (measured rig height when set,
         // mechanical prior otherwise). Phone-only scans keep the base thresholds.
-        if ThetaCameraManager.shared.isConnected {
+        if shouldShow360SourceChip {
             let measured = Float(UserDefaults.standard.double(forKey: AppConstants.Key.rigMeasuredDyMeters))
             frameCaptureSession.rigLeverArmMeters = measured > 0.1 ? measured : AppConstants.rigRodHeightMeters
         } else {
@@ -824,7 +825,7 @@ extension CaptureView {
     /// created for this flow, and resets state. For the extend flow it fires completion(nil) so the
     /// caller (pinAndExtend) can abort its session-restart sequence and clean up its new location.
     func discardInProgressScan(isExtendFlow: Bool, completion: ((CapturedScan?) -> Void)?) {
-        ThetaCameraManager.shared.endScanStillSession()   // drop the 360° floor markers with the scan
+        activeStillSource.endScanStillSession()   // drop the 360° floor markers with the scan
         isRecording = false
         recordingTimer?.invalidate()
         recordingTimer = nil
@@ -1010,7 +1011,7 @@ extension CaptureView {
                                                scanStore: scanStore)
 
         saveMessage = "Scan Saved!"
-        ThetaCameraManager.shared.endScanStillSession()   // the scan's floor markers retire with it
+        activeStillSource.endScanStillSession()   // the scan's floor markers retire with it
         pendingScan = nil
         // Release the processing/waiting claim now that the save is done — otherwise isWaitingToSave
         // (set in finishStopRecording's rescan branch / the name-prompt Save) leaks true and leaves the
