@@ -220,13 +220,13 @@ struct CaptureView: View {
         let phonePose = frame.camera.transform
 
         let session = currentARSession
+        let stillNumber = activeStillSourceCount + 1
         if activeStillSource.captureStillForScan(
             phoneTransform: phonePose,
             timestamp: frame.timestamp,
             into: rawDataDir,
             samplePose: { session?.currentFrame?.camera.transform }
         ) {
-            let stillNumber = activeStillSourceCount + 1
             let noun = selectedStillSourceKind == .deferredExternal ? "ticket" : "still"
             showTransientMessage("360° \(noun) #\(stillNumber)…", duration: 2, systemImage: "camera.aperture", tint: .cyan)
             let swayedBefore = activeStillSource.swayedStillCount
@@ -312,7 +312,7 @@ struct CaptureView: View {
             return Text(Image(systemName: "antenna.radiowaves.left.and.right.slash")).foregroundColor(.red)
                 + Text(" 360° camera lost — reconnect to resume")
         }
-        if thetaManager.isHoldingForExposure {
+        if selectedStillSourceKind == .thetaLive, thetaManager.isHoldingForExposure {
             return Text(Image(systemName: "camera.aperture")).foregroundColor(.orange) + Text(" exposing — hold still…")
         }
         if count == 0 {
@@ -385,7 +385,7 @@ struct CaptureView: View {
         HStack(spacing: 5) {
             Circle()
                 .fill(activeStillSource.cameraUnresponsive ? Color.red
-                      : thetaManager.isHoldingForExposure ? Color.orange
+                      : (selectedStillSourceKind == .thetaLive && thetaManager.isHoldingForExposure) ? Color.orange
                       : count == 0 ? Color.gray : sufficient ? Color.green : Color.yellow)
                 .frame(width: 7, height: 7)
             chipText(count: count, spread: spread, pending: pending)
