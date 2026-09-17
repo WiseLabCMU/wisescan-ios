@@ -308,10 +308,14 @@ final class External360StillSource: ScanStillSource {
         guard !tickets.isEmpty, !candidates.isEmpty else { return MatchPlan(assignments: [], estimatedOffsetMs: nil) }
         let ticketTimes = tickets.map { $0.capturedAtEpochMs }
         let candidateTimes = candidates.map { $0.timestamp.map { Int64($0.timeIntervalSince1970 * 1000) } }
-        let candidateOffsets = Set(ticketTimes.compactMap { ticketMs in
-            guard let ticketMs else { return nil }
-            return candidateTimes.compactMap { candidateMs in candidateMs.map { $0 - ticketMs } }
-        }.flatMap { $0 })
+        // Explicit loops: the nested compactMap/flatMap closure form does not type-check
+        // (Xcode 27.0: "'nil' is not compatible with closure result type 'String'").
+        var candidateOffsets = Set<Int64>()
+        for case let ticketMs? in ticketTimes {
+            for case let candidateMs? in candidateTimes {
+                candidateOffsets.insert(candidateMs - ticketMs)
+            }
+        }
         let offsetOptions: [Int64?] = candidateOffsets.isEmpty ? [nil] : candidateOffsets.sorted().map(Optional.some)
 
         var bestPlan = MatchPlan(assignments: [], estimatedOffsetMs: nil)

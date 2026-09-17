@@ -46,15 +46,15 @@ final class External360StillSourceTests: XCTestCase {
         XCTAssertTrue(outcome.message.contains("1 extra file ignored"))
         XCTAssertEqual(
             try Data(contentsOf: rawDataDir.appendingPathComponent("equirect_stills/still_0001.JPG")),
-            jpegData(color: .red)
+            try jpegData(color: .red)
         )
         XCTAssertEqual(
             try Data(contentsOf: rawDataDir.appendingPathComponent("equirect_stills/still_0002.JPG")),
-            jpegData(color: .green)
+            try jpegData(color: .green)
         )
         XCTAssertEqual(
             try Data(contentsOf: rawDataDir.appendingPathComponent("equirect_stills/still_0003.JPG")),
-            jpegData(color: .blue)
+            try jpegData(color: .blue)
         )
     }
 
