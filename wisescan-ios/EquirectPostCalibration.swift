@@ -275,11 +275,17 @@ enum EquirectPostCalibration {
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let seq = obj["sequence"] as? Int,
                   let flat = obj["phone_transform"] as? [Double], flat.count == 16 else { continue }
-            let cols = (0..<4).map { c in
-                SIMD4<Float>(Float(flat[c * 4]), Float(flat[c * 4 + 1]),
-                             Float(flat[c * 4 + 2]), Float(flat[c * 4 + 3]))
-            }
-            let m = simd_float4x4(columns: (cols[0], cols[1], cols[2], cols[3]))
+            // Unrolled with explicit types. The closure form — `(0..<4).map { c in
+            // SIMD4<Float>(Float(flat[c * 4]), …) }`, sixteen Double→Float conversions inside
+            // a generic map — is rejected by Xcode 27.0 / Swift 6.4 ("unable to type-check this
+            // expression in reasonable time") in both Debug and Release, on main, from a clean
+            // checkout. Identical semantics; the solver just needs the types spelled out.
+            let f: [Float] = flat.map { Float($0) }
+            let c0 = SIMD4<Float>(f[0], f[1], f[2], f[3])
+            let c1 = SIMD4<Float>(f[4], f[5], f[6], f[7])
+            let c2 = SIMD4<Float>(f[8], f[9], f[10], f[11])
+            let c3 = SIMD4<Float>(f[12], f[13], f[14], f[15])
+            let m = simd_float4x4(columns: (c0, c1, c2, c3))
             let swayM = (obj["exposure_motion_m"] as? Double) ?? (obj["trigger_motion_m"] as? Double)
             let swayDeg = (obj["exposure_motion_deg"] as? Double) ?? (obj["trigger_motion_deg"] as? Double)
             out.append(StillRecord(
