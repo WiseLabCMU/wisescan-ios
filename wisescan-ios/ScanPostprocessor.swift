@@ -247,7 +247,8 @@ enum ScanPostprocessor {
                   let data = try? Data(contentsOf: dir.appendingPathComponent(file)),
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let urlStr = obj["camera_file_url"] as? String,
-                  let seq = obj["sequence"] as? Int else { continue }
+                  let seq = obj["sequence"] as? Int,
+                  !External360StillSource.isManualImportPlaceholder(urlStr) else { continue }
             out.append((seq, urlStr))
         }
         return out.sorted { $0.sequence < $1.sequence }
@@ -300,9 +301,15 @@ enum ScanPostprocessor {
         let dir = rawDataPath.appendingPathComponent("equirect_stills")
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return false }
         for file in files where file.hasPrefix("still_") && file.hasSuffix(".json") {
+            let jpgExists = FileManager.default.fileExists(atPath: dir.appendingPathComponent(String(file.dropLast(5)) + ".JPG").path)
             guard let data = try? Data(contentsOf: dir.appendingPathComponent(file)),
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             else { continue }
+            if let url = obj["camera_file_url"] as? String,
+               External360StillSource.isManualImportPlaceholder(url),
+               !jpgExists {
+                continue
+            }
             if obj["rig_calibration_source"] == nil { return true }
             if (obj["rig_calibration_solver_version"] as? Int ?? 0) < EquirectPostCalibration.solverVersion {
                 return true
@@ -357,6 +364,7 @@ enum ScanPostprocessor {
             guard let data = try? Data(contentsOf: sidecarURL),
                   var obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let fileUrl = obj["camera_file_url"] as? String,
+                  !External360StillSource.isManualImportPlaceholder(fileUrl),
                   obj["camera_file_deleted"] == nil,
                   FileManager.default.fileExists(atPath: jpgPath)
             else { continue }

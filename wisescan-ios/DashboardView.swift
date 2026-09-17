@@ -8,6 +8,7 @@ struct DashboardView: View {
     @State private var wearableManager = MetaWearableManager.shared
     @State private var thetaManager = ThetaCameraManager.shared
     @State private var bleManager = ThetaBLEManager.shared
+    @AppStorage(AppConstants.Key.stillSourceKind) private var stillSourceKindRaw: String = AppConstants.stillSourceKind
 
     enum ServerStatus {
         case unknown, checking, available, unavailable
@@ -210,8 +211,22 @@ struct DashboardView: View {
                             .padding(.horizontal)
                             .padding(.top, 16)
 
-                        ThetaCameraCard(manager: thetaManager)
-                            .padding(.horizontal)
+                        VStack(spacing: 12) {
+                            Picker("360° Source", selection: $stillSourceKindRaw) {
+                                ForEach(StillSourceKind.allCases, id: \.rawValue) { kind in
+                                    Text(kind.displayName).tag(kind.rawValue)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .colorScheme(.dark)
+
+                            if StillSourceKind(persistedValue: stillSourceKindRaw) == .thetaLive {
+                                ThetaCameraCard(manager: thetaManager)
+                            } else {
+                                External360CameraCard(source: External360StillSource.shared)
+                            }
+                        }
+                        .padding(.horizontal)
 
                         // BLE bootstrap probe bench (see ThetaBLEProbe) — dev only.
                         if developerMode { ThetaBLEProbeCard().padding(.horizontal) }

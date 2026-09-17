@@ -98,7 +98,9 @@ struct UserGuideView: View {
                               "shot, and the amber overlay clears where the photo landed. Tap on every " +
                               "amber area — these crisp stills drive the final texture quality. In the " +
                               "mesh preview, the camera toggle shows where each still (and motion frame) " +
-                              "was captured."
+                             "was captured. With Deferred External Import, each tap also records a 360° " +
+                             "ticket for a later equirect import, so hold the rig steady while you trigger " +
+                             "the external camera too."
                     )
                     guideRow(
                         icon: "arrow.left.and.right",
@@ -191,17 +193,22 @@ struct UserGuideView: View {
                 }
                 .listRowBackground(Color.white.opacity(0.05))
 
-                // MARK: - Supported Wearables
+                // MARK: - Supported Camera Sources
                 Section {
                     appRow(name: "Meta Ray-Ban Smart Glasses", icon: "eyeglasses", color: .indigo,
                            desc: "Stream proxy frames directly from your Meta Ray-Bans " +
                                  "via the Device Access Toolkit (DAT).",
                            appStore: nil, website: "https://developers.meta.com/wearables")
+                    appRow(name: "Ricoh Theta", icon: "camera.aperture", color: .cyan,
+                           desc: "Live 360° still source with Bluetooth/Wi‑Fi control and automatic download.",
+                           appStore: nil, website: nil)
+                    appRow(name: "Insta360 X6", icon: "square.and.arrow.down.on.square", color: .orange,
+                           desc: "Supported today through Deferred External Import: capture stitched equirect JPEGs on the camera, then import them into the scan.",
+                           appStore: nil, website: nil)
                 } header: {
-                    Text("SUPPORTED WEARABLES")
+                    Text("SUPPORTED CAMERA SOURCES")
                 } footer: {
-                    Text("Follow the Meta Wearables developer documentation to enable developer mode " +
-                         "and pair your smart glasses.")
+                    Text("Meta wearables stream live proxy frames. Ricoh Theta supports live 360° still capture. Insta360 X6 currently uses deferred import until SDK access is available. Imported originals in Photos or Files remain unblurred; Scan4D only privacy-filters the copies it stages and exports.")
                         .font(.caption2)
                         .foregroundColor(.gray)
                 }
@@ -216,6 +223,10 @@ struct UserGuideView: View {
                     NavigationLink(destination: ThetaConnectionGuideView()) {
                         guideRow(icon: "camera.aperture", title: "Connect Ricoh Theta",
                                  text: "Join the 360° camera's Wi‑Fi and trigger stills from the Dashboard.")
+                    }
+                    NavigationLink(destination: Insta360DeferredImportGuideView()) {
+                        guideRow(icon: "square.and.arrow.down.on.square", title: "Use Insta360 X6 (Deferred Import)",
+                                 text: "Record 360° tickets during capture, then import stitched X6 equirects into the scan afterwards.")
                     }
                 } header: {
                     Text("DEVICE CONNECTION")
