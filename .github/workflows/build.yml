@@ -1,0 +1,46 @@
+name: build
+on:
+  pull_request:
+    branches: [main]
+
+# One run per PR head at a time; a new push cancels the stale run.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ios:
+    name: Compile the app (generic iOS, unsigned)
+    # Pinned to the macos-26 image (Xcode 26.6 default) rather than macos-latest, so a
+    # runner-image promotion cannot change the toolchain under us. When the team's Macs
+    # move to Xcode 27, bump this on purpose; hosted runners do not carry Xcode 27 yet.
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Record the toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      # The same invocation as docs/BUILDING.md. generic/platform=iOS needs neither a
+      # simulator nor a device, and CODE_SIGNING_ALLOWED=NO because the runner has no
+      # team certificate. This is a compile gate only: nothing else in the repo (hooks or
+      # the lint jobs) compiles, which is how a file-scope function (#99) and a toolchain
+      # type-check regression (#101) both reached review with no signal.
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild -project wisescan-ios.xcodeproj -scheme wisescan-ios \
+            -destination 'generic/platform=iOS' -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build.log | grep -E 'error:|BUILD ' || true
+          grep -q 'BUILD SUCCEEDED' build.log
+
+      - name: Upload the full build log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcodebuild-log
+          path: build.log
+          retention-days: 7
