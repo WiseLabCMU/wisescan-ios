@@ -7,32 +7,6 @@ enum LibraryViewMode {
     case graph
 }
 
-private func handleManualImport(_ result: Result<[URL], Error>) {
-    guard case .success(let urls) = result else {
-        if case .failure(let error) = result {
-            manualImportAlertMessage = "Import failed: \(error.localizedDescription)"
-            showManualImportAlert = true
-        }
-        return
-    }
-    guard !urls.isEmpty else { return }
-    coloringMessage = "Importing 360° stills…"
-    let rawDir = scan.rawDataPath
-    DispatchQueue.global(qos: .userInitiated).async {
-        let outcome = External360StillSource.importPendingStills(rawDataPath: rawDir, from: urls)
-        DispatchQueue.main.async {
-            pendingManualImportCount = outcome.remaining
-            manualImportAlertMessage = outcome.message
-            showManualImportAlert = true
-            coloringMessage = nil
-            onUpdate(scan)
-            if outcome.imported > 0 {
-                reRunProcessing()
-            }
-        }
-    }
-}
-
 /// Controls whether bulk actions target only the latest scan per selected location
 /// or every scan within each selected location.
 enum BulkScope: String, CaseIterable {
@@ -1047,6 +1021,8 @@ struct ScanCard: View {
     @State private var showManualImportPicker = false
     @State private var showManualImportAlert = false
     @State private var manualImportAlertMessage = ""
+    @State private var equirectSupportSummary: EquirectFaceExport.SupportSummary?
+    @State private var showEquirectSupportAlert = false
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat.persisted(selectedFormatStr) ?? .polycam }
@@ -1178,7 +1154,7 @@ struct ScanCard: View {
             let fm = FileManager.default
 
             let resolved = await Task.detached(priority: .utility) {
-                () -> (counts: (Int, Int, Int, Int, Int, Int), relocMissing: Bool, sizeMB: Double, pendingManualImports: Int) in
+                () -> (counts: (Int, Int, Int, Int, Int, Int), relocMissing: Bool, sizeMB: Double, pendingManualImports: Int, supportSummary: EquirectFaceExport.SupportSummary?) in
                 let iCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("images").path))?.count ?? 0
                 let pCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("proxy_images").path))?.count ?? 0
                 let dCount = (try? fm.contentsOfDirectory(atPath: rawDir.appendingPathComponent("depth").path))?.count ?? 0
@@ -1194,19 +1170,21 @@ struct ScanCard: View {
 
                 let relocMissing = !fm.fileExists(atPath: worldMapPath)
                 let pendingManualImports = External360StillSource.pendingImportTickets(rawDataPath: rawDir).count
+                let supportSummary = EquirectFaceExport.supportSummary(rawDataDir: rawDir)
 
                 var bytes: Int64 = 0
                 if let attr = try? fm.attributesOfItem(atPath: meshPath) { bytes += attr[.size] as? Int64 ?? 0 }
                 if let attr = try? fm.attributesOfItem(atPath: colorsPath) { bytes += attr[.size] as? Int64 ?? 0 }
                 let sizeMB = (bytes > 0 ? Double(bytes) : Double(fallbackBytes)) / (1024.0 * 1024.0)
 
-                return ((iCount, pCount, dCount, confCount, cCount, eCount), relocMissing, sizeMB, pendingManualImports)
+                return ((iCount, pCount, dCount, confCount, cCount, eCount), relocMissing, sizeMB, pendingManualImports, supportSummary)
             }.value
 
             itemCounts = resolved.counts
             isRelocMissing = resolved.relocMissing
             sizeMB = resolved.sizeMB
             pendingManualImportCount = resolved.pendingManualImports
+            equirectSupportSummary = resolved.supportSummary
         }
         // Load the preview as a downsampled, cached thumbnail. Keyed on the location's
         // updatedAt so it refreshes after (re)coloring rewrites model_preview.jpg.
@@ -1307,6 +1285,16 @@ struct ScanCard: View {
             }
             if dataIntegrityWarning != nil {
                 warningBadge(color: .orange) { showDataIntegrityAlert = true }
+            }
+            if let summary = equirectSupportSummary {
+                warningBadge(color: summary.support == .unsupported ? .orange : .yellow) {
+                    showEquirectSupportAlert = true
+                }
+                .alert(equirectSupportAlertTitle, isPresented: $showEquirectSupportAlert) {
+                    Button("OK", role: .cancel) { }
+                } message: {
+                    Text(equirectSupportAlertMessage(summary))
+                }
             }
         }
         .padding(8)
@@ -1484,9 +1472,37 @@ struct ScanCard: View {
             Text(manualImportAlertMessage)
         }
         .fileImporter(isPresented: $showManualImportPicker,
-                      allowedContentTypes: [.image],
+                      allowedContentTypes: [.jpeg],
                       allowsMultipleSelection: true) { result in
             handleManualImport(result)
+        }
+    }
+
+    private func handleManualImport(_ result: Result<[URL], Error>) {
+        guard case .success(let urls) = result else {
+            if case .failure(let error) = result {
+                manualImportAlertMessage = "Import failed: \(error.localizedDescription)"
+                showManualImportAlert = true
+            }
+            return
+        }
+        guard !urls.isEmpty else { return }
+        coloringMessage = "Importing 360° stills…"
+        let rawDir = scan.rawDataPath
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = External360StillSource.importPendingStills(rawDataPath: rawDir, from: urls)
+            let supportSummary = EquirectFaceExport.supportSummary(rawDataDir: rawDir)
+            DispatchQueue.main.async {
+                pendingManualImportCount = outcome.remaining
+                manualImportAlertMessage = outcome.message
+                showManualImportAlert = true
+                coloringMessage = nil
+                equirectSupportSummary = supportSummary
+                onUpdate(scan)
+                if outcome.imported > 0 {
+                    reRunProcessing()
+                }
+            }
         }
     }
 
@@ -1640,6 +1656,29 @@ struct ScanCard: View {
         if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000.0) }
         if count >= 1_000 { return String(format: "%.0fK", Double(count) / 1_000.0) }
         return "\(count)"
+    }
+
+    private var equirectSupportAlertTitle: String {
+        switch equirectSupportSummary?.support {
+        case .unsupported:
+            return "360° Faces Skipped"
+        case .assumedLevel:
+            return "360° Leveling Not Yet Validated"
+        case .validated, .none:
+            return "360° Camera"
+        }
+    }
+
+    private func equirectSupportAlertMessage(_ summary: EquirectFaceExport.SupportSummary) -> String {
+        let models = summary.models.joined(separator: ", ")
+        switch summary.support {
+        case .unsupported:
+            return "Scan4D can archive these equirects, but it will not emit pose-bearing cube faces for \(models) yet. Use a supported 360° source or update the leveling support first."
+        case .assumedLevel:
+            return "Scan4D emits cube faces for \(models) using assumed horizon leveling. Hold the rig still when you trigger each external shot, and confirm the imported JPGs are stitched equirects."
+        case .validated:
+            return ""
+        }
     }
 
     private func uploadScan() {

@@ -2,8 +2,32 @@ import Foundation
 import simd
 
 enum StillSourceKind: String, CaseIterable {
-    case thetaLive = "Ricoh Theta (Live)"
-    case deferredExternal = "Deferred External Import"
+    case thetaLive = "theta-live"
+    case deferredExternal = "deferred-external"
+
+    init(persistedValue: String) {
+        if let kind = StillSourceKind(rawValue: persistedValue) {
+            self = kind
+            return
+        }
+        switch persistedValue {
+        case "Ricoh Theta (Live)":
+            self = .thetaLive
+        case "Deferred External Import":
+            self = .deferredExternal
+        default:
+            self = .thetaLive
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .thetaLive:
+            return "Ricoh Theta (Live)"
+        case .deferredExternal:
+            return "Deferred External Import"
+        }
+    }
 }
 
 @MainActor

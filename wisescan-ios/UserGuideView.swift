@@ -99,7 +99,8 @@ struct UserGuideView: View {
                               "amber area — these crisp stills drive the final texture quality. In the " +
                               "mesh preview, the camera toggle shows where each still (and motion frame) " +
                              "was captured. With Deferred External Import, each tap also records a 360° " +
-                             "ticket for a later equirect import."
+                             "ticket for a later equirect import, so hold the rig steady while you trigger " +
+                             "the external camera too."
                     )
                     guideRow(
                         icon: "arrow.left.and.right",
@@ -202,12 +203,12 @@ struct UserGuideView: View {
                            desc: "Live 360° still source with Bluetooth/Wi‑Fi control and automatic download.",
                            appStore: nil, website: nil)
                     appRow(name: "Insta360 X6", icon: "square.and.arrow.down.on.square", color: .orange,
-                           desc: "Supported today through Deferred External Import: capture stitched equirects on the camera, then import them into the scan.",
+                           desc: "Supported today through Deferred External Import: capture stitched equirect JPEGs on the camera, then import them into the scan.",
                            appStore: nil, website: nil)
                 } header: {
                     Text("SUPPORTED CAMERA SOURCES")
                 } footer: {
-                    Text("Meta wearables stream live proxy frames. Ricoh Theta supports live 360° still capture. Insta360 X6 currently uses deferred import until SDK access is available.")
+                    Text("Meta wearables stream live proxy frames. Ricoh Theta supports live 360° still capture. Insta360 X6 currently uses deferred import until SDK access is available. Imported originals in Photos or Files remain unblurred; Scan4D only privacy-filters the copies it stages and exports.")
                         .font(.caption2)
                         .foregroundColor(.gray)
                 }

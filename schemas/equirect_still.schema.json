@@ -53,11 +53,11 @@
     },
     "camera_file_url": {
       "type": "string",
-      "description": "Source URI or path on the external camera device."
+      "description": "Source URI or path on the external camera device. Deferred imports reserve the slot with `import://pending/still_NNNN.jpg` until the matching stitched JPEG is imported."
     },
     "trigger_ms": {
       "type": "integer",
-      "description": "Elapsed milliseconds to trigger the shutter."
+      "description": "Elapsed milliseconds to trigger the shutter. Deferred imports write `0` because Scan4D only records the phone-side ticket at tap time and no camera trigger round trip occurs."
     },
     "transfer_ms": {
       "type": [
@@ -202,7 +202,7 @@
         "ble-unconfirmed",
         "manual-import"
       ],
-      "description": "How the shutter was triggered. 'ble' = write ack anchored the exposure window (ack is a true shutter time, tens of ms). 'osc' = HTTP round trip; the ack can be seconds late on a loaded device, so anything tuning sway windows must filter on this. 'ble-unconfirmed' = the BLE write was accepted but the file-URL push was lost; the file was recovered from the camera's file list. 'manual-import' = Scan4D recorded only the phone-side still ticket and the equirect JPG was imported later from an external camera."
+      "description": "How the shutter was triggered. 'ble' = write ack anchored the exposure window (ack is a true shutter time, tens of ms). 'osc' = HTTP round trip; the ack can be seconds late on a loaded device, so anything tuning sway windows must filter on this. 'ble-unconfirmed' = the BLE write was accepted but the file-URL push was lost; the file was recovered from the camera's file list. 'manual-import' = Scan4D recorded only the phone-side still ticket and the equirect JPG was imported later from an external camera; consumers must treat the placeholder `camera_file_url` as non-remote."
     },
     "shutter_ack_ms": {
       "type": [

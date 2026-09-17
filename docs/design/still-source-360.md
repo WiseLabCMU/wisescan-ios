@@ -359,9 +359,9 @@ operator, hand grip, and rod:
 ## Export & schema changes
 
 - `transforms.json` frames: cube-face frames carry standard per-frame pinhole intrinsics
-  (already supported since REQ-031), `is_keyframe: true`, plus new
-  `still_source: "onboard" | "theta_z1" | "theta_x" | "insta360_x3" | "insta360_x4"`
-  and `cube_face: "front" | ... | "up"` for provenance.
+  (already supported since REQ-031), `is_keyframe: true`, plus provenance copied from the
+  equirect sidecar: `still_source` stays the camera's reported model string (for example
+  `"RICOH THETA X"` or `"INSTA360 X6"`) and `cube_face: "front" | ... | "down"`.
 - `scan4d_metadata.json`: rig profile (rig transform matrix, rod length, rig type
   fixed/telescoping, camera model + firmware, calibration residual, transfer mode).
 - Schemas in `schemas/` updated accordingly (they are the data contract — see
@@ -934,8 +934,11 @@ cadence lever (all unbuilt; ThetaCameraManager's own header says so):**
 - **In-situ vs post-process transfer as a per-session setting** — the pivot hard-wired
   an opportunistic middle path (queue drains between triggers, Process finishes the
   rest); no user-facing mode exists. Revisit only if a field need appears.
-- **StillTicket matching** — DONE by other means: the sidecar-derived queue IS ticket
-  matching (sidecar at trigger = the ticket; JPG matched later via camera_file_url).
+- **StillTicket matching** — SHIPPED for deferred external cameras: the sidecar at trigger
+  time is the ticket, and post-import matches stitched JPEGs back to tickets by estimated
+  camera-clock offset + nearest timestamp, warning when residual timing is large. The
+  placeholder `camera_file_url` stays `import://pending/still_NNNN.jpg` until the JPG
+  arrives; it is a ticket identifier, not a remote URL.
 
 **Rod-stillness "rig mode"** — unbuilt in full (lever-arm-scaled angular threshold,
 sway settle detection, camera-IMU cross-check, honest reticle fill). Evidence note: the
@@ -954,12 +957,14 @@ depth-tested occlusion check; the P0-gated item) — unbuilt; the sufficiency ch
 (count · spread · pending) is the interim. The plan's open UX question stands: how the
 overlay distinguishes "covered, transfer pending" from "confirmed".
 
-**`StillSource` abstraction (P1)** — never landed as code; ThetaCameraManager is
-concrete. The DATA layer is camera-agnostic (still_source in sidecars, equirect_stills
-naming), but adding Insta360 or another camera still means refactor-first. The Insta360
-SDK-access question (approval time, what the iOS SDK exposes) remains unanswered, so
-P2's "written go/no-go per camera" is complete for Theta X (go) and Z1 (go —
-leveling validated 2026-08-19; BLE control remains v1-auth-gated, so Z1 is OSC-only).
+**`StillSource` abstraction (P1)** — SHIPPED in the narrow form needed for 360° companions:
+CaptureView now selects a `ScanStillSource` at capture time, Theta rides the live path,
+and Deferred External Import records tickets for cameras such as Insta360 X6 before SDK
+approval. The DATA layer remains camera-agnostic (`still_source` in sidecars,
+`equirect_stills` naming). The post-SDK step is to add a live Insta360 implementation
+behind the same seam. Leveling status is now explicit per model: Theta X/Z1 are
+validated, Insta360 X6/X4/X3 emit faces with `*_unvalidated_leveling` provenance, and
+unknown models are surfaced to the operator and skip pose-bearing faces.
 
 **Hybrid export** — SHIPPED (equirects + cube faces both export today). Deferred
 remainder: equirect entries in `transforms.json` (`camera_model: EQUIRECTANGULAR`) for

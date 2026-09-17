@@ -23,7 +23,7 @@ struct CaptureView: View {
     // NOTE: capture/recording state is `internal` (not private) because the recording, alignment,
     // and extend flows live in CaptureView+Recording/+Alignment/+Extend.swift extensions.
     @State var currentARSession: ARSession?
-    @State private var thetaManager = ThetaCameraManager.shared
+    @State var thetaManager = ThetaCameraManager.shared
     @State private var external360StillSource = External360StillSource.shared
     // Internal: the record-start pre-flight lives in the +Recording split.
     @AppStorage(AppConstants.Key.rigMeasuredDyMeters) var rigMeasuredDyMeters: Double = 0
@@ -173,11 +173,11 @@ struct CaptureView: View {
         var worldMapSuspect = false
     }
 
-    private var selectedStillSourceKind: StillSourceKind {
-        StillSourceKind(rawValue: stillSourceKindRaw) ?? .thetaLive
+    var selectedStillSourceKind: StillSourceKind {
+        StillSourceKind(persistedValue: stillSourceKindRaw)
     }
 
-    private var activeStillSource: any ScanStillSource {
+    var activeStillSource: any ScanStillSource {
         switch selectedStillSourceKind {
         case .thetaLive:
             return thetaManager
@@ -189,7 +189,7 @@ struct CaptureView: View {
     private var activeStillSourcePositions: [SIMD3<Float>] { activeStillSource.scanStillPositions }
     private var activeStillSourceCount: Int { activeStillSource.scanStillCount }
 
-    private var shouldShow360SourceChip: Bool {
+    var shouldShow360SourceChip: Bool {
         thetaManager.isConnected || selectedStillSourceKind == .deferredExternal
     }
 

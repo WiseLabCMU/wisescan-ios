@@ -213,13 +213,14 @@ struct DashboardView: View {
 
                         VStack(spacing: 12) {
                             Picker("360° Source", selection: $stillSourceKindRaw) {
-                                Text(StillSourceKind.thetaLive.rawValue).tag(StillSourceKind.thetaLive.rawValue)
-                                Text(StillSourceKind.deferredExternal.rawValue).tag(StillSourceKind.deferredExternal.rawValue)
+                                ForEach(StillSourceKind.allCases, id: \.rawValue) { kind in
+                                    Text(kind.displayName).tag(kind.rawValue)
+                                }
                             }
                             .pickerStyle(.segmented)
                             .colorScheme(.dark)
 
-                            if (StillSourceKind(rawValue: stillSourceKindRaw) ?? .thetaLive) == .thetaLive {
+                            if StillSourceKind(persistedValue: stillSourceKindRaw) == .thetaLive {
                                 ThetaCameraCard(manager: thetaManager)
                             } else {
                                 External360CameraCard(source: External360StillSource.shared)

@@ -275,11 +275,12 @@ enum EquirectPostCalibration {
                   let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let seq = obj["sequence"] as? Int,
                   let flat = obj["phone_transform"] as? [Double], flat.count == 16 else { continue }
-            let cols = (0..<4).map { c in
-                SIMD4<Float>(Float(flat[c * 4]), Float(flat[c * 4 + 1]),
-                             Float(flat[c * 4 + 2]), Float(flat[c * 4 + 3]))
-            }
-            let m = simd_float4x4(columns: (cols[0], cols[1], cols[2], cols[3]))
+            let values = flat.map(Float.init)
+            let col0 = SIMD4<Float>(values[0], values[1], values[2], values[3])
+            let col1 = SIMD4<Float>(values[4], values[5], values[6], values[7])
+            let col2 = SIMD4<Float>(values[8], values[9], values[10], values[11])
+            let col3 = SIMD4<Float>(values[12], values[13], values[14], values[15])
+            let m = simd_float4x4(columns: (col0, col1, col2, col3))
             let swayM = (obj["exposure_motion_m"] as? Double) ?? (obj["trigger_motion_m"] as? Double)
             let swayDeg = (obj["exposure_motion_deg"] as? Double) ?? (obj["trigger_motion_deg"] as? Double)
             out.append(StillRecord(

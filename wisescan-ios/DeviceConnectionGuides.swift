@@ -186,16 +186,28 @@ struct Insta360DeferredImportGuideView: View {
                 GuideStepRow(number: 2, title: "Record normally",
                              text: "Scan as usual. Each accepted stillness tap records a 360° ticket with the phone pose and timestamp, but does not trigger the camera.")
                 GuideStepRow(number: 3, title: "Capture on the X6",
-                             text: "Capture matching stitched equirect stills on the Insta360 X6 during the scan. Keep them in capture order.")
+                             text: "Capture matching stitched equirect stills on the Insta360 X6 during the scan. Hold the rig still while you trigger each shot, and export stitched equirect JPEGs from the Insta360 app or Studio — not the camera-native dual-fisheye originals.")
                 GuideStepRow(number: 4, title: "Import into the scan",
-                             text: "Open the scan card, long-press Color, and choose Import Deferred 360° Stills. Select the X6 JPGs; Scan4D matches them to the recorded tickets in time/order.")
+                             text: "Open the scan card, long-press Color, and choose Import Deferred 360° Stills. Select the stitched JPEGs; Scan4D matches them to the recorded tickets by timestamp and warns if the timing no longer lines up.")
                 GuideStepRow(number: 5, title: "Process and export",
-                             text: "After import, Scan4D runs the normal 360° calibration, privacy, face-export, and export pipeline on the imported equirects.")
+                             text: "After import, Scan4D runs the normal 360° calibration, privacy, face-export, and export pipeline on the imported equirects. Insta360 faces currently ship with assumed leveling provenance until field validation is completed.")
             } header: {
                 Text("STEPS")
             } footer: {
                 Text("This is the pre-SDK path: no live trigger, wake, or download. It exists so Insta360 X6 rigs can be used before SDK approval.")
                     .font(.caption2).foregroundColor(.gray)
+            }
+            .listRowBackground(Color.white.opacity(0.05))
+
+            Section {
+                GuideNoteRow(icon: "person.crop.rectangle",
+                             text: "Imported originals remain in Photos or Files exactly as exported by Insta360. Scan4D's privacy blur applies only to the copies it stages and exports from the scan bundle.",
+                             color: .orange)
+                GuideNoteRow(icon: "exclamationmark.triangle.fill",
+                             text: "If Scan4D warns about a large time mismatch after import, check that you picked the same stitched shots you captured during the scan and remove extras before re-importing.",
+                             color: .orange)
+            } header: {
+                Text("IMPORTANT NOTES")
             }
             .listRowBackground(Color.white.opacity(0.05))
         }
