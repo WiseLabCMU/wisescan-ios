@@ -818,13 +818,10 @@ enum FeaturePointDiff {
 
     /// Diff the map about to be persisted against the loaded baseline. No-op when no map was
     /// loaded for this run.
-    ///
-    /// `sidecarDirectory` is where the `featdiff.ply` point cloud is written (the same directory
-    /// the caller archives the world map into). Passing nil skips the sidecar and logs only.
-    static func logDiff(against map: ARWorldMap, sidecarDirectory: URL?) {
+    static func logDiff(against map: ARWorldMap) {
         guard PerfDiag.enabled else { return }
-        // Copied out of the lock: everything below (clustering, PLY) runs on plain value copies,
-        // never while holding it.
+        // Copied out of the lock: everything below runs on plain value copies, never while
+        // holding it.
         guard let base = slot.withLock({ $0 }), !base.points.isEmpty else { return }
         let ids = map.rawFeaturePoints.identifiers
         let pts = map.rawFeaturePoints.points
@@ -832,22 +829,14 @@ enum FeaturePointDiff {
 
         var drift: [Float] = []
         drift.reserveCapacity(min(n, base.points.count))
-        var freshPts: [SIMD3<Float>] = []
-        // Banded here rather than after the fact: the loop already holds baseline, current and
-        // the distance between them, and `drift` gets sorted for the percentiles below.
-        var split = RetainedSplit()
-        var matchedIDs = Set<UInt64>(minimumCapacity: min(n, base.points.count))
+        var fresh = 0
         for i in 0..<n {
             if let old = base.points[ids[i]] {
-                let d = simd_distance(old, pts[i])
-                drift.append(d)
-                split.add(current: pts[i], baseline: old, drift: d)
-                matchedIDs.insert(ids[i])
+                drift.append(simd_distance(old, pts[i]))
             } else {
-                freshPts.append(pts[i])
+                fresh += 1
             }
         }
-        let fresh = freshPts.count
         let retained = drift.count
         let dropped = base.points.count - retained
         let retainedFrac = Float(retained) / Float(base.points.count)
@@ -874,209 +863,9 @@ enum FeaturePointDiff {
         PerfDiag.log(String(
             format: "[FeatDiff] baseline=%d(%@) current=%d | retained=%d (%.0f%%) dropped=%d fresh=%d | drift(retained): %@ | spatial-fallback: %@",
             base.points.count, base.name, n, retained, retainedFrac * 100, dropped, fresh, driftDesc, fallback))
-
-        // Where the drops landed. Contradiction culling (ARKit retiring points a moved object
-        // vacated) concentrates them into a few object-sized clusters; generic pruning scatters
-        // them across the whole map. The fresh cloud is the control — if it clusters in the same
-        // place, that's the object's NEW pose being re-observed, not a map-wide rebuild.
-        let droppedPts = base.points.filter { !matchedIDs.contains($0.key) }.map { $0.value }
-        logClusters(droppedPts, label: "drop-clusters")
-        logClusters(freshPts, label: "fresh-clusters")
-
-        // Retained ids whose positions ARKit rewrote by more than an object's width: clustered at
-        // their CURRENT positions, so a moved object reads as one dense cluster sitting on the new
-        // pose. A map-wide misfit instead scatters, and its avgΔ sits near the drift p95.
-        logClusters(split.movers, label: "mover-clusters",
-                    drifts: split.moverDrifts, note: String(format: "(>%.1fm)", driftMoverMin))
-
-        if let dir = sidecarDirectory {
-            writePLY(dropped: droppedPts, fresh: freshPts, retained: split, into: dir)
-        }
     }
 
-    // MARK: - Spatial breakdown
-
-    /// Cell edge for the connected-component pass. ~0.3 m is coarse enough that a moved object's
-    /// vacated points land in one component, fine enough that two objects a metre apart don't merge.
-    private static let clusterCell: Float = 0.3
-    /// Components below this are noise, not a moved object — rolled into the trailing "scattered" count.
-    private static let clusterMinPoints = 10
-    private static let clusterTopN = 5
-
-    /// Drift bands for retained points. Below `driftStable` is tracking noise plus map refinement;
-    /// the middle band is a global misfit (the whole map shifted, not one object); above
-    /// `driftMoverMin` a point plausibly rode a physical object to a new place, which is the case
-    /// the sidecar has to separate from background points that merely sit near that object.
-    private static let driftStable: Float = 0.10
-    private static let driftMoverMin: Float = 0.50
-
-    /// Retained points split by drift band as the diff loop walks them. `movers` / `moverBaselines`
-    /// / `moverDrifts` stay index-parallel: the sidecar draws each mover twice (new pose and old)
-    /// and the cluster line means the drifts per component.
-    private struct RetainedSplit {
-        var stable: [SIMD3<Float>] = []
-        var shifted: [SIMD3<Float>] = []
-        var movers: [SIMD3<Float>] = []
-        var moverBaselines: [SIMD3<Float>] = []
-        var moverDrifts: [Float] = []
-
-        mutating func add(current: SIMD3<Float>, baseline: SIMD3<Float>, drift: Float) {
-            if drift > driftMoverMin {
-                movers.append(current)
-                moverBaselines.append(baseline)
-                moverDrifts.append(drift)
-            } else if drift < driftStable {
-                stable.append(current)
-            } else {
-                shifted.append(current)
-            }
-        }
-    }
-
-    private struct Cluster {
-        var count: Int
-        var centroid: SIMD3<Float>
-        var extent: SIMD3<Float>
-        /// Mean of the per-point scalars passed to `clusters(of:cell:drifts:)`; nil when none were.
-        var meanDrift: Float?
-    }
-
-    /// `note` is inserted between the label and the counts; `drifts` (index-parallel with `points`)
-    /// adds a per-cluster `avgΔ`. Both default to nothing, so the drop/fresh lines stay byte-identical.
-    private static func logClusters(_ points: [SIMD3<Float>], label: String,
-                                    drifts: [Float]? = nil, note: String? = nil) {
-        let prefix = "[FeatDiff \(label)] " + (note.map { $0 + " " } ?? "")
-        guard !points.isEmpty else {
-            PerfDiag.log(prefix + "n=0")
-            return
-        }
-        let all = clusters(of: points, cell: clusterCell, drifts: drifts)
-        let scattered = all.filter { $0.count < clusterMinPoints }.reduce(0) { $0 + $1.count }
-        let top = all.filter { $0.count >= clusterMinPoints }.prefix(clusterTopN)
-        var parts = ["n=\(points.count) in \(all.count) clusters"]
-        for (i, c) in top.enumerated() {
-            var part = String(format: "#%d: %dpts c=(%.2f,%.2f,%.2f) ext=%.1fx%.1fx%.1fm",
-                              i + 1, c.count, c.centroid.x, c.centroid.y, c.centroid.z,
-                              c.extent.x, c.extent.y, c.extent.z)
-            if let d = c.meanDrift { part += String(format: " avgΔ=%.2fm", d) }
-            parts.append(part)
-        }
-        parts.append("scattered(<\(clusterMinPoints)pts clusters)=\(scattered)")
-        PerfDiag.log(prefix + parts.joined(separator: " | "))
-    }
-
-    /// Connected components over a uniform grid: points share a component when their cells are
-    /// 26-neighbours. O(n) — one hash pass to bin, one BFS over the *occupied cells* (not the
-    /// points), so 20k points is microseconds. Sorted by count, descending.
-    ///
-    /// Cells are addressed by slot index rather than by the packed key alone, so a 21-bit band
-    /// collision can't silently fuse two components half a map apart.
-    ///
-    /// `drifts`, when given, is index-parallel with `points` and is averaged per component.
-    private static func clusters(of points: [SIMD3<Float>], cell: Float,
-                                 drifts: [Float]? = nil) -> [Cluster] {
-        var slotOf = [Int64: Int](minimumCapacity: points.count)
-        var cellCoord: [SIMD3<Int64>] = []
-        var cellPoints: [[Int]] = []
-        for (i, p) in points.enumerated() {
-            let c = SIMD3<Int64>(Int64((p.x / cell).rounded(.down)),
-                                 Int64((p.y / cell).rounded(.down)),
-                                 Int64((p.z / cell).rounded(.down)))
-            let key = (c.x & 0x1FFFFF) | ((c.y & 0x1FFFFF) << 21) | ((c.z & 0x1FFFFF) << 42)
-            if let s = slotOf[key], cellCoord[s] == c {
-                cellPoints[s].append(i)
-            } else {
-                slotOf[key] = cellPoints.count
-                cellCoord.append(c)
-                cellPoints.append([i])
-            }
-        }
-
-        var visited = [Bool](repeating: false, count: cellPoints.count)
-        var out: [Cluster] = []
-        var queue: [Int] = []
-        for start in 0..<cellPoints.count where !visited[start] {
-            visited[start] = true
-            queue.removeAll(keepingCapacity: true)
-            queue.append(start)
-            var head = 0
-            var count = 0
-            var sum = SIMD3<Float>(repeating: 0)
-            var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
-            var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
-            var driftSum: Float = 0
-            while head < queue.count {
-                let s = queue[head]; head += 1
-                for i in cellPoints[s] {
-                    let p = points[i]
-                    count += 1
-                    sum += p
-                    lo = simd_min(lo, p)
-                    hi = simd_max(hi, p)
-                    if let drifts { driftSum += drifts[i] }
-                }
-                let c = cellCoord[s]
-                for dx in -1...1 { for dy in -1...1 { for dz in -1...1 {
-                    if dx == 0 && dy == 0 && dz == 0 { continue }
-                    let nc = SIMD3<Int64>(c.x + Int64(dx), c.y + Int64(dy), c.z + Int64(dz))
-                    let key = (nc.x & 0x1FFFFF) | ((nc.y & 0x1FFFFF) << 21) | ((nc.z & 0x1FFFFF) << 42)
-                    guard let ns = slotOf[key], cellCoord[ns] == nc, !visited[ns] else { continue }
-                    visited[ns] = true
-                    queue.append(ns)
-                }}}
-            }
-            out.append(Cluster(count: count, centroid: sum / Float(count), extent: hi - lo,
-                               meanDrift: drifts == nil ? nil : driftSum / Float(count)))
-        }
-        return out.sorted { $0.count > $1.count }
-    }
-
-    /// Sidecar point cloud for MeshLab/CloudCompare: dropped (red, at their BASELINE positions),
-    /// fresh (green) at their current positions, and retained at their current positions banded by
-    /// drift — grey stable, blue global-misfit, magenta mover. Each mover is drawn a second time in
-    /// orange at its BASELINE position, so an object ARKit dragged reads as a magenta blob (new
-    /// pose) paired with an orange one (old pose); the gap between them is the displacement.
-    /// Diagnostics-only — failure to write is logged and ignored, never propagated into the save.
-    private static func writePLY(dropped: [SIMD3<Float>], fresh: [SIMD3<Float>],
-                                 retained: RetainedSplit, into directory: URL) {
-        let total = dropped.count + fresh.count + retained.stable.count + retained.shifted.count
-            + retained.movers.count + retained.moverBaselines.count
-        guard total > 0 else { return }
-        var body = ""
-        body.reserveCapacity(total * 40)
-        func append(_ points: [SIMD3<Float>], _ rgb: String) {
-            for p in points {
-                body += String(format: "%.4f %.4f %.4f ", p.x, p.y, p.z) + rgb + "\n"
-            }
-        }
-        append(dropped, "255 0 0")
-        append(fresh, "0 255 0")
-        append(retained.stable, "128 128 128")
-        append(retained.shifted, "0 128 255")
-        append(retained.movers, "255 0 255")
-        append(retained.moverBaselines, "255 165 0")
-
-        let header = """
-        ply
-        format ascii 1.0
-        element vertex \(total)
-        property float x
-        property float y
-        property float z
-        property uchar red
-        property uchar green
-        property uchar blue
-        end_header
-
-        """
-        let url = directory.appendingPathComponent("featdiff.ply")
-        do {
-            try (header + body).write(to: url, atomically: true, encoding: .utf8)
-            PerfDiag.log("[FeatDiff ply] wrote \(url.path) (\(total) pts)")
-        } catch {
-            PerfDiag.log("[FeatDiff ply] write failed at \(url.path): \(error)")
-        }
-    }
+    // MARK: - Spatial fallback
 
     /// Fraction of `baseline` points with at least one `current` point within `radius`. Uniform
     /// grid at `cellSize = radius`, so each query scans the 27-cell neighbourhood — O(n), not O(n²).

@@ -50,25 +50,19 @@ enum VertexColorAccumulator {
             LocalizationDiag.logMapStats(map, context: "save (about to persist)")
 
             // ...and of those points, which are inherited from the map this run LOADED vs minted
-            // fresh this session, plus how far the inherited ones moved, and WHERE the dropped
-            // ones were. No-op when no map was loaded. Runs on whatever queue getCurrentWorldMap
-            // called back on — the baseline slot is lock-guarded for exactly that.
-            //
-            // Two sidecars land beside the map archive below, i.e. in the temp directory, and
-            // they are there for opposite reasons — do not collapse them into one rule:
-            //   • featdiff.ply is DIAGNOSTIC and stays in temp. Nothing enumerates temp's root
-            //     (the export zip stages named files from the scan dir into its own
-            //     staging_<uuid> subdir), so a diagnostics-only file can't reach a scan
-            //     directory, a parser, or an upload. Same convention as DiagnosticsLogExport.
-            //   • <map stem>.features is a PRODUCT artifact and does exactly the opposite:
-            //     saveScan looks it up by that derived name and promotes it into the scan
-            //     directory (as FeaturePointCloudFile.filename). That is why it is named off the
-            //     map archive's own UUID stem rather than a fixed filename — the promotion then
-            //     picks up the cloud belonging to the map that actually won, and a retried
-            //     export or a concurrent save each writes its own stem instead of overwriting
-            //     or stealing the other's.
+            // fresh this session, plus how far the inherited ones moved. No-op when no map was
+            // loaded. Runs on whatever queue getCurrentWorldMap called back on — the baseline
+            // slot is lock-guarded for exactly that.
+            FeaturePointDiff.logDiff(against: map)
+
+            // The map archive below lands in the temp directory, and <map stem>.features beside
+            // it is a PRODUCT artifact: saveScan looks it up by that derived name and promotes it
+            // into the scan directory (as FeaturePointCloudFile.filename). That is why it is
+            // named off the map archive's own UUID stem rather than a fixed filename — the
+            // promotion then picks up the cloud belonging to the map that actually won, and a
+            // retried export or a concurrent save each writes its own stem instead of overwriting
+            // or stealing the other's.
             let mapDirectory = FileManager.default.temporaryDirectory
-            FeaturePointDiff.logDiff(against: map, sidecarDirectory: mapDirectory)
 
             // Wandering-cluster check (see mapSuspect doc): flag a map whose feature cloud was
             // polluted by a tracking excursion so rescan/link flows can warn before trusting it.
@@ -124,8 +118,8 @@ enum VertexColorAccumulator {
     /// Writes the archived map's feature cloud as a sibling of the map archive, for `saveScan` to
     /// promote into the scan directory.
     ///
-    /// NOT PerfDiag-gated (a product artifact that ships in the bundle, unlike the featdiff.ply
-    /// probe) — gate it and it silently disappears from Release builds. Failure is swallowed
+    /// NOT PerfDiag-gated (a product artifact that ships in the bundle, unlike the diagnostic
+    /// probes above) — gate it and it silently disappears from Release builds. Failure is swallowed
     /// rather than thrown: a sidecar that can't be written must never cost us the map or the save,
     /// and `saveScan` names the absence in `incomplete_artifacts` instead.
     private static func writeFeatureSidecar(for map: ARWorldMap, besideMapAt mapURL: URL) {
