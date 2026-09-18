@@ -49,6 +49,18 @@ enum VertexColorAccumulator {
             // sudden collapse here is the inherited map being dropped before export.
             LocalizationDiag.logMapStats(map, context: "save (about to persist)")
 
+            // ...and of those points, which are inherited from the map this run LOADED vs minted
+            // fresh this session, plus how far the inherited ones moved, and WHERE the dropped
+            // ones were. No-op when no map was loaded. Runs on whatever queue getCurrentWorldMap
+            // called back on — the baseline slot is lock-guarded for exactly that.
+            //
+            // The featdiff.ply sidecar goes beside the map archive below, i.e. the temp directory:
+            // nothing enumerates temp's root (the export zip stages named files from the scan dir
+            // into its own staging_<uuid> subdir), so a diagnostics-only file can't reach a scan
+            // directory, a parser, or an upload. Same convention as DiagnosticsLogExport.
+            let mapDirectory = FileManager.default.temporaryDirectory
+            FeaturePointDiff.logDiff(against: map, sidecarDirectory: mapDirectory)
+
             // Wandering-cluster check (see mapSuspect doc): flag a map whose feature cloud was
             // polluted by a tracking excursion so rescan/link flows can warn before trusting it.
             // mapSuspect logs its own numbers and verdict at .notice — a bare "looks
@@ -59,7 +71,7 @@ enum VertexColorAccumulator {
             do {
                 let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
                 let filename = "worldmap_\(UUID().uuidString.prefix(8)).worldmap"
-                let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+                let fileURL = mapDirectory.appendingPathComponent(filename)
                 try data.write(to: fileURL)
                 completion(fileURL, suspect)
             } catch {

@@ -2,6 +2,7 @@ import Foundation
 import ARKit
 import os
 import simd
+import Synchronization
 
 /// Phase-0 localization diagnostics (see `docs/fix-localization-plan.md`).
 ///
@@ -221,6 +222,9 @@ enum LocalizationDiag {
             mapName = name
             features = map.rawFeaturePoints.points.count
             anchors = map.anchors.count
+            // Baseline for the save-time freshness diff. This is the last instant the cloud is
+            // provably free of live points — the session hasn't run against this map yet.
+            FeaturePointDiff.capture(map, name: name)
         }
         mutating func recordSettle(pos: SIMD3<Float>, yaw: Float, secs: Double) {
             settlePos = pos; settleYaw = yaw; settleSecs = secs
@@ -770,5 +774,346 @@ enum LocalizationDiag {
             }}}
             return best >= 0 ? best : nil
         }
+    }
+}
+
+/// Feature-point freshness diff: of the points in the map a rescan **saves**, which are RETAINED
+/// from the map it **loaded**, which are NEW this session — and did the retained ones move?
+///
+/// Log-only, `PerfDiag`-gated, and exactly two O(n) passes for a whole run: one snapshot at map
+/// load (`capture`, main thread, before `session.run`) and one diff at save (`logDiff`). There is
+/// deliberately **no per-frame component** — a "log-only" probe that burns CPU during capture
+/// corrupts the very scan it measures (the gen-8 ICP stall).
+///
+/// Stores only `[identifier: position]` (a few MB), never the `ARWorldMap` — a retained map is a
+/// ~50 MB lifetime footprint (see the world-map cache finding).
+enum FeaturePointDiff {
+    private struct Baseline {
+        let name: String
+        let points: [UInt64: SIMD3<Float>]
+    }
+
+    /// One loaded map per run, so a single slot. Lock-guarded rather than main-only: `capture`
+    /// runs on main but `logDiff` runs on whatever queue `getCurrentWorldMap` calls back on.
+    private static let slot = Mutex<Baseline?>(nil)
+
+    /// Snapshot the loaded map's feature cloud. Call where the map is deserialized, before the
+    /// session runs with it.
+    static func capture(_ map: ARWorldMap, name: String?) {
+        guard PerfDiag.enabled else { return }
+        // Bind both parallel arrays once: `ARPointCloud.identifiers`/`.points` bridge a fresh
+        // Array on every access, so touching them inside the loop would be O(n²).
+        let ids = map.rawFeaturePoints.identifiers
+        let pts = map.rawFeaturePoints.points
+        var points = [UInt64: SIMD3<Float>](minimumCapacity: ids.count)
+        for i in 0..<min(ids.count, pts.count) { points[ids[i]] = pts[i] }
+        slot.withLock { $0 = Baseline(name: name ?? "unnamed", points: points) }
+    }
+
+    /// Drop the baseline. Required on a run that loads no map, so its save can't diff against a
+    /// previous run's map.
+    static func clear() {
+        slot.withLock { $0 = nil }
+    }
+
+    /// Diff the map about to be persisted against the loaded baseline. No-op when no map was
+    /// loaded for this run.
+    ///
+    /// `sidecarDirectory` is where the `featdiff.ply` point cloud is written (the same directory
+    /// the caller archives the world map into). Passing nil skips the sidecar and logs only.
+    static func logDiff(against map: ARWorldMap, sidecarDirectory: URL?) {
+        guard PerfDiag.enabled else { return }
+        // Copied out of the lock: everything below (clustering, PLY) runs on plain value copies,
+        // never while holding it.
+        guard let base = slot.withLock({ $0 }), !base.points.isEmpty else { return }
+        let ids = map.rawFeaturePoints.identifiers
+        let pts = map.rawFeaturePoints.points
+        let n = min(ids.count, pts.count)
+
+        var drift: [Float] = []
+        drift.reserveCapacity(min(n, base.points.count))
+        var freshPts: [SIMD3<Float>] = []
+        // Banded here rather than after the fact: the loop already holds baseline, current and
+        // the distance between them, and `drift` gets sorted for the percentiles below.
+        var split = RetainedSplit()
+        var matchedIDs = Set<UInt64>(minimumCapacity: min(n, base.points.count))
+        for i in 0..<n {
+            if let old = base.points[ids[i]] {
+                let d = simd_distance(old, pts[i])
+                drift.append(d)
+                split.add(current: pts[i], baseline: old, drift: d)
+                matchedIDs.insert(ids[i])
+            } else {
+                freshPts.append(pts[i])
+            }
+        }
+        let fresh = freshPts.count
+        let retained = drift.count
+        let dropped = base.points.count - retained
+        let retainedFrac = Float(retained) / Float(base.points.count)
+
+        var driftDesc = "n/a (nothing retained by id)"
+        if retained > 0 {
+            drift.sort()
+            func p(_ q: Float) -> Float { drift[min(retained - 1, Int(Float(retained - 1) * q))] }
+            // Sorted, so the first over-threshold index is the count of everything above it.
+            let moved = retained - (drift.firstIndex { $0 > 0.01 } ?? retained)
+            driftDesc = String(format: "med=%.1fcm p95=%.1fcm max=%.1fcm >1cm=%d",
+                               p(0.50) * 100, p(0.95) * 100, p(1.0) * 100, moved)
+        }
+
+        // If ARKit remints identifiers per session, the id diff reads as a total wipe even when the
+        // geometry survived intact — which is the opposite conclusion. So when retention collapses,
+        // re-ask the question spatially: does each baseline point still have ANY new point near it?
+        var fallback = "n/a"
+        if retainedFrac < 0.05 {
+            let matched = spatialMatchFraction(baseline: Array(base.points.values), current: pts, radius: 0.05)
+            fallback = String(format: "%.0f%% of baseline within 5cm of some new point", matched * 100)
+        }
+
+        PerfDiag.log(String(
+            format: "[FeatDiff] baseline=%d(%@) current=%d | retained=%d (%.0f%%) dropped=%d fresh=%d | drift(retained): %@ | spatial-fallback: %@",
+            base.points.count, base.name, n, retained, retainedFrac * 100, dropped, fresh, driftDesc, fallback))
+
+        // Where the drops landed. Contradiction culling (ARKit retiring points a moved object
+        // vacated) concentrates them into a few object-sized clusters; generic pruning scatters
+        // them across the whole map. The fresh cloud is the control — if it clusters in the same
+        // place, that's the object's NEW pose being re-observed, not a map-wide rebuild.
+        let droppedPts = base.points.filter { !matchedIDs.contains($0.key) }.map { $0.value }
+        logClusters(droppedPts, label: "drop-clusters")
+        logClusters(freshPts, label: "fresh-clusters")
+
+        // Retained ids whose positions ARKit rewrote by more than an object's width: clustered at
+        // their CURRENT positions, so a moved object reads as one dense cluster sitting on the new
+        // pose. A map-wide misfit instead scatters, and its avgΔ sits near the drift p95.
+        logClusters(split.movers, label: "mover-clusters",
+                    drifts: split.moverDrifts, note: String(format: "(>%.1fm)", driftMoverMin))
+
+        if let dir = sidecarDirectory {
+            writePLY(dropped: droppedPts, fresh: freshPts, retained: split, into: dir)
+        }
+    }
+
+    // MARK: - Spatial breakdown
+
+    /// Cell edge for the connected-component pass. ~0.3 m is coarse enough that a moved object's
+    /// vacated points land in one component, fine enough that two objects a metre apart don't merge.
+    private static let clusterCell: Float = 0.3
+    /// Components below this are noise, not a moved object — rolled into the trailing "scattered" count.
+    private static let clusterMinPoints = 10
+    private static let clusterTopN = 5
+
+    /// Drift bands for retained points. Below `driftStable` is tracking noise plus map refinement;
+    /// the middle band is a global misfit (the whole map shifted, not one object); above
+    /// `driftMoverMin` a point plausibly rode a physical object to a new place, which is the case
+    /// the sidecar has to separate from background points that merely sit near that object.
+    private static let driftStable: Float = 0.10
+    private static let driftMoverMin: Float = 0.50
+
+    /// Retained points split by drift band as the diff loop walks them. `movers` / `moverBaselines`
+    /// / `moverDrifts` stay index-parallel: the sidecar draws each mover twice (new pose and old)
+    /// and the cluster line means the drifts per component.
+    private struct RetainedSplit {
+        var stable: [SIMD3<Float>] = []
+        var shifted: [SIMD3<Float>] = []
+        var movers: [SIMD3<Float>] = []
+        var moverBaselines: [SIMD3<Float>] = []
+        var moverDrifts: [Float] = []
+
+        mutating func add(current: SIMD3<Float>, baseline: SIMD3<Float>, drift: Float) {
+            if drift > driftMoverMin {
+                movers.append(current)
+                moverBaselines.append(baseline)
+                moverDrifts.append(drift)
+            } else if drift < driftStable {
+                stable.append(current)
+            } else {
+                shifted.append(current)
+            }
+        }
+    }
+
+    private struct Cluster {
+        var count: Int
+        var centroid: SIMD3<Float>
+        var extent: SIMD3<Float>
+        /// Mean of the per-point scalars passed to `clusters(of:cell:drifts:)`; nil when none were.
+        var meanDrift: Float?
+    }
+
+    /// `note` is inserted between the label and the counts; `drifts` (index-parallel with `points`)
+    /// adds a per-cluster `avgΔ`. Both default to nothing, so the drop/fresh lines stay byte-identical.
+    private static func logClusters(_ points: [SIMD3<Float>], label: String,
+                                    drifts: [Float]? = nil, note: String? = nil) {
+        let prefix = "[FeatDiff \(label)] " + (note.map { $0 + " " } ?? "")
+        guard !points.isEmpty else {
+            PerfDiag.log(prefix + "n=0")
+            return
+        }
+        let all = clusters(of: points, cell: clusterCell, drifts: drifts)
+        let scattered = all.filter { $0.count < clusterMinPoints }.reduce(0) { $0 + $1.count }
+        let top = all.filter { $0.count >= clusterMinPoints }.prefix(clusterTopN)
+        var parts = ["n=\(points.count) in \(all.count) clusters"]
+        for (i, c) in top.enumerated() {
+            var part = String(format: "#%d: %dpts c=(%.2f,%.2f,%.2f) ext=%.1fx%.1fx%.1fm",
+                              i + 1, c.count, c.centroid.x, c.centroid.y, c.centroid.z,
+                              c.extent.x, c.extent.y, c.extent.z)
+            if let d = c.meanDrift { part += String(format: " avgΔ=%.2fm", d) }
+            parts.append(part)
+        }
+        parts.append("scattered(<\(clusterMinPoints)pts clusters)=\(scattered)")
+        PerfDiag.log(prefix + parts.joined(separator: " | "))
+    }
+
+    /// Connected components over a uniform grid: points share a component when their cells are
+    /// 26-neighbours. O(n) — one hash pass to bin, one BFS over the *occupied cells* (not the
+    /// points), so 20k points is microseconds. Sorted by count, descending.
+    ///
+    /// Cells are addressed by slot index rather than by the packed key alone, so a 21-bit band
+    /// collision can't silently fuse two components half a map apart.
+    ///
+    /// `drifts`, when given, is index-parallel with `points` and is averaged per component.
+    private static func clusters(of points: [SIMD3<Float>], cell: Float,
+                                 drifts: [Float]? = nil) -> [Cluster] {
+        var slotOf = [Int64: Int](minimumCapacity: points.count)
+        var cellCoord: [SIMD3<Int64>] = []
+        var cellPoints: [[Int]] = []
+        for (i, p) in points.enumerated() {
+            let c = SIMD3<Int64>(Int64((p.x / cell).rounded(.down)),
+                                 Int64((p.y / cell).rounded(.down)),
+                                 Int64((p.z / cell).rounded(.down)))
+            let key = (c.x & 0x1FFFFF) | ((c.y & 0x1FFFFF) << 21) | ((c.z & 0x1FFFFF) << 42)
+            if let s = slotOf[key], cellCoord[s] == c {
+                cellPoints[s].append(i)
+            } else {
+                slotOf[key] = cellPoints.count
+                cellCoord.append(c)
+                cellPoints.append([i])
+            }
+        }
+
+        var visited = [Bool](repeating: false, count: cellPoints.count)
+        var out: [Cluster] = []
+        var queue: [Int] = []
+        for start in 0..<cellPoints.count where !visited[start] {
+            visited[start] = true
+            queue.removeAll(keepingCapacity: true)
+            queue.append(start)
+            var head = 0
+            var count = 0
+            var sum = SIMD3<Float>(repeating: 0)
+            var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+            var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+            var driftSum: Float = 0
+            while head < queue.count {
+                let s = queue[head]; head += 1
+                for i in cellPoints[s] {
+                    let p = points[i]
+                    count += 1
+                    sum += p
+                    lo = simd_min(lo, p)
+                    hi = simd_max(hi, p)
+                    if let drifts { driftSum += drifts[i] }
+                }
+                let c = cellCoord[s]
+                for dx in -1...1 { for dy in -1...1 { for dz in -1...1 {
+                    if dx == 0 && dy == 0 && dz == 0 { continue }
+                    let nc = SIMD3<Int64>(c.x + Int64(dx), c.y + Int64(dy), c.z + Int64(dz))
+                    let key = (nc.x & 0x1FFFFF) | ((nc.y & 0x1FFFFF) << 21) | ((nc.z & 0x1FFFFF) << 42)
+                    guard let ns = slotOf[key], cellCoord[ns] == nc, !visited[ns] else { continue }
+                    visited[ns] = true
+                    queue.append(ns)
+                }}}
+            }
+            out.append(Cluster(count: count, centroid: sum / Float(count), extent: hi - lo,
+                               meanDrift: drifts == nil ? nil : driftSum / Float(count)))
+        }
+        return out.sorted { $0.count > $1.count }
+    }
+
+    /// Sidecar point cloud for MeshLab/CloudCompare: dropped (red, at their BASELINE positions),
+    /// fresh (green) at their current positions, and retained at their current positions banded by
+    /// drift — grey stable, blue global-misfit, magenta mover. Each mover is drawn a second time in
+    /// orange at its BASELINE position, so an object ARKit dragged reads as a magenta blob (new
+    /// pose) paired with an orange one (old pose); the gap between them is the displacement.
+    /// Diagnostics-only — failure to write is logged and ignored, never propagated into the save.
+    private static func writePLY(dropped: [SIMD3<Float>], fresh: [SIMD3<Float>],
+                                 retained: RetainedSplit, into directory: URL) {
+        let total = dropped.count + fresh.count + retained.stable.count + retained.shifted.count
+            + retained.movers.count + retained.moverBaselines.count
+        guard total > 0 else { return }
+        var body = ""
+        body.reserveCapacity(total * 40)
+        func append(_ points: [SIMD3<Float>], _ rgb: String) {
+            for p in points {
+                body += String(format: "%.4f %.4f %.4f ", p.x, p.y, p.z) + rgb + "\n"
+            }
+        }
+        append(dropped, "255 0 0")
+        append(fresh, "0 255 0")
+        append(retained.stable, "128 128 128")
+        append(retained.shifted, "0 128 255")
+        append(retained.movers, "255 0 255")
+        append(retained.moverBaselines, "255 165 0")
+
+        let header = """
+        ply
+        format ascii 1.0
+        element vertex \(total)
+        property float x
+        property float y
+        property float z
+        property uchar red
+        property uchar green
+        property uchar blue
+        end_header
+
+        """
+        let url = directory.appendingPathComponent("featdiff.ply")
+        do {
+            try (header + body).write(to: url, atomically: true, encoding: .utf8)
+            PerfDiag.log("[FeatDiff ply] wrote \(url.path) (\(total) pts)")
+        } catch {
+            PerfDiag.log("[FeatDiff ply] write failed at \(url.path): \(error)")
+        }
+    }
+
+    /// Fraction of `baseline` points with at least one `current` point within `radius`. Uniform
+    /// grid at `cellSize = radius`, so each query scans the 27-cell neighbourhood — O(n), not O(n²).
+    private static func spatialMatchFraction(baseline: [SIMD3<Float>], current: [SIMD3<Float>],
+                                             radius: Float) -> Float {
+        guard !baseline.isEmpty, !current.isEmpty else { return 0 }
+        let cell = radius
+        var grid = [Int64: [SIMD3<Float>]](minimumCapacity: current.count)
+        for p in current { grid[cellKey(p, cell), default: []].append(p) }
+
+        let r = Int64((radius / cell).rounded(.up))
+        let r2 = radius * radius
+        var matched = 0
+        for q in baseline {
+            let bx = Int64((q.x / cell).rounded(.down))
+            let by = Int64((q.y / cell).rounded(.down))
+            let bz = Int64((q.z / cell).rounded(.down))
+            search: for dx in -r...r { for dy in -r...r { for dz in -r...r {
+                let k = ((bx + dx) & 0x1FFFFF)
+                    | (((by + dy) & 0x1FFFFF) << 21)
+                    | (((bz + dz) & 0x1FFFFF) << 42)
+                guard let bucket = grid[k] else { continue }
+                for p in bucket where simd_distance_squared(p, q) <= r2 {
+                    matched += 1
+                    break search
+                }
+            }}}
+        }
+        return Float(matched) / Float(baseline.count)
+    }
+
+    /// Same 21-bit-band pack as `LocalizationDiag.VoxelGrid`; band collisions only cost extra
+    /// candidates, which the exact distance test then rejects.
+    private static func cellKey(_ p: SIMD3<Float>, _ cell: Float) -> Int64 {
+        let x = Int64((p.x / cell).rounded(.down))
+        let y = Int64((p.y / cell).rounded(.down))
+        let z = Int64((p.z / cell).rounded(.down))
+        return (x & 0x1FFFFF) | ((y & 0x1FFFFF) << 21) | ((z & 0x1FFFFF) << 42)
     }
 }

@@ -560,7 +560,12 @@ struct ARCoverageView: UIViewRepresentable {
                 // Phase-0 diag: mark this run as recorded so stop emits a summary. A no-map run
                 // has nothing to relocalize → start the summary fresh (drops any stale map/settle).
                 if PerfDiag.enabled {
-                    if config.initialWorldMap == nil { context.coordinator.locDiagSummary = .init() }
+                    if config.initialWorldMap == nil {
+                        context.coordinator.locDiagSummary = .init()
+                        // ...and drop any feature-point baseline a PREVIOUS run left in the
+                        // process-wide slot, so this run's save doesn't diff against a stale map.
+                        FeaturePointDiff.clear()
+                    }
                     context.coordinator.locDiagSummary.didRecord = true
                 }
                 // Start RoomPlan session alongside ARKit (shares the same ARSession)
