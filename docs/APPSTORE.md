@@ -68,7 +68,7 @@ BULK OPERATIONS
 • Background post-scan processing with per-card progress
 
 FLEXIBLE EXPORT FORMATS
-• Scan4D: Full bundle with metadata, relocalization map, images, depth, confidence, and camera data
+• Scan4D: Full bundle with metadata, ARKit feature points, images, depth, confidence, and camera data
 • Polycam: Raw data import compatible with Polycam
 • RAW: Nerfstudio/COLMAP-compatible transforms.json + images + depth
 • OBJ / PLY / USDZ: Native mesh formats for MeshLab, Blender, and iOS Quick Look

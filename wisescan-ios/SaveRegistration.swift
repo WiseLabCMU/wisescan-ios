@@ -21,6 +21,9 @@ import RoomPlan
 ///   a bootstrap in the scan's own capture frame. The NEXT rescan relocalizes into that raw
 ///   frame while its ghost mesh is canonical — the ghost loader undoes this scan's transform
 ///   (`inverseForGhost`) so ghost + live stay co-framed (visual overlay, manual nudge, ICP probe).
+/// - `arkit_features.bin` — RAW. The feature cloud is serialized from that same `ARWorldMap` at
+///   save time, BEFORE registration runs, so it is permanently in this scan's raw capture frame —
+///   even though the Nerfstudio bundle ships it beside the canonical `mesh.obj` / `roomplan.json`.
 /// - `roomplan_raw.json` — RAW (Apple's opaque Codable, kept for round-tripping).
 /// - `registration.json` — the sidecar written here: the transform + fit stats + whether it was
 ///   applied, so every consumer (ghost loader, future stitch/pose-graph work) can recover the
@@ -78,7 +81,8 @@ enum SaveRegistration {
     private static let sidecarName = "registration.json"
     private static let artifactNote =
         "mesh.obj and roomplan.json are in the location's canonical (original-scan) frame; "
-        + "relocalization.worldmap and roomplan_raw.json remain in this scan's raw capture frame"
+        + "relocalization.worldmap, roomplan_raw.json and arkit_features.bin remain in this scan's "
+        + "raw capture frame"
 
     // MARK: - The save-time registration
 

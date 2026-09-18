@@ -54,10 +54,19 @@ enum VertexColorAccumulator {
             // ones were. No-op when no map was loaded. Runs on whatever queue getCurrentWorldMap
             // called back on — the baseline slot is lock-guarded for exactly that.
             //
-            // The featdiff.ply sidecar goes beside the map archive below, i.e. the temp directory:
-            // nothing enumerates temp's root (the export zip stages named files from the scan dir
-            // into its own staging_<uuid> subdir), so a diagnostics-only file can't reach a scan
-            // directory, a parser, or an upload. Same convention as DiagnosticsLogExport.
+            // Two sidecars land beside the map archive below, i.e. in the temp directory, and
+            // they are there for opposite reasons — do not collapse them into one rule:
+            //   • featdiff.ply is DIAGNOSTIC and stays in temp. Nothing enumerates temp's root
+            //     (the export zip stages named files from the scan dir into its own
+            //     staging_<uuid> subdir), so a diagnostics-only file can't reach a scan
+            //     directory, a parser, or an upload. Same convention as DiagnosticsLogExport.
+            //   • <map stem>.features is a PRODUCT artifact and does exactly the opposite:
+            //     saveScan looks it up by that derived name and promotes it into the scan
+            //     directory (as FeaturePointCloudFile.filename). That is why it is named off the
+            //     map archive's own UUID stem rather than a fixed filename — the promotion then
+            //     picks up the cloud belonging to the map that actually won, and a retried
+            //     export or a concurrent save each writes its own stem instead of overwriting
+            //     or stealing the other's.
             let mapDirectory = FileManager.default.temporaryDirectory
             FeaturePointDiff.logDiff(against: map, sidecarDirectory: mapDirectory)
 
@@ -70,9 +79,15 @@ enum VertexColorAccumulator {
 
             do {
                 let data = try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
-                let filename = "worldmap_\(UUID().uuidString.prefix(8)).worldmap"
-                let fileURL = mapDirectory.appendingPathComponent(filename)
+                let fileURL = mapDirectory.appendingPathComponent("worldmap_\(UUID().uuidString.prefix(8)).worldmap")
                 try data.write(to: fileURL)
+
+                // Ordering is load-bearing: saveScan runs off `completion` and MOVES the map (and
+                // this sidecar) out of temp, so writing it after the callback races that move and
+                // shows up as an intermittently-missing artifact. Hence: after `fileURL` exists,
+                // before `completion` fires.
+                writeFeatureSidecar(for: map, besideMapAt: fileURL)
+
                 completion(fileURL, suspect)
             } catch {
                 print("Error saving ARWorldMap: \(error)")
@@ -104,6 +119,23 @@ enum VertexColorAccumulator {
             print("[Warning] ARWorldMap export timed out after \(worldMapTimeout)s. Proceeding without map.")
             completion(nil, false)
         }
+    }
+
+    /// Writes the archived map's feature cloud as a sibling of the map archive, for `saveScan` to
+    /// promote into the scan directory.
+    ///
+    /// NOT PerfDiag-gated (a product artifact that ships in the bundle, unlike the featdiff.ply
+    /// probe) — gate it and it silently disappears from Release builds. Failure is swallowed
+    /// rather than thrown: a sidecar that can't be written must never cost us the map or the save,
+    /// and `saveScan` names the absence in `incomplete_artifacts` instead.
+    private static func writeFeatureSidecar(for map: ARWorldMap, besideMapAt mapURL: URL) {
+        // Bind both parallel arrays ONCE — ARPointCloud bridges a fresh Array on every property
+        // access (see LocalizationDiag.capture), so indexing `.points` inside a loop is O(n²).
+        // `encode` does the min-length pairing.
+        let ids = map.rawFeaturePoints.identifiers
+        let pts = map.rawFeaturePoints.points
+        let data = FeaturePointCloudFile.encode(ids: ids, points: pts)
+        try? data.write(to: FeaturePointCloudFile.tempURL(besideWorldMap: mapURL), options: .atomic)
     }
 
     /// Generate normals-based vertex colors (fast, no image I/O).

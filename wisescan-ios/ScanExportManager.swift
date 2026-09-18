@@ -717,7 +717,10 @@ struct ScanExportManager {
 
         switch format {
         case .scan4d:
-            // scan4d_metadata.json + relocalization.worldmap + full Polycam payload
+            // scan4d_metadata.json + arkit_features.bin + full Polycam payload.
+            // The opaque ARWorldMap itself is NOT exported — it is an on-device bootstrap only
+            // (rescan/link relocalization still read it from scanDir); what ships instead is the
+            // feature cloud serialized from it, which downstream consumers can actually read.
             return withStagingDir { stagingDir in
                 if let metaURL = findMetadata() {
                     do {
@@ -725,14 +728,6 @@ struct ScanExportManager {
                     } catch {
                         print("[prepareExport] Failed to copy metadata: \(error.localizedDescription)")
                     }
-                }
-                do {
-                    try fm.copyItem(
-                        at: scanDir.appendingPathComponent("arworldmap.map"),
-                        to: stagingDir.appendingPathComponent("relocalization.worldmap")
-                    )
-                } catch {
-                    print("[prepareExport] Failed to copy worldmap: \(error.localizedDescription)")
                 }
                 stagePolycamPayload(to: stagingDir)
 
@@ -786,11 +781,21 @@ struct ScanExportManager {
                     }
                 }
 
-                // Include roomplan.json + roomplan_raw.json if RoomPlan data was captured, and the
+                // Include roomplan.json + roomplan_raw.json if RoomPlan data was captured, the
                 // registration.json sidecar (save-time canonical registration: the raw→canonical
                 // transform + fit stats a downstream consumer needs to relate mesh/roomplan — which
-                // are canonical-frame — to the world map, which stays in the raw capture frame)
-                for rpFile in ["roomplan.json", "roomplan_raw.json", "registration.json"] {
+                // are canonical-frame — to the world map, which stays in the raw capture frame),
+                // and the ARKit feature cloud.
+                //
+                // FRAME: arkit_features.bin is RAW — it is serialized from the ARWorldMap before
+                // save-time registration runs, so it shares the frame of cameras/ and the world
+                // map, NOT the canonical frame of mesh.obj / roomplan.json. registration.json is
+                // what relates the two; a consumer mixing the cloud with the mesh must apply it.
+                //
+                // The fileExists guard below is what lets legacy scans (saved before the cloud
+                // existed) degrade quietly instead of logging a miss.
+                for rpFile in ["roomplan.json", "roomplan_raw.json", "registration.json",
+                               FeaturePointCloudFile.filename] {
                     let rpURL = scanDir.appendingPathComponent(rpFile)
                     if fm.fileExists(atPath: rpURL.path) {
                         do {
@@ -819,7 +824,11 @@ struct ScanExportManager {
 
         case .nerfstudio:
             // A bundle Nerfstudio and LichtFeld Studio load as-is: images/, depth/,
-            // confidence/, masks/, transforms.json, sparse_pc.ply.
+            // confidence/, masks/, transforms.json, plus the raw geometry sidecars staged
+            // below (mesh.obj, face_classes.bin, roomplan*.json, registration.json,
+            // arkit_features.bin). No seed cloud is written and transforms.json deliberately
+            // carries no "ply_file_path": LichtFeld auto-loads a seed the moment that key
+            // appears, which would change training behavior in one engine and not the other.
             //
             // Built from the staged Polycam payload rather than copying capture's own
             // transforms.json, which emits the pose matrix transposed and has never
@@ -835,12 +844,23 @@ struct ScanExportManager {
                 stageEquirectStills(rawDataDir: rawDataDir, stagingDir: stagingDir, phase: phase)
 
                 // Raw geometry the downstream splat pipeline consumes as-is: the ARKit mesh
-                // (+ its face-aligned classification sidecar), RoomPlan, and the registration
-                // that relates mesh/RoomPlan (canonical frame) to the cameras (raw frame).
+                // (+ its face-aligned classification sidecar), RoomPlan, the registration
+                // that relates mesh/RoomPlan (canonical frame) to the cameras (raw frame),
+                // and the ARKit feature cloud.
                 // Shipped unmodified — the export changes representation, never information;
                 // debiasing, hole filling, seeding and prior rendering are training-side.
+                //
+                // FRAME: arkit_features.bin is RAW — serialized from the ARWorldMap before
+                // save-time registration, so it is in the same frame as cameras/ (and the
+                // on-device world map), NOT the canonical frame of mesh.obj / roomplan.json.
+                // registration.json is the transform between them. The points are shipped as
+                // data, never wired in as a training seed (see the bundle note above).
+                //
+                // The fileExists guard below lets legacy scans with no feature cloud through
+                // unchanged.
                 for artifact in ["mesh.obj", "face_classes.bin", "roomplan.json",
-                                 "roomplan_raw.json", "registration.json"] {
+                                 "roomplan_raw.json", "registration.json",
+                                 FeaturePointCloudFile.filename] {
                     let src = scanDir.appendingPathComponent(artifact)
                     guard fm.fileExists(atPath: src.path) else { continue }
                     do {

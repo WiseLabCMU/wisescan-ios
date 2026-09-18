@@ -155,7 +155,7 @@ struct UserGuideView: View {
                 Section {
                     formatRow(
                         format: "Scan4D",
-                        desc: "Default format. Includes scan4d_metadata, relocalization worldmap, " +
+                        desc: "Default format. Includes scan4d_metadata, ARKit feature points, " +
                               "room layout (roomplan) and spatial-link (stitching) metadata, " +
                               "plus the full Polycam raw import payload " +
                               "(images, depth, cameras, mesh_info). Zip archive."
