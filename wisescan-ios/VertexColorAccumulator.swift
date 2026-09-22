@@ -50,10 +50,32 @@ enum VertexColorAccumulator {
             LocalizationDiag.logMapStats(map, context: "save (about to persist)")
 
             // ...and of those points, which are inherited from the map this run LOADED vs minted
-            // fresh this session, plus how far the inherited ones moved. No-op when no map was
-            // loaded. Runs on whatever queue getCurrentWorldMap called back on — the baseline
+            // fresh this session, plus how far the inherited ones moved. No-op (nil) when no map
+            // was loaded. Runs on whatever queue getCurrentWorldMap called back on — the baseline
             // slot is lock-guarded for exactly that.
-            FeaturePointDiff.logDiff(against: map)
+            //
+            // The correspondence pass itself is UNGATED: the promotion gate below has to score
+            // every save, PerfDiag on or off, or the calibration record has holes exactly on the
+            // runs nobody was instrumenting. Only the human-readable `[FeatDiff]` line stays
+            // PerfDiag-gated, and it is emitted here — the same point in the sequence the old
+            // `logDiff(against:)` occupied — so it keeps its position relative to the [LocDiag]
+            // map stats above when reading device logs.
+            let corr = FeaturePointDiff.correspondences(against: map)
+            if let corr { FeaturePointDiff.logDiff(corr) }
+
+            // Shadow run of the relocalization promotion gate: scored on every save, acted on by
+            // nothing yet. Evaluated here, before the archive, so the report describes exactly the
+            // map that is about to be written (and, like the diff above, reuses the single
+            // correspondence pass rather than walking the cloud again). Bounded RANSAC over the
+            // ~15k pairs is tens of milliseconds — nowhere near the 30s failsafe at the bottom of
+            // this function, whose whole job is to catch a getCurrentWorldMap that never returns.
+            let report = corr.map { PromotionGate.evaluate($0) }
+            // Gated through PerfDiag.log, deliberately NOT the always-on `log` Logger that
+            // mapSuspect writes its verdict to. mapSuspect drives a product badge and has to be
+            // explainable from a pulled bundle; the gate's verdict is a shadow decision under
+            // calibration, and putting it on the unified log would make it read as a product
+            // judgement on the scan in every diagnostics bundle we collect.
+            if let report { PerfDiag.log(report.logLine()) }
 
             // The map archive below lands in the temp directory, and <map stem>.features beside
             // it is a PRODUCT artifact: saveScan looks it up by that derived name and promotes it
@@ -62,6 +84,17 @@ enum VertexColorAccumulator {
             // promotion then picks up the cloud belonging to the map that actually won, and a
             // retried export or a concurrent save each writes its own stem instead of overwriting
             // or stealing the other's.
+            //
+            // So this stack now spans THREE artifact classes, not the two it used to:
+            //   1. diagnostic, unpromoted — the [LocDiag]/[FeatDiff]/gate log lines, and anything
+            //      left in temp: it reaches no scan directory and no export;
+            //   2. product, promoted — <map stem>.worldmap and <map stem>.features: promoted into
+            //      the scan directory, named in the metadata schema, shipped by exports;
+            //   3. diagnostic, PROMOTED — PromotionGate's reloc_quality.json below. It is promoted
+            //      by the same derived-stem mechanism as .features purely so weeks of gate
+            //      calibration data survive unified-log rotation, but it is a diagnostic file:
+            //      excluded from every export allow-list and absent from the metadata schema, so
+            //      it stays on device and never ships as part of a scan.
             let mapDirectory = FileManager.default.temporaryDirectory
 
             // Wandering-cluster check (see mapSuspect doc): flag a map whose feature cloud was
@@ -77,10 +110,19 @@ enum VertexColorAccumulator {
                 try data.write(to: fileURL)
 
                 // Ordering is load-bearing: saveScan runs off `completion` and MOVES the map (and
-                // this sidecar) out of temp, so writing it after the callback races that move and
-                // shows up as an intermittently-missing artifact. Hence: after `fileURL` exists,
-                // before `completion` fires.
+                // these sidecars) out of temp, so writing them after the callback races that move
+                // and shows up as an intermittently-missing artifact. Hence: after `fileURL`
+                // exists, before `completion` fires.
                 writeFeatureSidecar(for: map, besideMapAt: fileURL)
+
+                // reloc_quality.json — the promoted DIAGNOSTIC of case 3 above. Same placement
+                // constraint as the sidecar for the same reason, and the same swallow-everything
+                // discipline, extended to the encode: `try?` on both steps keeps a failure out of
+                // the `catch` below, which would report a failed map save and hand the caller nil
+                // for a map that had already been written. A diagnostic file never costs the map.
+                if let reportData = report?.encoded() {
+                    try? reportData.write(to: PromotionGate.tempURL(besideWorldMap: fileURL), options: .atomic)
+                }
 
                 completion(fileURL, suspect)
             } catch {

@@ -135,6 +135,10 @@ class CapturedScan {
     /// beside the temp map at export and promoted here by `saveScan`, so it exists only for scans
     /// that actually produced a map (raw capture frame, like the map itself).
     @Transient var featurePointsURL: URL { scanDirectory.appendingPathComponent(FeaturePointCloudFile.filename) }
+    /// Shadow-mode relocalization quality report, promoted by `saveScan` like the feature cloud.
+    /// Diagnostic, not a bundle member: it exists only for a run that relocalized against a loaded
+    /// map, so a baseline scan legitimately has none and its absence is never a failure.
+    @Transient var relocQualityURL: URL { scanDirectory.appendingPathComponent(PromotionGate.filename) }
     @Transient var modelPreviewURL: URL { scanDirectory.appendingPathComponent("model_preview.jpg") }
     @Transient var thumbnailURL: URL { scanDirectory.appendingPathComponent("thumbnail.jpg") }
     @Transient var rawDataPath: URL { scanDirectory.appendingPathComponent("raw_data") }
@@ -1142,6 +1146,18 @@ class ScanFileManager {
             } else {
                 recordMissingArtifact(FeaturePointCloudFile.filename,
                                       reason: "no sidecar beside the exported map at \(features.lastPathComponent)")
+            }
+
+            // The shadow promotion gate's report, when this run had a baseline to score against.
+            // Unlike the feature cloud, absence is routine — a baseline scan relocalizes against
+            // nothing and produces no report — so it is never named in `incomplete_artifacts`.
+            let quality = PromotionGate.tempURL(besideWorldMap: map)
+            if FileManager.default.fileExists(atPath: quality.path) {
+                if (try? FileManager.default.linkItem(at: quality, to: newScan.relocQualityURL)) == nil {
+                    bestEffort(PromotionGate.filename) {
+                        try FileManager.default.copyItem(at: quality, to: newScan.relocQualityURL)
+                    }
+                }
             }
         } else {
             // No map means getCurrentWorldMap failed or timed out, which takes the cloud with it.
