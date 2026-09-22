@@ -119,9 +119,17 @@ struct ARCoverageView: UIViewRepresentable {
         let config = Self.makeConfiguration(enableMeshReconstruction: alignmentMesh, worldMapURL: initialWorldMapURL,
                                             enablePlaneDetection: initialWorldMapURL != nil && !ghostReferencePlanes.isEmpty)
         let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
-        if PerfDiag.enabled, let m = config.initialWorldMap {
-            context.coordinator.locDiagSummary.recordMap(m, name: initialWorldMapURL?.lastPathComponent) // 0.x: start a fresh per-run summary
-            context.coordinator.locDiagBeginRun() // reset per-run settle state (delegate queue)
+        if let m = config.initialWorldMap {
+            // UNGATED on purpose: the feature-point baseline is shadow-mode calibration data, and it
+            // only accrues if it is taken during NORMAL use — a PerfDiag-gated capture would collect
+            // nothing outside a diagnostics run. The diagnostics around it stay gated.
+            FeaturePointDiff.capture(m, name: initialWorldMapURL?.lastPathComponent,
+                                     mapPath: initialWorldMapURL?.path,
+                                     scanCase: scanStore?.activeScanCase.rawValue ?? "")
+            if PerfDiag.enabled {
+                context.coordinator.locDiagSummary.recordMap(m, name: initialWorldMapURL?.lastPathComponent) // 0.x: start a fresh per-run summary
+                context.coordinator.locDiagBeginRun() // reset per-run settle state (delegate queue)
+            }
         }
 
         context.coordinator.scanStats = scanStats
@@ -354,12 +362,20 @@ struct ARCoverageView: UIViewRepresentable {
                     worldMapURL: initialWorldMapURL,
                     enablePlaneDetection: initialWorldMapURL != nil && !ghostReferencePlanes.isEmpty
                 )
-                if PerfDiag.enabled, let m = config.initialWorldMap {
-                    context.coordinator.locDiagSummary.recordMap(m, name: initialWorldMapURL?.lastPathComponent) // 0.x: fresh per-run summary
-                    context.coordinator.locDiagBeginRun() // reset per-run settle state (delegate queue)
-                    context.coordinator.pendingICPBake = nil // Phase 2.1: drop any stale correction from a prior/cancelled alignment
-                    context.coordinator.icpRefineCandidates.removeAll() // and the stale candidate buffer
-                    scanStore?.icpAlignReady = nil
+                if let m = config.initialWorldMap {
+                    // UNGATED on purpose (see makeUIView): shadow-mode calibration data has to accrue
+                    // in normal use, so the baseline capture runs whether or not diagnostics are on —
+                    // only the diag summary / ICP-alignment bookkeeping below stays gated.
+                    FeaturePointDiff.capture(m, name: initialWorldMapURL?.lastPathComponent,
+                                             mapPath: initialWorldMapURL?.path,
+                                             scanCase: scanStore?.activeScanCase.rawValue ?? "")
+                    if PerfDiag.enabled {
+                        context.coordinator.locDiagSummary.recordMap(m, name: initialWorldMapURL?.lastPathComponent) // 0.x: fresh per-run summary
+                        context.coordinator.locDiagBeginRun() // reset per-run settle state (delegate queue)
+                        context.coordinator.pendingICPBake = nil // Phase 2.1: drop any stale correction from a prior/cancelled alignment
+                        context.coordinator.icpRefineCandidates.removeAll() // and the stale candidate buffer
+                        scanStore?.icpAlignReady = nil
+                    }
                 }
 
                 let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [.resetTracking, .removeExistingAnchors] : []
@@ -441,6 +457,19 @@ struct ARCoverageView: UIViewRepresentable {
                     enableMeshReconstruction: true,
                     worldMapURL: initialWorldMapURL
                 )
+                // Third load site, and the ONLY one a rescan hits when its ghost mesh never resolved
+                // (the capture in the ghost-arrival branch sits inside `if let ghostData =
+                // initialGhostMeshData`, and CaptureView withholds the URL until the ghost cache
+                // resolves). Without a capture here such a run would be diffed at save against a
+                // STALE baseline left by a previous run's map. Ungated for the same reason as the
+                // other two — shadow-mode calibration data only accrues if it is collected in normal
+                // use — and `captureIfNeeded` makes the common case (same map already captured
+                // above) free.
+                if let m = config.initialWorldMap {
+                    FeaturePointDiff.captureIfNeeded(m, name: initialWorldMapURL?.lastPathComponent,
+                                                     mapPath: initialWorldMapURL?.path,
+                                                     scanCase: scanStore?.activeScanCase.rawValue ?? "")
+                }
                 if privacyFilter, ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
                     config.frameSemantics.insert(.personSegmentationWithDepth)
                 }
@@ -559,13 +588,15 @@ struct ARCoverageView: UIViewRepresentable {
                 context.coordinator.resetFrameGapBaseline("record start")
                 // Phase-0 diag: mark this run as recorded so stop emits a summary. A no-map run
                 // has nothing to relocalize → start the summary fresh (drops any stale map/settle).
+                if config.initialWorldMap == nil {
+                    // UNGATED for the same reason the captures above are: with the clear gated on
+                    // PerfDiag, a diagnostics-off no-map recording would INHERIT the previous
+                    // rescan's baseline and its save would diff a fresh room against another room's
+                    // map. The baseline must be dropped whenever a run loads no map.
+                    FeaturePointDiff.clear()
+                    if PerfDiag.enabled { context.coordinator.locDiagSummary = .init() }
+                }
                 if PerfDiag.enabled {
-                    if config.initialWorldMap == nil {
-                        context.coordinator.locDiagSummary = .init()
-                        // ...and drop any feature-point baseline a PREVIOUS run left in the
-                        // process-wide slot, so this run's save doesn't diff against a stale map.
-                        FeaturePointDiff.clear()
-                    }
                     context.coordinator.locDiagSummary.didRecord = true
                 }
                 // Start RoomPlan session alongside ARKit (shares the same ARSession)

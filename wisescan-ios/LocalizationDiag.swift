@@ -222,9 +222,9 @@ enum LocalizationDiag {
             mapName = name
             features = map.rawFeaturePoints.points.count
             anchors = map.anchors.count
-            // Baseline for the save-time freshness diff. This is the last instant the cloud is
-            // provably free of live points — the session hasn't run against this map yet.
-            FeaturePointDiff.capture(map, name: name)
+            // NOTE: the `FeaturePointDiff` baseline is deliberately NOT captured here. This whole
+            // summary is PerfDiag-gated, and the baseline now feeds a production gate, so the load
+            // sites capture it explicitly instead of inheriting this call's gating.
         }
         mutating func recordSettle(pos: SIMD3<Float>, yaw: Float, secs: Double) {
             settlePos = pos; settleYaw = yaw; settleSecs = secs
@@ -780,66 +780,130 @@ enum LocalizationDiag {
 /// Feature-point freshness diff: of the points in the map a rescan **saves**, which are RETAINED
 /// from the map it **loaded**, which are NEW this session — and did the retained ones move?
 ///
-/// Log-only, `PerfDiag`-gated, and exactly two O(n) passes for a whole run: one snapshot at map
-/// load (`capture`, main thread, before `session.run`) and one diff at save (`logDiff`). There is
-/// deliberately **no per-frame component** — a "log-only" probe that burns CPU during capture
-/// corrupts the very scan it measures (the gen-8 ICP stall).
+/// **Not** log-only any more. The baseline snapshot (`capture`, main thread, before `session.run`)
+/// and the correspondence extraction at save (`correspondences`, on the `getCurrentWorldMap` queue)
+/// both run unconditionally, because a production gate scores those correspondences; only the
+/// `[FeatDiff]` line itself (`logDiff`) stays `PerfDiag`-gated. Still exactly two O(n) passes for a
+/// whole run, and still deliberately **no per-frame component** — a "log-only" probe that burns CPU
+/// during capture corrupts the very scan it measures (the gen-8 ICP stall).
 ///
-/// Stores only `[identifier: position]` (a few MB), never the `ARWorldMap` — a retained map is a
-/// ~50 MB lifetime footprint (see the world-map cache finding).
+/// The cost that always-on collection trades: the baseline `[UInt64: SIMD3<Float>]` — ~0.5-1 MB for
+/// a typical map — is now resident for the whole capture session in production builds, not just on
+/// diagnostics runs, and is released only by `clear()`. It stays two orders of magnitude under
+/// retaining the `ARWorldMap` itself (~50 MB held for the app's lifetime — see `WorldMapCache` and
+/// `releaseCachedWorldMap`, ARCoverageView.swift ~5987-6008), which is exactly why only
+/// `[identifier: position]` is kept here and never the map.
 enum FeaturePointDiff {
-    private struct Baseline {
+    private nonisolated struct Baseline {
         let name: String
+        /// The file the map was deserialized from, or nil when it has no identity on disk. Used
+        /// only to recognise a re-capture of the same map; never opened.
+        let mapPath: String?
+        /// Stamped here because it can only be read here: `ScanStore.activeScanCase` is main-only
+        /// and `capture` runs on main, whereas the save-time callback runs off-main and cannot
+        /// reach it.
+        let scanCase: String
         let points: [UInt64: SIMD3<Float>]
     }
 
     /// One loaded map per run, so a single slot. Lock-guarded rather than main-only: `capture`
-    /// runs on main but `logDiff` runs on whatever queue `getCurrentWorldMap` calls back on.
-    private static let slot = Mutex<Baseline?>(nil)
+    /// runs on main but `correspondences` runs on whatever queue `getCurrentWorldMap` calls back on.
+    private nonisolated static let slot = Mutex<Baseline?>(nil)
 
     /// Snapshot the loaded map's feature cloud. Call where the map is deserialized, before the
-    /// session runs with it.
-    static func capture(_ map: ARWorldMap, name: String?) {
-        guard PerfDiag.enabled else { return }
+    /// session runs with it. Ungated: the gate that consumes this runs in normal use, so the
+    /// baseline has to exist with diagnostics off.
+    ///
+    /// Left main-actor-isolated on purpose — `scanCase` comes from `ScanStore.activeScanCase`,
+    /// which exists only on main.
+    static func capture(_ map: ARWorldMap, name: String?, mapPath: String?, scanCase: String) {
         // Bind both parallel arrays once: `ARPointCloud.identifiers`/`.points` bridge a fresh
         // Array on every access, so touching them inside the loop would be O(n²).
         let ids = map.rawFeaturePoints.identifiers
         let pts = map.rawFeaturePoints.points
         var points = [UInt64: SIMD3<Float>](minimumCapacity: ids.count)
         for i in 0..<min(ids.count, pts.count) { points[ids[i]] = pts[i] }
-        slot.withLock { $0 = Baseline(name: name ?? "unnamed", points: points) }
+        slot.withLock {
+            $0 = Baseline(name: name ?? "unnamed", mapPath: mapPath, scanCase: scanCase, points: points)
+        }
+    }
+
+    /// `capture`, skipped when the slot already holds this same map. The same map is handed in at
+    /// capture bring-up and again at record-start; re-walking an unchanged cloud there would cost a
+    /// full O(n) pass and a fresh dictionary for an identical result. A nil `mapPath` carries no
+    /// identity, so it never matches and always re-captures.
+    static func captureIfNeeded(_ map: ARWorldMap, name: String?, mapPath: String?, scanCase: String) {
+        if let mapPath, slot.withLock({ $0?.mapPath }) == mapPath { return }
+        capture(map, name: name, mapPath: mapPath, scanCase: scanCase)
     }
 
     /// Drop the baseline. Required on a run that loads no map, so its save can't diff against a
     /// previous run's map.
-    static func clear() {
+    ///
+    /// Deliberately NOT called after a diff: `exportWorldMapThenContinue` retries the export when
+    /// it fails (CaptureView+Recording.swift ~786-812), and a consumed baseline would make the
+    /// retry produce no correspondences at all.
+    nonisolated static func clear() {
         slot.withLock { $0 = nil }
     }
 
-    /// Diff the map about to be persisted against the loaded baseline. No-op when no map was
-    /// loaded for this run.
-    static func logDiff(against map: ARWorldMap) {
-        guard PerfDiag.enabled else { return }
+    /// Baseline↔saved-map point correspondences, extracted in one O(n) pass. Raw enough that a
+    /// caller can both log them and score them without walking the cloud twice.
+    nonisolated struct Correspondences {
+        let baselineName: String
+        let baselineMapPath: String?
+        /// The scan case in effect when the baseline was captured (stamped on main).
+        let scanCase: String
+        let baselinePointCount: Int
+        /// Feature points in the map about to be persisted.
+        let currentCount: Int
+        /// `(baseline position, current position)` for every point the saved map kept by identifier.
+        let pairs: [(SIMD3<Float>, SIMD3<Float>)]
+        /// Saved-map points with no baseline identifier — minted this session.
+        let freshPoints: [SIMD3<Float>]
+        /// Every baseline position, retained or not; the spatial fallback needs the whole cloud.
+        let baselinePositions: [SIMD3<Float>]
+    }
+
+    /// Correspond the map about to be persisted against the loaded baseline. UNGATED — this is the
+    /// data half, and a production gate reads it. Returns nil when no map was loaded for this run.
+    nonisolated static func correspondences(against map: ARWorldMap) -> Correspondences? {
         // Copied out of the lock: everything below runs on plain value copies, never while
         // holding it.
-        guard let base = slot.withLock({ $0 }), !base.points.isEmpty else { return }
+        guard let base = slot.withLock({ $0 }), !base.points.isEmpty else { return nil }
+        // Bind both parallel arrays once — the same O(n) vs O(n²) contract as `capture`.
         let ids = map.rawFeaturePoints.identifiers
         let pts = map.rawFeaturePoints.points
         let n = min(ids.count, pts.count)
 
-        var drift: [Float] = []
-        drift.reserveCapacity(min(n, base.points.count))
-        var fresh = 0
+        var pairs: [(SIMD3<Float>, SIMD3<Float>)] = []
+        pairs.reserveCapacity(min(n, base.points.count))
+        var fresh: [SIMD3<Float>] = []
         for i in 0..<n {
             if let old = base.points[ids[i]] {
-                drift.append(simd_distance(old, pts[i]))
+                pairs.append((old, pts[i]))
             } else {
-                fresh += 1
+                fresh.append(pts[i])
             }
         }
+        return Correspondences(baselineName: base.name,
+                               baselineMapPath: base.mapPath,
+                               scanCase: base.scanCase,
+                               baselinePointCount: base.points.count,
+                               currentCount: n,
+                               pairs: pairs,
+                               freshPoints: fresh,
+                               baselinePositions: Array(base.points.values))
+    }
+
+    /// Emit the `[FeatDiff]` line for an already-extracted correspondence set. The log half, and
+    /// the only `PerfDiag`-gated part of this probe.
+    nonisolated static func logDiff(_ c: Correspondences) {
+        guard PerfDiag.enabled else { return }
+        var drift = c.pairs.map { simd_distance($0.0, $0.1) }
         let retained = drift.count
-        let dropped = base.points.count - retained
-        let retainedFrac = Float(retained) / Float(base.points.count)
+        let dropped = c.baselinePointCount - retained
+        let retainedFrac = Float(retained) / Float(c.baselinePointCount)
 
         var driftDesc = "n/a (nothing retained by id)"
         if retained > 0 {
@@ -854,23 +918,28 @@ enum FeaturePointDiff {
         // If ARKit remints identifiers per session, the id diff reads as a total wipe even when the
         // geometry survived intact — which is the opposite conclusion. So when retention collapses,
         // re-ask the question spatially: does each baseline point still have ANY new point near it?
+        // The O(n) grid build below stays inside the gated path: it is pure log-side work, and the
+        // production gate never needs it.
         var fallback = "n/a"
         if retainedFrac < 0.05 {
-            let matched = spatialMatchFraction(baseline: Array(base.points.values), current: pts, radius: 0.05)
+            let current = c.pairs.map { $0.1 } + c.freshPoints
+            let matched = spatialMatchFraction(baseline: c.baselinePositions, current: current, radius: 0.05)
             fallback = String(format: "%.0f%% of baseline within 5cm of some new point", matched * 100)
         }
 
         PerfDiag.log(String(
             format: "[FeatDiff] baseline=%d(%@) current=%d | retained=%d (%.0f%%) dropped=%d fresh=%d | drift(retained): %@ | spatial-fallback: %@",
-            base.points.count, base.name, n, retained, retainedFrac * 100, dropped, fresh, driftDesc, fallback))
+            c.baselinePointCount, c.baselineName, c.currentCount, retained, retainedFrac * 100,
+            dropped, c.freshPoints.count, driftDesc, fallback))
     }
 
     // MARK: - Spatial fallback
 
     /// Fraction of `baseline` points with at least one `current` point within `radius`. Uniform
     /// grid at `cellSize = radius`, so each query scans the 27-cell neighbourhood — O(n), not O(n²).
-    private static func spatialMatchFraction(baseline: [SIMD3<Float>], current: [SIMD3<Float>],
-                                             radius: Float) -> Float {
+    private nonisolated static func spatialMatchFraction(baseline: [SIMD3<Float>],
+                                                         current: [SIMD3<Float>],
+                                                         radius: Float) -> Float {
         guard !baseline.isEmpty, !current.isEmpty else { return 0 }
         let cell = radius
         var grid = [Int64: [SIMD3<Float>]](minimumCapacity: current.count)
@@ -899,7 +968,7 @@ enum FeaturePointDiff {
 
     /// Same 21-bit-band pack as `LocalizationDiag.VoxelGrid`; band collisions only cost extra
     /// candidates, which the exact distance test then rejects.
-    private static func cellKey(_ p: SIMD3<Float>, _ cell: Float) -> Int64 {
+    private nonisolated static func cellKey(_ p: SIMD3<Float>, _ cell: Float) -> Int64 {
         let x = Int64((p.x / cell).rounded(.down))
         let y = Int64((p.y / cell).rounded(.down))
         let z = Int64((p.z / cell).rounded(.down))
