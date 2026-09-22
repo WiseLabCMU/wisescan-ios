@@ -17,7 +17,15 @@ Release, which is what the field mostly runs. ON enables:
   yaw, zncc, per-still yaw spread, rails), `[VertexColor]` frame selection + gray
   fraction, `[Colorize]` face generation, `[PerfTimer]` step timings, `[TrackStab]`
   tracking jumps and mesh purges, `[LocDiag]` relocalization/map health, `[Session]`
-  interruptions.
+  interruptions, `[PromoGate]` shadow-mode relocalization promotion-gate measurement
+  (RANSAC rigid fit of identifier-matched feature pairs, inlier conditioning, 0.5 m
+  coverage/staleness, and a would-be decision that is never acted on), scored against the
+  baseline map: the PREVIOUS generation's saved map that the rescan relocalized into, not a
+  canonical reference — the app has no canonical-scan selection yet, so successive reports
+  for one location compare against different baselines. Because `OSLogStore` only exposes the
+  current process (`DiagnosticsLogExport.swift:14-19`), the same numbers are also
+  persisted per scan as `reloc_quality.json` inside the scan directory; that file is
+  on-device diagnostics excluded from every export bundle.
 - **MainThreadWatchdog** — logs `main-thread stall BEGIN/END (max no-frame gap Nms)`
   for stalls over 400 ms. Mid-recording stalls ≥4 s independently hard-trip the VIO
   guard (that is a capture-safety mechanism, always on).

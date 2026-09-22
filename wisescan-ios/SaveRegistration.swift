@@ -32,6 +32,11 @@ import RoomPlan
 /// - `registration.json` — the sidecar written here: the transform + fit stats + whether it was
 ///   applied, so every consumer (ghost loader, future stitch/pose-graph work) can recover the
 ///   raw↔canonical relationship per scan.
+/// - `reloc_quality.json` — FRAME-INDEPENDENT; no frame to re-base. Shadow-mode `[PromoGate]`
+///   promotion numbers, persisted per scan because `OSLogStore` only exposes the current process.
+///   By the report's privacy rule it holds scalar magnitudes only — fractions, counts, spans, RMS,
+///   offset/rotation magnitudes — never a coordinate, so nothing in it is raw or canonical and
+///   nothing here should ever route it. Diagnostic only — not an export member.
 ///
 /// Runs ONLY for `.rescanSpace` saves with an existing original-room target. Never for
 /// link-adjacent (a different physical room — forcing a wall match there would be a false lock;
