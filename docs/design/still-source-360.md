@@ -68,6 +68,51 @@ Assessment criteria for each (fill in during the viability spike):
 4. **Metadata quality** — per-still gyro/level (zenith) data, timestamps, exposure info.
 5. **Cost, weight, battery life** on a handheld rig.
 
+### Adjacent device, not a still source: 3DMakerpro Eagle / Eagle Max (assessed 2026-09-23)
+
+Raised as a possible integration; assessed from vendor and review material only, no unit
+in hand. It is a **handheld SLAM LiDAR scanner**, not a 360° camera: LiDAR + IMU + optional
+RTK GNSS + (Max) four 48 MP fisheye cameras, fused into its own trajectory by a Windows-only
+desktop app (RayStudio, NVIDIA GPU required, GUI only). It does the whole job this app does
+on the phone, at 80–140 m range and ~2 cm accuracy at 10 m.
+
+| | Eagle Max |
+| :--- | :--- |
+| Cameras / panorama | 4×48 MP fisheye; 8K HDR panorama |
+| Range / accuracy | 80–140 m; 2 cm @10 m, 3 cm @20 m, 5 cm @40 m |
+| Weight / battery | 1.5 kg; ~1 h (external power supported) |
+| Connectivity | Wi-Fi 5, 2× USB-C, TF card. **No BLE, no phone control, no SDK/API** |
+| Processing | RayStudio, Windows 10/11 only, NVIDIA GPU; no headless/batch mode documented |
+| Exports | PLY point cloud, 3DGS PLY, OBJ mesh, panoramic tour; E57 with panoramas at a chosen trajectory interval (one source; unverified) |
+| Price | $4,399 list (Max), $3,398 (Standard), pre-order discounts |
+
+**Why it cannot sit behind `StillSource`.** The seam assumes *we* trigger a still at a
+stillness point and *we* supply the pose from the rig. The Eagle offers no trigger, no
+mid-scan transfer and no app-side API, and it computes its own trajectory; its panoramas
+are sampled along that trajectory, in its frame. Neither the in-situ nor the deferred-ticket
+flow has anything to match against.
+
+**Where it could fit: a parallel capture path, imported after the fact.**
+
+1. Device → TF card/USB → RayStudio on a Windows box, by hand (nothing headless documented).
+2. Export E57-with-panoramas + PLY/OBJ → `PUT` to the existing upload gateway
+   (`wisescan-upload` accepts arbitrary objects). The NATS ingestion stack is for live
+   time-series streams and is the wrong fit for batch files.
+3. Backend needs an **external-scan import contract**: a manifest mapping their panoramas +
+   poses onto `equirect_still.schema.json` (camera model `equirectangular`, pose per still)
+   and their point cloud/mesh onto our mesh slot. The hard part is registration into our
+   frame — there is no shared anchor, so this is the multi-scan alignment problem again.
+
+**Best use case.** Whole-building or outdoor sweeps beyond the ~5 m phone-LiDAR range, and a
+coarse independent reference against Scan4D on large sites. Not fine-tolerance ground truth.
+Reviews note fan noise and floor-parallelism drift across storeys; panorama and 3DGS export
+only shipped spring 2026.
+
+**Verify with a unit before committing anything:** (a) does the raw project folder or the
+E57 expose per-panorama poses + timestamps we can consume; (b) is the panorama a true 2:1
+equirect with a known camera→trajectory transform; (c) does RayStudio have any batch mode;
+(d) is "Eagle Pro Max" a distinct SKU from Eagle Max (none found).
+
 ### Measured on device (spike — Theta X, firmware 2.92.0)
 
 Wi‑Fi-OSC numbers from the Dashboard card, at both still resolutions:
