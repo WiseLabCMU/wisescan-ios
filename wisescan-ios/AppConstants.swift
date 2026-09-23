@@ -221,6 +221,46 @@ enum AppConstants {
     static let vioHardFrameGapTripSeconds: TimeInterval = 4.0 // VIO guard belt: a gap this large trips REGARDLESS of how tracking presents on the recovery frame — covers OS actions (Control Center on iPadOS) that stall delivery without firing sessionWasInterrupted and resume via benign-looking .initializing (7.9s gap → silent SLAM reinit, 2026-07-24 M2 runs). Compute stalls on the marginal iPad top out well under 2s, so 4s is clear of false trips.
     static let meshStartWatchdogSeconds: TimeInterval = 10   // Recording on a LiDAR device with zero ARMeshAnchors for this long AFTER tracking settled = Recon3D is dead for this scan (60fps default-format fallback after RoomPlan's internal reconfigure; Fig err storm, 2026-07-24 runs) → halt via the VIO guard. NOT a live rebuild: re-running the session under active RoomPlan crashed ObjectUnderstanding at save (run 4).
     static let trackingSettleWatchdogSeconds: TimeInterval = 20 // Recording whose tracking NEVER reaches .normal (e.g. started mid-relocalization chase after an idle interruption) has both graduated guards unarmed — if it hasn't settled in this budget the capture is unusable → halt (2026-07-28 A12Z: indefinite degraded limbo, faces=0, no stillness settle).
+    /// Content floor for the tracking-loss recovery save (`CaptureView+Recording.swift`, the
+    /// mesh-less/map-less branch): a "Recovered Scan" is only worth persisting as a scan if the raw
+    /// capture holds at least this many stream frames. Below the floor NOTHING IS PERSISTED and
+    /// NOTHING IS DELETED — see `FrameCaptureSession.RecoveryOutcome.refuseKeepingCapture`.
+    ///
+    /// Why refuse at all: such a stub is not merely useless, it is actively harmful — it becomes the
+    /// location's NEWEST scan, and both Rescan Space and Connect Adjacent take `sortedScans.first`
+    /// (`LocationDetailView.swift:60`, `:126`) and hard-gate on that scan's world map file existing
+    /// (`:718`, `:743`), which a recovery scan never has. A 2-frame stub therefore disables both
+    /// actions for the whole location while presenting as a legitimate 0 MB entry. (The floor only
+    /// NARROWS that window: an above-floor recovery scan is still map-less and still shadows the
+    /// location's good scans. Closing the class means fixing the `sortedScans.first` gate itself.)
+    ///
+    /// NO VERTEX TERM, and not for the reason it first looks like. Issue #81 prescribes
+    /// `(!supportsLiDAR || scanStats.totalVertices > 0) && frameCount >= floor`. The first conjunct
+    /// is dropped because `totalVertices` is derived LIVE from the mesh-anchor bookkeeping
+    /// (`ARCoverageView.swift:3205` → `:3271` publishes `anchorVertexCounts.values.reduce`), and
+    /// that dictionary is emptied when the anchors go (`:3118` on `didRemove`, `:3151`/`:1447`/
+    /// `:1502` wholesale). At the instant this branch runs the anchors are already gone — that is
+    /// *why* the branch runs — so the term would read 0 and refuse EVERY LiDAR recovery. The term is
+    /// meaningful only while the mesh is still live, which is the one place it is now used: the
+    /// tracking-loss alert's "Save Anyway" gate (`FrameCaptureSession.recoverySaveWouldPersist`).
+    ///
+    /// JUDGEMENT CALL, NOT A MEASUREMENT: nothing committed states how many frames the
+    /// reconstruction backend needs, so this is deliberately set at the low end — the issue's own
+    /// guidance is to bias toward saving and treat "not sure" as save. What admits a frame is the
+    /// MOVEMENT gate, not the 10 Hz poll (`FrameCaptureSession.swift:661-671`, `cameraMovement` at `:1627-1638`): at the default
+    /// `overlapMax` of 60 the threshold is `0.15 * 0.4 + 0.01` = 0.07 of
+    /// `translation + 0.3 * (1 - |dot(fwd, fwd)|)`, so ten frames is ~0.7 m of camera path — or, for
+    /// a user standing still and panning, ~40° per frame and so most of one full turn. Raise it only
+    /// against a real backend measurement; note that at the "only distinct views" end of the user
+    /// setting (`overlapMax` 10) the threshold is 0.145 and the floor costs ~2× the sweep.
+    ///
+    /// Isolation is the project default (MainActor, `SWIFT_DEFAULT_ACTOR_ISOLATION`), NOT
+    /// `nonisolated` like `meshSubdivisionMaxFaces` below: both readers are main-actor —
+    /// `FrameCaptureSession.recoveryHasEnoughContent(_:)` and, through it, `finishStopRecording`
+    /// in the `CaptureView` extension, which is entered via `DispatchQueue.main.async`
+    /// (`CaptureView+Recording.swift:386-388`), plus `CaptureView.handleVIOCompromised`. There is no
+    /// off-main reader to serve.
+    static let minRecoveryFrames: Int = 10
 
     // MARK: - 360° Rig (mechanical-prior extrinsic — calibration plan step 1; the solved
     // hand–eye refinement replaces these per rig profile later)
