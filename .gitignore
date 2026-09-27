@@ -140,3 +140,12 @@ Temporary Items
 **/raw_data/
 **/equirect_stills/
 *.xcappdata
+
+# Insta360 Camera SDK: proprietary, EULA §4.1(d) forbids stand-alone distribution and the
+# repo is public. Obtain it per person via Insta360's application; never commit it, nor the
+# App ID/secret. See docs/design/insta360-sdk-eula-review.md.
+Insta360SDK/
+INSCameraSDK.xcframework/
+INSCameraServiceSDK.xcframework/
+INSCoreMedia.xcframework/
+*.secrets.xcconfig
