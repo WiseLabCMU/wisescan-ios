@@ -64,6 +64,8 @@ enum AppConstants {
         static let keyframeWeightBonus = "keyframeWeightBonus"        // Developer Mode: keyframe weight bonus in colorization (A/B vs equal still/sweep weighting)
         static let robustColorMedian = "robustColorMedian"            // Developer Mode: consensus vector-median color reduce (A/B vs legacy per-channel median)
         static let keepCameraOriginals = "keepCameraOriginals"        // Developer Mode: skip the security-P1 sweep that deletes each 360° still from the camera after verified transfer
+        static let stillSourceKind = "stillSourceKind"                // which 360° still source the shutter tap should arm (live Theta vs deferred import)
+        static let external360CameraModel = "external360CameraModel"  // preferred model string for deferred imported equirects
         static let thetaBLESerial = "thetaBLESerial"                  // 8-digit serial of the paired camera (BLE identity + factory password)
         static let thetaBLEPeripheralID = "thetaBLEPeripheralID"      // CBPeripheral identifier for scan-free reconnects
         static let thetaBLEModel = "thetaBLEModel"                    // model of the active camera, for link-time decisions (Z1 rides the v1 auth family; X rides bonded CCv2)
@@ -178,6 +180,8 @@ enum AppConstants {
     /// reads back pose error directly. Face frames carry no depth, so occlusion is off
     /// in this mode — bleed-through is expected and not the signal being judged.
     static let colorizeFrom360Faces: Bool = false
+    static let stillSourceKind = StillSourceKind.thetaLive.rawValue
+    static let external360CameraModel = External360CameraModel.insta360X6.rawValue
     /// Developer Mode, debugging only: keep 360° originals on the camera after verified
     /// transfer. Default OFF = the security-P1 sweep deletes them — raw equirects capture
     /// bystanders in every direction, and the camera (open AP, factory password = serial
@@ -1029,4 +1033,3 @@ extension String {
         }
     }
 }
-
