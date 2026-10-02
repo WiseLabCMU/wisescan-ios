@@ -99,7 +99,7 @@
     "incomplete_artifacts": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Present when one or more OPTIONAL bundle artifacts failed to write at save time, listing them by filename (e.g. \"colors.bin\", \"relocalization.worldmap\", \"thumbnail.jpg\", \"raw_data/mesh.obj\"). The scan itself is valid — the mesh write is critical and aborts the save on failure — but the named files are absent from this bundle, so a consumer expecting them should treat them as missing rather than corrupt. Absent on a complete save."
+      "description": "Present when one or more OPTIONAL bundle artifacts failed to write at save time, listing them by filename (e.g. \"colors.bin\", \"relocalization.worldmap\", \"arkit_features.bin\", \"thumbnail.jpg\", \"raw_data/mesh.obj\"). The scan itself is valid — the mesh write is critical and aborts the save on failure — but the named files are absent from this bundle, so a consumer expecting them should treat them as missing rather than corrupt. Absent on a complete save."
     },
     "photo_coverage": {
       "type": "object",

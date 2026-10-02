@@ -131,6 +131,10 @@ class CapturedScan {
     @Transient var meshFileURL: URL { scanDirectory.appendingPathComponent("mesh.obj") }
     @Transient var colorsFileURL: URL { scanDirectory.appendingPathComponent("colors.bin") }
     @Transient var worldMapURL: URL { scanDirectory.appendingPathComponent("arworldmap.map") }
+    /// Feature cloud serialized from the same `ARWorldMap` as `worldMapURL` — written as a sidecar
+    /// beside the temp map at export and promoted here by `saveScan`, so it exists only for scans
+    /// that actually produced a map (raw capture frame, like the map itself).
+    @Transient var featurePointsURL: URL { scanDirectory.appendingPathComponent(FeaturePointCloudFile.filename) }
     @Transient var modelPreviewURL: URL { scanDirectory.appendingPathComponent("model_preview.jpg") }
     @Transient var thumbnailURL: URL { scanDirectory.appendingPathComponent("thumbnail.jpg") }
     @Transient var rawDataPath: URL { scanDirectory.appendingPathComponent("raw_data") }
@@ -991,6 +995,14 @@ class ScanFileManager {
         }
     }
 
+    /// Record an artifact that never reached the save with no throwing call to wrap — a producer
+    /// upstream swallowed the failure and left nothing on disk. Same bookkeeping as `bestEffort`
+    /// so the name still reaches `incomplete_artifacts`.
+    private func recordMissingArtifact(_ artifact: String, reason: String) {
+        lastSaveArtifactFailures.append(artifact)
+        Self.log.error("saveScan artifact MISSING \(artifact, privacy: .public): \(reason, privacy: .public)")
+    }
+
     /// Free space on the Documents volume, in bytes ("important usage" = what iOS will
     /// actually let an app consume, after purgeable reclamation).
     static func freeDiskBytes() -> Int64? {
@@ -1114,6 +1126,28 @@ class ScanFileManager {
             if (try? FileManager.default.linkItem(at: map, to: newScan.worldMapURL)) == nil {
                 bestEffort("relocalization.worldmap") { try FileManager.default.copyItem(at: map, to: newScan.worldMapURL) }
             }
+            // The feature cloud rides along with the map: same export, same raw capture frame, and
+            // it is derived from no parameter of its own — the sidecar sits beside the temp map.
+            // Every exported map writes one unconditionally, and a cloud with no points is still a
+            // header-only file, so absence here means the save-time write failed. Name it: a
+            // consumer that finds neither the file nor an `incomplete_artifacts` entry would
+            // otherwise read a broken current save as a scan predating the format.
+            let features = FeaturePointCloudFile.tempURL(besideWorldMap: map)
+            if FileManager.default.fileExists(atPath: features.path) {
+                if (try? FileManager.default.linkItem(at: features, to: newScan.featurePointsURL)) == nil {
+                    bestEffort(FeaturePointCloudFile.filename) {
+                        try FileManager.default.copyItem(at: features, to: newScan.featurePointsURL)
+                    }
+                }
+            } else {
+                recordMissingArtifact(FeaturePointCloudFile.filename,
+                                      reason: "no sidecar beside the exported map at \(features.lastPathComponent)")
+            }
+        } else {
+            // No map means getCurrentWorldMap failed or timed out, which takes the cloud with it.
+            // The map itself no longer ships in the bundle, so this is the only trace a consumer
+            // would ever get that the cloud was expected and lost.
+            recordMissingArtifact(FeaturePointCloudFile.filename, reason: "world map export produced no map")
         }
         if let thumb = thumbnailData {
             bestEffort("thumbnail.jpg") { try thumb.write(to: newScan.thumbnailURL) }

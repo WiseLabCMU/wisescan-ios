@@ -147,9 +147,9 @@ Each export format includes **only** the data relevant to that format. The filen
 
 | Format | Extension | Contents | Viewer |
 | :--- | :--- | :--- | :--- |
-| **Scan4D** | `.zip` | `scan4d_metadata.json`, `relocalization.worldmap`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
+| **Scan4D** | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
 | **Polycam** | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
-| **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `cameras/`, + raw geometry: `mesh.obj`, `face_classes.bin`, `roomplan*.json`, `registration.json` | Nerfstudio and LichtFeld Studio, as-is; training-side pipeline in `tools/` |
+| **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `cameras/`, + raw geometry: `mesh.obj`, `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin` | Nerfstudio and LichtFeld Studio, as-is; training-side pipeline in `tools/` |
 | **OBJ** | `.obj` | Single mesh file (no vertex colors) | MeshLab, Blender |
 | **PLY** | `.ply` | Converted mesh with embedded vertex colors | MeshLab, CloudCompare |
 | **USDZ** | `.usdz` | Converted mesh via ModelIO | iOS Quick Look (native) |
@@ -158,7 +158,7 @@ Each export format includes **only** the data relevant to that format. The filen
 ```
 scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
 ├── scan4d_metadata.json    # GPS tags, Location ID, `export_format`, `hardware_device_model`, & `face_anchors`
-├── relocalization.worldmap # ARKit spatial anchor for Scan4D rescanning
+├── arkit_features.bin       # ARKit sparse feature cloud (id + xyz, raw capture frame)
 ├── images/                 # RGB frames (JPEG, ~2fps adaptive)
 │   ├── frame_00000.jpg
 │   └── ...

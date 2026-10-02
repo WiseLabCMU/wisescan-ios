@@ -858,10 +858,10 @@ extension CaptureView {
     }
 
     /// Deletes a stopped-and-baked pending scan that was never saved (naming-dialog discard,
-    /// after its destructive confirmation): removes the temp artifacts — raw frames dir and
-    /// world map, which both live in FileManager.temporaryDirectory and saveScan would
-    /// normally move — and clears the save-flow state. Dropping pendingScan alone would
-    /// leak the (potentially large) raw-frames dir.
+    /// after its destructive confirmation): removes the temp artifacts — raw frames dir, world
+    /// map, and its feature-point-cloud sidecar, which all live in FileManager.temporaryDirectory
+    /// and saveScan would normally move — and clears the save-flow state. Dropping pendingScan
+    /// alone would leak the (potentially large) raw-frames dir.
     func discardPendingScan() {
         if let pending = pendingScan {
             if let rawDir = pending.rawDataPath {
@@ -869,6 +869,7 @@ extension CaptureView {
             }
             if let mapURL = pending.worldMapURL {
                 try? FileManager.default.removeItem(at: mapURL)
+                try? FileManager.default.removeItem(at: FeaturePointCloudFile.tempURL(besideWorldMap: mapURL))
             }
         }
         pendingScan = nil

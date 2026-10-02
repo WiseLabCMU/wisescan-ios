@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import ARKit    // ARWorldMap — unarchived off disk for the feature-cloud backfill
 import RoomPlan
 import simd
 import os
@@ -54,7 +55,7 @@ enum ScanPostprocessor {
     // MARK: - Steps + per-artifact status
 
     enum Step: String {
-        case equirectDownloads, equirectMasks, equirectCalibration, registration, proxy, colorize
+        case equirectDownloads, equirectMasks, equirectCalibration, featureCloud, registration, proxy, colorize
     }
 
     /// Find an artifact at the scan dir top level or in raw_data/ — late-arriving sidecars
@@ -165,6 +166,16 @@ enum ScanPostprocessor {
             steps.append(.equirectCalibration)
         }
 
+        // Feature-cloud BACKFILL for scans saved before `arkit_features.bin` existed: the cloud
+        // is re-derivable from the `arworldmap.map` those scans already persisted, so nothing is
+        // lost forever. Map present + cloud absent is the whole condition — an existing cloud is
+        // never overwritten (the save-time one is authoritative), and a scan that produced no map
+        // has nothing to derive from and yields no step. Disk-derived like every other step, so
+        // writing the file is what clears it. DERIVED, never structural: see `needsPostprocess`.
+        if featureCloudPending(scanDirectory: scan.scanDirectory) {
+            steps.append(.featureCloud)
+        }
+
         // Registration is pending when never attempted, or when a REFUSED attempt predates the
         // current solver (`SaveRegistration.sidecarVersion` bump ⇒ refused scans retry with the
         // upgraded solver — e.g. v2's trim rescue). APPLIED sidecars are final regardless of
@@ -219,8 +230,15 @@ enum ScanPostprocessor {
         // a scan whose masks have not been built yet is still complete — blocking Save
         // on them (as this did when the step was introduced) stops the user for
         // something the export can do itself.
+        //
+        // The feature-cloud backfill is excluded on exactly that reasoning, and the blast
+        // radius is larger: EVERY scan saved before `arkit_features.bin` existed has a map
+        // and no cloud, so counting it as blocking would hard-gate rescan/connect/upload on
+        // the entire existing library the moment the app updates. The cloud is derived from
+        // the map that is already on disk, is re-derivable at any later time, and no gate
+        // consumes it — its absence is not an integrity defect.
         let blocking = pendingSteps(for: scan, includeColorize: false)
-            .filter { $0 != .equirectMasks }
+            .filter { $0 != .equirectMasks && $0 != .featureCloud }
         return !blocking.isEmpty || roomPending(scan)
     }
 
@@ -335,6 +353,90 @@ enum ScanPostprocessor {
             cleared += 1
         }
         return cleared
+    }
+
+    // MARK: - Feature-cloud backfill
+
+    /// True when this scan's `arkit_features.bin` can be RECOVERED but has not been: the world map
+    /// is on disk and the cloud is not.
+    ///
+    /// Spelled against the scan DIRECTORY rather than the `@Model` so the background pass can
+    /// re-check it off-main; the paths are the same ones `CapturedScan.worldMapURL` /
+    /// `.featurePointsURL` derive.
+    nonisolated static func featureCloudPending(scanDirectory: URL) -> Bool {
+        let fileManager = FileManager.default
+        let map = scanDirectory.appendingPathComponent(worldMapFilename)
+        let cloud = scanDirectory.appendingPathComponent(FeaturePointCloudFile.filename)
+        return fileManager.fileExists(atPath: map.path)
+            && !fileManager.fileExists(atPath: cloud.path)
+    }
+
+    /// The world map's on-disk name inside a scan directory — the same path
+    /// `CapturedScan.worldMapURL` builds, restated here for the off-main, directory-only callers.
+    private static let worldMapFilename = "arworldmap.map"
+
+    /// Re-derives `arkit_features.bin` from the scan's persisted `arworldmap.map`.
+    ///
+    /// The save-time writer (`VertexColorAccumulator.writeFeatureSidecar`) serializes the cloud
+    /// from the live `ARWorldMap`; the identical bytes are recoverable offline because
+    /// `NSKeyedUnarchiver` restores a real `ARWorldMap` with no ARSession involved and
+    /// `rawFeaturePoints` then yields the same identifiers + points. That is the whole reason a
+    /// legacy scan is not a lost cause.
+    ///
+    /// **FRAME — do not "fix" this.** `arworldmap.map` is never re-based (see the RAW list in
+    /// `SaveRegistration`: an `ARWorldMap` is opaque and stays in the scan's own capture frame even
+    /// when registration has been applied to `mesh.obj` / `roomplan.json`). So points extracted here
+    /// are in the SAME raw capture frame as a cloud written at save time, whether or not this scan
+    /// was registered, and the file's `frame raw` header is honest. Transforming them into the
+    /// canonical frame would silently make a backfilled cloud disagree with every save-time one.
+    ///
+    /// **MEMORY.** These archives run to ~50 MB and world-map retention has bitten this codebase
+    /// before. The archive bytes are read memory-mapped and die with `unarchiveMap`'s scope, so the
+    /// Data and the live map are never both resident for longer than the unarchive itself; the map
+    /// is released when the `autoreleasepool` drains — before the write — and nothing is cached.
+    ///
+    /// Every failure (unreadable file, corrupt archive, failed write) is logged and swallowed: the
+    /// step stays pending, the rest of the pass continues, and the next Process retries.
+    nonisolated static func backfillFeatureCloud(scanDirectory: URL, name: String) {
+        let mapURL = scanDirectory.appendingPathComponent(worldMapFilename)
+
+        func unarchiveMap() -> ARWorldMap? {
+            do {
+                // .mappedIfSafe: the archive is paged in rather than copied onto the heap, so the
+                // peak is the map itself and not map + a 50 MB Data. Both are gone at return.
+                let archive = try Data(contentsOf: mapURL, options: .mappedIfSafe)
+                guard let map = try NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self,
+                                                                       from: archive) else {
+                    log.warning("[FeatureBackfill] \(name, privacy: .public): archive unarchived to nil — skipped")
+                    return nil
+                }
+                return map
+            } catch {
+                log.warning("[FeatureBackfill] \(name, privacy: .public): could not read/unarchive \(worldMapFilename, privacy: .public) — \(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+        }
+
+        let encoded: Data? = autoreleasepool {
+            guard let map = unarchiveMap() else { return nil }
+            // Bind both parallel arrays ONCE — ARPointCloud bridges a fresh Array on every
+            // property access, so indexing `.points` inside a loop is O(n²). Same note as
+            // VertexColorAccumulator.writeFeatureSidecar, which this mirrors byte for byte.
+            let ids = map.rawFeaturePoints.identifiers
+            let pts = map.rawFeaturePoints.points
+            return FeaturePointCloudFile.encode(ids: ids, points: pts)
+        }
+        guard let encoded else { return }
+
+        let outURL = scanDirectory.appendingPathComponent(FeaturePointCloudFile.filename)
+        do {
+            try encoded.write(to: outURL, options: .atomic)
+            let points = (encoded.count - FeaturePointCloudFile.headerByteCount)
+                / FeaturePointCloudFile.recordByteCount
+            log.notice("[FeatureBackfill] \(name, privacy: .public): recovered \(points, privacy: .public) point(s) from \(worldMapFilename, privacy: .public)")
+        } catch {
+            log.error("[FeatureBackfill] \(name, privacy: .public): write failed — \(error.localizedDescription, privacy: .public); step stays pending")
+        }
     }
 
     /// Security P1 (post-transfer auto-delete): remove camera-side originals whose bytes
@@ -669,6 +771,18 @@ enum ScanPostprocessor {
             } else {
                 log.notice("postprocess \(w.name, privacy: .public): equirect calibration deferred — downloads incomplete")
             }
+        }
+
+        // ── 0.7 FEATURE-CLOUD BACKFILL ──
+        // Re-derives arkit_features.bin from the arworldmap.map this scan already persisted, for
+        // scans saved before the cloud artifact existed. RAW-frame in, RAW-frame out (the map is
+        // never re-based), so it is safe on either side of registration — but it is placed here,
+        // ahead of the bake, to keep that independence obvious. Never sets `didStructural`: no
+        // geometry moved and no colors changed, so triggering the preview re-render at the bottom
+        // would re-parse and re-snapshot a multi-megabyte mesh for a sidecar nothing renders.
+        if steps.contains(.featureCloud) {
+            report("Recovering feature cloud…")
+            backfillFeatureCloud(scanDirectory: dir, name: w.name)
         }
 
         // ── 1. REGISTRATION ──

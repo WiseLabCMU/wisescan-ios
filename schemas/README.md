@@ -8,9 +8,9 @@ Each export format includes **only** the data relevant to that format. The commo
 `scan4d_{locationName}_{scanName}_{format}_{timestamp}_{uuid}.{ext}`
 
 ### Scan4D (`.zip`)
-Our native format. Includes relocalization data plus the full Polycam raw import payload.
+Our native format. Includes the full Polycam raw import payload plus the Scan4D-specific spatial sidecars — the ARKit sparse feature cloud, stitching links, and RoomPlan output.
 - `scan4d_metadata.json`: Global metadata for the scan (see schema below).
-- `relocalization.worldmap`: ARKit `ARWorldMap` for relocalizing against this scan.
+- `arkit_features.bin`: The ARKit sparse feature cloud taken from the scan's `ARWorldMap`, in the scan's **raw** capture frame (see format below).
 - `stitching.json`: Per-location manifest of spatial boundary links to other scans (present when this scan's location participates in a Pin & Extend or Link Adjacent stitch; see schema below).
 - `semantics.json`: *(Removed in v0.4)* Previously contained per-face mesh classification; replaced by `roomplan.json`.
 - `roomplan.json`: RoomPlan oriented bounding boxes for detected surfaces and objects (see schema below). Present when semantic labeling was enabled during capture.
@@ -46,6 +46,10 @@ bundle serves both. Built by `NerfstudioExport` from the staged Polycam payload;
 - `roomplan.json`, `roomplan_raw.json`: RoomPlan surfaces and objects (canonical / raw frame).
 - `registration.json`: The raw→canonical transform relating mesh + RoomPlan to the cameras,
   which stay in the raw capture frame.
+- `arkit_features.bin`: The ARKit sparse feature cloud (see format below). It is in the
+  **raw** capture frame — the same frame as `cameras/` and `transforms.json`, and a
+  *different* frame from `mesh.obj` and `roomplan.json`. Apply `registration.json` before
+  drawing it against either of those.
 
 **The export changes representation, never information.** It renames, re-lays-out, fixes
 the matrix layout and byte order, resamples depth to the size an engine insists on, and
@@ -96,6 +100,64 @@ Converted mesh with embedded vertex colors.
 ### USDZ (`.usdz`)
 Apple's native 3D format, converted via ModelIO.
 - Single USDZ file converted from the on-device OBJ mesh. Opens natively in Quick Look on iOS/macOS.
+
+#### `arkit_features.bin` (ARKit sparse feature cloud)
+The sparse 3D feature points ARKit accumulated while tracking, lifted out of the scan's
+`ARWorldMap` at save time. Shipped in the **Scan4D** and **Nerfstudio** bundles; always in
+the scan's **raw** capture frame, the same frame as `cameras/` / `transforms.json` and a
+different frame from `mesh.obj` / `roomplan.json` (apply `registration.json` to cross over).
+
+**Header — exactly 128 bytes of ASCII**, four newline-terminated lines followed by space
+padding, with the 128th byte itself a `\n`:
+
+```
+ARKITFEAT 1
+count <N>
+dtype id:u8,x:f4,y:f4,z:f4
+frame raw
+```
+
+**Body — `N` records of exactly 20 bytes**, little-endian, immediately after the header:
+
+| Offset | Field | Type |
+|---|---|---|
+| 0 | `id` | `UInt64` |
+| 8 | `x` | `Float32` |
+| 12 | `y` | `Float32` |
+| 16 | `z` | `Float32` |
+
+The records are **packed: no padding, no alignment**, neither between fields nor between
+records. This is the one detail a reader has to get right — a naive C `struct { uint64_t id;
+float x, y, z; }` gets padded to 24 bytes by the compiler's alignment rules, so reading the
+file into an array of it lands record 0 correctly and every record from 1 onward as garbage.
+Declare the struct packed, or read the fields by offset. In numpy the layout is one line:
+
+```python
+np.fromfile(p, dtype=np.dtype([('id','<u8'), ('x','<f4'), ('y','<f4'), ('z','<f4')]), offset=128)
+```
+
+A feature-poor capture — a dark room, a blank wall, a very short session — yields a valid
+128-byte header with `count 0` and no body, **not** a missing file: `count 0` is how "ARKit
+had nothing to give" is expressed, so a consumer never has to branch on existence to tell an
+empty cloud from a broken one. The file is absent only when the scan predates the format, or
+when it was expected and lost — and the lost case always names it in `incomplete_artifacts` in
+`scan4d_metadata.json`, whether the sidecar write failed, the promotion into the bundle failed,
+or the world-map export that produces it failed outright. So absence with no
+`incomplete_artifacts` entry means a scan older than the format, and nothing else.
+
+`id` is ARKit's own stable feature identifier, and it survives the map's save/load/save
+cycle. Successive scans of the same location — a rescan that relocalized against the earlier
+map, or a Pin & Extend continuation — therefore reuse ids for the same physical point, so the
+clouds can be joined on `id` rather than re-matched geometrically.
+
+**This is not a training seed cloud.** It is deliberately never named `sparse_pc.ply` and
+never sets `ply_file_path` in `transforms.json`; both of those stay reserved for the
+training-side pipeline in `tools/`, for the reasons given under **The export changes
+representation, never information** and **Why the sidecars look the way they do** above. It is
+a relocalization / registration artifact that happens to be points: unfiltered, unweighted,
+sparse by construction, and carrying none of the opinions about voxel size or confidence
+weighting that a seed cloud encodes. Feeding it to a trainer as one will not produce the
+result the pipeline's cloud does.
 
 ---
 

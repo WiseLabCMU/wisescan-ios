@@ -2,6 +2,7 @@ import Foundation
 import ARKit
 import os
 import simd
+import Synchronization
 
 /// Phase-0 localization diagnostics (see `docs/fix-localization-plan.md`).
 ///
@@ -221,6 +222,9 @@ enum LocalizationDiag {
             mapName = name
             features = map.rawFeaturePoints.points.count
             anchors = map.anchors.count
+            // Baseline for the save-time freshness diff. This is the last instant the cloud is
+            // provably free of live points — the session hasn't run against this map yet.
+            FeaturePointDiff.capture(map, name: name)
         }
         mutating func recordSettle(pos: SIMD3<Float>, yaw: Float, secs: Double) {
             settlePos = pos; settleYaw = yaw; settleSecs = secs
@@ -770,5 +774,135 @@ enum LocalizationDiag {
             }}}
             return best >= 0 ? best : nil
         }
+    }
+}
+
+/// Feature-point freshness diff: of the points in the map a rescan **saves**, which are RETAINED
+/// from the map it **loaded**, which are NEW this session — and did the retained ones move?
+///
+/// Log-only, `PerfDiag`-gated, and exactly two O(n) passes for a whole run: one snapshot at map
+/// load (`capture`, main thread, before `session.run`) and one diff at save (`logDiff`). There is
+/// deliberately **no per-frame component** — a "log-only" probe that burns CPU during capture
+/// corrupts the very scan it measures (the gen-8 ICP stall).
+///
+/// Stores only `[identifier: position]` (a few MB), never the `ARWorldMap` — a retained map is a
+/// ~50 MB lifetime footprint (see the world-map cache finding).
+enum FeaturePointDiff {
+    private struct Baseline {
+        let name: String
+        let points: [UInt64: SIMD3<Float>]
+    }
+
+    /// One loaded map per run, so a single slot. Lock-guarded rather than main-only: `capture`
+    /// runs on main but `logDiff` runs on whatever queue `getCurrentWorldMap` calls back on.
+    private static let slot = Mutex<Baseline?>(nil)
+
+    /// Snapshot the loaded map's feature cloud. Call where the map is deserialized, before the
+    /// session runs with it.
+    static func capture(_ map: ARWorldMap, name: String?) {
+        guard PerfDiag.enabled else { return }
+        // Bind both parallel arrays once: `ARPointCloud.identifiers`/`.points` bridge a fresh
+        // Array on every access, so touching them inside the loop would be O(n²).
+        let ids = map.rawFeaturePoints.identifiers
+        let pts = map.rawFeaturePoints.points
+        var points = [UInt64: SIMD3<Float>](minimumCapacity: ids.count)
+        for i in 0..<min(ids.count, pts.count) { points[ids[i]] = pts[i] }
+        slot.withLock { $0 = Baseline(name: name ?? "unnamed", points: points) }
+    }
+
+    /// Drop the baseline. Required on a run that loads no map, so its save can't diff against a
+    /// previous run's map.
+    static func clear() {
+        slot.withLock { $0 = nil }
+    }
+
+    /// Diff the map about to be persisted against the loaded baseline. No-op when no map was
+    /// loaded for this run.
+    static func logDiff(against map: ARWorldMap) {
+        guard PerfDiag.enabled else { return }
+        // Copied out of the lock: everything below runs on plain value copies, never while
+        // holding it.
+        guard let base = slot.withLock({ $0 }), !base.points.isEmpty else { return }
+        let ids = map.rawFeaturePoints.identifiers
+        let pts = map.rawFeaturePoints.points
+        let n = min(ids.count, pts.count)
+
+        var drift: [Float] = []
+        drift.reserveCapacity(min(n, base.points.count))
+        var fresh = 0
+        for i in 0..<n {
+            if let old = base.points[ids[i]] {
+                drift.append(simd_distance(old, pts[i]))
+            } else {
+                fresh += 1
+            }
+        }
+        let retained = drift.count
+        let dropped = base.points.count - retained
+        let retainedFrac = Float(retained) / Float(base.points.count)
+
+        var driftDesc = "n/a (nothing retained by id)"
+        if retained > 0 {
+            drift.sort()
+            func p(_ q: Float) -> Float { drift[min(retained - 1, Int(Float(retained - 1) * q))] }
+            // Sorted, so the first over-threshold index is the count of everything above it.
+            let moved = retained - (drift.firstIndex { $0 > 0.01 } ?? retained)
+            driftDesc = String(format: "med=%.1fcm p95=%.1fcm max=%.1fcm >1cm=%d",
+                               p(0.50) * 100, p(0.95) * 100, p(1.0) * 100, moved)
+        }
+
+        // If ARKit remints identifiers per session, the id diff reads as a total wipe even when the
+        // geometry survived intact — which is the opposite conclusion. So when retention collapses,
+        // re-ask the question spatially: does each baseline point still have ANY new point near it?
+        var fallback = "n/a"
+        if retainedFrac < 0.05 {
+            let matched = spatialMatchFraction(baseline: Array(base.points.values), current: pts, radius: 0.05)
+            fallback = String(format: "%.0f%% of baseline within 5cm of some new point", matched * 100)
+        }
+
+        PerfDiag.log(String(
+            format: "[FeatDiff] baseline=%d(%@) current=%d | retained=%d (%.0f%%) dropped=%d fresh=%d | drift(retained): %@ | spatial-fallback: %@",
+            base.points.count, base.name, n, retained, retainedFrac * 100, dropped, fresh, driftDesc, fallback))
+    }
+
+    // MARK: - Spatial fallback
+
+    /// Fraction of `baseline` points with at least one `current` point within `radius`. Uniform
+    /// grid at `cellSize = radius`, so each query scans the 27-cell neighbourhood — O(n), not O(n²).
+    private static func spatialMatchFraction(baseline: [SIMD3<Float>], current: [SIMD3<Float>],
+                                             radius: Float) -> Float {
+        guard !baseline.isEmpty, !current.isEmpty else { return 0 }
+        let cell = radius
+        var grid = [Int64: [SIMD3<Float>]](minimumCapacity: current.count)
+        for p in current { grid[cellKey(p, cell), default: []].append(p) }
+
+        let r = Int64((radius / cell).rounded(.up))
+        let r2 = radius * radius
+        var matched = 0
+        for q in baseline {
+            let bx = Int64((q.x / cell).rounded(.down))
+            let by = Int64((q.y / cell).rounded(.down))
+            let bz = Int64((q.z / cell).rounded(.down))
+            search: for dx in -r...r { for dy in -r...r { for dz in -r...r {
+                let k = ((bx + dx) & 0x1FFFFF)
+                    | (((by + dy) & 0x1FFFFF) << 21)
+                    | (((bz + dz) & 0x1FFFFF) << 42)
+                guard let bucket = grid[k] else { continue }
+                for p in bucket where simd_distance_squared(p, q) <= r2 {
+                    matched += 1
+                    break search
+                }
+            }}}
+        }
+        return Float(matched) / Float(baseline.count)
+    }
+
+    /// Same 21-bit-band pack as `LocalizationDiag.VoxelGrid`; band collisions only cost extra
+    /// candidates, which the exact distance test then rejects.
+    private static func cellKey(_ p: SIMD3<Float>, _ cell: Float) -> Int64 {
+        let x = Int64((p.x / cell).rounded(.down))
+        let y = Int64((p.y / cell).rounded(.down))
+        let z = Int64((p.z / cell).rounded(.down))
+        return (x & 0x1FFFFF) | ((y & 0x1FFFFF) << 21) | ((z & 0x1FFFFF) << 42)
     }
 }
