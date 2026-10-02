@@ -717,7 +717,7 @@ struct ScanExportManager {
 
         switch format {
         case .scan4d:
-            // scan4d_metadata.json + arkit_features.bin + full Polycam payload.
+            // scan4d_metadata.json + arkit_features.bin + sweep_coverage.bin + full Polycam payload.
             // The opaque ARWorldMap itself is NOT exported — it is an on-device bootstrap only
             // (rescan/link relocalization still read it from scanDir); what ships instead is the
             // feature cloud serialized from it, which downstream consumers can actually read.
@@ -785,17 +785,21 @@ struct ScanExportManager {
                 // registration.json sidecar (save-time canonical registration: the raw→canonical
                 // transform + fit stats a downstream consumer needs to relate mesh/roomplan — which
                 // are canonical-frame — to the world map, which stays in the raw capture frame),
-                // and the ARKit feature cloud.
+                // the ARKit feature cloud, and the sweep-coverage grid.
                 //
                 // FRAME: arkit_features.bin is RAW — it is serialized from the ARWorldMap before
                 // save-time registration runs, so it shares the frame of cameras/ and the world
                 // map, NOT the canonical frame of mesh.obj / roomplan.json. registration.json is
                 // what relates the two; a consumer mixing the cloud with the mesh must apply it.
+                // sweep_coverage.bin is RAW too — it is accumulated from capture poses + depth
+                // during the sweep, co-framed with cameras/, and never rewritten by registration.
+                // It ships beside the cloud because it is what makes the cloud interpretable:
+                // an absence of features means something only where coverage says we looked.
                 //
                 // The fileExists guard below is what lets legacy scans (saved before the cloud
-                // existed) degrade quietly instead of logging a miss.
+                // or the coverage grid existed) degrade quietly instead of logging a miss.
                 for rpFile in ["roomplan.json", "roomplan_raw.json", "registration.json",
-                               FeaturePointCloudFile.filename] {
+                               FeaturePointCloudFile.filename, SweepCoverageFile.filename] {
                     let rpURL = scanDir.appendingPathComponent(rpFile)
                     if fm.fileExists(atPath: rpURL.path) {
                         do {
@@ -826,9 +830,10 @@ struct ScanExportManager {
             // A bundle Nerfstudio and LichtFeld Studio load as-is: images/, depth/,
             // confidence/, masks/, transforms.json, plus the raw geometry sidecars staged
             // below (mesh.obj, face_classes.bin, roomplan*.json, registration.json,
-            // arkit_features.bin). No seed cloud is written and transforms.json deliberately
-            // carries no "ply_file_path": LichtFeld auto-loads a seed the moment that key
-            // appears, which would change training behavior in one engine and not the other.
+            // arkit_features.bin, sweep_coverage.bin). No seed cloud is written and
+            // transforms.json deliberately carries no "ply_file_path": LichtFeld auto-loads a
+            // seed the moment that key appears, which would change training behavior in one
+            // engine and not the other.
             //
             // Built from the staged Polycam payload rather than copying capture's own
             // transforms.json, which emits the pose matrix transposed and has never
@@ -846,7 +851,7 @@ struct ScanExportManager {
                 // Raw geometry the downstream splat pipeline consumes as-is: the ARKit mesh
                 // (+ its face-aligned classification sidecar), RoomPlan, the registration
                 // that relates mesh/RoomPlan (canonical frame) to the cameras (raw frame),
-                // and the ARKit feature cloud.
+                // the ARKit feature cloud, and the sweep-coverage grid.
                 // Shipped unmodified — the export changes representation, never information;
                 // debiasing, hole filling, seeding and prior rendering are training-side.
                 //
@@ -855,12 +860,15 @@ struct ScanExportManager {
                 // on-device world map), NOT the canonical frame of mesh.obj / roomplan.json.
                 // registration.json is the transform between them. The points are shipped as
                 // data, never wired in as a training seed (see the bundle note above).
+                // sweep_coverage.bin is RAW as well — accumulated from capture poses + depth,
+                // co-framed with cameras/ — and ships so the cloud's absences are readable:
+                // no features where coverage says we looked is a real observation.
                 //
-                // The fileExists guard below lets legacy scans with no feature cloud through
-                // unchanged.
+                // The fileExists guard below lets legacy scans with no feature cloud or
+                // coverage grid through unchanged.
                 for artifact in ["mesh.obj", "face_classes.bin", "roomplan.json",
                                  "roomplan_raw.json", "registration.json",
-                                 FeaturePointCloudFile.filename] {
+                                 FeaturePointCloudFile.filename, SweepCoverageFile.filename] {
                     let src = scanDir.appendingPathComponent(artifact)
                     guard fm.fileExists(atPath: src.path) else { continue }
                     do {

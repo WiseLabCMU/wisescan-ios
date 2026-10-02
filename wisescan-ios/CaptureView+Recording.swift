@@ -364,6 +364,12 @@ extension CaptureView {
         // another thread; this also guarantees no further frames are captured during shutdown.
         // (FrameCaptureSession.pauseCapture() contract — see its docs.)
         capSession.pauseCapture()
+        // Freeze sweep coverage at the Stop tap, in lockstep with pauseCapture — NOT at
+        // isRecording=false in the save pipeline. Freezing later would keep the accumulator
+        // raycasting through the world-map export window (the gen-8 contention) and stamp frames
+        // that cameras/ never received. nil only if the capture view is already gone; saveScan
+        // names that case in incomplete_artifacts.
+        let sweepCoverage = scanStore.freezeSweepCoverage?()
         // Snapshot the save-routing state NOW, on main, while it's still valid. The pipeline below
         // resolves asynchronously, and a teardown/reset between here and finishStopRecording (most
         // notably onDisappear's resetCaptureState) would otherwise clear scanStore — making an
@@ -385,13 +391,15 @@ extension CaptureView {
             let rawDataPath = capSession.stop()
             DispatchQueue.main.async {
                 self.finishStopRecording(rawDataPath: rawDataPath, locationId: locationId,
-                                         scanCase: scanCase, completion: completion)
+                                         scanCase: scanCase, sweepCoverage: sweepCoverage,
+                                         completion: completion)
             }
         }
     }
 
     // swiftlint:disable:next function_body_length cyclomatic_complexity
     private func finishStopRecording(rawDataPath: URL?, locationId: UUID?, scanCase: ScanCase,
+                                     sweepCoverage: SweepCoverageSnapshot?,
                                      completion: ((CapturedScan?) -> Void)? = nil) {
         // SNAPSHOT the mesh from the still-active AR session: a handful of memcpys (raw vertex/face
         // buffers + segmentation pixels + camera matrices), all by value. This is the only mesh work
@@ -485,6 +493,7 @@ extension CaptureView {
                             locationId: locationId, meshData: Data(), vertexCount: 0, faceCount: 0,
                             rawDataPath: rawDataPath, vertexColors: nil, worldMapURL: mapURL,
                             thumbnailData: thumbnailData, scanCase: scanCase,
+                            sweepCoverage: sweepCoverage,
                             worldMapSuspect: mapSuspect)
                         self.frameCaptureSession = FrameCaptureSession()
                         MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
@@ -519,6 +528,7 @@ extension CaptureView {
                     rawDataPath: rawDataPath,
                     vertexColors: nil,
                     worldMapURL: nil,
+                    sweepCoverage: sweepCoverage,
                     thumbnailData: thumbnailData,
                     scanCase: scanCase
                 )
@@ -709,6 +719,7 @@ extension CaptureView {
                             rawDataPath: rawDataPath,
                             vertexColors: vertexColors,
                             worldMapURL: mapURL,
+                            sweepCoverage: sweepCoverage,
                             thumbnailData: thumbnailData,
                             scanCase: capturedScanCase,
                             worldMapSuspect: mapSuspect
@@ -748,6 +759,7 @@ extension CaptureView {
                             worldMapURL: mapURL,
                             thumbnailData: thumbnailData,
                             scanCase: capturedScanCase,
+                            sweepCoverage: sweepCoverage,
                             worldMapSuspect: mapSuspect
                         )
 
@@ -975,6 +987,7 @@ extension CaptureView {
             rawDataPath: pending.rawDataPath,
             vertexColors: pending.vertexColors,
             worldMapURL: pending.worldMapURL,
+            sweepCoverage: pending.sweepCoverage,
             thumbnailData: pending.thumbnailData,
             scanCase: pending.scanCase,
             worldMapSuspect: pending.worldMapSuspect

@@ -11,6 +11,7 @@ Each export format includes **only** the data relevant to that format. The commo
 Our native format. Includes the full Polycam raw import payload plus the Scan4D-specific spatial sidecars — the ARKit sparse feature cloud, stitching links, and RoomPlan output.
 - `scan4d_metadata.json`: Global metadata for the scan (see schema below).
 - `arkit_features.bin`: The ARKit sparse feature cloud taken from the scan's `ARWorldMap`, in the scan's **raw** capture frame (see format below).
+- `sweep_coverage.bin`: Where the capture sweep actually looked — a coarse cell grid of free-space / surface / visit counts built from camera poses + LiDAR depth, in the scan's **raw** capture frame (see format below). It is what makes `arkit_features.bin` interpretable: an absence of features means something only where coverage says we looked.
 - `stitching.json`: Per-location manifest of spatial boundary links to other scans (present when this scan's location participates in a Pin & Extend or Link Adjacent stitch; see schema below).
 - `semantics.json`: *(Removed in v0.4)* Previously contained per-face mesh classification; replaced by `roomplan.json`.
 - `roomplan.json`: RoomPlan oriented bounding boxes for detected surfaces and objects (see schema below). Present when semantic labeling was enabled during capture.
@@ -50,6 +51,9 @@ bundle serves both. Built by `NerfstudioExport` from the staged Polycam payload;
   **raw** capture frame — the same frame as `cameras/` and `transforms.json`, and a
   *different* frame from `mesh.obj` and `roomplan.json`. Apply `registration.json` before
   drawing it against either of those.
+- `sweep_coverage.bin`: The observed-space grid (see format below) — also **raw** capture
+  frame, so the same `registration.json` caveat applies. Shipped so the feature cloud's
+  absences are readable; it is data, not a training input.
 
 **The export changes representation, never information.** It renames, re-lays-out, fixes
 the matrix layout and byte order, resamples depth to the size an engine insists on, and
@@ -158,6 +162,88 @@ a relocalization / registration artifact that happens to be points: unfiltered, 
 sparse by construction, and carrying none of the opinions about voxel size or confidence
 weighting that a seed cloud encodes. Feeding it to a trainer as one will not produce the
 result the pipeline's cloud does.
+
+#### `sweep_coverage.bin` (sweep coverage grid)
+Where the capture sweep **looked**, accumulated live from camera poses + LiDAR depth — never
+from feature points. Each depth sample is cast as a ray from the camera; the cells it passes
+through are *free*, the cell it ends in is *surface*. Shipped in the **Scan4D** and
+**Nerfstudio** bundles beside `arkit_features.bin`, because it is the null-case field the cloud
+needs: "no features here" is an observation only in cells this grid says were looked at. Zero
+coverage means **no claim is possible**, not "empty". (This is unrelated to
+`photo_coverage` in `scan4d_metadata.json`, which scores keyframe photos against the mesh.)
+
+**Header — exactly 512 bytes of ASCII**, seven newline-terminated lines followed by space
+padding, with the 512th byte itself a `\n`:
+
+```
+SWEEPCOV 1
+count <N>
+cell <metres>
+dtype i:i4,j:i4,k:i4,free:u2,surface:u2,visits:u2
+frame raw
+stats frames=<n> drop_busy=<n> drop_rate=<n> skip_tracking=<n> skip_nodepth=<n> depth=<0|1>
+rays integrated=<n> truncated=<n> lowconf=<n> invalid=<n>
+```
+
+The `stats` line counts frames integrated (`frames`), dropped (`drop_busy`: the integrator was
+still busy with the previous frame; `drop_rate`: over the rate throttle) and skipped
+(`skip_tracking`: tracking not `.normal`; `skip_nodepth`: no depth map); `depth=1` iff a depth
+map was ever available during the capture. The `rays` line counts rays `integrated`,
+`truncated` at the range cap, skipped as low-confidence (`lowconf`), and rejected as `invalid`
+(non-finite / non-positive depth). Readers should parse both lines as space-separated
+`key=value` tokens and ignore unknown keys.
+
+The 512 bytes leave room to spare: with every number at its type's maximum a header uses 368 of
+them, so later layers can add header keys without moving the body. Should a header ever
+outgrow the budget regardless, the writer withholds the diagnostics rather than fail the save:
+every `stats` / `rays` counter is written as `-1`, which no real count can be. `count`, `cell`
+and `depth=` are never withheld, and the body is unaffected.
+
+**Body — `N` records of exactly 18 bytes**, little-endian, packed (no padding or alignment,
+same caveat as `arkit_features.bin`), immediately after the header:
+
+| Offset | Field | Type |
+|---|---|---|
+| 0 | `i` | `Int32` |
+| 4 | `j` | `Int32` |
+| 8 | `k` | `Int32` |
+| 12 | `free` | `UInt16` |
+| 14 | `surface` | `UInt16` |
+| 16 | `visits` | `UInt16` |
+
+```python
+np.fromfile(p, dtype=np.dtype([('i','<i4'), ('j','<i4'), ('k','<i4'), ('free','<u2'), ('surface','<u2'), ('visits','<u2')]), offset=512)
+```
+
+**Cells.** Origin-anchored floor binning: cell `(i, j, k)` spans
+`[i*cell, (i+1)*cell)` × `[j*cell, (j+1)*cell)` × `[k*cell, (k+1)*cell)` — so `-0.1` lands in
+cell `-1`, not `0`. `cell` is **0.5 m** in v1; read it from the header rather than assuming.
+Only touched cells are written; a cell absent from the body was never observed.
+
+**Counters.** `free`, `surface` and `visits` count *frame updates*, not rays: each update
+increments each counter at most once per cell, and all three saturate at 65535 rather than
+wrapping. `visits` is updates that touched the cell in either state. Low-confidence depth
+samples are skipped entirely. Rays longer than **5 m** are truncated: free space is stamped up
+to the cap and no surface is recorded. Only frames with `.normal` tracking are stamped.
+
+**Frame.** The scan's **raw** capture frame, co-framed with `cameras/` at capture time. It is
+**not** snap-corrected the way the saved mesh is (the mesh re-reads live anchor transforms at
+save; this grid keeps whatever pose each frame had when it was stamped), and it is not
+`mesh.obj`'s canonical frame. Apply `registration.json`'s raw→canonical transform before
+comparing it with the mesh or RoomPlan. The on-device registration bake never rewrites it.
+
+**Presence contract** (mirrors `arkit_features.bin`):
+- Every current save writes the file, even when the grid is empty — a valid header with
+  `count 0` and no body.
+- `depth=0` on the `stats` line means the device **could not look** (no depth was ever
+  available): the empty grid makes no claim, and is not "observed empty".
+- Absent **with** an `incomplete_artifacts` entry in `scan4d_metadata.json` means it was lost.
+- Absent with **no** entry means the scan predates the format, and nothing else.
+
+**Scope.** v1 is the **room-relocalization** profile only: any observation counts, with no
+viewing-direction or ground-sample-distance binning. Direction-binned / GSD coverage, and
+*achievability* (which unobserved cells a sweep could have reached — free-space erosion plus
+flood-fill), are planned as later layers on top of this file, not encoded in it.
 
 ---
 

@@ -138,6 +138,9 @@ class CapturedScan {
     @Transient var modelPreviewURL: URL { scanDirectory.appendingPathComponent("model_preview.jpg") }
     @Transient var thumbnailURL: URL { scanDirectory.appendingPathComponent("thumbnail.jpg") }
     @Transient var rawDataPath: URL { scanDirectory.appendingPathComponent("raw_data") }
+    /// Sweep-coverage grid frozen at the Stop tap and written by `saveScan` straight from the
+    /// in-memory snapshot (derived from poses + depth, not the map, so map-less saves have one too).
+    @Transient var sweepCoverageURL: URL { scanDirectory.appendingPathComponent(SweepCoverageFile.filename) }
 
     @Transient var roomPlanFileURL: URL { scanDirectory.appendingPathComponent("roomplan.json") }
     @Transient var roomPlanRawFileURL: URL { scanDirectory.appendingPathComponent("roomplan_raw.json") }
@@ -502,6 +505,11 @@ class ScanStore {
     /// path. The box builds the room and writes roomplan.json/_raw whenever both the didEndWith
     /// data and this destination are in hand. Weakly captures the coordinator.
     @ObservationIgnored var setRoomDataPersistDir: ((URL) -> Void)?
+    /// Freezes the live sweep-coverage accumulator and returns its snapshot. Populated by
+    /// ARCoverageView; called on MAIN at the Stop tap. It stops accepting frames and drains the
+    /// in-flight update before returning, so the snapshot covers exactly the recorded frames.
+    /// Returns nil (or the hook is nil) when the capture view is already gone.
+    @ObservationIgnored var freezeSweepCoverage: (() -> SweepCoverageSnapshot?)?
     /// Re-runs the AR session's configuration if no frames have been delivered for several
     /// seconds — the record button's escape from a wedged capture graph (set by ARCoverageView;
     /// called from the record tap's "establishing tracking" bounce).
@@ -1030,6 +1038,9 @@ class ScanFileManager {
         rawDataPath: URL?,
         vertexColors: Data?,
         worldMapURL: URL?,
+        // No default on purpose: every call site must decide whether it has a snapshot, so a new
+        // save path can't silently drop coverage (cf. PendingScanData.worldMapSuspect's default).
+        sweepCoverage: SweepCoverageSnapshot?,
         thumbnailData: Data? = nil,
         scanCase: ScanCase = .rescanSpace,
         worldMapSuspect: Bool = false
@@ -1201,6 +1212,24 @@ class ScanFileManager {
                     }
                 }
             }
+        }
+
+        // Sweep coverage — written directly from the in-memory snapshot frozen at the Stop tap.
+        // DESIGN: this deliberately departs from arkit_features.bin's temp-file-beside-the-map
+        // pattern. Coverage is derived from poses + depth, not the map; two save paths have no
+        // map at all (the VIO-loss recovered scan, and Lite when no map exported) yet still have
+        // real or legitimately empty coverage; and a value write needs no temp file, so there is
+        // nothing for discardPendingScan / discardInProgressScan to clean up. An empty grid (no
+        // frames, or no depth) is still written as a valid header-only file; only a lost snapshot
+        // or a failed write is named in incomplete_artifacts. scanDirectory was created with the
+        // mesh write above (the save returns early if that failed), so the target dir exists.
+        if let sweepCoverage {
+            bestEffort(SweepCoverageFile.filename) {
+                try SweepCoverageFile.encode(sweepCoverage).write(to: newScan.sweepCoverageURL, options: .atomic)
+            }
+        } else {
+            recordMissingArtifact(SweepCoverageFile.filename,
+                                  reason: "no sweep-coverage snapshot reached the save (capture view gone at Stop)")
         }
 
         // Bundle self-description (#58): if any optional artifact failed above, say so INSIDE
