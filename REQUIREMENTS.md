@@ -815,7 +815,7 @@ Each format includes only its own payload — no universal base.
 
 | Format | Extension | Contents | Target Tool |
 |:-------|:----------|:---------|:------------|
-| Scan4D | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, `images/`, `depth/`, `cameras/`, `mesh_info.json` | Scan4D server workflows |
+| Scan4D | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, `sweep_coverage.bin` (observed-space grid from poses + depth, raw frame), `images/`, `depth/`, `cameras/`, `mesh_info.json` | Scan4D server workflows |
 | Polycam | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
 | RAW | `.zip` | `images/`, `depth/`, `transforms.json` | Nerfstudio, COLMAP |
 | Flame3D | `.zip` | `keyframes/{images,corrected_cameras,depth}/`, `raw.glb` (colored mesh), `mesh_info.json` at the zip root | flame3d-core (`polycam` data source) |

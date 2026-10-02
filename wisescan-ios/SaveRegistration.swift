@@ -24,6 +24,10 @@ import RoomPlan
 /// - `arkit_features.bin` — RAW. The feature cloud is serialized from that same `ARWorldMap` at
 ///   save time, BEFORE registration runs, so it is permanently in this scan's raw capture frame —
 ///   even though the Nerfstudio bundle ships it beside the canonical `mesh.obj` / `roomplan.json`.
+/// - `sweep_coverage.bin` — RAW. The sweep-coverage grid is accumulated from capture poses + depth
+///   during the sweep, so it is co-framed with `cameras/` at capture time. Nothing here re-bases it,
+///   and the ScanPostprocessor registration bake rewrites only `mesh.obj` / `roomplan.json` — it
+///   must never route this file (re-binning a cell grid under a rigid transform is not lossless).
 /// - `roomplan_raw.json` — RAW (Apple's opaque Codable, kept for round-tripping).
 /// - `registration.json` — the sidecar written here: the transform + fit stats + whether it was
 ///   applied, so every consumer (ghost loader, future stitch/pose-graph work) can recover the
@@ -81,7 +85,8 @@ enum SaveRegistration {
     private static let sidecarName = "registration.json"
     private static let artifactNote =
         "mesh.obj and roomplan.json are in the location's canonical (original-scan) frame; "
-        + "relocalization.worldmap, roomplan_raw.json and arkit_features.bin remain in this scan's "
+        + "relocalization.worldmap, roomplan_raw.json, arkit_features.bin and sweep_coverage.bin "
+        + "remain in this scan's "
         + "raw capture frame"
 
     // MARK: - The save-time registration

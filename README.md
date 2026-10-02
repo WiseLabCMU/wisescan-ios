@@ -147,10 +147,10 @@ Each export format includes **only** the data relevant to that format. The filen
 
 | Format | Extension | Contents | Viewer |
 | :--- | :--- | :--- | :--- |
-| **Scan4D** | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
+| **Scan4D** | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, `sweep_coverage.bin`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
 | **Polycam** | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
 | **Flame3D** | `.zip` | `keyframes/images/`, `keyframes/corrected_cameras/`, `keyframes/depth/` (native LiDAR), `raw.glb` (mesh with captured vertex colors), `mesh_info.json` (registration as `alignmentTransform`); entries at the zip root | [flame3d-core](https://github.com/openflam/flame3d-core)'s `polycam` data source, as-is; contract in `tools/scan4d-to-flame3d` |
-| **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `cameras/`, + raw geometry: `mesh.obj` (with captured vertex colors), `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin` | Nerfstudio and LichtFeld Studio, as-is; training-side pipeline in `tools/` |
+| **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `cameras/`, + raw geometry: `mesh.obj` (with captured vertex colors), `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin`, `sweep_coverage.bin` | Nerfstudio and LichtFeld Studio, as-is; training-side pipeline in `tools/` |
 | **OBJ** | `.obj` | Single mesh file with captured vertex colors | MeshLab, Blender |
 | **PLY** | `.ply` | Converted mesh with captured vertex colors | MeshLab, CloudCompare |
 | **USDZ** | `.usdz` | Converted mesh via ModelIO, with vertex colors | iOS Quick Look (native) |
@@ -160,6 +160,7 @@ Each export format includes **only** the data relevant to that format. The filen
 scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
 ├── scan4d_metadata.json    # GPS tags, Location ID, `export_format`, `hardware_device_model`, & `face_anchors`
 ├── arkit_features.bin       # ARKit sparse feature cloud (id + xyz, raw capture frame)
+├── sweep_coverage.bin       # Where the sweep looked: per-cell free/surface/visit counts (raw capture frame)
 ├── images/                 # RGB frames (JPEG, ~2fps adaptive)
 │   ├── frame_00000.jpg
 │   └── ...

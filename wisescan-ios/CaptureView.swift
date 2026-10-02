@@ -165,6 +165,9 @@ struct CaptureView: View {
         let worldMapURL: URL?
         let thumbnailData: Data?
         let scanCase: ScanCase
+        // Sweep-coverage grid frozen at the Stop tap; nil only when the capture view was gone.
+        // A `let` with no default so the memberwise init makes every construction site decide.
+        let sweepCoverage: SweepCoverageSnapshot?
         // Map saved with a wandering outlier cluster in its feature cloud (tracking excursion,
         // e.g. an OS interruption with motion) — persisted so rescan/link can warn (default lets
         // the VIO-recovery construction sites, which save no map, omit it).

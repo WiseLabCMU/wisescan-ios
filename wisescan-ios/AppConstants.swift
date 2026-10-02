@@ -483,6 +483,14 @@ enum AppConstants {
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)
     static let stillOverlapFloor: Double = 0.4                 // coach nudges "overlap your photos" while mean still-to-still overlap is below this (photogrammetry target ~0.6)
     static let stillParallaxDiversityFloor: Double = 0.15      // coach nudges "step sideways" while under this fraction of photo-covered voxels has ≥2 standpoints
+    static let sweepCoverageCellSize: Float = 0.5              // m — sweep-coverage cell (room-relocalization profile; finer 0.1-0.2 m guidance is a constant change)
+    static let sweepCoverageMaxHz: Double = 5.0                // max sweep-coverage integrations per second (frames above this rate are dropped)
+    static let sweepCoverageRayColumns: Int = 20               // depth-ray grid columns per frame (20×15 = 300 rays/frame)
+    static let sweepCoverageRayRows: Int = 15                  // depth-ray grid rows per frame
+    static let sweepCoverageMaxRange: Float = 5.0              // m — rays longer than this are truncated: free space to the cap, no surface
+    static let sweepCoverageMinDepth: Float = 0.1              // m — depth at or below this is invalid (sensor floor / zero fill)
+    static let sweepCoverageMinConfidence: UInt8 = 1           // skip ARConfidenceLevel.low only — a High-only filter blanked the cloud under thermal duty-cycling (Shaders/PointCloud.metal:123-128)
+    static let sweepCoverageLogEveryUpdates: Int = 25          // emit a sweep-coverage diagnostic line every N integrated updates
     static let keyframeFrustumDepth: Float = 0.25             // m — length of the still-capture frustum wedge in the preview
     static let keyframeStillColor = SIMD4<Float>(0.2, 0.85, 1.0, 1.0)  // cyan — sharp still (keyframe) capture markers
     static let keyframeMotionColor = SIMD4<Float>(1.0, 0.6, 0.15, 1.0) // amber — motion (sweep) frame markers

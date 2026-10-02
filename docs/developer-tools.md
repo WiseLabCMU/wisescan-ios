@@ -23,6 +23,12 @@ Release, which is what the field mostly runs. ON enables:
   guard (that is a capture-safety mechanism, always on).
 - **MemDiag** — 1 Hz `footprint/resident/faces/verts/anchors/fps/cpu/thermal` telemetry
   plus lifecycle events (`RECORD-START`, `RP-STOP`, …) and per-thread CPU breakdowns.
+- **`[Coverage]` sweep lines** — the sweep-coverage recorder's measured cost, every 25
+  integrated updates while recording: per-update CPU (`last/mean/max` ms), `cpu_total` as a
+  share of one core, cell count, the throttle's `drop_busy`/`drop_rate` drops and the
+  `skip_tracking`/`skip_nodepth` skips. One `sweep FINAL` line at the Stop tap adds the
+  frame and ray totals that land in `sweep_coverage.bin`'s header. Only the lines are gated —
+  the grid itself is always recorded and saved.
 - **os_signpost intervals** for the Instruments timeline when a cable IS available.
 
 Decision-bearing lines (map-suspect verdicts, link drops, calibration rails) log at
