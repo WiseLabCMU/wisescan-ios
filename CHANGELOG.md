@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.6.0...v0.7.0) (2026-10-04)
+
+
+### Features
+
+* recover the feature cloud for scans saved before it existed ([916f9b6](https://github.com/WiseLabCMU/wisescan-ios/commit/916f9b63169a83debfd51c1d7ea1ab9342d45c75))
+
+
+### Bug Fixes
+
+* **build:** unroll the phone_transform column expression Xcode 27 rejects ([c53be85](https://github.com/WiseLabCMU/wisescan-ios/commit/c53be85de9a12aa7eee4565ffa546651785da4e7))
+* **build:** unroll the phone_transform column expression Xcode 27 rejects ([41ac00f](https://github.com/WiseLabCMU/wisescan-ios/commit/41ac00f8ba5f3174ef2b57f4858e51da22dc08ae))
+
 ## [0.6.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.5.0...v0.6.0) (2026-09-08)
 
 
