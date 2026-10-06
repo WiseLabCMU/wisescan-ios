@@ -214,6 +214,16 @@ enum ExportFormat: String, CaseIterable, Codable {
         }
     }
 
+    /// The export carries the scan's mesh, and with it the mesh's vertex colors. Exporting
+    /// one colorizes the scan first if it hasn't been (`ScanExportManager.colorizeForExport`),
+    /// so the colors that ship are sampled from the frames, never the normals preview.
+    var includesMesh: Bool {
+        switch self {
+        case .nerfstudio, .usdz, .ply, .obj: return true
+        case .scan4d, .polycam: return false
+        }
+    }
+
     /// Decodes a persisted raw value, mapping names that have changed.
     ///
     /// This format was called "RAW" until it was rebuilt into a bundle that actually loads

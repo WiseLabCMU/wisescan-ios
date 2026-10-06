@@ -42,7 +42,8 @@ bundle serves both. Built by `NerfstudioExport` from the staged Polycam payload;
 - `cameras/`, `mesh_info.json`: The per-frame Polycam camera JSONs `transforms.json` was
   built from — kept rather than deleted; the export never discards captured data.
 - `mesh.obj` (+ `face_classes.bin`): The ARKit scene-reconstruction mesh with its
-  face-aligned classification sidecar, in the location's **canonical** frame.
+  face-aligned classification sidecar, in the location's **canonical** frame. Vertices carry
+  their captured colors as `v x y z r g b` (sRGB, 0–1); see **Mesh vertex colors** below.
 - `roomplan.json`, `roomplan_raw.json`: RoomPlan surfaces and objects (canonical / raw frame).
 - `registration.json`: The raw→canonical transform relating mesh + RoomPlan to the cameras,
   which stay in the raw capture frame.
@@ -90,16 +91,19 @@ dropped — at 6720×3360 they would dominate the archive and neither engine rea
 this layout. Use **Scan4D** when you want them kept.
 
 ### OBJ (`.obj`)
-Single mesh file export (no vertex colors).
-- The raw `mesh.obj` reconstructed on-device by RealityKit.
+Single mesh file export, with vertex colors.
+- The `mesh.obj` reconstructed on-device by RealityKit, with each vertex's captured color appended as `v x y z r g b` (sRGB, 0–1), the vertex-color extension MeshLab, Blender, CloudCompare and Open3D read.
 
 ### PLY (`.ply`)
-Converted mesh with embedded vertex colors.
-- Single ASCII PLY file with vertices, faces, and per-vertex RGB colors converted from the on-device OBJ + colors.bin.
+Converted mesh with vertex colors.
+- Single binary (`binary_little_endian`) PLY file with vertices, faces and per-vertex RGB (`uchar red/green/blue`).
 
 ### USDZ (`.usdz`)
 Apple's native 3D format, converted via ModelIO.
-- Single USDZ file converted from the on-device OBJ mesh. Opens natively in Quick Look on iOS/macOS.
+- Single USDZ file converted from the on-device OBJ mesh, read with its vertex colors. Opens natively in Quick Look on iOS/macOS.
+
+### Mesh vertex colors
+Every export that includes the mesh (Nerfstudio, OBJ, PLY, USDZ) carries per-vertex colors **sampled from the captured frames**: the colorize step projects the mesh into the saved frames and takes a weighted median per vertex. Exporting a scan that hasn't been colorized runs that step first, the same pass as the **Color** button. The save-time colors the in-app viewer shows before that are normals-based, a visual preview only, and are never exported. If colorize can't run (no saved frames, or the scan is mid-process), the mesh exports without colors.
 
 #### `arkit_features.bin` (ARKit sparse feature cloud)
 The sparse 3D feature points ARKit accumulated while tracking, lifted out of the scan's

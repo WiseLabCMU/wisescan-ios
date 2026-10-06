@@ -20,7 +20,7 @@ When Privacy Filtering is enabled, the app saves ARKit's person segmentation mas
 
 Raw (unblurred) images exist temporarily in the app's sandboxed container between capture and export. They are not accessible to other apps and are only exported after privacy blur is applied. The segmentation masks themselves are internal-only and are not included in any export archive.
 
-Person-shaped geometry is also excluded from the exported mesh, and a live on-screen indicator shows detected people during scanning. All privacy processing occurs entirely on-device.
+Person-shaped geometry is also excluded from the exported mesh, and a live on-screen indicator shows detected people during scanning. Mesh exports carry per-vertex colors sampled from the captured frames; with Privacy Filtering on, that sampling skips the same person masks (with a margin around each person), and skips any frame whose mask is missing, so no person's appearance is baked into the mesh colors. All privacy processing occurs entirely on-device.
 
 ### 360° Camera Stills
 

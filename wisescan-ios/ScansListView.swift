@@ -545,11 +545,16 @@ struct ScansListView: View {
 
         bulkProgressMessage = "Preparing 1/\(totalScans)…"
 
-        // Capture scan directories + the set of locations on main (SwiftData model access).
-        let scanInfos = scans.map { (dir: $0.scanDirectory, filename: $0.makeExportFilename(format: format)) }
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         Task { @MainActor in
+            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            await ScanExportManager.colorizeForExport(
+                scans, format: format, modelContext: modelContext,
+                progress: { scan, msg in if let msg { bulkProgressMessage = "\(scan.name): \(msg)" } })
+            // Capture scan directories on main, after colorizing (SwiftData model access).
+            let scanInfos = scans.map { (dir: $0.scanDirectory, filename: $0.makeExportFilename(format: format),
+                                         colorsFromCapture: $0.isColored) }
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             DispatchQueue.global(qos: .userInitiated).async {
@@ -559,7 +564,8 @@ struct ScansListView: View {
                         self.bulkProgressMessage = "Preparing \(idx + 1)/\(totalScans)…"
                     }
                     if let url = ScanExportManager.prepareExport(
-                        filename: info.filename, scanDir: info.dir, format: format, bulkStitch: bulkStitch
+                        filename: info.filename, scanDir: info.dir, format: format,
+                        vertexColorsFromCapture: info.colorsFromCapture, bulkStitch: bulkStitch
                     ) {
                         urls.append(ZipExportItem(url: url))
                     }
@@ -595,6 +601,11 @@ struct ScansListView: View {
 
         let locationIds = Set(scans.compactMap { $0.location?.id })
         Task { @MainActor in
+            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            await ScanExportManager.colorizeForExport(
+                scans, format: format, modelContext: modelContext,
+                progress: { scan, msg in if let msg { bulkProgressMessage = "\(scan.name): \(msg)" } })
+            bulkProgressMessage = "Uploading 0/\(scans.count)…"
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             for scan in scans {
@@ -606,13 +617,15 @@ struct ScansListView: View {
                 }
                 scan.uploadStatus = .zipping
                 let scanDir = scan.scanDirectory
+                let colorsFromCapture = scan.isColored
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     guard let exportURL = ScanExportManager.prepareExport(
                         // No phase callback: this screen shows LOCATION tiles, not scan cards —
                         // there's no per-scan pill here to report into (LocationDetailView's
                         // bulk flows drive `bulkExportPhases`).
-                        filename: filename, scanDir: scanDir, format: format, bulkStitch: bulkStitch
+                        filename: filename, scanDir: scanDir, format: format,
+                        vertexColorsFromCapture: colorsFromCapture, bulkStitch: bulkStitch
                     ) else {
                         DispatchQueue.main.async {
                             scan.uploadStatus = .failed("Export failed")
@@ -1601,6 +1614,18 @@ struct ScanCard: View {
         onUpdate(scan)
 
         let format = selectedFormat
+        Task { @MainActor in
+            // Mesh exports ship captured colors: colorize first if the scan isn't yet.
+            await ScanExportManager.colorizeForExport(
+                [scan], format: format, modelContext: modelContext,
+                progress: { _, msg in exportPhase = msg.map { ExportPhase($0) } })
+            exportPhase = nil
+            uploadExport(format: format)
+        }
+    }
+
+    /// The upload proper, once `uploadScan` has the scan ready to export.
+    private func uploadExport(format: ExportFormat) {
         let filename = scan.makeExportFilename(format: format)
 
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
@@ -1612,6 +1637,7 @@ struct ScanCard: View {
 
         // Capture scan directory on main thread (SwiftData models aren't thread-safe)
         let scanDir = scan.scanDirectory
+        let colorsFromCapture = scan.isColored
         print("[Upload] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
         guard FileManager.default.fileExists(atPath: scanDir.path) else {
             scan.uploadStatus = .failed("No scan data")
@@ -1622,6 +1648,7 @@ struct ScanCard: View {
         DispatchQueue.global(qos: .userInitiated).async {
             guard let exportURL = ScanExportManager.prepareExport(
                 filename: filename, scanDir: scanDir, format: format,
+                vertexColorsFromCapture: colorsFromCapture,
                 phase: { step in DispatchQueue.main.async { self.exportPhase = step } }
             ) else {
                 DispatchQueue.main.async {
@@ -1695,9 +1722,22 @@ struct ScanCard: View {
         onUpdate(scan)
 
         let format = selectedFormat
+        Task { @MainActor in
+            // Mesh exports ship captured colors: colorize first if the scan isn't yet.
+            await ScanExportManager.colorizeForExport(
+                [scan], format: format, modelContext: modelContext,
+                progress: { _, msg in exportPhase = msg.map { ExportPhase($0) } })
+            exportPhase = nil
+            saveExportToFiles(format: format)
+        }
+    }
+
+    /// The export proper, once `saveToFiles` has the scan ready to export.
+    private func saveExportToFiles(format: ExportFormat) {
         let filename = scan.makeExportFilename(format: format)
 
         let scanDir = scan.scanDirectory
+        let colorsFromCapture = scan.isColored
         print("[SaveToFiles] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
         print("[SaveToFiles] location?.id: \(scan.location?.id.uuidString ?? "nil")")
         print("[SaveToFiles] meshFileURL: \(scan.meshFileURL.path) exists=\(FileManager.default.fileExists(atPath: scan.meshFileURL.path))")
@@ -1714,6 +1754,7 @@ struct ScanCard: View {
         DispatchQueue.global(qos: .userInitiated).async {
             if let exportURL = ScanExportManager.prepareExport(
                 filename: filename, scanDir: scanDir, format: format,
+                vertexColorsFromCapture: colorsFromCapture,
                 phase: { step in DispatchQueue.main.async { self.exportPhase = step } }
             ) {
                 DispatchQueue.main.async {

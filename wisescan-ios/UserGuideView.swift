@@ -169,25 +169,29 @@ struct UserGuideView: View {
                         format: "Nerfstudio",
                         desc: "Trains as-is in Nerfstudio and LichtFeld Studio — no conversion. " +
                               "RGB images, camera poses (transforms.json), 16-bit depth, " +
-                              "operator masks for 360° frames, plus the raw ARKit mesh, " +
+                              "operator masks for 360° frames, plus the ARKit mesh with its colors, " +
                               "RoomPlan and registration for the training-side pipeline."
                     )
                     formatRow(
                         format: "USDZ",
-                        desc: "Apple's 3D format converted from on-device mesh via ModelIO. " +
+                        desc: "Apple's 3D format converted from on-device mesh via ModelIO, with its colors. " +
                               "Opens natively on iPhone/iPad with Quick Look."
                     )
                     formatRow(
                         format: "PLY",
-                        desc: "Polygon file with embedded vertex colors, converted from on-device OBJ mesh."
+                        desc: "Polygon file converted from the on-device mesh, with per-vertex colors."
                     )
                     formatRow(
                         format: "OBJ",
                         desc: "Wavefront 3D mesh file. Universal format supported by almost all " +
-                              "3D software. No vertex colors."
+                              "3D software, with per-vertex colors."
                     )
                 } header: {
                     Text("EXPORT FORMATS")
+                } footer: {
+                    Text("Mesh exports (Nerfstudio, USDZ, PLY, OBJ) color the mesh from your captured " +
+                         "frames first if the scan hasn't been colored yet, so the first such export " +
+                         "of a scan takes a little longer.")
                 }
                 .listRowBackground(Color.white.opacity(0.05))
 

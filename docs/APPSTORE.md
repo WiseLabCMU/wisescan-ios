@@ -71,7 +71,7 @@ FLEXIBLE EXPORT FORMATS
 • Scan4D: Full bundle with metadata, ARKit feature points, images, depth, confidence, and camera data
 • Polycam: Raw data import compatible with Polycam
 • RAW: Nerfstudio/COLMAP-compatible transforms.json + images + depth
-• OBJ / PLY / USDZ: Native mesh formats for MeshLab, Blender, and iOS Quick Look
+• OBJ / PLY / USDZ: Native mesh formats, in the scan's real colors, for MeshLab, Blender, and iOS Quick Look
 
 SERVER INTEGRATION
 • Configure any HTTP(S) upload endpoint in Settings
