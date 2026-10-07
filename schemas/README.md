@@ -42,7 +42,8 @@ bundle serves both. Built by `NerfstudioExport` from the staged Polycam payload;
 - `cameras/`, `mesh_info.json`: The per-frame Polycam camera JSONs `transforms.json` was
   built from — kept rather than deleted; the export never discards captured data.
 - `mesh.obj` (+ `face_classes.bin`): The ARKit scene-reconstruction mesh with its
-  face-aligned classification sidecar, in the location's **canonical** frame.
+  face-aligned classification sidecar, in the location's **canonical** frame. Vertices carry
+  their captured colors as `v x y z r g b` (sRGB, 0–1); see **Mesh vertex colors** below.
 - `roomplan.json`, `roomplan_raw.json`: RoomPlan surfaces and objects (canonical / raw frame).
 - `registration.json`: The raw→canonical transform relating mesh + RoomPlan to the cameras,
   which stay in the raw capture frame.
@@ -89,17 +90,44 @@ The equirect originals are staged only so the cube faces can be reprojected from
 dropped — at 6720×3360 they would dominate the archive and neither engine reads them from
 this layout. Use **Scan4D** when you want them kept.
 
+### Flame3D (`.zip`)
+Upload-ready input for [flame3d-core](https://github.com/openflam/flame3d-core)'s `polycam`
+data source (3D object segmentation, captioning and semantic search). Built by
+`Flame3DExport` from the privacy-processed Polycam payload. The full contract and its
+reasons live in [tools/scan4d-to-flame3d/README.md](../tools/scan4d-to-flame3d/README.md),
+whose converter writes the same bundle from a Nerfstudio export. Entries sit at the **zip
+root**, because flame3d extracts the upload as-is:
+
+- `keyframes/images/<stem>.jpg`: the stream frames and the hi-res stills, all at one
+  resolution (stills resized to the stream size). No 360° cube faces yet.
+- `keyframes/corrected_cameras/<stem>.json`: a Polycam camera record per frame. `t_00`…`t_23`
+  are the camera-to-world rows in the raw capture frame. `fx fy cx cy width height` are scaled
+  to the exported image.
+- `keyframes/depth/<stem>.png`: 16-bit millimetre LiDAR depth at its native raster, with zeros
+  where a frame has none.
+- `raw.glb`: the mesh in the canonical frame, with captured vertex colors as `COLOR_0` (linear).
+- `mesh_info.json`: `alignmentTransform`, the registration's raw→canonical transform,
+  column-major (identity for an original scan), plus the frame count and image size.
+- `scan4d/`: `registration.json`, `roomplan.json` and `export.json`, which records what was
+  exported and what was left out.
+
+Check a bundle before uploading with
+`python3 tools/scan4d-to-flame3d/scan4d_to_flame3d.py --verify <bundle>.zip`.
+
 ### OBJ (`.obj`)
-Single mesh file export (no vertex colors).
-- The raw `mesh.obj` reconstructed on-device by RealityKit.
+Single mesh file export, with vertex colors.
+- The `mesh.obj` reconstructed on-device by RealityKit, with each vertex's captured color appended as `v x y z r g b` (sRGB, 0–1), the vertex-color extension MeshLab, Blender, CloudCompare and Open3D read.
 
 ### PLY (`.ply`)
-Converted mesh with embedded vertex colors.
-- Single ASCII PLY file with vertices, faces, and per-vertex RGB colors converted from the on-device OBJ + colors.bin.
+Converted mesh with vertex colors.
+- Single binary (`binary_little_endian`) PLY file with vertices, faces and per-vertex RGB (`uchar red/green/blue`).
 
 ### USDZ (`.usdz`)
 Apple's native 3D format, converted via ModelIO.
-- Single USDZ file converted from the on-device OBJ mesh. Opens natively in Quick Look on iOS/macOS.
+- Single USDZ file converted from the on-device OBJ mesh, read with its vertex colors. Opens natively in Quick Look on iOS/macOS.
+
+### Mesh vertex colors
+Every export that includes the mesh (Nerfstudio, OBJ, PLY, USDZ) carries per-vertex colors **sampled from the captured frames**: the colorize step projects the mesh into the saved frames and takes a weighted median per vertex. Exporting a scan that hasn't been colorized runs that step first, the same pass as the **Color** button. The save-time colors the in-app viewer shows before that are normals-based, a visual preview only, and are never exported. If colorize can't run (no saved frames, or the scan is mid-process), the mesh exports without colors.
 
 #### `arkit_features.bin` (ARKit sparse feature cloud)
 The sparse 3D feature points ARKit accumulated while tracking, lifted out of the scan's

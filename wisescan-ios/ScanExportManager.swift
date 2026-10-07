@@ -91,6 +91,25 @@ struct ScanExportManager {
         return makeArtifacts(for: location, graph: graph, encoder: makeStitchEncoder())
     }
 
+    /// Mesh exports ship the mesh's vertex colors, and only colors sampled from the captured
+    /// frames — the save-time normals colors are an in-app preview. So before exporting a
+    /// format that `includesMesh`, colorize every scan that hasn't been, through the same engine
+    /// pass as the Color button (pending structural steps run first, as they do there).
+    /// Returns once all are done; read `isColored` afterwards for
+    /// `prepareExport(vertexColorsFromCapture:)`. A scan colorize can't run on (no saved frames,
+    /// or already mid-process) stays uncolored and exports geometry only.
+    @MainActor
+    static func colorizeForExport(_ scans: [CapturedScan], format: ExportFormat,
+                                  modelContext: ModelContext,
+                                  progress: ((CapturedScan, String?) -> Void)? = nil) async {
+        let uncolored = format.includesMesh ? scans.filter { !$0.isColored } : []
+        guard !uncolored.isEmpty else { return }
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            ScanPostprocessor.run(scans: uncolored, colorize: true, modelContext: modelContext,
+                                  progress: progress, completion: { done.resume() })
+        }
+    }
+
     /// BULK export path: build the connected-component graph ONCE, then assemble artifacts for
     /// every requested location off that single graph. Call once on the main actor before a bulk
     /// export and pass the result into each `prepareExport(…, bulkStitch:)` — replacing the
@@ -639,7 +658,13 @@ struct ScanExportManager {
     /// SwiftData strings). The pipeline
     /// has grown real phases (privacy blur, 360° verification, cube faces); a bare
     /// "Converting..." hides where the time goes.
+    ///
+    /// `vertexColorsFromCapture` is the scan's `isColored`, read after `colorizeForExport`: true
+    /// once colors.bin holds colors sampled from the captured frames instead of the save-time
+    /// normals preview. Mesh exports carry vertex colors only when it is true. It defaults to
+    /// false so a caller that forgets it exports geometry alone rather than preview colors.
     static func prepareExport(filename: String, scanDir: URL, format: ExportFormat,
+                              vertexColorsFromCapture: Bool = false,
                               bulkStitch: BulkStitchArtifacts? = nil,
                               phase: ((ExportPhase) -> Void)? = nil) -> URL? {
         let fm = FileManager.default
@@ -822,6 +847,18 @@ struct ScanExportManager {
                 return zipStaging(stagingDir)
             }
 
+        case .flame3d:
+            // flame3d-core's `polycam` input (see Flame3DExport). Built from the staged Polycam
+            // payload so frames and depth have been through the privacy passes; written as its
+            // own archive with the entries at the root, where flame3d looks for them.
+            return withStagingDir { stagingDir in
+                stagePolycamPayload(to: stagingDir)
+                let zipURL = fm.temporaryDirectory.appendingPathComponent(filename)
+                return Flame3DExport.build(stagedDir: stagingDir, scanDir: scanDir,
+                                           vertexColorsFromCapture: vertexColorsFromCapture,
+                                           zipURL: zipURL, phase: phase) ? zipURL : nil
+            }
+
         case .nerfstudio:
             // A bundle Nerfstudio and LichtFeld Studio load as-is: images/, depth/,
             // confidence/, masks/, transforms.json, plus the raw geometry sidecars staged
@@ -863,6 +900,15 @@ struct ScanExportManager {
                                  FeaturePointCloudFile.filename] {
                     let src = scanDir.appendingPathComponent(artifact)
                     guard fm.fileExists(atPath: src.path) else { continue }
+                    // The mesh carries its captured vertex colors (`v x y z r g b`) once the
+                    // scan is colorized; never the normals preview.
+                    if artifact == "mesh.obj", vertexColorsFromCapture,
+                       MeshConverter.objWithVertexColors(
+                           objURL: src, colorsURL: scanDir.appendingPathComponent("colors.bin"),
+                           outputURL: stagingDir.appendingPathComponent(artifact)) {
+                        print("[prepareExport] ✓ included mesh.obj with vertex colors")
+                        continue
+                    }
                     do {
                         try fm.copyItem(at: src, to: stagingDir.appendingPathComponent(artifact))
                         print("[prepareExport] ✓ included \(artifact)")
@@ -887,9 +933,16 @@ struct ScanExportManager {
             }
 
         case .obj:
-            // Single mesh file
+            // Single mesh file, with its captured vertex colors once the scan is colorized.
             let outputURL = fm.temporaryDirectory.appendingPathComponent(filename)
             try? fm.removeItem(at: outputURL)
+            if vertexColorsFromCapture,
+               MeshConverter.objWithVertexColors(
+                   objURL: scanDir.appendingPathComponent("mesh.obj"),
+                   colorsURL: scanDir.appendingPathComponent("colors.bin"),
+                   outputURL: outputURL) {
+                return outputURL
+            }
             do {
                 try fm.copyItem(at: scanDir.appendingPathComponent("mesh.obj"), to: outputURL)
                 print("[prepareExport] OBJ copied to \(outputURL.lastPathComponent)")
@@ -900,12 +953,16 @@ struct ScanExportManager {
             }
 
         case .ply:
-            // Convert OBJ + colors.bin → PLY
+            // Convert OBJ (+ colors.bin when it holds captured colors) → PLY. Before colorize,
+            // colors.bin holds the normals preview colors, which must not ship.
             let outputURL = fm.temporaryDirectory.appendingPathComponent(filename)
             try? fm.removeItem(at: outputURL)
+            if !vertexColorsFromCapture {
+                print("[prepareExport] PLY without vertex colors: scan not colorized from its frames")
+            }
             if MeshConverter.objToPLY(
                 objURL: scanDir.appendingPathComponent("mesh.obj"),
-                colorsURL: scanDir.appendingPathComponent("colors.bin"),
+                colorsURL: vertexColorsFromCapture ? scanDir.appendingPathComponent("colors.bin") : nil,
                 outputURL: outputURL
             ) {
                 return outputURL
@@ -913,11 +970,22 @@ struct ScanExportManager {
             return nil
 
         case .usdz:
-            // Convert OBJ → USDZ via ModelIO
+            // Convert OBJ → USDZ via ModelIO. Once the scan is colorized, convert from an OBJ
+            // carrying its captured vertex colors, which ModelIO imports as a color attribute.
             let outputURL = fm.temporaryDirectory.appendingPathComponent(filename)
             try? fm.removeItem(at: outputURL)
+            var sourceOBJ = scanDir.appendingPathComponent("mesh.obj")
+            let coloredDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? fm.removeItem(at: coloredDir) }
+            if vertexColorsFromCapture,
+               (try? fm.createDirectory(at: coloredDir, withIntermediateDirectories: true)) != nil,
+               MeshConverter.objWithVertexColors(
+                   objURL: sourceOBJ, colorsURL: scanDir.appendingPathComponent("colors.bin"),
+                   outputURL: coloredDir.appendingPathComponent("mesh.obj")) {
+                sourceOBJ = coloredDir.appendingPathComponent("mesh.obj")
+            }
             if MeshConverter.objToUSDZ(
-                objURL: scanDir.appendingPathComponent("mesh.obj"),
+                objURL: sourceOBJ,
                 outputURL: outputURL
             ) {
                 return outputURL

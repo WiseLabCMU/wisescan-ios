@@ -495,15 +495,22 @@ struct LocationDetailView: View {
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         Task { @MainActor in
+            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            await ScanExportManager.colorizeForExport(
+                scans, format: format, modelContext: modelContext,
+                progress: { scan, msg in bulkExportPhases[scan.id] = msg.map { ExportPhase($0) } })
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
+            // Read on main, after colorizing: SwiftData models aren't thread-safe.
+            let capturedColorIds = Set(scans.filter { $0.isColored }.map(\.id))
             DispatchQueue.global(qos: .userInitiated).async {
                 var urls: [ZipExportItem] = []
                 for scan in scans {
                     DispatchQueue.main.async { scan.uploadStatus = .zipping }
                     let filename = scan.makeExportFilename(format: format)
                     if let url = ScanExportManager.prepareExport(
-                        filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch,
+                        filename: filename, scanDir: scan.scanDirectory, format: format,
+                        vertexColorsFromCapture: capturedColorIds.contains(scan.id), bulkStitch: bulkStitch,
                         phase: { step in DispatchQueue.main.async { bulkExportPhases[scan.id] = step } }
                     ) {
                         urls.append(ZipExportItem(url: url))
@@ -537,17 +544,28 @@ struct LocationDetailView: View {
         let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
+        // In flight from the start, so the guard above holds while colorize runs.
+        for scan in scans { scan.uploadStatus = .zipping }
         Task { @MainActor in
+            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            await ScanExportManager.colorizeForExport(
+                scans, format: format, modelContext: modelContext,
+                progress: { scan, msg in bulkExportPhases[scan.id] = msg.map { ExportPhase($0) } })
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             for scan in scans {
-                guard let url = URL(string: baseURLString + scan.makeExportFilename(format: format)) else { continue }
+                guard let url = URL(string: baseURLString + scan.makeExportFilename(format: format)) else {
+                    scan.uploadStatus = .failed("Bad upload URL")
+                    continue
+                }
                 scan.uploadStatus = .zipping
+                let colorsFromCapture = scan.isColored
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     let filename = scan.makeExportFilename(format: format)
                     guard let exportURL = ScanExportManager.prepareExport(
-                        filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch,
+                        filename: filename, scanDir: scan.scanDirectory, format: format,
+                        vertexColorsFromCapture: colorsFromCapture, bulkStitch: bulkStitch,
                         phase: { step in DispatchQueue.main.async { bulkExportPhases[scan.id] = step } }
                     ) else {
                         DispatchQueue.main.async {

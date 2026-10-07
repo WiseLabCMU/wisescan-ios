@@ -85,3 +85,7 @@ the camera's open AP is the weakest place to leave raw equirects.
   the photometric solve against exported `staging_*` bundles, A/B cost functions,
   reproduce any scan's solve offline. Its README carries the edge-vs-photometric
   verdict that led to v15.
+- **`tools/scan4d-to-flame3d/`** — converts a Nerfstudio export into a flame3d-core
+  input bundle (3D object segmentation + semantic search), with a mesh-vs-LiDAR
+  frame check. Its README is the contract the app's Flame3D export follows; `--verify`
+  checks an exported bundle before upload.

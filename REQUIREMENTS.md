@@ -316,8 +316,8 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Each export format includes only the data relevant to that format. Scan4D bundles metadata + relocalization + Polycam payload. Polycam exports raw import data. RAW exports Nerfstudio-compatible poses. OBJ exports the raw mesh file. PLY and USDZ are converted from OBJ on-device via `MeshConverter`. |
-| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `exportMeshOBJ()` · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `writeTransformsJSON()` · [ScansListView.swift](wisescan-ios/ScansListView.swift) — `prepareExport()` · [MeshConverter.swift](wisescan-ios/MeshConverter.swift) — `objToPLY()`, `objToUSDZ()` |
+| **Description** | Each export format includes only the data relevant to that format. Scan4D bundles metadata + relocalization + Polycam payload. Polycam exports raw import data. RAW exports Nerfstudio-compatible poses. OBJ exports the raw mesh file. PLY and USDZ are converted from OBJ on-device via `MeshConverter`. Every format that includes the mesh (Nerfstudio, OBJ, PLY, USDZ) carries per-vertex colors sampled from the captured frames: exporting colorizes an uncolored scan first (`ScanExportManager.colorizeForExport`, the Color button's pass), and the save-time normals preview colors are never exported. Flame3D writes flame3d-core's `polycam` input (contract: `tools/scan4d-to-flame3d`) via `Flame3DExport` from the privacy-processed Polycam payload: stream frames + stills at one resolution, native LiDAR depth, a GLB of the colored mesh, and the registration as `alignmentTransform`, in its own root-level zip. |
+| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `exportMeshOBJ()` · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `writeTransformsJSON()` · [ScansListView.swift](wisescan-ios/ScansListView.swift) — `prepareExport()` · [MeshConverter.swift](wisescan-ios/MeshConverter.swift) — `objToPLY()`, `objToUSDZ()`, `objWithVertexColors()` · [ScanExportManager.swift](wisescan-ios/ScanExportManager.swift) — `colorizeForExport()` · [Flame3DExport.swift](wisescan-ios/Flame3DExport.swift) — `build()`, `glb()` |
 
 ### REQ-007: Save & Upload
 | | |
@@ -818,9 +818,10 @@ Each format includes only its own payload — no universal base.
 | Scan4D | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, `images/`, `depth/`, `cameras/`, `mesh_info.json` | Scan4D server workflows |
 | Polycam | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
 | RAW | `.zip` | `images/`, `depth/`, `transforms.json` | Nerfstudio, COLMAP |
-| OBJ | `.obj` | Single mesh file (no vertex colors) | MeshLab, Blender |
-| PLY | `.ply` | Converted mesh with embedded vertex colors | MeshLab, CloudCompare |
-| USDZ | `.usdz` | Converted mesh via ModelIO | iOS Quick Look |
+| Flame3D | `.zip` | `keyframes/{images,corrected_cameras,depth}/`, `raw.glb` (colored mesh), `mesh_info.json` at the zip root | flame3d-core (`polycam` data source) |
+| OBJ | `.obj` | Single mesh file with captured vertex colors | MeshLab, Blender |
+| PLY | `.ply` | Converted mesh with captured vertex colors | MeshLab, CloudCompare |
+| USDZ | `.usdz` | Converted mesh via ModelIO, with vertex colors | iOS Quick Look |
 
 ---
 
