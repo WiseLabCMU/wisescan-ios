@@ -631,7 +631,8 @@ def describe_check(report: dict) -> list[str]:
     if "skipped" in report:
         return [f"check: skipped — {report['skipped']}"]
     agree, best = report["agree"], max(report["agree_shifted"].values())
-    lines = [(f"check: {agree:.0%} of {report['points']:,} confident LiDAR points on "
+    kind = "confident LiDAR points" if report.get("confidence_filtered", True) else "LiDAR points"
+    lines = [(f"check: {agree:.0%} of {report['points']:,} {kind} on "
               f"{report['frames']} frames lie within {report['tolerance_m'] * 100:.0f} cm of the "
               f"mesh; nudging the cameras {report['shift_m'] * 100:.0f} cm scores at most "
               f"{best:.0%}")]
@@ -646,6 +647,171 @@ def describe_check(report: dict) -> list[str]:
                      "or a canonical-frame mesh without its registration.json?) — flame3d would "
                      "reproject the mesh onto the wrong pixels")
     return lines
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Verifying a bundle (the converter's, or the app's Flame3D export)
+# ═══════════════════════════════════════════════════════════════════════════
+
+CAMERA_KEYS = [f"t_{r}{c}" for r in range(3) for c in range(4)] + [
+    "fx", "fy", "cx", "cy", "width", "height"]
+
+
+def read_glb(data: bytes) -> dict[str, np.ndarray]:
+    """{"POSITION": (N,3), "COLOR_0": (N,3) if present, "indices": (M,3)} of the first
+    primitive of a binary glTF with float32 attributes and uint32 indices."""
+    magic, version, total = struct.unpack_from("<4sII", data, 0)
+    if (magic, version, total) != (b"glTF", 2, len(data)):
+        raise ValueError("not a glTF 2.0 binary of the stated length")
+    jlen, jtype = struct.unpack_from("<I4s", data, 12)
+    gltf = json.loads(data[20:20 + jlen])
+    blen, btype = struct.unpack_from("<I4s", data, 20 + jlen)
+    if (jtype, btype) != (b"JSON", b"BIN\0"):
+        raise ValueError("unexpected glTF chunk types")
+    binary = data[28 + jlen:28 + jlen + blen]
+    acc, views = gltf["accessors"], gltf["bufferViews"]
+    width = {"SCALAR": 1, "VEC3": 3}
+    dtype = {5126: "<f4", 5125: "<u4"}
+
+    def read(i):
+        a = acc[i]
+        arr = np.frombuffer(binary, dtype[a["componentType"]], a["count"] * width[a["type"]],
+                            views[a["bufferView"]].get("byteOffset", 0))
+        return arr.reshape(-1, width[a["type"]])
+
+    prim = gltf["meshes"][0]["primitives"][0]
+    out = {name: read(i) for name, i in prim["attributes"].items()}
+    out["indices"] = read(prim["indices"]).reshape(-1, 3)
+    return out
+
+
+def verify_bundle(path: Path) -> tuple[list[str], dict]:
+    """Check a flame3d bundle against what flame3d's polycam loader and pipeline need, and
+    run the mesh-vs-LiDAR check on it. Returns (problems, info); no problems means flame3d
+    can ingest it. Meant for the app's Flame3D export, which the converter's tests can't run."""
+    problems: list[str] = []
+    info: dict = {}
+    tmp = None
+    try:
+        if path.is_file():
+            with zipfile.ZipFile(path) as zf:
+                names = zf.namelist()
+                if not any(n.startswith("keyframes/images/") for n in names):
+                    nested = sorted({n.split("/", 1)[0] for n in names if "/keyframes/images/" in n})
+                    problems.append("no keyframes/ at the zip root" + (
+                        f" (found under {', '.join(nested)}/ — flame3d extracts the zip as-is "
+                        "and would not find it)" if nested else ""))
+                    return problems, info
+                tmp = Path(tempfile.mkdtemp(prefix="flame3d_verify_"))
+                zf.extractall(tmp)
+            root = tmp
+        elif (path / "keyframes" / "images").is_dir():
+            root = path
+        else:
+            return [f"{path}: no keyframes/images/ inside"], info
+
+        kf = root / "keyframes"
+        sets = {d: {p.stem for p in (kf / d).glob(f"*.{ext}")}
+                for d, ext in (("images", "jpg"), ("corrected_cameras", "json"), ("depth", "png"))}
+        if not sets["images"] == sets["corrected_cameras"] == sets["depth"]:
+            problems.append("images/, corrected_cameras/ and depth/ hold different frames ("
+                            + ", ".join(f"{d}: {len(s)}" for d, s in sets.items()) + ")")
+        stems = sorted(sets["images"] & sets["corrected_cameras"] & sets["depth"])
+        if not stems:
+            return problems + ["no complete frames"], info
+
+        numbers: dict[int, str] = {}
+        image_sizes: Counter = Counter()
+        depth_sizes: Counter = Counter()
+        cams: dict[str, dict] = {}
+        for s in stems:
+            m = re.search(r"(\d+)$", s)
+            if m is None:
+                problems.append(f"{s}: no trailing frame number (flame3d's normalize_labels needs one)")
+            elif int(m.group(1)) in numbers:
+                problems.append(f"{s} and {numbers[int(m.group(1))]} share frame number {m.group(1)}")
+            else:
+                numbers[int(m.group(1))] = s
+            cam = json.loads((kf / "corrected_cameras" / f"{s}.json").read_text())
+            missing = [k for k in CAMERA_KEYS if k not in cam]
+            if missing:
+                problems.append(f"{s}: camera record lacks {', '.join(missing)}")
+                continue
+            with Image.open(kf / "images" / f"{s}.jpg") as im:
+                if im.size != (cam["width"], cam["height"]):
+                    problems.append(f"{s}: image {im.size[0]}x{im.size[1]}, camera says "
+                                    f"{cam['width']}x{cam['height']}")
+                if im.getexif().get(0x0112, 1) != 1:
+                    problems.append(f"{s}: EXIF orientation set (cv2 would rotate the pixels)")
+                image_sizes[im.size] += 1
+            with Image.open(kf / "depth" / f"{s}.png") as d:
+                if not d.mode.startswith("I"):
+                    problems.append(f"{s}: depth PNG is {d.mode}, not 16-bit")
+                depth_sizes[d.size] += 1
+            cams[s] = cam
+        if len(image_sizes) > 1:
+            problems.append(f"{len(image_sizes)} image sizes {dict(image_sizes)}; SAM3 needs one")
+
+        vertices = None
+        if not (root / "raw.glb").is_file():
+            problems.append("no raw.glb")
+        else:
+            try:
+                glb = read_glb((root / "raw.glb").read_bytes())
+                vertices = glb["POSITION"].astype(np.float64)
+                info["mesh_vertices"] = len(vertices)
+                info["vertex_colors"] = "COLOR_0" in glb
+            except (ValueError, KeyError, struct.error) as exc:
+                problems.append(f"raw.glb unreadable: {exc}")
+
+        alignment = None
+        try:
+            flat = json.loads((root / "mesh_info.json").read_text())["alignmentTransform"]
+            alignment = np.array(flat, dtype=np.float64).reshape(4, 4).T
+            if np.allclose(alignment, np.eye(4)):
+                alignment = None
+        except (OSError, KeyError, ValueError) as exc:
+            problems.append(f"mesh_info.json alignmentTransform unreadable: {exc}")
+
+        info.update(frames=len(stems),
+                    image_size=list(image_sizes.most_common(1)[0][0]) if image_sizes else None,
+                    depth_raster=list(depth_sizes.most_common(1)[0][0]) if depth_sizes else None,
+                    alignment_applied=alignment is not None)
+        if vertices is not None and cams:
+            with_depth = [s for s in cams
+                          if read_png(kf / "depth" / f"{s}.png").astype(np.uint16).any()]
+            every = max(1, len(with_depth) // CHECK_FRAMES)
+            samples = [check_sample(cams[s], read_png(kf / "depth" / f"{s}.png").astype(np.uint16), None)
+                       for s in with_depth[::every]]
+            info["check"] = dict(run_check(vertices, samples, alignment), confidence_filtered=False)
+        return problems, info
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def print_verify(path: Path) -> int:
+    problems, info = verify_bundle(path)
+    print(f"verify {path}")
+    if "frames" in info:
+        size = "x".join(map(str, info["image_size"] or []))
+        raster = "x".join(map(str, info["depth_raster"] or []))
+        colours = "with vertex colours" if info.get("vertex_colors") else "WITHOUT vertex colours"
+        print(f"  frames: {info['frames']} at {size}; depth {raster}; mesh "
+              f"{info.get('mesh_vertices', 0):,} vertices {colours}; "
+              f"alignment {'applied' if info['alignment_applied'] else 'identity'}")
+    if info.get("check"):
+        for line in describe_check(info["check"]):
+            print(line)
+    if problems:
+        print(f"{len(problems)} problem(s):")
+        for p in problems[:20]:
+            print(f"  - {p}")
+        return 1
+    print("OK: flame3d can ingest this bundle")
+    return 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -820,7 +986,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Convert a Scan4D Nerfstudio export (.zip or folder) into a flame3d-core "
                     "'polycam' input bundle.")
-    ap.add_argument("bundle", type=Path, help="Scan4D Nerfstudio export: the .zip or its folder")
+    ap.add_argument("bundle", type=Path,
+                    help="Scan4D Nerfstudio export (.zip or folder); with --verify, a flame3d bundle")
+    ap.add_argument("--verify", action="store_true",
+                    help="check an existing flame3d bundle (e.g. the app's Flame3D export) "
+                         "instead of converting; exits non-zero if flame3d couldn't ingest it")
     ap.add_argument("-o", "--out", type=Path, default=None,
                     help="output .zip (default: <bundle>_flame3d.zip next to the input); a path "
                          "not ending in .zip writes an unpacked folder instead")
@@ -840,6 +1010,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip the mesh-vs-LiDAR alignment check")
     args = ap.parse_args(argv)
 
+    if args.verify:
+        return print_verify(args.bundle)
     if args.stride < 1 or args.max_size < 16:
         ap.error("--stride must be >= 1 and --max-size >= 16")
     out = args.out or args.bundle.with_name(

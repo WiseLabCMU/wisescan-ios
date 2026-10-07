@@ -192,6 +192,7 @@ enum ExportFormat: String, CaseIterable, Codable {
     case scan4d = "Scan4D"
     case polycam = "Polycam"
     case nerfstudio = "Nerfstudio"
+    case flame3d = "Flame3D"
     case usdz = "USDZ"
     case ply = "PLY"
     case obj = "OBJ"
@@ -201,7 +202,7 @@ enum ExportFormat: String, CaseIterable, Codable {
         case .usdz: return "usdz"
         case .ply: return "ply"
         case .obj: return "obj"
-        case .scan4d, .polycam, .nerfstudio: return "zip"
+        case .scan4d, .polycam, .nerfstudio, .flame3d: return "zip"
         }
     }
 
@@ -210,7 +211,7 @@ enum ExportFormat: String, CaseIterable, Codable {
         case .usdz: return "model/vnd.usdz+zip"
         case .ply: return "application/x-ply"
         case .obj: return "application/x-wavefront-obj"
-        case .scan4d, .polycam, .nerfstudio: return "application/zip"
+        case .scan4d, .polycam, .nerfstudio, .flame3d: return "application/zip"
         }
     }
 
@@ -219,7 +220,7 @@ enum ExportFormat: String, CaseIterable, Codable {
     /// so the colors that ship are sampled from the frames, never the normals preview.
     var includesMesh: Bool {
         switch self {
-        case .nerfstudio, .usdz, .ply, .obj: return true
+        case .nerfstudio, .flame3d, .usdz, .ply, .obj: return true
         case .scan4d, .polycam: return false
         }
     }

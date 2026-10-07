@@ -59,7 +59,7 @@ struct UserGuideView: View {
                     guideRow(
                         icon: "6.circle.fill",
                         title: "Choose Format",
-                        text: "Select an export format (Scan4D, Polycam, OBJ, PLY, USDZ, or RAW) " +
+                        text: "Select an export format (Scan4D, Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ) " +
                               "using the format picker on each scan card."
                     )
                     guideRow(
@@ -173,6 +173,12 @@ struct UserGuideView: View {
                               "RoomPlan and registration for the training-side pipeline."
                     )
                     formatRow(
+                        format: "Flame3D",
+                        desc: "Upload-ready input for flame3d, which finds, captions and lets you " +
+                              "search the objects in your scan. Frames, camera poses, depth and the " +
+                              "colored mesh, in the layout flame3d reads. Zip archive."
+                    )
+                    formatRow(
                         format: "USDZ",
                         desc: "Apple's 3D format converted from on-device mesh via ModelIO, with its colors. " +
                               "Opens natively on iPhone/iPad with Quick Look."
@@ -189,7 +195,7 @@ struct UserGuideView: View {
                 } header: {
                     Text("EXPORT FORMATS")
                 } footer: {
-                    Text("Mesh exports (Nerfstudio, USDZ, PLY, OBJ) color the mesh from your captured " +
+                    Text("Mesh exports (Nerfstudio, Flame3D, USDZ, PLY, OBJ) color the mesh from your captured " +
                          "frames first if the scan hasn't been colored yet, so the first such export " +
                          "of a scan takes a little longer.")
                 }

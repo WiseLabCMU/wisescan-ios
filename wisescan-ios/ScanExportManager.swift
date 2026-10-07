@@ -847,6 +847,18 @@ struct ScanExportManager {
                 return zipStaging(stagingDir)
             }
 
+        case .flame3d:
+            // flame3d-core's `polycam` input (see Flame3DExport). Built from the staged Polycam
+            // payload so frames and depth have been through the privacy passes; written as its
+            // own archive with the entries at the root, where flame3d looks for them.
+            return withStagingDir { stagingDir in
+                stagePolycamPayload(to: stagingDir)
+                let zipURL = fm.temporaryDirectory.appendingPathComponent(filename)
+                return Flame3DExport.build(stagedDir: stagingDir, scanDir: scanDir,
+                                           vertexColorsFromCapture: vertexColorsFromCapture,
+                                           zipURL: zipURL, phase: phase) ? zipURL : nil
+            }
+
         case .nerfstudio:
             // A bundle Nerfstudio and LichtFeld Studio load as-is: images/, depth/,
             // confidence/, masks/, transforms.json, plus the raw geometry sidecars staged

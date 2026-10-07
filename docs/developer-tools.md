@@ -87,4 +87,5 @@ the camera's open AP is the weakest place to leave raw equirects.
   verdict that led to v15.
 - **`tools/scan4d-to-flame3d/`** — converts a Nerfstudio export into a flame3d-core
   input bundle (3D object segmentation + semantic search), with a mesh-vs-LiDAR
-  frame check. Its README is the bundle contract a future in-app export follows.
+  frame check. Its README is the contract the app's Flame3D export follows; `--verify`
+  checks an exported bundle before upload.

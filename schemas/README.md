@@ -90,6 +90,30 @@ The equirect originals are staged only so the cube faces can be reprojected from
 dropped — at 6720×3360 they would dominate the archive and neither engine reads them from
 this layout. Use **Scan4D** when you want them kept.
 
+### Flame3D (`.zip`)
+Upload-ready input for [flame3d-core](https://github.com/openflam/flame3d-core)'s `polycam`
+data source (3D object segmentation, captioning and semantic search). Built by
+`Flame3DExport` from the privacy-processed Polycam payload. The full contract and its
+reasons live in [tools/scan4d-to-flame3d/README.md](../tools/scan4d-to-flame3d/README.md),
+whose converter writes the same bundle from a Nerfstudio export. Entries sit at the **zip
+root**, because flame3d extracts the upload as-is:
+
+- `keyframes/images/<stem>.jpg`: the stream frames and the hi-res stills, all at one
+  resolution (stills resized to the stream size). No 360° cube faces yet.
+- `keyframes/corrected_cameras/<stem>.json`: a Polycam camera record per frame. `t_00`…`t_23`
+  are the camera-to-world rows in the raw capture frame. `fx fy cx cy width height` are scaled
+  to the exported image.
+- `keyframes/depth/<stem>.png`: 16-bit millimetre LiDAR depth at its native raster, with zeros
+  where a frame has none.
+- `raw.glb`: the mesh in the canonical frame, with captured vertex colors as `COLOR_0` (linear).
+- `mesh_info.json`: `alignmentTransform`, the registration's raw→canonical transform,
+  column-major (identity for an original scan), plus the frame count and image size.
+- `scan4d/`: `registration.json`, `roomplan.json` and `export.json`, which records what was
+  exported and what was left out.
+
+Check a bundle before uploading with
+`python3 tools/scan4d-to-flame3d/scan4d_to_flame3d.py --verify <bundle>.zip`.
+
 ### OBJ (`.obj`)
 Single mesh file export, with vertex colors.
 - The `mesh.obj` reconstructed on-device by RealityKit, with each vertex's captured color appended as `v x y z r g b` (sRGB, 0–1), the vertex-color extension MeshLab, Blender, CloudCompare and Open3D read.

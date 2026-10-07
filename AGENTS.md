@@ -31,7 +31,7 @@ Orientation for agents (and humans) working in this repo. Detailed docs live in 
 
 ## Field testing & diagnostics
 - [docs/developer-tools.md](docs/developer-tools.md) — the on-device developer/field-test surface: Performance Diagnostics and what each `[perf]` log prefix means, the diagnostics log export (and its two iOS-imposed limits), simulation toggles, the Color-from-360°-Faces pose probe, the BLE bench, and calibration provenance in sidecars.
-- [tools/scan4d-to-flame3d/README.md](tools/scan4d-to-flame3d/README.md) — converter from the Nerfstudio export to a flame3d-core input bundle (3D segmentation / semantic search), and the contract for a future in-app flame3d export.
+- [tools/scan4d-to-flame3d/README.md](tools/scan4d-to-flame3d/README.md) — converter from the Nerfstudio export to a flame3d-core input bundle (3D segmentation / semantic search), the contract the app's Flame3D export follows, and `--verify` for checking any bundle.
 - [tools/rigcal-ab/README.md](tools/rigcal-ab/README.md) — Mac-side offline solver harness (ffmpeg + numpy): re-run the photometric rig solve against exported `staging_*` bundles, A/B cost functions; carries the edge-vs-photometric verdict behind solver v15.
 - [docs/testing/2026-07-30-360-branch-test-plan.md](docs/testing/2026-07-30-360-branch-test-plan.md) — device test plan for the 360° still-source branch (dated; useful as the template for future branch test plans).
 

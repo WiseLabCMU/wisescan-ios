@@ -5,8 +5,8 @@ from __future__ import annotations
 import io
 import json
 import shutil
-import struct
 import zipfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -33,30 +33,6 @@ def stems(zf: zipfile.ZipFile, folder: str) -> list[str]:
                   for n in zf.namelist() if n.startswith(f"keyframes/{folder}/"))
 
 
-def read_glb(data: bytes) -> dict[str, np.ndarray]:
-    """{"POSITION": (N,3), "COLOR_0": (N,3) if present, "indices": (M,3)} of the one primitive."""
-    magic, version, total = struct.unpack_from("<4sII", data, 0)
-    assert (magic, version, total) == (b"glTF", 2, len(data))
-    jlen, jtype = struct.unpack_from("<I4s", data, 12)
-    assert jtype == b"JSON"
-    gltf = json.loads(data[20:20 + jlen])
-    blen, btype = struct.unpack_from("<I4s", data, 20 + jlen)
-    assert btype == b"BIN\0"
-    binary = data[28 + jlen:28 + jlen + blen]
-    acc, views = gltf["accessors"], gltf["bufferViews"]
-    width = {"SCALAR": 1, "VEC3": 3}
-    dtype = {5126: "<f4", 5125: "<u4"}
-
-    def read(i):
-        a = acc[i]
-        arr = np.frombuffer(binary, dtype[a["componentType"]], a["count"] * width[a["type"]],
-                            views[a["bufferView"]]["byteOffset"])
-        return arr.reshape(-1, width[a["type"]])
-
-    prim = gltf["meshes"][0]["primitives"][0]
-    out = {name: read(i) for name, i in prim["attributes"].items()}
-    out["indices"] = read(prim["indices"]).reshape(-1, 3)
-    return out
 
 
 def test_frame_selection(converted):
@@ -101,7 +77,7 @@ def test_alignment_is_registration_verbatim(converted, bundle):
 
 def test_glb_matches_obj(converted, bundle):
     zf, _ = converted
-    glb = read_glb(zf.read("raw.glb"))
+    glb = conv.read_glb(zf.read("raw.glb"))
     ov, ot, _ = conv.load_obj(bundle / "mesh.obj")
     assert np.allclose(glb["POSITION"], ov.astype(np.float32))
     assert np.array_equal(glb["indices"], ot)
@@ -144,7 +120,7 @@ def test_vertex_colours_are_the_captured_colours(bundle, converted):
     # The GLB carries exactly these colours, linearised as glTF requires.
     zf, summary = converted
     assert summary["mesh"]["colors"] == {"source": "frames", **stats}
-    assert np.allclose(read_glb(zf.read("raw.glb"))["COLOR_0"], conv.srgb_to_linear(srgb), atol=1e-6)
+    assert np.allclose(conv.read_glb(zf.read("raw.glb"))["COLOR_0"], conv.srgb_to_linear(srgb), atol=1e-6)
 
 
 def test_person_regions_never_colour_the_mesh(bundle):
@@ -185,7 +161,7 @@ def test_app_colours_in_mesh_obj_are_used_as_is(bundle, tmp_path):
     summary = conv.convert(coloured, out, check=False)
     assert summary["mesh"]["colors"] == {"source": "mesh.obj"}
     with zipfile.ZipFile(out) as zf:
-        got = read_glb(zf.read("raw.glb"))["COLOR_0"]
+        got = conv.read_glb(zf.read("raw.glb"))["COLOR_0"]
     assert np.allclose(got, conv.srgb_to_linear(np.round(np.asarray(rgb), 4)), atol=1e-5)
 
 
@@ -194,7 +170,7 @@ def test_no_colors_writes_geometry_only(bundle, tmp_path):
     summary = conv.convert(bundle, out, check=False, colors=False)
     assert summary["mesh"]["colors"] is None
     with zipfile.ZipFile(out) as zf:
-        assert "COLOR_0" not in read_glb(zf.read("raw.glb"))
+        assert "COLOR_0" not in conv.read_glb(zf.read("raw.glb"))
 
 
 def test_depth_recovers_lidar_raster(converted, bundle):
@@ -271,3 +247,35 @@ def test_stem_without_frame_number_is_refused(bundle, tmp_path):
     (bad / "transforms.json").write_text(json.dumps(meta))
     with pytest.raises(SystemExit, match="frame number"):
         conv.convert(bad, tmp_path / "out.zip", check=False)
+
+
+def test_verify_accepts_converter_output(converted):
+    zf, _ = converted
+    problems, info = conv.verify_bundle(Path(zf.filename))
+    assert problems == []
+    assert info["frames"] == 18 and info["image_size"] == [192, 144]
+    assert info["vertex_colors"] and info["alignment_applied"]
+    assert info["check"]["agree"] > 0.8
+
+
+def test_verify_rejects_entries_under_a_folder(converted, tmp_path):
+    """A directory zip (NSFileCoordinator's) puts the folder itself at the top; flame3d,
+    which extracts the upload as-is, would not find keyframes/ there."""
+    zf, _ = converted
+    nested = tmp_path / "nested.zip"
+    with zipfile.ZipFile(nested, "w") as out:
+        for name in zf.namelist():
+            out.writestr(f"staging_X/{name}", zf.read(name))
+    problems, _ = conv.verify_bundle(nested)
+    assert problems and "staging_X" in problems[0]
+
+
+def test_verify_flags_a_missing_depth_map(converted, tmp_path):
+    zf, _ = converted
+    broken = tmp_path / "broken.zip"
+    with zipfile.ZipFile(broken, "w") as out:
+        for name in zf.namelist():
+            if name != "keyframes/depth/frame_00003.png":
+                out.writestr(name, zf.read(name))
+    problems, _ = conv.verify_bundle(broken)
+    assert any("different frames" in p for p in problems)

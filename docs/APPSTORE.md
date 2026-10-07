@@ -71,6 +71,7 @@ FLEXIBLE EXPORT FORMATS
 • Scan4D: Full bundle with metadata, ARKit feature points, images, depth, confidence, and camera data
 • Polycam: Raw data import compatible with Polycam
 • RAW: Nerfstudio/COLMAP-compatible transforms.json + images + depth
+• Flame3D: Upload-ready input for flame3d 3D object segmentation and semantic search
 • OBJ / PLY / USDZ: Native mesh formats, in the scan's real colors, for MeshLab, Blender, and iOS Quick Look
 
 SERVER INTEGRATION
@@ -202,7 +203,7 @@ https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md
 | 5 | **Scans List** (location grid with multi-select active) | "Organize scans by location with bulk Save, Upload, and Delete" |
 | 6 | **Link Adjacent Space** (ghost overlay + tracking banner) | "Re-scan over time or link adjacent areas with guided alignment" |
 | 7 | **Meta Ray-Ban PiP** (glasses stream + capture view) | "Stream frames from Meta Ray-Ban Smart Glasses via Bluetooth" |
-| 8 | **Export Format Picker** (scan card with format dropdown) | "Export to Scan4D, Polycam, Nerfstudio, OBJ, PLY, or USDZ" |
+| 8 | **Export Format Picker** (scan card with format dropdown) | "Export to Scan4D, Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ" |
 | 9 | **Dashboard** (server status + glasses connection) | "Connect to your server and pair Meta Ray-Ban Smart Glasses" |
 | 10 | **Settings** (upload URL + capture mode + glasses) | "Full control over capture quality, mode, and device pairing" |
 

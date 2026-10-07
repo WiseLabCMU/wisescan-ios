@@ -379,6 +379,10 @@ enum AppConstants {
     static let captureIntegrityMinFrames: Int = 4            // min captured frames before judging modality completeness (too few to be meaningful below this)
     static let captureIntegrityMinFraction: Double = 0.5     // a modality (depth/confidence) present in fewer than this fraction of frames = grossly incomplete capture → warn the user
     static let jpegCompressionQuality: CGFloat = 0.85        // JPEG quality for captured frames
+    // Flame3D export (Flame3DExport; mirrors tools/scan4d-to-flame3d's converter defaults)
+    static let flame3dMaxImageLongEdge: Int = 1920           // cap on the exported long edge; stills are resized to the stream size under it
+    static let flame3dAspectTolerance: Double = 0.01         // a still within 1% of the stream's aspect is resized to it, else left out (SAM3 needs one resolution)
+    static let flame3dJPEGQuality: CGFloat = 0.95            // re-encode quality for resized stills
     static let blurWarningTimeout: TimeInterval = 1.5        // seconds before blur warning auto-dismisses
     static let consecutiveBlurThreshold: Int = 5             // blurred frames before warning triggers
     static let motionBlurVelocity: Float = 0.5               // m/s threshold for motion blur detection

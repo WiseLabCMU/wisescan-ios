@@ -7,6 +7,14 @@ LLM search. `scan4d_to_flame3d.py` converts a Scan4D **Nerfstudio** export into 
 flame3d's existing **`polycam`** data source reads, so a Scan4D capture runs through flame3d
 with no flame3d change.
 
+The app now writes this bundle itself: the **Flame3D** export format (`Flame3DExport.swift`)
+follows the contract below. This script stays for Nerfstudio exports, and `--verify` checks
+any bundle, the app's included, before you upload it:
+
+```bash
+python3 scan4d_to_flame3d.py --verify scan4d_Lab_Room_flame3d_....zip
+```
+
 ```bash
 pip install numpy pillow
 python3 scan4d_to_flame3d.py scan4d_Lab_Room_nerfstudio_....zip -o lab_room.zip
@@ -15,8 +23,8 @@ scripts/start_pipeline.sh --data lab_room.zip --config my_config.json --wait
 ```
 
 `my_config.json` is flame3d's `server/default_config.json` with `"data_source": "polycam"`
-and your `dataset_name`. See [flame3d settings](#flame3d-settings-worth-changing) for two
-values worth changing.
+and your `dataset_name`. See [flame3d settings](#flame3d-settings-worth-knowing) for two
+values worth knowing.
 
 The input is the Nerfstudio export as a `.zip` or an unpacked `staging_*` folder. The Scan4D
 and Polycam exports don't work: neither carries `mesh.obj`, and flame3d needs the mesh. Pass
@@ -194,21 +202,23 @@ RUN pip install --no-cache-dir numpy pillow pytest opencv-python-headless tqdm s
 - **`identify_objects.max_frames`.** It samples frames uniformly before the VLM pass, which
   makes one API call per frame. `--stride` does the same at conversion time.
 
-## Toward an in-app export
+## In the app: the Flame3D export
 
-The bundle above is the format contract. Every step is a cheap re-layout of data the app
-already stages for the Nerfstudio export:
+`Flame3DExport.swift` writes the bundle above from the same data the other exports stage.
+Keep it and this script in step:
 
-- **Frames.** Copy `images/`, and rename `cameras/*.json` to `corrected_cameras/`. Resize
-  the 12 MP stills to the stream size and scale their intrinsics. Skip the cube faces.
-- **Depth.** Ship the LiDAR depth at its native raster, which skips the upsample.
-- **Mesh.** Write a minimal GLB from `mesh.obj` as `glb_bytes()` does: positions, indices,
-  and `COLOR_0` from `colors.bin`, converted to linear. The export runs
-  `ScanExportManager.colorizeForExport` first like every mesh export, so the colors are
-  captured ones, never the normals preview.
-- **Alignment.** Write `alignmentTransform` from the registration sidecar.
+- **Frames.** It starts from the staged Polycam payload, after the export-time privacy
+  passes, so people are already pixelated and their depth zeroed. It keeps the stream frames
+  and stills, resizing stills to the stream size and scaling their intrinsics. It skips the
+  cube faces and any still whose aspect ratio differs from the stream's.
+- **Depth.** The LiDAR depth at its native raster, unchanged.
+- **Mesh.** `raw.glb` from `mesh.obj`, with `COLOR_0` from `colors.bin` converted to linear.
+  Like every mesh export, it colorizes the scan first if needed, so the colors are captured
+  ones, never the normals preview.
+- **Alignment.** `alignmentTransform` from the registration sidecar.
+- **Archive.** Its own uncompressed zip with the entries at the root. The app's usual
+  directory zip puts the folder itself at the top, and flame3d would not find `keyframes/`.
 
-The alternative is a native `scan4d` data source in flame3d-core, which reads the
-Nerfstudio export directly. That touches about six flame3d files (`pipeline_steps.py`,
-`data_process.py`, `config_schema.json`, `default_config.json`, `routes/processing.py` and
-a new loader). Today's path needs neither repo to change.
+Cube faces are a planned follow-up. To use them without breaking flame3d, each face would
+need cropping to the stream's aspect and size, and frame numbers in blocks after the
+stream.
