@@ -521,6 +521,11 @@ class ScanStore {
     /// in-flight update before returning, so the snapshot covers exactly the recorded frames.
     /// Returns nil (or the hook is nil) when the capture view is already gone.
     @ObservationIgnored var freezeSweepCoverage: (() -> SweepCoverageSnapshot?)?
+    /// Reads the live sweep-coverage counters WITHOUT freezing the recorder (the developer
+    /// coverage readout polls it at ~1 Hz on MAIN while recording). Populated by ARCoverageView;
+    /// returns nil (or the hook is nil) when the capture view is gone. Never call
+    /// `freezeSweepCoverage` for a readout: it stops the sweep.
+    @ObservationIgnored var sweepCoverageLiveStats: (() -> SweepCoverageLiveStats?)?
     /// Re-runs the AR session's configuration if no frames have been delivered for several
     /// seconds — the record button's escape from a wedged capture graph (set by ARCoverageView;
     /// called from the record tap's "establishing tracking" bounce).

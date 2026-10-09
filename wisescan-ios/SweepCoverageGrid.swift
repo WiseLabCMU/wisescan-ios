@@ -84,6 +84,11 @@ struct SweepIntegrateResult: Equatable {
 struct SweepCoverageGrid {
     let cellSize: Float
     private(set) var cells: [SIMD3<Int32>: SweepCoverageCell] = [:]
+    /// Cells with `free > 0` / `surface > 0`. Maintained in `integrate` on each cell's first
+    /// 0 → nonzero transition, so a live readout never walks `cells`. Exact because the
+    /// counters saturate rather than wrap: a counted cell can never drop back to zero.
+    private(set) var freeCellCount = 0
+    private(set) var surfaceCellCount = 0
 
     init(cellSize: Float = AppConstants.sweepCoverageCellSize) {
         self.cellSize = cellSize
@@ -185,13 +190,20 @@ struct SweepCoverageGrid {
         let touched = freeSet.union(surfaceSet)
         for key in touched {
             var cell = cells[key] ?? SweepCoverageCell()
-            if freeSet.contains(key) { SweepCoverageCell.saturatingIncrement(&cell.free) }
-            if surfaceSet.contains(key) { SweepCoverageCell.saturatingIncrement(&cell.surface) }
+            if freeSet.contains(key) { Self.observe(&cell.free, cellCount: &freeCellCount) }
+            if surfaceSet.contains(key) { Self.observe(&cell.surface, cellCount: &surfaceCellCount) }
             SweepCoverageCell.saturatingIncrement(&cell.visits)
             cells[key] = cell
         }
         result.cellsTouched = touched.count
         return result
+    }
+
+    /// Saturating-increments one per-cell counter, counting the cell into `cellCount` on its
+    /// first observation (0 → 1).
+    private static func observe(_ counter: inout UInt16, cellCount: inout Int) {
+        if counter == 0 { cellCount += 1 }
+        SweepCoverageCell.saturatingIncrement(&counter)
     }
 
     func snapshot(stats: SweepCoverageStats) -> SweepCoverageSnapshot {
@@ -200,5 +212,7 @@ struct SweepCoverageGrid {
 
     mutating func reset() {
         cells.removeAll()
+        freeCellCount = 0
+        surfaceCellCount = 0
     }
 }

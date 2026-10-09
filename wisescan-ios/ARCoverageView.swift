@@ -156,6 +156,11 @@ struct ARCoverageView: UIViewRepresentable {
         scanStore?.freezeSweepCoverage = { [weak coordinator = context.coordinator] in
             coordinator?.sweepCoverage.freezeAndSnapshot()
         }
+        // Non-freezing read for the developer coverage readout (lock-guarded mirror, never the
+        // recorder's queue). Main-thread, ~1 Hz while that readout is visible.
+        scanStore?.sweepCoverageLiveStats = { [weak coordinator = context.coordinator] in
+            coordinator?.sweepCoverage.liveStats()
+        }
         // Record-tap escape hatch: lets CaptureView revive a wedged capture graph (no frames
         // flowing) when the "establishing tracking" gate keeps bouncing the record button.
         scanStore?.reviveARSession = { [weak coordinator = context.coordinator] in

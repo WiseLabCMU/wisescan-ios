@@ -29,6 +29,13 @@ Release, which is what the field mostly runs. ON enables:
   `skip_tracking`/`skip_nodepth` skips. One `sweep FINAL` line at the Stop tap adds the
   frame and ray totals that land in `sweep_coverage.bin`'s header. Only the lines are gated —
   the grid itself is always recorded and saved.
+- **Live Coverage Readout** (sub-toggle, shown under Perf Diagnostics, off by default) — the
+  same counters on screen while recording, refreshed once a second in a small monospaced
+  block at the left edge under the top chrome: `cov surf/free` cells (with `nodepth` until a
+  depth frame arrives), `upd`, `drop busy/rate`, `skip tracking/nodepth`, and per-update
+  `cpu` last/avg/max ms. It reads a lock-guarded copy the recorder republishes per update —
+  never the recorder's queue, never the Stop-time freeze — so watching it does not pause or
+  slow the sweep.
 - **os_signpost intervals** for the Instruments timeline when a cable IS available.
 
 Decision-bearing lines (map-suspect verdicts, link drops, calibration rails) log at

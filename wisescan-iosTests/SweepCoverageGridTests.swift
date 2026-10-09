@@ -137,4 +137,51 @@ final class SweepCoverageGridTests: XCTestCase {
         XCTAssertTrue(grid.cells.isEmpty)
         XCTAssertEqual(SweepCoverageSnapshot.empty(cellSize: cell).cells.count, 0)
     }
+
+    // MARK: - Incremental cell counts (the live readout's source; never a walk of `cells`)
+
+    private func recount(_ grid: SweepCoverageGrid) -> (free: Int, surface: Int) {
+        (grid.cells.values.filter { $0.free > 0 }.count, grid.cells.values.filter { $0.surface > 0 }.count)
+    }
+
+    func testCellCountsCountFirstObservationOnly() {
+        var grid = SweepCoverageGrid(cellSize: cell)
+        XCTAssertEqual(grid.freeCellCount, 0)
+        XCTAssertEqual(grid.surfaceCellCount, 0)
+        let dir = SIMD3<Float>(1, 0, 0)
+        // Free x=0,1; surface x=2.
+        grid.integrate(origin: SIMD3(0.1, 0.1, 0.1), rays: [SweepRay(direction: dir, depth: 1.2)])
+        XCTAssertEqual(grid.freeCellCount, 2)
+        XCTAssertEqual(grid.surfaceCellCount, 1)
+        // Re-observing adds nothing; a shorter ray makes free cell x=1 a surface cell as well.
+        grid.integrate(origin: SIMD3(0.1, 0.1, 0.1), rays: [SweepRay(direction: dir, depth: 1.2)])
+        grid.integrate(origin: SIMD3(0.1, 0.1, 0.1), rays: [SweepRay(direction: dir, depth: 0.7)])
+        XCTAssertEqual(grid.freeCellCount, 2)
+        XCTAssertEqual(grid.surfaceCellCount, 2)
+        grid.reset()
+        XCTAssertEqual(grid.freeCellCount, 0)
+        XCTAssertEqual(grid.surfaceCellCount, 0)
+    }
+
+    func testCellCountsMatchRecountOverManyUpdates() {
+        var grid = SweepCoverageGrid(cellSize: cell)
+        // Fixed-seed LCG: deterministic rays in all directions, including truncated ones.
+        var state: UInt64 = 0x5EED
+        func next() -> Float {
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return Float(state >> 40) / Float(1 << 24)
+        }
+        for _ in 0..<40 {
+            let origin = SIMD3<Float>(next(), next(), next()) * 4 - 2
+            let rays = (0..<25).map { _ in
+                SweepRay(direction: simd_normalize(SIMD3<Float>(next(), next(), next()) - 0.5),
+                         depth: 0.2 + next() * 7)
+            }
+            grid.integrate(origin: origin, rays: rays)
+            let expected = recount(grid)
+            XCTAssertEqual(grid.freeCellCount, expected.free)
+            XCTAssertEqual(grid.surfaceCellCount, expected.surface)
+        }
+        XCTAssertGreaterThan(grid.surfaceCellCount, 0)
+    }
 }
