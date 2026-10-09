@@ -28,8 +28,9 @@ import os
 /// frame shift (unlike the VR voxel wipe in ARCoverageView): wiping would erase real coverage, and
 /// the post-snap frames land in the corrected frame anyway.
 ///
-/// Threading: `begin()` and `offer(_:)` on the delegate queue, `freezeAndSnapshot()` on main.
-/// `grid`, `stats` and the cost accumulators are touched only on `queue`.
+/// Threading: `begin()` and `offer(_:)` on the delegate queue, `freezeAndSnapshot()` on main,
+/// `liveStats()` from anywhere (main, ~1 Hz). `grid`, `stats` and the cost accumulators are
+/// touched only on `queue`.
 nonisolated final class SweepCoverageRecorder: @unchecked Sendable {
     private let queue = DispatchQueue(label: "org.arenaxr.scan4d.coverage", qos: .utility)
     private let accepting = Atomic<Bool>(false)
@@ -43,6 +44,18 @@ nonisolated final class SweepCoverageRecorder: @unchecked Sendable {
     }
     private let skips = OSAllocatedUnfairLock(initialState: SkipCounters())
 
+    /// The queue-owned half of `liveStats()`, copied out at the end of every queue job so a
+    /// reader never has to enter `queue`. One small struct copy per update (~5 Hz).
+    private struct LiveMirror {
+        var surfaceCells = 0
+        var freeCells = 0
+        var updates = 0
+        var lastNs: UInt64 = 0
+        var meanNs: UInt64 = 0
+        var maxNs: UInt64 = 0
+    }
+    private let live = OSAllocatedUnfairLock(initialState: LiveMirror())
+
     // MARK: Queue-owned state (only touched on `queue`)
 
     private var grid = SweepCoverageGrid()
@@ -54,7 +67,8 @@ nonisolated final class SweepCoverageRecorder: @unchecked Sendable {
     private var firstUpdateWall: CFAbsoluteTime?
 
     /// Value-only copy of what one admitted frame contributes. Holds no ARKit references.
-    private struct FrameSample {
+    /// Internal rather than private only so unit tests can build one for `offer(sample:timestamp:)`.
+    struct FrameSample {
         let transform: simd_float4x4
         let focalX: Float
         let focalY: Float
@@ -78,7 +92,11 @@ nonisolated final class SweepCoverageRecorder: @unchecked Sendable {
             cpuMaxNs = 0
             lastNs = 0
             firstUpdateWall = nil
+            // Zeroed again here, in queue order: a job left over from a recording that was never
+            // frozen could republish its numbers after the synchronous zero below.
+            live.withLock { $0 = LiveMirror() }
         }
+        live.withLock { $0 = LiveMirror() }
         gate.withLock { $0.reset() }
         skips.withLock { $0 = SkipCounters() }
         accepting.store(true, ordering: .releasing)
@@ -112,10 +130,59 @@ nonisolated final class SweepCoverageRecorder: @unchecked Sendable {
             return
         }
         // `sample` holds only value arrays; the frame and pixel buffers are not captured.
+        enqueue(sample)
+    }
+
+    /// `offer(_:)` for a sample that is already extracted: the same accepting check, depth
+    /// bookkeeping, throttle admission and queue hand-off, minus the ARFrame. An ARFrame cannot
+    /// be constructed outside a running session, so this is how the unit tests drive the
+    /// recorder. The app always goes through `offer(_:)`, which extracts only AFTER admission.
+    func offer(sample: FrameSample, timestamp: TimeInterval) {
+        guard accepting.load(ordering: .acquiring) else { return }
+        skips.withLock { $0.depthEverAvailable = true }
+        guard case .admitted = gate.withLock({ $0.offer(timestamp: timestamp) }) else { return }
+        enqueue(sample)
+    }
+
+    /// Hands an admitted sample to the work queue. The caller holds the in-flight slot.
+    private func enqueue(_ sample: FrameSample) {
         queue.async { [self] in
-            defer { gate.withLock { $0.finish() } }
+            defer {
+                gate.withLock { $0.finish() }
+                // After the release, so a reader that sees update N in `liveStats()` also knows
+                // N's slot is free (the unit tests sequence frames on that rather than on timing).
+                publishLive()
+            }
             process(sample)
         }
+    }
+
+    /// The recording's counters so far, WITHOUT stopping it (unlike `freezeAndSnapshot()`).
+    /// Cheap enough for a ~1 Hz readout on main.
+    ///
+    /// Never enters `queue`: a `queue.sync` would park main behind an in-flight update and put a
+    /// UI read on the cost path the throttle exists to protect. Instead it takes three unfair
+    /// locks, each held for a struct copy: the queue's mirror (republished at the end of every
+    /// update) and the delegate-side drop and skip counters, read where they live so they keep
+    /// moving while no frame is being processed (tracking lost, no depth), which is exactly when
+    /// a readout needs them. The three are not one atomic cut, so a frame can show as dropped a
+    /// moment before an update count catches up; `freezeAndSnapshot()` is the exact record.
+    ///
+    /// This mirror is also the entry point for any future mid-recording read (tap-to-focus
+    /// bootstrap needs coverage-so-far; design review flagged it): publish what that read needs
+    /// from `publishLive()` at its own cost, rather than reaching into `queue` from main.
+    ///
+    /// After `freezeAndSnapshot()` it keeps answering with the frozen values; `begin()` zeroes it.
+    func liveStats() -> SweepCoverageLiveStats {
+        let mirror = live.withLock { $0 }
+        let (droppedBusy, droppedRate) = gate.withLock { ($0.droppedBusy, $0.droppedRate) }
+        let skip = skips.withLock { $0 }
+        return SweepCoverageLiveStats(
+            surfaceCells: mirror.surfaceCells, freeCells: mirror.freeCells, updates: mirror.updates,
+            framesDroppedBusy: droppedBusy, framesDroppedRate: droppedRate,
+            framesSkippedTracking: skip.skippedTracking, framesSkippedNoDepth: skip.skippedNoDepth,
+            depthEverAvailable: skip.depthEverAvailable,
+            lastUpdateCPUNs: mirror.lastNs, meanUpdateCPUNs: mirror.meanNs, maxUpdateCPUNs: mirror.maxNs)
     }
 
     /// Stops accepting frames and returns the coverage so far. Call on MAIN at the Stop tap.
@@ -267,6 +334,15 @@ nonisolated final class SweepCoverageRecorder: @unchecked Sendable {
         }
     }
 
+    /// Copies the queue-owned counters into the `liveStats()` mirror. Queue-only. Cell counts
+    /// are the grid's incremental counters, never a walk of `cells`.
+    private func publishLive() {
+        let mirror = LiveMirror(
+            surfaceCells: grid.surfaceCellCount, freeCells: grid.freeCellCount, updates: updates,
+            lastNs: lastNs, meanNs: updates > 0 ? cpuTotalNs / UInt64(updates) : 0, maxNs: cpuMaxNs)
+        live.withLock { $0 = mirror }
+    }
+
     /// Shared field list for the periodic and FINAL lines. Queue-only.
     private func diagnosticFields(droppedBusy: UInt32, droppedRate: UInt32, skip: SkipCounters) -> String {
         let ms = { (ns: UInt64) in String(format: "%.2f", Double(ns) / 1_000_000) }
@@ -281,4 +357,25 @@ nonisolated final class SweepCoverageRecorder: @unchecked Sendable {
             + "cpu_total=\(String(format: "%.2f", cpuSeconds))s (\(String(format: "%.1f", corePct))% of 1 core since first update) "
             + "drop_busy=\(droppedBusy) drop_rate=\(droppedRate) skip_tracking=\(skip.skippedTracking) skip_nodepth=\(skip.skippedNoDepth)"
     }
+}
+
+/// What `SweepCoverageRecorder.liveStats()` reports: the current recording's counters so far,
+/// for the developer readout. Zero after `begin()`. Not saved anywhere — the artifact is
+/// `SweepCoverageSnapshot`. `nonisolated` so it can be built and compared off main.
+nonisolated struct SweepCoverageLiveStats: Equatable, Sendable {
+    /// Cells some ray ended in (`surface > 0`).
+    var surfaceCells = 0
+    /// Cells some ray passed through (`free > 0`). Overlaps `surfaceCells`: a cell can be both.
+    var freeCells = 0
+    /// Frame updates integrated so far.
+    var updates = 0
+    var framesDroppedBusy: UInt32 = 0
+    var framesDroppedRate: UInt32 = 0
+    var framesSkippedTracking: UInt32 = 0
+    var framesSkippedNoDepth: UInt32 = 0
+    var depthEverAvailable = false
+    /// Thread CPU per update, nanoseconds.
+    var lastUpdateCPUNs: UInt64 = 0
+    var meanUpdateCPUNs: UInt64 = 0
+    var maxUpdateCPUNs: UInt64 = 0
 }
