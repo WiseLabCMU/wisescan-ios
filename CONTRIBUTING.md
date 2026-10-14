@@ -181,6 +181,10 @@ The `wisescan-ios` repository uses [Release Please](https://github.com/googleapi
 > **Issue and PR References in Commit & PR Messages:**
 > Only use `#NN` notation in commit messages, PR titles, and PR descriptions if they correspond to actual GitHub issues or pull requests. Do **not** use `#NN` notation for internal enumerations of planning docs or triage items (e.g., use `REQ-NNN`, `Task NN`, or plain text instead), as this creates erroneous links and may result in unintended automatic actions.
 
+> [!IMPORTANT]
+> **No emoji in documentation, code comments, commit messages, or GitHub issue/PR titles and descriptions.**
+> Write plain text. Emoji render inconsistently across editors, terminals, diffs, and generated release notes, and add nothing a plain word does not. This applies to all contributors, including automated/agentic coding tools. Icons in the software's own user interface are fine, but they must follow the project's existing conventions for UI icons (here: SF Symbols, see [No emoji in rendered UI text](#no-emoji-in-rendered-ui-text--use-sf-symbols)).
+
 > [!WARNING]
 > **Xcode strips `x-release-please-version` markers.** The `MARKETING_VERSION` lines in `project.pbxproj` contain `/* x-release-please-version */` inline comments that release-please uses to locate the version string. Xcode's project serializer does **not** preserve non-standard inline comments — opening the project or modifying build settings will silently strip these markers. **Before committing any `project.pbxproj` changes, verify the markers are intact:**
 > ```bash
