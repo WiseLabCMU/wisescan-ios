@@ -176,6 +176,7 @@ final class ThetaCameraManager {
     /// always 192.168.1.1 (a CL-mode camera, #84, will need the real host threaded in).
     nonisolated static func absoluteCameraURLString(_ raw: String, host: String = "192.168.1.1") -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if External360StillSource.isManualImportPlaceholder(trimmed) { return trimmed }
         if trimmed.lowercased().hasPrefix("http://") || trimmed.lowercased().hasPrefix("https://") { return trimmed }
         return "http://\(host)" + (trimmed.hasPrefix("/") ? trimmed : "/" + trimmed)
     }

@@ -2,6 +2,7 @@ import CoreGraphics
 import CryptoKit
 import ImageIO
 import Metal
+import os
 import UIKit
 import simd
 
@@ -25,6 +26,7 @@ import simd
 /// privacy pass — blur (or the user's per-scan consent) is baked into the pixels the faces
 /// inherit. Never call this on a raw_data equirect.
 enum EquirectFaceExport {
+    private static let log = Logger(subsystem: "org.arenaxr.scan4d", category: "equirect-faces")
 
     /// Whether a camera model's panos can be trusted LEVEL — the rig-prior pose math assumes
     /// zenith-corrected (internally "gimbaled") equirects; a non-leveling camera would bake
@@ -51,11 +53,50 @@ enum EquirectFaceExport {
         case unsupported
     }
 
+    struct SupportSummary {
+        let support: LevelingSupport
+        let models: [String]
+    }
+
     static func levelingSupport(forModel model: String?) -> LevelingSupport {
         guard let model = model?.uppercased() else { return .unsupported }
         if model.contains("THETA X") { return .validated }
         if model.contains("THETA Z1") { return .validated }
+        if model.contains("INSTA360 X6") || model.contains("INSTA360 X4") || model.contains("INSTA360 X3") {
+            return .assumedLevel
+        }
         return .unsupported
+    }
+
+    /// Highest-severity leveling status present in a scan's equirect sidecars, for operator
+    /// surfacing on the scan card. Unsupported beats assumed-level; validated-only returns nil.
+    static func supportSummary(rawDataDir: URL) -> SupportSummary? {
+        let dir = rawDataDir.appendingPathComponent("equirect_stills")
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return nil }
+        var unsupportedModels: Set<String> = []
+        var assumedModels: Set<String> = []
+        for file in files where file.hasPrefix("still_") && file.hasSuffix(".json") {
+            let sidecarURL = dir.appendingPathComponent(file)
+            guard let data = try? Data(contentsOf: sidecarURL),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else { continue }
+            let model = (obj["still_source"] as? String) ?? "Unknown 360° camera"
+            switch levelingSupport(forModel: model) {
+            case .validated:
+                break
+            case .assumedLevel:
+                assumedModels.insert(model)
+            case .unsupported:
+                unsupportedModels.insert(model)
+            }
+        }
+        if !unsupportedModels.isEmpty {
+            return SupportSummary(support: .unsupported, models: unsupportedModels.sorted())
+        }
+        if !assumedModels.isEmpty {
+            return SupportSummary(support: .assumedLevel, models: assumedModels.sorted())
+        }
+        return nil
     }
 
     /// One emitted cube face: name suffix + its rotation FROM the rig camera frame.
@@ -272,12 +313,9 @@ enum EquirectFaceExport {
             poseSource = solvedPose ? "rig_calibrated" : "rig_prior"
         case .assumedLevel:
             poseSource = solvedPose ? "rig_calibrated_unvalidated_leveling" : "rig_prior_unvalidated_leveling"
-            print("[prepareExport] ⚠️ \(equirectURL.lastPathComponent): \(stillSource ?? "?") leveling "
-                + "not yet device-validated — faces emitted with pose source '\(poseSource)'")
+            log.warning("\(equirectURL.lastPathComponent, privacy: .public): \(stillSource ?? "unknown", privacy: .public) leveling not yet field-validated — faces emitted with pose source '\(poseSource, privacy: .public)'")
         case .unsupported:
-            print("[prepareExport] ⚠️ \(equirectURL.lastPathComponent): '\(stillSource ?? "unknown")' has no "
-                + "validated zenith/leveling behavior — pose-bearing cube faces NOT emitted for this "
-                + "camera yet (the archived equirect still ships; gyro-metadata compensation is a future feature)")
+            log.warning("\(equirectURL.lastPathComponent, privacy: .public): \(stillSource ?? "unknown", privacy: .public) has no validated or assumed leveling behavior — pose-bearing cube faces were skipped")
             return 0
         }
         let bitmap: Bitmap? = PerfDiag.timed("cf_decode") { decodeBitmap(from: equirectURL) }
@@ -292,7 +330,7 @@ enum EquirectFaceExport {
         } else {
             // Pre-contract sidecar (no baked pose): mechanical prior only — nothing ties a
             // stored solved profile to the rig that actually shot this still.
-            print("[prepareExport] \(equirectURL.lastPathComponent): no baked cam_transform (pre-contract still) — mechanical-prior pose")
+            log.notice("\(equirectURL.lastPathComponent, privacy: .public): no baked cam_transform (pre-contract still) — mechanical-prior pose")
             camTransform = RigModel.composeRigTransform(
                 phoneToWorld: phoneToWorld,
                 offsetPhone: RigProfile.mechanicalPrior.offsetPhone,
