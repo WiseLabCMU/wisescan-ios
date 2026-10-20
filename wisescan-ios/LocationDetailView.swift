@@ -18,6 +18,8 @@ struct LocationDetailView: View {
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
     @State private var showNoWorldMapAlert = false
+    /// EXPERIMENT: the ARKit-free raw capture screen (see RawCaptureView).
+    @State private var showRawCapture = false
     // Suspect-map confirm: the latest scan's world map carries a wandering outlier cluster
     // (tracking excursion baked in — see CapturedScan.worldMapSuspect), so relocalizing a
     // rescan/link against it risks an offset ghost + offset registration. Warn, don't block:
@@ -164,6 +166,25 @@ struct LocationDetailView: View {
                                     .buttonStyle(FilledActionButtonStyle(background: Color.orange.opacity(0.8)))
                                 }
                             }
+
+                            // EXPERIMENT: ARKit-free capture (stills + depth + IMU to a zip). Debug
+                            // surface beside Rescan so it opens from an existing room; no pose,
+                            // nothing saved into the scan store. See RawCaptureSession.
+                            Button(action: {
+                                scanStore.rawCaptureActive = true
+                                showRawCapture = true
+                            }, label: {
+                                HStack {
+                                    Image(systemName: "camera.aperture")
+                                    Text("Raw Capture (experiment)")
+                                        .font(.subheadline).bold()
+                                }
+                            })
+                            .buttonStyle(FilledActionButtonStyle(
+                                background: Color.white.opacity(0.08),
+                                foreground: .white.opacity(0.85),
+                                border: Color.white.opacity(0.2)
+                            ))
 
                             // Global Export Settings
                             VStack(spacing: 12) {
@@ -355,6 +376,11 @@ struct LocationDetailView: View {
                 // Cleanup
                 isBulkExporting = false
             }
+        }
+        .fullScreenCover(isPresented: $showRawCapture, onDismiss: {
+            scanStore.rawCaptureActive = false
+        }) {
+            RawCaptureView(locationName: location.name)
         }
     }
 

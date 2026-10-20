@@ -403,6 +403,9 @@ class ScanStore {
     var activeScanToExtend: UUID?
     /// Whether the user chose "Rescan Space" or "Link Adjacent Space".
     var activeScanCase: ScanCase = .rescanSpace
+    /// EXPERIMENT: a raw (ARKit-free) capture is on screen. CaptureView pauses its AR session
+    /// at once while this is set, so the capture session can take the camera.
+    var rawCaptureActive = false
 
     // MARK: Capture Phase
 

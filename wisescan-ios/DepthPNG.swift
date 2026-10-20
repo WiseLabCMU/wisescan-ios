@@ -18,7 +18,8 @@ import UniformTypeIdentifiers
 /// reads either correctly: real depth is metres-scale millimetres, and the wrong
 /// interpretation scatters uniformly across the 16-bit range, so the two never tie in
 /// practice (measured: 100% vs 15% on a capture frame).
-enum DepthPNG {
+/// `nonisolated`: pure CoreGraphics/ImageIO, called from capture and export queues as well as main.
+nonisolated enum DepthPNG {
     /// Depth is in millimetres and 0 means "no data"; anything outside this is nonsense
     /// for an indoor scan and votes against the interpretation that produced it.
     private static let plausibleRange: ClosedRange<UInt16> = 100...20000
