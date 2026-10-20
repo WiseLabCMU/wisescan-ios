@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ARKit
+import AVFoundation
 import RoomPlan
 import SwiftUI
 
@@ -480,6 +481,26 @@ enum AppConstants {
     static let photoCoverageDebtMinVoxels: Int = 40            // min mesh voxels before the coverage-debt coach tip can fire (too little geometry below this)
     static let photoCoverageDebtFraction: Double = 0.3         // coach nudges "pause for photos" while photo coverage is below this fraction of mesh
     static let photoCoverageStandpointCell: Float = 0.5        // m — camera-position quantization for the per-voxel standpoint (parallax) mask
+
+    // ── Raw capture (EXPERIMENT: ARKit-free stills + depth + IMU, see RawCaptureSession) ──
+    static let rawCaptureFolder = "RawCaptures"                // Documents/<folder>/ — capture directories and their zips
+    static let rawCaptureVideoFPS: Int = 30                    // video/depth stream rate; the stream is only for sync + intrinsics
+    static let rawCapturePhotoQuality: AVCapturePhotoOutput.QualityPrioritization = .balanced  // .speed / .balanced / .quality — the photo-pipeline cost knob
+    static let rawCapturePhotoCodec: AVVideoCodecType = .jpeg   // container for the processed still: .jpeg reads everywhere downstream; .hevc (HEIC) is smaller but needs libheif in the pipeline
+    static let rawCaptureJPEGQuality: Double = 0.95              // AVVideoQualityKey for .jpeg stills (ignored for .hevc)
+    static let rawCaptureResponsiveCapture: Bool = true        // let the pipeline overlap processing with the next capture where supported
+    static let rawCaptureDepthSaveMaxHz: Double = 10           // streamed depth PNGs are rate-capped; every frame is still logged in depth_frames.csv
+    static let rawCaptureIMUUpdateInterval: TimeInterval = 0.0001 // requested CoreMotion interval, far below any sensor's minimum, so each stream runs at the hardware maximum (CoreMotion clamps); the achieved rate is measured into manifest.json
+    static let rawCaptureGateRetrySeconds: TimeInterval = 0.05 // re-check the gyro gate this often while the device is turning too fast
+    static let rawCaptureMaxExposureSeconds: Double = 1.0 / 120 // cap on AUTO exposure duration (device.activeMaxExposureDuration), clamped to the format's range; AE raises ISO to compensate. 0 = no cap. First dump at 1/30 s was blurry.
+    static let rawCaptureBlurBudgetPx: Double = 2.0            // a still is requested only while gyro rate x live exposure x focal length (px) predicts at most this much smear
+    // Still spacing: viewpoint change required between consecutive stills. With both thresholds 0 the loop runs at the photo pipeline's latency.
+    static let rawCaptureStillSpacingRotationDeg: Double = 6    // next still once the device has rotated this much since the previous one (fused attitude), OR
+    static let rawCaptureStillSpacingShiftFraction: Double = 0.08 // once the image has shifted this fraction of the frame width since the previous one (video-stream block match, so translation counts too; one frame width = one horizontal field of view, so 0.08 is about 5-6 degrees of pan)
+    static let rawCaptureStillMinIntervalSeconds: TimeInterval = 0 // hard floor between stills regardless of motion (0 = none)
+    static let rawCaptureStillMaxIntervalSeconds: TimeInterval = 1.0 // also fire after this long without a still however little the view changed: a pause yields one still per second instead of one per pipeline round trip (the unspaced build gave 3-5 near-identical stills per pause). 0 = one still per pause.
+    static let rawCaptureFlowHz: Double = 15                    // video-stream shift estimates per second
+    static let rawCaptureStatsRefreshSeconds: TimeInterval = 0.5 // on-screen counters refresh
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)
     static let stillOverlapFloor: Double = 0.4                 // coach nudges "overlap your photos" while mean still-to-still overlap is below this (photogrammetry target ~0.6)
     static let stillParallaxDiversityFloor: Double = 0.15      // coach nudges "step sideways" while under this fraction of photo-covered voxels has ≥2 standpoints
