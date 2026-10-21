@@ -80,6 +80,13 @@ struct ARCoverageView: UIViewRepresentable {
     /// delegate pushes updates to `scanStats.analysisRoom`. Set false to stop and snapshot results.
     @Binding var isAnalyzing: Bool
 
+    /// EXPERIMENT (AR Capture): the capture-only branch of a rescan is running. On the rising edge
+    /// this view does what record-start does to the frame (re-run preserving the relocalized
+    /// frame, then the ICP and manual-nudge bakes) but with LiDAR depth only: no mesh, planes or
+    /// RoomPlan, and the ghost is removed. Every frame then goes to `stillCapture`.
+    var isStillCapturing: Bool = false
+    var stillCapture: ARStillCaptureSession?
+
     /// Whether this device has LiDAR for scene reconstruction and depth capture.
     static let supportsLiDAR = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
 
@@ -428,6 +435,16 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
+        // EXPERIMENT (AR Capture): the capture-only branch's record-start (see beginStillCapture).
+        context.coordinator.stillCapture = stillCapture
+        if isStillCapturing != context.coordinator.isStillCapturing {
+            context.coordinator.isStillCapturing = isStillCapturing
+            if isStillCapturing {
+                Self.beginStillCapture(uiView, coordinator: context.coordinator, worldMapURL: initialWorldMapURL,
+                                       bakedGhostTransform: bakedGhostTransform, stillCapture: stillCapture)
+            }
+        }
+
         // Detect recording state change → switch AR session config
         if recordingChanged {
             context.coordinator.isRecording.store(isRecording, ordering: .relaxed)
@@ -701,6 +718,35 @@ struct ARCoverageView: UIViewRepresentable {
 
     }
 
+    /// EXPERIMENT (AR Capture): record-start for the capture-only branch. The frame handling is the
+    /// real record-start's, step for step: re-run WITHOUT resetting tracking (the loaded map keeps
+    /// the relocalized frame; same run options as record-start), then the dev ICP bake, then the
+    /// manual ghost-nudge bake. The content is not: LiDAR scene depth only, no mesh reconstruction,
+    /// plane detection or RoomPlan, and the ghost leaves the scene. Only then does the engine start
+    /// taking frames, so no still carries a pre-bake pose.
+    private static func beginStillCapture(_ uiView: ARView, coordinator: Coordinator, worldMapURL: URL?,
+                                          bakedGhostTransform: simd_float4x4?, stillCapture: ARStillCaptureSession?) {
+        let config = makeConfiguration(enableMeshReconstruction: false, worldMapURL: worldMapURL)
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            config.frameSemantics.insert(.sceneDepth)
+        }
+        let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [] : .removeExistingAnchors
+        uiView.session.run(config, options: runOptions)
+        if let icpBake = coordinator.pendingICPBake {
+            uiView.session.setWorldOrigin(relativeTransform: icpBake)
+            stillCapture?.noteICPBake(icpBake)
+            coordinator.pendingICPBake = nil
+            coordinator.icpRefineCandidates.removeAll()
+            PerfDiag.log("[ARStill] applied the gravity-locked ICP bake at capture start")
+        }
+        if let baked = bakedGhostTransform {
+            uiView.session.setWorldOrigin(relativeTransform: baked)
+            PerfDiag.log("[ARStill] applied the manual ghost-nudge bake at capture start")
+        }
+        coordinator.ghostAnchorEntity?.removeFromParent()
+        stillCapture?.startAccepting()
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
@@ -948,6 +994,11 @@ struct ARCoverageView: UIViewRepresentable {
 
     class Coordinator: NSObject, ARSessionDelegate {
         weak var arView: ARView?
+        /// EXPERIMENT (AR Capture): the capture-only engine fed from `session(_:didUpdate:)`, and the
+        /// last-seen `isStillCapturing` for edge detection in updateUIView (main). The engine is
+        /// one stable instance per capture view and ignores frames unless it is capturing.
+        var stillCapture: ARStillCaptureSession?
+        var isStillCapturing = false
         var scanStats: ScanStats?
         let rootEntity = Entity()
         /// Serial queue for ALL ARSession delegate callbacks. Keeping them off the main thread is
@@ -2674,6 +2725,9 @@ struct ARCoverageView: UIViewRepresentable {
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
             memDiagFrameCount &+= 1 // [MemDiag] frames/sample → measured FPS (the "visible slowdown")
             prodFrameCount &+= 1    // production fps → capacity bar (ungated)
+            // EXPERIMENT (AR Capture): no-op unless the capture-only branch is running. First, so
+            // its gates see every frame regardless of what the rest of this handler does.
+            stillCapture?.offer(frame)
 
             // [MemDiag] First frame carrying a segmentation buffer = the person-segmentation CoreML
             // model (enabled by the privacy filter / analysis mode) is loaded and resident. The delta

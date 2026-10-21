@@ -403,9 +403,14 @@ class ScanStore {
     var activeScanToExtend: UUID?
     /// Whether the user chose "Rescan Space" or "Link Adjacent Space".
     var activeScanCase: ScanCase = .rescanSpace
-    /// EXPERIMENT: a raw (ARKit-free) capture is on screen. CaptureView pauses its AR session
-    /// at once while this is set, so the capture session can take the camera.
+    /// EXPERIMENT: a capture screen that needs the camera is up (raw capture, or the stripped AR
+    /// capture with its own ARSession). CaptureView pauses its AR session at once while this is
+    /// set, so that screen can take the camera.
     var rawCaptureActive = false
+    /// EXPERIMENT: this rescan is an AR Capture. Everything up to Start is the ordinary Rescan
+    /// flow; at Start the capture view runs the capture-only branch (ARStillCaptureSession)
+    /// instead of recording a scan. Cleared with the rest of the capture state.
+    var stillCaptureMode = false
 
     // MARK: Capture Phase
 
@@ -530,6 +535,7 @@ class ScanStore {
         activeRelocalizationMap = nil
         activeScanToExtend = nil
         activeScanCase = .rescanSpace
+        stillCaptureMode = false
         capturePhase = .idle
         boundaryAnchorTransform = nil
         boundaryAnchorId = nil

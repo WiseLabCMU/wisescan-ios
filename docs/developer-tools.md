@@ -71,7 +71,7 @@ the camera's open AP is the weakest place to leave raw equirects.
 
 ## Raw capture dump (EXPERIMENT, not gated)
 
-**Location detail → Raw Capture (experiment)**, under the Rescan / Connect buttons. An
+**Location detail → Raw Capture**, under the Rescan / Connect buttons (beside AR Capture). An
 ARKit-free capture to test the premise behind a splat-quality focal scan: can the photo
 pipeline deliver full-sensor stills back-to-back while LiDAR depth keeps streaming, and can
 both be aligned to the IMU by timestamp alone. No pose, no coverage, nothing saved into the
@@ -183,6 +183,81 @@ agreement. A photo's `host_ts` is the capture pipeline's time for the still, and
 actual smear of a still is the integral of the gyro rate over `[host_ts, host_ts +
 exposure_s]` from `imu_gyro.csv` times `fx`; comparing that with `predicted_smear_px` (a
 single sample at request time) shows how much of the blur the gate could have caught.
+
+## AR still capture dump (EXPERIMENT, not gated)
+
+**Location detail → AR Capture**, beside Raw Capture. It is the **Rescan flow up to Start**:
+the same entry (`startRescan`, so the same world map, post-process gate and suspect-map
+confirm), relocalization, ghost, alignment and manual nudge. Only Start and Stop differ
+(`ScanStore.stillCaptureMode`, `CaptureView+StillCapture`). The goal is high-quality stills
+and nothing else: no stream images are saved.
+
+**Start** goes through the same pre-start gates as a rescan's record tap (tracking out of
+cold init; with Perf Diagnostics, the short hold for the ICP correction), computes the same
+manual-nudge bake as `startRecording`, and raises `isStillCapturing`. On that edge
+`ARCoverageView.beginStillCapture` does what record-start does **to the frame**, in the same
+order: re-run without resetting tracking (the loaded map keeps the relocalized frame), the
+dev ICP bake, then the manual-nudge bake. It differs in **content**: LiDAR scene depth only,
+no mesh reconstruction, plane detection or RoomPlan, and the ghost leaves the scene. Only then
+does the engine accept frames, so no still carries a pre-bake pose.
+
+**Coordinate space.** Poses are in the world-map scan's raw capture frame with the rescan's
+record-start bakes applied, i.e. exactly where a rescan recorded from the same alignment
+would put them. A rescan then registers its own RoomPlan to the original scan at save; this
+mode has no RoomPlan, so instead the dump carries the world-map scan's
+`registration.json` (`world_map_registration.json`: that raw frame to the original scan's
+canonical frame). `setup.icpBake` and `setup.manualNudgeBake` record what was baked.
+
+**Stills** come from `captureHighResolutionFrame`, one in flight. Each returns its own
+ARFrame: pose, intrinsics and exposure of that instant, plus the 256x192 LiDAR depth and
+confidence. The resolution is the capture view's high-resolution 4:3 format's still (full
+sensor: 4032x3024 on an M1 iPad Pro). ARKit hands the image over unencoded; the app encodes
+JPEG on its own queue and holds new stills while `arStillMaxPendingEncodes` are queued.
+
+**Gates**, evaluated on every tracked frame (`ARStillCaptureGates`, unit tested):
+- *Blur:* predicted smear = gyro rate x exposure x focal + sideways speed x exposure x focal /
+  near-scene depth, in still pixels, against `rawCaptureBlurBudgetPx`. Sideways speed is the
+  ARKit velocity over `arStillVelocityWindowSeconds` with the along-view part removed; near
+  depth is the `arStillGateDepthPercentile` of confident LiDAR samples. A sidestep close to a
+  surface counts, which raw capture's gyro-only gate could not do.
+- *Spacing:* a still once the view has turned `arStillViewpointThresholdDeg`, or a sideways
+  move subtends that angle at the near scene (parallax), or `rawCaptureStillMaxIntervalSeconds`
+  has passed.
+- *Exposure:* `rawCaptureMaxExposureSeconds` is applied to ARKit's own camera through
+  `configurableCaptureDeviceForPrimaryCamera` (auto exposure keeps metering and raises ISO).
+
+**Debug panel** (mid-screen while AR Capture is active). Its large first line is the point of
+the experiment: the last still's resolution, exposure and ISO; the next line is the stream's
+size and exposure against the cap. Below: still counts and rate, latency, why the last still
+fired, frames held by each gate, the gate inputs, and the exposure-cap note.
+
+| Path | What |
+|---|---|
+| `manifest.json` | `setup` (device, stream format, world-map scan and id, original scan id, bakes, exposure cap requested / applied / note, gate settings, `deviceSupportedPhotoDimensions` vs `arkitDefaultPhotoDimensions`, frame and pose conventions) and `totals` |
+| `photos/photo_NNNNN.jpg` | Full-resolution ARKit still, sensor (landscape) orientation |
+| `photos.csv` | Per still: `host_ts`, request time, latency, size, exposure, ISO, tracking, depth and confidence files, intrinsics, `c2w_00..c2w_23` pose, and what the gates measured (gyro, sideways speed, near depth, stream exposure, predicted rotation and translation smear, interval, turn, parallax, reason) |
+| `photo_depth/photo_NNNNN.png` | 16-bit mm LiDAR depth of the same ARFrame, 256x192, unsmoothed |
+| `photo_confidence/photo_NNNNN.png` | 8-bit ARKit confidence of the same ARFrame: 0 low, 1 medium, 2 high |
+| `frames.csv` | Text-only pose log of every tracking frame while capturing (the trajectory between stills); no stream images |
+| `imu_gyro.csv`, `imu_accel.csv` | Raw gyroscope (also the blur gate's rotation input) and accelerometer |
+| `world_map_registration.json` | Copy of the world-map scan's `registration.json`, when it has one |
+| `events.log` | Capture lifecycle, exposure cap, failures |
+
+**Pose convention:** `c2w_*` is ARKit's camera-to-world transform, row-major 3x4; the camera
+looks down its -Z axis with +Y up in the image, world +Y is up (gravity), metres. Images,
+depth and intrinsics are in the sensor's landscape orientation. All timestamps are seconds
+since boot (`ARFrame.timestamp` and CoreMotion share that clock).
+
+**For the splat pipeline**, the poses replace COLMAP's job of recovering pose, scale and
+gravity; a COLMAP refit with the ARKit poses fixed is optional polish. Two gotchas from the
+raw-capture runs carry over: LichtFeld normalises 16-bit depth PNGs and rejects desk-scale
+millimetre depth as flat (write 0.1 mm units), and its depth anchoring needs a seed cloud.
+
+**Open questions one device run answers:** the still resolution and exposure actually
+delivered (first panel line; `photos.csv`); whether the still's exposure honours the cap;
+the sustained still rate with the mesh off; whether tracking holds at 1/120 s; and on a 48MP
+iPhone, whether ARKit stills stay at 12MP (`deviceSupportedPhotoDimensions` vs
+`arkitDefaultPhotoDimensions` and the stills' actual size).
 
 ## Process-step tools (not gated)
 

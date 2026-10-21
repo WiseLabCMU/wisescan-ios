@@ -10,6 +10,11 @@ import os
 extension CaptureView {
 
     func toggleRecording() {
+        // EXPERIMENT (AR Capture): the one divergence from a rescan is what Start and Stop do.
+        if scanStore.stillCaptureMode {
+            toggleStillCapture()
+            return
+        }
         if isRecording {
             // Every user-initiated stop confirms via the menu — the old rescan bypass saved
             // immediately on an accidental tap with no way to cancel/discard (2026-07-22 field

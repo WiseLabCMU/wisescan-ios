@@ -167,24 +167,49 @@ struct LocationDetailView: View {
                                 }
                             }
 
-                            // EXPERIMENT: ARKit-free capture (stills + depth + IMU to a zip). Debug
-                            // surface beside Rescan so it opens from an existing room; no pose,
-                            // nothing saved into the scan store. See RawCaptureSession.
-                            Button(action: {
-                                scanStore.rawCaptureActive = true
-                                showRawCapture = true
-                            }, label: {
-                                HStack {
-                                    Image(systemName: "camera.aperture")
-                                    Text("Raw Capture (experiment)")
-                                        .font(.subheadline).bold()
-                                }
-                            })
-                            .buttonStyle(FilledActionButtonStyle(
-                                background: Color.white.opacity(0.08),
-                                foreground: .white.opacity(0.85),
-                                border: Color.white.opacity(0.2)
-                            ))
+                            // EXPERIMENTS, debug surface beside Rescan so they open from an existing
+                            // room; nothing is saved into the scan store, each dumps a zip.
+                            //  - Raw: ARKit-free stills + depth + IMU (RawCaptureSession).
+                            //  - AR: the Rescan flow up to Start (same map, gates, ghost, alignment,
+                            //    nudge); Start runs the capture-only branch: full-resolution stills +
+                            //    pose + LiDAR depth, nothing else (ARStillCaptureSession).
+                            HStack(spacing: 12) {
+                                Button(action: {
+                                    scanStore.rawCaptureActive = true
+                                    showRawCapture = true
+                                }, label: {
+                                    HStack {
+                                        Image(systemName: "camera.aperture")
+                                        Text("Raw Capture")
+                                            .font(.subheadline).bold()
+                                    }
+                                })
+                                .buttonStyle(FilledActionButtonStyle(
+                                    background: Color.white.opacity(0.08),
+                                    foreground: .white.opacity(0.85),
+                                    border: Color.white.opacity(0.2)
+                                ))
+
+                                Button(action: {
+                                    // The Rescan entry itself (same map, gates, confirm); the capture
+                                    // view diverges only at Start. See CaptureView+StillCapture.
+                                    if let latest = sortedScans.first { startRescan(latest, stillCapture: true) }
+                                }, label: {
+                                    HStack {
+                                        Image(systemName: "arkit")
+                                        Text("AR Capture")
+                                            .font(.subheadline).bold()
+                                    }
+                                })
+                                .buttonStyle(FilledActionButtonStyle(
+                                    background: Color.white.opacity(0.08),
+                                    foreground: .white.opacity(0.85),
+                                    border: Color.white.opacity(0.2)
+                                ))
+                            }
+                            Text("Experiments: raw camera, or ARKit tracking only. Each saves a zip.")
+                                .font(.caption2)
+                                .foregroundColor(.white.opacity(0.5))
 
                             // Global Export Settings
                             VStack(spacing: 12) {
@@ -381,8 +406,7 @@ struct LocationDetailView: View {
             scanStore.rawCaptureActive = false
         }) {
             RawCaptureView(locationName: location.name)
-        }
-    }
+        }    }
 
     /// Rename/world-map alerts, the gate/bulk modifier stack, and the confirmation dialog.
     private func detailDialogs(_ content: some View) -> some View {
@@ -785,7 +809,9 @@ struct LocationDetailView: View {
     /// guard first. DECISION 3 hard gate: the rescan consumes the LATEST scan's proxy/roomplan
     /// (ghost + auto-align reference) and the ORIGINAL's roomplan (registration target) — all
     /// post-process products. A suspect map (tracking excursion baked in) warns before proceeding.
-    private func startRescan(_ latestScan: CapturedScan) {
+    /// `stillCapture` (EXPERIMENT, AR Capture): the identical rescan entry (same map, gates and
+    /// suspect-map confirm); only the capture view's Start differs (capture-only branch).
+    private func startRescan(_ latestScan: CapturedScan, stillCapture: Bool = false) {
         guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
             showNoWorldMapAlert = true
             return
@@ -796,6 +822,7 @@ struct LocationDetailView: View {
             scanStore.activeRelocalizationMap = latestScan.worldMapURL
             scanStore.activeScanToExtend = latestScan.id
             scanStore.activeScanCase = .rescanSpace
+            scanStore.stillCaptureMode = stillCapture
             selectedTab = 1
         }
         if latestScan.worldMapSuspect {

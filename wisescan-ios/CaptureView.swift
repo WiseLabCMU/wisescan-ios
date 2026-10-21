@@ -43,6 +43,9 @@ struct CaptureView: View {
     /// where `totalVertices` already starts high (would otherwise never cross an absolute threshold).
     @State var verticesAtRecordStart = 0
     @State var isRecording = false
+    /// EXPERIMENT (AR Capture): the capture-only branch of a rescan (see CaptureView+StillCapture).
+    @State var stillCapture = ARStillCaptureController()
+    @State var isStillCapturing = false
     // Set true by ARCoverageView's coordinator when VIO tracking is lost mid‑recording; observed
     // below to halt the scan and prompt save/rescan (data after VIO loss is corrupt).
     @State var vioCompromised = false
@@ -646,7 +649,9 @@ struct CaptureView: View {
                 dismissGhostMesh: dismissGhostMesh,
                 bakedGhostTransform: bakedGhostTransform,
                 pauseARSession: pauseARSession,
-                isAnalyzing: $isAnalyzing
+                isAnalyzing: $isAnalyzing,
+                isStillCapturing: isStillCapturing,
+                stillCapture: stillCapture.engine
             )
         .alert(rigMeasuredDyMeters < 0.01 ? "Rig height not set" : "Rig height looks wrong",
                isPresented: $showRigHeightPrompt) {
@@ -924,6 +929,10 @@ struct CaptureView: View {
                 pauseARSession = true
             }
         }
+        // EXPERIMENT (AR Capture): debug panel mid-screen (the bottom is busy) and the zip's share
+        // sheet. Both live in CaptureView+StillCapture.
+        .overlay { stillCaptureOverlay }
+        .sheet(isPresented: stillCaptureShareBinding) { stillCaptureShareSheet }
         .onAppear {
             // Pick up any Settings change to the diagnostics flag, then start the main-thread
             // stall watchdog for this capture session (both no-ops unless Perf Diagnostics is on).
@@ -1027,6 +1036,8 @@ struct CaptureView: View {
         }
         .onDisappear {
             memoryPressureMonitor.stop()
+            // EXPERIMENT (AR Capture): leaving mid-capture stops it and keeps the data (zip in Documents).
+            if isStillCapturing { stopStillCapture() }
             // Next appearance must re-load the ghost before the world map is handed over (the
             // makeUIView-vs-onAppear race gate in body).
             ghostLoadAttempted = false
@@ -1803,9 +1814,9 @@ struct CaptureView: View {
                                 Circle()
                                     .fill(.ultraThinMaterial)
                                     .frame(width: 80, height: 80)
-                                    .overlay(Circle().stroke(isRecording ? Color.red : Color.cyan, lineWidth: 2))
+                                    .overlay(Circle().stroke(isRecording || isStillCapturing ? Color.red : Color.cyan, lineWidth: 2))
 
-                                if isRecording {
+                                if isRecording || isStillCapturing {
                                     RoundedRectangle(cornerRadius: 4)
                                         .fill(Color.red)
                                         .frame(width: 28, height: 28)
@@ -2067,6 +2078,7 @@ struct CaptureView: View {
     /// Caption under the record button. A computed String (not a chained ternary in `body`) so the
     /// body expression stays type-checkable.
     private var recordButtonCaption: String {
+        if scanStore.stillCaptureMode { return isStillCapturing ? "Tap to stop AR capture" : "Tap to start AR capture" }
         if isRecording { return "Tap to stop" }
         if isProcessingMesh || isWaitingToSave { return "Processing previous scan…" }
         return "Tap to scan"

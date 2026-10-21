@@ -501,6 +501,17 @@ enum AppConstants {
     static let rawCaptureStillMaxIntervalSeconds: TimeInterval = 1.0 // also fire after this long without a still however little the view changed: a pause yields one still per second instead of one per pipeline round trip (the unspaced build gave 3-5 near-identical stills per pause). 0 = one still per pause.
     static let rawCaptureFlowHz: Double = 15                    // video-stream shift estimates per second
     static let rawCaptureStatsRefreshSeconds: TimeInterval = 0.5 // on-screen counters refresh
+
+    // ── AR still capture (EXPERIMENT: stripped ARKit session + the raw-capture still loop, see ARStillCaptureSession) ──
+    // Shares the raw-capture knobs where the meaning is identical: rawCaptureMaxExposureSeconds (exposure cap), rawCaptureBlurBudgetPx,
+    // rawCaptureStillMinIntervalSeconds / rawCaptureStillMaxIntervalSeconds, rawCaptureDepthSaveMaxHz, rawCaptureIMUUpdateInterval, rawCaptureStatsRefreshSeconds.
+    static let arStillFolder = "ARStillCaptures"               // Documents/<folder>/ — capture directories and their zips
+    static let arStillViewpointThresholdDeg: Double = 6         // next still once the view has rotated this much, OR a sideways move subtends this much at the scene (pose + LiDAR depth, so sidesteps count)
+    static let arStillJPEGQuality: CGFloat = 0.95              // still encode quality (the ARKit still arrives as raw YCbCr; we encode it)
+    static let arStillMaxPendingEncodes: Int = 2               // hold new stills while this many 12MP encodes are queued (each holds ~18 MB until written)
+    static let arStillGateMinConfidence: UInt8 = 1             // LiDAR confidence floor for the depth the gates use (0 low, 1 medium, 2 high)
+    static let arStillGateDepthPercentile: Double = 0.25       // gates use the nearer part of the scene: near content smears and shifts most
+    static let arStillVelocityWindowSeconds: TimeInterval = 0.1 // device velocity = pose difference over this window (ARKit pose jitter dominates shorter windows)
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)
     static let stillOverlapFloor: Double = 0.4                 // coach nudges "overlap your photos" while mean still-to-still overlap is below this (photogrammetry target ~0.6)
     static let stillParallaxDiversityFloor: Double = 0.15      // coach nudges "step sideways" while under this fraction of photo-covered voxels has ≥2 standpoints
