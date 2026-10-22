@@ -1,7 +1,6 @@
 import Foundation
 import CoreGraphics
 import ARKit
-import AVFoundation
 import RoomPlan
 import SwiftUI
 
@@ -482,30 +481,13 @@ enum AppConstants {
     static let photoCoverageDebtFraction: Double = 0.3         // coach nudges "pause for photos" while photo coverage is below this fraction of mesh
     static let photoCoverageStandpointCell: Float = 0.5        // m — camera-position quantization for the per-voxel standpoint (parallax) mask
 
-    // ── Raw capture (EXPERIMENT: ARKit-free stills + depth + IMU, see RawCaptureSession) ──
-    static let rawCaptureFolder = "RawCaptures"                // Documents/<folder>/ — capture directories and their zips
-    static let rawCaptureVideoFPS: Int = 30                    // video/depth stream rate; the stream is only for sync + intrinsics
-    static let rawCapturePhotoQuality: AVCapturePhotoOutput.QualityPrioritization = .balanced  // .speed / .balanced / .quality — the photo-pipeline cost knob
-    static let rawCapturePhotoCodec: AVVideoCodecType = .jpeg   // container for the processed still: .jpeg reads everywhere downstream; .hevc (HEIC) is smaller but needs libheif in the pipeline
-    static let rawCaptureJPEGQuality: Double = 0.95              // AVVideoQualityKey for .jpeg stills (ignored for .hevc)
-    static let rawCaptureResponsiveCapture: Bool = true        // let the pipeline overlap processing with the next capture where supported
-    static let rawCaptureDepthSaveMaxHz: Double = 10           // streamed depth PNGs are rate-capped; every frame is still logged in depth_frames.csv
-    static let rawCaptureIMUUpdateInterval: TimeInterval = 0.0001 // requested CoreMotion interval, far below any sensor's minimum, so each stream runs at the hardware maximum (CoreMotion clamps); the achieved rate is measured into manifest.json
-    static let rawCaptureGateRetrySeconds: TimeInterval = 0.05 // re-check the gyro gate this often while the device is turning too fast
-    static let rawCaptureMaxExposureSeconds: Double = 1.0 / 120 // cap on AUTO exposure duration (device.activeMaxExposureDuration), clamped to the format's range; AE raises ISO to compensate. 0 = no cap. First dump at 1/30 s was blurry.
-    static let rawCaptureBlurBudgetPx: Double = 2.0            // a still is requested only while gyro rate x live exposure x focal length (px) predicts at most this much smear
-    // Still spacing: viewpoint change required between consecutive stills. With both thresholds 0 the loop runs at the photo pipeline's latency.
-    static let rawCaptureStillSpacingRotationDeg: Double = 6    // next still once the device has rotated this much since the previous one (fused attitude), OR
-    static let rawCaptureStillSpacingShiftFraction: Double = 0.08 // once the image has shifted this fraction of the frame width since the previous one (video-stream block match, so translation counts too; one frame width = one horizontal field of view, so 0.08 is about 5-6 degrees of pan)
-    static let rawCaptureStillMinIntervalSeconds: TimeInterval = 0 // hard floor between stills regardless of motion (0 = none)
-    static let rawCaptureStillMaxIntervalSeconds: TimeInterval = 1.0 // also fire after this long without a still however little the view changed: a pause yields one still per second instead of one per pipeline round trip (the unspaced build gave 3-5 near-identical stills per pause). 0 = one still per pause.
-    static let rawCaptureFlowHz: Double = 15                    // video-stream shift estimates per second
-    static let rawCaptureStatsRefreshSeconds: TimeInterval = 0.5 // on-screen counters refresh
-
-    // ── AR still capture (EXPERIMENT: stripped ARKit session + the raw-capture still loop, see ARStillCaptureSession) ──
-    // Shares the raw-capture knobs where the meaning is identical: rawCaptureMaxExposureSeconds (exposure cap), rawCaptureBlurBudgetPx,
-    // rawCaptureStillMinIntervalSeconds / rawCaptureStillMaxIntervalSeconds, rawCaptureDepthSaveMaxHz, rawCaptureIMUUpdateInterval, rawCaptureStatsRefreshSeconds.
+    // ── AR still capture (EXPERIMENT: the capture-only branch of a rescan, see ARStillCaptureSession) ──
     static let arStillFolder = "ARStillCaptures"               // Documents/<folder>/ — capture directories and their zips
+    static let arStillMaxExposureSeconds: Double = 1.0 / 120   // longest exposure auto exposure may use on ARKit's camera (activeMaxExposureDuration, clamped to the format); AE raises ISO instead. 1/120 integrates one 120 Hz mains-flicker cycle. 0 = no cap. An uncapped 1/30 s was blurry.
+    static let arStillMinIntervalSeconds: TimeInterval = 0     // hard floor between stills regardless of motion (0 = none)
+    static let arStillMaxIntervalSeconds: TimeInterval = 1.0   // also fire after this long without a still however little the view changed: a pause yields one still per second (unspaced, a pause gave 3-5 near-identical stills). 0 = one still per pause.
+    static let arStillIMUUpdateInterval: TimeInterval = 0.0001 // requested CoreMotion interval, far below any sensor's minimum, so the gyro and accelerometer run at the hardware maximum (CoreMotion clamps)
+    static let arStillStatsRefreshSeconds: TimeInterval = 0.5  // debug-panel counters refresh
     static let arStillViewpointThresholdDeg: Double = 6         // next still once the view has rotated this much, OR a sideways move subtends this much at the scene (pose + LiDAR depth, so sidesteps count)
     static let arStillJPEGQuality: CGFloat = 0.95              // still encode quality (the ARKit still arrives as raw YCbCr; we encode it)
     static let arStillMaxPendingEncodes: Int = 2               // hold new stills while this many 12MP encodes are queued (each holds ~18 MB until written)
@@ -513,7 +495,7 @@ enum AppConstants {
     static let arStillGateDepthPercentile: Double = 0.25       // gates use the nearer part of the scene: near content smears and shifts most
     static let arStillVelocityWindowSeconds: TimeInterval = 0.1 // device velocity = pose difference over this window (ARKit pose jitter dominates shorter windows)
     static let arStillBlurBudgetRad: Double = 0.0009           // blur gate on predicted IMAGE MOTION during the exposure, as an ANGLE (pose-only, rotation and translation as vectors, centre + corners at the near depth). 0.9 mrad = 3 px at the 12MP still's 3,346 px focal. Angular so a 48MP still is held to the same real sharpness (6 px) instead of silently twice as strict. The first capture's sharp stills moved up to 2.8 px (p90); replaying its motion, 3 px fired every 1.37 s vs 2.05 s for the original 2 px magnitude sum.
-    // Short-exposure experiment (toggle on the AR Capture screen): instead of holding the exposure at rawCaptureMaxExposureSeconds (1/120),
+    // Short-exposure experiment (toggle on the AR Capture screen): instead of holding the exposure at arStillMaxExposureSeconds (1/120),
     // shorten it to whatever reaches this ISO in the current light. The gate reads the real exposure, so it loosens in proportion.
     // Caveat: 1/120 integrates one full 120 Hz mains-flicker cycle; shorter exposures can band or pulse under flickering LED/fluorescent light.
     static let arStillShortExposureISOCeiling: Double = 800    // the first capture's noise grew only as ISO^0.29 (0.45 -> ~1.1 of 255 over ISO 50-700; the ISP denoises)

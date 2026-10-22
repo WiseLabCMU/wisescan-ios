@@ -26,7 +26,7 @@ import simd
 ///   - **Gates** (`ARStillCaptureGates`), per tracked frame: predicted smear from gyro rotation
 ///     AND sideways translation (ARKit velocity over the near scene depth); viewpoint spacing as
 ///     rotation or parallax since the previous still.
-///   - **Exposure cap**: `rawCaptureMaxExposureSeconds` on ARKit's own camera via
+///   - **Exposure cap**: `arStillMaxExposureSeconds` on ARKit's own camera via
 ///     `configurableCaptureDeviceForPrimaryCamera`; auto exposure keeps metering and raises ISO.
 ///   - **Logs**: every stream frame's pose; stream depth + confidence at a capped rate; raw gyro
 ///     and accelerometer. One clock: `ARFrame.timestamp` and CoreMotion are seconds since boot.
@@ -207,8 +207,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         s.shortExposureISOCeiling = AppConstants.arStillShortExposureISOCeiling
         s.shortExposureFloorSeconds = AppConstants.arStillShortExposureFloorSeconds
         s.viewpointThresholdDeg = AppConstants.arStillViewpointThresholdDeg
-        s.stillMinIntervalSeconds = AppConstants.rawCaptureStillMinIntervalSeconds
-        s.stillMaxIntervalSeconds = AppConstants.rawCaptureStillMaxIntervalSeconds
+        s.stillMinIntervalSeconds = AppConstants.arStillMinIntervalSeconds
+        s.stillMaxIntervalSeconds = AppConstants.arStillMaxIntervalSeconds
         s.gateDepthPercentile = AppConstants.arStillGateDepthPercentile
         s.gateMinConfidence = Int(AppConstants.arStillGateMinConfidence)
         if let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera {
@@ -413,9 +413,9 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let sinceLast = lastStillTime < 0 ? Double.infinity : t - lastStillTime
         guard let reason = ARStillCaptureGates.spacingDecision(
             sinceLast: sinceLast, rotationDeg: view.rotationDeg, parallaxDeg: view.parallaxDeg,
-            minInterval: AppConstants.rawCaptureStillMinIntervalSeconds,
+            minInterval: AppConstants.arStillMinIntervalSeconds,
             viewpointThresholdDeg: AppConstants.arStillViewpointThresholdDeg,
-            maxInterval: AppConstants.rawCaptureStillMaxIntervalSeconds
+            maxInterval: AppConstants.arStillMaxIntervalSeconds
         ) else {
             live.withLock { $0.heldSpacingFrames += 1 }
             return
@@ -569,7 +569,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     /// not `setup`: this runs on the delegate queue; the manifest merges them at Stop.
     private func applyExposureCap() {
         exposureCapApplied = true
-        let requested = AppConstants.rawCaptureMaxExposureSeconds
+        let requested = AppConstants.arStillMaxExposureSeconds
         guard requested > 0 else { reportCap(0, "cap disabled"); return }
         setMaxExposure(requested, why: "fixed cap")
     }
@@ -586,7 +586,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             if toggled { event("short-exposure experiment \(short ? "ON" : "OFF")") }
             return
         }
-        guard short, AppConstants.rawCaptureMaxExposureSeconds > 0,
+        guard short, AppConstants.arStillMaxExposureSeconds > 0,
               t - lastExposureUpdate >= AppConstants.arStillShortExposureUpdateSeconds,
               let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else { return }
         lastExposureUpdate = t
@@ -597,7 +597,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let floor = max(AppConstants.arStillShortExposureFloorSeconds, CMTimeGetSeconds(device.activeFormat.minExposureDuration))
         let target = ARStillCaptureGates.shortExposureCap(
             exposure: exposure, iso: iso, targetOffsetEV: offset, isoCeiling: ceiling,
-            floor: floor, cap: AppConstants.rawCaptureMaxExposureSeconds)
+            floor: floor, cap: AppConstants.arStillMaxExposureSeconds)
         let current = live.withLock { $0.exposureCapAppliedSeconds }
         guard current <= 0 || abs(target - current) / current > 0.1 else { return }
         setMaxExposure(target, why: String(format: "short-exposure: light %.4f (%.6f s x ISO %.0f, AE offset %+.2f EV), ISO ceiling %.0f", exposure * iso, exposure, iso, offset, ceiling))
@@ -651,7 +651,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     // MARK: IMU
 
     private func startMotion() {
-        let interval = AppConstants.rawCaptureIMUUpdateInterval
+        let interval = AppConstants.arStillIMUUpdateInterval
         if motion.isGyroAvailable {
             motion.gyroUpdateInterval = interval
             motion.startGyroUpdates(to: motionQueue) { [weak self] data, _ in
@@ -754,7 +754,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             ]
         ]
         var setup = self.setup   // exposure and ICP results come from locked state (written off main)
-        setup.exposureCapRequestedSeconds = AppConstants.rawCaptureMaxExposureSeconds
+        setup.exposureCapRequestedSeconds = AppConstants.arStillMaxExposureSeconds
         setup.exposureCapAppliedSeconds = stats.exposureCapAppliedSeconds
         setup.exposureCapNote = stats.exposureCapNote
         setup.icpBake = icpBakeNoted.withLock { $0 }

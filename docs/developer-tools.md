@@ -69,124 +69,9 @@ the camera's open AP is the weakest place to leave raw equirects.
   property bitmasks at link-ready for the known failure modes.
 - **Camera storage panel** — camera-side file count + confirmed bulk erase.
 
-## Raw capture dump (EXPERIMENT, not gated)
-
-**Location detail → Raw Capture**, under the Rescan / Connect buttons (beside AR Capture). An
-ARKit-free capture to test the premise behind a splat-quality focal scan: can the photo
-pipeline deliver full-sensor stills back-to-back while LiDAR depth keeps streaming, and can
-both be aligned to the IMU by timestamp alone. No pose, no coverage, nothing saved into the
-scan store. The capture tab's AR session is paused the moment the screen opens so the
-capture session can take the camera (`ScanStore.rawCaptureActive`).
-
-`RawCaptureSession` runs one `AVCaptureSession` on the LiDAR camera: stills from the photo
-output at the format's largest photo dimensions with depth delivery requested, one capture
-in flight, fired again as soon as the previous one finishes unless the blur gate holds it; an unfiltered
-depth stream synchronized with the video stream (video is never saved, it carries the
-intrinsics attachment); and every CoreMotion stream (raw gyroscope, raw accelerometer, fused
-device motion, magnetometer) as its own file at the sensor's own maximum rate. The requested
-interval (`rawCaptureIMUUpdateInterval`) is far below any hardware minimum, so CoreMotion
-clamps each stream to the fastest it can deliver; the achieved rate is measured from the
-sample timestamps and written to `manifest.json` (`totals.gyro_hz` etc.) rather than
-assumed. The on-screen panel shows the negotiated formats and live counters
-(saved/requested/failed/gated stills, last latency, exposure, ISO, depth frames
-received/dropped/saved, per-stream IMU counts and achieved Hz, interruptions). Stop zips
-the directory into `Documents/RawCaptures/raw_capture_<location>_<stamp>.zip` and offers
-the share sheet. Knobs are the `rawCapture*` constants (photo quality prioritization,
-codec and JPEG quality, responsive capture, depth PNG rate cap, the exposure cap and blur
-budget below).
-
-**Sharpness.** The first dump ran with auto exposure uncapped and a fixed gyro threshold; AE
-sat at 1/30 s indoors and a good share of the stills were blurred at walking pace. Two
-controls now exist, both things ARKit never allowed:
-
-- **Exposure cap** (`rawCaptureMaxExposureSeconds`, default 1/120 s). A ceiling on the
-  auto-exposure duration via `activeMaxExposureDuration`: AE keeps metering and raises ISO
-  instead of the shutter. Clamped to the format's exposure range; the effective value is in
-  `setup.maxExposureCapSeconds` and on screen as `cap`. Where light is too low even at the
-  sensor's top ISO the still goes dark rather than blurred, which is the right failure for a
-  reconstruction input. 0 disables the cap.
-- **Blur budget** (`rawCaptureBlurBudgetPx`, default 2 px). A still is requested only while
-  gyro rate x the exposure AE is about to use x focal length (photo pixels) predicts at most
-  this much smear. A fixed angular threshold cannot be right across lighting: the AR path's
-  0.5 rad/s is a 50 px smear at 1/30 s on a 4032 px frame and 3 px at 1/500 s. The focal
-  length starts from the format's field of view and is replaced by the first photo's
-  calibration data. The AR path's angular ceiling (`motionBlurAngularVelocity`) stays as a
-  backstop for when the exposure reading is unavailable. Rotation only: translational blur
-  needs a pose, which this path does not have, so a fast sidestep close to a surface still
-  gets through.
-
-The gate's inputs at each request land in `photos.csv` (`request_omega_rad_s`,
-`request_exposure_s`, `predicted_smear_px`). The on-screen `ae` / `smear` line turns orange
-while the gate is holding, which is the operator's cue to slow down; `gated` counts the
-held requests.
-
-**Spacing.** Without it the loop fires the next still the instant the previous one
-finishes, so the rate is the photo pipeline's latency and "stills per degree" is whatever
-rotation happened during one round trip: dense when moving slowly, sparse when moving fast.
-The spacing gate holds the next still until the viewpoint has changed since the previous
-one, by either of:
-
-- `rawCaptureStillSpacingRotationDeg` — rotation of the fused attitude since the last still.
-- `rawCaptureStillSpacingShiftFraction` — image shift since the last still, as a fraction of
-  the frame width, from a block-matched global shift between consecutive luma thumbnails of
-  the video stream (`ImageShiftEstimator`, at `rawCaptureFlowHz`). This is how a sidestep
-  registers: rotation shows up here too, so the two thresholds should agree (one frame width
-  is one horizontal field of view, so 0.12 is about 8 degrees of pan). Featureless frames
-  are called still rather than guessed.
-
-`rawCaptureStillMinIntervalSeconds` is a hard floor regardless of motion and
-`rawCaptureStillMaxIntervalSeconds` a timeout that also sets what a pause yields: the
-unspaced build fired 3 to 5 near-identical stills per pause (one per pipeline round trip);
-with the timeout at 1 s a pause yields one still per second, and at 0 exactly one still per
-pause, which is the better input for splat training since duplicates add nothing but hand
-tremor. Both motion thresholds at 0 restores the unspaced loop. Each still's row in `photos.csv`
-carries the inputs and the verdict (`interval_since_prev_s`, `rotation_since_prev_deg`,
-`shift_since_prev_frac`, `flow_speed_frac_s`, `spacing_reason`), and the `space` line on
-screen shows the accumulation toward each threshold, `held` checks, and the last reason. To
-tune, run the analysis tool below on a dump to see the median rotation per still as it is
-now, and set the thresholds at the spacing you want.
-
-**Analysing a dump.** [tools/rawcapture-analyze/analyze.py](../tools/rawcapture-analyze/README.md)
-reads the zip and prints the still rate, the rotation between consecutive stills, the
-rotational smear each still actually had from the gyro against the budget, the same motion
-re-evaluated at the old 1/30 s shutter and old fixed gate (to separate what the shorter
-shutter did from what the stricter gate did), depth-stream gaps during in-flight stills,
-and the achieved IMU rates.
-
-**Clock.** Every `host_ts` is seconds on the host clock (time since boot). Capture
-timestamps are converted from the session's synchronization clock; CoreMotion reports on the
-host clock natively, so the columns subtract directly. `manifest.json` records wall time and
-uptime at start.
-
-Contents of the zip:
-
-| Path | What |
-|---|---|
-| `manifest.json` | `setup` (device, negotiated video/photo/depth formats, which deliveries the pipeline supported and enabled, knobs) and `totals` |
-| `photos/photo_NNNNN.jpg` | Full-sensor processed still. JPEG at `rawCaptureJPEGQuality` by default so every downstream reader opens it; `rawCapturePhotoCodec = .hevc` writes `.heic` instead (smaller, needs libheif in the pipeline). The same ISP processing applies either way; only the container differs. `setup.rawPhotoPixelFormats` in the manifest lists the Bayer RAW formats the device offers (empty = DNG capture unavailable) |
-| `photos.csv` | Per still: `host_ts`, request time, latency, dimensions, exposure, ISO, the attached-depth file and dimensions, intrinsics (`fx fy cx cy` + reference dimensions) from the calibration data |
-| `photo_depth/photo_NNNNN.png` | 16-bit mm depth delivered **with** that photo. Absent when the pipeline attached none, which is one of the answers this dump exists to give |
-| `depth/depth_NNNNNN.png` | 16-bit mm streamed depth, capped at `rawCaptureDepthSaveMaxHz` |
-| `depth_frames.csv` | **Every** streamed depth frame: `host_ts`, dropped flags, the synchronized video frame's time, dimensions and intrinsics, and the saved file if any |
-| `imu_gyro.csv`, `imu_accel.csv` | Raw gyroscope (rad/s) and accelerometer (g), each at its sensor's maximum rate. These are the streams a motion reconstruction integrates |
-| `imu_devicemotion.csv` | Apple's fused estimate beside the raw streams: attitude quaternion, rotation rate, user acceleration, gravity |
-| `imu_magnetometer.csv` | Raw, uncalibrated magnetometer (microtesla). Recorded because it is free; noisy indoors |
-| `events.log` | Session lifecycle, interruptions, runtime errors, failed writes |
-
-What to read off a dump: the still rate (`photos.csv` row spacing) at each quality
-prioritization; whether `photo_depth/` exists at the largest photo dimensions; whether
-`depth_frames.csv` keeps its cadence through the moments stills are in flight (the
-`request_host_ts`..`host_ts` windows in `photos.csv`); the achieved IMU rate per stream
-(`totals.*_hz`, and the row spacing in each IMU file); and the IMU-to-depth timestamp
-agreement. A photo's `host_ts` is the capture pipeline's time for the still, and
-`exposure_s` beside it bounds where within the exposure the IMU should be sampled. The
-actual smear of a still is the integral of the gyro rate over `[host_ts, host_ts +
-exposure_s]` from `imu_gyro.csv` times `fx`; comparing that with `predicted_smear_px` (a
-single sample at request time) shows how much of the blur the gate could have caught.
-
 ## AR still capture dump (EXPERIMENT, not gated)
 
-**Location detail → AR Capture**, beside Raw Capture. It is the **Rescan flow up to Start**:
+**Location detail → AR Capture**, under the Rescan / Connect buttons. It is the **Rescan flow up to Start**:
 the same entry (`startRescan`, so the same world map, post-process gate and suspect-map
 confirm), relocalization, ghost, alignment and manual nudge. Only Start and Stop differ
 (`ScanStore.stillCaptureMode`, `CaptureView+StillCapture`). The goal is high-quality stills
@@ -231,9 +116,9 @@ stills while `arStillMaxPendingEncodes` are queued.
   `predicted_image_motion_smear_rad` is the gate's value (`_px` is the same in still pixels); the
   rotation and translation columns are the old sum's parts, kept for comparison.
 - *Spacing:* a still once the view has turned `arStillViewpointThresholdDeg`, or a sideways
-  move subtends that angle at the near scene (parallax), or `rawCaptureStillMaxIntervalSeconds`
+  move subtends that angle at the near scene (parallax), or `arStillMaxIntervalSeconds`
   has passed.
-- *Exposure:* `rawCaptureMaxExposureSeconds` (1/120) is applied to ARKit's own camera through
+- *Exposure:* `arStillMaxExposureSeconds` (1/120) is applied to ARKit's own camera through
   `configurableCaptureDeviceForPrimaryCamera` as the longest exposure auto exposure may use. In
   the first capture 93 of 94 stills sat exactly at it: iOS holds the longest allowed exposure and
   only shortens it once ISO bottoms out.
@@ -306,9 +191,12 @@ refits are ~1.6 px and uncorrelated with motion). LichtFeld's `ssi-depth` fits s
 shift per camera, which absorbs most of it; a tape measure on a known object would say which
 side is right.
 
-**For the splat pipeline**, the poses replace COLMAP's job of recovering pose, scale and
-gravity; a COLMAP refit with the ARKit poses fixed is optional polish. Two gotchas from the
-raw-capture runs carry over: LichtFeld normalises 16-bit depth PNGs and rejects desk-scale
+**For the splat pipeline**, the poses give metric scale, gravity and the room's frame, and a
+splat trains on them directly. They are not pixel-exact, though: on the first capture a full
+SfM pose solve seeded from them moved the stills by about 21 px median and trained 2.7 dB
+better on held-out stills, so solve poses from the images and keep ARKit's for scale and
+frame. Two gotchas from the
+earlier desk-scale runs carry over: LichtFeld normalises 16-bit depth PNGs and rejects desk-scale
 millimetre depth as flat (write 0.1 mm units), and its depth anchoring needs a seed cloud.
 
 **Open questions one device run answers:** the still resolution and exposure actually

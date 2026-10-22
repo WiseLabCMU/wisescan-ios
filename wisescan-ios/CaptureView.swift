@@ -919,16 +919,6 @@ struct CaptureView: View {
             Text("The ghost mesh from your previous scan may not be perfectly aligned. Choose an option:")
         }
         .preferredColorScheme(.dark)
-        // EXPERIMENT (raw capture): the ARKit-free capture needs the camera, so release it the
-        // moment a raw capture opens rather than after the idle teardown delay. Never mid-recording.
-        // Not resumed here: returning to the capture tab clears pauseARSession in onAppear.
-        .onChange(of: scanStore.rawCaptureActive) { _, active in
-            if active && !isRecording {
-                idleTeardownTimer?.invalidate()
-                idleTeardownTimer = nil
-                pauseARSession = true
-            }
-        }
         // EXPERIMENT (AR Capture): debug panel mid-screen (the bottom is busy) and the zip's share
         // sheet. Both live in CaptureView+StillCapture.
         .overlay { stillCaptureOverlay }

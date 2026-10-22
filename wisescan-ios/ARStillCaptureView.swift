@@ -65,7 +65,7 @@ final class ARStillCaptureController {
 
     private func startPolling() {
         stopPolling()
-        timer = Timer.scheduledTimer(withTimeInterval: AppConstants.rawCaptureStatsRefreshSeconds, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: AppConstants.arStillStatsRefreshSeconds, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 stats = engine.liveStats()
@@ -141,7 +141,7 @@ struct ARStillCaptureOverlay: View {
 
     private func shortExposureLine(_ live: ARStillCaptureSession.LiveStats) -> String {
         guard live.shortExposure else {
-            return "short exp off: fixed cap \(exposure(AppConstants.rawCaptureMaxExposureSeconds))"
+            return "short exp off: fixed cap \(exposure(AppConstants.arStillMaxExposureSeconds))"
         }
         let ceiling = fmt(AppConstants.arStillShortExposureISOCeiling, 0)
         let floor = exposure(AppConstants.arStillShortExposureFloorSeconds)

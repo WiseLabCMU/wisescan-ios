@@ -3,7 +3,7 @@ import Foundation
 import simd
 
 /// EXPERIMENT: still-capture gates for `ARStillCaptureSession`, driven by the ARKit pose and the
-/// LiDAR depth rather than the raw IMU and optical flow the ARKit-free raw capture has to use.
+/// LiDAR depth (an earlier ARKit-free capture had only the raw IMU and optical flow to go on).
 /// Pure functions, so the decisions are unit tested.
 ///
 /// Camera convention is ARKit's: the transform is camera-to-world, the camera looks down its -Z
