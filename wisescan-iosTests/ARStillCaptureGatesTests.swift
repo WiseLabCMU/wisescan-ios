@@ -60,6 +60,53 @@ final class ARStillCaptureGatesTests: XCTestCase {
         XCTAssertEqual(forward.parallaxDeg, 0, accuracy: 1e-6)
     }
 
+    func testImageMotionSmearPanSidestepAndOrbit() {
+        let f = 3000.0, exposure = 1.0 / 120, half = (w: 0.6, h: 0.45)
+        func smear(_ a: simd_float4x4, _ b: simd_float4x4, depth: Double = 1, corner: Double = 0) -> Double {
+            ARStillCaptureGates.imageMotionSmear(from: a, to: b, dt: 0.1, depth: depth, exposure: exposure,
+                                                 focalPx: f, halfWidthNorm: half.w, halfHeightNorm: half.h,
+                                                 cornerFraction: corner)
+        }
+        // Standing still: nothing moves.
+        XCTAssertEqual(smear(pose(.zero), pose(.zero)), 0, accuracy: 1e-9)
+        // Pan 1 degree in 0.1 s (10 deg/s) at the centre: omega * f * t = 0.1745 * 3000 / 120.
+        let pan = smear(pose(.zero), pose(.zero, yawDeg: 1))
+        XCTAssertEqual(pan, (10 * Double.pi / 180) * f * exposure, accuracy: 0.05)
+        // Sidestep 1 cm in 0.1 s (0.1 m/s) with the scene 1 m away: v / Z * f * t = 2.5 px.
+        XCTAssertEqual(smear(pose(.zero), pose(SIMD3(0.01, 0, 0))), 0.1 * f * exposure, accuracy: 0.01)
+        // Orbit: step sideways while turning to keep a point 1 m ahead centred; at that depth the
+        // two motions cancel and the centre barely moves, while the magnitude sum would not.
+        let step: Float = 0.01
+        let orbitYaw = atan(step / 1) * 180 / .pi     // turn toward the target by the parallax angle
+        let orbit = smear(pose(.zero), pose(SIMD3(step, 0, 0), yawDeg: orbitYaw), depth: 1)
+        XCTAssertLessThan(orbit, 0.1 * pan, "orbiting a point at the gate depth should nearly cancel")
+        // Corners see more than the centre under roll.
+        let roll = simd_float4x4(simd_quatf(angle: 1 * .pi / 180, axis: SIMD3(0, 0, 1)))
+        XCTAssertGreaterThan(smear(pose(.zero), roll, corner: 0.8), smear(pose(.zero), roll, corner: 0) + 1)
+    }
+
+    func testShortExposureCap() {
+        func cap(_ e: Double, _ iso: Double, offset: Double = 0) -> Double {
+            ARStillCaptureGates.shortExposureCap(exposure: e, iso: iso, targetOffsetEV: offset,
+                                                 isoCeiling: 800, floor: 1.0 / 500, cap: 1.0 / 120)
+        }
+        // The first AR capture's median light: 1/120 s at ISO 157 -> ISO 800 reached at 1/611 s,
+        // which is past the floor, so the floor wins.
+        XCTAssertEqual(cap(1.0 / 120, 157), 1.0 / 500, accuracy: 1e-9)
+        // Its 90th-percentile dim still: 1/120 at ISO 501 -> 1/192 s.
+        XCTAssertEqual(cap(1.0 / 120, 501), 501.0 / 120 / 800, accuracy: 1e-9)
+        // Too dark to go shorter than the cap: stays at 1/120 (ISO above the ceiling is accepted).
+        XCTAssertEqual(cap(1.0 / 120, 2000), 1.0 / 120, accuracy: 1e-9)
+        // The same light measured after a shorter cap was applied gives the same answer.
+        XCTAssertEqual(cap(1.0 / 240, 1002), cap(1.0 / 120, 501), accuracy: 1e-9)
+        // Underexposed by 1 EV (ISO pinned): twice the light is needed, so the cap lengthens.
+        XCTAssertEqual(cap(1.0 / 300, 800, offset: -1), 2.0 / 300, accuracy: 1e-9)
+        // A wild offset is clamped to 2 EV.
+        XCTAssertEqual(cap(1.0 / 400, 200, offset: -10), cap(1.0 / 400, 200, offset: -2), accuracy: 1e-12)
+        // Bad readings fall back to the cap.
+        XCTAssertEqual(cap(0, 100), 1.0 / 120, accuracy: 1e-12)
+    }
+
     func testSpacingDecision() {
         func decide(_ since: Double, _ rot: Double, _ par: Double,
                     min: Double = 0, threshold: Double = 6, max: Double = 0) -> String? {

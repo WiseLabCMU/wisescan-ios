@@ -56,7 +56,21 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         /// the evidence for whether ARKit stills are capped below the sensor (48MP iPhones).
         var deviceSupportedPhotoDimensions = ""
         var arkitDefaultPhotoDimensions = ""
-        var blurBudgetPx = 0.0
+        /// ARKit reports each still with the VIDEO's intrinsics scaled to the still size, but the
+        /// still has a narrower field of view: on an M1 iPad Pro a multi-view refit put its focal
+        /// length at 1.0476x the reported value, matching the photo pipeline's own calibration.
+        /// The likely cause is geometric distortion correction (a crop) on the photo path. These
+        /// fields record the format's two fields of view so every dump carries the expected ratio;
+        /// `photos.csv` keeps the reported intrinsics, which ARE right for the LiDAR maps.
+        var videoFieldOfViewDeg = 0.0
+        var distortionCorrectedFieldOfViewDeg = 0.0
+        var geometricDistortionCorrectionEnabled = false
+        /// tan(videoFOV/2) / tan(correctedFOV/2): the still focal over the reported focal, if the
+        /// still is the distortion-corrected crop. 0 when either field of view is unavailable.
+        var expectedStillFocalScale = 0.0
+        var blurBudgetRad = 0.0
+        var shortExposureISOCeiling = 0.0
+        var shortExposureFloorSeconds = 0.0
         var viewpointThresholdDeg = 0.0
         var stillMinIntervalSeconds = 0.0
         var stillMaxIntervalSeconds = 0.0
@@ -104,6 +118,11 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var gateDepth = 0.0
         var smearRotationPx = 0.0
         var smearTranslationPx = 0.0
+        /// Predicted image-motion smear in still pixels, and the angular budget in the same pixels.
+        var smearImageMotionPx = 0.0
+        var blurBudgetPx = 0.0
+        var shortExposure = false
+        var stillsShortExposure = 0
         var rotationSinceStillDeg = 0.0
         var parallaxSinceStillDeg = 0.0
         var framesLogged = 0
@@ -139,17 +158,23 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     private let stillScale = OSAllocatedUnfairLock(initialState: 4032.0 / 1920.0)
     /// The dev ICP correction, when the AR view baked one at Start (any queue).
     private let icpBakeNoted = OSAllocatedUnfairLock<[Float]?>(initialState: nil)
+    /// Short-exposure experiment: set from main by the toggle, read per frame on the delegate queue.
+    private let shortExposure = Atomic<Bool>(false)
+    /// Raised when the toggle flips so the next tracked frame re-applies the cap.
+    private let exposureModeChanged = Atomic<Bool>(false)
 
     private(set) var setup = Setup()
     private(set) var captureDirectory: URL?
     private var startUptime: TimeInterval = 0
+    private var stopUptime: TimeInterval = 0
 
     // Delegate-queue-owned (reset by `begin` while not recording).
-    private var poseHistory: [(t: TimeInterval, p: SIMD3<Float>)] = []
+    private var poseHistory: [(t: TimeInterval, m: simd_float4x4)] = []
     private var lastStillTransform: simd_float4x4?
     private var lastStillTime: TimeInterval = -1
     private var frameIndex = 0
     private var exposureCapApplied = false
+    private var lastExposureUpdate: TimeInterval = -1
 
     // encodeQueue-owned
     private var photoIndex = 0
@@ -168,6 +193,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let directory = try makeDirectory(label: label)
         captureDirectory = directory
         startUptime = ProcessInfo.processInfo.systemUptime
+        stopUptime = 0
 
         var s = Setup()
         s.deviceModel = Self.hardwareModel()
@@ -177,7 +203,9 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         s.worldMapScanId = context.worldMapScanId
         s.originalScanId = context.originalScanId
         s.manualNudgeBake = context.manualNudgeBake.map(Self.columnMajor)
-        s.blurBudgetPx = AppConstants.rawCaptureBlurBudgetPx
+        s.blurBudgetRad = AppConstants.arStillBlurBudgetRad
+        s.shortExposureISOCeiling = AppConstants.arStillShortExposureISOCeiling
+        s.shortExposureFloorSeconds = AppConstants.arStillShortExposureFloorSeconds
         s.viewpointThresholdDeg = AppConstants.arStillViewpointThresholdDeg
         s.stillMinIntervalSeconds = AppConstants.rawCaptureStillMinIntervalSeconds
         s.stillMaxIntervalSeconds = AppConstants.rawCaptureStillMaxIntervalSeconds
@@ -186,6 +214,14 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         if let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera {
             s.deviceSupportedPhotoDimensions = device.activeFormat.supportedMaxPhotoDimensions
                 .map { "\($0.width)x\($0.height)" }.joined(separator: " ")
+            let video = Double(device.activeFormat.videoFieldOfView)
+            let corrected = Double(device.activeFormat.geometricDistortionCorrectedVideoFieldOfView)
+            s.videoFieldOfViewDeg = video
+            s.distortionCorrectedFieldOfViewDeg = corrected
+            s.geometricDistortionCorrectionEnabled = device.isGeometricDistortionCorrectionEnabled
+            if video > 0, corrected > 0 {
+                s.expectedStillFocalScale = tan(video / 2 * .pi / 180) / tan(corrected / 2 * .pi / 180)
+            }
         }
         if let format = session.configuration?.videoFormat {
             s.streamFormat = "\(Int(format.imageResolution.width))x\(Int(format.imageResolution.height))@\(format.framesPerSecond)"
@@ -209,7 +245,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         encodeQueue.sync { photoIndex = 0 }
         pipeline.withLock { $0 = (false, 0) }
         icpBakeNoted.withLock { $0 = nil }
-        live.withLock { $0 = LiveStats() }
+        let shortOn = shortExposure.load(ordering: .acquiring)
+        live.withLock { $0 = LiveStats(); $0.shortExposure = shortOn }
         ioQueue.sync { openWriters(in: directory) }
         startMotion()
         live.withLock { $0.recording = true }
@@ -224,6 +261,14 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         event("accepting frames (bakes applied)")
     }
 
+    /// Short-exposure experiment on or off (any time; it takes effect on the next tracked frame
+    /// while capturing, and is recorded per still).
+    func setShortExposure(_ on: Bool) {
+        shortExposure.store(on, ordering: .releasing)
+        exposureModeChanged.store(true, ordering: .releasing)
+        live.withLock { $0.shortExposure = on }
+    }
+
     /// The AR view applied the dev ICP correction at Start (before any manual nudge).
     func noteICPBake(_ bake: simd_float4x4) {
         let values = Self.columnMajor(bake)
@@ -234,9 +279,17 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     /// manifest, zips. Completion on main with the zip, or nil (directory kept) when zipping failed.
     func stop(completion: @escaping @Sendable (URL?) -> Void) {
         recording.store(false, ordering: .releasing)
+        stopUptime = ProcessInfo.processInfo.systemUptime
         live.withLock { $0.recording = false }
         motion.stopGyroUpdates()
         motion.stopAccelerometerUpdates()
+        // Hand the camera back with auto exposure's own limit (an invalid time restores the
+        // default), so neither the 1/120 cap nor a short-exposure cap leaks into later scans.
+        if let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera,
+           (try? device.lockForConfiguration()) != nil {
+            device.activeMaxExposureDuration = .invalid
+            device.unlockForConfiguration()
+        }
         event("capture stopped")
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             // A requested still can complete after Stop; give it a bounded moment, then drain.
@@ -267,7 +320,10 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let state = pipeline.withLock { $0 }
         stats.inFlight = state.inFlight
         stats.pendingEncodes = state.pending
-        if stats.recording, startUptime > 0 { stats.elapsedSeconds = ProcessInfo.processInfo.systemUptime - startUptime }
+        if startUptime > 0 {
+            let end = stats.recording || stopUptime <= startUptime ? ProcessInfo.processInfo.systemUptime : stopUptime
+            stats.elapsedSeconds = end - startUptime
+        }
         return stats
     }
 
@@ -281,15 +337,15 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let t = frame.timestamp
         let transform = camera.transform
         let (trackingLabel, isNormal) = Self.describe(camera.trackingState)
-        if !exposureCapApplied && isNormal { applyExposureCap() }
+        if isNormal { manageExposure(at: t) }
 
-        // Velocity from the pose over a short window.
-        let p = ARStillCaptureGates.position(transform)
-        poseHistory.append((t, p))
+        // Motion from the pose over a short window (ARKit pose jitter dominates shorter ones).
+        poseHistory.append((t, transform))
         while let first = poseHistory.first, t - first.t > AppConstants.arStillVelocityWindowSeconds * 2 { poseHistory.removeFirst() }
+        let past = poseHistory.last(where: { t - $0.t >= AppConstants.arStillVelocityWindowSeconds })
         var velocity = SIMD3<Float>(0, 0, 0)
-        if let past = poseHistory.last(where: { t - $0.t >= AppConstants.arStillVelocityWindowSeconds }), t > past.t {
-            velocity = (p - past.p) / Float(t - past.t)
+        if let past, t > past.t {
+            velocity = (ARStillCaptureGates.position(transform) - ARStillCaptureGates.position(past.m)) / Float(t - past.t)
         }
 
         // Near-scene depth from a sparse sample of the LiDAR map (~800 reads).
@@ -298,9 +354,29 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let omega = gyroRate.withLock { $0 }
         let lateral = ARStillCaptureGates.lateralSpeed(velocity: velocity, cameraToWorld: transform)
         let scale = stillScale.withLock { $0 }
-        let focalStill = Double(camera.intrinsics[0][0]) * scale
+        let fStream = Double(camera.intrinsics[0][0])
+        let focalStill = fStream * scale
+        // Reported for context (the old sum gate); the gate itself is the image-motion smear below.
         let smear = ARStillCaptureGates.smear(angularRate: omega, lateralSpeed: lateral, depth: gateDepth,
                                               exposure: exposure, focalPx: focalStill)
+        // The blur gate: rigid camera motion from two poses, as image motion at the centre and
+        // corners at the near depth. Pose only. Until a window of poses exists, fall back to the
+        // gyro's rotation-only prediction.
+        // Computed as an ANGLE (focal 1: normalized image plane), so the budget means the same real
+        // sharpness at any still resolution; the pixel figure is for the panel and the log.
+        // Sideways motion is in it: a sidestep at v m/s, Z m from the scene, sweeps v/Z rad/s.
+        let angularSmear: Double
+        if let past, t > past.t, gateDepth > 0, fStream > 0 {
+            angularSmear = ARStillCaptureGates.imageMotionSmear(
+                from: past.m, to: transform, dt: t - past.t, depth: gateDepth, exposure: exposure,
+                focalPx: 1,
+                halfWidthNorm: Double(camera.imageResolution.width) / 2 / fStream,
+                halfHeightNorm: Double(camera.imageResolution.height) / 2 / Double(camera.intrinsics[1][1]))
+        } else {
+            angularSmear = omega * exposure
+        }
+        let imageSmear = angularSmear * focalStill
+        let budgetPx = AppConstants.arStillBlurBudgetRad * focalStill
         let view = lastStillTransform.map {
             ARStillCaptureGates.viewpointChange(from: $0, to: transform, depth: gateDepth)
         } ?? (rotationDeg: 0.0, parallaxDeg: 0.0)
@@ -314,6 +390,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             $0.gateDepth = gateDepth
             $0.smearRotationPx = smear.rotationPx
             $0.smearTranslationPx = smear.translationPx
+            $0.smearImageMotionPx = imageSmear
+            $0.blurBudgetPx = budgetPx
             $0.rotationSinceStillDeg = view.rotationDeg
             $0.parallaxSinceStillDeg = view.parallaxDeg
         }
@@ -328,7 +406,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             live.withLock { $0.heldBackpressureFrames += 1 }
             return
         }
-        if exposure > 0, smear.totalPx > AppConstants.rawCaptureBlurBudgetPx {
+        if exposure > 0, angularSmear > AppConstants.arStillBlurBudgetRad {
             live.withLock { $0.heldBlurFrames += 1 }
             return
         }
@@ -347,8 +425,10 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         lastStillTime = t
         let request = StillRequest(hostTime: ProcessInfo.processInfo.systemUptime, reason: reason,
                                    angularRate: omega, lateralSpeed: lateral, gateDepth: gateDepth,
-                                   streamExposure: exposure, smear: smear, sinceLast: sinceLast,
-                                   rotationDeg: view.rotationDeg, parallaxDeg: view.parallaxDeg)
+                                   streamExposure: exposure, smear: smear, imageSmear: imageSmear, sinceLast: sinceLast,
+                                   rotationDeg: view.rotationDeg, parallaxDeg: view.parallaxDeg,
+                                   angularSmear: angularSmear, shortExposure: shortExposure.load(ordering: .acquiring),
+                                   exposureCap: live.withLock { $0.exposureCapAppliedSeconds })
         requestStill(request)
     }
 
@@ -362,9 +442,13 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var gateDepth: Double
         var streamExposure: Double
         var smear: ARStillCaptureGates.Smear
+        var imageSmear: Double
         var sinceLast: Double
         var rotationDeg: Double
         var parallaxDeg: Double
+        var angularSmear: Double
+        var shortExposure: Bool
+        var exposureCap: Double
     }
 
     private func requestStill(_ request: StillRequest) {
@@ -415,7 +499,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             let index = photoIndex
             photoIndex += 1
             let stem = String(format: "photo_%05d", index)
-            guard let jpeg = encodeJPEG(image) else {
+            guard let jpeg = encodeJPEG(image, exposure: exposure, iso: iso) else {
                 live.withLock { $0.stillsFailed += 1; $0.lastError = "jpeg encode failed" }
                 event("jpeg encode failed \(stem)")
                 return
@@ -435,7 +519,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             row += [Fmt.f4(request.angularRate), Fmt.f4(request.lateralSpeed), Fmt.f4(request.gateDepth), Fmt.f6(request.streamExposure)]
             row += [Fmt.f3(request.smear.rotationPx), Fmt.f3(request.smear.translationPx)]
             row += [request.sinceLast.isFinite ? Fmt.f3(request.sinceLast) : "inf"]
-            row += [Fmt.f3(request.rotationDeg), Fmt.f3(request.parallaxDeg), request.reason]
+            row += [Fmt.f3(request.rotationDeg), Fmt.f3(request.parallaxDeg), request.reason, Fmt.f3(request.imageSmear)]
+            row += [Fmt.f6(request.angularSmear), request.shortExposure ? "1" : "0", Fmt.f6(request.exposureCap)]
             let line = row.joined(separator: ",")
             ioQueue.async { [self] in
                 write(jpeg, to: "photos/\(stem).jpg")
@@ -444,8 +529,10 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                 writers["photos.csv"]?.append(line)
             }
             let hasDepth = depth != nil
+            let wasShort = request.shortExposure
             live.withLock {
                 $0.stillsSaved += 1
+                if wasShort { $0.stillsShortExposure += 1 }
                 if hasDepth { $0.stillsWithDepth += 1 }
                 $0.lastStillDimensions = "\(width)x\(height)"
                 $0.lastLatencySeconds = latency
@@ -455,11 +542,24 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         }
     }
 
-    private func encodeJPEG(_ buffer: CVPixelBuffer) -> Data? {
+    /// JPEG with the still's exposure time and ISO in its EXIF, so photo tools and pipelines see
+    /// them without photos.csv (ARKit hands the image over bare; CIContext's own JPEG path writes
+    /// almost no EXIF).
+    private func encodeJPEG(_ buffer: CVPixelBuffer, exposure: Double, iso: Double) -> Data? {
         let image = CIImage(cvPixelBuffer: buffer)
         let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-        let key = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
-        return ciContext.jpegRepresentation(of: image, colorSpace: space, options: [key: AppConstants.arStillJPEGQuality])
+        guard let cgImage = ciContext.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: space) else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data as CFMutableData, "public.jpeg" as CFString, 1, nil) else { return nil }
+        var exif: [CFString: Any] = [:]
+        if exposure > 0 { exif[kCGImagePropertyExifExposureTime] = exposure }
+        if iso > 0 { exif[kCGImagePropertyExifISOSpeedRatings] = [Int(iso.rounded())] }
+        let properties: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: AppConstants.arStillJPEGQuality,
+            kCGImagePropertyExifDictionary: exif
+        ]
+        CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
     }
 
     // MARK: Exposure
@@ -470,29 +570,65 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     private func applyExposureCap() {
         exposureCapApplied = true
         let requested = AppConstants.rawCaptureMaxExposureSeconds
-        func report(_ applied: Double, _ note: String) {
-            live.withLock { $0.exposureCapAppliedSeconds = applied; $0.exposureCapNote = note }
-            event("exposure cap: \(note)")
+        guard requested > 0 else { reportCap(0, "cap disabled"); return }
+        setMaxExposure(requested, why: "fixed cap")
+    }
+
+    /// Per tracked frame (delegate queue). The fixed cap goes on once after `begin` and again
+    /// whenever the experiment toggle flips; with the experiment on, the cap follows the light
+    /// (`ARStillCaptureGates.shortExposureCap`), re-evaluated every few frames.
+    private func manageExposure(at t: TimeInterval) {
+        let toggled = exposureModeChanged.exchange(false, ordering: .acquiringAndReleasing)
+        let short = shortExposure.load(ordering: .acquiring)
+        if !exposureCapApplied || toggled {
+            applyExposureCap()
+            lastExposureUpdate = t
+            if toggled { event("short-exposure experiment \(short ? "ON" : "OFF")") }
+            return
         }
-        guard requested > 0 else { report(0, "cap disabled"); return }
+        guard short, AppConstants.rawCaptureMaxExposureSeconds > 0,
+              t - lastExposureUpdate >= AppConstants.arStillShortExposureUpdateSeconds,
+              let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else { return }
+        lastExposureUpdate = t
+        let exposure = CMTimeGetSeconds(device.exposureDuration)
+        let iso = Double(device.iso)
+        let offset = Double(device.exposureTargetOffset)
+        let ceiling = min(AppConstants.arStillShortExposureISOCeiling, Double(device.activeFormat.maxISO))
+        let floor = max(AppConstants.arStillShortExposureFloorSeconds, CMTimeGetSeconds(device.activeFormat.minExposureDuration))
+        let target = ARStillCaptureGates.shortExposureCap(
+            exposure: exposure, iso: iso, targetOffsetEV: offset, isoCeiling: ceiling,
+            floor: floor, cap: AppConstants.rawCaptureMaxExposureSeconds)
+        let current = live.withLock { $0.exposureCapAppliedSeconds }
+        guard current <= 0 || abs(target - current) / current > 0.1 else { return }
+        setMaxExposure(target, why: String(format: "short-exposure: light %.4f (%.6f s x ISO %.0f, AE offset %+.2f EV), ISO ceiling %.0f", exposure * iso, exposure, iso, offset, ceiling))
+    }
+
+    /// Sets the longest exposure auto exposure may use on ARKit's camera, clamped to the format.
+    private func setMaxExposure(_ seconds: Double, why: String) {
         guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else {
-            report(0, "no configurable capture device")
+            reportCap(0, "no configurable capture device")
             return
         }
         do {
             try device.lockForConfiguration()
             let format = device.activeFormat
-            let wanted = CMTime(seconds: requested, preferredTimescale: 1_000_000)
+            let wanted = CMTime(seconds: seconds, preferredTimescale: 1_000_000)
             let range = CMTimeRange(start: format.minExposureDuration, end: format.maxExposureDuration)
             let clamped = CMTimeClampToRange(wanted, range: range)
             device.activeMaxExposureDuration = clamped
             let mode = device.exposureMode.rawValue
             device.unlockForConfiguration()
             let applied = CMTimeGetSeconds(clamped)
-            report(applied, "activeMaxExposureDuration \(applied) s on the primary camera (exposure mode \(mode))")
+            let shutter = String(format: "%.0f", 1 / applied)
+            reportCap(applied, "activeMaxExposureDuration 1/\(shutter) s (\(why); exposure mode \(mode))")
         } catch {
-            report(0, "lockForConfiguration failed: \(error.localizedDescription)")
+            reportCap(0, "lockForConfiguration failed: \(error.localizedDescription)")
         }
+    }
+
+    private func reportCap(_ applied: Double, _ note: String) {
+        live.withLock { $0.exposureCapAppliedSeconds = applied; $0.exposureCapNote = note }
+        event("exposure cap: \(note)")
     }
 
     // MARK: Stream logging (delegate queue)
@@ -559,7 +695,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let pose = "c2w_00,c2w_01,c2w_02,c2w_03,c2w_10,c2w_11,c2w_12,c2w_13,c2w_20,c2w_21,c2w_22,c2w_23"
         let photosHeader = "index,file,host_ts,request_host_ts,latency_s,width,height,exposure_s,iso,tracking,depth_file,confidence_file,depth_width,depth_height,fx,fy,cx,cy,"
             + pose
-            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason"
+            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason,predicted_image_motion_smear_px,predicted_image_motion_smear_rad,short_exposure,exposure_cap_s"
         writers = [
             "photos.csv": ARStillCSVWriter(url: directory.appendingPathComponent("photos.csv"), header: photosHeader),
             "frames.csv": ARStillCSVWriter(url: directory.appendingPathComponent("frames.csv"),
@@ -630,6 +766,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             "stills_failed": stats.stillsFailed, "stills_with_depth": stats.stillsWithDepth,
             "frames_held_blur": stats.heldBlurFrames, "frames_held_spacing": stats.heldSpacingFrames,
             "frames_held_backpressure": stats.heldBackpressureFrames,
+            "stills_short_exposure": stats.stillsShortExposure,
             "frames_logged": stats.framesLogged,
             "gyro_samples": stats.gyroSamples, "accel_samples": stats.accelSamples,
             "last_still_dimensions": stats.lastStillDimensions,

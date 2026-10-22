@@ -113,10 +113,19 @@ extension CaptureView {
 
     // MARK: Views
 
-    /// Debug panel, mid-screen (the bottom of the capture view is busy).
+    /// Debug panel mid-screen (the bottom of the capture view is busy), and the short-exposure
+    /// experiment switch on the trailing edge at mid-height. The panel ignores touches; the switch
+    /// is the only control here.
     @ViewBuilder var stillCaptureOverlay: some View {
         if scanStore.stillCaptureMode || stillCapture.phase != .idle {
-            ARStillCaptureOverlay(controller: stillCapture)
+            ZStack {
+                ARStillCaptureOverlay(controller: stillCapture)
+                HStack {
+                    Spacer()
+                    ARStillShortExposureToggle(controller: stillCapture)
+                        .padding(.trailing, 12)
+                }
+            }
         }
     }
 

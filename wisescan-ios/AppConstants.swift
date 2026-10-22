@@ -512,6 +512,13 @@ enum AppConstants {
     static let arStillGateMinConfidence: UInt8 = 1             // LiDAR confidence floor for the depth the gates use (0 low, 1 medium, 2 high)
     static let arStillGateDepthPercentile: Double = 0.25       // gates use the nearer part of the scene: near content smears and shifts most
     static let arStillVelocityWindowSeconds: TimeInterval = 0.1 // device velocity = pose difference over this window (ARKit pose jitter dominates shorter windows)
+    static let arStillBlurBudgetRad: Double = 0.0009           // blur gate on predicted IMAGE MOTION during the exposure, as an ANGLE (pose-only, rotation and translation as vectors, centre + corners at the near depth). 0.9 mrad = 3 px at the 12MP still's 3,346 px focal. Angular so a 48MP still is held to the same real sharpness (6 px) instead of silently twice as strict. The first capture's sharp stills moved up to 2.8 px (p90); replaying its motion, 3 px fired every 1.37 s vs 2.05 s for the original 2 px magnitude sum.
+    // Short-exposure experiment (toggle on the AR Capture screen): instead of holding the exposure at rawCaptureMaxExposureSeconds (1/120),
+    // shorten it to whatever reaches this ISO in the current light. The gate reads the real exposure, so it loosens in proportion.
+    // Caveat: 1/120 integrates one full 120 Hz mains-flicker cycle; shorter exposures can band or pulse under flickering LED/fluorescent light.
+    static let arStillShortExposureISOCeiling: Double = 800    // the first capture's noise grew only as ISO^0.29 (0.45 -> ~1.1 of 255 over ISO 50-700; the ISP denoises)
+    static let arStillShortExposureFloorSeconds: Double = 1.0 / 500 // never shorter: at 1/500 the 3 px budget already allows ~26 deg/s; spacing and walking pace bind first
+    static let arStillShortExposureUpdateSeconds: TimeInterval = 0.3 // re-evaluate the cap this often; changes under 10% are ignored
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)
     static let stillOverlapFloor: Double = 0.4                 // coach nudges "overlap your photos" while mean still-to-still overlap is below this (photogrammetry target ~0.6)
     static let stillParallaxDiversityFloor: Double = 0.15      // coach nudges "step sideways" while under this fraction of photo-covered voxels has ≥2 standpoints

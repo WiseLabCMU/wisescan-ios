@@ -31,6 +31,61 @@ nonisolated enum ARStillCaptureGates {
         return Smear(rotationPx: rotation, translationPx: translation)
     }
 
+    /// Predicted smear of a still, in still pixels, from the camera's rigid motion between two
+    /// ARKit poses `dt` seconds apart: the largest image velocity among the frame's centre and four
+    /// points at ±`cornerFraction` of its half-extents, for scene content `depth` metres away, times
+    /// the exposure. Rotation and translation enter as vectors, so they cancel where they should:
+    /// orbiting a target while turning to keep it centred barely moves the target in the image,
+    /// which the `smear` sum (rotation + sideways, both as magnitudes) cannot see.
+    ///
+    /// `halfWidthNorm` / `halfHeightNorm` are the image half-extents over the focal length (the
+    /// same at any resolution with the same field of view); `focalPx` is the still's focal length.
+    /// Replayed on a 94-still capture: the shipped 2 px sum fired every 2.05 s; this at 3 px every
+    /// 1.37 s on the same motion, inside the 2.8 px p90 that the sharp stills actually moved.
+    static func imageMotionSmear(from past: simd_float4x4, to now: simd_float4x4, dt: Double,
+                                 depth: Double, exposure: Double, focalPx: Double,
+                                 halfWidthNorm: Double, halfHeightNorm: Double,
+                                 cornerFraction: Double = 0.8) -> Double {
+        guard dt > 0, depth > 0, exposure > 0, focalPx > 0 else { return 0 }
+        // OpenCV camera axes (x right, y down, z forward) from ARKit's (x right, y up, z back).
+        let flip = simd_double3x3(diagonal: SIMD3<Double>(1, -1, -1))
+        func double(_ m: simd_float3x3) -> simd_double3x3 {
+            simd_double3x3(columns: (SIMD3<Double>(m.columns.0), SIMD3<Double>(m.columns.1), SIMD3<Double>(m.columns.2)))
+        }
+        let rPast = double(rotationPart(past)) * flip
+        let rNow = double(rotationPart(now)) * flip
+        let relative = simd_quatd(rPast.transpose * rNow)
+        let angle = relative.angle
+        let omega = angle > 1e-9 ? relative.axis * (angle / dt) : SIMD3<Double>(0, 0, 0)  // body frame
+        let move = SIMD3<Double>(position(now) - position(past))
+        let v = rNow.transpose * move / dt                                                  // camera frame
+        let xs = halfWidthNorm * cornerFraction, ys = halfHeightNorm * cornerFraction
+        let points: [(Double, Double)] = [(0, 0), (-xs, -ys), (xs, -ys), (-xs, ys), (xs, ys)]
+        var fastest = 0.0
+        for (x, y) in points {
+            // Image Jacobian of a point at normalized (x, y), depth Z, under camera velocity (v, omega).
+            let xd = (-v.x + x * v.z) / depth + x * y * omega.x - (1 + x * x) * omega.y + y * omega.z
+            let yd = (-v.y + y * v.z) / depth + (1 + y * y) * omega.x - x * y * omega.y - x * omega.z
+            fastest = max(fastest, (xd * xd + yd * yd).squareRoot())
+        }
+        return fastest * focalPx * exposure
+    }
+
+    /// Exposure cap for the short-exposure experiment: Auto ISO with a minimum shutter speed, run
+    /// the other way round. Returns the shortest exposure the scene's light allows at `isoCeiling`,
+    /// clamped to [`floor`, `cap`]. Light is exposure x ISO (auto exposure holds it constant for a
+    /// given brightness, so the answer does not depend on the cap currently applied), corrected by
+    /// auto exposure's own error: `targetOffsetEV` is how far the metered level sits from its
+    /// target (negative = underexposed, so more light is needed). The offset is clamped to +-2 EV
+    /// so a transient cannot swing the cap.
+    static func shortExposureCap(exposure: Double, iso: Double, targetOffsetEV: Double,
+                                 isoCeiling: Double, floor: Double, cap: Double) -> Double {
+        guard exposure > 0, iso > 0, isoCeiling > 0, cap > 0 else { return cap }
+        let offset = min(2, max(-2, targetOffsetEV.isFinite ? targetOffsetEV : 0))
+        let light = exposure * iso * pow(2, -offset)
+        return min(cap, max(min(floor, cap), light / isoCeiling))
+    }
+
     /// Component of `velocity` perpendicular to the camera's viewing direction, m/s.
     static func lateralSpeed(velocity: SIMD3<Float>, cameraToWorld: simd_float4x4) -> Double {
         let forward = forwardAxis(cameraToWorld)

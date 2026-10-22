@@ -212,19 +212,52 @@ canonical frame). `setup.icpBake` and `setup.manualNudgeBake` record what was ba
 ARFrame: pose, intrinsics and exposure of that instant, plus the 256x192 LiDAR depth and
 confidence. The resolution is the capture view's high-resolution 4:3 format's still (full
 sensor: 4032x3024 on an M1 iPad Pro). ARKit hands the image over unencoded; the app encodes
-JPEG on its own queue and holds new stills while `arStillMaxPendingEncodes` are queued.
+JPEG on its own queue, with the still's exposure time and ISO in its EXIF, and holds new
+stills while `arStillMaxPendingEncodes` are queued.
 
 **Gates**, evaluated on every tracked frame (`ARStillCaptureGates`, unit tested):
-- *Blur:* predicted smear = gyro rate x exposure x focal + sideways speed x exposure x focal /
-  near-scene depth, in still pixels, against `rawCaptureBlurBudgetPx`. Sideways speed is the
-  ARKit velocity over `arStillVelocityWindowSeconds` with the along-view part removed; near
-  depth is the `arStillGateDepthPercentile` of confident LiDAR samples. A sidestep close to a
-  surface counts, which raw capture's gyro-only gate could not do.
+- *Blur:* predicted **image motion**, pose only. The camera's velocity and angular velocity
+  come from two ARKit poses `arStillVelocityWindowSeconds` apart, enter as vectors, and are
+  applied to the frame's centre and four corner points at the near-scene depth (the
+  `arStillGateDepthPercentile` of confident LiDAR samples); the largest image velocity times the
+  exposure is held to `arStillBlurBudgetRad` (0.9 mrad, 3 px at the 12MP still's 3,346 px
+  focal). The budget is an **angle**, so a 48MP still is held to the same real sharpness (6 px)
+  rather than silently twice as strict; it still covers sidesteps (a sideways move at v m/s, Z m
+  from the scene, sweeps v/Z rad/s). Rotation and sideways motion cancel where they really do:
+  orbiting the focal area while keeping it centred barely moves it in the image. The first
+  capture used a 2 px budget on rotation + sideways speed as magnitudes, which cannot cancel;
+  replaying that capture's motion, it fired every 2.05 s, this rule every 1.37 s, and the first
+  capture's sharp stills had moved up to 2.8 px (p90) during their exposure. In `photos.csv`,
+  `predicted_image_motion_smear_rad` is the gate's value (`_px` is the same in still pixels); the
+  rotation and translation columns are the old sum's parts, kept for comparison.
 - *Spacing:* a still once the view has turned `arStillViewpointThresholdDeg`, or a sideways
   move subtends that angle at the near scene (parallax), or `rawCaptureStillMaxIntervalSeconds`
   has passed.
-- *Exposure:* `rawCaptureMaxExposureSeconds` is applied to ARKit's own camera through
-  `configurableCaptureDeviceForPrimaryCamera` (auto exposure keeps metering and raises ISO).
+- *Exposure:* `rawCaptureMaxExposureSeconds` (1/120) is applied to ARKit's own camera through
+  `configurableCaptureDeviceForPrimaryCamera` as the longest exposure auto exposure may use. In
+  the first capture 93 of 94 stills sat exactly at it: iOS holds the longest allowed exposure and
+  only shortens it once ISO bottoms out.
+
+**Short-exposure experiment** (the yellow SHORT EXP switch on the trailing edge, mid-height;
+usable before Start and during a capture, and kept across captures in a session). With it on,
+the exposure cap follows the light instead of sitting at 1/120: every
+`arStillShortExposureUpdateSeconds` the cap becomes exposure x ISO / `arStillShortExposureISOCeiling`
+(ISO 800), corrected by auto exposure's own target offset and clamped between
+`arStillShortExposureFloorSeconds` (1/500) and 1/120 (`ARStillCaptureGates.shortExposureCap`,
+unit tested). Auto exposure keeps running and raises ISO to match. The blur gate needs no change:
+it reads each frame's real exposure, so a shorter exposure loosens it in proportion. Replaying
+the first capture's light, ISO 800 would have meant a median exposure of 1/611 s, held at the
+1/500 floor. Each still records `short_exposure` and the cap in force (`exposure_cap_s`), so one
+capture can mix both settings; `totals.stills_short_exposure` counts them.
+
+Why it is an experiment, not the default: 1/120 s integrates exactly one cycle of the 120 Hz
+flicker of mains-powered LED and fluorescent light (60 Hz countries), so frames come out evenly
+lit. Shorter exposures under flickering light can show rolling-shutter bands and frame-to-frame
+brightness pulses, which hurt a splat more than noise does. Noise itself is mild on the M1 iPad
+Pro: in the first capture it grew only as ISO^0.29 (0.45 to about 1.1 of 255 over ISO 50 to 700),
+because the ISP denoises; that denoising's cost, smoothed low-contrast texture, is the other
+thing to look for. The test: the same desk captured with the switch off and on, checked for
+banding and lost texture, and compared on COLMAP track counts.
 
 **Debug panel** (mid-screen while AR Capture is active). Its large first line is the point of
 the experiment: the last still's resolution, exposure and ISO; the next line is the stream's
@@ -247,6 +280,31 @@ fired, frames held by each gate, the gate inputs, and the exposure-cap note.
 looks down its -Z axis with +Y up in the image, world +Y is up (gravity), metres. Images,
 depth and intrinsics are in the sensor's landscape orientation. All timestamps are seconds
 since boot (`ARFrame.timestamp` and CoreMotion share that clock).
+
+**The still's intrinsics are NOT what ARKit reports.** ARKit gives each high-resolution still
+the video's intrinsics scaled to the still size, but the still has a narrower field of view.
+On the first AR capture (M1 iPad Pro) a multi-view focal refit with every pose held fixed put
+the still focal at **1.0476x** the reported value (10th-90th percentile 1.0455-1.0497; principal
+point within ~5 px), which matches the photo pipeline's own calibration on the same iPad
+(1.0486x). With the reported focal, COLMAP found 18k points with 8% of tracks spanning 3+
+stills; with the corrected focal, 61k and 36%, and LichtFeld anchored 70 of 82 cameras' depth
+instead of 59. So:
+- `fx..cy` in `photos.csv` are right for the **LiDAR maps** (they follow the video geometry) and
+  wrong for the **still**: multiply `fx`/`fy` by the still focal scale.
+- Depth must be **resampled** into the still's pixel grid (still pixel -> ray with the still
+  focal -> video pixel -> depth pixel), not stretched to the still size: the still is the central
+  ~95% of the LiDAR map, and stretching misplaces depth by up to ~5% toward the edges.
+- The manifest records `videoFieldOfViewDeg`, `distortionCorrectedFieldOfViewDeg` and
+  `expectedStillFocalScale` (their tangent ratio), on the hypothesis that the photo path's
+  geometric distortion correction is the crop. If that matches the refit on device, the scale
+  comes from the manifest and the refit becomes a check.
+
+A smaller open item from the same capture: LiDAR depth reads farther than depth triangulated
+from the stills by a roughly constant 0.035 m^-1 in inverse depth (1 cm at 0.6 m, 12 cm at
+1.9 m). It is not the intrinsics (flat across the image) and not pose timing (per-still pose
+refits are ~1.6 px and uncorrelated with motion). LichtFeld's `ssi-depth` fits scale and
+shift per camera, which absorbs most of it; a tape measure on a known object would say which
+side is right.
 
 **For the splat pipeline**, the poses replace COLMAP's job of recovering pose, scale and
 gravity; a COLMAP refit with the ARKit poses fixed is optional polish. Two gotchas from the

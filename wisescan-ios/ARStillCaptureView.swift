@@ -17,7 +17,15 @@ final class ARStillCaptureController {
     let engine = ARStillCaptureSession()
     var phase: Phase = .idle
     var stats = ARStillCaptureSession.LiveStats()
+    /// Short-exposure experiment toggle. Kept across captures in this session so an A/B pair
+    /// is two taps apart; takes effect while capturing and is recorded per still.
+    private(set) var shortExposure = false
     private var timer: Timer?
+
+    func setShortExposure(_ on: Bool) {
+        shortExposure = on
+        engine.setShortExposure(on)
+    }
 
     var shareURL: URL? {
         if case .done(let url) = phase { return url }
@@ -80,9 +88,9 @@ struct ARStillCaptureOverlay: View {
     var body: some View {
         let live = controller.stats
         let elapsed = max(live.elapsedSeconds, 0.001)
-        let budget = AppConstants.rawCaptureBlurBudgetPx
+        let budget = live.blurBudgetPx
         let threshold = AppConstants.arStillViewpointThresholdDeg
-        let smear = live.smearRotationPx + live.smearTranslationPx
+        let smear = live.smearImageMotionPx
         return VStack(alignment: .leading, spacing: 3) {
             Text("AR CAPTURE  \(phaseLabel)")
                 .font(.system(size: 12, weight: .bold, design: .monospaced))
@@ -91,11 +99,13 @@ struct ARStillCaptureOverlay: View {
                 .font(.system(size: 17, weight: .bold, design: .monospaced))
             Text("stream \(live.streamDimensions)  exp \(exposure(live.streamExposureSeconds))  cap \(exposure(live.exposureCapAppliedSeconds))")
                 .font(.system(size: 13, weight: .semibold, design: .monospaced))
-            Text("stills \(live.stillsSaved)/\(live.stillsRequested)  fail \(live.stillsFailed)  w/depth \(live.stillsWithDepth)  \(fmt(Double(live.stillsSaved) / elapsed, 2))/s  pend \(live.pendingEncodes)\(live.inFlight ? " *" : "")")
+            Text(shortExposureLine(live))
+                .foregroundColor(live.shortExposure ? .yellow : .white.opacity(0.7))
+            Text("stills\(live.stillsSaved)/\(live.stillsRequested)  fail \(live.stillsFailed)  w/depth \(live.stillsWithDepth)  \(fmt(Double(live.stillsSaved) / elapsed, 2))/s  pend \(live.pendingEncodes)\(live.inFlight ? " *" : "")")
             Text("last lat \(fmt(live.lastLatencySeconds, 2))s  why \(live.lastReason)  tracking \(live.tracking)")
             Text("held blur \(live.heldBlurFrames)  spacing \(live.heldSpacingFrames)  backlog \(live.heldBackpressureFrames)")
             Text("gyro \(fmt(live.angularRate, 2)) rad/s  side \(fmt(live.lateralSpeed, 2)) m/s  near \(fmt(live.gateDepth, 2)) m")
-            Text("smear rot \(fmt(live.smearRotationPx, 1)) + side \(fmt(live.smearTranslationPx, 1)) / \(fmt(budget, 0)) px")
+            Text("smear \(fmt(smear, 1)) / \(fmt(budget, 1)) px  (\(fmt(AppConstants.arStillBlurBudgetRad * 1000, 2)) mrad; rotation + sidestep)")
                 .foregroundColor(smear > budget ? .orange : .white)
             Text("view turn \(fmt(live.rotationSinceStillDeg, 1)) / parallax \(fmt(live.parallaxSinceStillDeg, 1)) of \(fmt(threshold, 0)) deg")
             Text("frames \(live.framesLogged)  gyro \(live.gyroSamples)  t \(fmt(live.elapsedSeconds, 1))s  \(fmt(Double(live.bytesWritten) / 1_048_576, 1)) MB")
@@ -129,6 +139,15 @@ struct ARStillCaptureOverlay: View {
         }
     }
 
+    private func shortExposureLine(_ live: ARStillCaptureSession.LiveStats) -> String {
+        guard live.shortExposure else {
+            return "short exp off: fixed cap \(exposure(AppConstants.rawCaptureMaxExposureSeconds))"
+        }
+        let ceiling = fmt(AppConstants.arStillShortExposureISOCeiling, 0)
+        let floor = exposure(AppConstants.arStillShortExposureFloorSeconds)
+        return "SHORT EXP ON: ISO <= \(ceiling), no shorter than \(floor)  (\(live.stillsShortExposure) stills)"
+    }
+
     private func fmt(_ value: Double, _ digits: Int) -> String {
         String(format: "%.\(digits)f", value)
     }
@@ -136,5 +155,36 @@ struct ARStillCaptureOverlay: View {
     private func exposure(_ seconds: Double) -> String {
         guard seconds > 0 else { return "-" }
         return seconds >= 1 ? fmt(seconds, 2) + "s" : "1/" + String(Int((1 / seconds).rounded()))
+    }
+}
+
+/// The short-exposure experiment switch, on the trailing edge at mid-height so it stays clear of
+/// the busy bottom controls and the centred panel. Usable before Start and during a capture.
+struct ARStillShortExposureToggle: View {
+    let controller: ARStillCaptureController
+
+    var body: some View {
+        let on = controller.shortExposure
+        Button {
+            controller.setShortExposure(!on)
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: on ? "timer.circle.fill" : "timer.circle")
+                    .font(.system(size: 30))
+                Text("SHORT\nEXP")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .multilineTextAlignment(.center)
+                Text(on ? "ON" : "OFF")
+                    .font(.system(size: 13, weight: .heavy, design: .monospaced))
+            }
+            .foregroundColor(on ? .black : .white)
+            .padding(.vertical, 12)
+            .padding(.horizontal, 10)
+            .background(on ? Color.yellow : Color.black.opacity(0.6))
+            .cornerRadius(14)
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.yellow, lineWidth: 2))
+        }
+        .accessibilityLabel("Short exposure experiment")
+        .accessibilityValue(on ? "on" : "off")
     }
 }
