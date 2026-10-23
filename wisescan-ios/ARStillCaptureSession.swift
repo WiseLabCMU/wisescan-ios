@@ -78,6 +78,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var gateMinConfidence = 0
         var startWallTime = ""
         var startUptimeSeconds = 0.0
+        var thermalStateAtStart = ""
         var clock = "ARFrame.timestamp and CoreMotion: seconds since boot (same clock)"
         var frame = "world = the latest scan's raw capture frame (its world map), with the rescan record-start bakes applied (icpBake, then manualNudgeBake, both column-major, as setWorldOrigin relative transforms). world_map_registration.json maps that raw frame to the original scan's canonical frame."
         var poseConvention = "c2w_* = ARKit camera-to-world, row-major 3x4; camera looks down -Z, +Y up in the image; world +Y up (gravity), metres. Images, depth and intrinsics are in the sensor's landscape orientation."
@@ -123,6 +124,11 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var blurBudgetPx = 0.0
         var shortExposure = false
         var stillsShortExposure = 0
+        var sceneDepthPresent = false
+        var depthDropouts = 0
+        var framesWithoutDepth = 0
+        var trackingChanges = 0
+        var thermalState = ""
         var rotationSinceStillDeg = 0.0
         var parallaxSinceStillDeg = 0.0
         var framesLogged = 0
@@ -175,6 +181,18 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     private var frameIndex = 0
     private var exposureCapApplied = false
     private var lastExposureUpdate: TimeInterval = -1
+    // Session health: tracking and depth transitions for the events log, the depth watchdog, and
+    // the last good near depth the gates hold through a short dropout.
+    private var lastTrackingLabel = ""
+    private var hadDepth: Bool?
+    private var everHadDepth = false
+    private var firstHealthFrame: TimeInterval = -1
+    private var lastDepthRequest: TimeInterval = -1
+    private var lastGoodDepth = 0.0
+    private var lastGoodDepthTime: TimeInterval = -1
+    /// Set once "depth requested but not delivered" has been logged for the current dropout.
+    private let depthNotDeliveredLogged = Atomic<Bool>(false)
+    private var thermalObserver: NSObjectProtocol?
 
     // encodeQueue-owned
     private var photoIndex = 0
@@ -242,11 +260,28 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         lastStillTime = -1
         frameIndex = 0
         exposureCapApplied = false
+        lastTrackingLabel = ""
+        hadDepth = nil
+        everHadDepth = false
+        firstHealthFrame = -1
+        lastDepthRequest = -1
+        lastGoodDepth = 0
+        lastGoodDepthTime = -1
+        depthNotDeliveredLogged.store(false, ordering: .releasing)
         encodeQueue.sync { photoIndex = 0 }
         pipeline.withLock { $0 = (false, 0) }
         icpBakeNoted.withLock { $0 = nil }
         let shortOn = shortExposure.load(ordering: .acquiring)
-        live.withLock { $0 = LiveStats(); $0.shortExposure = shortOn }
+        let thermal = Self.thermalName(ProcessInfo.processInfo.thermalState)
+        setup.thermalStateAtStart = thermal
+        live.withLock { $0 = LiveStats(); $0.shortExposure = shortOn; $0.thermalState = thermal }
+        thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            let state = Self.thermalName(ProcessInfo.processInfo.thermalState)
+            self?.live.withLock { $0.thermalState = state }
+            self?.event("thermal state -> \(state)")
+        }
         ioQueue.sync { openWriters(in: directory) }
         startMotion()
         live.withLock { $0.recording = true }
@@ -283,6 +318,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         live.withLock { $0.recording = false }
         motion.stopGyroUpdates()
         motion.stopAccelerometerUpdates()
+        if let thermalObserver { NotificationCenter.default.removeObserver(thermalObserver) }
+        thermalObserver = nil
         // Hand the camera back with auto exposure's own limit (an invalid time restores the
         // default), so neither the 1/120 cap nor a short-exposure cap leaks into later scans.
         if let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera,
@@ -337,6 +374,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let t = frame.timestamp
         let transform = camera.transform
         let (trackingLabel, isNormal) = Self.describe(camera.trackingState)
+        noteSessionHealth(hasDepth: frame.sceneDepth != nil, t: t, trackingLabel: trackingLabel)
         if isNormal { manageExposure(at: t) }
 
         // Motion from the pose over a short window (ARKit pose jitter dominates shorter ones).
@@ -348,8 +386,20 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             velocity = (ARStillCaptureGates.position(transform) - ARStillCaptureGates.position(past.m)) / Float(t - past.t)
         }
 
-        // Near-scene depth from a sparse sample of the LiDAR map (~800 reads).
-        let gateDepth = frame.sceneDepth.flatMap { Self.sampleDepth($0) } ?? 0
+        // Near-scene depth from a sparse sample of the LiDAR map (~800 reads). Through a short
+        // dropout the last good value is held, so the gates keep their sidestep and parallax terms
+        // instead of falling back to rotation only.
+        var nearDepth = frame.sceneDepth.flatMap { Self.sampleDepth($0) } ?? 0
+        var held = false
+        if nearDepth > 0 {
+            lastGoodDepth = nearDepth
+            lastGoodDepthTime = t
+        } else if lastGoodDepthTime >= 0, t - lastGoodDepthTime <= AppConstants.arStillDepthHoldSeconds {
+            nearDepth = lastGoodDepth
+            held = true
+        }
+        let gateDepth = nearDepth
+        let depthHeld = held
         let exposure = camera.exposureDuration
         let omega = gyroRate.withLock { $0 }
         let lateral = ARStillCaptureGates.lateralSpeed(velocity: velocity, cameraToWorld: transform)
@@ -428,7 +478,9 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                                    streamExposure: exposure, smear: smear, imageSmear: imageSmear, sinceLast: sinceLast,
                                    rotationDeg: view.rotationDeg, parallaxDeg: view.parallaxDeg,
                                    angularSmear: angularSmear, shortExposure: shortExposure.load(ordering: .acquiring),
-                                   exposureCap: live.withLock { $0.exposureCapAppliedSeconds })
+                                   exposureCap: live.withLock { $0.exposureCapAppliedSeconds },
+                                   depthHeld: depthHeld,
+                                   thermalState: Self.thermalName(ProcessInfo.processInfo.thermalState))
         requestStill(request)
     }
 
@@ -449,6 +501,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var angularSmear: Double
         var shortExposure: Bool
         var exposureCap: Double
+        var depthHeld: Bool
+        var thermalState: String
     }
 
     private func requestStill(_ request: StillRequest) {
@@ -521,6 +575,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             row += [request.sinceLast.isFinite ? Fmt.f3(request.sinceLast) : "inf"]
             row += [Fmt.f3(request.rotationDeg), Fmt.f3(request.parallaxDeg), request.reason, Fmt.f3(request.imageSmear)]
             row += [Fmt.f6(request.angularSmear), request.shortExposure ? "1" : "0", Fmt.f6(request.exposureCap)]
+            row += [request.depthHeld ? "1" : "0", request.thermalState]
             let line = row.joined(separator: ",")
             ioQueue.async { [self] in
                 write(jpeg, to: "photos/\(stem).jpg")
@@ -560,6 +615,74 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         ]
         CGImageDestinationAddImage(destination, cgImage, properties as CFDictionary)
         return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+
+    // MARK: Session health (delegate queue)
+
+    /// Logs tracking and depth transitions, and keeps scene depth on. The first iPhone capture lost
+    /// depth for good 107 s in: something re-ran the session (tracking went normal -> initializing
+    /// -> relocalizing) with a configuration that did not request scene depth, and nothing logged
+    /// it. Map reloads are now blocked during a capture; this is the safety net for any other
+    /// re-run, and the record that says which case a dropout was.
+    private func noteSessionHealth(hasDepth: Bool, t: TimeInterval, trackingLabel: String) {
+        if trackingLabel != lastTrackingLabel {
+            if !lastTrackingLabel.isEmpty {
+                event("tracking \(lastTrackingLabel) -> \(trackingLabel)")
+                live.withLock { $0.trackingChanges += 1 }
+            }
+            lastTrackingLabel = trackingLabel
+        }
+        if firstHealthFrame < 0 { firstHealthFrame = t }
+        if hasDepth != hadDepth {
+            let wasPresent = hadDepth == true
+            // The first frames after the Start re-run can lack depth before ARKit delivers it:
+            // only a loss after depth was seen counts (and a recovery only after a logged loss).
+            if wasPresent && !hasDepth { event("scene depth LOST") }
+            if hasDepth && everHadDepth { event("scene depth restored") }
+            if hasDepth { everHadDepth = true; depthNotDeliveredLogged.store(false, ordering: .releasing) }
+            hadDepth = hasDepth
+            live.withLock {
+                $0.sceneDepthPresent = hasDepth
+                if wasPresent && !hasDepth { $0.depthDropouts += 1 }
+            }
+        }
+        guard !hasDepth, everHadDepth || t - firstHealthFrame > 5 else { return }
+        live.withLock { $0.framesWithoutDepth += 1 }
+        if lastDepthRequest < 0 || t - lastDepthRequest >= AppConstants.arStillDepthRequestCooldownSeconds {
+            lastDepthRequest = t
+            requestSceneDepth()
+        }
+    }
+
+    /// Re-requests scene depth on the LIVE configuration, with no run options: tracking, the
+    /// loaded world map and the session's frame are kept (the app's proven live-config pattern).
+    /// If the configuration still asks for depth, ARKit itself stopped delivering it; that is
+    /// logged once per dropout with the thermal state, the likeliest cause.
+    private func requestSceneDepth() {
+        DispatchQueue.main.async { [self] in
+            guard recording.load(ordering: .acquiring), let session,
+                  ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth),
+                  let config = session.configuration as? ARWorldTrackingConfiguration else { return }
+            if config.frameSemantics.contains(.sceneDepth) {
+                if !depthNotDeliveredLogged.exchange(true, ordering: .acquiringAndReleasing) {
+                    event("scene depth requested by the configuration but not delivered (thermal \(Self.thermalName(ProcessInfo.processInfo.thermalState)))")
+                }
+                return
+            }
+            config.frameSemantics.insert(.sceneDepth)
+            session.run(config)
+            event("scene depth missing from the live configuration (the session was re-run elsewhere); re-requested without a tracking reset")
+        }
+    }
+
+    private static func thermalName(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
     }
 
     // MARK: Exposure
@@ -695,7 +818,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let pose = "c2w_00,c2w_01,c2w_02,c2w_03,c2w_10,c2w_11,c2w_12,c2w_13,c2w_20,c2w_21,c2w_22,c2w_23"
         let photosHeader = "index,file,host_ts,request_host_ts,latency_s,width,height,exposure_s,iso,tracking,depth_file,confidence_file,depth_width,depth_height,fx,fy,cx,cy,"
             + pose
-            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason,predicted_image_motion_smear_px,predicted_image_motion_smear_rad,short_exposure,exposure_cap_s"
+            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason,predicted_image_motion_smear_px,predicted_image_motion_smear_rad,short_exposure,exposure_cap_s,gate_depth_held,thermal_state"
         writers = [
             "photos.csv": ARStillCSVWriter(url: directory.appendingPathComponent("photos.csv"), header: photosHeader),
             "frames.csv": ARStillCSVWriter(url: directory.appendingPathComponent("frames.csv"),
@@ -767,6 +890,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             "frames_held_blur": stats.heldBlurFrames, "frames_held_spacing": stats.heldSpacingFrames,
             "frames_held_backpressure": stats.heldBackpressureFrames,
             "stills_short_exposure": stats.stillsShortExposure,
+            "depth_dropouts": stats.depthDropouts, "frames_without_depth": stats.framesWithoutDepth,
+            "tracking_changes": stats.trackingChanges, "thermal_state_at_stop": stats.thermalState,
             "frames_logged": stats.framesLogged,
             "gyro_samples": stats.gyroSamples, "accel_samples": stats.accelSamples,
             "last_still_dimensions": stats.lastStillDimensions,

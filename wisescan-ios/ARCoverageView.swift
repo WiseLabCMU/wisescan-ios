@@ -338,7 +338,10 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Detect ghost mesh data changes (e.g., user tapped "Rescan Space" or "Link Adjacent Space" after initial view creation)
         let newGhostCount = initialGhostMeshData?.count
-        if newGhostCount != context.coordinator.lastGhostMeshDataCount {
+        // Never during an AR Capture: this path reloads the world map with a tracking reset, which
+        // restarts tracking mid-capture and re-runs a configuration without scene depth. The ghost
+        // only initializes the pose, so a change is picked up after the capture instead.
+        if newGhostCount != context.coordinator.lastGhostMeshDataCount && !isStillCapturing {
             context.coordinator.lastGhostMeshDataCount = newGhostCount
 
             // Tear down old ghost mesh if any

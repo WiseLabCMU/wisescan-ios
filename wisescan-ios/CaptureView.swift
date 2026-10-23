@@ -554,8 +554,9 @@ struct CaptureView: View {
     /// flips); it stands down — and clears any timed-out flag — the moment relocalization succeeds
     /// (`.normal`), recording starts, or the ghost is cleared.
     private func evaluateRelocalizationTimeout() {
+        // An AR Capture stands the watchdog down like a recording: its Try Again reloads the map.
         let relocalizing = cachedGhostMeshData != nil
-            && !isRecording
+            && !isRecording && !isStillCapturing
             && scanStats.trackingStatus == .limited(reason: .relocalizing)
         if relocalizing {
             // Arm once. Don't restart if already running or already timed out.
@@ -566,7 +567,7 @@ struct CaptureView: View {
             ) { _ in
                 // Fires on the main run loop. Re-check we're still stuck (a success/back-out would
                 // have cancelled us via onChange, but guard against the race).
-                if cachedGhostMeshData != nil && !isRecording
+                if cachedGhostMeshData != nil && !isRecording && !isStillCapturing
                     && scanStats.trackingStatus == .limited(reason: .relocalizing) {
                     relocTimedOut = true
                 }
@@ -586,6 +587,7 @@ struct CaptureView: View {
     /// "Try Again" — restart relocalization from scratch by reloading the world map (toggling the
     /// ghost data, the proven `showRelocDialog` Re-relocalize path). Re-arms the watchdog.
     private func retryRelocalization() {
+        guard !isStillCapturing else { return }   // a map reload mid-capture resets tracking
         relocTimeoutTimer?.invalidate()
         relocTimeoutTimer = nil
         relocTimedOut = false
@@ -865,7 +867,9 @@ struct CaptureView: View {
         // alignment dialog, plus a slider overlay to rotate/translate the ghost when
         // relocalization is imperfect. Complements the anchor-based AlignmentOverlayView above;
         // startRecording bakes any offset into the world origin so mesh + world map stay co-framed.
-        if cachedGhostMeshData != nil && !dismissGhostMesh {
+        // Hidden during an AR Capture: the ghost only initializes the pose, and its dialog's
+        // Re-relocalize reloads the world map, which resets tracking mid-capture.
+        if cachedGhostMeshData != nil && !dismissGhostMesh && !isStillCapturing {
             ghostMeshChipStack
         }
 
@@ -899,6 +903,7 @@ struct CaptureView: View {
         .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
             Button("Re-relocalize") {
                 // Reset transform and reload the world map by toggling the ghost data.
+                guard !isStillCapturing else { return }   // would reset tracking mid-capture
                 ghostYRotation = 0
                 ghostXOffset = 0
                 ghostZOffset = 0
@@ -1025,6 +1030,9 @@ struct CaptureView: View {
             }
         }
         .onDisappear {
+            // Leaving the capture screen mid-AR-Capture: finish it (stills drain and zip into
+            // Documents) before the capture state below is cleared and the map torn down.
+            if isStillCapturing { stopStillCapture() }
             memoryPressureMonitor.stop()
             // EXPERIMENT (AR Capture): leaving mid-capture stops it and keeps the data (zip in Documents).
             if isStillCapturing { stopStillCapture() }
@@ -1891,6 +1899,7 @@ struct CaptureView: View {
         // the meaningful transitions (loaded / cleared / reloaded).
         .onChange(of: cachedGhostMeshData?.count) { _, _ in evaluateRelocalizationTimeout() }
         .onChange(of: isRecording) { _, _ in evaluateRelocalizationTimeout() }
+        .onChange(of: isStillCapturing) { _, _ in evaluateRelocalizationTimeout() }
     }
 
     // Item 2 (perfDiag-gated during dev validation; reframed 2026-06-25 to a STORM signal):

@@ -101,6 +101,8 @@ struct ARStillCaptureOverlay: View {
                 .font(.system(size: 13, weight: .semibold, design: .monospaced))
             Text(shortExposureLine(live))
                 .foregroundColor(live.shortExposure ? .yellow : .white.opacity(0.7))
+            Text("depth \(live.recording && !live.sceneDepthPresent ? "LOST" : "ok")  dropouts \(live.depthDropouts)  thermal \(live.thermalState.isEmpty ? "-" : live.thermalState)  tracking changes \(live.trackingChanges)")
+                .foregroundColor(live.recording && !live.sceneDepthPresent ? .orange : .white)
             Text("stills\(live.stillsSaved)/\(live.stillsRequested)  fail \(live.stillsFailed)  w/depth \(live.stillsWithDepth)  \(fmt(Double(live.stillsSaved) / elapsed, 2))/s  pend \(live.pendingEncodes)\(live.inFlight ? " *" : "")")
             Text("last lat \(fmt(live.lastLatencySeconds, 2))s  why \(live.lastReason)  tracking \(live.tracking)")
             Text("held blur \(live.heldBlurFrames)  spacing \(live.heldSpacingFrames)  backlog \(live.heldBackpressureFrames)")
