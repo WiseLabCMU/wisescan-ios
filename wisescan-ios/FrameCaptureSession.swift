@@ -868,6 +868,7 @@ class FrameCaptureSession {
             guard let requested = hiResRequestTime, t - requested > AppConstants.hiResCaptureTimeoutSeconds else { return }
             print("[FrameCapture] Automatic still timed out after \(Int(AppConstants.hiResCaptureTimeoutSeconds))s — re-arming")
             hiResCaptureInFlight = false
+            adoptInFlightStillForTap = false
         }
         let hot = ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
         let minInterval = hot ? AppConstants.roomStillHotMinIntervalSeconds : AppConstants.roomStillMinIntervalSeconds

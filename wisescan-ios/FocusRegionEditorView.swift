@@ -27,6 +27,8 @@ struct FocusRegionEditorView: View {
     @State private var label = ""
     /// The label the last pick filled in; a new pick replaces it unless the operator typed one.
     @State private var autoLabel = ""
+    /// Size sliders' upper end: the usual range, or a larger imported box's own size.
+    @State private var sizeCeiling = AppConstants.focusRegionEditorMaxSizeM
     @State private var detail: FocusDetailLevel = .check
     @State private var sceneCentre: SIMD3<Float> = .zero
     @State private var frameIsCanonical = true
@@ -139,10 +141,9 @@ struct FocusRegionEditorView: View {
             set: { value in region?.size[axis] = value })
         return HStack {
             Text(title).frame(width: AppConstants.focusEditorLabelWidth, alignment: .leading)
-            // An imported box can be larger than the slider's usual range; extend it rather than
-            // snapping the box down on first touch.
-            Slider(value: binding,
-                   in: AppConstants.focusRegionMinSizeM...max(AppConstants.focusRegionEditorMaxSizeM, binding.wrappedValue))
+            // An imported box can be larger than the slider's usual range; the range is fixed per
+            // placed box (sizeCeiling), so it doesn't shrink under the finger.
+            Slider(value: binding, in: AppConstants.focusRegionMinSizeM...sizeCeiling)
             Text(String(format: "%.2f m", binding.wrappedValue)).monospacedDigit()
                 .frame(width: AppConstants.focusEditorValueWidth, alignment: .trailing)
         }
@@ -189,6 +190,7 @@ struct FocusRegionEditorView: View {
         placed.detail = detail
         anchor = placed.center
         offset = .zero
+        sizeCeiling = max(AppConstants.focusRegionEditorMaxSizeM, placed.size.max())
         if label.isEmpty || label == autoLabel {
             label = placed.label
             autoLabel = placed.label
@@ -265,12 +267,15 @@ struct FocusRegionSceneView: UIViewRepresentable {
                 let span = max(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z, AppConstants.focusEditorMinFramingM)
                 let cameraNode = SCNNode()
                 cameraNode.camera = SCNCamera()
-                cameraNode.camera?.zFar = Double(span * AppConstants.focusEditorZFarSpans)
+                // Near plane follows the zoom (a fixed 1 m default clips a table-sized box up close),
+                // as in the scan viewer.
+                cameraNode.camera?.automaticallyAdjustsZRange = true
                 cameraNode.simdPosition = centre + SIMD3<Float>(0, span * AppConstants.focusEditorCameraRise,
                                                                 span * AppConstants.focusEditorCameraBack)
                 cameraNode.simdLook(at: centre)
                 view.scene?.rootNode.addChildNode(cameraNode)
                 view.pointOfView = cameraNode
+                view.defaultCameraController.target = SCNVector3(centre.x, centre.y, centre.z)   // orbit about the room
             }
         }
         return view

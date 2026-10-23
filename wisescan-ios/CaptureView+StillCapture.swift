@@ -90,7 +90,7 @@ extension CaptureView {
         guard stillCapture.begin(session: session, label: resolveCurrentLocationName(), context: context) else {
             // Nothing started: keep the operator's nudge (the sliders still hold it) for a retry.
             if case .failed(let reason) = stillCapture.phase {
-                showTransientMessage("Focus scan could not start: \(reason)", duration: 5,
+                showTransientMessage("Focus scan: \(reason)", duration: 5,
                                      systemImage: "xmark.octagon.fill", tint: .red)
             }
             stillCapture.reset()
@@ -153,9 +153,10 @@ extension CaptureView {
         }
         focusScanTarget = nil
         let locationId = target.locationId, region = target.region
-        // Still the active flow? Leaving the tab mid-drain already reset the capture state, and the
-        // operator may have armed another flow since; neither should be reset or navigated away from.
-        let stillOurs = scanStore.activeFocusRequest?.region == region || scanStore.activeLocationForScan == nil
+        // Still the active flow? Leaving the tab mid-drain already ran the leave-tab teardown (state
+        // reset, ghost cleared, map released), and the operator may have armed or started another
+        // scan since: then nothing here may reset the session or switch tabs.
+        let stillOurs = !isRecording && scanStore.activeFocusRequest?.region == region
         guard stills > 0 else {
             try? FileManager.default.removeItem(at: directory)
             showTransientMessage("No photos were taken, nothing saved", duration: 4,
@@ -173,7 +174,7 @@ extension CaptureView {
                                  systemImage: "checkmark.circle.fill", tint: .green)
             let location = scan.location
             finishStillCapture(resetCaptureState: stillOurs)
-            guard selectedTab == 1 else { return }   // left the capture tab: no jump to the new scan
+            guard stillOurs, selectedTab == 1 else { return }   // no jump away from another flow or tab
             saveNavigationTask = Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(1000))
                 guard !Task.isCancelled else { return }

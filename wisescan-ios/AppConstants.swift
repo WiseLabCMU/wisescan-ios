@@ -575,7 +575,6 @@ enum AppConstants {
     static let focusEditorMinFramingM: Float = 2               // editor camera frames at least this much
     static let focusEditorCameraRise: Float = 0.6              // camera placed this many room spans above the centre...
     static let focusEditorCameraBack: Float = 0.8              // ...and this many back
-    static let focusEditorZFarSpans: Float = 10
     static let exposureCapChangeTolerance: Double = 0.1       // CaptureExposurePolicy: a new short-exposure target within this fraction of the applied cap is ignored
     static let exposureCapReapplyTolerance: Double = 0.02      // CaptureExposurePolicy: the device's cap drifted further than this from what was applied -> a session re-run reset it; re-apply
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)
