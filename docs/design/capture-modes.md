@@ -39,7 +39,8 @@ rescan does today, then diverge at Start.
 4. The room scan drops video-stream images entirely. Stills fire automatically at 12MP; the
    stream-frame path stays only as the fallback when stills keep failing.
 5. The screen tap fires the 360° camera only, and only with a rig connected.
-6. Privacy blur for focus stills runs at export, like every other capture source.
+6. Privacy blur for focus stills runs at export, like every other capture source. With nothing
+   filtered during capture, the toggle stays live through a focus scan and its value at Stop counts.
 7. Regions are not catalogued yet. A focus scan carries its own region; scans of the same table
    are not grouped. Focus scans sit in the same list as room scans, marked partial, with a card
    that shows the previous room scan's outline with the box and one photo.

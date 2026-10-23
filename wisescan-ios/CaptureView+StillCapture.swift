@@ -129,11 +129,13 @@ extension CaptureView {
         stopStillCapture()
     }
 
-    /// Drains the engine; its completion files the scan (on main, even off-screen).
+    /// Drains the engine; its completion files the scan (on main, even off-screen). The privacy
+    /// filter stays live through a focus capture (nothing is filtered until export), so the
+    /// capture records it as it stands now.
     func stopStillCapture() {
         guard isStillCapturing else { return }
         isStillCapturing = false
-        stillCapture.stop { phase in handleStillCapturePhase(phase) }
+        stillCapture.stop(privacyFilter: isPrivacyFilterOn) { phase in handleStillCapturePhase(phase) }
     }
 
     /// Check finishes by itself at its target; the other levels run until the operator stops.

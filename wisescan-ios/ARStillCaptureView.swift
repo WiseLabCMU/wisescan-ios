@@ -42,10 +42,11 @@ final class ARStillCaptureController {
 
     /// Drains and finalizes the capture; `onFinish` gets the outcome on main (`.done` with the
     /// capture directory, or `.failed`) whether or not the capture view is on screen.
-    func stop(onFinish: (@MainActor (Phase) -> Void)? = nil) {
+    /// `privacyFilter` is the filter at Stop, which the export follows.
+    func stop(privacyFilter: Bool? = nil, onFinish: (@MainActor (Phase) -> Void)? = nil) {
         guard phase == .running else { return }
         phase = .stopping
-        engine.stop { [weak self] url in
+        engine.stop(privacyFilter: privacyFilter) { [weak self] url in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 stopPolling()

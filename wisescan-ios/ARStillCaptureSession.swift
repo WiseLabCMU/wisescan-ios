@@ -465,10 +465,16 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     /// Stops accepting frames, waits for the in-flight still and queued encodes, writes the
     /// manifest and closes the logs. Completion on main with the finished capture directory (the
     /// caller files it into a focus scan), or nil if there was none.
-    func stop(completion: @escaping @Sendable (URL?) -> Void) {
+    /// `privacyFilter`: the filter as the operator left it. Nothing is filtered while capturing
+    /// (the export runs the person check), so the value at Stop is the one the manifest records.
+    func stop(privacyFilter: Bool? = nil, completion: @escaping @Sendable (URL?) -> Void) {
         recording.store(false, ordering: .releasing)
         stopUptime = ProcessInfo.processInfo.systemUptime
         live.withLock { $0.recording = false }
+        if let privacyFilter, privacyFilter != setup.privacyFilter {
+            setup.privacyFilter = privacyFilter
+            event("privacy filter turned \(privacyFilter ? "on" : "off") during the capture; the export follows the value at Stop")
+        }
         motion.stopGyroUpdates()
         motion.stopAccelerometerUpdates()
         if let thermalObserver { NotificationCenter.default.removeObserver(thermalObserver) }
