@@ -82,7 +82,35 @@
     },
     "keyframe_count": {
       "type": "integer",
-      "description": "Number of sharp stillness keyframes captured (hi-res stills when the device supports them, stream frames otherwise)."
+      "description": "Number of sharp stillness keyframes captured (hi-res stills when the device supports them, stream frames otherwise). With automatic stills every saved frame is a keyframe."
+    },
+    "auto_stills": {
+      "type": "object",
+      "description": "Room scans with automatic stills (REQ-036): how the gates behaved and the exposure cap they ran under.",
+      "properties": {
+        "requested": { "type": "integer" },
+        "saved": { "type": "integer" },
+        "ticks_held_blur": { "type": "integer", "description": "0.1 s capture ticks held by the blur gate." },
+        "ticks_held_spacing": { "type": "integer", "description": "Ticks held because the view had not changed enough." },
+        "slow_encode_backoffs": { "type": "integer" },
+        "frame_gap_backoffs": { "type": "integer" },
+        "spacing_deg": { "type": "number" },
+        "warmup_s": { "type": "number" },
+        "blur_budget_rad": { "type": "number" },
+        "short_exposure": { "type": "boolean" },
+        "exposure_cap_s": { "type": "number", "description": "The exposure cap in force at stop, seconds (0 = none applied)." },
+        "exposure_cap_note": { "type": "string" }
+      }
+    },
+    "frame_work_ms": {
+      "type": "object",
+      "description": "The AR session delegate's per-frame handler time while recording.",
+      "properties": {
+        "frames": { "type": "integer" },
+        "mean_ms": { "type": "number" },
+        "p99_ms": { "type": "number" },
+        "max_ms": { "type": "number" }
+      }
     },
     "privacy_filter": {
       "type": "boolean",

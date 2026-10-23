@@ -50,11 +50,27 @@ struct UserGuideView: View {
                               "— a colored ghost overlay (default magenta, configurable in Settings) shows " +
                               "your previous scan for reference, and each new scan is auto-aligned into " +
                               "the location's shared frame using detected walls and floors. " +
+                              "Rescan asks what to capture: the whole room, or one region (a focus scan, " +
+                              "below). " +
                               "Tap 'Connect Adjacent Space' to scan a neighboring room: relocalize with your " +
                               "previous scan, walk to where the new connector should be, " +
                               "and confirm to place the connector and start scanning the new space. " +
                               "You can also tap 'Pin & Extend' mid-scan to drop a connector and continue " +
                               "into the next space without stopping."
+                    )
+                    guideRow(
+                        icon: "scope",
+                        title: "Focus Scan a Region",
+                        text: "Rescan Space > Focus on a region photographs one area in detail, like a " +
+                              "work table. Tap a table or object in the scan to draw a box around it (or " +
+                              "tap the surface for a default box), adjust it with the sliders, and pick " +
+                              "how much to capture: Check takes about 5 photos and finishes by itself, " +
+                              "Detail about 30, Splat 150 or more for 3D reconstruction. After the usual " +
+                              "relocalization, a yellow box shows the region: tap record and walk around " +
+                              "it. Photos are taken only while the box is in view; the dial fills with " +
+                              "the directions you have covered. The result is a partial scan in the same " +
+                              "location (no mesh of its own) that you can save or upload like any other. " +
+                              "A region file from another tool can be imported from the same menu."
                     )
                     guideRow(
                         icon: "6.circle.fill",
@@ -92,13 +108,14 @@ struct UserGuideView: View {
                     )
                     guideRow(
                         icon: "camera.fill",
-                        title: "Hold Still, Tap for Photos",
-                        text: "To capture a high-resolution photo, hold still until the center ring " +
-                              "locks green, then tap the screen: a shutter click and flash confirm the " +
-                              "shot, and the amber overlay clears where the photo landed. Tap on every " +
-                              "amber area — these crisp stills drive the final texture quality. In the " +
-                              "mesh preview, the camera toggle shows where each still (and motion frame) " +
-                              "was captured."
+                        title: "Photos Are Automatic",
+                        text: "High-resolution photos are taken for you whenever the device is steady " +
+                              "enough and the view has changed since the last one; the amber overlay " +
+                              "clears where photos land. Slow down over amber areas and step sideways " +
+                              "now and then so surfaces are seen from more than one spot. With a 360° " +
+                              "camera connected, tapping the screen while holding still takes a 360° " +
+                              "still and a matching phone photo. In the mesh preview, the camera toggle " +
+                              "shows where each photo was captured."
                     )
                     guideRow(
                         icon: "arrow.left.and.right",
@@ -191,6 +208,13 @@ struct UserGuideView: View {
                         format: "OBJ",
                         desc: "Wavefront 3D mesh file. Universal format supported by almost all " +
                               "3D software, with per-vertex colors."
+                    )
+                    formatRow(
+                        format: "Focus scan",
+                        desc: "Focus scans always export as one zip, whatever format is selected: the " +
+                              "photos with their poses, LiDAR depth and confidence, the region box " +
+                              "(focus_region.json) and capture logs. With the Privacy Filter on, people " +
+                              "are blurred, and a photo that can't be checked is left out."
                     )
                 } header: {
                     Text("EXPORT FORMATS")

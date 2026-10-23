@@ -69,13 +69,30 @@ the camera's open AP is the weakest place to leave raw equirects.
   property bitmasks at link-ready for the known failure modes.
 - **Camera storage panel** — camera-side file count + confirmed bulk erase.
 
-## AR still capture dump (EXPERIMENT, not gated)
+## Focus scan still capture (developer view)
 
-**Location detail → AR Capture**, under the Rescan / Connect buttons. It is the **Rescan flow up to Start**:
-the same entry (`startRescan`, so the same world map, post-process gate and suspect-map
-confirm), relocalization, ghost, alignment and manual nudge. Only Start and Stop differ
-(`ScanStore.activeScanKind == .focus`, `CaptureView+StillCapture`). The goal is high-quality stills
-and nothing else: no stream images are saved.
+Design and decisions: [docs/design/capture-modes.md](design/capture-modes.md); requirements
+REQ-035 to REQ-037. This section is the engine's developer view: what it logs and why. The
+developer panel (mid-screen) and the SHORT EXP switch appear only with Perf Diagnostics on; the
+operator sees the focus HUD. The room scan's automatic stills (REQ-036) reuse the same blur gate
+and `CaptureExposurePolicy`; their counters land in `scan4d_metadata.json` (`auto_stills`,
+`frame_work_ms`) and `[RoomStills]` PerfDiag lines.
+
+**Location detail → Rescan Space → Focus on a region** (or an imported region). It is the
+**Rescan flow up to Start**: the same entry (`startRescan(_:focus:)`, so the same world map,
+post-process gate and suspect-map confirm), relocalization, ghost, alignment and manual nudge.
+Only Start and Stop differ (`ScanStore.activeScanKind == .focus`, `CaptureView+StillCapture`). The
+goal is high-quality stills of the region and nothing else: no stream images are saved. Stop
+files the dump as a focus scan (`ScanFileManager.saveFocusScan`; `focus_capture/` in the scan
+folder) instead of the experiment's zip.
+
+**Region.** `ARCoverageView.beginStillCapture` places the box in the capture world after the
+bakes (the ghost's seat: identity after a nudge or ICP bake, else the visual auto-align) and hands
+it to the engine (`setRegionPlacement`, `setup.regionToWorld`). Per frame the engine projects the
+box (`ARStillCaptureGates.regionView`): stills need its centre in frame (10% margin) and at least
+`focusMinFrameCoverage` of the frame; spacing is the detail level's, measured as the view angle at
+the region's centre (orbit or sidestep) or the camera's turn, with no time trigger. `photos.csv`
+carries the region columns and `totals.coverage_counts` the dial's cells.
 
 **Start** goes through the same pre-start gates as a rescan's record tap (tracking out of
 cold init; with Perf Diagnostics, the short hold for the ICP correction), computes the same
@@ -142,7 +159,7 @@ capture starts, nothing reloads it. The first iPhone capture lost scene depth fo
 because something re-ran the session mid-capture (tracking went normal -> initializing ->
 relocalizing, i.e. a map reload with a tracking reset) using the app's normal configuration,
 which does not request depth. A reload like that also discards the record-start frame bakes.
-AR Capture never sets `isRecording`, so the pre-record rescan paths had stayed live. Now the
+The AR Capture experiment never set `isRecording`, so the pre-record rescan paths had stayed live. Now the
 pre-record safeguards read one state, `CaptureView.isCapturing` (recording or capturing stills):
 the relocalization watchdog and its Try Again stand down, Re-relocalize is a no-op, the Ghost
 Mesh chip is hidden during a focus scan, ARCoverageView's ghost-reload path is skipped, and
@@ -181,7 +198,7 @@ beyond that. The pose solve showed no trend with ISO. Still untested: a room lit
 light (60 Hz countries); shorter exposures can show rolling-shutter bands and frame-to-frame
 brightness pulses there (that office had a lot of daylight). Switch it off if stills band.
 
-**Debug panel** (mid-screen while AR Capture is active). Its large first line is the point of
+**Developer panel** (mid-screen during a focus scan, with Perf Diagnostics on). Its large first line is the point of
 the experiment: the last still's resolution, exposure and ISO; the next line is the stream's
 size and exposure against the cap. Below: still counts and rate, latency, why the last still
 fired, frames held by each gate, the gate inputs, the last still's blur at capture, the

@@ -1,6 +1,8 @@
 # Capture modes: room scan and focus scan
 
-Status: in progress (2026-10-23). Supersedes the AR Capture experiment (`exp/arkit-capture-mode`).
+Status: implemented on `exp/arkit-capture-mode` (2026-10-23), not yet built or tested on a device.
+Supersedes the AR Capture experiment. Requirements: REQ-035 (focus scan), REQ-036 (automatic room
+stills), REQ-037 (region import).
 
 A rescan now offers two modes. Both relocalize into the latest room scan's world map exactly as a
 rescan does today, then diverge at Start.
@@ -118,6 +120,22 @@ focus capture with the region loaded. Delivery from the server (polling) waits f
   waiting at most; back off when ARKit frames arrive late, the delegate's work climbs, or thermal
   state reaches serious; stills only while tracking is normal. The per-frame work timing covers
   the room scan, so the first capture measures the cost.
+
+## As built (where it differs from the plan above)
+
+- **Configuration.** Not one builder: `Coordinator.runSession` wraps every `session.run` in
+  ARCoverageView and re-inserts the active `SessionRole`'s frame semantics into whatever
+  configuration it is given. The existing configuration paths (RoomPlan's re-runs, live-config
+  tweaks) stay as they were; re-running a session under RoomPlan has crashed ObjectUnderstanding
+  before, so they were not restructured.
+- **The 360° rig keeps its tap.** With a Theta connected, the tap still arms a phone still with the
+  360° still: the rig calibration needs the co-timed pair. The stillness reticle and chime follow.
+- **Room-scan spacing** is 15° of turn or parallax, one still at most every 0.5 s (2 s when hot).
+- **Coverage dial** cells: 12 sectors of azimuth around the region's own axes x 3 elevation rings
+  (below 20°, 20 to 50°, above 50°).
+- **Focus card**: the best still (sharp at capture, region share of the frame nearest 35%) and the
+  parent room scan's existing preview image. Drawing the box onto that preview is not done.
+- **Not done**: drag handles on the box; a catalogue of regions; server delivery of regions.
 
 ## Phases
 
