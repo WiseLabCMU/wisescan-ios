@@ -452,6 +452,7 @@ struct ARCoverageView: UIViewRepresentable {
         // Focus scan: the still-capture branch's record-start (see beginStillCapture). At the end
         // the session drops back to the pre-capture role; CaptureView resets it after the save.
         context.coordinator.stillCapture = stillCapture
+        context.coordinator.roomWorkMeter = frameCaptureSession?.delegateWorkMeter
         if isStillCapturing != context.coordinator.isStillCapturing {
             context.coordinator.isStillCapturing = isStillCapturing
             if isStillCapturing {
@@ -1053,6 +1054,9 @@ struct ARCoverageView: UIViewRepresentable {
         /// instance per capture view and ignores frames unless it is capturing.
         var stillCapture: ARStillCaptureSession?
         var isStillCapturing = false
+        /// The room scan's delegate-work meter (FrameCaptureSession's), fed from
+        /// `session(_:didUpdate:)`; it measures only while a room scan records.
+        var roomWorkMeter: DelegateWorkMeter?
         /// Main thread. What the session is running for (see `SessionRole`).
         var sessionRole: ARCoverageView.SessionRole = .preCapture
         /// Main thread. The focus region's wireframe (under an anchor carrying the ghost's seat)
@@ -2809,9 +2813,12 @@ struct ARCoverageView: UIViewRepresentable {
         func sessionShouldAttemptRelocalization(_ session: ARSession) -> Bool { true }
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
-            // EXPERIMENT (AR Capture): times this whole handler while a capture runs (no-op otherwise).
+            // Times this whole handler while a focus scan or a room scan records (no-op otherwise).
             let frameWorkStart = DispatchTime.now().uptimeNanoseconds
-            defer { stillCapture?.noteDelegateWork(since: frameWorkStart) }
+            defer {
+                stillCapture?.noteDelegateWork(since: frameWorkStart)
+                roomWorkMeter?.note(since: frameWorkStart)
+            }
             memDiagFrameCount &+= 1 // [MemDiag] frames/sample → measured FPS (the "visible slowdown")
             prodFrameCount &+= 1    // production fps → capacity bar (ungated)
             // EXPERIMENT (AR Capture): no-op unless the capture-only branch is running. First, so

@@ -1125,7 +1125,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     }
 
     /// Near-scene depth for the gates: a low percentile of a sparse grid of confident samples.
-    private static func sampleDepth(_ depth: ARDepthData) -> Double? {
+    /// Shared with the room scan's automatic stills (FrameCaptureSession).
+    static func sampleDepth(_ depth: ARDepthData) -> Double? {
         let map = depth.depthMap
         guard CVPixelBufferGetPixelFormatType(map) == kCVPixelFormatType_DepthFloat32 else { return nil }
         CVPixelBufferLockBaseAddress(map, .readOnly)

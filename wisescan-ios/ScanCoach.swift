@@ -545,7 +545,7 @@ class ScanCoach {
            photoCoverageOccupied >= AppConstants.photoCoverageDebtMinVoxels &&
            photoCoverageFraction < AppConstants.photoCoverageDebtFraction {
             if let t = tip("guidance.pauseForPhoto",
-                           "Hold still on amber areas, then tap for a photo",
+                           "Slow down over amber areas so photos can land",
                            icon: "camera.fill",
                            priority: .guidance, now: now) { return t }
         }
@@ -556,7 +556,7 @@ class ScanCoach {
             // ~60% shared content between neighboring photos, not isolated islands.
             if meanStillOverlap < AppConstants.stillOverlapFloor {
                 if let overlapTip = tip("guidance.stillOverlap",
-                                        "Overlap your photos — shoot the next one closer to the last",
+                                        "Move more slowly so photos overlap",
                                         icon: "square.on.square",
                                         priority: .guidance, now: now) { return overlapTip }
             }
@@ -564,7 +564,7 @@ class ScanCoach {
             // photos) matters more than re-aiming from the same spot.
             if standpointDiversity < AppConstants.stillParallaxDiversityFloor {
                 if let parallaxTip = tip("guidance.stillParallax",
-                                         "Step sideways and photograph covered areas again",
+                                         "Step sideways across covered areas for new angles",
                                          icon: "figure.walk",
                                          priority: .guidance, now: now) { return parallaxTip }
             }

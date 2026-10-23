@@ -506,6 +506,16 @@ enum AppConstants {
     static let arStillShortExposureISOCeiling: Double = 800   // the first capture's noise grew only as ISO^0.29 (0.45 -> ~1.1 of 255 over ISO 50-700; the ISP denoises)
     static let arStillShortExposureFloorSeconds: Double = 1.0 / 500 // never shorter: at 1/500 the 3 px budget already allows ~26 deg/s; spacing and walking pace bind first
     static let arStillShortExposureUpdateSeconds: TimeInterval = 0.3 // re-evaluate the cap this often; changes under 10% are ignored
+    // ── Room scan automatic stills (docs/design/capture-modes.md) ── replace the video-stream frames
+    static let roomScanAutoStills = true                       // 12MP stills fire on their own (blur gate + spacing); no stream frames are saved. The rig's tap still stays.
+    static let roomStillSpacingDeg: Double = 15                // next still once the view turned this much, or a sideways move subtends this at the near depth (focus Splat: 5)
+    static let roomStillWarmupSeconds: TimeInterval = 10       // none in the first seconds of recording: RoomPlan + segmentation model loads (the bring-up storm, capture-quality-triage.md)
+    static let roomStillMinIntervalSeconds: TimeInterval = 0.5
+    static let roomStillHotMinIntervalSeconds: TimeInterval = 2 // at thermal state serious or worse
+    static let roomStillSlowEncodeMs: Double = 400             // a 12MP encode slower than this means CPU contention...
+    static let roomStillBackoffSeconds: TimeInterval = 3       // ...or a frame gap: hold automatic stills this long
+    static let roomStillFrameGapSeconds: TimeInterval = 0.3    // ARKit frame timestamps jumping more than this between 0.1 s capture ticks = a stall
+
     // ── Focus scan (docs/design/capture-modes.md) ── starting values per detail level, to tune from field captures
     static let focusCheckSpacingDeg: Double = 25               // Check: next still once the view of the region changed this much (turn or parallax)
     static let focusDetailSpacingDeg: Double = 12

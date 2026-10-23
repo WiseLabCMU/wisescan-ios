@@ -744,8 +744,12 @@ struct CaptureView: View {
             // stillness pause yields a co-timed phone-hi-res + 360° pair with a shared
             // phone pose — the calibration raw material this branch exists for. A
             // refused tap fires neither, keeping the pair invariant.
+            //
+            // Automatic room stills (docs/design/capture-modes.md): phone stills fire on their
+            // own, so the tap is the 360° rig's shutter only. With a camera connected it still
+            // arms the phone still too, keeping the co-timed pair the rig calibration needs.
             .onTapGesture {
-                guard isRecording else { return }
+                guard isRecording, thetaManager.isConnected else { return }
                 if frameCaptureSession.requestStillCapture() {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     captureThetaStill()
@@ -813,7 +817,9 @@ struct CaptureView: View {
         // "Capturing…" while a tapped still is in flight. Shown in both AR and VR
         // modes: keyframes are captured in both. Wrapped in a host view so the 10Hz
         // progress updates re-evaluate only the reticle's body, not this entire view.
-        if isRecording && isARSessionReady {
+        // Only with a 360° camera connected: phone stills are otherwise automatic, and the
+        // tap is the rig's shutter alone.
+        if isRecording && isARSessionReady && thetaManager.isConnected {
             StillnessReticleHost(session: frameCaptureSession)
                 .allowsHitTesting(false)
         }
@@ -897,7 +903,8 @@ struct CaptureView: View {
     /// Appearance, appear/disappear wiring, and the ghost-alignment dialog.
     private func captureLifecycle(_ content: some View) -> some View {
         content
-        .onChange(of: frameCaptureSession.sharpFrameCount) { oldCount, newCount in
+        // Announced stills only (the rig's tapped ones): automatic stills land about once a second.
+        .onChange(of: frameCaptureSession.shutterFeedbackCount) { oldCount, newCount in
             guard newCount > oldCount else { return } // ignore session-start reset to 0
             // Two-phase so the peak actually renders: commit the peak opacity this
             // update, then animate down on the next runloop turn — writing both in one
