@@ -2726,6 +2726,9 @@ struct ARCoverageView: UIViewRepresentable {
         func sessionShouldAttemptRelocalization(_ session: ARSession) -> Bool { true }
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
+            // EXPERIMENT (AR Capture): times this whole handler while a capture runs (no-op otherwise).
+            let frameWorkStart = DispatchTime.now().uptimeNanoseconds
+            defer { stillCapture?.noteDelegateWork(since: frameWorkStart) }
             memDiagFrameCount &+= 1 // [MemDiag] frames/sample → measured FPS (the "visible slowdown")
             prodFrameCount &+= 1    // production fps → capacity bar (ungated)
             // EXPERIMENT (AR Capture): no-op unless the capture-only branch is running. First, so

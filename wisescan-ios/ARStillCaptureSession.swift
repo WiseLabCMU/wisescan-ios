@@ -23,9 +23,10 @@ import simd
 ///     once the gates allow. Each comes back as its own ARFrame: pose, intrinsics, exposure, and
 ///     the depth + confidence of that instant. The image arrives unencoded and is encoded to JPEG
 ///     here, on a dedicated queue, with a bounded backlog.
-///   - **Gates** (`ARStillCaptureGates`), per tracked frame: predicted smear from gyro rotation
-///     AND sideways translation (ARKit velocity over the near scene depth); viewpoint spacing as
-///     rotation or parallax since the previous still.
+///   - **Gates** (`ARStillCaptureGates`), per tracked frame: predicted image motion, the larger of
+///     a pose term (rotation and sideways translation over the near scene depth) and the gyro's
+///     recent peak rate; viewpoint spacing as rotation or parallax since the previous still. Each
+///     still is then checked against the gyro rate at its own timestamp, and logged.
 ///   - **Exposure cap**: `arStillMaxExposureSeconds` on ARKit's own camera via
 ///     `configurableCaptureDeviceForPrimaryCamera`; auto exposure keeps metering and raises ISO.
 ///   - **Logs**: every stream frame's pose; stream depth + confidence at a capped rate; raw gyro
@@ -69,6 +70,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         /// still is the distortion-corrected crop. 0 when either field of view is unavailable.
         var expectedStillFocalScale = 0.0
         var blurBudgetRad = 0.0
+        var gyroPeakWindowSeconds = 0.0
         var shortExposureISOCeiling = 0.0
         var shortExposureFloorSeconds = 0.0
         var viewpointThresholdDeg = 0.0
@@ -115,6 +117,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var exposureCapAppliedSeconds = 0.0
         var exposureCapNote = ""
         var angularRate = 0.0
+        var gyroPeakRate = 0.0
         var lateralSpeed = 0.0
         var gateDepth = 0.0
         var smearRotationPx = 0.0
@@ -122,6 +125,17 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         /// Predicted image-motion smear in still pixels, and the angular budget in the same pixels.
         var smearImageMotionPx = 0.0
         var blurBudgetPx = 0.0
+        /// What the stills actually got: the gyro rate at each still's own timestamp times its
+        /// exposure. `stillsCaptureBlurUnknown` counts stills the gyro history did not cover.
+        var lastCaptureSmearPx = 0.0
+        var stillsOverBudgetAtCapture = 0
+        var stillsCaptureBlurUnknown = 0
+        /// Wall time of the AR delegate's per-frame work while capturing: the whole handler in the
+        /// capture view, and this engine's share of it (`offer`). Filled in by `liveStats()`.
+        var handlerMeanMs = 0.0
+        var handlerMaxMs = 0.0
+        var engineMeanMs = 0.0
+        var engineMaxMs = 0.0
         var shortExposure = false
         var stillsShortExposure = 0
         var sceneDepthPresent = false
@@ -137,6 +151,41 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var bytesWritten: Int64 = 0
         var elapsedSeconds = 0.0
         var lastError = ""
+    }
+
+    /// Durations of per-frame work as a histogram (0.1 ms bins; the last bin holds 50 ms and up),
+    /// so a capture reports its mean, p99 and worst frame without keeping every sample.
+    nonisolated struct WorkTiming: Sendable {
+        private static let binMs = 0.1
+        private var bins = [Int](repeating: 0, count: 501)
+        private(set) var count = 0
+        private(set) var totalMs = 0.0
+        private(set) var maxMs = 0.0
+
+        var meanMs: Double { count > 0 ? totalMs / Double(count) : 0 }
+
+        mutating func record(ms: Double) {
+            bins[min(bins.count - 1, max(0, Int(ms / Self.binMs)))] += 1
+            count += 1
+            totalMs += ms
+            maxMs = max(maxMs, ms)
+        }
+
+        /// Upper edge of the bin holding the `p` quantile (capped at the maximum seen).
+        func percentileMs(_ p: Double) -> Double {
+            guard count > 0 else { return 0 }
+            let target = Int((Double(count) * p).rounded(.up))
+            var seen = 0
+            for (i, n) in bins.enumerated() {
+                seen += n
+                if seen >= target { return min(maxMs, Double(i + 1) * Self.binMs) }
+            }
+            return maxMs
+        }
+
+        var summary: [String: Any] {
+            ["frames": count, "mean_ms": Fmt.round3(meanMs), "p99_ms": Fmt.round3(percentileMs(0.99)), "max_ms": Fmt.round3(maxMs)]
+        }
     }
 
     // MARK: State
@@ -156,7 +205,10 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
 
     private let recording = Atomic<Bool>(false)
     private let live = OSAllocatedUnfairLock(initialState: LiveStats())
-    private let gyroRate = OSAllocatedUnfairLock(initialState: 0.0)
+    /// Written by the gyro callback; read per frame by the gate and per still by the capture check.
+    private let gyroHistory = OSAllocatedUnfairLock(initialState: ARStillCaptureGates.GyroHistory(capacity: AppConstants.arStillGyroHistoryCapacity))
+    /// Per-frame delegate work while capturing (delegate queue writes; `liveStats` and Stop read).
+    private let frameWork = OSAllocatedUnfairLock(initialState: (handler: WorkTiming(), engine: WorkTiming()))
     /// In-flight still and queued encodes, shared by the frame path and the completion path.
     private let pipeline = OSAllocatedUnfairLock(initialState: (inFlight: false, pending: 0))
     /// Still width / stream width, learned from the first still (completion queue) and read per
@@ -165,7 +217,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     /// The dev ICP correction, when the AR view baked one at Start (any queue).
     private let icpBakeNoted = OSAllocatedUnfairLock<[Float]?>(initialState: nil)
     /// Short-exposure experiment: set from main by the toggle, read per frame on the delegate queue.
-    private let shortExposure = Atomic<Bool>(false)
+    private let shortExposure = Atomic<Bool>(AppConstants.arStillShortExposureDefault)
     /// Raised when the toggle flips so the next tracked frame re-applies the cap.
     private let exposureModeChanged = Atomic<Bool>(false)
 
@@ -222,6 +274,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         s.originalScanId = context.originalScanId
         s.manualNudgeBake = context.manualNudgeBake.map(Self.columnMajor)
         s.blurBudgetRad = AppConstants.arStillBlurBudgetRad
+        s.gyroPeakWindowSeconds = AppConstants.arStillGyroPeakWindowSeconds
         s.shortExposureISOCeiling = AppConstants.arStillShortExposureISOCeiling
         s.shortExposureFloorSeconds = AppConstants.arStillShortExposureFloorSeconds
         s.viewpointThresholdDeg = AppConstants.arStillViewpointThresholdDeg
@@ -270,6 +323,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         depthNotDeliveredLogged.store(false, ordering: .releasing)
         encodeQueue.sync { photoIndex = 0 }
         pipeline.withLock { $0 = (false, 0) }
+        frameWork.withLock { $0 = (WorkTiming(), WorkTiming()) }
+        gyroHistory.withLock { $0 = ARStillCaptureGates.GyroHistory(capacity: AppConstants.arStillGyroHistoryCapacity) }
         icpBakeNoted.withLock { $0 = nil }
         let shortOn = shortExposure.load(ordering: .acquiring)
         let thermal = Self.thermalName(ProcessInfo.processInfo.thermalState)
@@ -328,6 +383,11 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             device.unlockForConfiguration()
         }
         event("capture stopped")
+        let work = frameWork.withLock { $0 }
+        for (name, timing) in [("AR delegate handler", work.handler), ("capture engine", work.engine)] {
+            event(String(format: "frame work, %@: %ld frames, mean %.2f ms, p99 %.2f ms, max %.2f ms",
+                         name, timing.count, timing.meanMs, timing.percentileMs(0.99), timing.maxMs))
+        }
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             // A requested still can complete after Stop; give it a bounded moment, then drain.
             let deadline = Date().addingTimeInterval(5)
@@ -357,6 +417,12 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let state = pipeline.withLock { $0 }
         stats.inFlight = state.inFlight
         stats.pendingEncodes = state.pending
+        let work = frameWork.withLock { (handler: (mean: $0.handler.meanMs, max: $0.handler.maxMs),
+                                         engine: (mean: $0.engine.meanMs, max: $0.engine.maxMs)) }
+        stats.handlerMeanMs = work.handler.mean
+        stats.handlerMaxMs = work.handler.max
+        stats.engineMeanMs = work.engine.mean
+        stats.engineMaxMs = work.engine.max
         if startUptime > 0 {
             let end = stats.recording || stopUptime <= startUptime ? ProcessInfo.processInfo.systemUptime : stopUptime
             stats.elapsedSeconds = end - startUptime
@@ -366,10 +432,23 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
 
     // MARK: Frames (AR delegate queue)
 
+    /// The capture view's whole delegate handler for one frame, timed from `start`
+    /// (`DispatchTime.now().uptimeNanoseconds` at its entry). No-op unless capturing.
+    func noteDelegateWork(since start: UInt64) {
+        guard recording.load(ordering: .acquiring) else { return }
+        let ms = Double(DispatchTime.now().uptimeNanoseconds &- start) / 1_000_000
+        frameWork.withLock { $0.handler.record(ms: ms) }
+    }
+
     /// One ARKit frame from the capture view's session delegate. Cheap and non-blocking; must not
     /// retain the frame (pool buffers).
     func offer(_ frame: ARFrame) {
         guard recording.load(ordering: .acquiring) else { return }
+        let started = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds &- started) / 1_000_000
+            frameWork.withLock { $0.engine.record(ms: ms) }
+        }
         let camera = frame.camera
         let t = frame.timestamp
         let transform = camera.transform
@@ -401,7 +480,9 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let gateDepth = nearDepth
         let depthHeld = held
         let exposure = camera.exposureDuration
-        let omega = gyroRate.withLock { $0 }
+        let (omega, gyroPeak) = gyroHistory.withLock {
+            ($0.latest ?? 0, $0.peak(window: AppConstants.arStillGyroPeakWindowSeconds))
+        }
         let lateral = ARStillCaptureGates.lateralSpeed(velocity: velocity, cameraToWorld: transform)
         let scale = stillScale.withLock { $0 }
         let fStream = Double(camera.intrinsics[0][0])
@@ -409,22 +490,23 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         // Reported for context (the old sum gate); the gate itself is the image-motion smear below.
         let smear = ARStillCaptureGates.smear(angularRate: omega, lateralSpeed: lateral, depth: gateDepth,
                                               exposure: exposure, focalPx: focalStill)
-        // The blur gate: rigid camera motion from two poses, as image motion at the centre and
-        // corners at the near depth. Pose only. Until a window of poses exists, fall back to the
-        // gyro's rotation-only prediction.
+        // The blur gate, the larger of two terms. Pose: rigid camera motion from two poses, as image
+        // motion at the centre and corners at the near depth (0 until a window of poses exists).
+        // Sideways motion is in it: a sidestep at v m/s, Z m from the scene, sweeps v/Z rad/s. Gyro:
+        // the peak rate over the last few samples, which catches the hand shake the pose term's
+        // 0.1 s average smooths out.
         // Computed as an ANGLE (focal 1: normalized image plane), so the budget means the same real
         // sharpness at any still resolution; the pixel figure is for the panel and the log.
-        // Sideways motion is in it: a sidestep at v m/s, Z m from the scene, sweeps v/Z rad/s.
-        let angularSmear: Double
+        var poseSmear = 0.0
         if let past, t > past.t, gateDepth > 0, fStream > 0 {
-            angularSmear = ARStillCaptureGates.imageMotionSmear(
+            poseSmear = ARStillCaptureGates.imageMotionSmear(
                 from: past.m, to: transform, dt: t - past.t, depth: gateDepth, exposure: exposure,
                 focalPx: 1,
                 halfWidthNorm: Double(camera.imageResolution.width) / 2 / fStream,
                 halfHeightNorm: Double(camera.imageResolution.height) / 2 / Double(camera.intrinsics[1][1]))
-        } else {
-            angularSmear = omega * exposure
         }
+        let gyroSmear = gyroPeak * exposure
+        let angularSmear = max(poseSmear, gyroSmear)
         let imageSmear = angularSmear * focalStill
         let budgetPx = AppConstants.arStillBlurBudgetRad * focalStill
         let view = lastStillTransform.map {
@@ -436,6 +518,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             $0.streamDimensions = streamDims
             $0.streamExposureSeconds = exposure
             $0.angularRate = omega
+            $0.gyroPeakRate = gyroPeak
             $0.lateralSpeed = lateral
             $0.gateDepth = gateDepth
             $0.smearRotationPx = smear.rotationPx
@@ -480,7 +563,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                                    angularSmear: angularSmear, shortExposure: shortExposure.load(ordering: .acquiring),
                                    exposureCap: live.withLock { $0.exposureCapAppliedSeconds },
                                    depthHeld: depthHeld,
-                                   thermalState: Self.thermalName(ProcessInfo.processInfo.thermalState))
+                                   thermalState: Self.thermalName(ProcessInfo.processInfo.thermalState),
+                                   poseSmear: poseSmear, gyroPeak: gyroPeak, gyroSmear: gyroSmear)
         requestStill(request)
     }
 
@@ -503,6 +587,10 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var exposureCap: Double
         var depthHeld: Bool
         var thermalState: String
+        /// The blur gate's two terms (`angularSmear` is the larger), angular.
+        var poseSmear: Double
+        var gyroPeak: Double
+        var gyroSmear: Double
     }
 
     private func requestStill(_ request: StillRequest) {
@@ -547,6 +635,11 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let streamDims = live.withLock { $0.streamDimensions }
         let streamWidth = streamDims.split(separator: "x").first.flatMap { Double(String($0)) } ?? 0
         if streamWidth > 0 { stillScale.withLock { $0 = Double(width) / streamWidth } }
+        // What the still actually got: the gyro rate at its own timestamp times its exposure
+        // (rotation only, angular). nil when the gyro history does not cover that instant.
+        let captureRate = gyroHistory.withLock { $0.rate(at: t) }
+        let captureSmear = captureRate.map { $0 * exposure }
+        let overBudget = captureSmear.map { $0 > AppConstants.arStillBlurBudgetRad }
         pipeline.withLock { $0.inFlight = false; $0.pending += 1 }
         encodeQueue.async { [self] in
             defer { pipeline.withLock { $0.pending -= 1 } }
@@ -576,6 +669,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             row += [Fmt.f3(request.rotationDeg), Fmt.f3(request.parallaxDeg), request.reason, Fmt.f3(request.imageSmear)]
             row += [Fmt.f6(request.angularSmear), request.shortExposure ? "1" : "0", Fmt.f6(request.exposureCap)]
             row += [request.depthHeld ? "1" : "0", request.thermalState]
+            row += [Fmt.f6(request.poseSmear), Fmt.f4(request.gyroPeak), Fmt.f6(request.gyroSmear)]
+            row += [captureRate.map(Fmt.f4) ?? "", captureSmear.map(Fmt.f6) ?? "", overBudget.map { $0 ? "1" : "0" } ?? ""]
             let line = row.joined(separator: ",")
             ioQueue.async { [self] in
                 write(jpeg, to: "photos/\(stem).jpg")
@@ -585,6 +680,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             }
             let hasDepth = depth != nil
             let wasShort = request.shortExposure
+            let capturePx = captureSmear.map { $0 * Double(k[0][0]) }
+            let wasOverBudget = overBudget == true
             live.withLock {
                 $0.stillsSaved += 1
                 if wasShort { $0.stillsShortExposure += 1 }
@@ -593,6 +690,12 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                 $0.lastLatencySeconds = latency
                 $0.lastStillExposureSeconds = exposure
                 $0.lastStillISO = iso
+                if let capturePx {
+                    $0.lastCaptureSmearPx = capturePx
+                    if wasOverBudget { $0.stillsOverBudgetAtCapture += 1 }
+                } else {
+                    $0.stillsCaptureBlurUnknown += 1
+                }
             }
         }
     }
@@ -781,7 +884,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                 guard let self, let d = data else { return }
                 let r = d.rotationRate
                 let rate = sqrt(r.x * r.x + r.y * r.y + r.z * r.z)
-                gyroRate.withLock { $0 = rate }
+                let time = d.timestamp
+                gyroHistory.withLock { $0.append(time: time, rate: rate) }
                 append("imu_gyro.csv", [d.timestamp, r.x, r.y, r.z].map { String(format: "%.6f", $0) }.joined(separator: ","))
                 live.withLock { $0.gyroSamples += 1 }
             }
@@ -818,7 +922,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let pose = "c2w_00,c2w_01,c2w_02,c2w_03,c2w_10,c2w_11,c2w_12,c2w_13,c2w_20,c2w_21,c2w_22,c2w_23"
         let photosHeader = "index,file,host_ts,request_host_ts,latency_s,width,height,exposure_s,iso,tracking,depth_file,confidence_file,depth_width,depth_height,fx,fy,cx,cy,"
             + pose
-            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason,predicted_image_motion_smear_px,predicted_image_motion_smear_rad,short_exposure,exposure_cap_s,gate_depth_held,thermal_state"
+            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason,predicted_image_motion_smear_px,predicted_image_motion_smear_rad,short_exposure,exposure_cap_s,gate_depth_held,thermal_state,pose_smear_rad,gate_gyro_peak_rad_s,gate_gyro_smear_rad,capture_gyro_rad_s,capture_gyro_smear_rad,capture_over_budget"
         writers = [
             "photos.csv": ARStillCSVWriter(url: directory.appendingPathComponent("photos.csv"), header: photosHeader),
             "frames.csv": ARStillCSVWriter(url: directory.appendingPathComponent("frames.csv"),
@@ -870,10 +974,10 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                 "photo_depth/photo_NNNNN.png": "16-bit mm LiDAR depth of the same ARFrame (sceneDepth, unsmoothed)",
                 "photo_confidence/photo_NNNNN.png": "8-bit ARKit depth confidence of the same ARFrame: 0 low, 1 medium, 2 high",
                 "frames.csv": "pose log of every tracking-stream frame while capturing (text only: host_ts, tracking, exposure, intrinsics, pose); no stream images are saved",
-                "imu_gyro.csv": "raw gyroscope rad/s (also the rotation input of the blur gate)",
+                "imu_gyro.csv": "raw gyroscope rad/s (the blur gate's peak-rate term, and each still's rate at capture)",
                 "imu_accel.csv": "raw accelerometer g",
                 "world_map_registration.json": "copy of the world-map scan's registration.json (raw -> original scan's canonical frame), when it had one",
-                "events.log": "capture lifecycle, exposure cap, failures"
+                "events.log": "capture lifecycle, exposure-cap changes, tracking and scene-depth changes, thermal changes, per-frame work timing at stop, failures"
             ]
         ]
         var setup = self.setup   // exposure and ICP results come from locked state (written off main)
@@ -895,9 +999,13 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             "frames_logged": stats.framesLogged,
             "gyro_samples": stats.gyroSamples, "accel_samples": stats.accelSamples,
             "last_still_dimensions": stats.lastStillDimensions,
+            "stills_over_budget_at_capture": stats.stillsOverBudgetAtCapture,
+            "stills_capture_blur_unknown": stats.stillsCaptureBlurUnknown,
             "elapsed_seconds": stats.elapsedSeconds
         ]
         manifest["totals"] = totals
+        let work = frameWork.withLock { $0 }
+        manifest["frame_work_ms"] = ["ar_delegate_handler": work.handler.summary, "capture_engine": work.engine.summary]
         if let data = try? JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
             try? data.write(to: directory.appendingPathComponent("manifest.json"))
         }
@@ -1045,6 +1153,7 @@ private nonisolated enum Fmt {
     static func f3(_ v: Double) -> String { String(format: "%.3f", v) }
     static func f4(_ v: Double) -> String { String(format: "%.4f", v) }
     static func f6(_ v: Double) -> String { String(format: "%.6f", v) }
+    static func round3(_ v: Double) -> Double { (v * 1000).rounded() / 1000 }
 }
 
 /// Buffered line writer for the AR still capture dump. ioQueue-only. (Same shape as the raw

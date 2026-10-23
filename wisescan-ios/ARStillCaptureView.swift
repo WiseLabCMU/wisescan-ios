@@ -17,9 +17,9 @@ final class ARStillCaptureController {
     let engine = ARStillCaptureSession()
     var phase: Phase = .idle
     var stats = ARStillCaptureSession.LiveStats()
-    /// Short-exposure experiment toggle. Kept across captures in this session so an A/B pair
+    /// Short-exposure toggle, on by default. Kept across captures in this session so an A/B pair
     /// is two taps apart; takes effect while capturing and is recorded per still.
-    private(set) var shortExposure = false
+    private(set) var shortExposure = AppConstants.arStillShortExposureDefault
     private var timer: Timer?
 
     func setShortExposure(_ on: Bool) {
@@ -106,9 +106,11 @@ struct ARStillCaptureOverlay: View {
             Text("stills\(live.stillsSaved)/\(live.stillsRequested)  fail \(live.stillsFailed)  w/depth \(live.stillsWithDepth)  \(fmt(Double(live.stillsSaved) / elapsed, 2))/s  pend \(live.pendingEncodes)\(live.inFlight ? " *" : "")")
             Text("last lat \(fmt(live.lastLatencySeconds, 2))s  why \(live.lastReason)  tracking \(live.tracking)")
             Text("held blur \(live.heldBlurFrames)  spacing \(live.heldSpacingFrames)  backlog \(live.heldBackpressureFrames)")
-            Text("gyro \(fmt(live.angularRate, 2)) rad/s  side \(fmt(live.lateralSpeed, 2)) m/s  near \(fmt(live.gateDepth, 2)) m")
-            Text("smear \(fmt(smear, 1)) / \(fmt(budget, 1)) px  (\(fmt(AppConstants.arStillBlurBudgetRad * 1000, 2)) mrad; rotation + sidestep)")
+            Text("gyro \(fmt(live.angularRate, 2)) peak \(fmt(live.gyroPeakRate, 2)) rad/s  side \(fmt(live.lateralSpeed, 2)) m/s  near \(fmt(live.gateDepth, 2)) m")
+            Text("smear \(fmt(smear, 1)) / \(fmt(budget, 1)) px  (\(fmt(AppConstants.arStillBlurBudgetRad * 1000, 2)) mrad; pose or gyro peak)")
                 .foregroundColor(smear > budget ? .orange : .white)
+            Text("at capture: last \(fmt(live.lastCaptureSmearPx, 1)) px  over budget \(live.stillsOverBudgetAtCapture)/\(live.stillsSaved)")
+            Text("frame work ms: handler \(fmt(live.handlerMeanMs, 2)) max \(fmt(live.handlerMaxMs, 1))  engine \(fmt(live.engineMeanMs, 2)) max \(fmt(live.engineMaxMs, 1))")
             Text("view turn \(fmt(live.rotationSinceStillDeg, 1)) / parallax \(fmt(live.parallaxSinceStillDeg, 1)) of \(fmt(threshold, 0)) deg")
             Text("frames \(live.framesLogged)  gyro \(live.gyroSamples)  t \(fmt(live.elapsedSeconds, 1))s  \(fmt(Double(live.bytesWritten) / 1_048_576, 1)) MB")
             if !live.exposureCapNote.isEmpty {

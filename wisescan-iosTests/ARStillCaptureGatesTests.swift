@@ -123,6 +123,30 @@ final class ARStillCaptureGatesTests: XCTestCase {
         XCTAssertNil(decide(0.2, 90, 90, min: 0.5), "below the floor nothing fires")
     }
 
+    func testGyroHistoryPeakAndRateAtTime() {
+        var history = ARStillCaptureGates.GyroHistory(capacity: 4)
+        XCTAssertNil(history.latest)
+        XCTAssertEqual(history.peak(window: 0.05), 0)
+        XCTAssertNil(history.rate(at: 1))
+        // 100 Hz: 0.1, 0.5 (a shake peak), 0.2, 0.3 rad/s.
+        for (i, rate) in [0.1, 0.5, 0.2, 0.3].enumerated() { history.append(time: 1 + Double(i) * 0.01, rate: rate) }
+        XCTAssertEqual(history.latest, 0.3)
+        XCTAssertEqual(history.peak(window: 0), 0.3, "the newest sample is always in the window")
+        XCTAssertEqual(history.peak(window: 0.015), 0.3)
+        XCTAssertEqual(history.peak(window: 0.025), 0.5, "the peak 20 ms back is caught")
+        // Interpolated between neighbours; past the newest within the gap; too old is unknown.
+        XCTAssertEqual(history.rate(at: 1.005)!, 0.3, accuracy: 1e-9)
+        XCTAssertEqual(history.rate(at: 1.04)!, 0.3, accuracy: 1e-9)
+        XCTAssertNil(history.rate(at: 1.2))
+        XCTAssertNil(history.rate(at: 0.9))
+        // The ring drops the oldest: 0.1 at t=1.00 is gone, so t=1.00 is no longer covered.
+        history.append(time: 1.04, rate: 0.4)
+        XCTAssertNil(history.rate(at: 0.99))
+        XCTAssertEqual(history.peak(window: 1), 0.5)
+        history.append(time: 1.05, rate: 0.1)
+        XCTAssertEqual(history.peak(window: 1), 0.4, "0.5 fell out of the ring")
+    }
+
     func testDepthPercentileSkipsInvalidAndLowConfidence() {
         let depths: [Float] = [0, .nan, 0.5, 1.0, 1.5, 2.0, 3.0, 9.0]
         let conf: [UInt8] = [2, 2, 0, 2, 2, 2, 2, 1]

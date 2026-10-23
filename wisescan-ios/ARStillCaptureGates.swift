@@ -71,6 +71,72 @@ nonisolated enum ARStillCaptureGates {
         return fastest * focalPx * exposure
     }
 
+    /// Recent gyro rates (magnitude, rad/s) in a fixed ring, for the blur gate's peak and the
+    /// per-still check of the rate at capture. Appending and reading cost a few float operations,
+    /// so the gyro callback and the frame path stay as cheap as before.
+    ///
+    /// Why a peak: the pose term above averages rotation over `arStillVelocityWindowSeconds`, which
+    /// smooths hand shake out, while a 2 ms exposure sees the shake at its peak. In the iPhone
+    /// office capture 30% of the stills that pose term passed turned faster than the budget allows
+    /// at capture; with a 50 ms gyro peak also required to pass, 7% did.
+    nonisolated struct GyroHistory: Sendable {
+        private var times: [Double]
+        private var rates: [Double]
+        private var head = 0
+        private(set) var count = 0
+
+        init(capacity: Int) {
+            times = [Double](repeating: 0, count: max(1, capacity))
+            rates = [Double](repeating: 0, count: max(1, capacity))
+        }
+
+        mutating func append(time: Double, rate: Double) {
+            times[head] = time
+            rates[head] = rate
+            head = (head + 1) % times.count
+            count = min(count + 1, times.count)
+        }
+
+        /// Ring slot of the `age`-th newest sample (0 = newest).
+        private func slot(_ age: Int) -> Int { (head - 1 - age + 2 * times.count) % times.count }
+
+        var latest: Double? { count > 0 ? rates[slot(0)] : nil }
+
+        /// Highest rate among the samples within `window` seconds of the newest one (which is
+        /// always included). 0 when empty.
+        func peak(window: Double) -> Double {
+            guard count > 0 else { return 0 }
+            let newest = times[slot(0)]
+            var highest = 0.0
+            for age in 0..<count {
+                let k = slot(age)
+                if newest - times[k] > window { break }
+                highest = max(highest, rates[k])
+            }
+            return highest
+        }
+
+        /// Rate at `time`, interpolated between the samples on either side. Past the newest sample
+        /// it is the newest rate if that is within `maxGap`; nil when the history does not reach
+        /// back to `time` or the nearest sample is further than `maxGap` away.
+        func rate(at time: Double, maxGap: Double = 0.05) -> Double? {
+            guard count > 0 else { return nil }
+            var newer: Int?
+            for age in 0..<count {
+                let k = slot(age)
+                if times[k] <= time {
+                    guard let n = newer else { return time - times[k] <= maxGap ? rates[k] : nil }
+                    let span = times[n] - times[k]
+                    if span > 2 * maxGap { return nil }
+                    let f = span > 0 ? (time - times[k]) / span : 0
+                    return rates[k] + (rates[n] - rates[k]) * f
+                }
+                newer = k
+            }
+            return nil
+        }
+    }
+
     /// Exposure cap for the short-exposure experiment: Auto ISO with a minimum shutter speed, run
     /// the other way round. Returns the shortest exposure the scene's light allows at `isoCeiling`,
     /// clamped to [`floor`, `cap`]. Light is exposure x ISO (auto exposure holds it constant for a
