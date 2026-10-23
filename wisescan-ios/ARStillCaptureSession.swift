@@ -417,12 +417,22 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
 
     /// Focus scan: where the region's box sits in this capture's world, once the AR view has
     /// applied the Start bakes. Call before `startAccepting`.
-    func setRegionPlacement(boxToWorld: simd_float4x4, halfExtents: SIMD3<Float>) {
+    /// `boxToMap` (the box in the map scan's raw frame) and `seat` (the ghost's seat at Start,
+    /// `boxToWorld = seat * boxToMap`) are logged with the drawn region, so the whole frame chain
+    /// can be checked from events.log.
+    func setRegionPlacement(boxToWorld: simd_float4x4, halfExtents: SIMD3<Float>,
+                            boxToMap: simd_float4x4 = matrix_identity_float4x4,
+                            seat: simd_float4x4 = matrix_identity_float4x4) {
         regionPlacement.withLock { $0 = (boxToWorld, halfExtents) }
         setup.regionToWorld = Self.columnMajor(boxToWorld)
-        let t = boxToWorld.columns.3
-        event(String(format: "region placed: centre (%.2f, %.2f, %.2f) m, half extents (%.2f, %.2f, %.2f) m",
-                     t.x, t.y, t.z, halfExtents.x, halfExtents.y, halfExtents.z))
+        func describe(_ m: simd_float4x4) -> String {
+            let yaw = atan2(m.columns.2.x, m.columns.2.z) * 180 / .pi
+            return String(format: "(%.3f, %.3f, %.3f) m yaw %.1f deg", m.columns.3.x, m.columns.3.y, m.columns.3.z, yaw)
+        }
+        let drawn = setup.focusRegion.map { describe($0.transform) } ?? "-"
+        event("region placed: drawn (mesh frame\(setup.focusRegion?.frameIsCanonical == true ? ", canonical" : ", raw")) \(drawn); "
+              + "map raw frame \(describe(boxToMap)); ghost seat \(describe(seat)); capture world \(describe(boxToWorld)); "
+              + String(format: "half extents (%.2f, %.2f, %.2f) m", halfExtents.x, halfExtents.y, halfExtents.z))
     }
 
     /// The AR view applied the dev ICP correction at Start (before any manual nudge).
@@ -568,11 +578,13 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let angularSmear = max(poseSmear, gyroSmear)
         let imageSmear = angularSmear * focalStill
         let budgetPx = AppConstants.arStillBlurBudgetRad * focalStill
-        // Focus scan: how the region sits in this view. Spacing then measures the view change at
-        // the region itself (the angle between the two camera positions seen from its centre, so
-        // an orbit and a sidestep both count) in place of parallax at the near depth.
+        // Focus scan: whether the camera is looking at the region. The LiDAR aim points (what the
+        // centre and four inner image rays hit) landing in the box is the test; it holds for a
+        // large box seen in part, from inside it, or from under a desk. Only without usable depth
+        // does it fall back to the box's centre projecting into the frame. `aimHits` is -1 then.
         let placement = regionPlacement.withLock { $0 }
         var regionView: ARStillCaptureGates.RegionView?
+        var aimHits = -1
         if let placement, fStream > 0 {
             regionView = ARStillCaptureGates.regionView(
                 boxToWorld: placement.boxToWorld, halfExtents: placement.halfExtents, cameraToWorld: transform,
@@ -580,21 +592,31 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                 cx: Double(camera.intrinsics[2][0]), cy: Double(camera.intrinsics[2][1]),
                 width: Double(camera.imageResolution.width), height: Double(camera.imageResolution.height),
                 centreMargin: AppConstants.focusRegionCentreMargin)
+            if let depth = frame.sceneDepth {
+                let aim = Self.aimPoints(depth, camera: camera)
+                if !aim.isEmpty {
+                    aimHits = ARStillCaptureGates.pointsInRegion(aim, boxToWorld: placement.boxToWorld,
+                                                                 halfExtents: placement.halfExtents,
+                                                                 margin: AppConstants.focusRegionAimMarginM)
+                }
+            }
         }
+        // Spacing: a turn, or a sideways move's parallax at the near depth, as for the room scan;
+        // for a focus scan an orbit around the region counts too (the view angle at its centre).
         // Immutable: `view` is read inside the stats lock's @Sendable closure below.
         let baseView = lastStillTransform.map {
             ARStillCaptureGates.viewpointChange(from: $0, to: transform, depth: gateDepth)
         } ?? (rotationDeg: 0.0, parallaxDeg: 0.0)
         let view: (rotationDeg: Double, parallaxDeg: Double)
         if let placement, let last = lastStillTransform {
-            view = (rotationDeg: baseView.rotationDeg,
-                    parallaxDeg: ARStillCaptureGates.regionViewAngleDeg(
-                        from: ARStillCaptureGates.position(last), to: ARStillCaptureGates.position(transform),
-                        centre: ARStillCaptureGates.position(placement.boxToWorld)))
+            let orbit = ARStillCaptureGates.regionViewAngleDeg(
+                from: ARStillCaptureGates.position(last), to: ARStillCaptureGates.position(transform),
+                centre: ARStillCaptureGates.position(placement.boxToWorld))
+            view = (rotationDeg: baseView.rotationDeg, parallaxDeg: max(baseView.parallaxDeg, orbit))
         } else {
             view = baseView
         }
-        let inView = regionView?.centreInFrame ?? false
+        let inView = aimHits >= 0 ? aimHits > 0 : (regionView?.centreInFrame ?? false)
         let regionCoverage = regionView?.frameCoverage ?? 0
         let regionDistance = regionView?.distance ?? 0
         let regionAzimuth = regionView?.azimuthDeg ?? 0
@@ -643,19 +665,19 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             return
         }
         if let regionView {
-            let regionHold: Hold? = !regionView.centreInFrame ? .outOfView
-                : regionView.frameCoverage < AppConstants.focusMinFrameCoverage ? .tooFar : nil
+            // Off the region, or (from outside, the whole box in front) too small in the frame.
+            let tooSmall = !regionView.upClose && regionView.frameCoverage < AppConstants.focusMinFrameCoverage
+            let regionHold: Hold? = !inView ? .outOfView : tooSmall ? .tooFar : nil
             if let regionHold {
                 live.withLock { $0.heldRegionFrames += 1; $0.hold = regionHold }
                 return
             }
         }
         // A focus scan spaces by its detail level and fires on view changes only (a pause in
-        // front of the region takes one still, not one a second). The change is the view angle at
-        // the region alone: turning on the spot (a pan, a wobble) is not a new view of it.
+        // front of the region takes one still, not one a second).
         let sinceLast = lastStillTime < 0 ? Double.infinity : t - lastStillTime
         guard let reason = ARStillCaptureGates.spacingDecision(
-            sinceLast: sinceLast, rotationDeg: placement == nil ? view.rotationDeg : 0, parallaxDeg: view.parallaxDeg,
+            sinceLast: sinceLast, rotationDeg: view.rotationDeg, parallaxDeg: view.parallaxDeg,
             minInterval: AppConstants.arStillMinIntervalSeconds,
             viewpointThresholdDeg: detail?.spacingDeg ?? AppConstants.arStillViewpointThresholdDeg,
             maxInterval: detail == nil ? AppConstants.arStillMaxIntervalSeconds : 0
@@ -683,7 +705,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                                    depthHeld: depthHeld,
                                    thermalState: Self.thermalName(ProcessInfo.processInfo.thermalState),
                                    poseSmear: poseSmear, gyroPeak: gyroPeak, gyroSmear: gyroSmear,
-                                   region: regionView, regionCell: regionCell)
+                                   region: regionView, regionCell: regionCell, regionAimHits: aimHits)
         requestStill(request)
     }
 
@@ -713,6 +735,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         /// Focus scan: the region in the gating frame, and its coverage-dial cell (-1 = none).
         var region: ARStillCaptureGates.RegionView?
         var regionCell: Int
+        /// Focus scan: LiDAR aim points inside the box (0-5), -1 when there was no depth to judge by.
+        var regionAimHits: Int
     }
 
     private func requestStill(_ request: StillRequest) {
@@ -795,9 +819,10 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             row += [captureRate.map(Fmt.f4) ?? "", captureSmear.map(Fmt.f6) ?? "", overBudget.map { $0 ? "1" : "0" } ?? ""]
             if let region = request.region {
                 row += [Fmt.f4(region.frameCoverage), Fmt.f3(region.distance),
-                        Fmt.f3(region.azimuthDeg), Fmt.f3(region.elevationDeg), String(request.regionCell)]
+                        Fmt.f3(region.azimuthDeg), Fmt.f3(region.elevationDeg), String(request.regionCell),
+                        String(request.regionAimHits)]
             } else {
-                row += ["", "", "", "", ""]
+                row += ["", "", "", "", "", ""]
             }
             let line = row.joined(separator: ",")
             ioQueue.async { [self] in
@@ -983,7 +1008,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let pose = "c2w_00,c2w_01,c2w_02,c2w_03,c2w_10,c2w_11,c2w_12,c2w_13,c2w_20,c2w_21,c2w_22,c2w_23"
         let photosHeader = "index,file,host_ts,request_host_ts,latency_s,width,height,exposure_s,iso,tracking,depth_file,confidence_file,depth_width,depth_height,fx,fy,cx,cy,"
             + pose
-            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason,predicted_image_motion_smear_px,predicted_image_motion_smear_rad,short_exposure,exposure_cap_s,gate_depth_held,thermal_state,pose_smear_rad,gate_gyro_peak_rad_s,gate_gyro_smear_rad,capture_gyro_rad_s,capture_gyro_smear_rad,capture_over_budget,region_frame_coverage,region_distance_m,region_azimuth_deg,region_elevation_deg,region_cell"
+            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason,predicted_image_motion_smear_px,predicted_image_motion_smear_rad,short_exposure,exposure_cap_s,gate_depth_held,thermal_state,pose_smear_rad,gate_gyro_peak_rad_s,gate_gyro_smear_rad,capture_gyro_rad_s,capture_gyro_smear_rad,capture_over_budget,region_frame_coverage,region_distance_m,region_azimuth_deg,region_elevation_deg,region_cell,region_aim_hits"
         writers = [
             "photos.csv": ARStillCSVWriter(url: directory.appendingPathComponent("photos.csv"), header: photosHeader),
             "frames.csv": ARStillCSVWriter(url: directory.appendingPathComponent("frames.csv"),
@@ -1166,6 +1191,53 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         return ARStillCaptureGates.depthPercentile(depths, confidences: confs,
                                                    minConfidence: AppConstants.arStillGateMinConfidence,
                                                    percentile: AppConstants.arStillGateDepthPercentile)
+    }
+
+    /// What the camera is looking at: LiDAR points along a few image rays (the centre and four
+    /// points `focusAimRayOffset` in from it toward the corners), each the median of a small
+    /// window of confident depth samples, in world coordinates. Empty without usable depth.
+    static func aimPoints(_ depth: ARDepthData, camera: ARCamera) -> [SIMD3<Float>] {
+        let map = depth.depthMap
+        guard CVPixelBufferGetPixelFormatType(map) == kCVPixelFormatType_DepthFloat32 else { return [] }
+        CVPixelBufferLockBaseAddress(map, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(map, .readOnly) }
+        let w = CVPixelBufferGetWidth(map), h = CVPixelBufferGetHeight(map)
+        guard w > 0, h > 0, let base = CVPixelBufferGetBaseAddress(map) else { return [] }
+        let stride = CVPixelBufferGetBytesPerRow(map) / MemoryLayout<Float32>.stride
+        let floats = base.assumingMemoryBound(to: Float32.self)
+        let confMap = depth.confidenceMap.flatMap { CVPixelBufferGetWidth($0) == w && CVPixelBufferGetHeight($0) == h ? $0 : nil }
+        if let c = confMap { CVPixelBufferLockBaseAddress(c, .readOnly) }
+        defer { if let c = confMap { CVPixelBufferUnlockBaseAddress(c, .readOnly) } }
+        let confBytes = confMap.flatMap { CVPixelBufferGetBaseAddress($0) }?.assumingMemoryBound(to: UInt8.self)
+        let confRow = confMap.map { CVPixelBufferGetBytesPerRow($0) } ?? 0
+
+        let k = camera.intrinsics
+        let fx = Double(k[0][0]), fy = Double(k[1][1]), cx = Double(k[2][0]), cy = Double(k[2][1])
+        let imageW = Double(camera.imageResolution.width), imageH = Double(camera.imageResolution.height)
+        guard fx > 0, fy > 0, imageW > 0, imageH > 0 else { return [] }
+        let offset = AppConstants.focusAimRayOffset
+        let rays: [(Double, Double)] = [(0.5, 0.5), (0.5 - offset, 0.5 - offset), (0.5 + offset, 0.5 - offset),
+                                        (0.5 - offset, 0.5 + offset), (0.5 + offset, 0.5 + offset)]
+        let radius = AppConstants.focusAimWindowRadius
+        var points: [SIMD3<Float>] = []
+        for (nx, ny) in rays {
+            let px = min(w - 1, max(0, Int(nx * Double(w)))), py = min(h - 1, max(0, Int(ny * Double(h))))
+            var samples: [Float] = []
+            for y in max(0, py - radius)...min(h - 1, py + radius) {
+                for x in max(0, px - radius)...min(w - 1, px + radius) {
+                    let d = floats[y * stride + x]
+                    let conf = confBytes?[y * confRow + x] ?? 2
+                    if d.isFinite, d > 0.05, conf >= AppConstants.arStillGateMinConfidence { samples.append(d) }
+                }
+            }
+            guard !samples.isEmpty else { continue }
+            samples.sort()
+            let d = Double(samples[samples.count / 2])
+            points.append(ARStillCaptureGates.unproject(u: nx * imageW, v: ny * imageH, depth: d,
+                                                        fx: fx, fy: fy, cx: cx, cy: cy,
+                                                        cameraToWorld: camera.transform))
+        }
+        return points
     }
 
     /// 8-bit greyscale PNG of raw values (confidence 0/1/2 stays 0/1/2).

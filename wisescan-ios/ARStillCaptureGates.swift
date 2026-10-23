@@ -200,6 +200,9 @@ nonisolated enum ARStillCaptureGates {
         /// Share of the image the box's projected bounding rectangle covers (clipped to the
         /// image), 0...1. 1 when the camera is inside or right up against the box.
         var frameCoverage: Double
+        /// The camera is inside the box, or part of the box reaches behind the camera: up close,
+        /// where the projection says little and "too far" does not apply.
+        var upClose: Bool = false
         /// Camera to box centre, metres.
         var distance: Double
         /// Where the camera is, seen from the box centre in the box's own axes: azimuth 0...360
@@ -229,9 +232,15 @@ nonisolated enum ARStillCaptureGates {
 
         var coverage = 0.0
         let projected = FocusRegion.corners(of: boxToWorld, halfExtents: halfExtents).map(project)
-        if projected.contains(where: { $0.depth <= AppConstants.focusRegionNearPlaneM }) {
+        let cameraLocal = boxToWorld.inverse * SIMD4<Float>(camera, 1)
+        let inside = abs(cameraLocal.x) <= halfExtents.x && abs(cameraLocal.y) <= halfExtents.y
+            && abs(cameraLocal.z) <= halfExtents.z
+        let cornerBehind = projected.contains(where: { $0.depth <= AppConstants.focusRegionNearPlaneM })
+        if inside {
+            coverage = 1
+        } else if cornerBehind {
             // A corner at or behind the camera: up against the box, or partly behind us. Seen
-            // head-on that fills the frame; otherwise the box is not in view.
+            // head-on that fills the frame; otherwise the projection says little.
             coverage = centreIn ? 1 : 0
         } else {
             let us = projected.map { $0.u }, vs = projected.map { $0.v }
@@ -248,9 +257,33 @@ nonisolated enum ARStillCaptureGates {
         var azimuth = atan2(Double(local.x), Double(local.z)) * 180 / .pi
         if azimuth < 0 { azimuth += 360 }
         let elevation = atan2(Double(local.y), horizontal) * 180 / .pi
-        return RegionView(centreInFrame: centreIn, frameCoverage: min(1, coverage),
+        return RegionView(centreInFrame: centreIn, frameCoverage: min(1, coverage), upClose: inside || cornerBehind,
                           distance: Double(simd_length(camera - centre)),
                           azimuthDeg: azimuth, elevationDeg: elevation)
+    }
+
+    /// How many of `points` (world positions the LiDAR depth puts along a few image rays: what the
+    /// camera is actually looking at) lie inside the box grown by `margin` on every side. The
+    /// robust "is the camera on the region" test: unlike the box centre being in frame, it holds
+    /// for a large box seen in part, from inside it, or from under a desk.
+    static func pointsInRegion(_ points: [SIMD3<Float>], boxToWorld: simd_float4x4,
+                               halfExtents: SIMD3<Float>, margin: Float) -> Int {
+        let toBox = boxToWorld.inverse
+        let h = halfExtents + SIMD3<Float>(repeating: max(0, margin))
+        return points.filter { point in
+            let l = toBox * SIMD4<Float>(point, 1)
+            return abs(l.x) <= h.x && abs(l.y) <= h.y && abs(l.z) <= h.z
+        }.count
+    }
+
+    /// World position of the scene at image pixel (u, v) and camera-space `depth` (ARKit scene
+    /// depth is along the view axis): the camera looks down -Z with +Y up, pixel v runs down.
+    static func unproject(u: Double, v: Double, depth: Double, fx: Double, fy: Double, cx: Double, cy: Double,
+                          cameraToWorld: simd_float4x4) -> SIMD3<Float> {
+        let x = (u - cx) / fx * depth
+        let y = -(v - cy) / fy * depth
+        let world = cameraToWorld * SIMD4<Float>(Float(x), Float(y), Float(-depth), 1)
+        return SIMD3<Float>(world.x, world.y, world.z)
     }
 
     /// Coverage-dial cell for a view direction: `azimuthBins` sectors per ring, rings split at

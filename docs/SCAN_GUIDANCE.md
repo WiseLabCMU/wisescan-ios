@@ -114,7 +114,7 @@ the region has been photographed from.
 | `none` / `saving` | A still was taken or is being saved | "Capturing" |
 | `tracking` | Tracking not normal | "Hold on, finding tracking" |
 | `motion` | Blur gate: the camera moves too fast for the exposure | "Hold steadier" |
-| `outOfView` | The box's centre is not in the frame (with a 10% margin) | "Point at the box" |
+| `outOfView` | The LiDAR depth along the image centre and four inner rays misses the box (without depth: its centre is not in the frame, 10% margin) | "Point at the box" |
 | `tooFar` | The box fills less than `focusMinFrameCoverage` (4%) of the frame | "Move closer" |
 | `sameView` | The view of the box has not changed by the detail level's spacing | "Move to a new angle" |
 

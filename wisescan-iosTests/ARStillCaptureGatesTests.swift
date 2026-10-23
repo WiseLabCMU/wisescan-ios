@@ -177,6 +177,35 @@ final class ARStillCaptureGatesTests: XCTestCase {
         XCTAssertEqual(view(pose(SIMD3(0, 2, 0))).elevationDeg, 45, accuracy: 1e-3)
     }
 
+    func testAimPointsDecideTheRegionFromInsideAndUnderneath() {
+        // A desk-sized region: 1.5 x 1.8 x 0.8 m, centred 0.9 m up.
+        var box = matrix_identity_float4x4
+        box.columns.3 = SIMD4(0, 0.9, 0, 1)
+        let half = SIMD3<Float>(0.75, 0.9, 0.4)
+        // Camera inside the box, looking at its far end: the centre is not ahead, but the depth
+        // says the camera looks at the region's far side.
+        let inside = pose(SIMD3(0.6, 1.2, 0), yawDeg: 90)   // looking down -X
+        let view = ARStillCaptureGates.regionView(boxToWorld: box, halfExtents: half, cameraToWorld: inside,
+                                                  fx: 1000, fy: 1000, cx: 960, cy: 720, width: 1920, height: 1440)
+        XCTAssertTrue(view.upClose)
+        XCTAssertEqual(view.frameCoverage, 1)
+        let hit = ARStillCaptureGates.unproject(u: 960, v: 720, depth: 1.0, fx: 1000, fy: 1000, cx: 960, cy: 720,
+                                                cameraToWorld: inside)
+        XCTAssertEqual(hit.x, -0.4, accuracy: 1e-4, "1 m down -X from x = 0.6")
+        XCTAssertEqual(ARStillCaptureGates.pointsInRegion([hit], boxToWorld: box, halfExtents: half, margin: 0.05), 1)
+        // The same camera looking at a wall 3 m away: outside the box.
+        let wall = ARStillCaptureGates.unproject(u: 960, v: 720, depth: 3.0, fx: 1000, fy: 1000, cx: 960, cy: 720,
+                                                 cameraToWorld: inside)
+        XCTAssertEqual(ARStillCaptureGates.pointsInRegion([wall], boxToWorld: box, halfExtents: half, margin: 0.05), 0)
+        // Under the desk looking up at its underside (0.7 m up): inside the box, so on the region.
+        let underside = SIMD3<Float>(0.1, 0.7, 0.1)
+        XCTAssertEqual(ARStillCaptureGates.pointsInRegion([underside], boxToWorld: box, halfExtents: half, margin: 0), 1)
+        // The margin admits a surface just outside a face.
+        let justOutside = SIMD3<Float>(0.78, 0.9, 0)
+        XCTAssertEqual(ARStillCaptureGates.pointsInRegion([justOutside], boxToWorld: box, halfExtents: half, margin: 0), 0)
+        XCTAssertEqual(ARStillCaptureGates.pointsInRegion([justOutside], boxToWorld: box, halfExtents: half, margin: 0.05), 1)
+    }
+
     func testCoverageBinsAndRegionViewAngle() {
         let edges = [20.0, 50.0]
         XCTAssertEqual(ARStillCaptureGates.coverageBin(azimuthDeg: 0, elevationDeg: 0, azimuthBins: 12, elevationEdgesDeg: edges), 0)

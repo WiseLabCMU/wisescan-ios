@@ -772,7 +772,8 @@ struct ARCoverageView: UIViewRepresentable {
         coordinator.ghostAnchorEntity?.removeFromParent()
         if let focusBox {
             coordinator.focusBoxAnchor?.transform = Transform(matrix: seat)
-            stillCapture?.setRegionPlacement(boxToWorld: seat * focusBox.boxToMap, halfExtents: focusBox.halfExtents)
+            stillCapture?.setRegionPlacement(boxToWorld: seat * focusBox.boxToMap, halfExtents: focusBox.halfExtents,
+                                             boxToMap: focusBox.boxToMap, seat: seat)
         }
         stillCapture?.startAccepting()
     }

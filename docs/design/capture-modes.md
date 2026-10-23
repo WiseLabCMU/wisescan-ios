@@ -131,7 +131,7 @@ focus capture with the region loaded. Delivery from the server (polling) waits f
 - **The 360° rig keeps its tap.** With a Theta connected, the tap still arms a phone still with the
   360° still: the rig calibration needs the co-timed pair. The stillness reticle and chime follow.
 - **Room-scan spacing** is 15° of turn or parallax, or 0.5 m walked, one request at most every 0.5 s (2 s when hot). On the rig, a held pause belongs to the tap (no automatic still while confirmed still), and a tap during an automatic still in flight adopts it.
-- **Focus-scan spacing** counts the view angle at the region only; turning on the spot is not a new view.
+- **Focus-scan region test** is LiDAR-based: the depth along the image centre and four inner rays must land in the box (a large box seen in part, from inside it or from under a desk counts); the box centre in frame is only the no-depth fallback. Spacing is a turn, parallax at the near depth, or an orbit around the region.
 - **Coverage dial** cells: 12 sectors of azimuth around the region's own axes x 3 elevation rings
   (below 20°, 20 to 50°, above 50°).
 - **Focus card**: the best still (sharp at capture, region share of the frame nearest 35%) and the

@@ -527,7 +527,10 @@ enum AppConstants {
     static let focusRegionMaxSizeM: Float = 10                 // a region larger than this on any side is rejected (a room scan's job)
     static let focusRegionNearPlaneM: Double = 0.05            // a box corner this close to the camera (or behind it) means "up against the box"
     static let focusRegionCentreMargin: Double = 0.1           // the box centre must project at least this far (fraction of the image) inside every edge
-    static let focusMinFrameCoverage: Double = 0.04            // and the box must fill at least this share of the frame (else "move closer")
+    static let focusMinFrameCoverage: Double = 0.04            // and the box must fill at least this share of the frame (else "move closer"); not applied up close or inside the box
+    static let focusAimRayOffset: Double = 0.2                 // "looking at the region" = LiDAR depth along the image centre and 4 rays this far (fraction of the image) toward the corners lands in the box
+    static let focusAimWindowRadius: Int = 2                   // each aim point is the median of a (2r+1)^2 window of confident depth pixels
+    static let focusRegionAimMarginM: Float = 0.05             // the box counts this much larger for the aim test (surfaces on its faces)
     static let focusCoverageAzimuthBins: Int = 12              // coverage dial: 30-degree sectors around the region
     static let focusCoverageElevationEdgesDeg: [Double] = [20, 50] // and three rings: low (< 20 deg above the region's middle), mid, high (>= 50)
     static let focusRegionURLScheme = "scan4d"                 // scan4d://focus-region?data=<base64url focus_region.json> (Custom-Info.plist CFBundleURLTypes)

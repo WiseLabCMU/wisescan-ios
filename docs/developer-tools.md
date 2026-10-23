@@ -88,11 +88,16 @@ folder) instead of the experiment's zip.
 
 **Region.** `ARCoverageView.beginStillCapture` places the box in the capture world after the
 bakes (the ghost's seat: identity after a nudge or ICP bake, else the visual auto-align) and hands
-it to the engine (`setRegionPlacement`, `setup.regionToWorld`). Per frame the engine projects the
-box (`ARStillCaptureGates.regionView`): stills need its centre in frame (10% margin) and at least
-`focusMinFrameCoverage` of the frame; spacing is the detail level's, measured as the view angle at
-the region's centre (orbit or sidestep) or the camera's turn, with no time trigger. `photos.csv`
-carries the region columns and `totals.coverage_counts` the dial's cells.
+it to the engine (`setRegionPlacement`, `setup.regionToWorld`); events.log records the chain
+("region placed": drawn in the mesh frame, in the map's raw frame, the ghost seat, the capture
+world). Per frame the engine asks whether the camera looks into the box: LiDAR depth along the
+image centre and four rays `focusAimRayOffset` toward the corners (`aimPoints`), unprojected, must
+land inside it grown by `focusRegionAimMarginM` (`ARStillCaptureGates.pointsInRegion`;
+`region_aim_hits` per still). Only without usable depth does the box centre have to project into
+the frame. From outside with the whole box in front, it must also fill `focusMinFrameCoverage` of
+the frame. Spacing is the detail level's: a turn, or parallax at the near depth, or an orbit (the
+view angle at the region's centre), with no time trigger. `photos.csv` carries the region columns
+and `totals.coverage_counts` the dial's cells.
 
 **Start** goes through the same pre-start gates as a rescan's record tap (tracking out of
 cold init; with Perf Diagnostics, the short hold for the ICP correction), computes the same
