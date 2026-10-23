@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Scan4D Focus Region JSON Schema",
+  "description": "The box a focus scan captures (docs/design/capture-modes.md). Written beside each focus scan (focus_region.json, also at the root of its export zip), and the format a downstream processor (e.g. a VLM) hands the app to request a focus scan: by deep link scan4d://focus-region?data=<base64url of this JSON>, or as a file imported from a space's Rescan button. Gravity-aligned: the box turns about +Y only. Metres and radians.",
+  "type": "object",
+  "required": ["center_m", "size_m"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "description": "Format version. Currently 1. Optional on import."
+    },
+    "location_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The space (ScanLocation id) the region belongs to. Required for a deep link (it picks the space to open); ignored for a file imported inside a space."
+    },
+    "center_m": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "Box centre [x, y, z] in metres, in the frame named by frame_is_canonical / frame_scan_id. +Y is up (gravity)."
+    },
+    "yaw_rad": {
+      "type": "number",
+      "description": "Turn of the box about +Y, radians (right-handed; 0 = box axes along the frame's axes). Default 0."
+    },
+    "size_m": {
+      "type": "array",
+      "items": { "type": "number", "exclusiveMinimum": 0, "maximum": 10 },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "Full box size [width (local x), height (y), depth (local z)] in metres. Each side positive and at most 10 m (larger is a room scan's job)."
+    },
+    "label": {
+      "type": "string",
+      "description": "Human label shown on the scan card, e.g. \"work table\". Optional."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["user", "roomplan", "import"],
+      "description": "How the region was made: drawn on the mesh, taken from a RoomPlan object, or handed to the app. Imports are recorded as \"import\" whatever they say."
+    },
+    "detail_level": {
+      "type": "string",
+      "enum": ["check", "detail", "splat"],
+      "description": "How much to capture: check (about 5 photos, finishes by itself), detail (about 30), splat (150 or more, for reconstruction). Default check."
+    },
+    "frame_scan_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The room scan whose mesh frame the box is in, when drawn in the app. Optional on import."
+    },
+    "frame_is_canonical": {
+      "type": "boolean",
+      "description": "True (default): the box is in the space's canonical frame, the original scan's frame, which every registered room scan's mesh.obj, roomplan.json and the exports' mesh share. False: in frame_scan_id's raw capture frame (an unregistered scan)."
+    },
+    "created_at_ms": {
+      "type": "integer",
+      "description": "UTC epoch milliseconds. Optional on import (set to the import time)."
+    }
+  },
+  "additionalProperties": true
+}

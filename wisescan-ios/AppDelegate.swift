@@ -116,6 +116,9 @@ struct Scan4DApp: App {
             } else {
                 ContentView()
                     .onOpenURL { url in
+                        // A focus region handed over by a downstream processor (FocusRegionInbox);
+                        // everything else is the Meta Wearables SDK's.
+                        if FocusRegionInbox.shared.receive(url) { return }
                         Task {
                             do {
                                 _ = try await Wearables.shared.handleUrl(url)

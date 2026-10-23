@@ -52,6 +52,14 @@
 				<string>wisescandat</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>org.arenaxr.scan4d.focus-region</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>scan4d</string>
+			</array>
+		</dict>
 	</array>
 </dict>
 </plist>

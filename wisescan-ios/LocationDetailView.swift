@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
 
 // swiftlint:disable type_body_length
 struct LocationDetailView: View {
@@ -52,9 +53,13 @@ struct LocationDetailView: View {
     @State private var isBulkExporting = false
     @State private var exportItems: [ZipExportItem] = []
     @State private var showExportSheet = false
-    /// Rescan asks what to capture: the whole room, or a focus region (drawn in the editor).
+    /// Rescan asks what to capture: the whole room, or a focus region (drawn in the editor, or
+    /// imported from a focus_region.json and opened in the editor to check).
     @State private var showRescanChoice = false
     @State private var showRegionEditor = false
+    @State private var showRegionImporter = false
+    @State private var importedRegion: FocusRegion?
+    @State private var regionImportError: String?
 
     /// Composed from four independently type-checked pieces — same surgery as
     /// CaptureView.body (#56): measured at **14,345 ms** to type-check, second only to
@@ -359,9 +364,9 @@ struct LocationDetailView: View {
                 isBulkExporting = false
             }
         }
-        .fullScreenCover(isPresented: $showRegionEditor) {
+        .fullScreenCover(isPresented: $showRegionEditor, onDismiss: { importedRegion = nil }) {
             if let latest = location.latestRoomScan {
-                FocusRegionEditorView(scan: latest, onScan: { region in
+                FocusRegionEditorView(scan: latest, initialRegion: importedRegion, onScan: { region in
                     showRegionEditor = false
                     startRescan(latest, focus: region)
                 }, onCancel: { showRegionEditor = false })
@@ -371,11 +376,55 @@ struct LocationDetailView: View {
             if let latest = location.latestRoomScan {
                 Button("Whole room") { startRescan(latest) }
                 Button("Focus on a region") { showRegionEditor = true }
+                Button("Import a region file") { showRegionImporter = true }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("A whole-room scan updates the room's mesh and photos. A focus scan photographs one region in detail (a partial scan).")
         }
+        .fileImporter(isPresented: $showRegionImporter, allowedContentTypes: [.json]) { result in
+            importRegionFile(result)
+        }
+        .alert("Region not imported", isPresented: Binding(get: { regionImportError != nil },
+                                                           set: { if !$0 { regionImportError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(regionImportError ?? "")
+        }
+        // A region handed over by deep link for this space (ContentView opened it).
+        .onAppear { takeInboxRegion() }
+        .onChange(of: FocusRegionInbox.shared.pending) { _, _ in takeInboxRegion() }
+    }
+
+    /// A focus_region.json picked from Files: opened in the editor on this space's latest room
+    /// scan, to check and adjust before scanning.
+    private func importRegionFile(_ result: Result<URL, Error>) {
+        switch result {
+        case .failure(let error):
+            regionImportError = error.localizedDescription
+        case .success(let url):
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url) else {
+                regionImportError = "The file could not be read."
+                return
+            }
+            switch FocusRegionInbox.region(fromJSON: data) {
+            case .success(let region):
+                importedRegion = region
+                showRegionEditor = true
+            case .failure(let error):
+                regionImportError = error.localizedDescription
+            }
+        }
+    }
+
+    private func takeInboxRegion() {
+        guard let region = FocusRegionInbox.shared.pending, region.locationId == location.id,
+              location.latestRoomScan != nil else { return }
+        FocusRegionInbox.shared.pending = nil
+        importedRegion = region
+        showRegionEditor = true
     }
 
     /// Rename/world-map alerts, the gate/bulk modifier stack, and the confirmation dialog.

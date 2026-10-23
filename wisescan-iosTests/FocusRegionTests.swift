@@ -4,6 +4,7 @@ import simd
 
 /// The focus-scan region: its JSON (also the import format a downstream processor writes) and the
 /// box math the capture gate and the viewer rely on.
+@MainActor
 final class FocusRegionTests: XCTestCase {
 
     func testJSONRoundTripUsesExplicitKeys() throws {
@@ -51,6 +52,32 @@ final class FocusRegionTests: XCTestCase {
         XCTAssertFalse(FocusRegion(center: .zero, size: SIMD3(0, 1, 1)).isValid)
         XCTAssertFalse(FocusRegion(center: .zero, size: SIMD3(1, 1, 50)).isValid, "room-sized is not a focus region")
         XCTAssertFalse(FocusRegion(center: SIMD3(.nan, 0, 0), size: SIMD3(1, 1, 1)).isValid)
+    }
+
+    func testDeepLinkCarriesARegion() throws {
+        let json = #"{"center_m":[1,0.8,-2],"size_m":[1.2,0.6,0.8],"label":"work table","detail_level":"detail","source":"user"}"#
+        let base64url = Data(json.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let url = try XCTUnwrap(URL(string: "scan4d://focus-region?data=\(base64url)"))
+        let region = try FocusRegionInbox.region(from: url).get()
+        XCTAssertEqual(region.label, "work table")
+        XCTAssertEqual(region.detail, .detail)
+        XCTAssertEqual(region.source, .imported, "an import is recorded as one whatever it says")
+
+        var components = URLComponents()
+        components.scheme = "scan4d"
+        components.host = "focus-region"
+        components.queryItems = [URLQueryItem(name: "json", value: json)]
+        XCTAssertEqual(try FocusRegionInbox.region(from: try XCTUnwrap(components.url)).get().size, SIMD3(1.2, 0.6, 0.8))
+    }
+
+    func testDeepLinkRefusals() throws {
+        XCTAssertEqual(FocusRegionInbox.region(from: try XCTUnwrap(URL(string: "wisescandat://callback"))), .failure(.notARegionLink))
+        XCTAssertEqual(FocusRegionInbox.region(from: try XCTUnwrap(URL(string: "scan4d://focus-region"))), .failure(.noPayload))
+        XCTAssertEqual(FocusRegionInbox.region(from: try XCTUnwrap(URL(string: "scan4d://focus-region?data=@@@"))), .failure(.undecodable))
+        let huge = #"{"center_m":[0,0,0],"size_m":[1,1,40]}"#
+        XCTAssertEqual(FocusRegionInbox.region(fromJSON: Data(huge.utf8)), .failure(.invalidBox))
     }
 
     func testDetailLevelsTightenSpacingAndRaiseTargets() {

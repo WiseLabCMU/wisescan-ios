@@ -14,6 +14,9 @@ import simd
 /// draws the mesh shifted by the location's canonical room centre, and the editor adds it back.
 struct FocusRegionEditorView: View {
     let scan: CapturedScan
+    /// An imported region (deep link or file) to start from, as handed over; drawn on this scan's
+    /// mesh to check and adjust.
+    var initialRegion: FocusRegion?
     let onScan: (FocusRegion) -> Void
     let onCancel: () -> Void
 
@@ -60,6 +63,15 @@ struct FocusRegionEditorView: View {
             sceneCentre = MeshPreviewView.canonicalFrameCenter(for: scan.location) ?? .zero
             let isOriginal = ScanPostprocessor.original(of: scan)?.id == scan.id
             frameIsCanonical = isOriginal || SaveRegistration.appliedTransform(scanDirectory: scan.scanDirectory) != nil
+            if region == nil, let initialRegion {
+                // An imported box is in the canonical frame; this mesh is too once its scan's
+                // registration applied, and otherwise its raw frame is the only one known
+                // (no transform to apply), so the coordinates carry over either way.
+                detail = initialRegion.detail
+                label = initialRegion.label
+                place(initialRegion)
+                region?.source = initialRegion.source
+            }
         }
     }
 

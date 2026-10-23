@@ -529,6 +529,8 @@ enum AppConstants {
     static let focusMinFrameCoverage: Double = 0.04            // and the box must fill at least this share of the frame (else "move closer")
     static let focusCoverageAzimuthBins: Int = 12              // coverage dial: 30-degree sectors around the region
     static let focusCoverageElevationEdgesDeg: [Double] = [20, 50] // and three rings: low (< 20 deg above the region's middle), mid, high (>= 50)
+    static let focusRegionURLScheme = "scan4d"                 // scan4d://focus-region?data=<base64url focus_region.json> (Custom-Info.plist CFBundleURLTypes)
+    static let focusRegionURLHost = "focus-region"
     static let focusCaptureFolder = "focus_capture"            // a focus scan's still-capture dump, inside its scan folder
     static let focusRegionFilename = "focus_region.json"       // its region, beside it (and at the export zip's root)
     static let focusThumbnailMaxPixel: Int = 640               // card thumbnail: the best still, downsampled during decode

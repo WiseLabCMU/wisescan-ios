@@ -66,6 +66,38 @@ struct ContentView: View {
         } message: {
             Text("This device does not have a LiDAR sensor. You can still capture images and camera poses for server-side photogrammetry, but real-time 3D mesh, depth, and coverage overlay features are unavailable.")
         }
+        // A focus region handed over by deep link (FocusRegionInbox): open its space, whose
+        // detail view takes the region into the editor. Refusals surface as an alert.
+        .onChange(of: FocusRegionInbox.shared.pending) { _, region in
+            guard let region else { return }
+            openSpace(for: region)
+        }
+        .alert("Focus region not opened", isPresented: Binding(
+            get: { FocusRegionInbox.shared.lastError != nil },
+            set: { if !$0 { FocusRegionInbox.shared.lastError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(FocusRegionInbox.shared.lastError ?? "")
+        }
+    }
+
+    /// The space a handed-over region names; without a known one the region is refused (a file
+    /// picked inside a space's Rescan sheet needs no id).
+    private func openSpace(for region: FocusRegion) {
+        guard let locationId = region.locationId else {
+            FocusRegionInbox.shared.pending = nil
+            FocusRegionInbox.shared.lastError = "The focus region does not say which space it belongs to (location_id). Import it from that space's Rescan button instead."
+            return
+        }
+        let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locationId })
+        guard let location = try? modelContext.fetch(descriptor).first, location.latestRoomScan != nil else {
+            FocusRegionInbox.shared.pending = nil
+            FocusRegionInbox.shared.lastError = "The space this focus region names is not on this device, or has no room scan to draw it on."
+            return
+        }
+        selectedTab = 2
+        scanStore.navigationPath = NavigationPath()
+        scanStore.navigationPath.append(location)
     }
 }
 
