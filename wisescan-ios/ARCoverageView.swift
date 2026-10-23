@@ -760,6 +760,9 @@ struct ARCoverageView: UIViewRepresentable {
             stillCapture?.noteICPBake(icpBake)
             coordinator.pendingICPBake = nil
             coordinator.icpRefineCandidates.removeAll()
+            // As at record start: the bake moved the world onto the ghost, so the visual
+            // auto-align (measured pre-bake) is stale and the ghost's seat is identity.
+            coordinator.ghostAutoAlign = matrix_identity_float4x4
             PerfDiag.log("[ARStill] applied the gravity-locked ICP bake at capture start")
         }
         if let baked = bakedGhostTransform {
@@ -1541,6 +1544,10 @@ struct ARCoverageView: UIViewRepresentable {
                       !self.manualNudgeActive.load(ordering: .relaxed) else { return }
                 self.ghostAutoAlign = fit
                 self.ghostAnchorEntity?.transform = Transform(matrix: fit)
+                // The focus region rides the ghost's seat until Start (then it is fixed).
+                if !self.isStillCapturing {
+                    self.focusBoxAnchor?.transform = Transform(matrix: fit)
+                }
                 // Publish the fit so the adjacent-connect can compose it into pinA at Confirm — the
                 // stitch anchor then lands in the ghost's raw frame, not the raw relocalization pose.
                 // Best-not-latest: only a tighter-RMS seat replaces the published fit (pinA has no

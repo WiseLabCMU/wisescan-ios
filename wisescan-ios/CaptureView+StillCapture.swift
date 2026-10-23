@@ -6,6 +6,14 @@ import simd
 
 // MARK: - Focus scan: the still-capture branch of a rescan (docs/design/capture-modes.md)
 
+/// Where a focus capture files: snapshotted at Start, because leaving the capture tab resets the
+/// capture state while the stills are still draining.
+struct FocusScanTarget: Equatable {
+    var locationId: UUID
+    var region: FocusRegion
+    var parentScanId: UUID?
+}
+
 /// A focus scan is the Rescan flow up to Start: same entry (LocationDetailView.startRescan with a
 /// focus request), same world map, gates, relocalization, ghost, alignment and manual nudge. Only
 /// Start and Stop differ. Start computes the same manual-nudge bake as `startRecording`, then
@@ -65,26 +73,46 @@ extension CaptureView {
             showTransientMessage("AR session not ready", duration: 3)
             return
         }
-        if ghostXOffset != 0 || ghostYRotation != 0 || ghostZOffset != 0 {
+        guard let locationId = scanStore.activeLocationForScan, let region = scanStore.activeFocusRequest?.region else {
+            showTransientMessage("No focus region: start a focus scan from the space's Rescan button", duration: 4,
+                                 systemImage: "exclamationmark.triangle.fill", tint: .orange)
+            return
+        }
+        let nudged = ghostXOffset != 0 || ghostYRotation != 0 || ghostZOffset != 0
+        if nudged {
             let rotation = simd_quatf(angle: ghostYRotation, axis: [0, 1, 0])
             let translation = SIMD3<Float>(ghostXOffset, 0, ghostZOffset)
             bakedGhostTransform = Transform(rotation: rotation, translation: translation).matrix
-            ghostYRotation = 0
-            ghostXOffset = 0
-            ghostZOffset = 0
         } else {
             bakedGhostTransform = nil
         }
-        showManualAdjust = false
         let context = stillCaptureFrameContext()
-        guard stillCapture.begin(session: session, label: resolveCurrentLocationName(), context: context) else { return }
+        guard stillCapture.begin(session: session, label: resolveCurrentLocationName(), context: context) else {
+            // Nothing started: keep the operator's nudge (the sliders still hold it) for a retry.
+            if case .failed(let reason) = stillCapture.phase {
+                showTransientMessage("Focus scan could not start: \(reason)", duration: 5,
+                                     systemImage: "xmark.octagon.fill", tint: .red)
+            }
+            stillCapture.reset()
+            bakedGhostTransform = nil
+            return
+        }
+        // The nudge is baked at Start (ARCoverageView.beginStillCapture), so the sliders zero now.
+        if nudged {
+            ghostYRotation = 0
+            ghostXOffset = 0
+            ghostZOffset = 0
+        }
+        showManualAdjust = false
+        focusScanTarget = FocusScanTarget(locationId: locationId, region: region, parentScanId: scanStore.activeScanToExtend)
         isStillCapturing = true
     }
 
+    /// Drains the engine; its completion files the scan (on main, even off-screen).
     func stopStillCapture() {
         guard isStillCapturing else { return }
         isStillCapturing = false
-        stillCapture.stop()
+        stillCapture.stop { phase in handleStillCapturePhase(phase) }
     }
 
     /// Check finishes by itself at its target; the other levels run until the operator stops.
@@ -106,6 +134,7 @@ extension CaptureView {
             showTransientMessage("Focus scan failed: \(reason)", duration: 5,
                                  systemImage: "xmark.octagon.fill", tint: .red)
             stillCapture.reset()
+            focusScanTarget = nil
         case .idle, .running, .stopping:
             break
         }
@@ -115,22 +144,27 @@ extension CaptureView {
     /// scan's save does. A capture with no stills is discarded.
     private func saveFocusCapture(_ directory: URL) {
         let stills = stillCapture.stats.stillsSaved
-        guard let locationId = scanStore.activeLocationForScan,
-              let region = scanStore.activeFocusRequest?.region else {
+        guard let target = focusScanTarget else {
+            // Not reachable (Start always snapshots); the stills stay in the staging folder.
             showTransientMessage("Focus scan not saved: the capture lost its space", duration: 5,
                                  systemImage: "exclamationmark.triangle.fill", tint: .orange)
             finishStillCapture()
             return
         }
+        focusScanTarget = nil
+        let locationId = target.locationId, region = target.region
+        // Still the active flow? Leaving the tab mid-drain already reset the capture state, and the
+        // operator may have armed another flow since; neither should be reset or navigated away from.
+        let stillOurs = scanStore.activeFocusRequest?.region == region || scanStore.activeLocationForScan == nil
         guard stills > 0 else {
             try? FileManager.default.removeItem(at: directory)
             showTransientMessage("No photos were taken, nothing saved", duration: 4,
                                  systemImage: "camera.badge.ellipsis", tint: .yellow)
-            finishStillCapture()
+            finishStillCapture(resetCaptureState: stillOurs)
             return
         }
         let result = ScanFileManager.shared.saveFocusScan(
-            context: modelContext, locationId: locationId, parentScanId: scanStore.activeScanToExtend,
+            context: modelContext, locationId: locationId, parentScanId: target.parentScanId,
             region: region, captureDirectory: directory, stillCount: stills,
             hardwareDeviceModel: UIDevice.current.name)
         switch result {
@@ -138,7 +172,8 @@ extension CaptureView {
             showTransientMessage("Focus scan saved: \(stills) photos", duration: 3,
                                  systemImage: "checkmark.circle.fill", tint: .green)
             let location = scan.location
-            finishStillCapture()
+            finishStillCapture(resetCaptureState: stillOurs)
+            guard selectedTab == 1 else { return }   // left the capture tab: no jump to the new scan
             saveNavigationTask = Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(1000))
                 guard !Task.isCancelled else { return }
@@ -151,18 +186,24 @@ extension CaptureView {
         case .failure(let error):
             showTransientMessage(error.localizedDescription, duration: 6,
                                  systemImage: "xmark.octagon.fill", tint: .red)
-            finishStillCapture()
+            finishStillCapture(resetCaptureState: stillOurs)
         }
     }
 
     /// After the scan is filed: leave the rescan the way cancelling one does (clear the capture
-    /// state and the ghost, reset the session to a fresh frame).
-    func finishStillCapture() {
+    /// state and the ghost, reset the session to a fresh frame). `resetCaptureState: false` when
+    /// another flow owns the capture state by now (see saveFocusCapture).
+    func finishStillCapture(resetCaptureState: Bool = true) {
         stillCapture.reset()
+        focusScanTarget = nil
+        guard resetCaptureState else { return }
         scanStore.resetCaptureState()
         cachedGhostMeshData = nil
+        // Swapping onto a map-less config drops the session's reference to the world map;
+        // releasing the cache drops the other (~50 MB).
         let fresh = ARCoverageView.makeFreshConfiguration()
         currentARSession?.run(fresh, options: [.resetTracking, .removeExistingAnchors])
+        ARCoverageView.releaseCachedWorldMap()
     }
 
     /// The region's box in the raw frame of the map being relocalized into (`activeScanToExtend`'s).

@@ -116,6 +116,10 @@ struct FocusCoverageDial: View {
             context.stroke(Path(CGRect(x: centre.x - box, y: centre.y - box, width: box * 2, height: box * 2)),
                            with: .color(.yellow), lineWidth: 1.5)
         }
+        // Azimuth runs from the region's +Z toward its +X, which seen from above (+Z at the top)
+        // is counterclockwise; the cells are laid out clockwise, so mirror the dial to match a
+        // walk around the region.
+        .scaleEffect(x: -1, y: 1)
         .accessibilityLabel("Coverage: \(counts.filter { $0 > 0 }.count) of \(counts.count) directions photographed")
     }
 }

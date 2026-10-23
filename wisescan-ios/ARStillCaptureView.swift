@@ -40,7 +40,9 @@ final class ARStillCaptureController {
         }
     }
 
-    func stop() {
+    /// Drains and finalizes the capture; `onFinish` gets the outcome on main (`.done` with the
+    /// capture directory, or `.failed`) whether or not the capture view is on screen.
+    func stop(onFinish: (@MainActor (Phase) -> Void)? = nil) {
         guard phase == .running else { return }
         phase = .stopping
         engine.stop { [weak self] url in
@@ -49,6 +51,7 @@ final class ARStillCaptureController {
                 stopPolling()
                 stats = engine.liveStats()
                 phase = url.map { .done($0) } ?? .failed("The capture folder was not created")
+                onFinish?(phase)
             }
         }
     }

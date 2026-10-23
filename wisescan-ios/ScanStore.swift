@@ -466,6 +466,9 @@ class ScanStore {
     var activeScanKind: ScanKind = .room
     /// Focus scan: the region and detail level to capture (nil for a room scan).
     var activeFocusRequest: FocusCaptureRequest?
+    /// A room scan is recording or a focus scan is capturing (mirrored from CaptureView's
+    /// `isCapturing`), so app-level navigation (a region deep link) can refuse to leave it.
+    var isCaptureActive = false
 
     // MARK: Capture Phase
 

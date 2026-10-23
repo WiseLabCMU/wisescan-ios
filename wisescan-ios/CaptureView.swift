@@ -49,6 +49,9 @@ struct CaptureView: View {
     /// Focus scan: the region's box in the loaded map's raw frame (refreshFocusBoxPlacement, off
     /// the body: it reads the map scan's registration sidecar).
     @State var focusBoxPlacement: FocusBoxPlacement?
+    /// Focus scan: where the capture files, snapshotted at Start, so leaving the tab (which resets
+    /// the capture state) cannot strand the stills.
+    @State var focusScanTarget: FocusScanTarget?
     /// Recording a room scan or capturing a focus scan. The one state the pre-record safeguards read
     /// (relocalization watchdog, Try Again, Re-relocalize, idle teardown, the leave-capture config
     /// swap): each of those reloads the map or swaps the configuration, which mid-capture resets
@@ -940,10 +943,9 @@ struct CaptureView: View {
             Text("The ghost mesh from your previous scan may not be perfectly aligned. Choose an option:")
         }
         .preferredColorScheme(.dark)
-        // Focus scan: the HUD (and, with Perf Diagnostics, the developer panel), the finished
-        // capture's filing, Check's auto-finish, and the region box. All in CaptureView+StillCapture.
+        // Focus scan: the HUD (and, with Perf Diagnostics, the developer panel), Check's auto-finish,
+        // and the region box. All in CaptureView+StillCapture (the stop's completion files the scan).
         .overlay { stillCaptureOverlay }
-        .onChange(of: stillCapture.phase) { _, phase in handleStillCapturePhase(phase) }
         .onChange(of: stillCapture.stats.stillsSaved) { _, saved in finishFocusScanIfTargetReached(saved) }
         .onChange(of: scanStore.activeFocusRequest) { _, _ in refreshFocusBoxPlacement() }
         .onAppear {
@@ -1049,9 +1051,6 @@ struct CaptureView: View {
             }
         }
         .onDisappear {
-            // Leaving the capture screen mid-focus-scan: finish it (the stills drain and save) before
-            // the capture state below is cleared and the map torn down.
-            if isStillCapturing { stopStillCapture() }
             memoryPressureMonitor.stop()
             // Next appearance must re-load the ghost before the world map is handed over (the
             // makeUIView-vs-onAppear race gate in body).
@@ -1108,6 +1107,9 @@ struct CaptureView: View {
                 if isRecording {
                     stopRecording(force: true)
                 }
+                // Mid-focus-scan: finish it. The stills drain and file into the scan target
+                // snapshotted at Start (focusScanTarget), so the reset below cannot orphan them.
+                if isStillCapturing { stopStillCapture() }
                 // Always clear ghost state when leaving Capture.
                 // Preserve pendingStitchLink for in-flight saves — the async pipeline
                 // needs it to write stitching.json. It's consumed and nilled out by
@@ -1917,6 +1919,7 @@ struct CaptureView: View {
         .onChange(of: cachedGhostMeshData?.count) { _, _ in evaluateRelocalizationTimeout() }
         .onChange(of: isRecording) { _, _ in evaluateRelocalizationTimeout() }
         .onChange(of: isStillCapturing) { _, _ in evaluateRelocalizationTimeout() }
+        .onChange(of: isCapturing) { _, active in scanStore.isCaptureActive = active }
     }
 
     // Item 2 (perfDiag-gated during dev validation; reframed 2026-06-25 to a STORM signal):
@@ -2243,12 +2246,16 @@ struct CaptureView: View {
             alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
                 self.discardInProgressScan(isExtendFlow: false, completion: nil)
             })
-        } else if capturedCount > 0 {
+        } else if capturedCount > 0 || scanStats.totalVertices > verticesAtRecordStart {
+            // Photos are automatic and start a few seconds in, so a scan can hold mesh before its
+            // first photo: that is still worth offering to save.
+            let captured = capturedCount > 0
+                ? "the \(capturedCount) photo\(capturedCount == 1 ? "" : "s") and mesh"
+                : "the mesh (no photos yet)"
             alert = UIAlertController(
                 title: "Tracking Lost",
                 message: "AR tracking was interrupted during this scan, so anything captured after that "
-                    + "point is unreliable. Save the \(capturedCount) frame\(capturedCount == 1 ? "" : "s") "
-                    + "captured so far, or discard and rescan?",
+                    + "point is unreliable. Save \(captured) captured so far, or discard and rescan?",
                 preferredStyle: .alert
             )
             alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in

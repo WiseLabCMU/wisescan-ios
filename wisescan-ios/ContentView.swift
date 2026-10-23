@@ -84,6 +84,12 @@ struct ContentView: View {
     /// The space a handed-over region names; without a known one the region is refused (a file
     /// picked inside a space's Rescan sheet needs no id).
     private func openSpace(for region: FocusRegion) {
+        // Switching tabs mid-capture would end the capture (CaptureView's leave-tab teardown).
+        guard !scanStore.isCaptureActive else {
+            FocusRegionInbox.shared.pending = nil
+            FocusRegionInbox.shared.lastError = "A scan is in progress. Finish it, then open the focus region link again."
+            return
+        }
         guard let locationId = region.locationId else {
             FocusRegionInbox.shared.pending = nil
             FocusRegionInbox.shared.lastError = "The focus region does not say which space it belongs to (location_id). Import it from that space's Rescan button instead."

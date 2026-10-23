@@ -139,7 +139,7 @@ extension MeshPreviewView {
         }
 
         // Build equirect face frustums from sidecar JSONs (pure pose math, no pixel data).
-        let equirectNodes = buildEquirectFaceNodes(scanDirectoryURL: scanDir, rigProfile: rigProfile)
+        let equirectNodes = buildEquirectFaceNodes(scanDirectoryURL: scanDir, rigProfile: rigProfile, registration: registration)
 
         return KeyframeMarkerNodes(
             stills: container(named: "keyframeStills", nodes: stillNodes),
@@ -323,7 +323,8 @@ extension MeshPreviewView {
     /// camera's −Z (the equirect's front/identity direction). Replaced the 5-frustum
     /// rendering, which was too busy to read at a glance. Poses come from the sidecar's
     /// baked `cam_transform` (Process-step calibration) or the prior. Runs off-main.
-    private nonisolated static func buildEquirectFaceNodes(scanDirectoryURL: URL, rigProfile: RigProfile?) -> SCNNode? {
+    private nonisolated static func buildEquirectFaceNodes(scanDirectoryURL: URL, rigProfile: RigProfile?,
+                                                          registration: simd_float4x4 = matrix_identity_float4x4) -> SCNNode? {
         let fileMgr = FileManager.default
         let equirectDir = scanDirectoryURL
             .appendingPathComponent("raw_data")
@@ -375,7 +376,7 @@ extension MeshPreviewView {
             }
 
             let node = makeEquirectSphereNode(marker: marker)
-            node.simdTransform = camTransform
+            node.simdTransform = registration * camTransform   // raw capture frame -> the mesh's (see buildKeyframeMarkerNodes)
             allNodes.append(node)
         }
 

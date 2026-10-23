@@ -25,6 +25,8 @@ struct FocusRegionEditorView: View {
     @State private var anchor: SIMD3<Float> = .zero
     @State private var offset: SIMD3<Float> = .zero
     @State private var label = ""
+    /// The label the last pick filled in; a new pick replaces it unless the operator typed one.
+    @State private var autoLabel = ""
     @State private var detail: FocusDetailLevel = .check
     @State private var sceneCentre: SIMD3<Float> = .zero
     @State private var frameIsCanonical = true
@@ -137,7 +139,10 @@ struct FocusRegionEditorView: View {
             set: { value in region?.size[axis] = value })
         return HStack {
             Text(title).frame(width: AppConstants.focusEditorLabelWidth, alignment: .leading)
-            Slider(value: binding, in: AppConstants.focusRegionMinSizeM...AppConstants.focusRegionEditorMaxSizeM)
+            // An imported box can be larger than the slider's usual range; extend it rather than
+            // snapping the box down on first touch.
+            Slider(value: binding,
+                   in: AppConstants.focusRegionMinSizeM...max(AppConstants.focusRegionEditorMaxSizeM, binding.wrappedValue))
             Text(String(format: "%.2f m", binding.wrappedValue)).monospacedDigit()
                 .frame(width: AppConstants.focusEditorValueWidth, alignment: .trailing)
         }
@@ -184,7 +189,10 @@ struct FocusRegionEditorView: View {
         placed.detail = detail
         anchor = placed.center
         offset = .zero
-        if label.isEmpty { label = placed.label }
+        if label.isEmpty || label == autoLabel {
+            label = placed.label
+            autoLabel = placed.label
+        }
         region = placed
     }
 }
@@ -249,6 +257,20 @@ struct FocusRegionSceneView: UIViewRepresentable {
                     container.addChildNode(Self.objectNode(object, index: index))
                 }
                 context.coordinator.objects = objects
+                // Frame the room from above and to the side (SceneKit's default camera was set up
+                // before the mesh existed).
+                let (lo, hi) = mesh.boundingBox
+                let localCentre = SIMD3<Float>((lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2)
+                let centre = mesh.simdConvertPosition(localCentre, to: nil)
+                let span = max(hi.x - lo.x, hi.y - lo.y, hi.z - lo.z, AppConstants.focusEditorMinFramingM)
+                let cameraNode = SCNNode()
+                cameraNode.camera = SCNCamera()
+                cameraNode.camera?.zFar = Double(span * AppConstants.focusEditorZFarSpans)
+                cameraNode.simdPosition = centre + SIMD3<Float>(0, span * AppConstants.focusEditorCameraRise,
+                                                                span * AppConstants.focusEditorCameraBack)
+                cameraNode.simdLook(at: centre)
+                view.scene?.rootNode.addChildNode(cameraNode)
+                view.pointOfView = cameraNode
             }
         }
         return view
@@ -318,7 +340,8 @@ struct FocusRegionSceneView: UIViewRepresentable {
     static func region(at point: SIMD3<Float>, viewerYaw: Float) -> FocusRegion {
         let size = AppConstants.focusRegionDefaultSizeM
         let centre = SIMD3<Float>(point.x, point.y + size.y / 2 - AppConstants.focusRegionDropSinkM, point.z)
-        return FocusRegion(center: centre, yaw: viewerYaw, size: size, source: .user)
+        // Within -pi...pi, the turn slider's range.
+        return FocusRegion(center: centre, yaw: viewerYaw.remainder(dividingBy: 2 * .pi), size: size, source: .user)
     }
 
     final class Coordinator: NSObject {

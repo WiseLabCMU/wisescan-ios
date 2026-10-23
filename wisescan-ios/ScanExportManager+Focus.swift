@@ -206,7 +206,7 @@ enum FocusStillPrivacy {
         blend.maskImage = grown
         guard let output = blend.outputImage?.cropped(to: extent),
               let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
-        let quality = [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: AppConstants.arStillJPEGQuality]
+        let quality = [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): AppConstants.arStillJPEGQuality]
         return context.jpegRepresentation(of: output, colorSpace: space, options: quality)
     }
 }

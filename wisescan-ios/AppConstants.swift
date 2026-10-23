@@ -510,7 +510,8 @@ enum AppConstants {
     static let roomScanAutoStills = true                       // 12MP stills fire on their own (blur gate + spacing); no stream frames are saved. The rig's tap still stays.
     static let roomStillSpacingDeg: Double = 15                // next still once the view turned this much, or a sideways move subtends this at the near depth (focus Splat: 5)
     static let roomStillWarmupSeconds: TimeInterval = 10       // none in the first seconds of recording: RoomPlan + segmentation model loads (the bring-up storm, capture-quality-triage.md)
-    static let roomStillMinIntervalSeconds: TimeInterval = 0.5
+    static let roomStillWalkMeters: Double = 0.5               // ...or after walking this far (straight down a hallway turns nothing and has no parallax)
+    static let roomStillMinIntervalSeconds: TimeInterval = 0.5 // between automatic requests (a blur-rejected still saves nothing, so this times requests)
     static let roomStillHotMinIntervalSeconds: TimeInterval = 2 // at thermal state serious or worse
     static let roomStillSlowEncodeMs: Double = 400             // a 12MP encode slower than this means CPU contention...
     static let roomStillBackoffSeconds: TimeInterval = 3       // ...or a frame gap: hold automatic stills this long
@@ -571,6 +572,10 @@ enum AppConstants {
     static let focusEditorObjectOpacity: CGFloat = 0.12        // RoomPlan objects as faint tap targets
     static let focusEditorRegionOpacity: CGFloat = 0.22
     static let focusEditorEdgeThicknessM: Float = 0.01
+    static let focusEditorMinFramingM: Float = 2               // editor camera frames at least this much
+    static let focusEditorCameraRise: Float = 0.6              // camera placed this many room spans above the centre...
+    static let focusEditorCameraBack: Float = 0.8              // ...and this many back
+    static let focusEditorZFarSpans: Float = 10
     static let exposureCapChangeTolerance: Double = 0.1       // CaptureExposurePolicy: a new short-exposure target within this fraction of the applied cap is ignored
     static let exposureCapReapplyTolerance: Double = 0.02      // CaptureExposurePolicy: the device's cap drifted further than this from what was applied -> a session re-run reset it; re-apply
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)

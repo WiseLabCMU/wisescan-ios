@@ -60,6 +60,9 @@ struct LocationDetailView: View {
     @State private var showRegionImporter = false
     @State private var importedRegion: FocusRegion?
     @State private var regionImportError: String?
+    /// The region the editor's Scan returned; the focus scan starts once the editor has closed,
+    /// so the rescan's suspect-map confirm presents over this view, not a dismissing cover.
+    @State private var pendingFocusScan: FocusRegion?
 
     /// Composed from four independently type-checked pieces — same surgery as
     /// CaptureView.body (#56): measured at **14,345 ms** to type-check, second only to
@@ -364,19 +367,25 @@ struct LocationDetailView: View {
                 isBulkExporting = false
             }
         }
-        .fullScreenCover(isPresented: $showRegionEditor, onDismiss: { importedRegion = nil }) {
+        .fullScreenCover(isPresented: $showRegionEditor, onDismiss: {
+            importedRegion = nil
+            if let region = pendingFocusScan, let latest = location.latestRoomScan {
+                pendingFocusScan = nil
+                startRescan(latest, focus: region)
+            }
+        }) {
             if let latest = location.latestRoomScan {
                 FocusRegionEditorView(scan: latest, initialRegion: importedRegion, onScan: { region in
+                    pendingFocusScan = region
                     showRegionEditor = false
-                    startRescan(latest, focus: region)
                 }, onCancel: { showRegionEditor = false })
             }
         }
         .confirmationDialog("Rescan", isPresented: $showRescanChoice, titleVisibility: .visible) {
             if let latest = location.latestRoomScan {
                 Button("Whole room") { startRescan(latest) }
-                Button("Focus on a region") { showRegionEditor = true }
-                Button("Import a region file") { showRegionImporter = true }
+                Button("Focus on a region") { if focusScanGatesAllow(latest) { showRegionEditor = true } }
+                Button("Import a region file") { if focusScanGatesAllow(latest) { showRegionImporter = true } }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -421,10 +430,21 @@ struct LocationDetailView: View {
 
     private func takeInboxRegion() {
         guard let region = FocusRegionInbox.shared.pending, region.locationId == location.id,
-              location.latestRoomScan != nil else { return }
+              let latest = location.latestRoomScan else { return }
         FocusRegionInbox.shared.pending = nil
+        guard focusScanGatesAllow(latest) else { return }
         importedRegion = region
         showRegionEditor = true
+    }
+
+    /// The rescan's own gates (world map on disk, post-processing done), checked BEFORE a region
+    /// is drawn or imported, so a refusal never costs the operator a drawn box.
+    private func focusScanGatesAllow(_ latestScan: CapturedScan) -> Bool {
+        guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
+            showNoWorldMapAlert = true
+            return false
+        }
+        return postprocessGateAllows()
     }
 
     /// Rename/world-map alerts, the gate/bulk modifier stack, and the confirmation dialog.
@@ -629,6 +649,7 @@ struct LocationDetailView: View {
                 }
                 scan.uploadStatus = .zipping
                 let colorsFromCapture = scan.isColored
+                let contentType = format.effective(for: scan).contentType   // read on main (SwiftData)
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     let filename = scan.makeExportFilename(format: format)
@@ -651,7 +672,7 @@ struct LocationDetailView: View {
 
                     var request = URLRequest(url: url)
                     request.httpMethod = "PUT"
-                    request.setValue(format.effective(for: scan).contentType, forHTTPHeaderField: "Content-Type")
+                    request.setValue(contentType, forHTTPHeaderField: "Content-Type")
 
                     let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
                         try? FileManager.default.removeItem(at: exportURL)

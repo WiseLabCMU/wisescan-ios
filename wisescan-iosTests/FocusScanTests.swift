@@ -1,4 +1,5 @@
 import CoreGraphics
+import simd
 import XCTest
 @testable import wisescan_ios
 

@@ -618,6 +618,7 @@ struct ScansListView: View {
                 scan.uploadStatus = .zipping
                 let scanDir = scan.scanDirectory
                 let colorsFromCapture = scan.isColored
+                let contentType = format.effective(for: scan).contentType   // read on main (SwiftData)
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     guard let exportURL = ScanExportManager.prepareExport(
@@ -639,7 +640,7 @@ struct ScansListView: View {
 
                     var request = URLRequest(url: url)
                     request.httpMethod = "PUT"
-                    request.setValue(format.effective(for: scan).contentType, forHTTPHeaderField: "Content-Type")
+                    request.setValue(contentType, forHTTPHeaderField: "Content-Type")
 
                     let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
                         try? FileManager.default.removeItem(at: exportURL)
@@ -1165,7 +1166,7 @@ struct ScanCard: View {
                     let files = (fm.enumerator(at: captureDir, includingPropertiesForKeys: [.fileSizeKey])?.allObjects as? [URL]) ?? []
                     let bytes = files.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
                     let photos = count("photos")
-                    return ((photos, 0, count("photo_depth"), count("photo_confidence"), photos, 0), Double(bytes) / (1024.0 * 1024.0))
+                    return ((photos, 0, count("photo_depth"), count("photo_confidence"), 0, 0), Double(bytes) / (1024.0 * 1024.0))
                 }.value
                 itemCounts = focus.counts
                 isRelocMissing = false
@@ -1733,6 +1734,7 @@ struct ScanCard: View {
         // Capture scan directory on main thread (SwiftData models aren't thread-safe)
         let scanDir = scan.scanDirectory
         let colorsFromCapture = scan.isColored
+        let contentType = format.effective(for: scan).contentType
         print("[Upload] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
         guard FileManager.default.fileExists(atPath: scanDir.path) else {
             scan.uploadStatus = .failed("No scan data")
@@ -1764,7 +1766,7 @@ struct ScanCard: View {
             // Upload natively via streaming
             var request = URLRequest(url: url)
             request.httpMethod = "PUT"
-            request.setValue(format.effective(for: scan).contentType, forHTTPHeaderField: "Content-Type")
+            request.setValue(contentType, forHTTPHeaderField: "Content-Type")
 
             // Track upload progress using KVO
             class ObserverBox { var observer: NSKeyValueObservation? }

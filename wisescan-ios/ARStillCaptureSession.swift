@@ -581,13 +581,18 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                 width: Double(camera.imageResolution.width), height: Double(camera.imageResolution.height),
                 centreMargin: AppConstants.focusRegionCentreMargin)
         }
-        var view = lastStillTransform.map {
+        // Immutable: `view` is read inside the stats lock's @Sendable closure below.
+        let baseView = lastStillTransform.map {
             ARStillCaptureGates.viewpointChange(from: $0, to: transform, depth: gateDepth)
         } ?? (rotationDeg: 0.0, parallaxDeg: 0.0)
+        let view: (rotationDeg: Double, parallaxDeg: Double)
         if let placement, let last = lastStillTransform {
-            view.parallaxDeg = ARStillCaptureGates.regionViewAngleDeg(
-                from: ARStillCaptureGates.position(last), to: ARStillCaptureGates.position(transform),
-                centre: ARStillCaptureGates.position(placement.boxToWorld))
+            view = (rotationDeg: baseView.rotationDeg,
+                    parallaxDeg: ARStillCaptureGates.regionViewAngleDeg(
+                        from: ARStillCaptureGates.position(last), to: ARStillCaptureGates.position(transform),
+                        centre: ARStillCaptureGates.position(placement.boxToWorld)))
+        } else {
+            view = baseView
         }
         let inView = regionView?.centreInFrame ?? false
         let regionCoverage = regionView?.frameCoverage ?? 0
@@ -646,10 +651,11 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             }
         }
         // A focus scan spaces by its detail level and fires on view changes only (a pause in
-        // front of the region takes one still, not one a second).
+        // front of the region takes one still, not one a second). The change is the view angle at
+        // the region alone: turning on the spot (a pan, a wobble) is not a new view of it.
         let sinceLast = lastStillTime < 0 ? Double.infinity : t - lastStillTime
         guard let reason = ARStillCaptureGates.spacingDecision(
-            sinceLast: sinceLast, rotationDeg: view.rotationDeg, parallaxDeg: view.parallaxDeg,
+            sinceLast: sinceLast, rotationDeg: placement == nil ? view.rotationDeg : 0, parallaxDeg: view.parallaxDeg,
             minInterval: AppConstants.arStillMinIntervalSeconds,
             viewpointThresholdDeg: detail?.spacingDeg ?? AppConstants.arStillViewpointThresholdDeg,
             maxInterval: detail == nil ? AppConstants.arStillMaxIntervalSeconds : 0
