@@ -38,6 +38,17 @@ class CapturedScan {
     /// rescan/link seated on this map can inherit an offset frame — the rescan/connect
     /// buttons warn before proceeding. Defaulted for lightweight migration of existing scans.
     var worldMapSuspect: Bool = false
+    /// `ScanKind` raw value: a room scan (mesh, RoomPlan, photos) or a focus scan (stills of one
+    /// region, no mesh or map of its own). "" for scans saved before focus scans existed: room.
+    var scanKindRaw: String = ""
+    /// Focus scans: the room scan whose world map the capture relocalized into, and so whose
+    /// frame its poses are in ("" otherwise).
+    var parentScanIdRaw: String = ""
+    /// Focus scans: the captured region as `FocusRegion` JSON ("" otherwise). Inline so cards
+    /// read it without file I/O; `focus_region.json` in the scan folder is the export copy.
+    var focusRegionJSON: String = ""
+    /// Focus scans: stills saved.
+    var stillCount: Int = 0
 
     @Relationship(inverse: \ScanLocation.scans)
     var location: ScanLocation?
@@ -108,6 +119,22 @@ class CapturedScan {
         }
     }
 
+    @Transient var scanKind: ScanKind {
+        get { ScanKind(rawValue: scanKindRaw) ?? .room }
+        set { scanKindRaw = newValue.rawValue }
+    }
+
+    /// Stills of one region: no mesh, world map or RoomPlan of its own. Never a relocalization
+    /// source, never the canonical frame owner, never post-processed or colored.
+    @Transient var isFocusScan: Bool { scanKind == .focus }
+
+    @Transient var parentScanId: UUID? { UUID(uuidString: parentScanIdRaw) }
+
+    @Transient var focusRegion: FocusRegion? {
+        get { focusRegionJSON.isEmpty ? nil : FocusRegion.decode(Data(focusRegionJSON.utf8)) }
+        set { focusRegionJSON = newValue?.encoded().flatMap { String(data: $0, encoding: .utf8) } ?? "" }
+    }
+
     @Transient var isUploaded: Bool { lastUploadedAt != nil }
 
     @Transient var formattedUploadDate: String? {
@@ -138,6 +165,11 @@ class CapturedScan {
     @Transient var modelPreviewURL: URL { scanDirectory.appendingPathComponent("model_preview.jpg") }
     @Transient var thumbnailURL: URL { scanDirectory.appendingPathComponent("thumbnail.jpg") }
     @Transient var rawDataPath: URL { scanDirectory.appendingPathComponent("raw_data") }
+
+    /// Focus scans: the still-capture dump (photos/, photo_depth/, photo_confidence/, CSVs, logs,
+    /// manifest.json), as `ARStillCaptureSession` wrote it.
+    @Transient var focusCaptureURL: URL { scanDirectory.appendingPathComponent("focus_capture") }
+    @Transient var focusRegionFileURL: URL { scanDirectory.appendingPathComponent("focus_region.json") }
 
     @Transient var roomPlanFileURL: URL { scanDirectory.appendingPathComponent("roomplan.json") }
     @Transient var roomPlanRawFileURL: URL { scanDirectory.appendingPathComponent("roomplan_raw.json") }
@@ -351,6 +383,16 @@ class ScanLocation {
             return ScanCase(rawValue: scanCaseStr) ?? .rescanSpace
         }
         set { scanCaseStr = newValue.rawValue }
+    }
+
+    /// The scans that carry the room: mesh, world map, RoomPlan. Everything that assumes those
+    /// (the original / canonical-frame owner, the rescan's map, the history scrubber, stitching,
+    /// post-processing) reads this, not `scans`; focus scans only appear in the scan list.
+    @Transient var roomScans: [CapturedScan] { scans.filter { !$0.isFocusScan } }
+
+    /// The newest room scan: a rescan's or focus scan's world map and ghost come from it.
+    @Transient var latestRoomScan: CapturedScan? {
+        roomScans.max(by: { $0.capturedAt < $1.capturedAt })
     }
 }
 

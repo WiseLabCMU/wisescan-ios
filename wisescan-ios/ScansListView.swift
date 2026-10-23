@@ -834,7 +834,8 @@ struct LocationGridTile: View {
     var latestScan: CapturedScan? {
         // Single O(n) pass with no intermediate sorted-array allocation; this is read
         // multiple times per body evaluation.
-        location.scans.max(by: { $0.capturedAt < $1.capturedAt })
+        // Room scans: the tile shows the room, and its world-map checks are a room scan's.
+        location.latestRoomScan
     }
 
     /// Any scan's world map flagged suspect at save (tracking excursion baked into the
@@ -955,8 +956,8 @@ struct LocationGridTile: View {
             }
             let previewURL = latest.modelPreviewURL
             let fallbackURL = latest.thumbnailURL
-            let worldMapPaths = location.scans.map { $0.worldMapURL.path }
-            let rawDirs = location.scans.map { $0.rawDataPath }
+            let worldMapPaths = location.roomScans.map { $0.worldMapURL.path }   // focus scans have no map by design
+            let rawDirs = location.roomScans.map { $0.rawDataPath }
 
             // Missing-worldmap flag off-main.
             hasMissingWorldMap = await Task.detached(priority: .utility) {

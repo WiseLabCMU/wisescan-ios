@@ -135,7 +135,7 @@ struct LocationDetailView: View {
                             }
 
                             // Extend / Rescan Latest Scan
-                            if let latestScan = sortedScans.first,
+                            if let latestScan = location.latestRoomScan,
                                !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("ray ban") &&
                                !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("glass") {
                                 HStack(spacing: 12) {
@@ -173,7 +173,7 @@ struct LocationDetailView: View {
                             Button(action: {
                                 // The Rescan entry itself (same map, gates, confirm); the capture
                                 // view diverges only at Start. See CaptureView+StillCapture.
-                                if let latest = sortedScans.first { startRescan(latest, stillCapture: true) }
+                                if let latest = location.latestRoomScan { startRescan(latest, stillCapture: true) }
                             }, label: {
                                 HStack {
                                     Image(systemName: "arkit")
@@ -843,7 +843,7 @@ struct LocationDetailView: View {
     private func postprocessGateAllows() -> Bool {
         // Same deterministic comparator as ScanPostprocessor.original(of:) — on a capturedAt tie
         // the gate must bad-check the SAME scan registration will target.
-        let ordered = location.scans.sorted(by: CapturedScan.canonicalOrder)
+        let ordered = location.roomScans.sorted(by: CapturedScan.canonicalOrder)
         let prerequisites = [ordered.first, ordered.last].compactMap { $0 }
         if prerequisites.contains(where: { ScanPostprocessor.isBad($0) }) {
             showBadScanGate = true

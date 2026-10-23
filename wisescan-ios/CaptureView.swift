@@ -541,11 +541,11 @@ struct CaptureView: View {
         // via the rescan→latest chain). Today rescan always targets latest, so this aggregates all —
         // but if a non-latest scan ever becomes the target, restrict to ITS connectors so we never
         // render another scan's connectors in the wrong frame (the failure the comment above warns of).
-        let latestId = location.scans.max(by: { $0.capturedAt < $1.capturedAt })?.id
+        let latestId = location.latestRoomScan?.id
         let target = scanStore.activeScanToExtend
         let scansForConnectors: [CapturedScan] = (target == nil || target == latestId)
-            ? location.scans
-            : location.scans.filter { $0.id == target }
+            ? location.roomScans
+            : location.roomScans.filter { $0.id == target }
         var seenConnectors = Set<UUID>()
         connectorAnchors = scansForConnectors
             .flatMap { StitchLinkStore.connectorAnchors(for: $0, from: linkIndex[$0.id] ?? []) }
