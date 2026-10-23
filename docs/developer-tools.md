@@ -112,9 +112,23 @@ stills while `arStillMaxPendingEncodes` are queued.
   orbiting the focal area while keeping it centred barely moves it in the image. The first
   capture used a 2 px budget on rotation + sideways speed as magnitudes, which cannot cancel;
   replaying that capture's motion, it fired every 2.05 s, this rule every 1.37 s, and the first
-  capture's sharp stills had moved up to 2.8 px (p90) during their exposure. In `photos.csv`,
-  `predicted_image_motion_smear_rad` is the gate's value (`_px` is the same in still pixels); the
-  rotation and translation columns are the old sum's parts, kept for comparison.
+  capture's sharp stills had moved up to 2.8 px (p90) during their exposure.
+  That pose term averages rotation over 0.1 s, which smooths hand shake out, while a 2 ms
+  exposure sees the shake at its peak. So the gate also takes the gyro's **peak rate** over the
+  last `arStillGyroPeakWindowSeconds` (50 ms) times the exposure, and holds the still if either
+  term is over budget. Replaying the iPhone office capture (all at 1/500): of the stills the
+  pose term passed, 30% turned faster than the budget allows at their actual capture instant;
+  requiring a 30 ms gyro peak to pass too left 21%, 50 ms 7%, 100 ms 6% (while holding more
+  frames). In `photos.csv`, `predicted_image_motion_smear_rad` is the gate's value, the larger
+  term (`_px` is the same in still pixels); `pose_smear_rad` and `gate_gyro_smear_rad` (from
+  `gate_gyro_peak_rad_s`) are the two terms. The rotation and translation columns are the old
+  sum's parts, kept for comparison.
+- *Check at capture:* a still is not exposed at the instant the gate requests it (in the iPhone
+  capture half the stills were timestamped before the request, the rest up to 0.55 s after). Each still's own timestamp is looked up in the gyro history: `capture_gyro_rad_s` (the
+  rate there), `capture_gyro_smear_rad` (times the still's exposure, rotation only) and
+  `capture_over_budget`; empty when the gyro history did not cover that instant. Logged only:
+  an over-budget still is kept and still counts toward spacing.
+  `totals.stills_over_budget_at_capture` counts them; the panel shows the last still's figure.
 - *Spacing:* a still once the view has turned `arStillViewpointThresholdDeg`, or a sideways
   move subtends that angle at the near scene (parallax), or `arStillMaxIntervalSeconds`
   has passed.
@@ -123,7 +137,24 @@ stills while `arStillMaxPendingEncodes` are queued.
   the first capture 93 of 94 stills sat exactly at it: iOS holds the longest allowed exposure and
   only shortens it once ISO bottoms out.
 
-**Short-exposure experiment** (the yellow SHORT EXP switch on the trailing edge, mid-height;
+**The session stays put during a capture.** The world map only initializes the pose; once a
+capture starts, nothing reloads it. The first iPhone capture lost scene depth for good 107 s in
+because something re-ran the session mid-capture (tracking went normal -> initializing ->
+relocalizing, i.e. a map reload with a tracking reset) using the app's normal configuration,
+which does not request depth. A reload like that also discards the record-start frame bakes.
+AR Capture never sets `isRecording`, so the pre-record rescan paths had stayed live. Now, while
+`isStillCapturing`: the Ghost Mesh chip (whose dialog offers Re-relocalize) is hidden, the
+relocalization watchdog and its Try Again stand down, ARCoverageView's ghost-reload path is
+skipped, and leaving the capture screen stops the capture (its zip lands in Documents). The
+engine is the safety net for anything else: it logs every tracking-state change and every
+depth loss or recovery to `events.log`, re-requests scene depth on the live configuration (no
+tracking reset) if a re-run dropped it, and logs once if depth is requested but ARKit simply
+stopped delivering it, with the thermal state. Through a dropout the gates hold the last good
+near depth for `arStillDepthHoldSeconds` (10 s), so sidesteps and parallax still count.
+Pose drift after initialization is accepted: the poses are a prior for the image-based pose
+solve, not ground truth.
+
+**Short exposure** (the yellow SHORT EXP switch on the trailing edge, mid-height; on by default,
 usable before Start and during a capture, and kept across captures in a session). With it on,
 the exposure cap follows the light instead of sitting at 1/120: every
 `arStillShortExposureUpdateSeconds` the cap becomes exposure x ISO / `arStillShortExposureISOCeiling`
@@ -135,31 +166,41 @@ the first capture's light, ISO 800 would have meant a median exposure of 1/611 s
 1/500 floor. Each still records `short_exposure` and the cap in force (`exposure_cap_s`), so one
 capture can mix both settings; `totals.stills_short_exposure` counts them.
 
-Why it is an experiment, not the default: 1/120 s integrates exactly one cycle of the 120 Hz
-flicker of mains-powered LED and fluorescent light (60 Hz countries), so frames come out evenly
-lit. Shorter exposures under flickering light can show rolling-shutter bands and frame-to-frame
-brightness pulses, which hurt a splat more than noise does. Noise itself is mild on the M1 iPad
-Pro: in the first capture it grew only as ISO^0.29 (0.45 to about 1.1 of 255 over ISO 50 to 700),
-because the ISP denoises; that denoising's cost, smoothed low-contrast texture, is the other
-thing to look for. The test: the same desk captured with the switch off and on, checked for
-banding and lost texture, and compared on COLMAP track counts.
+Why it is on by default: in the iPhone 17 Pro Max office capture (all 202 stills at about 1/500,
+ISO median 229) the stills came out blur-free at about 2.4 times the rate of the 1/120 iPad
+captures (1.06 against 0.44 stills/s). The gate turns a shorter exposure into faster movement,
+not sharper stills. No flicker banding showed. The cost is texture: the ISP denoises, so noise
+stays flat (1 to 1.6 grey levels at any ISO) while fine texture at 1 to 2 px, compared on the
+same 3D point across stills, comes out 14% weaker at 2.5 to 4 times the ISO and 24% weaker
+beyond that. The pose solve showed no trend with ISO. Still untested: a room lit only by LEDs.
+1/120 s integrates exactly one cycle of the 120 Hz flicker of mains-powered LED and fluorescent
+light (60 Hz countries); shorter exposures can show rolling-shutter bands and frame-to-frame
+brightness pulses there (that office had a lot of daylight). Switch it off if stills band.
 
 **Debug panel** (mid-screen while AR Capture is active). Its large first line is the point of
 the experiment: the last still's resolution, exposure and ISO; the next line is the stream's
 size and exposure against the cap. Below: still counts and rate, latency, why the last still
-fired, frames held by each gate, the gate inputs, and the exposure-cap note.
+fired, frames held by each gate, the gate inputs, the last still's blur at capture, the
+per-frame work timing, and the exposure-cap note.
+
+**Per-frame work timing.** ARKit hands frames to the capture view's delegate on its own serial
+queue; a handler that runs long holds frames back, and a starved session can degrade tracking.
+While capturing, the app times the whole delegate handler and the capture engine's share of it
+(`offer`), each frame. The panel shows mean and max; at Stop `events.log` and the manifest's
+`frame_work_ms` give frames, mean, p99 and max for both. For scale: the iPhone office capture's
+stream ran at 30 Hz (33 ms a frame) with no gap between frames across its 202 stills.
 
 | Path | What |
 |---|---|
-| `manifest.json` | `setup` (device, stream format, world-map scan and id, original scan id, bakes, exposure cap requested / applied / note, gate settings, `deviceSupportedPhotoDimensions` vs `arkitDefaultPhotoDimensions`, frame and pose conventions) and `totals` |
+| `manifest.json` | `setup` (device, stream format, world-map scan and id, original scan id, bakes, exposure cap requested / applied / note, gate settings, `deviceSupportedPhotoDimensions` vs `arkitDefaultPhotoDimensions`, frame and pose conventions), `totals`, and `frame_work_ms` (per-frame delegate work: frames, mean, p99, max) |
 | `photos/photo_NNNNN.jpg` | Full-resolution ARKit still, sensor (landscape) orientation |
-| `photos.csv` | Per still: `host_ts`, request time, latency, size, exposure, ISO, tracking, depth and confidence files, intrinsics, `c2w_00..c2w_23` pose, and what the gates measured (gyro, sideways speed, near depth, stream exposure, predicted rotation and translation smear, interval, turn, parallax, reason) |
+| `photos.csv` | Per still: `host_ts`, request time, latency, size, exposure, ISO, tracking, depth and confidence files, intrinsics, `c2w_00..c2w_23` pose, and what the gates measured (gyro, sideways speed, near depth, stream exposure, predicted rotation and translation smear, interval, turn, parallax, reason), the angular prediction, `short_exposure` and `exposure_cap_s`, and `gate_depth_held` (1 = a held depth from before a dropout) and `thermal_state`, the blur gate's two terms (`pose_smear_rad`, `gate_gyro_peak_rad_s`, `gate_gyro_smear_rad`), and the check at capture (`capture_gyro_rad_s`, `capture_gyro_smear_rad`, `capture_over_budget`) |
 | `photo_depth/photo_NNNNN.png` | 16-bit mm LiDAR depth of the same ARFrame, 256x192, unsmoothed |
 | `photo_confidence/photo_NNNNN.png` | 8-bit ARKit confidence of the same ARFrame: 0 low, 1 medium, 2 high |
 | `frames.csv` | Text-only pose log of every tracking frame while capturing (the trajectory between stills); no stream images |
 | `imu_gyro.csv`, `imu_accel.csv` | Raw gyroscope (also the blur gate's rotation input) and accelerometer |
 | `world_map_registration.json` | Copy of the world-map scan's `registration.json`, when it has one |
-| `events.log` | Capture lifecycle, exposure cap, failures |
+| `events.log` | Capture lifecycle, exposure-cap changes, tracking-state changes, scene-depth loss and recovery, thermal-state changes, per-frame work timing at Stop, failures |
 
 **Pose convention:** `c2w_*` is ARKit's camera-to-world transform, row-major 3x4; the camera
 looks down its -Z axis with +Y up in the image, world +Y is up (gravity), metres. Images,
