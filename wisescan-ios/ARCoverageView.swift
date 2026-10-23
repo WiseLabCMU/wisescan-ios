@@ -86,6 +86,10 @@ struct ARCoverageView: UIViewRepresentable {
     /// RoomPlan, and the ghost is removed. Every frame then goes to `stillCapture`.
     var isStillCapturing: Bool = false
     var stillCapture: ARStillCaptureSession?
+    /// Focus scan: the region's box in the loaded world map's raw frame. Drawn as a yellow
+    /// wireframe that rides the ghost's seat until Start; at Start it stays where the bakes leave
+    /// the world, and that placement goes to the engine for the region gate.
+    var focusBox: FocusBoxPlacement?
 
     /// Whether this device has LiDAR for scene reconstruction and depth capture.
     static let supportsLiDAR = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
@@ -438,6 +442,13 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
+        // Focus scan: the region box. Before Start it takes the ghost's transform (the same seat
+        // the ghost is drawn at); beginStillCapture fixes it at Start.
+        context.coordinator.syncFocusBox(focusBox, in: uiView)
+        if !isStillCapturing, let boxAnchor = context.coordinator.focusBoxAnchor {
+            boxAnchor.transform = context.coordinator.ghostAnchorEntity?.transform ?? .identity
+        }
+
         // Focus scan: the still-capture branch's record-start (see beginStillCapture). At the end
         // the session drops back to the pre-capture role; CaptureView resets it after the save.
         context.coordinator.stillCapture = stillCapture
@@ -445,7 +456,8 @@ struct ARCoverageView: UIViewRepresentable {
             context.coordinator.isStillCapturing = isStillCapturing
             if isStillCapturing {
                 Self.beginStillCapture(uiView, coordinator: context.coordinator, worldMapURL: initialWorldMapURL,
-                                       bakedGhostTransform: bakedGhostTransform, stillCapture: stillCapture)
+                                       bakedGhostTransform: bakedGhostTransform, stillCapture: stillCapture,
+                                       focusBox: focusBox)
             } else {
                 context.coordinator.sessionRole = .preCapture
             }
@@ -730,12 +742,18 @@ struct ARCoverageView: UIViewRepresentable {
     /// detection or RoomPlan, and the ghost leaves the scene. Only then does the engine start
     /// taking frames, so no still carries a pre-bake pose.
     private static func beginStillCapture(_ uiView: ARView, coordinator: Coordinator, worldMapURL: URL?,
-                                          bakedGhostTransform: simd_float4x4?, stillCapture: ARStillCaptureSession?) {
+                                          bakedGhostTransform: simd_float4x4?, stillCapture: ARStillCaptureSession?,
+                                          focusBox: FocusBoxPlacement?) {
         let config = makeConfiguration(enableMeshReconstruction: false, worldMapURL: worldMapURL)
         coordinator.sessionRole = .focusCapture
         applySemantics(for: .focusCapture, privacyFilter: coordinator.privacyFilter, to: config)
         let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [] : .removeExistingAnchors
         coordinator.runSession(uiView.session, config, options: runOptions, reason: "focus scan start")
+        // Where the region sits after the bakes below. The ICP and nudge bakes move the world
+        // onto the ghost, which then belongs at identity; without either, the ghost is still
+        // seated by the visual auto-align, so the box is too.
+        let worldFollowsGhost = coordinator.pendingICPBake != nil || bakedGhostTransform != nil
+        let seat = worldFollowsGhost ? matrix_identity_float4x4 : coordinator.ghostAutoAlign
         if let icpBake = coordinator.pendingICPBake {
             uiView.session.setWorldOrigin(relativeTransform: icpBake)
             stillCapture?.noteICPBake(icpBake)
@@ -748,7 +766,39 @@ struct ARCoverageView: UIViewRepresentable {
             PerfDiag.log("[ARStill] applied the manual ghost-nudge bake at capture start")
         }
         coordinator.ghostAnchorEntity?.removeFromParent()
+        if let focusBox {
+            coordinator.focusBoxAnchor?.transform = Transform(matrix: seat)
+            stillCapture?.setRegionPlacement(boxToWorld: seat * focusBox.boxToMap, halfExtents: focusBox.halfExtents)
+        }
         stillCapture?.startAccepting()
+    }
+
+    /// The focus region as a yellow wireframe: 12 thin opaque unlit edges (the AR view renders
+    /// opaque unlit geometry reliably; see the ghost's notes), placed by `box.boxToMap` under an
+    /// anchor whose transform is the ghost's seat.
+    static func makeFocusBoxEntity(_ box: FocusBoxPlacement) -> Entity {
+        let root = Entity()
+        root.transform = Transform(matrix: box.boxToMap)
+        let h = box.halfExtents
+        let thickness = AppConstants.focusBoxEdgeThicknessM
+        let material = UnlitMaterial(color: .systemYellow)
+        for axis in 0..<3 {
+            var size = SIMD3<Float>(repeating: thickness)
+            size[axis] = 2 * h[axis]
+            let mesh = MeshResource.generateBox(size: size)
+            let others = (0..<3).filter { $0 != axis }
+            for a in [Float(-1), 1] {
+                for b in [Float(-1), 1] {
+                    var position = SIMD3<Float>(repeating: 0)
+                    position[others[0]] = a * h[others[0]]
+                    position[others[1]] = b * h[others[1]]
+                    let edge = ModelEntity(mesh: mesh, materials: [material])
+                    edge.position = position
+                    root.addChild(edge)
+                }
+            }
+        }
+        return root
     }
 
     func makeCoordinator() -> Coordinator {
@@ -1005,6 +1055,23 @@ struct ARCoverageView: UIViewRepresentable {
         var isStillCapturing = false
         /// Main thread. What the session is running for (see `SessionRole`).
         var sessionRole: ARCoverageView.SessionRole = .preCapture
+        /// Main thread. The focus region's wireframe (under an anchor carrying the ghost's seat)
+        /// and the placement it was built for.
+        var focusBoxAnchor: AnchorEntity?
+        private var focusBoxShown: FocusBoxPlacement?
+
+        /// Adds, rebuilds or removes the focus-region wireframe to match `box` (main thread).
+        func syncFocusBox(_ box: FocusBoxPlacement?, in arView: ARView) {
+            guard box != focusBoxShown else { return }
+            focusBoxShown = box
+            focusBoxAnchor?.removeFromParent()
+            focusBoxAnchor = nil
+            guard let box else { return }
+            let anchor = AnchorEntity(world: .zero)
+            anchor.addChild(ARCoverageView.makeFocusBoxEntity(box))
+            arView.scene.addAnchor(anchor)
+            focusBoxAnchor = anchor
+        }
 
         /// Every `session.run` in this view goes through here (main thread). While a capture runs,
         /// a configuration built without the role's frame semantics gets them back before it runs,

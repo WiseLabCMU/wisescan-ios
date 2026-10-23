@@ -514,6 +514,37 @@ enum AppConstants {
     static let focusDetailTargetStills: Int = 30
     static let focusSplatTargetStills: Int = 150
     static let focusRegionMaxSizeM: Float = 10                 // a region larger than this on any side is rejected (a room scan's job)
+    static let focusRegionNearPlaneM: Double = 0.05            // a box corner this close to the camera (or behind it) means "up against the box"
+    static let focusRegionCentreMargin: Double = 0.1           // the box centre must project at least this far (fraction of the image) inside every edge
+    static let focusMinFrameCoverage: Double = 0.04            // and the box must fill at least this share of the frame (else "move closer")
+    static let focusCoverageAzimuthBins: Int = 12              // coverage dial: 30-degree sectors around the region
+    static let focusCoverageElevationEdgesDeg: [Double] = [20, 50] // and three rings: low (< 20 deg above the region's middle), mid, high (>= 50)
+    static let focusCaptureFolder = "focus_capture"            // a focus scan's still-capture dump, inside its scan folder
+    static let focusRegionFilename = "focus_region.json"       // its region, beside it (and at the export zip's root)
+    static let focusThumbnailMaxPixel: Int = 640               // card thumbnail: the best still, downsampled during decode
+    static let focusThumbnailIdealCoverage: Double = 0.35      // best still = the sharp one whose region share of the frame is nearest this
+    static let focusThumbnailJPEGQuality: CGFloat = 0.85
+    static let focusPrivacyWorkingMaxPixel: Int = 1024         // export person check: Vision runs on a decode this size (its model's working scale)
+    static let focusPrivacyDilateRadiusPx: Float = 24          // person mask grown by this many full-resolution pixels before pixelation (12MP stills)
+    static let focusPrivacyPixelateScale: Float = 60           // pixelation block size at 12MP (the 3MP frame pass uses 40)
+    // Focus scan HUD and AR box
+    static let focusHUDTopPadding: CGFloat = 96                // below the capture view's top status pills
+    static let focusHUDDialSize: CGFloat = 76
+    static let focusHUDBackgroundOpacity: Double = 0.6
+    static let focusHUDDialHoleFraction: CGFloat = 0.3         // the dial's empty middle, as a share of its radius (the region sits there)
+    static let focusHUDDialBoxFraction: CGFloat = 0.45         // the region square drawn in that middle, as a share of the hole
+    static let focusHUDDialGap: CGFloat = 1.5                  // points between rings
+    static let focusHUDDialGapDeg: Double = 2                  // degrees between sectors
+    static let focusHUDEmptyCellOpacity: Double = 0.18
+    static let focusHUDFilledCellMinOpacity: Double = 0.45     // a cell with one still; full green at its share of the target
+    static let focusHUDDialDotSize: CGFloat = 7                // the camera's current direction
+    static let focusBoxEdgeThicknessM: Float = 0.006           // AR wireframe edge of the region box
+    static let focusPhotoGridMinCell: CGFloat = 96             // focus scan photo grid
+    static let focusPhotoGridSpacing: CGFloat = 6
+    static let focusPhotoGridMaxPixel: CGFloat = 300
+    static let focusPhotoPagerMaxPixel: CGFloat = 2048         // full-screen still, downsampled to about screen size
+    static let focusStillUprightAspect: CGFloat = 0.75         // a 4:3 still held upright (portrait)
+    static let focusCardInsetSize: CGFloat = 64                // the room scan's preview in a focus scan's card
     static let exposureCapChangeTolerance: Double = 0.1       // CaptureExposurePolicy: a new short-exposure target within this fraction of the applied cap is ignored
     static let exposureCapReapplyTolerance: Double = 0.02      // CaptureExposurePolicy: the device's cap drifted further than this from what was applied -> a session re-run reset it; re-apply
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)

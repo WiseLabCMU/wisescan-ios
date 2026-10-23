@@ -200,3 +200,27 @@ nonisolated struct FocusRegion: Codable, Equatable, Sendable {
 nonisolated struct FocusCaptureRequest: Equatable, Sendable {
     var region: FocusRegion
 }
+
+/// A region's box in the raw capture frame of the world map a capture relocalizes into: what the
+/// AR view draws (riding the ghost's seat until Start) and what the capture gate tests against.
+nonisolated struct FocusBoxPlacement: Equatable, Sendable {
+    var boxToMap: simd_float4x4
+    var halfExtents: SIMD3<Float>
+}
+
+extension FocusRegion {
+    /// This region in the raw capture frame of `mapScanId`, the scan whose world map is loaded.
+    /// A canonical-frame region comes back through the inverse of that scan's applied
+    /// registration (`SaveRegistration.appliedTransform`, identity when none was applied); a
+    /// raw-frame region drawn on that same scan is already there. A raw-frame region drawn on a
+    /// different, unregistered scan has no known path and is treated as canonical.
+    func placement(inRawFrameOf mapScanId: UUID, appliedRegistration: simd_float4x4?) -> FocusBoxPlacement {
+        let toMap: simd_float4x4
+        if !frameIsCanonical, frameScanId == mapScanId {
+            toMap = transform
+        } else {
+            toMap = (appliedRegistration ?? matrix_identity_float4x4).inverse * transform
+        }
+        return FocusBoxPlacement(boxToMap: toMap, halfExtents: halfExtents)
+    }
+}

@@ -4,15 +4,15 @@ import RealityKit
 import SwiftData
 import simd
 
-// MARK: - AR Capture (EXPERIMENT): the capture-only branch of a rescan
+// MARK: - Focus scan: the still-capture branch of a rescan (docs/design/capture-modes.md)
 
-/// AR Capture is the Rescan flow up to Start: same entry (LocationDetailView.startRescan with
-/// `stillCapture`), same world map, gates, relocalization, ghost, alignment and manual nudge. Only
+/// A focus scan is the Rescan flow up to Start: same entry (LocationDetailView.startRescan with a
+/// focus request), same world map, gates, relocalization, ghost, alignment and manual nudge. Only
 /// Start and Stop differ. Start computes the same manual-nudge bake as `startRecording`, then
 /// raises `isStillCapturing`; ARCoverageView re-runs the session the way record-start does
 /// (preserving the relocalized frame), applies the ICP and nudge bakes, drops mesh / planes /
-/// RoomPlan / ghost, and starts feeding frames to the engine. Stop zips the stills for the share
-/// sheet; nothing is saved into the scan store.
+/// RoomPlan / ghost, places the region, and starts feeding frames to the engine. Stop drains the
+/// engine and files its directory as a focus scan of the location.
 extension CaptureView {
 
     func toggleStillCapture() {
@@ -23,6 +23,11 @@ extension CaptureView {
         switch stillCapture.phase {
         case .running, .stopping: return
         case .idle, .done, .failed: break
+        }
+        guard scanStore.activeFocusRequest != nil else {
+            showTransientMessage("No focus region: start a focus scan from the space's Rescan button", duration: 4,
+                                 systemImage: "exclamationmark.triangle.fill", tint: .orange)
+            return
         }
         // The same pre-start gates as a rescan's record tap (toggleRecording): tracking out of the
         // cold-init state, and (Perf Diagnostics) a short hold so the ICP correction can land and
@@ -52,7 +57,7 @@ extension CaptureView {
         }
     }
 
-    /// Start of the capture-only branch. The manual ghost-nudge bake is computed exactly as
+    /// Start of the still-capture branch. The manual ghost-nudge bake is computed exactly as
     /// `startRecording` computes it (keep the two in sync); ARCoverageView applies it, after the
     /// ICP bake, on the `isStillCapturing` rising edge.
     func startStillCapture() {
@@ -82,23 +87,106 @@ extension CaptureView {
         stillCapture.stop()
     }
 
-    /// After the zip is handed off: leave the rescan the way cancelling one does (clear the
-    /// capture state and the ghost, reset the session to a fresh frame).
+    /// Check finishes by itself at its target; the other levels run until the operator stops.
+    func finishFocusScanIfTargetReached(_ saved: Int) {
+        guard isStillCapturing, let level = scanStore.activeFocusRequest?.region.detail,
+              level.finishesAtTarget, saved >= level.targetStills else { return }
+        stopStillCapture()
+        showTransientMessage("Got \(saved) photos, saving", duration: 3,
+                             systemImage: "checkmark.circle.fill", tint: .green)
+    }
+
+    /// The engine finished (or failed): file the capture as a focus scan.
+    func handleStillCapturePhase(_ phase: ARStillCaptureController.Phase) {
+        switch phase {
+        case .done(let directory):
+            saveFocusCapture(directory)
+        case .failed(let reason):
+            // The focus setup (map, region, alignment) stays, so a tap on record retries.
+            showTransientMessage("Focus scan failed: \(reason)", duration: 5,
+                                 systemImage: "xmark.octagon.fill", tint: .red)
+            stillCapture.reset()
+        case .idle, .running, .stopping:
+            break
+        }
+    }
+
+    /// Files the finished capture into the location and takes the operator to it, as a room
+    /// scan's save does. A capture with no stills is discarded.
+    private func saveFocusCapture(_ directory: URL) {
+        let stills = stillCapture.stats.stillsSaved
+        guard let locationId = scanStore.activeLocationForScan,
+              let region = scanStore.activeFocusRequest?.region else {
+            showTransientMessage("Focus scan not saved: the capture lost its space", duration: 5,
+                                 systemImage: "exclamationmark.triangle.fill", tint: .orange)
+            finishStillCapture()
+            return
+        }
+        guard stills > 0 else {
+            try? FileManager.default.removeItem(at: directory)
+            showTransientMessage("No photos were taken, nothing saved", duration: 4,
+                                 systemImage: "camera.badge.ellipsis", tint: .yellow)
+            finishStillCapture()
+            return
+        }
+        let result = ScanFileManager.shared.saveFocusScan(
+            context: modelContext, locationId: locationId, parentScanId: scanStore.activeScanToExtend,
+            region: region, captureDirectory: directory, stillCount: stills,
+            hardwareDeviceModel: UIDevice.current.name)
+        switch result {
+        case .success(let scan):
+            showTransientMessage("Focus scan saved: \(stills) photos", duration: 3,
+                                 systemImage: "checkmark.circle.fill", tint: .green)
+            let location = scan.location
+            finishStillCapture()
+            saveNavigationTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(1000))
+                guard !Task.isCancelled else { return }
+                selectedTab = 2
+                if let location {
+                    scanStore.navigationPath = NavigationPath()
+                    scanStore.navigationPath.append(location)
+                }
+            }
+        case .failure(let error):
+            showTransientMessage(error.localizedDescription, duration: 6,
+                                 systemImage: "xmark.octagon.fill", tint: .red)
+            finishStillCapture()
+        }
+    }
+
+    /// After the scan is filed: leave the rescan the way cancelling one does (clear the capture
+    /// state and the ghost, reset the session to a fresh frame).
     func finishStillCapture() {
         stillCapture.reset()
         scanStore.resetCaptureState()
         cachedGhostMeshData = nil
         let fresh = ARCoverageView.makeFreshConfiguration()
         currentARSession?.run(fresh, options: [.resetTracking, .removeExistingAnchors])
-        showTransientMessage("AR capture finished", duration: 3)
+    }
+
+    /// The region's box in the raw frame of the map being relocalized into (`activeScanToExtend`'s).
+    /// Reads that scan's registration sidecar, so it runs on changes, not in the body.
+    func refreshFocusBoxPlacement() {
+        guard let region = scanStore.activeFocusRequest?.region, let mapScanId = scanStore.activeScanToExtend else {
+            focusBoxPlacement = nil
+            return
+        }
+        let descriptor = FetchDescriptor<CapturedScan>(predicate: #Predicate { $0.id == mapScanId })
+        let mapScan = try? modelContext.fetch(descriptor).first
+        let registration = mapScan.flatMap { SaveRegistration.appliedTransform(scanDirectory: $0.scanDirectory) }
+        focusBoxPlacement = region.placement(inRawFrameOf: mapScanId, appliedRegistration: registration)
     }
 
     /// What the dump records about the frame: the world-map scan (the rescan's source), its
-    /// `registration.json` (that scan's raw frame -> the original scan's canonical frame), and the
-    /// manual nudge bake. The ICP bake is reported by ARCoverageView when it applies one.
+    /// `registration.json` (that scan's raw frame -> the original scan's canonical frame), the
+    /// manual nudge bake, the region and the privacy filter. The ICP bake is reported by
+    /// ARCoverageView when it applies one, and the region's placement at Start likewise.
     private func stillCaptureFrameContext() -> ARStillCaptureSession.FrameContext {
         var context = ARStillCaptureSession.FrameContext()
         context.manualNudgeBake = bakedGhostTransform
+        context.region = scanStore.activeFocusRequest?.region
+        context.privacyFilter = isPrivacyFilterOn
         if let scanId = scanStore.activeScanToExtend {
             let descriptor = FetchDescriptor<CapturedScan>(predicate: #Predicate { $0.id == scanId })
             if let scan = try? modelContext.fetch(descriptor).first {
@@ -113,30 +201,26 @@ extension CaptureView {
 
     // MARK: Views
 
-    /// Debug panel mid-screen (the bottom of the capture view is busy), and the short-exposure
-    /// experiment switch on the trailing edge at mid-height. The panel ignores touches; the switch
-    /// is the only control here.
+    /// The capture HUD near the top while a focus scan is set up or running; with Perf Diagnostics
+    /// also the developer panel mid-screen and the short-exposure switch on the trailing edge.
     @ViewBuilder var stillCaptureOverlay: some View {
-        if scanStore.activeScanKind == .focus || stillCapture.phase != .idle {
+        if let region = scanStore.activeFocusRequest?.region,
+           scanStore.activeScanKind == .focus || stillCapture.phase != .idle {
             ZStack {
-                ARStillCaptureOverlay(controller: stillCapture)
-                HStack {
+                VStack {
+                    FocusCaptureHUD(region: region, stats: stillCapture.stats, isCapturing: isStillCapturing)
+                        .padding(.top, AppConstants.focusHUDTopPadding)
                     Spacer()
-                    ARStillShortExposureToggle(controller: stillCapture)
-                        .padding(.trailing, 12)
+                }
+                if PerfDiag.enabled {
+                    ARStillCaptureOverlay(controller: stillCapture)
+                    HStack {
+                        Spacer()
+                        ARStillShortExposureToggle(controller: stillCapture)
+                            .padding(.trailing, 12)
+                    }
                 }
             }
-        }
-    }
-
-    var stillCaptureShareBinding: Binding<Bool> {
-        Binding(get: { stillCapture.shareURL != nil },
-                set: { presented in if !presented { finishStillCapture() } })
-    }
-
-    @ViewBuilder var stillCaptureShareSheet: some View {
-        if let url = stillCapture.shareURL {
-            ShareSheet(activityItems: [url])
         }
     }
 }

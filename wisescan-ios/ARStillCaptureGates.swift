@@ -191,6 +191,90 @@ nonisolated enum ARStillCaptureGates {
         return nil
     }
 
+    // MARK: Focus region
+
+    /// How a focus scan's region sits in one camera view.
+    struct RegionView: Equatable {
+        /// The box centre projects inside the image, `centreMargin` in from every edge.
+        var centreInFrame: Bool
+        /// Share of the image the box's projected bounding rectangle covers (clipped to the
+        /// image), 0...1. 1 when the camera is inside or right up against the box.
+        var frameCoverage: Double
+        /// Camera to box centre, metres.
+        var distance: Double
+        /// Where the camera is, seen from the box centre in the box's own axes: azimuth 0...360
+        /// degrees about +Y (0 = the box's +Z side), elevation -90...90 degrees above its middle.
+        var azimuthDeg: Double
+        var elevationDeg: Double
+    }
+
+    /// The region in one view. `boxToWorld` places the box (it spans +-`halfExtents`);
+    /// `cameraToWorld` and the intrinsics are the frame's (ARKit: camera looks down -Z, +Y up;
+    /// pixels in the sensor's landscape image, v down).
+    static func regionView(boxToWorld: simd_float4x4, halfExtents: SIMD3<Float>,
+                           cameraToWorld: simd_float4x4, fx: Double, fy: Double, cx: Double, cy: Double,
+                           width: Double, height: Double, centreMargin: Double = 0.1) -> RegionView {
+        let worldToCamera = cameraToWorld.inverse
+        let centre = position(boxToWorld)
+        let camera = position(cameraToWorld)
+        func project(_ world: SIMD3<Float>) -> (u: Double, v: Double, depth: Double) {
+            let p = worldToCamera * SIMD4<Float>(world, 1)
+            let depth = Double(-p.z)
+            guard depth > 1e-6 else { return (0, 0, depth) }
+            return (cx + fx * Double(p.x) / depth, cy - fy * Double(p.y) / depth, depth)
+        }
+        let c = project(centre)
+        let marginU = width * centreMargin, marginV = height * centreMargin
+        let centreIn = c.depth > 0 && c.u >= marginU && c.u <= width - marginU && c.v >= marginV && c.v <= height - marginV
+
+        var coverage = 0.0
+        let projected = FocusRegion.corners(of: boxToWorld, halfExtents: halfExtents).map(project)
+        if projected.contains(where: { $0.depth <= AppConstants.focusRegionNearPlaneM }) {
+            // A corner at or behind the camera: up against the box, or partly behind us. Seen
+            // head-on that fills the frame; otherwise the box is not in view.
+            coverage = centreIn ? 1 : 0
+        } else {
+            let us = projected.map { $0.u }, vs = projected.map { $0.v }
+            let left = max(0, us.min() ?? 0), right = min(width, us.max() ?? 0)
+            let top = max(0, vs.min() ?? 0), bottom = min(height, vs.max() ?? 0)
+            if right > left, bottom > top, width > 0, height > 0 {
+                coverage = (right - left) * (bottom - top) / (width * height)
+            }
+        }
+
+        let rotation = rotationPart(boxToWorld)
+        let local = rotation.transpose * (camera - centre)
+        let horizontal = (Double(local.x) * Double(local.x) + Double(local.z) * Double(local.z)).squareRoot()
+        var azimuth = atan2(Double(local.x), Double(local.z)) * 180 / .pi
+        if azimuth < 0 { azimuth += 360 }
+        let elevation = atan2(Double(local.y), horizontal) * 180 / .pi
+        return RegionView(centreInFrame: centreIn, frameCoverage: min(1, coverage),
+                          distance: Double(simd_length(camera - centre)),
+                          azimuthDeg: azimuth, elevationDeg: elevation)
+    }
+
+    /// Coverage-dial cell for a view direction: `azimuthBins` sectors per ring, rings split at
+    /// `elevationEdgesDeg` (ascending; below the first edge is ring 0). Index = ring * bins + sector.
+    static func coverageBin(azimuthDeg: Double, elevationDeg: Double, azimuthBins: Int,
+                            elevationEdgesDeg: [Double]) -> Int {
+        let bins = max(1, azimuthBins)
+        var az = azimuthDeg.truncatingRemainder(dividingBy: 360)
+        if az < 0 { az += 360 }
+        let sector = min(bins - 1, Int(az / (360 / Double(bins))))
+        let ring = elevationEdgesDeg.filter { elevationDeg >= $0 }.count
+        return ring * bins + sector
+    }
+
+    /// Angle at the region centre between two camera positions, degrees: how far the view of the
+    /// region has moved, whether by orbiting or by a sidestep.
+    static func regionViewAngleDeg(from a: SIMD3<Float>, to b: SIMD3<Float>, centre: SIMD3<Float>) -> Double {
+        let da = a - centre, db = b - centre
+        let la = simd_length(da), lb = simd_length(db)
+        guard la > 1e-6, lb > 1e-6 else { return 0 }
+        let cosine = Double(simd_dot(da, db) / (la * lb))
+        return acos(min(1, max(-1, cosine))) * 180 / .pi
+    }
+
     // MARK: Pose helpers
 
     static func position(_ m: simd_float4x4) -> SIMD3<Float> {

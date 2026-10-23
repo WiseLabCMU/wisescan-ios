@@ -2,9 +2,10 @@ import ARKit
 import SwiftUI
 import simd
 
-/// EXPERIMENT: presentation state for the capture-only branch of the Rescan flow (AR Capture).
-/// Owned by CaptureView. The engine (`ARStillCaptureSession`) is fed frames by ARCoverageView's
-/// session delegate; this class only starts/stops it, polls its counters, and holds the result.
+/// Presentation state for a focus scan's still capture (the still-capture branch of the Rescan
+/// flow). Owned by CaptureView. The engine (`ARStillCaptureSession`) is fed frames by
+/// ARCoverageView's session delegate; this class only starts/stops it, polls its counters, and
+/// holds the result: the finished capture directory, which CaptureView files as a scan.
 @Observable
 @MainActor
 final class ARStillCaptureController {
@@ -27,11 +28,6 @@ final class ARStillCaptureController {
         engine.setShortExposure(on)
     }
 
-    var shareURL: URL? {
-        if case .done(let url) = phase { return url }
-        return nil
-    }
-
     func begin(session: ARSession, label: String, context: ARStillCaptureSession.FrameContext) -> Bool {
         do {
             try engine.begin(session: session, label: label, context: context)
@@ -52,7 +48,7 @@ final class ARStillCaptureController {
                 guard let self else { return }
                 stopPolling()
                 stats = engine.liveStats()
-                phase = url.map { .done($0) } ?? .failed("Zip failed; the capture directory was kept in Documents/\(AppConstants.arStillFolder)")
+                phase = url.map { .done($0) } ?? .failed("The capture folder was not created")
             }
         }
     }
@@ -79,9 +75,9 @@ final class ARStillCaptureController {
     }
 }
 
-/// Debug panel for AR Capture, drawn in the middle of the capture view (the bottom is busy).
-/// The first line is the point of the experiment: the still resolution and the exposure the
-/// stills actually got, against the cap.
+/// Developer panel for a focus scan's still capture (Perf Diagnostics on), drawn in the middle of
+/// the capture view (the bottom is busy). The first line: the still resolution and the exposure
+/// the stills actually got, against the cap.
 struct ARStillCaptureOverlay: View {
     let controller: ARStillCaptureController
 
@@ -92,7 +88,7 @@ struct ARStillCaptureOverlay: View {
         let threshold = AppConstants.arStillViewpointThresholdDeg
         let smear = live.smearImageMotionPx
         return VStack(alignment: .leading, spacing: 3) {
-            Text("AR CAPTURE  \(phaseLabel)")
+            Text("FOCUS CAPTURE  \(phaseLabel)")
                 .font(.system(size: 12, weight: .bold, design: .monospaced))
                 .foregroundColor(.cyan)
             Text("still \(live.lastStillDimensions.isEmpty ? "-" : live.lastStillDimensions)  exp \(exposure(live.lastStillExposureSeconds))  ISO \(fmt(live.lastStillISO, 0))")
@@ -111,7 +107,11 @@ struct ARStillCaptureOverlay: View {
                 .foregroundColor(smear > budget ? .orange : .white)
             Text("at capture: last \(fmt(live.lastCaptureSmearPx, 1)) px  over budget \(live.stillsOverBudgetAtCapture)/\(live.stillsSaved)")
             Text("frame work ms: handler \(fmt(live.handlerMeanMs, 2)) max \(fmt(live.handlerMaxMs, 1))  engine \(fmt(live.engineMeanMs, 2)) max \(fmt(live.engineMaxMs, 1))")
-            Text("view turn \(fmt(live.rotationSinceStillDeg, 1)) / parallax \(fmt(live.parallaxSinceStillDeg, 1)) of \(fmt(threshold, 0)) deg")
+            Text("view turn \(fmt(live.rotationSinceStillDeg, 1)) / parallax \(fmt(live.parallaxSinceStillDeg, 1)) of \(fmt(live.detailLevel?.spacingDeg ?? threshold, 0)) deg")
+            if live.hasRegion {
+                Text("region \(live.regionInView ? "in view" : "OUT")  fills \(fmt(live.regionFrameCoverage * 100, 0))%  at \(fmt(live.regionDistance, 2)) m  held \(live.heldRegionFrames)  hold \(live.hold.rawValue)")
+                    .foregroundColor(live.regionInView ? .white : .orange)
+            }
             Text("frames \(live.framesLogged)  gyro \(live.gyroSamples)  t \(fmt(live.elapsedSeconds, 1))s  \(fmt(Double(live.bytesWritten) / 1_048_576, 1)) MB")
             if !live.exposureCapNote.isEmpty {
                 Text(live.exposureCapNote).foregroundColor(.white.opacity(0.7))
@@ -137,7 +137,7 @@ struct ARStillCaptureOverlay: View {
         switch controller.phase {
         case .idle: return "ready: align, then tap record"
         case .running: return "capturing"
-        case .stopping: return "finishing stills, zipping"
+        case .stopping: return "finishing stills, saving"
         case .done: return "done"
         case .failed: return "failed"
         }

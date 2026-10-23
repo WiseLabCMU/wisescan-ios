@@ -147,6 +147,48 @@ final class ARStillCaptureGatesTests: XCTestCase {
         XCTAssertEqual(history.peak(window: 1), 0.4, "0.5 fell out of the ring")
     }
 
+    func testRegionViewInFrameCoverageAndDirection() {
+        // A 0.5 m box 2 m in front of a camera at the origin looking down -Z.
+        var box = matrix_identity_float4x4
+        box.columns.3 = SIMD4(0, 0, -2, 1)
+        let half = SIMD3<Float>(0.25, 0.25, 0.25)
+        func view(_ camera: simd_float4x4) -> ARStillCaptureGates.RegionView {
+            ARStillCaptureGates.regionView(boxToWorld: box, halfExtents: half, cameraToWorld: camera,
+                                           fx: 1000, fy: 1000, cx: 960, cy: 720, width: 1920, height: 1440)
+        }
+        let ahead = view(pose(.zero))
+        XCTAssertTrue(ahead.centreInFrame)
+        XCTAssertEqual(ahead.distance, 2, accuracy: 1e-5)
+        // Near face at 1.75 m spans 500 px / 1.75 = 286 px each way: about 3% of the frame.
+        XCTAssertEqual(ahead.frameCoverage, (500 / 1.75) * (500 / 1.75) / (1920 * 1440), accuracy: 1e-3)
+        // The camera sits on the box's +Z side, level with it.
+        XCTAssertEqual(ahead.azimuthDeg, 0, accuracy: 1e-3)
+        XCTAssertEqual(ahead.elevationDeg, 0, accuracy: 1e-3)
+        // Turned 90 degrees away: out of view.
+        XCTAssertFalse(view(pose(.zero, yawDeg: 90)).centreInFrame)
+        // Behind the camera entirely.
+        var behind = box
+        behind.columns.3 = SIMD4(0, 0, 2, 1)
+        let back = ARStillCaptureGates.regionView(boxToWorld: behind, halfExtents: half, cameraToWorld: pose(.zero),
+                                                  fx: 1000, fy: 1000, cx: 960, cy: 720, width: 1920, height: 1440)
+        XCTAssertFalse(back.centreInFrame)
+        XCTAssertEqual(back.frameCoverage, 0)
+        // From above: 2 m up and 2 m back, the camera is 45 degrees above the box.
+        XCTAssertEqual(view(pose(SIMD3(0, 2, 0))).elevationDeg, 45, accuracy: 1e-3)
+    }
+
+    func testCoverageBinsAndRegionViewAngle() {
+        let edges = [20.0, 50.0]
+        XCTAssertEqual(ARStillCaptureGates.coverageBin(azimuthDeg: 0, elevationDeg: 0, azimuthBins: 12, elevationEdgesDeg: edges), 0)
+        XCTAssertEqual(ARStillCaptureGates.coverageBin(azimuthDeg: 359, elevationDeg: 10, azimuthBins: 12, elevationEdgesDeg: edges), 11)
+        XCTAssertEqual(ARStillCaptureGates.coverageBin(azimuthDeg: 45, elevationDeg: 30, azimuthBins: 12, elevationEdgesDeg: edges), 12 + 1)
+        XCTAssertEqual(ARStillCaptureGates.coverageBin(azimuthDeg: -15, elevationDeg: 80, azimuthBins: 12, elevationEdgesDeg: edges), 24 + 11)
+        let centre = SIMD3<Float>(0, 0, 0)
+        XCTAssertEqual(ARStillCaptureGates.regionViewAngleDeg(from: SIMD3(1, 0, 0), to: SIMD3(0, 0, 1), centre: centre), 90, accuracy: 1e-4)
+        XCTAssertEqual(ARStillCaptureGates.regionViewAngleDeg(from: SIMD3(1, 0, 0), to: SIMD3(2, 0, 0), centre: centre), 0, accuracy: 1e-4,
+                       "walking straight at the region does not change the view of it")
+    }
+
     func testDepthPercentileSkipsInvalidAndLowConfidence() {
         let depths: [Float] = [0, .nan, 0.5, 1.0, 1.5, 2.0, 3.0, 9.0]
         let conf: [UInt8] = [2, 2, 0, 2, 2, 2, 2, 1]

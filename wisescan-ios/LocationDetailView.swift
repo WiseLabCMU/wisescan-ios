@@ -607,7 +607,7 @@ struct LocationDetailView: View {
 
                     var request = URLRequest(url: url)
                     request.httpMethod = "PUT"
-                    request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
+                    request.setValue(format.effective(for: scan).contentType, forHTTPHeaderField: "Content-Type")
 
                     let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
                         try? FileManager.default.removeItem(at: exportURL)

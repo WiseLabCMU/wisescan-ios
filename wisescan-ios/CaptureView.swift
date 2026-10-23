@@ -46,6 +46,9 @@ struct CaptureView: View {
     /// Focus scan: the still-capture branch of a rescan (see CaptureView+StillCapture).
     @State var stillCapture = ARStillCaptureController()
     @State var isStillCapturing = false
+    /// Focus scan: the region's box in the loaded map's raw frame (refreshFocusBoxPlacement, off
+    /// the body: it reads the map scan's registration sidecar).
+    @State var focusBoxPlacement: FocusBoxPlacement?
     /// Recording a room scan or capturing a focus scan. The one state the pre-record safeguards read
     /// (relocalization watchdog, Try Again, Re-relocalize, idle teardown, the leave-capture config
     /// swap): each of those reloads the map or swaps the configuration, which mid-capture resets
@@ -658,7 +661,8 @@ struct CaptureView: View {
                 pauseARSession: pauseARSession,
                 isAnalyzing: $isAnalyzing,
                 isStillCapturing: isStillCapturing,
-                stillCapture: stillCapture.engine
+                stillCapture: stillCapture.engine,
+                focusBox: focusBoxPlacement
             )
         .alert(rigMeasuredDyMeters < 0.01 ? "Rig height not set" : "Rig height looks wrong",
                isPresented: $showRigHeightPrompt) {
@@ -929,10 +933,12 @@ struct CaptureView: View {
             Text("The ghost mesh from your previous scan may not be perfectly aligned. Choose an option:")
         }
         .preferredColorScheme(.dark)
-        // EXPERIMENT (AR Capture): debug panel mid-screen (the bottom is busy) and the zip's share
-        // sheet. Both live in CaptureView+StillCapture.
+        // Focus scan: the HUD (and, with Perf Diagnostics, the developer panel), the finished
+        // capture's filing, Check's auto-finish, and the region box. All in CaptureView+StillCapture.
         .overlay { stillCaptureOverlay }
-        .sheet(isPresented: stillCaptureShareBinding) { stillCaptureShareSheet }
+        .onChange(of: stillCapture.phase) { _, phase in handleStillCapturePhase(phase) }
+        .onChange(of: stillCapture.stats.stillsSaved) { _, saved in finishFocusScanIfTargetReached(saved) }
+        .onChange(of: scanStore.activeFocusRequest) { _, _ in refreshFocusBoxPlacement() }
         .onAppear {
             // Pick up any Settings change to the diagnostics flag, then start the main-thread
             // stall watchdog for this capture session (both no-ops unless Perf Diagnostics is on).
@@ -949,6 +955,7 @@ struct CaptureView: View {
             // the save-flow and tab-tap stalls it exists to catch happen outside capture.
             MainThreadWatchdog.shared.start()
             memoryPressureMonitor.start()
+            refreshFocusBoxPlacement()
 
             // Battery: returning to the capture tab — cancel any pending idle teardown and resume
             // the AR session if it was paused while we were away.

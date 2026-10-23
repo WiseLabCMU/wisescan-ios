@@ -168,8 +168,8 @@ class CapturedScan {
 
     /// Focus scans: the still-capture dump (photos/, photo_depth/, photo_confidence/, CSVs, logs,
     /// manifest.json), as `ARStillCaptureSession` wrote it.
-    @Transient var focusCaptureURL: URL { scanDirectory.appendingPathComponent("focus_capture") }
-    @Transient var focusRegionFileURL: URL { scanDirectory.appendingPathComponent("focus_region.json") }
+    @Transient var focusCaptureURL: URL { scanDirectory.appendingPathComponent(AppConstants.focusCaptureFolder) }
+    @Transient var focusRegionFileURL: URL { scanDirectory.appendingPathComponent(AppConstants.focusRegionFilename) }
 
     @Transient var roomPlanFileURL: URL { scanDirectory.appendingPathComponent("roomplan.json") }
     @Transient var roomPlanRawFileURL: URL { scanDirectory.appendingPathComponent("roomplan_raw.json") }
@@ -267,6 +267,13 @@ enum ExportFormat: String, CaseIterable, Codable {
     static func persisted(_ rawValue: String) -> ExportFormat? {
         if let format = ExportFormat(rawValue: rawValue) { return format }
         return rawValue == "RAW" ? .nerfstudio : nil
+    }
+
+    /// The format a scan actually exports in. A focus scan has one export, its still-capture zip
+    /// (`ScanExportManager.prepareFocusExport`), whatever format is selected, so its filename and
+    /// upload content type follow `.scan4d`'s zip.
+    func effective(for scan: CapturedScan) -> ExportFormat {
+        scan.isFocusScan ? .scan4d : self
     }
 }
 
@@ -457,6 +464,8 @@ class ScanStore {
     /// Start a focus scan runs the still-capture branch (ARStillCaptureSession) instead of
     /// recording mesh and RoomPlan. Cleared with the rest of the capture state.
     var activeScanKind: ScanKind = .room
+    /// Focus scan: the region and detail level to capture (nil for a room scan).
+    var activeFocusRequest: FocusCaptureRequest?
 
     // MARK: Capture Phase
 
@@ -582,6 +591,7 @@ class ScanStore {
         activeScanToExtend = nil
         activeScanCase = .rescanSpace
         activeScanKind = .room
+        activeFocusRequest = nil
         capturePhase = .idle
         boundaryAnchorTransform = nil
         boundaryAnchorId = nil

@@ -81,6 +81,13 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var startWallTime = ""
         var startUptimeSeconds = 0.0
         var thermalStateAtStart = ""
+        /// Focus scan: the region as drawn (its own frame, see `FocusRegion`), the box-to-world
+        /// transform the gate used in this capture's world (column-major), the detail level, and
+        /// whether the privacy filter was on (the export blurs people when it was).
+        var focusRegion: FocusRegion?
+        var regionToWorld: [Float]?
+        var detailLevel = ""
+        var privacyFilter = true
         var clock = "ARFrame.timestamp and CoreMotion: seconds since boot (same clock)"
         var frame = "world = the latest scan's raw capture frame (its world map), with the rescan record-start bakes applied (icpBake, then manualNudgeBake, both column-major, as setWorldOrigin relative transforms). world_map_registration.json maps that raw frame to the original scan's canonical frame."
         var poseConvention = "c2w_* = ARKit camera-to-world, row-major 3x4; camera looks down -Z, +Y up in the image; world +Y up (gravity), metres. Images, depth and intrinsics are in the sensor's landscape orientation."
@@ -93,6 +100,11 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var originalScanId = ""
         var registrationFile: URL?
         var manualNudgeBake: simd_float4x4?
+        /// Focus scan: the region to capture and the privacy filter state. The region's placement
+        /// in the session's world arrives separately (`setRegionPlacement`), from the AR view at
+        /// Start once the bakes are applied.
+        var region: FocusRegion?
+        var privacyFilter = true
     }
 
     nonisolated struct LiveStats: Equatable, Sendable {
@@ -145,12 +157,37 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var thermalState = ""
         var rotationSinceStillDeg = 0.0
         var parallaxSinceStillDeg = 0.0
+        /// Focus scan. `hold` is why the last frame did not take a still (for the capture HUD);
+        /// `coverageCounts` counts saved stills per coverage-dial cell (rings x sectors).
+        var hasRegion = false
+        var detailLevel: FocusDetailLevel?
+        var targetStills = 0
+        var regionInView = false
+        var regionFrameCoverage = 0.0
+        var regionDistance = 0.0
+        /// Where the camera is around the region now (degrees; see `RegionView`), for the dial.
+        var regionAzimuthDeg = 0.0
+        var regionElevationDeg = 0.0
+        var hold: Hold = .none
+        var heldRegionFrames = 0
+        var coverageCounts: [Int] = []
         var framesLogged = 0
         var gyroSamples = 0
         var accelSamples = 0
         var bytesWritten: Int64 = 0
         var elapsedSeconds = 0.0
         var lastError = ""
+    }
+
+    /// Why the latest tracked frame did not take a still, in the order the gates run.
+    nonisolated enum Hold: String, Sendable {
+        case none
+        case tracking       // tracking not normal
+        case saving         // a still in flight or the encode backlog full
+        case motion         // the blur gate: moving too fast for the exposure
+        case outOfView      // the region's centre is not in the frame
+        case tooFar         // the region fills too little of the frame
+        case sameView       // spacing: the view has not changed enough since the last still
     }
 
     /// Durations of per-frame work as a histogram (0.1 ms bins; the last bin holds 50 ms and up),
@@ -216,6 +253,10 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     private let stillScale = OSAllocatedUnfairLock(initialState: 4032.0 / 1920.0)
     /// The dev ICP correction, when the AR view baked one at Start (any queue).
     private let icpBakeNoted = OSAllocatedUnfairLock<[Float]?>(initialState: nil)
+    /// Focus scan: the box in this capture's world (set from main at Start, read per frame).
+    private let regionPlacement = OSAllocatedUnfairLock<(boxToWorld: simd_float4x4, halfExtents: SIMD3<Float>)?>(initialState: nil)
+    /// Focus scan: the detail level, set by `begin` while not recording (so read freely after).
+    private var detail: FocusDetailLevel?
     /// The exposure cap on ARKit's camera (shared with the room scan); updated per tracked frame.
     let exposurePolicy = CaptureExposurePolicy()
 
@@ -278,6 +319,13 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         s.stillMaxIntervalSeconds = AppConstants.arStillMaxIntervalSeconds
         s.gateDepthPercentile = AppConstants.arStillGateDepthPercentile
         s.gateMinConfidence = Int(AppConstants.arStillGateMinConfidence)
+        s.focusRegion = context.region
+        s.detailLevel = context.region?.detail.rawValue ?? ""
+        s.privacyFilter = context.privacyFilter
+        if let level = context.region?.detail {
+            s.viewpointThresholdDeg = level.spacingDeg
+            s.stillMaxIntervalSeconds = 0   // a focus scan fires on view changes only
+        }
         if let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera {
             s.deviceSupportedPhotoDimensions = device.activeFormat.supportedMaxPhotoDimensions
                 .map { "\($0.width)x\($0.height)" }.joined(separator: " ")
@@ -323,10 +371,22 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         frameWork.withLock { $0 = (WorkTiming(), WorkTiming()) }
         gyroHistory.withLock { $0 = ARStillCaptureGates.GyroHistory(capacity: AppConstants.arStillGyroHistoryCapacity) }
         icpBakeNoted.withLock { $0 = nil }
+        regionPlacement.withLock { $0 = nil }
+        detail = context.region?.detail
         let shortOn = exposurePolicy.isShortExposure
         let thermal = Self.thermalName(ProcessInfo.processInfo.thermalState)
         setup.thermalStateAtStart = thermal
-        live.withLock { $0 = LiveStats(); $0.shortExposure = shortOn; $0.thermalState = thermal }
+        let level = detail
+        let cells = level == nil ? 0 : AppConstants.focusCoverageAzimuthBins * (AppConstants.focusCoverageElevationEdgesDeg.count + 1)
+        live.withLock {
+            $0 = LiveStats()
+            $0.shortExposure = shortOn
+            $0.thermalState = thermal
+            $0.hasRegion = level != nil
+            $0.detailLevel = level
+            $0.targetStills = level?.targetStills ?? 0
+            $0.coverageCounts = [Int](repeating: 0, count: cells)
+        }
         thermalObserver = NotificationCenter.default.addObserver(
             forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: nil
         ) { [weak self] _ in
@@ -355,6 +415,16 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         live.withLock { $0.shortExposure = on }
     }
 
+    /// Focus scan: where the region's box sits in this capture's world, once the AR view has
+    /// applied the Start bakes. Call before `startAccepting`.
+    func setRegionPlacement(boxToWorld: simd_float4x4, halfExtents: SIMD3<Float>) {
+        regionPlacement.withLock { $0 = (boxToWorld, halfExtents) }
+        setup.regionToWorld = Self.columnMajor(boxToWorld)
+        let t = boxToWorld.columns.3
+        event(String(format: "region placed: centre (%.2f, %.2f, %.2f) m, half extents (%.2f, %.2f, %.2f) m",
+                     t.x, t.y, t.z, halfExtents.x, halfExtents.y, halfExtents.z))
+    }
+
     /// The AR view applied the dev ICP correction at Start (before any manual nudge).
     func noteICPBake(_ bake: simd_float4x4) {
         let values = Self.columnMajor(bake)
@@ -362,7 +432,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     }
 
     /// Stops accepting frames, waits for the in-flight still and queued encodes, writes the
-    /// manifest, zips. Completion on main with the zip, or nil (directory kept) when zipping failed.
+    /// manifest and closes the logs. Completion on main with the finished capture directory (the
+    /// caller files it into a focus scan), or nil if there was none.
     func stop(completion: @escaping @Sendable (URL?) -> Void) {
         recording.store(false, ordering: .releasing)
         stopUptime = ProcessInfo.processInfo.systemUptime
@@ -392,13 +463,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                 writeManifest(stats: stats)
                 closeWriters()
             }
-            guard let directory = captureDirectory else {
-                DispatchQueue.main.async { completion(nil) }
-                return
-            }
-            let zip = Self.zip(directory: directory)
-            if zip != nil { try? FileManager.default.removeItem(at: directory) }
-            DispatchQueue.main.async { completion(zip) }
+            let directory = captureDirectory
+            DispatchQueue.main.async { completion(directory) }
         }
     }
 
@@ -502,11 +568,39 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let angularSmear = max(poseSmear, gyroSmear)
         let imageSmear = angularSmear * focalStill
         let budgetPx = AppConstants.arStillBlurBudgetRad * focalStill
-        let view = lastStillTransform.map {
+        // Focus scan: how the region sits in this view. Spacing then measures the view change at
+        // the region itself (the angle between the two camera positions seen from its centre, so
+        // an orbit and a sidestep both count) in place of parallax at the near depth.
+        let placement = regionPlacement.withLock { $0 }
+        var regionView: ARStillCaptureGates.RegionView?
+        if let placement, fStream > 0 {
+            regionView = ARStillCaptureGates.regionView(
+                boxToWorld: placement.boxToWorld, halfExtents: placement.halfExtents, cameraToWorld: transform,
+                fx: fStream, fy: Double(camera.intrinsics[1][1]),
+                cx: Double(camera.intrinsics[2][0]), cy: Double(camera.intrinsics[2][1]),
+                width: Double(camera.imageResolution.width), height: Double(camera.imageResolution.height),
+                centreMargin: AppConstants.focusRegionCentreMargin)
+        }
+        var view = lastStillTransform.map {
             ARStillCaptureGates.viewpointChange(from: $0, to: transform, depth: gateDepth)
         } ?? (rotationDeg: 0.0, parallaxDeg: 0.0)
+        if let placement, let last = lastStillTransform {
+            view.parallaxDeg = ARStillCaptureGates.regionViewAngleDeg(
+                from: ARStillCaptureGates.position(last), to: ARStillCaptureGates.position(transform),
+                centre: ARStillCaptureGates.position(placement.boxToWorld))
+        }
+        let inView = regionView?.centreInFrame ?? false
+        let regionCoverage = regionView?.frameCoverage ?? 0
+        let regionDistance = regionView?.distance ?? 0
+        let regionAzimuth = regionView?.azimuthDeg ?? 0
+        let regionElevation = regionView?.elevationDeg ?? 0
         let streamDims = "\(Int(camera.imageResolution.width))x\(Int(camera.imageResolution.height))"
         live.withLock {
+            $0.regionInView = inView
+            $0.regionFrameCoverage = regionCoverage
+            $0.regionDistance = regionDistance
+            $0.regionAzimuthDeg = regionAzimuth
+            $0.regionElevationDeg = regionElevation
             $0.tracking = trackingLabel
             $0.streamDimensions = streamDims
             $0.streamExposureSeconds = exposure
@@ -523,28 +617,53 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         }
 
         logFrame(frame, trackingLabel: trackingLabel)
-        guard isNormal else { return }
+        guard isNormal else {
+            live.withLock { $0.hold = .tracking }
+            return
+        }
 
-        // Gates: backpressure, blur, then spacing.
+        // Gates: backpressure, blur, the region (focus scans), then spacing. Each hold names
+        // itself for the capture HUD.
         let state = pipeline.withLock { $0 }
-        if state.inFlight { return }
+        if state.inFlight {
+            live.withLock { $0.hold = .saving }
+            return
+        }
         if state.pending >= AppConstants.arStillMaxPendingEncodes {
-            live.withLock { $0.heldBackpressureFrames += 1 }
+            live.withLock { $0.heldBackpressureFrames += 1; $0.hold = .saving }
             return
         }
         if exposure > 0, angularSmear > AppConstants.arStillBlurBudgetRad {
-            live.withLock { $0.heldBlurFrames += 1 }
+            live.withLock { $0.heldBlurFrames += 1; $0.hold = .motion }
             return
         }
+        if let regionView {
+            let regionHold: Hold? = !regionView.centreInFrame ? .outOfView
+                : regionView.frameCoverage < AppConstants.focusMinFrameCoverage ? .tooFar : nil
+            if let regionHold {
+                live.withLock { $0.heldRegionFrames += 1; $0.hold = regionHold }
+                return
+            }
+        }
+        // A focus scan spaces by its detail level and fires on view changes only (a pause in
+        // front of the region takes one still, not one a second).
         let sinceLast = lastStillTime < 0 ? Double.infinity : t - lastStillTime
         guard let reason = ARStillCaptureGates.spacingDecision(
             sinceLast: sinceLast, rotationDeg: view.rotationDeg, parallaxDeg: view.parallaxDeg,
             minInterval: AppConstants.arStillMinIntervalSeconds,
-            viewpointThresholdDeg: AppConstants.arStillViewpointThresholdDeg,
-            maxInterval: AppConstants.arStillMaxIntervalSeconds
+            viewpointThresholdDeg: detail?.spacingDeg ?? AppConstants.arStillViewpointThresholdDeg,
+            maxInterval: detail == nil ? AppConstants.arStillMaxIntervalSeconds : 0
         ) else {
-            live.withLock { $0.heldSpacingFrames += 1 }
+            live.withLock { $0.heldSpacingFrames += 1; $0.hold = .sameView }
             return
+        }
+        live.withLock { $0.hold = .none }
+        var regionCell = -1
+        if let regionView {
+            regionCell = ARStillCaptureGates.coverageBin(
+                azimuthDeg: regionView.azimuthDeg, elevationDeg: regionView.elevationDeg,
+                azimuthBins: AppConstants.focusCoverageAzimuthBins,
+                elevationEdgesDeg: AppConstants.focusCoverageElevationEdgesDeg)
         }
         // The pose of the frame that passed the gates anchors the spacing for the next still.
         lastStillTransform = transform
@@ -557,7 +676,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                                    exposureCap: exposurePolicy.report.appliedSeconds,
                                    depthHeld: depthHeld,
                                    thermalState: Self.thermalName(ProcessInfo.processInfo.thermalState),
-                                   poseSmear: poseSmear, gyroPeak: gyroPeak, gyroSmear: gyroSmear)
+                                   poseSmear: poseSmear, gyroPeak: gyroPeak, gyroSmear: gyroSmear,
+                                   region: regionView, regionCell: regionCell)
         requestStill(request)
     }
 
@@ -584,6 +704,9 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var poseSmear: Double
         var gyroPeak: Double
         var gyroSmear: Double
+        /// Focus scan: the region in the gating frame, and its coverage-dial cell (-1 = none).
+        var region: ARStillCaptureGates.RegionView?
+        var regionCell: Int
     }
 
     private func requestStill(_ request: StillRequest) {
@@ -664,6 +787,12 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             row += [request.depthHeld ? "1" : "0", request.thermalState]
             row += [Fmt.f6(request.poseSmear), Fmt.f4(request.gyroPeak), Fmt.f6(request.gyroSmear)]
             row += [captureRate.map(Fmt.f4) ?? "", captureSmear.map(Fmt.f6) ?? "", overBudget.map { $0 ? "1" : "0" } ?? ""]
+            if let region = request.region {
+                row += [Fmt.f4(region.frameCoverage), Fmt.f3(region.distance),
+                        Fmt.f3(region.azimuthDeg), Fmt.f3(region.elevationDeg), String(request.regionCell)]
+            } else {
+                row += ["", "", "", "", ""]
+            }
             let line = row.joined(separator: ",")
             ioQueue.async { [self] in
                 write(jpeg, to: "photos/\(stem).jpg")
@@ -675,8 +804,10 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             let wasShort = request.shortExposure
             let capturePx = captureSmear.map { $0 * Double(k[0][0]) }
             let wasOverBudget = overBudget == true
+            let cell = request.regionCell
             live.withLock {
                 $0.stillsSaved += 1
+                if cell >= 0, cell < $0.coverageCounts.count { $0.coverageCounts[cell] += 1 }
                 if wasShort { $0.stillsShortExposure += 1 }
                 if hasDepth { $0.stillsWithDepth += 1 }
                 $0.lastStillDimensions = "\(width)x\(height)"
@@ -846,7 +977,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let pose = "c2w_00,c2w_01,c2w_02,c2w_03,c2w_10,c2w_11,c2w_12,c2w_13,c2w_20,c2w_21,c2w_22,c2w_23"
         let photosHeader = "index,file,host_ts,request_host_ts,latency_s,width,height,exposure_s,iso,tracking,depth_file,confidence_file,depth_width,depth_height,fx,fy,cx,cy,"
             + pose
-            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason,predicted_image_motion_smear_px,predicted_image_motion_smear_rad,short_exposure,exposure_cap_s,gate_depth_held,thermal_state,pose_smear_rad,gate_gyro_peak_rad_s,gate_gyro_smear_rad,capture_gyro_rad_s,capture_gyro_smear_rad,capture_over_budget"
+            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason,predicted_image_motion_smear_px,predicted_image_motion_smear_rad,short_exposure,exposure_cap_s,gate_depth_held,thermal_state,pose_smear_rad,gate_gyro_peak_rad_s,gate_gyro_smear_rad,capture_gyro_rad_s,capture_gyro_smear_rad,capture_over_budget,region_frame_coverage,region_distance_m,region_azimuth_deg,region_elevation_deg,region_cell"
         writers = [
             "photos.csv": ARStillCSVWriter(url: directory.appendingPathComponent("photos.csv"), header: photosHeader),
             "frames.csv": ARStillCSVWriter(url: directory.appendingPathComponent("frames.csv"),
@@ -901,6 +1032,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                 "imu_gyro.csv": "raw gyroscope rad/s (the blur gate's peak-rate term, and each still's rate at capture)",
                 "imu_accel.csv": "raw accelerometer g",
                 "world_map_registration.json": "copy of the world-map scan's registration.json (raw -> original scan's canonical frame), when it had one",
+                "photos.csv region_*": "focus scan: the region's share of the gating frame, camera distance, azimuth/elevation seen from the region (its own axes), coverage-dial cell; setup.regionToWorld places the box in this capture's world",
                 "events.log": "capture lifecycle, exposure-cap changes, tracking and scene-depth changes, thermal changes, per-frame work timing at stop, failures"
             ]
         ]
@@ -925,6 +1057,9 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             "last_still_dimensions": stats.lastStillDimensions,
             "stills_over_budget_at_capture": stats.stillsOverBudgetAtCapture,
             "stills_capture_blur_unknown": stats.stillsCaptureBlurUnknown,
+            "frames_held_region": stats.heldRegionFrames,
+            // Focus scan: saved stills per coverage-dial cell, ring-major (see region_cell in photos.csv).
+            "coverage_counts": stats.coverageCounts,
             "elapsed_seconds": stats.elapsedSeconds
         ]
         manifest["totals"] = totals
@@ -933,18 +1068,6 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         if let data = try? JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) {
             try? data.write(to: directory.appendingPathComponent("manifest.json"))
         }
-    }
-
-    private static func zip(directory: URL) -> URL? {
-        let fm = FileManager.default
-        let zipURL = directory.deletingPathExtension().appendingPathExtension("zip")
-        try? fm.removeItem(at: zipURL)
-        var error: NSError?
-        NSFileCoordinator().coordinate(readingItemAt: directory, options: .forUploading, error: &error) { temp in
-            try? fm.copyItem(at: temp, to: zipURL)
-        }
-        if error != nil { return nil }
-        return fm.fileExists(atPath: zipURL.path) ? zipURL : nil
     }
 
     // MARK: Helpers
