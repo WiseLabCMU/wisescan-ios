@@ -154,6 +154,10 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var depthDropouts = 0
         var framesWithoutDepth = 0
         var trackingChanges = 0
+        /// Why the capture stopped taking stills because the session may have left the map's frame
+        /// (empty while it has not). The region and every earlier still are in that frame; later
+        /// poses might not be. CaptureView stops the capture when this turns non-empty.
+        var frameLost = ""
         var thermalState = ""
         var rotationSinceStillDeg = 0.0
         var parallaxSinceStillDeg = 0.0
@@ -279,6 +283,9 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     private var lastDepthRequest: TimeInterval = -1
     private var lastGoodDepth = 0.0
     private var lastGoodDepthTime: TimeInterval = -1
+    // Frame integrity: whether tracking has been normal in this capture, and the previous frame's time.
+    private var trackedThisCapture = false
+    private var lastFrameTime: TimeInterval = -1
     /// Set once "depth requested but not delivered" has been logged for the current dropout.
     private let depthNotDeliveredLogged = Atomic<Bool>(false)
     private var thermalObserver: NSObjectProtocol?
@@ -365,6 +372,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         lastDepthRequest = -1
         lastGoodDepth = 0
         lastGoodDepthTime = -1
+        trackedThisCapture = false
+        lastFrameTime = -1
         depthNotDeliveredLogged.store(false, ordering: .releasing)
         encodeQueue.sync { photoIndex = 0 }
         pipeline.withLock { $0 = (false, 0) }
@@ -433,6 +442,18 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         event("region placed: drawn (mesh frame\(setup.focusRegion?.frameIsCanonical == true ? ", canonical" : ", raw")) \(drawn); "
               + "map raw frame \(describe(boxToMap)); ghost seat \(describe(seat)); capture world \(describe(boxToWorld)); "
               + String(format: "half extents (%.2f, %.2f, %.2f) m", halfExtents.x, halfExtents.y, halfExtents.z))
+    }
+
+    /// The session may have left the map's frame (any queue): no stills from here on. The first
+    /// reason sticks; it is logged and lands in `LiveStats.frameLost` and the manifest.
+    func noteFrameLost(_ reason: String) {
+        guard recording.load(ordering: .acquiring) else { return }
+        let first = live.withLock { (stats: inout LiveStats) -> Bool in
+            guard stats.frameLost.isEmpty else { return false }
+            stats.frameLost = reason
+            return true
+        }
+        if first { event("frame lost (\(reason)): no further stills") }
     }
 
     /// The AR view applied the dev ICP correction at Start (before any manual nudge).
@@ -523,6 +544,18 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let transform = camera.transform
         let (trackingLabel, isNormal) = Self.describe(camera.trackingState)
         noteSessionHealth(hasDepth: frame.sceneDepth != nil, t: t, trackingLabel: trackingLabel)
+
+        // Frame integrity. Once tracking has been normal in this capture, a frame gap long enough
+        // for SLAM to re-initialize under it (the room scan's hard VIO trip) may have left the
+        // map's frame. No stills after that, or after the AR view reports a loss (an interruption,
+        // or tracking back without relocalizing into the map).
+        if isNormal { trackedThisCapture = true }
+        let frameGap = lastFrameTime >= 0 ? t - lastFrameTime : 0
+        lastFrameTime = t
+        if trackedThisCapture, frameGap > AppConstants.vioHardFrameGapTripSeconds {
+            noteFrameLost(String(format: "no camera frames for %.1f s", frameGap))
+        }
+        if live.withLock({ !$0.frameLost.isEmpty }) { return }
         if isNormal { exposurePolicy.update(at: t) }
 
         // Motion from the pose over a short window (ARKit pose jitter dominates shorter ones).
@@ -1082,7 +1115,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             "frames_held_backpressure": stats.heldBackpressureFrames,
             "stills_short_exposure": stats.stillsShortExposure,
             "depth_dropouts": stats.depthDropouts, "frames_without_depth": stats.framesWithoutDepth,
-            "tracking_changes": stats.trackingChanges, "thermal_state_at_stop": stats.thermalState,
+            "tracking_changes": stats.trackingChanges, "frame_lost": stats.frameLost,
+            "thermal_state_at_stop": stats.thermalState,
             "frames_logged": stats.framesLogged,
             "gyro_samples": stats.gyroSamples, "accel_samples": stats.accelSamples,
             "last_still_dimensions": stats.lastStillDimensions,

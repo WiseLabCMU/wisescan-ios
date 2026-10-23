@@ -65,9 +65,11 @@ struct UserGuideView: View {
                               "work table. Tap a table or object in the scan to draw a box around it (or " +
                               "tap the surface for a default box), adjust it with the sliders, and pick " +
                               "how much to capture: Check takes about 5 photos and finishes by itself, " +
-                              "Detail about 30, Splat 150 or more for 3D reconstruction. After the usual " +
-                              "relocalization, a yellow box shows the region: tap record and walk around " +
-                              "it. Photos are taken only while the box is in view; the dial fills with " +
+                              "Detail about 30, Splat 150 or more for 3D reconstruction. Look around until " +
+                              "the ghost mesh appears (the scan can't start before that), and a yellow box " +
+                              "shows the region: tap record and walk around it. If tracking is lost, the " +
+                              "scan stops and keeps the photos taken so far. " +
+                              "Photos are taken only while the box is in view; the dial fills with " +
                               "the directions you have covered. The result is a partial scan in the same " +
                               "location (no mesh of its own) that you can save or upload like any other. " +
                               "A region file from another tool can be imported from the same menu."

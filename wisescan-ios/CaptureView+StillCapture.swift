@@ -45,6 +45,7 @@ extension CaptureView {
             showTransientMessage("Hold steady — establishing tracking…", duration: 3)
             return
         }
+        guard focusStartIsInMapFrame() else { return }
         let shouldAwaitAlignment = PerfDiag.enabled
             && cachedGhostMeshData != nil
             && scanStats.trackingStatus.isNormal
@@ -73,6 +74,7 @@ extension CaptureView {
             showTransientMessage("AR session not ready", duration: 3)
             return
         }
+        guard focusStartIsInMapFrame() else { return }   // again: the alignment wait can span a loss
         guard let locationId = scanStore.activeLocationForScan, let region = scanStore.activeFocusRequest?.region else {
             showTransientMessage("No focus region: start a focus scan from the space's Rescan button", duration: 4,
                                  systemImage: "exclamationmark.triangle.fill", tint: .orange)
@@ -106,6 +108,25 @@ extension CaptureView {
         showManualAdjust = false
         focusScanTarget = FocusScanTarget(locationId: locationId, region: region, parentScanId: scanStore.activeScanToExtend)
         isStillCapturing = true
+    }
+
+    /// The region and every still must share the room scan's frame. A rescan may start while still
+    /// relocalizing (its save re-registers the mesh); a focus scan has nothing to re-register, so
+    /// it waits until the session has relocalized into the map, the moment the ghost appears.
+    private func focusStartIsInMapFrame() -> Bool {
+        guard scanStore.sessionInMapFrame else {
+            showTransientMessage("Not localized in the room scan yet: look around until the ghost mesh appears",
+                                 duration: 4, systemImage: "location.magnifyingglass", tint: .yellow)
+            return false
+        }
+        return true
+    }
+
+    /// The engine took no more stills because the session may have left the map's frame: stop,
+    /// keeping the stills taken before it (they and the region are still in that frame).
+    func handleFocusFrameLost(_ reason: String) {
+        guard !reason.isEmpty, isStillCapturing else { return }
+        stopStillCapture()
     }
 
     /// Drains the engine; its completion files the scan (on main, even off-screen).
@@ -159,7 +180,8 @@ extension CaptureView {
         let stillOurs = !isRecording && scanStore.activeFocusRequest?.region == region
         guard stills > 0 else {
             try? FileManager.default.removeItem(at: directory)
-            showTransientMessage("No photos were taken, nothing saved", duration: 4,
+            showTransientMessage(stillCapture.stats.frameLost.isEmpty ? "No photos were taken, nothing saved"
+                                    : "Tracking was lost before any photo was taken, nothing saved", duration: 4,
                                  systemImage: "camera.badge.ellipsis", tint: .yellow)
             finishStillCapture(resetCaptureState: stillOurs)
             return
@@ -170,8 +192,13 @@ extension CaptureView {
             hardwareDeviceModel: UIDevice.current.name)
         switch result {
         case .success(let scan):
-            showTransientMessage("Focus scan saved: \(stills) photos", duration: 3,
-                                 systemImage: "checkmark.circle.fill", tint: .green)
+            if stillCapture.stats.frameLost.isEmpty {
+                showTransientMessage("Focus scan saved: \(stills) photos", duration: 3,
+                                     systemImage: "checkmark.circle.fill", tint: .green)
+            } else {
+                showTransientMessage("Tracking was lost, so the scan stopped: saved the \(stills) photos taken before it",
+                                     duration: 5, systemImage: "exclamationmark.triangle.fill", tint: .orange)
+            }
             let location = scan.location
             finishStillCapture(resetCaptureState: stillOurs)
             guard stillOurs, selectedTab == 1 else { return }   // no jump away from another flow or tab

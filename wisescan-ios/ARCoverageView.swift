@@ -147,6 +147,7 @@ struct ARCoverageView: UIViewRepresentable {
         context.coordinator.finalCapturedRoomBinding = $finalCapturedRoom
         context.coordinator.hasWorldMap.store(config.initialWorldMap != nil, ordering: .relaxed)
         context.coordinator.scanStore = scanStore
+        scanStore?.sessionInMapFrame = false // a new session: not relocalized into anything yet
         context.coordinator.resetGhostAutoAlign(referencePlanes: ghostReferencePlanes,
                                                derivedLevelYs: ghostDerivedLevelYs)
         context.coordinator.ghostIsProxy = ghostIsProxy
@@ -422,32 +423,25 @@ struct ARCoverageView: UIViewRepresentable {
 
         // Ghost transform: the user's manual nudge wins when active; otherwise the plane-based
         // auto-align seats the ghost (visual-only — never baked into the world origin).
-        if let ghostAnchor = context.coordinator.ghostAnchorEntity {
-            let manualActive = ghostXOffset != 0 || ghostZOffset != 0 || ghostYRotation != 0
-            context.coordinator.manualNudgeActive.store(manualActive, ordering: .relaxed)
-            if manualActive {
-                if isRecording {
-                    // When recording, the manual offset is baked into the world origin, so the mesh stays at identity
-                    ghostAnchor.transform = Transform.identity
-                } else {
-                    let rotation = simd_quatf(angle: ghostYRotation, axis: [0, 1, 0])
-                    let translation = SIMD3<Float>(ghostXOffset, 0, ghostZOffset)
-                    ghostAnchor.transform = Transform(rotation: rotation, translation: translation)
-                }
-            } else {
-                // Auto-align: held at its last pre-record value through recording (keeps the ghost
-                // seated — it was never baked, so identity would snap it back to misaligned);
-                // reset to identity when the dev ICP bake moves the world origin instead.
-                ghostAnchor.transform = Transform(matrix: context.coordinator.ghostAutoAlign)
-            }
+        let manualActive = ghostXOffset != 0 || ghostZOffset != 0 || ghostYRotation != 0
+        context.coordinator.manualNudgeActive.store(manualActive, ordering: .relaxed)
+        let ghostSeat: Transform
+        if manualActive {
+            let rotation = simd_quatf(angle: ghostYRotation, axis: [0, 1, 0])
+            let translation = SIMD3<Float>(ghostXOffset, 0, ghostZOffset)
+            ghostSeat = Transform(rotation: rotation, translation: translation)
+        } else {
+            // Auto-align: held at its last pre-record value through recording (keeps the ghost
+            // seated — it was never baked, so identity would snap it back to misaligned);
+            // reset to identity when the dev ICP bake moves the world origin instead.
+            ghostSeat = Transform(matrix: context.coordinator.ghostAutoAlign)
         }
+        // When recording, the manual offset is baked into the world origin, so the mesh stays at identity
+        context.coordinator.ghostAnchorEntity?.transform = manualActive && isRecording ? .identity : ghostSeat
 
-        // Focus scan: the region box. Before Start it takes the ghost's transform (the same seat
-        // the ghost is drawn at); beginStillCapture fixes it at Start.
-        context.coordinator.syncFocusBox(focusBox, in: uiView)
-        if !isStillCapturing, let boxAnchor = context.coordinator.focusBoxAnchor {
-            boxAnchor.transform = context.coordinator.ghostAnchorEntity?.transform ?? .identity
-        }
+        // Focus scan: the region box. Before Start it sits where the ghost does (with or without a
+        // ghost on screen); beginStillCapture fixes it at Start.
+        context.coordinator.syncFocusBox(focusBox, ghostSeat: ghostSeat, in: uiView)
 
         // Focus scan: the still-capture branch's record-start (see beginStillCapture). At the end
         // the session drops back to the pre-capture role; CaptureView resets it after the save.
@@ -760,18 +754,19 @@ struct ARCoverageView: UIViewRepresentable {
             stillCapture?.noteICPBake(icpBake)
             coordinator.pendingICPBake = nil
             coordinator.icpRefineCandidates.removeAll()
-            // As at record start: the bake moved the world onto the ghost, so the visual
-            // auto-align (measured pre-bake) is stale and the ghost's seat is identity.
-            coordinator.ghostAutoAlign = matrix_identity_float4x4
             PerfDiag.log("[ARStill] applied the gravity-locked ICP bake at capture start")
         }
         if let baked = bakedGhostTransform {
             uiView.session.setWorldOrigin(relativeTransform: baked)
             PerfDiag.log("[ARStill] applied the manual ghost-nudge bake at capture start")
         }
+        // As at record start: a bake moved the world onto the ghost, so the visual auto-align
+        // (measured pre-bake) is stale and the ghost's seat is identity. The nudge bake counts
+        // too: after a failed capture the box takes the auto-align seat again.
+        if worldFollowsGhost { coordinator.ghostAutoAlign = matrix_identity_float4x4 }
         coordinator.ghostAnchorEntity?.removeFromParent()
         if let focusBox {
-            coordinator.focusBoxAnchor?.transform = Transform(matrix: seat)
+            coordinator.setFocusBoxSeat(Transform(matrix: seat))
             stillCapture?.setRegionPlacement(boxToWorld: seat * focusBox.boxToMap, halfExtents: focusBox.halfExtents,
                                              boxToMap: focusBox.boxToMap, seat: seat)
         }
@@ -1063,22 +1058,87 @@ struct ARCoverageView: UIViewRepresentable {
         var roomWorkMeter: DelegateWorkMeter?
         /// Main thread. What the session is running for (see `SessionRole`).
         var sessionRole: ARCoverageView.SessionRole = .preCapture
-        /// Main thread. The focus region's wireframe (under an anchor carrying the ghost's seat)
-        /// and the placement it was built for.
+        /// Main thread. The focus region's wireframe: its anchor, the placement it was built for,
+        /// the placement asked for, and its seat (the ghost's until Start, the fixed one from Start).
         var focusBoxAnchor: AnchorEntity?
         private var focusBoxShown: FocusBoxPlacement?
+        private var focusBoxWanted: FocusBoxPlacement?
+        private var focusBoxSeat = Transform.identity
 
-        /// Adds, rebuilds or removes the focus-region wireframe to match `box` (main thread).
-        func syncFocusBox(_ box: FocusBoxPlacement?, in arView: ARView) {
+        /// Whether the session is in the loaded map's frame: tracking relocalized into the map
+        /// (relocalizing, then normal) since it last (re)initialized. The focus region exists only
+        /// then, and a focus scan starts only then (`ScanStore.sessionInMapFrame`). Written on the
+        /// delegate queue, and cleared on main by a tracking reset.
+        let inMapFrame = Atomic<Bool>(false)
+        /// Delegate queue. Tracking has been relocalizing since it last (re)initialized.
+        private var relocalizedSinceInit = false
+
+        /// The focus region to show, and where the ghost sits now (main thread).
+        func syncFocusBox(_ box: FocusBoxPlacement?, ghostSeat: Transform, in arView: ARView) {
+            focusBoxWanted = box
+            if !isStillCapturing { setFocusBoxSeat(ghostSeat) }
+            reconcileFocusBox(in: arView)
+        }
+
+        /// Main thread. Moves the box; it keeps the seat across a rebuild.
+        func setFocusBoxSeat(_ seat: Transform) {
+            focusBoxSeat = seat
+            focusBoxAnchor?.transform = seat
+        }
+
+        /// Adds, rebuilds or removes the wireframe (main thread). A world anchor added before the
+        /// session relocalizes into the map is placed in the provisional frame and stays there:
+        /// after a tracking loss and a Re-relocalize the box sat about 10 m off while the ghost,
+        /// which waits for relocalization, sat right. So the box exists only while the session is
+        /// in the map's frame, and is rebuilt fresh once it is back. A running capture keeps it;
+        /// the engine's frame-loss guard ends that capture instead.
+        func reconcileFocusBox(in arView: ARView) {
+            let box = inMapFrame.load(ordering: .relaxed) || isStillCapturing ? focusBoxWanted : nil
             guard box != focusBoxShown else { return }
             focusBoxShown = box
             focusBoxAnchor?.removeFromParent()
             focusBoxAnchor = nil
             guard let box else { return }
             let anchor = AnchorEntity(world: .zero)
+            anchor.transform = focusBoxSeat
             anchor.addChild(ARCoverageView.makeFocusBoxEntity(box))
             arView.scene.addAnchor(anchor)
             focusBoxAnchor = anchor
+        }
+
+        /// Delegate queue, on every tracking change: leaves the map's frame at a (re)initialization
+        /// or while relocalizing, and enters it when a relocalization into the loaded map completes.
+        /// Excessive motion and too few features keep the frame.
+        private func updateMapFrame(_ state: ARCamera.TrackingState) {
+            let was = inMapFrame.load(ordering: .relaxed)
+            switch state {
+            case .notAvailable, .limited(.initializing):
+                relocalizedSinceInit = false
+                inMapFrame.store(false, ordering: .relaxed)
+            case .limited(.relocalizing):
+                relocalizedSinceInit = true
+                inMapFrame.store(false, ordering: .relaxed)
+            case .normal:
+                if hasWorldMap.load(ordering: .relaxed) && relocalizedSinceInit {
+                    inMapFrame.store(true, ordering: .relaxed)
+                } else {
+                    // Tracking re-initialized and came back without relocalizing: a fresh frame,
+                    // not the map's. A focus capture takes no more stills (no-op unless one runs;
+                    // one that relocalizes back, as after Start's re-run, carries on).
+                    stillCapture?.noteFrameLost("tracking re-initialized without relocalizing into the map")
+                }
+            default:
+                break
+            }
+            if inMapFrame.load(ordering: .relaxed) != was {
+                DispatchQueue.main.async { [weak self] in self?.mapFrameChanged() }
+            }
+        }
+
+        /// Main thread. Publishes the map-frame state and shows or drops the focus region.
+        func mapFrameChanged() {
+            scanStore?.sessionInMapFrame = inMapFrame.load(ordering: .relaxed)
+            if let arView { reconcileFocusBox(in: arView) }
         }
 
         /// Every `session.run` in this view goes through here (main thread). While a capture runs,
@@ -1090,6 +1150,13 @@ struct ARCoverageView: UIViewRepresentable {
             if let world = config as? ARWorldTrackingConfiguration,
                ARCoverageView.applySemantics(for: sessionRole, privacyFilter: privacyFilter, to: world) {
                 PerfDiag.log("[Session] \(reason): re-added the \(sessionRole.rawValue) frame semantics the configuration lacked")
+            }
+            if options.contains(.resetTracking) {
+                // Out of the map's frame now, not when the delegate next hears from tracking (a
+                // callback still queued from the old run could otherwise re-show the region).
+                inMapFrame.store(false, ordering: .relaxed)
+                sessionDelegateQueue.async { [weak self] in self?.relocalizedSinceInit = false }
+                mapFrameChanged()
             }
             session.run(config, options: options)
         }
@@ -1546,9 +1613,7 @@ struct ARCoverageView: UIViewRepresentable {
                 self.ghostAutoAlign = fit
                 self.ghostAnchorEntity?.transform = Transform(matrix: fit)
                 // The focus region rides the ghost's seat until Start (then it is fixed).
-                if !self.isStillCapturing {
-                    self.focusBoxAnchor?.transform = Transform(matrix: fit)
-                }
+                if !self.isStillCapturing { self.setFocusBoxSeat(Transform(matrix: fit)) }
                 // Publish the fit so the adjacent-connect can compose it into pinA at Confirm — the
                 // stitch anchor then lands in the ghost's raw frame, not the raw relocalization pose.
                 // Best-not-latest: only a tighter-RMS seat replaces the published fit (pinA has no
@@ -2640,6 +2705,8 @@ struct ARCoverageView: UIViewRepresentable {
                 DispatchQueue.main.async { [weak self] in self?.reassertFrameSemantics() }
             }
 
+            updateMapFrame(camera.trackingState)
+
             // Track relocalization state for ghost mesh placement
             if case .limited(.relocalizing) = camera.trackingState {
                 if !hasSeenRelocalizing.load(ordering: .relaxed) {
@@ -2798,6 +2865,9 @@ struct ARCoverageView: UIViewRepresentable {
         func sessionWasInterrupted(_ session: ARSession) {
             let recording = isRecording.load(ordering: .relaxed)
             PerfDiag.log("[Session] OS interruption began (recording=\(recording))")
+            // A focus capture stops taking stills (no-op unless one is capturing); CaptureView
+            // stops it and keeps the stills taken before the interruption.
+            stillCapture?.noteFrameLost("the AR session was interrupted")
             guard recording else { return }
             // Disarm the gap-based guard: the resume frame after this interruption will carry a
             // multi-second gap that would hard-trip it a second time — one halt/alert is enough.

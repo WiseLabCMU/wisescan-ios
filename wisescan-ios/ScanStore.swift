@@ -488,6 +488,11 @@ class ScanStore {
     ///   artifact): a trusted correction queued to bake into the world origin at record-start.
     var icpAlignReady: ICPAlignReady?
 
+    /// The AR session has relocalized into the loaded world map and is still in its frame
+    /// (ARCoverageView.Coordinator.inMapFrame). A focus scan's region and stills are only
+    /// meaningful in that frame, so its Start waits for this.
+    var sessionInMapFrame = false
+
     /// Set by the VIO-compromised halt (`handleVIOCompromised`): tracking collapsed hard enough
     /// to kill the scan (snap storm / RoomPlan DriftDetection), so ARKit's internal map is
     /// corrupt. The next session configuration must include `.resetTracking` to re-bootstrap

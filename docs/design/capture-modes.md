@@ -70,9 +70,9 @@ Frames. The viewer draws `mesh.obj` shifted by the canonical room centre `c`, so
 `box_mesh = translate(c) * box_scene`. The capture session relocalizes into the latest room scan
 `L`'s world map, whose raw frame is `L`'s capture frame, so the box in the session's world is
 `inverse(T_L) * box_mesh`, with `T_L = SaveRegistration.appliedTransform(L)` (identity when none
-was applied). Before Start the box is a child of the ghost entity, so it follows the ghost's
-seating; at Start the ghost is removed and the record-start bakes return the world to `L`'s raw
-frame, so the box is re-added at world coordinates.
+was applied). Before Start the box takes the ghost's seat (auto-align or manual nudge); at Start
+the ghost is removed and the record-start bakes move the world onto the ghost, so the box is fixed
+at the seat left over (identity after a bake).
 
 ### Capture
 
@@ -131,6 +131,17 @@ focus capture with the region loaded. Delivery from the server (polling) waits f
 - **The 360° rig keeps its tap.** With a Theta connected, the tap still arms a phone still with the
   360° still: the rig calibration needs the co-timed pair. The stillness reticle and chime follow.
 - **Room-scan spacing** is 15° of turn or parallax, or 0.5 m walked, one request at most every 0.5 s (2 s when hot). On the rig, a held pause belongs to the tap (no automatic still while confirmed still), and a tap during an automatic still in flight adopts it.
+- **The map's frame is a precondition.** The region and every focus still must be in the room
+  scan's frame, so the session tracks whether it is in it (`Coordinator.inMapFrame`: relocalizing
+  then normal since tracking last initialized; any tracking reset clears it). The box exists only
+  then: a world anchor added before relocalization stays in the provisional frame, which put the
+  box about 10 m off after a tracking loss and a Re-relocalize while the ghost, which already
+  waited, sat right. Start waits for it too (`ScanStore.sessionInMapFrame`); a rescan may start
+  while relocalizing because its save re-registers the mesh, but a focus scan has nothing to
+  re-register. Mid-capture, tracking that comes back without relocalizing into the map, an
+  interruption or a 4 s frame gap stops the stills (`frame_lost` in the manifest) and the capture,
+  keeping the stills taken before it. A relocalization back into the map (Start's own re-run can
+  go through one) is not a loss: stills are only held while tracking is not normal.
 - **Focus-scan region test** is LiDAR-based: the depth along the image centre and four inner rays must land in the box (a large box seen in part, from inside it or from under a desk counts); the box centre in frame is only the no-depth fallback. Spacing is a turn, parallax at the near depth, or an orbit around the region.
 - **Coverage dial** cells: 12 sectors of azimuth around the region's own axes x 3 elevation rings
   (below 20°, 20 to 50°, above 50°).

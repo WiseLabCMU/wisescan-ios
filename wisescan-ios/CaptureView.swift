@@ -944,9 +944,11 @@ struct CaptureView: View {
         }
         .preferredColorScheme(.dark)
         // Focus scan: the HUD (and, with Perf Diagnostics, the developer panel), Check's auto-finish,
-        // and the region box. All in CaptureView+StillCapture (the stop's completion files the scan).
+        // the stop on a frame loss, and the region box. All in CaptureView+StillCapture (the stop's
+        // completion files the scan).
         .overlay { stillCaptureOverlay }
         .onChange(of: stillCapture.stats.stillsSaved) { _, saved in finishFocusScanIfTargetReached(saved) }
+        .onChange(of: stillCapture.stats.frameLost) { _, reason in handleFocusFrameLost(reason) }
         .onChange(of: scanStore.activeFocusRequest) { _, _ in refreshFocusBoxPlacement() }
         .onAppear {
             // Pick up any Settings change to the diagnostics flag, then start the main-thread
