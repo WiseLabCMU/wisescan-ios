@@ -545,6 +545,20 @@ enum AppConstants {
     static let focusPhotoPagerMaxPixel: CGFloat = 2048         // full-screen still, downsampled to about screen size
     static let focusStillUprightAspect: CGFloat = 0.75         // a 4:3 still held upright (portrait)
     static let focusCardInsetSize: CGFloat = 64                // the room scan's preview in a focus scan's card
+    // Focus region editor (draw the box on a room scan's mesh)
+    static let focusRegionObjectMarginM: Float = 0.1           // a RoomPlan object's box grows by this on each side...
+    static let focusRegionObjectHeadroomM: Float = 0.4         // ...and this upward, for what sits on it (tools on a table)
+    static let focusRegionDefaultSizeM = SIMD3<Float>(0.8, 0.6, 0.8) // box dropped on a mesh tap
+    static let focusRegionDropSinkM: Float = 0.05              // that box's bottom sits this far below the tapped surface
+    static let focusRegionMinSizeM: Float = 0.1
+    static let focusRegionEditorMaxSizeM: Float = 4            // slider range; a region over this is a room scan's job
+    static let focusRegionEditorMoveRangeM: Float = 1          // position sliders move the box this far from where it was placed
+    static let focusEditorPanelOpacity: Double = 0.75
+    static let focusEditorLabelWidth: CGFloat = 96
+    static let focusEditorValueWidth: CGFloat = 64
+    static let focusEditorObjectOpacity: CGFloat = 0.12        // RoomPlan objects as faint tap targets
+    static let focusEditorRegionOpacity: CGFloat = 0.22
+    static let focusEditorEdgeThicknessM: Float = 0.01
     static let exposureCapChangeTolerance: Double = 0.1       // CaptureExposurePolicy: a new short-exposure target within this fraction of the applied cap is ignored
     static let exposureCapReapplyTolerance: Double = 0.02      // CaptureExposurePolicy: the device's cap drifted further than this from what was applied -> a session re-run reset it; re-apply
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)

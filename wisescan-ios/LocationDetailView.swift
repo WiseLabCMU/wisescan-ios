@@ -52,6 +52,9 @@ struct LocationDetailView: View {
     @State private var isBulkExporting = false
     @State private var exportItems: [ZipExportItem] = []
     @State private var showExportSheet = false
+    /// Rescan asks what to capture: the whole room, or a focus region (drawn in the editor).
+    @State private var showRescanChoice = false
+    @State private var showRegionEditor = false
 
     /// Composed from four independently type-checked pieces — same surgery as
     /// CaptureView.body (#56): measured at **14,345 ms** to type-check, second only to
@@ -139,9 +142,9 @@ struct LocationDetailView: View {
                                !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("ray ban") &&
                                !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("glass") {
                                 HStack(spacing: 12) {
-                                    // Rescan Space button
+                                    // Rescan Space: whole room or a focus region (showRescanChoice)
                                     Button(action: {
-                                        startRescan(latestScan)
+                                        showRescanChoice = true
                                     }, label: {
                                         HStack {
                                             Image(systemName: "plus.viewfinder")
@@ -164,31 +167,6 @@ struct LocationDetailView: View {
                                     .buttonStyle(FilledActionButtonStyle(background: Color.orange.opacity(0.8)))
                                 }
                             }
-
-                            // EXPERIMENT, debug surface beside Rescan so it opens from an existing room;
-                            // nothing is saved into the scan store, it dumps a zip. The Rescan flow up
-                            // to Start (same map, gates, ghost, alignment, nudge); Start runs the
-                            // capture-only branch: full-resolution stills + pose + LiDAR depth, nothing
-                            // else (ARStillCaptureSession).
-                            Button(action: {
-                                // The Rescan entry itself (same map, gates, confirm); the capture
-                                // view diverges only at Start. See CaptureView+StillCapture.
-                                if let latest = location.latestRoomScan { startRescan(latest, stillCapture: true) }
-                            }, label: {
-                                HStack {
-                                    Image(systemName: "arkit")
-                                    Text("AR Capture")
-                                        .font(.subheadline).bold()
-                                }
-                            })
-                            .buttonStyle(FilledActionButtonStyle(
-                                background: Color.white.opacity(0.08),
-                                foreground: .white.opacity(0.85),
-                                border: Color.white.opacity(0.2)
-                            ))
-                            Text("Experiment: high-resolution stills with ARKit poses. Saves a zip.")
-                                .font(.caption2)
-                                .foregroundColor(.white.opacity(0.5))
 
                             // Global Export Settings
                             VStack(spacing: 12) {
@@ -380,6 +358,23 @@ struct LocationDetailView: View {
                 // Cleanup
                 isBulkExporting = false
             }
+        }
+        .fullScreenCover(isPresented: $showRegionEditor) {
+            if let latest = location.latestRoomScan {
+                FocusRegionEditorView(scan: latest, onScan: { region in
+                    showRegionEditor = false
+                    startRescan(latest, focus: region)
+                }, onCancel: { showRegionEditor = false })
+            }
+        }
+        .confirmationDialog("Rescan", isPresented: $showRescanChoice, titleVisibility: .visible) {
+            if let latest = location.latestRoomScan {
+                Button("Whole room") { startRescan(latest) }
+                Button("Focus on a region") { showRegionEditor = true }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("A whole-room scan updates the room's mesh and photos. A focus scan photographs one region in detail (a partial scan).")
         }
     }
 
@@ -784,9 +779,9 @@ struct LocationDetailView: View {
     /// guard first. DECISION 3 hard gate: the rescan consumes the LATEST scan's proxy/roomplan
     /// (ghost + auto-align reference) and the ORIGINAL's roomplan (registration target) — all
     /// post-process products. A suspect map (tracking excursion baked in) warns before proceeding.
-    /// `stillCapture` (EXPERIMENT, AR Capture): the identical rescan entry (same map, gates and
-    /// suspect-map confirm); only the capture view's Start differs (capture-only branch).
-    private func startRescan(_ latestScan: CapturedScan, stillCapture: Bool = false) {
+    /// `focus`: a focus scan of that region, the identical rescan entry (same map, gates and
+    /// suspect-map confirm); only the capture view's Start differs (the still-capture branch).
+    private func startRescan(_ latestScan: CapturedScan, focus: FocusRegion? = nil) {
         guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
             showNoWorldMapAlert = true
             return
@@ -797,7 +792,8 @@ struct LocationDetailView: View {
             scanStore.activeRelocalizationMap = latestScan.worldMapURL
             scanStore.activeScanToExtend = latestScan.id
             scanStore.activeScanCase = .rescanSpace
-            scanStore.activeScanKind = stillCapture ? .focus : .room
+            scanStore.activeScanKind = focus == nil ? .room : .focus
+            scanStore.activeFocusRequest = focus.map { FocusCaptureRequest(region: $0) }
             selectedTab = 1
         }
         if latestScan.worldMapSuspect {
