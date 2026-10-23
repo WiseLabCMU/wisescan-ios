@@ -43,9 +43,14 @@ struct CaptureView: View {
     /// where `totalVertices` already starts high (would otherwise never cross an absolute threshold).
     @State var verticesAtRecordStart = 0
     @State var isRecording = false
-    /// EXPERIMENT (AR Capture): the capture-only branch of a rescan (see CaptureView+StillCapture).
+    /// Focus scan: the still-capture branch of a rescan (see CaptureView+StillCapture).
     @State var stillCapture = ARStillCaptureController()
     @State var isStillCapturing = false
+    /// Recording a room scan or capturing a focus scan. The one state the pre-record safeguards read
+    /// (relocalization watchdog, Try Again, Re-relocalize, idle teardown, the leave-capture config
+    /// swap): each of those reloads the map or swaps the configuration, which mid-capture resets
+    /// tracking or drops scene depth.
+    var isCapturing: Bool { isRecording || isStillCapturing }
     // Set true by ARCoverageView's coordinator when VIO tracking is lost mid‑recording; observed
     // below to halt the scan and prompt save/rescan (data after VIO loss is corrupt).
     @State var vioCompromised = false
@@ -554,9 +559,9 @@ struct CaptureView: View {
     /// flips); it stands down — and clears any timed-out flag — the moment relocalization succeeds
     /// (`.normal`), recording starts, or the ghost is cleared.
     private func evaluateRelocalizationTimeout() {
-        // An AR Capture stands the watchdog down like a recording: its Try Again reloads the map.
+        // Stands down while capturing: its Try Again reloads the map.
         let relocalizing = cachedGhostMeshData != nil
-            && !isRecording && !isStillCapturing
+            && !isCapturing
             && scanStats.trackingStatus == .limited(reason: .relocalizing)
         if relocalizing {
             // Arm once. Don't restart if already running or already timed out.
@@ -567,7 +572,7 @@ struct CaptureView: View {
             ) { _ in
                 // Fires on the main run loop. Re-check we're still stuck (a success/back-out would
                 // have cancelled us via onChange, but guard against the race).
-                if cachedGhostMeshData != nil && !isRecording && !isStillCapturing
+                if cachedGhostMeshData != nil && !isCapturing
                     && scanStats.trackingStatus == .limited(reason: .relocalizing) {
                     relocTimedOut = true
                 }
@@ -587,7 +592,7 @@ struct CaptureView: View {
     /// "Try Again" — restart relocalization from scratch by reloading the world map (toggling the
     /// ghost data, the proven `showRelocDialog` Re-relocalize path). Re-arms the watchdog.
     private func retryRelocalization() {
-        guard !isStillCapturing else { return }   // a map reload mid-capture resets tracking
+        guard !isCapturing else { return }   // a map reload mid-capture resets tracking
         relocTimeoutTimer?.invalidate()
         relocTimeoutTimer = nil
         relocTimedOut = false
@@ -867,8 +872,8 @@ struct CaptureView: View {
         // alignment dialog, plus a slider overlay to rotate/translate the ghost when
         // relocalization is imperfect. Complements the anchor-based AlignmentOverlayView above;
         // startRecording bakes any offset into the world origin so mesh + world map stay co-framed.
-        // Hidden during an AR Capture: the ghost only initializes the pose, and its dialog's
-        // Re-relocalize reloads the world map, which resets tracking mid-capture.
+        // Hidden during a focus scan: the ghost only initializes the pose and leaves the scene at
+        // Start. (A room recording keeps the chip for Dismiss; its Re-relocalize is a no-op then.)
         if cachedGhostMeshData != nil && !dismissGhostMesh && !isStillCapturing {
             ghostMeshChipStack
         }
@@ -903,7 +908,7 @@ struct CaptureView: View {
         .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
             Button("Re-relocalize") {
                 // Reset transform and reload the world map by toggling the ghost data.
-                guard !isStillCapturing else { return }   // would reset tracking mid-capture
+                guard !isCapturing else { return }   // would reset tracking mid-capture
                 ghostYRotation = 0
                 ghostXOffset = 0
                 ghostZOffset = 0
@@ -1030,12 +1035,10 @@ struct CaptureView: View {
             }
         }
         .onDisappear {
-            // Leaving the capture screen mid-AR-Capture: finish it (stills drain and zip into
-            // Documents) before the capture state below is cleared and the map torn down.
+            // Leaving the capture screen mid-focus-scan: finish it (the stills drain and save) before
+            // the capture state below is cleared and the map torn down.
             if isStillCapturing { stopStillCapture() }
             memoryPressureMonitor.stop()
-            // EXPERIMENT (AR Capture): leaving mid-capture stops it and keeps the data (zip in Documents).
-            if isStillCapturing { stopStillCapture() }
             // Next appearance must re-load the ghost before the world map is handed over (the
             // makeUIView-vs-onAppear race gate in body).
             ghostLoadAttempted = false
@@ -1054,7 +1057,7 @@ struct CaptureView: View {
                 // unused by the capture path, so gate on the flags this pipeline actually maintains:
                 // isProcessingMesh (export/color in flight) and a pendingScan awaiting its name/save.
                 let processing = isProcessingMesh || pendingScan != nil
-                if selectedTab != 1 && !isRecording && !processing && !scanStore.isProcessingScan {
+                if selectedTab != 1 && !isCapturing && !processing && !scanStore.isProcessingScan {
                     pauseARSession = true
                     // Same idle moment: let the camera nap too (sleepDelay restored).
                     Task { @MainActor in ThetaCameraManager.shared.setKeepAwake(false) }
@@ -1127,7 +1130,7 @@ struct CaptureView: View {
                 // still reads the live session's mesh anchors and exports its world map, and this
                 // config swap drops scene reconstruction. When something IS in flight the recording
                 // ends normally, and the stop/save teardown's purge covers it.
-                if !isRecording && !isProcessingMesh && pendingScan == nil && !scanStore.isProcessingScan {
+                if !isCapturing && !isProcessingMesh && pendingScan == nil && !scanStore.isProcessingScan {
                     currentARSession?.run(ARCoverageView.makeConfiguration())
                 }
                 showExtendOverlay = false
@@ -1812,9 +1815,9 @@ struct CaptureView: View {
                                 Circle()
                                     .fill(.ultraThinMaterial)
                                     .frame(width: 80, height: 80)
-                                    .overlay(Circle().stroke(isRecording || isStillCapturing ? Color.red : Color.cyan, lineWidth: 2))
+                                    .overlay(Circle().stroke(isCapturing ? Color.red : Color.cyan, lineWidth: 2))
 
-                                if isRecording || isStillCapturing {
+                                if isCapturing {
                                     RoundedRectangle(cornerRadius: 4)
                                         .fill(Color.red)
                                         .frame(width: 28, height: 28)
@@ -2077,7 +2080,7 @@ struct CaptureView: View {
     /// Caption under the record button. A computed String (not a chained ternary in `body`) so the
     /// body expression stays type-checkable.
     private var recordButtonCaption: String {
-        if scanStore.stillCaptureMode { return isStillCapturing ? "Tap to stop AR capture" : "Tap to start AR capture" }
+        if scanStore.activeScanKind == .focus { return isStillCapturing ? "Tap to stop focus scan" : "Tap to start focus scan" }
         if isRecording { return "Tap to stop" }
         if isProcessingMesh || isWaitingToSave { return "Processing previous scan…" }
         return "Tap to scan"

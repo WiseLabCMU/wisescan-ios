@@ -311,6 +311,14 @@ enum ScanCase: String, Codable, CaseIterable {
     case linkAdjacent = "LinkAdjacent"
 }
 
+/// What a capture produces. A room scan records mesh, RoomPlan and photos of the whole space; a
+/// focus scan is full-resolution stills of one box-shaped region, with no mesh or RoomPlan of its
+/// own (docs/design/capture-modes.md). Stored raw on `CapturedScan`; "" (legacy) reads as room.
+enum ScanKind: String, Codable, CaseIterable {
+    case room = "Room"
+    case focus = "Focus"
+}
+
 // MARK: - Scan Hierarchy Model
 
 @Model
@@ -403,10 +411,10 @@ class ScanStore {
     var activeScanToExtend: UUID?
     /// Whether the user chose "Rescan Space" or "Link Adjacent Space".
     var activeScanCase: ScanCase = .rescanSpace
-    /// EXPERIMENT: this rescan is an AR Capture. Everything up to Start is the ordinary Rescan
-    /// flow; at Start the capture view runs the capture-only branch (ARStillCaptureSession)
-    /// instead of recording a scan. Cleared with the rest of the capture state.
-    var stillCaptureMode = false
+    /// What this capture produces. Everything up to Start is the ordinary Rescan flow for both; at
+    /// Start a focus scan runs the still-capture branch (ARStillCaptureSession) instead of
+    /// recording mesh and RoomPlan. Cleared with the rest of the capture state.
+    var activeScanKind: ScanKind = .room
 
     // MARK: Capture Phase
 
@@ -531,7 +539,7 @@ class ScanStore {
         activeRelocalizationMap = nil
         activeScanToExtend = nil
         activeScanCase = .rescanSpace
-        stillCaptureMode = false
+        activeScanKind = .room
         capturePhase = .idle
         boundaryAnchorTransform = nil
         boundaryAnchorId = nil

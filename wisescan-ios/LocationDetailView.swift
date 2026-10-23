@@ -797,7 +797,7 @@ struct LocationDetailView: View {
             scanStore.activeRelocalizationMap = latestScan.worldMapURL
             scanStore.activeScanToExtend = latestScan.id
             scanStore.activeScanCase = .rescanSpace
-            scanStore.stillCaptureMode = stillCapture
+            scanStore.activeScanKind = stillCapture ? .focus : .room
             selectedTab = 1
         }
         if latestScan.worldMapSuspect {

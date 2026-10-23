@@ -74,7 +74,7 @@ the camera's open AP is the weakest place to leave raw equirects.
 **Location detail → AR Capture**, under the Rescan / Connect buttons. It is the **Rescan flow up to Start**:
 the same entry (`startRescan`, so the same world map, post-process gate and suspect-map
 confirm), relocalization, ghost, alignment and manual nudge. Only Start and Stop differ
-(`ScanStore.stillCaptureMode`, `CaptureView+StillCapture`). The goal is high-quality stills
+(`ScanStore.activeScanKind == .focus`, `CaptureView+StillCapture`). The goal is high-quality stills
 and nothing else: no stream images are saved.
 
 **Start** goes through the same pre-start gates as a rescan's record tap (tracking out of
@@ -142,11 +142,15 @@ capture starts, nothing reloads it. The first iPhone capture lost scene depth fo
 because something re-ran the session mid-capture (tracking went normal -> initializing ->
 relocalizing, i.e. a map reload with a tracking reset) using the app's normal configuration,
 which does not request depth. A reload like that also discards the record-start frame bakes.
-AR Capture never sets `isRecording`, so the pre-record rescan paths had stayed live. Now, while
-`isStillCapturing`: the Ghost Mesh chip (whose dialog offers Re-relocalize) is hidden, the
-relocalization watchdog and its Try Again stand down, ARCoverageView's ghost-reload path is
-skipped, and leaving the capture screen stops the capture (its zip lands in Documents). The
-engine is the safety net for anything else: it logs every tracking-state change and every
+AR Capture never sets `isRecording`, so the pre-record rescan paths had stayed live. Now the
+pre-record safeguards read one state, `CaptureView.isCapturing` (recording or capturing stills):
+the relocalization watchdog and its Try Again stand down, Re-relocalize is a no-op, the Ghost
+Mesh chip is hidden during a focus scan, ARCoverageView's ghost-reload path is skipped, and
+leaving the capture screen stops the capture. Every `session.run` in ARCoverageView goes
+through `Coordinator.runSession`, which puts the active `SessionRole`'s frame semantics back
+on any configuration built without them (logged as `[Session] ... re-added`). The exposure
+cap lives in `CaptureExposurePolicy`, which re-applies it if a re-run reset it on the device.
+The engine is the safety net for anything else: it logs every tracking-state change and every
 depth loss or recovery to `events.log`, re-requests scene depth on the live configuration (no
 tracking reset) if a re-run dropped it, and logs once if depth is requested but ARKit simply
 stopped delivering it, with the thermal state. Through a dropout the gates hold the last good

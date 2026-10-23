@@ -117,7 +117,7 @@ extension CaptureView {
     /// experiment switch on the trailing edge at mid-height. The panel ignores touches; the switch
     /// is the only control here.
     @ViewBuilder var stillCaptureOverlay: some View {
-        if scanStore.stillCaptureMode || stillCapture.phase != .idle {
+        if scanStore.activeScanKind == .focus || stillCapture.phase != .idle {
             ZStack {
                 ARStillCaptureOverlay(controller: stillCapture)
                 HStack {

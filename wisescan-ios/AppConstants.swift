@@ -506,6 +506,8 @@ enum AppConstants {
     static let arStillShortExposureISOCeiling: Double = 800   // the first capture's noise grew only as ISO^0.29 (0.45 -> ~1.1 of 255 over ISO 50-700; the ISP denoises)
     static let arStillShortExposureFloorSeconds: Double = 1.0 / 500 // never shorter: at 1/500 the 3 px budget already allows ~26 deg/s; spacing and walking pace bind first
     static let arStillShortExposureUpdateSeconds: TimeInterval = 0.3 // re-evaluate the cap this often; changes under 10% are ignored
+    static let exposureCapChangeTolerance: Double = 0.1        // CaptureExposurePolicy: a new short-exposure target within this fraction of the applied cap is ignored
+    static let exposureCapReapplyTolerance: Double = 0.02      // CaptureExposurePolicy: the device's cap drifted further than this from what was applied -> a session re-run reset it; re-apply
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)
     static let stillOverlapFloor: Double = 0.4                 // coach nudges "overlap your photos" while mean still-to-still overlap is below this (photogrammetry target ~0.6)
     static let stillParallaxDiversityFloor: Double = 0.15      // coach nudges "step sideways" while under this fraction of photo-covered voxels has ≥2 standpoints

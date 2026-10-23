@@ -10,8 +10,8 @@ import os
 extension CaptureView {
 
     func toggleRecording() {
-        // EXPERIMENT (AR Capture): the one divergence from a rescan is what Start and Stop do.
-        if scanStore.stillCaptureMode {
+        // A focus scan's one divergence from a rescan is what Start and Stop do.
+        if scanStore.activeScanKind == .focus {
             toggleStillCapture()
             return
         }

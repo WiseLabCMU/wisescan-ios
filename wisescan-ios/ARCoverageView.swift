@@ -181,7 +181,7 @@ struct ARCoverageView: UIViewRepresentable {
         arView.session.delegateQueue = context.coordinator.sessionDelegateQueue
         // No debug options in nominal mode (no wireframe overlay)
 
-        arView.session.run(config, options: runOptions)
+        context.coordinator.runSession(arView.session, config, options: runOptions, reason: "bring-up")
 
         // Background parse the ghost mesh if provided (Scan4D extend scan)
         if let ghostData = initialGhostMeshData {
@@ -238,8 +238,8 @@ struct ARCoverageView: UIViewRepresentable {
             // storm) with Recon3D dead on EVERY post-resume recording — while the mesh-halt's
             // .resetTracking retry recovered 100% of the time. Nominal mode has nothing to
             // preserve (see above), so resume exactly the way the proven recovery path does.
-            uiView.session.run(ARCoverageView.makeConfiguration(),
-                               options: [.resetTracking, .removeExistingAnchors])
+            context.coordinator.runSession(uiView.session, ARCoverageView.makeConfiguration(),
+                                           options: [.resetTracking, .removeExistingAnchors], reason: "battery resume")
         }
 
         // Live active mesh color update — recolor all existing wireframe entities
@@ -387,7 +387,7 @@ struct ARCoverageView: UIViewRepresentable {
                     let coord = context.coordinator
                     DispatchQueue.main.async { coord.scanStore?.mapLoadFailed = true }
                 }
-                uiView.session.run(config, options: runOptions)
+                context.coordinator.runSession(uiView.session, config, options: runOptions, reason: "ghost/map reload")
 
                 // Background parse the new ghost mesh
                 Self.loadGhostMesh(data: ghostData, coordinator: context.coordinator, arView: uiView)
@@ -438,13 +438,16 @@ struct ARCoverageView: UIViewRepresentable {
             }
         }
 
-        // EXPERIMENT (AR Capture): the capture-only branch's record-start (see beginStillCapture).
+        // Focus scan: the still-capture branch's record-start (see beginStillCapture). At the end
+        // the session drops back to the pre-capture role; CaptureView resets it after the save.
         context.coordinator.stillCapture = stillCapture
         if isStillCapturing != context.coordinator.isStillCapturing {
             context.coordinator.isStillCapturing = isStillCapturing
             if isStillCapturing {
                 Self.beginStillCapture(uiView, coordinator: context.coordinator, worldMapURL: initialWorldMapURL,
                                        bakedGhostTransform: bakedGhostTransform, stillCapture: stillCapture)
+            } else {
+                context.coordinator.sessionRole = .preCapture
             }
         }
 
@@ -461,12 +464,9 @@ struct ARCoverageView: UIViewRepresentable {
                     enableMeshReconstruction: true,
                     worldMapURL: initialWorldMapURL
                 )
-                if privacyFilter, ARWorldTrackingConfiguration.supportsFrameSemantics(.personSegmentationWithDepth) {
-                    config.frameSemantics.insert(.personSegmentationWithDepth)
-                }
-                if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-                    config.frameSemantics.insert(.sceneDepth)
-                }
+                // Scene depth, and person segmentation with the privacy filter on.
+                context.coordinator.sessionRole = .roomRecording
+                Self.applySemantics(for: .roomRecording, privacyFilter: privacyFilter, to: config)
                 // Same GENUINE map-load failure the two load sites above guard (makeUIView and the
                 // ghost-arrival branch): a relocalization map was requested but the archive was
                 // missing/corrupt, knowable synchronously the instant the config is built. Without a
@@ -531,7 +531,7 @@ struct ARCoverageView: UIViewRepresentable {
                 PerfDiag.log(config.initialWorldMap != nil
                     ? "record-start: extend → preserving anchors + world map"
                     : "record-start: new scan → .removeExistingAnchors (clear prior scan's mesh)")
-                uiView.session.run(config, options: runOptions)
+                context.coordinator.runSession(uiView.session, config, options: runOptions, reason: "record start")
 
                 // Phase 2.1 (perfDiag, dev-only): bake the gravity-locked ICP correction from the
                 // alignment-phase refine into the world origin so recorded geometry lands in the
@@ -668,6 +668,7 @@ struct ARCoverageView: UIViewRepresentable {
                 }
 
                 let config = Self.makeConfiguration()
+                context.coordinator.sessionRole = .preCapture
                 // Which teardown is this? Read BEFORE the halt branch below consumes the flag.
                 let isPostHaltTeardown = scanStore?.needsTrackingReset == true
                 if isPostHaltTeardown {
@@ -678,9 +679,10 @@ struct ARCoverageView: UIViewRepresentable {
                     // 13s cold start (the session itself stays warm).
                     scanStore?.needsTrackingReset = false
                     PerfDiag.log("post-halt nominal downgrade → .resetTracking (re-bootstrap after VIO collapse)")
-                    uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+                    context.coordinator.runSession(uiView.session, config, options: [.resetTracking, .removeExistingAnchors],
+                                                   reason: "post-halt teardown")
                 } else {
-                    uiView.session.run(config)
+                    context.coordinator.runSession(uiView.session, config, reason: "scan teardown")
                 }
                 // Release the cached ARWorldMap (~50 MB) now the map-bearing config is off the
                 // session — after the run above, so the new run can't re-retain the map we just
@@ -721,20 +723,19 @@ struct ARCoverageView: UIViewRepresentable {
 
     }
 
-    /// EXPERIMENT (AR Capture): record-start for the capture-only branch. The frame handling is the
-    /// real record-start's, step for step: re-run WITHOUT resetting tracking (the loaded map keeps
-    /// the relocalized frame; same run options as record-start), then the dev ICP bake, then the
-    /// manual ghost-nudge bake. The content is not: LiDAR scene depth only, no mesh reconstruction,
-    /// plane detection or RoomPlan, and the ghost leaves the scene. Only then does the engine start
+    /// Focus scan: record-start for the still-capture branch. The frame handling is the real
+    /// record-start's, step for step: re-run WITHOUT resetting tracking (the loaded map keeps the
+    /// relocalized frame; same run options as record-start), then the dev ICP bake, then the manual
+    /// ghost-nudge bake. The content is not: LiDAR scene depth only, no mesh reconstruction, plane
+    /// detection or RoomPlan, and the ghost leaves the scene. Only then does the engine start
     /// taking frames, so no still carries a pre-bake pose.
     private static func beginStillCapture(_ uiView: ARView, coordinator: Coordinator, worldMapURL: URL?,
                                           bakedGhostTransform: simd_float4x4?, stillCapture: ARStillCaptureSession?) {
         let config = makeConfiguration(enableMeshReconstruction: false, worldMapURL: worldMapURL)
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-            config.frameSemantics.insert(.sceneDepth)
-        }
+        coordinator.sessionRole = .focusCapture
+        applySemantics(for: .focusCapture, privacyFilter: coordinator.privacyFilter, to: config)
         let runOptions: ARSession.RunOptions = config.initialWorldMap != nil ? [] : .removeExistingAnchors
-        uiView.session.run(config, options: runOptions)
+        coordinator.runSession(uiView.session, config, options: runOptions, reason: "focus scan start")
         if let icpBake = coordinator.pendingICPBake {
             uiView.session.setWorldOrigin(relativeTransform: icpBake)
             stillCapture?.noteICPBake(icpBake)
@@ -997,11 +998,26 @@ struct ARCoverageView: UIViewRepresentable {
 
     class Coordinator: NSObject, ARSessionDelegate {
         weak var arView: ARView?
-        /// EXPERIMENT (AR Capture): the capture-only engine fed from `session(_:didUpdate:)`, and the
-        /// last-seen `isStillCapturing` for edge detection in updateUIView (main). The engine is
-        /// one stable instance per capture view and ignores frames unless it is capturing.
+        /// Focus scan: the still-capture engine fed from `session(_:didUpdate:)`, and the last-seen
+        /// `isStillCapturing` for edge detection in updateUIView (main). The engine is one stable
+        /// instance per capture view and ignores frames unless it is capturing.
         var stillCapture: ARStillCaptureSession?
         var isStillCapturing = false
+        /// Main thread. What the session is running for (see `SessionRole`).
+        var sessionRole: ARCoverageView.SessionRole = .preCapture
+
+        /// Every `session.run` in this view goes through here (main thread). While a capture runs,
+        /// a configuration built without the role's frame semantics gets them back before it runs,
+        /// so no re-run (a map reload, a revive, a live-config tweak) can silently drop scene depth.
+        /// The AR Capture experiment lost depth for good that way, 107 s into a capture.
+        func runSession(_ session: ARSession, _ config: ARConfiguration,
+                        options: ARSession.RunOptions = [], reason: String) {
+            if let world = config as? ARWorldTrackingConfiguration,
+               ARCoverageView.applySemantics(for: sessionRole, privacyFilter: privacyFilter, to: world) {
+                PerfDiag.log("[Session] \(reason): re-added the \(sessionRole.rawValue) frame semantics the configuration lacked")
+            }
+            session.run(config, options: options)
+        }
         var scanStats: ScanStats?
         let rootEntity = Entity()
         /// Serial queue for ALL ARSession delegate callbacks. Keeping them off the main thread is
@@ -1426,7 +1442,7 @@ struct ARCoverageView: UIViewRepresentable {
                               let liveConfig = session.configuration as? ARWorldTrackingConfiguration,
                               !liveConfig.planeDetection.isEmpty else { return }
                         liveConfig.planeDetection = []
-                        session.run(liveConfig)
+                        self.runSession(session, liveConfig, reason: "plane detection off")
                         print("[PlaneReg] plane detection off (auto-align settled)")
                     }
                 }
@@ -2166,7 +2182,7 @@ struct ARCoverageView: UIViewRepresentable {
                 changed = true
             }
             guard changed else { return }
-            session.run(config, options: []) // no reset → preserve tracking/world map and RoomPlan
+            runSession(session, config, reason: "RoomPlan semantics re-assert") // no reset → preserve tracking/world map and RoomPlan
             PerfDiag.log("Re-asserted frame semantics after RoomPlan (sceneDepth + personSegmentation, "
                 + "\(Int(config.videoFormat.imageResolution.width))×\(Int(config.videoFormat.imageResolution.height)) "
                 + "@ \(config.videoFormat.framesPerSecond)fps)")
@@ -2186,7 +2202,7 @@ struct ARCoverageView: UIViewRepresentable {
             if stalledSecs > 3 {
                 // Dead graph: no frames at all — rebuild it (same config, no reset).
                 let config = session.configuration ?? ARCoverageView.makeConfiguration()
-                session.run(config, options: [])
+                runSession(session, config, reason: "revive: dead capture graph")
                 PerfDiag.log("[Session] revive: no ARFrame for "
                     + (lastMs == 0 ? "this session" : "\(Int(stalledSecs))s")
                     + " — re-ran configuration to rebuild the capture graph")
@@ -2203,8 +2219,8 @@ struct ARCoverageView: UIViewRepresentable {
             guard lastReadyMs > 0, !hasWorldMap.load(ordering: .relaxed) else { return }
             let stuckSecs = now - Double(lastReadyMs) / 1000
             guard stuckSecs > 5 else { return }
-            session.run(ARCoverageView.makeConfiguration(),
-                        options: [.resetTracking, .removeExistingAnchors])
+            runSession(session, ARCoverageView.makeConfiguration(),
+                       options: [.resetTracking, .removeExistingAnchors], reason: "revive: tracking cold")
             PerfDiag.log("[Session] revive: frames flowing but tracking cold for \(Int(stuckSecs))s "
                 + "— reset tracking for a fresh start")
         }
@@ -2270,7 +2286,7 @@ struct ARCoverageView: UIViewRepresentable {
                let config = arSession.configuration as? ARWorldTrackingConfiguration,
                !config.frameSemantics.contains(.personSegmentationWithDepth) {
                 config.frameSemantics.insert(.personSegmentationWithDepth)
-                arSession.run(config, options: []) // no reset — preserve tracking
+                runSession(arSession, config, reason: "analysis start") // no reset — preserve tracking
                 addedSegForAnalysis = true
                 PerfDiag.log("Analysis: temporarily enabled personSegmentation (privacy filter OFF)")
             }
@@ -2303,7 +2319,7 @@ struct ARCoverageView: UIViewRepresentable {
                let config = arSession.configuration as? ARWorldTrackingConfiguration,
                config.frameSemantics.contains(.personSegmentationWithDepth) {
                 config.frameSemantics.remove(.personSegmentationWithDepth)
-                arSession.run(config, options: [])
+                runSession(arSession, config, reason: "analysis stop")
                 PerfDiag.log("Analysis: removed temporary personSegmentation (privacy filter OFF)")
             }
             addedSegForAnalysis = false
@@ -5891,6 +5907,43 @@ struct ARCoverageView: UIViewRepresentable {
     /// reset the AR session to a clean coordinate space.
     static func makeFreshConfiguration() -> ARWorldTrackingConfiguration {
         return makeConfiguration()
+    }
+
+    /// What the session is running for, which decides the frame semantics every configuration it
+    /// runs must carry. Set on main at the capture transitions (record start/stop, focus-scan
+    /// start/stop); read by `Coordinator.runSession`.
+    enum SessionRole: String {
+        /// Before, between and after captures: no semantics required.
+        case preCapture
+        /// Recording a room scan: scene depth, plus person segmentation with the privacy filter on.
+        /// (Mesh reconstruction is record-start's own choice, not a semantic.)
+        case roomRecording
+        /// Capturing a focus scan's stills: scene depth.
+        case focusCapture
+    }
+
+    /// Inserts the frame semantics `role` requires into `config`; true if any were missing.
+    @discardableResult
+    static func applySemantics(for role: SessionRole, privacyFilter: Bool,
+                               to config: ARWorldTrackingConfiguration) -> Bool {
+        var wanted: ARConfiguration.FrameSemantics = []
+        switch role {
+        case .preCapture:
+            return false
+        case .roomRecording:
+            wanted.insert(.sceneDepth)
+            if privacyFilter { wanted.insert(.personSegmentationWithDepth) }
+        case .focusCapture:
+            wanted.insert(.sceneDepth)
+        }
+        var changed = false
+        for semantic in [ARConfiguration.FrameSemantics.sceneDepth, .personSegmentationWithDepth]
+        where wanted.contains(semantic) && !config.frameSemantics.contains(semantic)
+            && ARWorldTrackingConfiguration.supportsFrameSemantics(semantic) {
+            config.frameSemantics.insert(semantic)
+            changed = true
+        }
+        return changed
     }
 
     /// Centralized factory for `ARWorldTrackingConfiguration`.

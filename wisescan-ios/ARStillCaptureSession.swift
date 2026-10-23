@@ -216,10 +216,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     private let stillScale = OSAllocatedUnfairLock(initialState: 4032.0 / 1920.0)
     /// The dev ICP correction, when the AR view baked one at Start (any queue).
     private let icpBakeNoted = OSAllocatedUnfairLock<[Float]?>(initialState: nil)
-    /// Short-exposure experiment: set from main by the toggle, read per frame on the delegate queue.
-    private let shortExposure = Atomic<Bool>(AppConstants.arStillShortExposureDefault)
-    /// Raised when the toggle flips so the next tracked frame re-applies the cap.
-    private let exposureModeChanged = Atomic<Bool>(false)
+    /// The exposure cap on ARKit's camera (shared with the room scan); updated per tracked frame.
+    let exposurePolicy = CaptureExposurePolicy()
 
     private(set) var setup = Setup()
     private(set) var captureDirectory: URL?
@@ -231,8 +229,6 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
     private var lastStillTransform: simd_float4x4?
     private var lastStillTime: TimeInterval = -1
     private var frameIndex = 0
-    private var exposureCapApplied = false
-    private var lastExposureUpdate: TimeInterval = -1
     // Session health: tracking and depth transitions for the events log, the depth watchdog, and
     // the last good near depth the gates hold through a short dropout.
     private var lastTrackingLabel = ""
@@ -312,7 +308,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         lastStillTransform = nil
         lastStillTime = -1
         frameIndex = 0
-        exposureCapApplied = false
+        exposurePolicy.onEvent = { [weak self] in self?.event($0) }
+        exposurePolicy.begin()
         lastTrackingLabel = ""
         hadDepth = nil
         everHadDepth = false
@@ -326,7 +323,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         frameWork.withLock { $0 = (WorkTiming(), WorkTiming()) }
         gyroHistory.withLock { $0 = ARStillCaptureGates.GyroHistory(capacity: AppConstants.arStillGyroHistoryCapacity) }
         icpBakeNoted.withLock { $0 = nil }
-        let shortOn = shortExposure.load(ordering: .acquiring)
+        let shortOn = exposurePolicy.isShortExposure
         let thermal = Self.thermalName(ProcessInfo.processInfo.thermalState)
         setup.thermalStateAtStart = thermal
         live.withLock { $0 = LiveStats(); $0.shortExposure = shortOn; $0.thermalState = thermal }
@@ -351,11 +348,10 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         event("accepting frames (bakes applied)")
     }
 
-    /// Short-exposure experiment on or off (any time; it takes effect on the next tracked frame
-    /// while capturing, and is recorded per still).
+    /// Short exposure on or off (any time; it takes effect on the next tracked frame while
+    /// capturing, and is recorded per still).
     func setShortExposure(_ on: Bool) {
-        shortExposure.store(on, ordering: .releasing)
-        exposureModeChanged.store(true, ordering: .releasing)
+        exposurePolicy.setShortExposure(on)
         live.withLock { $0.shortExposure = on }
     }
 
@@ -375,13 +371,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         motion.stopAccelerometerUpdates()
         if let thermalObserver { NotificationCenter.default.removeObserver(thermalObserver) }
         thermalObserver = nil
-        // Hand the camera back with auto exposure's own limit (an invalid time restores the
-        // default), so neither the 1/120 cap nor a short-exposure cap leaks into later scans.
-        if let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera,
-           (try? device.lockForConfiguration()) != nil {
-            device.activeMaxExposureDuration = .invalid
-            device.unlockForConfiguration()
-        }
+        exposurePolicy.restore()
         event("capture stopped")
         let work = frameWork.withLock { $0 }
         for (name, timing) in [("AR delegate handler", work.handler), ("capture engine", work.engine)] {
@@ -417,6 +407,9 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let state = pipeline.withLock { $0 }
         stats.inFlight = state.inFlight
         stats.pendingEncodes = state.pending
+        let cap = exposurePolicy.report
+        stats.exposureCapAppliedSeconds = cap.appliedSeconds
+        stats.exposureCapNote = cap.note
         let work = frameWork.withLock { (handler: (mean: $0.handler.meanMs, max: $0.handler.maxMs),
                                          engine: (mean: $0.engine.meanMs, max: $0.engine.maxMs)) }
         stats.handlerMeanMs = work.handler.mean
@@ -454,7 +447,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let transform = camera.transform
         let (trackingLabel, isNormal) = Self.describe(camera.trackingState)
         noteSessionHealth(hasDepth: frame.sceneDepth != nil, t: t, trackingLabel: trackingLabel)
-        if isNormal { manageExposure(at: t) }
+        if isNormal { exposurePolicy.update(at: t) }
 
         // Motion from the pose over a short window (ARKit pose jitter dominates shorter ones).
         poseHistory.append((t, transform))
@@ -560,8 +553,8 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                                    angularRate: omega, lateralSpeed: lateral, gateDepth: gateDepth,
                                    streamExposure: exposure, smear: smear, imageSmear: imageSmear, sinceLast: sinceLast,
                                    rotationDeg: view.rotationDeg, parallaxDeg: view.parallaxDeg,
-                                   angularSmear: angularSmear, shortExposure: shortExposure.load(ordering: .acquiring),
-                                   exposureCap: live.withLock { $0.exposureCapAppliedSeconds },
+                                   angularSmear: angularSmear, shortExposure: exposurePolicy.isShortExposure,
+                                   exposureCap: exposurePolicy.report.appliedSeconds,
                                    depthHeld: depthHeld,
                                    thermalState: Self.thermalName(ProcessInfo.processInfo.thermalState),
                                    poseSmear: poseSmear, gyroPeak: gyroPeak, gyroSmear: gyroSmear)
@@ -786,75 +779,6 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         case .critical: return "critical"
         @unknown default: return "unknown"
         }
-    }
-
-    // MARK: Exposure
-
-    /// Caps auto exposure on ARKit's camera. Applied on the first normally tracked frame after
-    /// `begin` (the Start re-run can reconfigure the device). Results go through `live` (locked),
-    /// not `setup`: this runs on the delegate queue; the manifest merges them at Stop.
-    private func applyExposureCap() {
-        exposureCapApplied = true
-        let requested = AppConstants.arStillMaxExposureSeconds
-        guard requested > 0 else { reportCap(0, "cap disabled"); return }
-        setMaxExposure(requested, why: "fixed cap")
-    }
-
-    /// Per tracked frame (delegate queue). The fixed cap goes on once after `begin` and again
-    /// whenever the experiment toggle flips; with the experiment on, the cap follows the light
-    /// (`ARStillCaptureGates.shortExposureCap`), re-evaluated every few frames.
-    private func manageExposure(at t: TimeInterval) {
-        let toggled = exposureModeChanged.exchange(false, ordering: .acquiringAndReleasing)
-        let short = shortExposure.load(ordering: .acquiring)
-        if !exposureCapApplied || toggled {
-            applyExposureCap()
-            lastExposureUpdate = t
-            if toggled { event("short-exposure experiment \(short ? "ON" : "OFF")") }
-            return
-        }
-        guard short, AppConstants.arStillMaxExposureSeconds > 0,
-              t - lastExposureUpdate >= AppConstants.arStillShortExposureUpdateSeconds,
-              let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else { return }
-        lastExposureUpdate = t
-        let exposure = CMTimeGetSeconds(device.exposureDuration)
-        let iso = Double(device.iso)
-        let offset = Double(device.exposureTargetOffset)
-        let ceiling = min(AppConstants.arStillShortExposureISOCeiling, Double(device.activeFormat.maxISO))
-        let floor = max(AppConstants.arStillShortExposureFloorSeconds, CMTimeGetSeconds(device.activeFormat.minExposureDuration))
-        let target = ARStillCaptureGates.shortExposureCap(
-            exposure: exposure, iso: iso, targetOffsetEV: offset, isoCeiling: ceiling,
-            floor: floor, cap: AppConstants.arStillMaxExposureSeconds)
-        let current = live.withLock { $0.exposureCapAppliedSeconds }
-        guard current <= 0 || abs(target - current) / current > 0.1 else { return }
-        setMaxExposure(target, why: String(format: "short-exposure: light %.4f (%.6f s x ISO %.0f, AE offset %+.2f EV), ISO ceiling %.0f", exposure * iso, exposure, iso, offset, ceiling))
-    }
-
-    /// Sets the longest exposure auto exposure may use on ARKit's camera, clamped to the format.
-    private func setMaxExposure(_ seconds: Double, why: String) {
-        guard let device = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera else {
-            reportCap(0, "no configurable capture device")
-            return
-        }
-        do {
-            try device.lockForConfiguration()
-            let format = device.activeFormat
-            let wanted = CMTime(seconds: seconds, preferredTimescale: 1_000_000)
-            let range = CMTimeRange(start: format.minExposureDuration, end: format.maxExposureDuration)
-            let clamped = CMTimeClampToRange(wanted, range: range)
-            device.activeMaxExposureDuration = clamped
-            let mode = device.exposureMode.rawValue
-            device.unlockForConfiguration()
-            let applied = CMTimeGetSeconds(clamped)
-            let shutter = String(format: "%.0f", 1 / applied)
-            reportCap(applied, "activeMaxExposureDuration 1/\(shutter) s (\(why); exposure mode \(mode))")
-        } catch {
-            reportCap(0, "lockForConfiguration failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func reportCap(_ applied: Double, _ note: String) {
-        live.withLock { $0.exposureCapAppliedSeconds = applied; $0.exposureCapNote = note }
-        event("exposure cap: \(note)")
     }
 
     // MARK: Stream logging (delegate queue)
