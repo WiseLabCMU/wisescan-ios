@@ -27,10 +27,18 @@ final class ControlPlaneSync {
     private(set) var status: Status = .idle
     /// Whether exports go through the server's grants (from the last sync).
     private(set) var uploadTarget: ControlPlaneClient.UploadTarget?
-    /// Focus scans the server asked this device for, not yet answered or done.
+    /// Focus scans the server asked this device for, not yet answered or done: the to-do list
+    /// (Dashboard), a worker's queue.
     private(set) var openTasks: [ControlPlaneClient.ScanTask] = []
-    /// The task ContentView asks about now (each once per launch).
+    /// The urgent task ContentView alerts about now. Each urgent task alerts once, ever; after that,
+    /// and for every normal one, the to-do list is where it waits.
     private(set) var taskToPrompt: ControlPlaneClient.ScanTask?
+    /// Map-package files the server asked for that are waiting for Wi-Fi (large files go up only on
+    /// an unmetered network), as of the last sync.
+    private(set) var waitingForWiFi = 0
+
+    /// To-dos not yet answered (the Dashboard tab's badge).
+    var unansweredTasks: Int { openTasks.filter { $0.status != "accepted" }.count }
 
     @ObservationIgnored private var captureActive = false
     @ObservationIgnored private var container: ModelContainer?
@@ -39,7 +47,7 @@ final class ControlPlaneSync {
     @ObservationIgnored private var running = false
     @ObservationIgnored private var rerun = false
     @ObservationIgnored private var deferredForCapture = false
-    @ObservationIgnored private var promptedTasks: Set<UUID> = []
+    @ObservationIgnored private var poller: Task<Void, Never>?
 
     private init() {}
 
@@ -51,7 +59,9 @@ final class ControlPlaneSync {
     }
     var client: ControlPlaneClient? { ControlPlaneClient.baseURL(fromHost: host).map { ControlPlaneClient(baseURL: $0) } }
 
-    /// Once, at launch: watch SwiftData saves and sync now.
+    /// Once, at launch: watch SwiftData saves and sync now, then every few minutes while the app is
+    /// open, so a request from the lab (a file it needs, a task) is picked up without a save. A
+    /// suspended app suspends the loop; returning to the foreground syncs anyway.
     func start(container: ModelContainer) {
         guard self.container == nil else { return }
         self.container = container
@@ -59,6 +69,12 @@ final class ControlPlaneSync {
                                                               queue: .main) { _ in
             Task { @MainActor in
                 ControlPlaneSync.shared.requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
+            }
+        }
+        poller = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(AppConstants.controlPlanePollIntervalS))
+                self?.requestSync(after: .zero)
             }
         }
         requestSync(after: .zero)
@@ -125,12 +141,17 @@ final class ControlPlaneSync {
             PerfDiag.log("[ControlPlane] synced: \(summary), \(reply.markedGone) marked gone, "
                          + "\(reply.wanted?.count ?? 0) files wanted")
             let wanted = packages ? (reply.wanted ?? []) : []
+            waitingForWiFi = 0
             if !wanted.isEmpty {
-                let sent = try await upload(wanted, from: local, with: client)
-                if sent < wanted.count {
+                let round = try await upload(wanted, from: local, with: client)
+                waitingForWiFi = round.waitingForWiFi
+                if round.stoppedForCapture {
                     // A capture began: the rest waits for it to end.
                     deferredForCapture = true
-                    summary += "; \(wanted.count - sent) map files waiting for the scan to end"
+                    summary += "; map files wait for the scan to end"
+                }
+                if round.waitingForWiFi > 0 {
+                    summary += "; \(round.waitingForWiFi) large map file(s) wait for Wi-Fi"
                 }
             }
             status = .synced(Date(), summary: summary)
@@ -145,23 +166,39 @@ final class ControlPlaneSync {
         }
     }
 
+    private struct UploadRound {
+        var sent = 0
+        var waitingForWiFi = 0
+        var stoppedForCapture = false
+    }
+
     /// The map-package files the server asked for, one at a time, stopping if a capture begins.
-    /// Returns how many went up. A failure ends the round; the next sync asks again.
+    /// Small ones go on any network; a large one (a mesh, a world map) only on an unmetered one,
+    /// and otherwise waits: the server keeps asking, and the next sync on Wi-Fi sends it. Any
+    /// other failure ends the round; the next sync asks again.
     private func upload(_ wanted: [ControlPlaneClient.WantedFile], from local: [UUID: [String: ControlPlaneManifest.LocalFile]],
-                        with client: ControlPlaneClient) async throws -> Int {
+                        with client: ControlPlaneClient) async throws -> UploadRound {
+        var round = UploadRound()
         for (index, want) in wanted.enumerated() {
-            guard !captureActive else { return index }
+            guard !captureActive else {
+                round.stoppedForCapture = true
+                return round
+            }
             status = .uploading(done: index, total: wanted.count)
             // A file the server wants but the snapshot did not find (deleted since): skip it.
             guard let scanId = UUID(uuidString: want.scanId), let file = local[scanId]?[want.name] else { continue }
             do {
-                _ = try await client.upload(file, scanId: want.scanId, name: want.name)
+                _ = try await client.upload(file, scanId: want.scanId, name: want.name,
+                                            unmeteredOnly: file.size >= AppConstants.controlPlaneLargeFileBytes)
+                round.sent += 1
+            } catch ControlPlaneClient.Failure.waitingForUnmeteredNetwork {
+                round.waitingForWiFi += 1
             } catch {
                 throw ControlPlaneClient.Failure.transport("Uploading \(want.name): \(error.localizedDescription)")
             }
         }
-        PerfDiag.log("[ControlPlane] uploaded \(wanted.count) map files")
-        return wanted.count
+        PerfDiag.log("[ControlPlane] uploaded \(round.sent) map file(s), \(round.waitingForWiFi) waiting for Wi-Fi")
+        return round
     }
 
     /// Fine-tunes the server resolved for this device's links: the web's edits, or the revision
@@ -187,11 +224,19 @@ final class ControlPlaneSync {
         }
     }
 
+    /// The to-do list from the server. Only an urgent task the device has never alerted about
+    /// interrupts; it alerts once (remembered across launches), then waits in the list like the rest.
     private func receive(_ tasks: [ControlPlaneClient.ScanTask]) {
         openTasks = tasks
+        let defaults = UserDefaults.standard
+        var alerted = Set(defaults.stringArray(forKey: AppConstants.Key.controlPlanePromptedTasks) ?? [])
         guard taskToPrompt == nil,
-              let next = tasks.first(where: { $0.status != "accepted" && !promptedTasks.contains($0.id) }) else { return }
-        promptedTasks.insert(next.id)
+              let next = tasks.first(where: { $0.isUrgent && $0.status != "accepted"
+                                              && !alerted.contains($0.id.uuidString) }) else { return }
+        alerted.insert(next.id.uuidString)
+        // Only ids still open are worth remembering.
+        let open = Set(tasks.map(\.id.uuidString))
+        defaults.set(Array(alerted.intersection(open)), forKey: AppConstants.Key.controlPlanePromptedTasks)
         taskToPrompt = next
     }
 

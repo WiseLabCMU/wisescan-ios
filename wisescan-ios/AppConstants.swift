@@ -31,7 +31,7 @@ enum AppConstants {
         static let uploadURL = "uploadURL"
         static let controlPlaneHost = "controlPlaneHost"              // the lab's control plane server (host[:port] or URL); empty = sync off
         static let controlPlaneDeviceLabel = "controlPlaneDeviceLabel" // this phone's name in the fleet (iOS gives apps only "iPhone")
-        static let controlPlaneDeviceId = "controlPlaneDeviceId"      // fallback copy of the Keychain device id (DeviceIdentity)
+        static let controlPlanePromptedTasks = "controlPlanePromptedTasks" // urgent tasks already alerted (each alerts once; then the to-do list)
         static let controlPlaneSendPackages = "controlPlaneSendPackages" // upload map packages (mesh, room layout, relocalization map) the server asks for
         static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
         static let rawOverlapMax = "rawOverlapMax"
@@ -103,7 +103,11 @@ enum AppConstants {
     private static let retiredDefaultsKeys = [
         // Retired 2026-08-28 with the coarse/full label toggle: the mesh preview now always names
         // its RoomPlan boxes with the full vocabulary, so there is no granularity left to persist.
-        "semanticLabelDetail"
+        "semanticLabelDetail",
+        // Retired 2026-10-25: a copy of the control plane device id. Defaults ride backups, so a
+        // phone restored from another's would have synced as it (DeviceIdentity now falls back to
+        // a file excluded from backups).
+        "controlPlaneDeviceId"
     ]
 
     /// Drop every retired key. Cheap, idempotent, and called once from the app's `init`.
@@ -649,6 +653,8 @@ enum AppConstants {
     static let controlPlaneRequestTimeoutS: TimeInterval = 15
     static let controlPlaneUploadTimeoutS: TimeInterval = 60     // idle time allowed mid map-package upload (tens of MB)
     static let controlPlaneSendPackages = true                   // map packages go up with the sync unless turned off
+    static let controlPlaneLargeFileBytes: Int64 = 5_000_000     // package files this big go up only on an unmetered network (Wi-Fi)
+    static let controlPlanePollIntervalS: Double = 300           // while the app is open, sync this often so the lab's requests are picked up
 }
 
 // MARK: - Semantic View Mode

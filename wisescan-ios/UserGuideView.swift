@@ -76,8 +76,8 @@ struct UserGuideView: View {
                               "(Room is the default; the list opens on a scan you just saved). " +
                               "A region file from another tool can be imported from the same menu. " +
                               "With a control plane set, the lab can also ask for a focus scan: the " +
-                              "app shows the request, and Open takes you to the region in the editor " +
-                              "(open requests are also listed under Settings > Control plane)."
+                              "request waits in the To do list on the Dashboard (an urgent one also " +
+                              "alerts once), and Open takes you to the region in the editor."
                     )
                     guideRow(
                         icon: "6.circle.fill",
@@ -93,8 +93,8 @@ struct UserGuideView: View {
                               "solid when every scan is uploaded, dimmed when only some are. With a " +
                               "control plane server set in Settings, the app also keeps your lab's " +
                               "server up to date with the spaces and scans on this phone (names, " +
-                              "times, poses and, unless turned off, each room's mesh and map; no " +
-                              "photos), never during a scan."
+                              "times, poses, the small files it reads, and a room's mesh or map when " +
+                              "the lab asks for it, over Wi-Fi; no photos), never during a scan."
                     )
                 } header: {
                     Text("HOW TO USE")

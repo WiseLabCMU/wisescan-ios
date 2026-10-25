@@ -20,14 +20,17 @@ If you enter a control plane server in Settings → Control plane, the app keeps
 
 The inventory holds no images or depth maps.
 
-With **Send map packages** on (the default), the app also uploads the files the server asks for:
-- each room scan's mesh (with its captured vertex colours, people already removed at capture), room layout, alignment, and ARKit relocalization map;
-- its sparse feature-point cloud and, where recorded, its sweep-coverage grid (points and cells, not images);
-- each focus scan's box.
+With **Send map packages** on (the default), the app also uploads the files the server asks for, and only those:
+- right after a sync, the small files the server reads itself: each room scan's alignment and room layout, its sparse feature-point cloud and sweep-coverage grid (points and cells, not images), and each focus scan's box;
+- only when the lab requests them (for example, to view a room in 3D): a room scan's mesh (with its captured vertex colours, people already removed at capture) and its ARKit relocalization map.
+
+Large files go only over Wi-Fi.
 
 Photos and depth maps leave only through an export you start. With a control plane set, the export's destination comes from it: a one-time upload address for the lab's own storage, so no storage credentials are kept on the phone. The privacy filtering above applies to these exports as to any other.
 
-The server can also ask for a focus scan of a region. The app shows the request, and nothing is captured unless you open it and scan.
+The server can also ask for a focus scan of a region. The request waits in a to-do list (an urgent one also alerts once), and nothing is captured unless you open it and scan.
+
+If the server has a password, you enter it in Settings; it is kept in the device's Keychain and sent only to that server.
 
 Nothing is sent while the server field is empty. The server is the one you configure, normally your lab's own on its internal network.
 

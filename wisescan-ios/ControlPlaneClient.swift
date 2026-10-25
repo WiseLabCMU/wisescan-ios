@@ -35,6 +35,8 @@ nonisolated struct ControlPlaneClient: Sendable {
         let scanId: String
         let name: String
         let size: Int64
+        /// "eager" (the server's own logic reads it) or "requested: <why>" (someone needs it).
+        let reason: String?
     }
 
     nonisolated struct StoredFile: Decodable, Sendable {
@@ -78,7 +80,11 @@ nonisolated struct ControlPlaneClient: Sendable {
         let mapName: String
         let reason: String
         let status: String
+        /// "high" alerts once; "normal" waits in the to-do list.
+        let priority: String
         let region: FocusRegion
+
+        var isUrgent: Bool { priority == "high" }
     }
 
     nonisolated struct SyncResult: Sendable {
@@ -92,12 +98,19 @@ nonisolated struct ControlPlaneClient: Sendable {
         case insecureHost(String)
         case untrustedCertificate(String)
         case unreachable(String)
+        case unauthorized
+        /// A large file held back on a metered (cellular) or Low Data network: not an error, it waits.
+        case waitingForUnmeteredNetwork
         case transport(String)
 
         var errorDescription: String? {
             switch self {
             case .server(let status, let detail):
                 return detail.isEmpty ? "The server answered \(status)." : "The server answered \(status): \(detail)"
+            case .unauthorized:
+                return "The server wants its password: enter it in Settings → Control plane."
+            case .waitingForUnmeteredNetwork:
+                return "Waiting for Wi-Fi."
             case .unreadableReply:
                 return "The server's answer could not be read. Is this a Scan4D control plane?"
             case .insecureHost(let host):
@@ -139,13 +152,24 @@ nonisolated struct ControlPlaneClient: Sendable {
     }
 
     /// One map-package file, streamed from disk. `modifiedAt` is the time the sync listed, so the
-    /// server knows which version it now holds.
-    func upload(_ file: ControlPlaneManifest.LocalFile, scanId: String, name: String) async throws -> StoredFile {
+    /// server knows which version it now holds. `unmeteredOnly` holds a large file back on cellular
+    /// or Low Data networks (`Failure.waitingForUnmeteredNetwork`).
+    func upload(_ file: ControlPlaneManifest.LocalFile, scanId: String, name: String,
+                unmeteredOnly: Bool) async throws -> StoredFile {
         var request = URLRequest(url: baseURL.appending(path: "v1/scans/\(scanId)/files/\(name)"))
         request.httpMethod = "PUT"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.setValue(ISO8601DateFormatter().string(from: file.modifiedAt), forHTTPHeaderField: "X-Scan4D-Modified-At")
+        request.allowsExpensiveNetworkAccess = !unmeteredOnly
+        request.allowsConstrainedNetworkAccess = !unmeteredOnly
         return try await send(request, uploading: file.url)
+    }
+
+    /// The export's PUT succeeded: the server checks the bucket and tells its pipelines.
+    func completeExport(_ exportId: String) async throws {
+        var request = URLRequest(url: baseURL.appending(path: "v1/exports/\(exportId)/complete"))
+        request.httpMethod = "POST"
+        _ = try await perform(request)
     }
 
     /// A grant to upload one export: where to PUT it and with which headers. The grant's host is
@@ -180,6 +204,10 @@ nonisolated struct ControlPlaneClient: Sendable {
         var request = request
         request.timeoutInterval = file == nil ? AppConstants.controlPlaneRequestTimeoutS
             : AppConstants.controlPlaneUploadTimeoutS
+        let password = ControlPlaneSecret.password
+        if !password.isEmpty {
+            request.setValue("Bearer \(password)", forHTTPHeaderField: "Authorization")
+        }
         let session = ControlPlaneSession.session
         let data: Data
         let response: URLResponse
@@ -193,6 +221,7 @@ nonisolated struct ControlPlaneClient: Sendable {
             throw Self.failure(for: error, host: request.url?.host() ?? baseURL.absoluteString)
         }
         guard let http = response as? HTTPURLResponse else { throw Failure.unreadableReply }
+        if http.statusCode == 401 { throw Failure.unauthorized }
         guard (200..<300).contains(http.statusCode) else {
             throw Failure.server(status: http.statusCode, detail: Self.detail(from: data))
         }
@@ -219,11 +248,14 @@ nonisolated struct ControlPlaneClient: Sendable {
                   let region = FocusRegion.decode(regionData), region.isValid else { return nil }
             return ScanTask(id: id, mapId: mapId, mapName: item["map_name"] as? String ?? "",
                             reason: item["reason"] as? String ?? "", status: item["status"] as? String ?? "",
-                            region: region)
+                            priority: item["priority"] as? String ?? "normal", region: region)
         }
     }
 
     static func failure(for error: URLError, host: String) -> Failure {
+        if error.networkUnavailableReason == .expensive || error.networkUnavailableReason == .constrained {
+            return .waitingForUnmeteredNetwork
+        }
         switch error.code {
         case .appTransportSecurityRequiresSecureConnection:
             return .insecureHost(host)

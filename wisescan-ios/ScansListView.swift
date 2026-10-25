@@ -653,6 +653,7 @@ struct ScansListView: View {
                             } else if let httpResponse = response as? HTTPURLResponse,
                                       (200...299).contains(httpResponse.statusCode) {
                                 scan.uploadStatus = .success
+                                target.reportCompleted()
                                 scan.lastUploadedAt = Date()
                             } else {
                                 scan.uploadStatus = .failed("Server error")
@@ -1796,6 +1797,7 @@ struct ScanCard: View {
                         self.scan.uploadStatus = .failed(uploadError.localizedDescription)
                     } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
                         self.scan.uploadStatus = .success
+                        target.reportCompleted()
                         self.scan.lastUploadedAt = Date()
                     } else {
                         self.scan.uploadStatus = .failed("Server error")

@@ -761,6 +761,7 @@ struct LocationDetailView: View {
                             } else if let httpResponse = response as? HTTPURLResponse,
                                       (200...299).contains(httpResponse.statusCode) {
                                 scan.uploadStatus = .success
+                                target.reportCompleted()
                                 scan.lastUploadedAt = Date()
                             } else {
                                 scan.uploadStatus = .failed("Server error")

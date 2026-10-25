@@ -78,6 +78,9 @@ struct DashboardView: View {
                         .cornerRadius(16)
                         .padding(.horizontal)
 
+                        // Focus scans the lab asked this device for (a worker's queue).
+                        ControlPlaneTodoCard()
+
                         // Local Servers (mDNS) — not yet implemented
                         /*
                         Text("LOCAL SERVERS (mDNS)")

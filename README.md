@@ -62,7 +62,11 @@ To check a device: the `[ARConfig]` launch log lists every supported format with
 - **Developer Mode:** Toggleable debugging tools — synthetic IMU/camera/depth injection for Simulator testing, performance diagnostics, and a **Force Rebuild Artifacts** switch that re-runs the derived-artifact build (ghost proxy, dynamic mesh, derived surfaces) on an already-current scan so its build diagnostics can be re-read — with a persistent banner across all views.
 - **Export & Scan Capture Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses governed by motion-blur rejection and overlapping metrics.
 - **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration.
-- **Control Plane Sync:** Set the lab's control plane server in Settings and the phone reports its inventory to it: spaces with their base and tip scans, every scan, every stitch link. It also uploads each scan's map package when the server asks: mesh, room layout, alignment, relocalization map and feature cloud (a Settings toggle, no photos). Nothing is sent during a capture. The server then:
+- **Control Plane Sync:** Set the lab's control plane server in Settings and the phone reports its inventory to it: spaces with their base and tip scans, every scan, every stitch link. It also uploads the parts of each scan's map package the server asks for (a Settings toggle, no photos):
+- the small files it reads itself right away;
+- the mesh and relocalization map only when the lab needs them, and large files only over Wi-Fi.
+
+Nothing is sent during a capture. The server then:
 - hands out each export's upload address in the lab's Versity bucket, revocable per device;
 - shares join fine-tunes edited on its web 3D view back to the phone;
 - can ask for a focus scan of a region, for example where its toy change evaluator saw a rescan differ. The server (the `scan4d-server` repo) keeps the fleet's devices, maps and scans in one place, the start of server-directed scanning. See REQ-038.

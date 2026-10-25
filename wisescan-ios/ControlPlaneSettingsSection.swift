@@ -1,13 +1,14 @@
 import SwiftUI
 
 /// Settings → Control plane: the lab server this phone reports its spaces, scans and stitches to
-/// (`ControlPlaneSync`; scan4d-server README). One host field, no auth yet: the server lives on
-/// the internal network.
+/// (`ControlPlaneSync`; scan4d-server README). Its host, and the shared password it may want
+/// (kept in the Keychain).
 struct ControlPlaneSettingsSection: View {
     @AppStorage(AppConstants.Key.controlPlaneHost) private var host = ""
     @AppStorage(AppConstants.Key.controlPlaneDeviceLabel) private var deviceLabel = ""
     @AppStorage(AppConstants.Key.controlPlaneSendPackages) private var sendPackages = AppConstants.controlPlaneSendPackages
     @AppStorage(AppConstants.Key.controlPlaneAllowUntrusted) private var allowUntrusted = false
+    @State private var password = ControlPlaneSecret.password
     @State private var connectionMessage: String?
     @State private var isTesting = false
 
@@ -24,6 +25,11 @@ struct ControlPlaneSettingsSection: View {
                 Text("The lab's Scan4D server, as host:port or a URL. No scheme means http. Leave empty to turn sync off.")
                     .font(.caption)
                     .foregroundColor(.gray)
+                SecureField("Server password", text: $password)
+                    .foregroundColor(.white)
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .onSubmit { savePassword() }
             }
             .padding(.vertical, 4)
 
@@ -41,7 +47,7 @@ struct ControlPlaneSettingsSection: View {
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Allow untrusted certificates", isOn: $allowUntrusted)
                     .foregroundColor(.white)
-                Text("For a lab server with its own (self-signed) certificate: accepted from this server and the upload hosts it names, nowhere else.")
+                Text("For servers on the lab's local network with their own (self-signed) certificate, reached by IP address or a .local name: accepted from this server and the upload hosts it names, nowhere else.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
@@ -50,7 +56,7 @@ struct ControlPlaneSettingsSection: View {
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Send map packages", isOn: $sendPackages)
                     .foregroundColor(.white)
-                Text("Each room scan's mesh, room layout, alignment and relocalization map (tens of MB), and each focus scan's box, so the lab can view and reuse them. Uploaded after a sync, one file at a time.")
+                Text("What the server asks for: the small files it reads itself (alignment, room layout, feature cloud, coverage, focus box) after each sync; the mesh and relocalization map only when the lab needs them, and large files only over Wi-Fi.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
@@ -62,20 +68,16 @@ struct ControlPlaneSettingsSection: View {
                     .foregroundColor(.gray)
             }
 
-            ForEach(sync.openTasks) { task in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Focus scan requested: \(task.region.label.isEmpty ? "a region" : task.region.label)")
-                            .font(.caption)
-                            .foregroundColor(.white)
-                        Text("\(task.mapName) · \(task.region.detail.title)\(task.reason.isEmpty ? "" : " · " + task.reason)")
-                            .font(.caption2)
-                            .foregroundColor(.gray)
-                    }
-                    Spacer()
-                    Button("Open") { sync.open(task) }
-                        .buttonStyle(.borderless)
-                }
+            if sync.waitingForWiFi > 0 {
+                Label("\(sync.waitingForWiFi) large map file(s) the lab asked for wait for Wi-Fi.", systemImage: "wifi")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+
+            if !sync.openTasks.isEmpty {
+                Label("\(sync.openTasks.count) focus scan request(s) in the to-do list on the Dashboard.", systemImage: "checklist")
+                    .font(.caption)
+                    .foregroundColor(.gray)
             }
 
             HStack(spacing: 8) {
@@ -103,7 +105,7 @@ struct ControlPlaneSettingsSection: View {
         } header: {
             Text("CONTROL PLANE")
         } footer: {
-            Text("Sends this phone's spaces, scans and stitches to the server: names, times, IDs, poses and focus regions, plus the map packages above when on. Never photos. Never during a scan.")
+            Text("Sends this phone's spaces, scans and stitches to the server: names, times, IDs, poses and focus regions, plus the map package files it asks for when on. Never photos. Never during a scan.")
                 .font(.caption2)
                 .foregroundColor(.gray)
         }
@@ -122,6 +124,17 @@ struct ControlPlaneSettingsSection: View {
         .onChange(of: allowUntrusted) { _, _ in
             sync.requestSync(after: .seconds(1))
         }
+        .onChange(of: password) { _, _ in
+            savePassword()
+        }
+    }
+
+    /// Into the Keychain as typed (an empty field removes it), then a sync to try it.
+    private func savePassword() {
+        guard password != ControlPlaneSecret.password else { return }
+        ControlPlaneSecret.setPassword(password)
+        connectionMessage = nil
+        sync.requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
     }
 
     /// Where the Upload buttons send exports, once a sync has said.

@@ -7,24 +7,50 @@ import Security
 /// A UUID made the first time it is asked for and kept in the Keychain, so it survives a
 /// reinstall. iOS gives apps no serial number, and `identifierForVendor` resets once every app
 /// from the vendor is deleted. `ThisDeviceOnly`: a backup restored onto another phone does not
-/// carry it, so two phones never share an identity. Mirrored in the app's defaults in case the
-/// Keychain write fails.
+/// carry it, so two phones never share an identity.
+///
+/// The fallback, for a Keychain write that fails, is a file excluded from backups, for the same
+/// reason. Never the app's defaults: those ride every backup, and a phone restored from another's
+/// would sync as it, each marking the other's scans gone.
 nonisolated enum DeviceIdentity {
     private static let service = "edu.cmu.wiselab.scan4d.control-plane"
     private static let account = "device_id"
 
     static let id: UUID = {
         if let stored = readKeychain() { return stored }
-        if let text = UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneDeviceId),
-           let fallback = UUID(uuidString: text) {
+        if let fallback = readFallback() {
             writeKeychain(fallback)
             return fallback
         }
         let fresh = UUID()
-        writeKeychain(fresh)
-        UserDefaults.standard.set(fresh.uuidString, forKey: AppConstants.Key.controlPlaneDeviceId)
+        if !writeKeychain(fresh) {
+            writeFallback(fresh)
+        }
         return fresh
     }()
+
+    private static var fallbackURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("control-plane-device-id")
+    }
+
+    private static func readFallback() -> UUID? {
+        guard let url = fallbackURL, let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        return UUID(uuidString: text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private static func writeFallback(_ id: UUID) {
+        guard var url = fallbackURL else { return }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try id.uuidString.write(to: url, atomically: true, encoding: .utf8)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try url.setResourceValues(values)
+        } catch {
+            print("[ControlPlane] device id fallback not written: \(error.localizedDescription)")
+        }
+    }
 
     /// The hardware model, e.g. "iPhone16,2" (the simulator reports the one it simulates).
     static var model: String {
@@ -76,7 +102,8 @@ nonisolated enum DeviceIdentity {
         return UUID(uuidString: text)
     }
 
-    private static func writeKeychain(_ id: UUID) {
+    @discardableResult
+    private static func writeKeychain(_ id: UUID) -> Bool {
         let item: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -86,7 +113,9 @@ nonisolated enum DeviceIdentity {
         ]
         let status = SecItemAdd(item as CFDictionary, nil)
         if status != errSecSuccess && status != errSecDuplicateItem {
-            print("[ControlPlane] Keychain write failed (\(status)); the device id lives in defaults only")
+            print("[ControlPlane] Keychain write failed (\(status)); the device id falls back to a file")
+            return false
         }
+        return true
     }
 }

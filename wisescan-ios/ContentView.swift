@@ -28,6 +28,8 @@ struct ContentView: View {
                     .tabItem {
                         Label("Dashboard", systemImage: "square.grid.2x2")
                     }
+                    // The lab's unanswered focus-scan requests (the Dashboard's to-do list).
+                    .badge(ControlPlaneSync.shared.unansweredTasks)
                     .tag(0)
 
                 CaptureView(selectedTab: $selectedTab)
@@ -97,9 +99,10 @@ struct ContentView: View {
         } message: {
             Text(FocusRegionInbox.shared.lastError ?? "")
         }
-        // The control plane asking for a focus scan (a task): Open takes the region into its
+        // An urgent focus scan the lab asked for (a high-priority task), alerted once ever; every
+        // request also waits in the Dashboard's to-do list. Open takes the region into its
         // space's editor through the same inbox as a deep link.
-        .alert("Focus scan requested", isPresented: Binding(
+        .alert("Urgent focus scan requested", isPresented: Binding(
             get: { ControlPlaneSync.shared.taskToPrompt != nil },
             set: { if !$0 { ControlPlaneSync.shared.dismissPrompt() } }),
                presenting: ControlPlaneSync.shared.taskToPrompt) { task in
@@ -114,7 +117,7 @@ struct ContentView: View {
     private func taskPromptMessage(_ task: ControlPlaneClient.ScanTask) -> String {
         let what = task.region.label.isEmpty ? "A region" : task.region.label
         let reason = task.reason.isEmpty ? "" : "\n\n\(task.reason)"
-        return "\(what) in \(task.mapName), at \(task.region.detail.title) detail.\(reason)\n\nLater: Settings → Control plane."
+        return "\(what) in \(task.mapName), at \(task.region.detail.title) detail.\(reason)\n\nLater: it waits in the to-do list on the Dashboard."
     }
 
     /// The space a handed-over region names; without a known one the region is refused (a file

@@ -103,7 +103,7 @@ final class ControlPlaneTests: XCTestCase {
                            "manual": {"yaw_deg": 2.0, "dx": 0.05, "dy": 0.0, "dz": -0.02}}],
          "upload_target": {"available": true, "revoked": false, "bucket": "scan4d"},
          "tasks": [{"task_id": "\(task.uuidString.lowercased())", "map_id": "\(map.uuidString.lowercased())",
-                    "map_name": "Lab 2F", "reason": "change near the window", "status": "delivered",
+                    "map_name": "Lab 2F", "reason": "change near the window", "status": "delivered", "priority": "high",
                     "created_at": "2026-10-25T08:00:00Z",
                     "region": {"version": 1, "location_id": "\(map.uuidString.lowercased())",
                                "center_m": [1.2, 0.45, -2.3], "yaw_rad": 0.0, "size_m": [1.0, 0.9, 1.2],
@@ -125,6 +125,7 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(region.locationId, map)
         XCTAssertEqual(region.detail, .detail)
         XCTAssertEqual(region.size.z, 1.2, accuracy: 1e-6)
+        XCTAssertEqual(tasks.first?.isUrgent, true)
     }
 
     /// The task id rides the region through save and sync: that is how the server learns the
@@ -138,6 +139,20 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(FocusRegion.decode(data)?.taskId, task)
         let plain = FocusRegion(center: .zero, size: SIMD3(1, 1, 1))
         XCTAssertNil(FocusRegion.decode(try XCTUnwrap(plain.encoded()))?.taskId)
+    }
+
+    /// Partial packages: the server says why it wants a file; a large one held back on a metered
+    /// network is "waiting", not a failure.
+    func testWantedReasonAndTheWiFiWait() throws {
+        let body = #"{"maps": 1, "scans": 1, "links": 0, "marked_gone": 0, "wanted": [{"scan_id": "x", "name": "mesh.obj", "size": 41000000, "reason": "requested: web 3D view"}]}"#
+        let reply = try ControlPlaneClient.decode(ControlPlaneClient.SyncReply.self, from: Data(body.utf8))
+        XCTAssertEqual(reply.wanted?.first?.reason, "requested: web 3D view")
+        XCTAssertGreaterThanOrEqual(reply.wanted?.first?.size ?? 0, AppConstants.controlPlaneLargeFileBytes)
+
+        let cellular = URLError(.notConnectedToInternet, userInfo: [
+            NSURLErrorNetworkUnavailableReasonKey: URLError.NetworkUnavailableReason.expensive.rawValue])
+        XCTAssertEqual(ControlPlaneClient.failure(for: cellular, host: "h"), .waitingForUnmeteredNetwork)
+        XCTAssertEqual(ControlPlaneClient.failure(for: URLError(.notConnectedToInternet), host: "h"), .unreachable("h"))
     }
 
     func testManualUploadURLIsThePlainPut() throws {
