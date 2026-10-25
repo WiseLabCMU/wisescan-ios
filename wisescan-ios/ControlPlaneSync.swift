@@ -6,8 +6,10 @@ import SwiftData
 
 /// Sends the whole local inventory (`ControlPlaneManifest`) to the control plane: on launch and
 /// return to the foreground, a few seconds after SwiftData saves (coalesced), and from Settings.
-/// Never during a capture: a request then waits for the capture to end, so the network and the
-/// file reads stay off the AR session's back. Does nothing while no server host is set.
+/// Then uploads the map-package files the server answers that it wants, one at a time (Settings →
+/// Send map packages). Never during a capture: a request then waits for the capture to end, so
+/// the network and the file reads stay off the AR session's back. Does nothing while no server
+/// host is set.
 @Observable
 @MainActor
 final class ControlPlaneSync {
@@ -17,6 +19,7 @@ final class ControlPlaneSync {
         case off
         case idle
         case syncing
+        case uploading(done: Int, total: Int)
         case synced(Date, summary: String)
         case failed(String)
     }
@@ -35,6 +38,10 @@ final class ControlPlaneSync {
 
     var host: String { UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneHost) ?? "" }
     var deviceLabel: String { UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneDeviceLabel) ?? "" }
+    var sendPackages: Bool {
+        UserDefaults.standard.object(forKey: AppConstants.Key.controlPlaneSendPackages) as? Bool
+            ?? AppConstants.controlPlaneSendPackages
+    }
     var client: ControlPlaneClient? { ControlPlaneClient.baseURL(fromHost: host).map { ControlPlaneClient(baseURL: $0) } }
 
     /// Once, at launch: watch SwiftData saves and sync now.
@@ -94,15 +101,28 @@ final class ControlPlaneSync {
                                                      device: DeviceIdentity.manifestDevice(label: deviceLabel))
         let draft = snapshot.manifest
         let files = snapshot.files
+        let packages = sendPackages
         do {
-            let reply = try await Task.detached(priority: .utility) {
+            // Encoding and the file reads off main (an async call from here would stay on it).
+            let (reply, local) = try await Task.detached(priority: .utility) {
                 var manifest = draft
-                manifest.readScanFiles(files)
-                return try await client.sync(manifest)
+                let local = manifest.readScanFiles(files, packages: packages)
+                let reply = try await client.sync(manifest)
+                return (reply, local)
             }.value
-            let summary = "\(reply.maps) spaces, \(reply.scans) scans, \(reply.links) links"
+            var summary = "\(reply.maps) spaces, \(reply.scans) scans, \(reply.links) links"
+            PerfDiag.log("[ControlPlane] synced: \(summary), \(reply.markedGone) marked gone, "
+                         + "\(reply.wanted?.count ?? 0) files wanted")
+            let wanted = packages ? (reply.wanted ?? []) : []
+            if !wanted.isEmpty {
+                let sent = try await upload(wanted, from: local, with: client)
+                if sent < wanted.count {
+                    // A capture began: the rest waits for it to end.
+                    deferredForCapture = true
+                    summary += "; \(wanted.count - sent) map files waiting for the scan to end"
+                }
+            }
             status = .synced(Date(), summary: summary)
-            PerfDiag.log("[ControlPlane] synced: \(summary), \(reply.markedGone) marked gone")
         } catch {
             status = .failed(error.localizedDescription)
             PerfDiag.log("[ControlPlane] sync failed: \(error.localizedDescription)")
@@ -112,6 +132,25 @@ final class ControlPlaneSync {
             rerun = false
             requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
         }
+    }
+
+    /// The map-package files the server asked for, one at a time, stopping if a capture begins.
+    /// Returns how many went up. A failure ends the round; the next sync asks again.
+    private func upload(_ wanted: [ControlPlaneClient.WantedFile], from local: [UUID: [String: ControlPlaneManifest.LocalFile]],
+                        with client: ControlPlaneClient) async throws -> Int {
+        for (index, want) in wanted.enumerated() {
+            guard !captureActive else { return index }
+            status = .uploading(done: index, total: wanted.count)
+            // A file the server wants but the snapshot did not find (deleted since): skip it.
+            guard let scanId = UUID(uuidString: want.scanId), let file = local[scanId]?[want.name] else { continue }
+            do {
+                _ = try await client.upload(file, scanId: want.scanId, name: want.name)
+            } catch {
+                throw ControlPlaneClient.Failure.transport("Uploading \(want.name): \(error.localizedDescription)")
+            }
+        }
+        PerfDiag.log("[ControlPlane] uploaded \(wanted.count) map files")
+        return wanted.count
     }
 
     /// Settings' Test connection: the server's health, as a line to show.

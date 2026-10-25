@@ -32,6 +32,7 @@ enum AppConstants {
         static let controlPlaneHost = "controlPlaneHost"              // the lab's control plane server (host[:port] or URL); empty = sync off
         static let controlPlaneDeviceLabel = "controlPlaneDeviceLabel" // this phone's name in the fleet (iOS gives apps only "iPhone")
         static let controlPlaneDeviceId = "controlPlaneDeviceId"      // fallback copy of the Keychain device id (DeviceIdentity)
+        static let controlPlaneSendPackages = "controlPlaneSendPackages" // upload map packages (mesh, room layout, relocalization map) the server asks for
         static let rawOverlapMax = "rawOverlapMax"
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"
@@ -635,6 +636,8 @@ enum AppConstants {
     // MARK: - Control plane (scan4d-server)
     static let controlPlaneSyncDebounceS: Double = 5             // saves within this window share one sync
     static let controlPlaneRequestTimeoutS: TimeInterval = 15
+    static let controlPlaneUploadTimeoutS: TimeInterval = 60     // idle time allowed mid map-package upload (tens of MB)
+    static let controlPlaneSendPackages = true                   // map packages go up with the sync unless turned off
 }
 
 // MARK: - Semantic View Mode

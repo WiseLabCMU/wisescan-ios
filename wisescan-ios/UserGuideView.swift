@@ -90,7 +90,8 @@ struct UserGuideView: View {
                               "solid when every scan is uploaded, dimmed when only some are. With a " +
                               "control plane server set in Settings, the app also keeps your lab's " +
                               "server up to date with the spaces and scans on this phone (names, " +
-                              "times and poses; no photos), never during a scan."
+                              "times, poses and, unless turned off, each room's mesh and map; no " +
+                              "photos), never during a scan."
                     )
                 } header: {
                     Text("HOW TO USE")

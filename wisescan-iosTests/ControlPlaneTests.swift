@@ -137,6 +137,47 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(registration.targetScanId, target)
     }
 
+    /// Map-package files: first existing candidate wins, times are whole seconds (what the
+    /// manifest's ISO 8601 and the upload header carry), nothing is listed with packages off.
+    func testPackageFilesAreListedFromTheFirstCandidate() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cp_\(UUID().uuidString)")
+        let raw = dir.appendingPathComponent("raw_data")
+        try FileManager.default.createDirectory(at: raw, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("v 0 0 0\n".utf8).write(to: dir.appendingPathComponent("mesh.obj"))
+        try Data(#"{"applied": false, "targetScanId": "x"}"#.utf8).write(to: raw.appendingPathComponent("registration.json"))
+
+        let scanId = UUID()
+        let scan = ControlPlaneManifest.Scan(scanId: scanId, kind: "room", name: "s", capturedAt: Date(), parentScanId: nil,
+                                             captureSource: "Native iOS", worldMapSuspect: false, stillCount: 0,
+                                             focusRegion: nil, upload: .init(status: "pending", lastUploadedAt: nil, format: "Scan4D"))
+        let draft = ControlPlaneManifest(
+            device: DeviceIdentity.manifestDevice(label: "test"), generatedAt: Date(),
+            locations: [.init(locationId: UUID(), name: "Lab", updatedAt: Date(), baseScanId: scanId, tipScanId: scanId, scans: [scan])],
+            links: [])
+        let files = [scanId: ControlPlaneManifest.ScanFiles(
+            directory: dir, worldMap: dir.appendingPathComponent("arworldmap.map"),
+            package: [("registration.json", [dir.appendingPathComponent("registration.json"), raw.appendingPathComponent("registration.json")]),
+                      ("arworldmap.map", [dir.appendingPathComponent("arworldmap.map")]),
+                      ("mesh.obj", [dir.appendingPathComponent("mesh.obj")])])]
+
+        var manifest = draft
+        let local = manifest.readScanFiles(files, packages: true)
+        let listed = try XCTUnwrap(manifest.locations.first?.scans.first)
+        XCTAssertEqual(listed.files.map(\.name), ["registration.json", "mesh.obj"])
+        XCTAssertEqual(listed.files.last?.size, 8)
+        XCTAssertFalse(listed.hasWorldMap)
+        XCTAssertEqual(listed.registration?.applied, false)
+        XCTAssertEqual(local[scanId]?["registration.json"]?.url.lastPathComponent, "registration.json")
+        XCTAssertEqual(local[scanId]?["registration.json"]?.url.deletingLastPathComponent().lastPathComponent, "raw_data")
+        let time = try XCTUnwrap(listed.files.first?.modifiedAt.timeIntervalSince1970)
+        XCTAssertEqual(time, time.rounded(.down))
+
+        var off = draft
+        XCTAssertTrue(off.readScanFiles(files, packages: false).isEmpty)
+        XCTAssertEqual(off.locations.first?.scans.first?.files.count, 0)
+    }
+
     func testDeviceIdIsStable() {
         XCTAssertEqual(DeviceIdentity.id, DeviceIdentity.id)
         XCTAssertFalse(DeviceIdentity.model.isEmpty)

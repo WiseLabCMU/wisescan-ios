@@ -6,6 +6,7 @@ import SwiftUI
 struct ControlPlaneSettingsSection: View {
     @AppStorage(AppConstants.Key.controlPlaneHost) private var host = ""
     @AppStorage(AppConstants.Key.controlPlaneDeviceLabel) private var deviceLabel = ""
+    @AppStorage(AppConstants.Key.controlPlaneSendPackages) private var sendPackages = AppConstants.controlPlaneSendPackages
     @State private var connectionMessage: String?
     @State private var isTesting = false
 
@@ -36,6 +37,15 @@ struct ControlPlaneSettingsSection: View {
             }
             .padding(.vertical, 4)
 
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Send map packages", isOn: $sendPackages)
+                    .foregroundColor(.white)
+                Text("Each room scan's mesh, room layout, alignment and relocalization map (tens of MB), and each focus scan's box, so the lab can view and reuse them. Uploaded after a sync, one file at a time.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+            .padding(.vertical, 4)
+
             HStack(spacing: 8) {
                 Image(systemName: statusSymbol)
                     .foregroundColor(statusColor)
@@ -49,7 +59,7 @@ struct ControlPlaneSettingsSection: View {
                     .disabled(host.isEmpty || isTesting)
                 Spacer()
                 Button("Sync now") { Task { await sync.syncNow() } }
-                    .disabled(host.isEmpty || sync.status == .syncing)
+                    .disabled(host.isEmpty || isBusy)
             }
             .buttonStyle(.borderless)
 
@@ -61,7 +71,7 @@ struct ControlPlaneSettingsSection: View {
         } header: {
             Text("CONTROL PLANE")
         } footer: {
-            Text("Sends this phone's spaces, scans and stitches to the server: names, times, IDs, poses and focus regions. No photos, meshes or maps. Never during a scan.")
+            Text("Sends this phone's spaces, scans and stitches to the server: names, times, IDs, poses and focus regions, plus the map packages above when on. Never photos. Never during a scan.")
                 .font(.caption2)
                 .foregroundColor(.gray)
         }
@@ -73,6 +83,16 @@ struct ControlPlaneSettingsSection: View {
         }
         .onChange(of: deviceLabel) { _, _ in
             sync.requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
+        }
+        .onChange(of: sendPackages) { _, _ in
+            sync.requestSync(after: .seconds(1))
+        }
+    }
+
+    private var isBusy: Bool {
+        switch sync.status {
+        case .syncing, .uploading: return true
+        default: return false
         }
     }
 
@@ -90,6 +110,7 @@ struct ControlPlaneSettingsSection: View {
         case .off: return "Off: no server set."
         case .idle: return "Not synced yet."
         case .syncing: return "Syncing…"
+        case .uploading(let done, let total): return "Uploading map files: \(done + 1) of \(total)…"
         case .synced(let date, let summary):
             return "Synced at \(date.formatted(date: .omitted, time: .shortened)): \(summary)."
         case .failed(let message): return message
@@ -101,6 +122,7 @@ struct ControlPlaneSettingsSection: View {
         case .off: return "icloud.slash"
         case .idle: return "clock"
         case .syncing: return "arrow.triangle.2.circlepath"
+        case .uploading: return "arrow.up.circle"
         case .synced: return "checkmark.circle"
         case .failed: return "exclamationmark.triangle"
         }

@@ -7,7 +7,8 @@ import SwiftData
 /// "map") with its base and tip, every scan, every stitch link. Sent whole on every sync, so a
 /// missed or failed one heals on the next and neither side tracks changes.
 ///
-/// Metadata only: names, times, IDs, poses, the focus box. No images, meshes or world maps.
+/// Metadata: names, times, IDs, poses, the focus box, and which map-package files each scan has
+/// (the files themselves go up separately, when the server asks; `ControlPlaneSync`). No images.
 nonisolated struct ControlPlaneManifest: Encodable, Sendable {
     var version = 1
     var device: Device
@@ -50,6 +51,22 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
         var registration: Registration?  // read from disk off main (`readScanFiles`)
         var focusRegion: FocusRegion?
         var upload: Upload
+        var files: [PackageFile] = []    // read from disk off main (`readScanFiles`)
+    }
+
+    /// A map-package file this scan has (scan4d-server README, "Map packages"). The server
+    /// answers with the ones it wants; size and time tell it which version it holds.
+    nonisolated struct PackageFile: Encodable, Sendable {
+        var name: String
+        var size: Int64
+        var modifiedAt: Date
+    }
+
+    /// A package file on disk, for the upload the server asks for.
+    nonisolated struct LocalFile: Sendable {
+        var url: URL
+        var size: Int64
+        var modifiedAt: Date
     }
 
     /// The scan's `registration.json` (`SaveRegistration.Sidecar`), the fields the server keeps:
@@ -93,10 +110,12 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
         var dz: Double
     }
 
-    /// Where a scan's files are, captured on main with the snapshot.
+    /// Where a scan's files are, captured on main with the snapshot. `package`: each map-package
+    /// file's name and where to look for it, first match wins.
     nonisolated struct ScanFiles: Sendable {
         var directory: URL
         var worldMap: URL
+        var package: [(name: String, candidates: [URL])]
     }
 
     static var encoder: JSONEncoder {
@@ -106,16 +125,37 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
         return encoder
     }
 
-    /// Fills the file-backed fields. File I/O, so off main.
-    mutating func readScanFiles(_ files: [UUID: ScanFiles]) {
+    /// Fills the file-backed fields. File I/O, so off main. With `packages`, lists each scan's
+    /// map-package files and returns where they are, for the uploads the server then asks for.
+    @discardableResult
+    mutating func readScanFiles(_ files: [UUID: ScanFiles], packages: Bool) -> [UUID: [String: LocalFile]] {
         let fm = FileManager.default
+        var local: [UUID: [String: LocalFile]] = [:]
         for l in locations.indices {
             for s in locations[l].scans.indices {
-                guard let paths = files[locations[l].scans[s].scanId] else { continue }
+                let scanId = locations[l].scans[s].scanId
+                guard let paths = files[scanId] else { continue }
                 locations[l].scans[s].hasWorldMap = fm.fileExists(atPath: paths.worldMap.path)
                 locations[l].scans[s].registration = Self.readRegistration(scanDirectory: paths.directory)
+                guard packages else { continue }
+                for (name, candidates) in paths.package {
+                    guard let found = candidates.lazy.compactMap(Self.localFile).first else { continue }
+                    locations[l].scans[s].files.append(PackageFile(name: name, size: found.size,
+                                                                   modifiedAt: found.modifiedAt))
+                    local[scanId, default: [:]][name] = found
+                }
             }
         }
+        return local
+    }
+
+    /// Size and modification time, whole seconds: the manifest's ISO 8601 carries no fraction,
+    /// and the server compares the time it was told at upload with the next sync's.
+    static func localFile(_ url: URL) -> LocalFile? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = (attributes[.size] as? NSNumber)?.int64Value,
+              let modified = attributes[.modificationDate] as? Date else { return nil }
+        return LocalFile(url: url, size: size, modifiedAt: Date(timeIntervalSince1970: modified.timeIntervalSince1970.rounded(.down)))
     }
 
     /// The scan's registration sidecar, where `SaveRegistration.loadSidecar` looks for it (top
@@ -146,7 +186,8 @@ extension ControlPlaneManifest {
         let entries = locations.map { location -> Location in
             let base = location.roomScans.min(by: CapturedScan.canonicalOrder)
             let scans = location.scans.sorted(by: CapturedScan.canonicalOrder).map { scan -> Scan in
-                files[scan.id] = ScanFiles(directory: scan.scanDirectory, worldMap: scan.worldMapURL)
+                files[scan.id] = ScanFiles(directory: scan.scanDirectory, worldMap: scan.worldMapURL,
+                                           package: packageCandidates(scan))
                 return Scan(scanId: scan.id,
                             kind: scan.isFocusScan ? "focus" : "room",
                             name: scan.name,
@@ -183,6 +224,25 @@ extension ControlPlaneManifest {
         let manifest = ControlPlaneManifest(device: device, generatedAt: now,
                                             locations: entries, links: linkEntries)
         return (manifest, files)
+    }
+
+    /// A scan's map-package files (scan4d-server README, "Map packages"), smallest first. Room
+    /// scans: the registration and room layout (top level, else raw_data/ like the export), the
+    /// relocalization map, the mesh. Focus scans: the region.
+    @MainActor
+    static func packageCandidates(_ scan: CapturedScan) -> [(name: String, candidates: [URL])] {
+        let dir = scan.scanDirectory
+        let raw = dir.appendingPathComponent("raw_data")
+        if scan.isFocusScan {
+            return [(AppConstants.focusRegionFilename, [scan.focusRegionFileURL])]
+        }
+        return [
+            ("registration.json", [dir.appendingPathComponent("registration.json"),
+                                   raw.appendingPathComponent("registration.json")]),
+            ("roomplan.json", [scan.roomPlanFileURL, raw.appendingPathComponent("roomplan.json")]),
+            ("arworldmap.map", [scan.worldMapURL]),
+            ("mesh.obj", [scan.meshFileURL])
+        ]
     }
 
     /// The stored status without its failure message: what the fleet view sorts on.

@@ -18,7 +18,13 @@ If you enter a control plane server in Settings → Control plane, the app keeps
 - upload state;
 - the device's model, iOS and app version, the device name you enter, and a random device ID the app makes once.
 
-It holds no images, depth maps, meshes or relocalization maps. Nothing is sent while the field is empty. The server is the one you configure, normally your lab's own on its internal network.
+The inventory holds no images or depth maps.
+
+With **Send map packages** on (the default), the app also uploads the files the server asks for:
+- each room scan's mesh (with its captured vertex colours, people already removed at capture), room layout, alignment, and ARKit relocalization map (feature points, not images);
+- each focus scan's box.
+
+Photos and depth maps leave only through an export you start. Nothing is sent while the server field is empty. The server is the one you configure, normally your lab's own on its internal network.
 
 ## Camera & LiDAR
 

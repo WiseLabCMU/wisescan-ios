@@ -18,6 +18,19 @@ nonisolated struct ControlPlaneClient: Sendable {
         let scans: Int
         let links: Int
         let markedGone: Int
+        /// Map-package files the server asks for (absent from servers before map packages).
+        let wanted: [WantedFile]?
+    }
+
+    nonisolated struct WantedFile: Decodable, Sendable {
+        let scanId: String
+        let name: String
+        let size: Int64
+    }
+
+    nonisolated struct StoredFile: Decodable, Sendable {
+        let name: String
+        let size: Int64
     }
 
     nonisolated enum Failure: LocalizedError, Equatable {
@@ -68,13 +81,28 @@ nonisolated struct ControlPlaneClient: Sendable {
         return try await send(request)
     }
 
-    private func send<Reply: Decodable>(_ request: URLRequest) async throws -> Reply {
+    /// One map-package file, streamed from disk. `modifiedAt` is the time the sync listed, so the
+    /// server knows which version it now holds.
+    func upload(_ file: ControlPlaneManifest.LocalFile, scanId: String, name: String) async throws -> StoredFile {
+        var request = URLRequest(url: baseURL.appending(path: "v1/scans/\(scanId)/files/\(name)"))
+        request.httpMethod = "PUT"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue(ISO8601DateFormatter().string(from: file.modifiedAt), forHTTPHeaderField: "X-Scan4D-Modified-At")
+        return try await send(request, uploading: file.url)
+    }
+
+    private func send<Reply: Decodable>(_ request: URLRequest, uploading file: URL? = nil) async throws -> Reply {
         var request = request
-        request.timeoutInterval = AppConstants.controlPlaneRequestTimeoutS
+        request.timeoutInterval = file == nil ? AppConstants.controlPlaneRequestTimeoutS
+            : AppConstants.controlPlaneUploadTimeoutS
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            if let file {
+                (data, response) = try await URLSession.shared.upload(for: request, fromFile: file)
+            } else {
+                (data, response) = try await URLSession.shared.data(for: request)
+            }
         } catch let error as URLError {
             throw Self.failure(for: error, host: baseURL.host() ?? baseURL.absoluteString)
         }
