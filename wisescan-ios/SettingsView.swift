@@ -714,6 +714,8 @@ struct SettingsView: View {
                     // MARK: - General Settings
                     settingsSection2
 
+                    ControlPlaneSettingsSection()
+
                     appearanceSection
 
                     // MARK: - Data Management

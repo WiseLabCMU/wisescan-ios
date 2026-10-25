@@ -4,6 +4,7 @@ import ARKit
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
     @State private var scanStore = ScanStore()
     @State private var selectedTab = 0
     @State private var showLiDARWarning = false
@@ -12,6 +13,12 @@ struct ContentView: View {
 
     private var hasLiDAR: Bool {
         ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
+    }
+
+    /// The AR session runs whenever the Capture tab is up, relocalizing before any recording
+    /// starts; control plane syncs wait it out (ControlPlaneSync).
+    private var arSessionBusy: Bool {
+        scanStore.isCaptureActive || selectedTab == 1
     }
 
     var body: some View {
@@ -60,6 +67,17 @@ struct ContentView: View {
             // Sweep "Adjacent to …" locations orphaned with 0 scans when a freeze/crash hit the
             // extend flow's record→save (the location is persisted before its scan is recorded).
             StitchLinkStore.reconcileOrphanedAdjacentLocations(context: modelContext)
+            // Control plane: report this phone's inventory now and after every save.
+            ControlPlaneSync.shared.captureStateChanged(active: arSessionBusy)
+            ControlPlaneSync.shared.start(container: modelContext.container)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                ControlPlaneSync.shared.requestSync(after: .seconds(1))
+            }
+        }
+        .onChange(of: arSessionBusy) { _, busy in
+            ControlPlaneSync.shared.captureStateChanged(active: busy)
         }
         .alert("Lite Mode — No LiDAR", isPresented: $showLiDARWarning) {
             Button("Got it", role: .cancel) {}

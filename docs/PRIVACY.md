@@ -1,12 +1,24 @@
 # Scan4D Privacy Policy
 
-*Last updated: April 30, 2026*
+*Last updated: October 25, 2026*
 
 ## Data Collection
 
 Scan4D does not collect, store, or transmit any personal data to our servers.
 
 All scan data (images, depth maps, meshes, and camera poses) is stored locally on your device and is only uploaded when you explicitly configure a server URL and tap the Upload button.
+
+### Control Plane Sync
+
+If you enter a control plane server in Settings → Control plane, the app keeps that server up to date with an inventory of this device's scans. It sends this on launch and after changes, and never during a scan. The inventory holds:
+- space and scan names and times;
+- scan and space IDs;
+- each scan's alignment transform and stitch-link anchor poses;
+- focus-scan regions (a box);
+- upload state;
+- the device's model, iOS and app version, the device name you enter, and a random device ID the app makes once.
+
+It holds no images, depth maps, meshes or relocalization maps. Nothing is sent while the field is empty. The server is the one you configure, normally your lab's own on its internal network.
 
 ## Camera & LiDAR
 
@@ -50,7 +62,7 @@ Scan4D does not integrate any third-party analytics, advertising, or tracking SD
 
 ## Data Retention
 
-Scan data persists on your device until you manually delete it from within the app. No data is retained on any remote server unless you explicitly upload it to a server you configure.
+Scan data persists on your device until you manually delete it from within the app. No data is retained on any remote server unless you explicitly upload it to a server you configure, or set a control plane server, which keeps the inventory above. Deleting a scan on the device marks it gone there rather than erasing its record.
 
 ## Contact
 

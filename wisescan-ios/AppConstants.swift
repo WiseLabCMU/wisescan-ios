@@ -29,6 +29,9 @@ enum AppConstants {
     // MARK: - AppStorage Keys
     enum Key {
         static let uploadURL = "uploadURL"
+        static let controlPlaneHost = "controlPlaneHost"              // the lab's control plane server (host[:port] or URL); empty = sync off
+        static let controlPlaneDeviceLabel = "controlPlaneDeviceLabel" // this phone's name in the fleet (iOS gives apps only "iPhone")
+        static let controlPlaneDeviceId = "controlPlaneDeviceId"      // fallback copy of the Keychain device id (DeviceIdentity)
         static let rawOverlapMax = "rawOverlapMax"
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"
@@ -628,6 +631,10 @@ enum AppConstants {
     // MARK: - 360° Still Source (Theta OSC spike — feat/still-source-360)
     static let thetaCaptureTimeout: TimeInterval = 20            // max wait for a takePicture command to reach "done"
     static let thetaStatusPollInterval: TimeInterval = 0.4       // /osc/commands/status poll cadence while a capture is inProgress
+
+    // MARK: - Control plane (scan4d-server)
+    static let controlPlaneSyncDebounceS: Double = 5             // saves within this window share one sync
+    static let controlPlaneRequestTimeoutS: TimeInterval = 15
 }
 
 // MARK: - Semantic View Mode

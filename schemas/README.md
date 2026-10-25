@@ -198,6 +198,15 @@ sparse by construction, and carrying none of the opinions about voxel size or co
 weighting that a seed cloud encodes. Feeding it to a trainer as one will not produce the
 result the pipeline's cloud does.
 
+### Control plane sync (not a file)
+
+The JSON the app sends the control plane on every sync, `POST /v1/devices/{device_id}/sync`
+(REQ-038), is this device's whole inventory. It carries spaces with base/tip, scans with their
+`registration.json` transform and `focus_region.json`, and stitch links with the same anchors as
+`stitching.json`. Its contract is defined by the server: the `scan4d-server` repo's README
+("Sync"), with the live schema at the server's `/openapi.json`. The app side is
+`ControlPlaneManifest.swift`, encoded snake_case with ISO 8601 times.
+
 ---
 
 ## 2. JSON Schemas

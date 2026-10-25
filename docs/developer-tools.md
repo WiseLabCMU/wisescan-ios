@@ -17,7 +17,8 @@ Release, which is what the field mostly runs. ON enables:
   yaw, zncc, per-still yaw spread, rails), `[VertexColor]` frame selection + gray
   fraction, `[Colorize]` face generation, `[PerfTimer]` step timings, `[TrackStab]`
   tracking jumps and mesh purges, `[LocDiag]` relocalization/map health, `[Session]`
-  interruptions.
+  interruptions, `[ControlPlane]` inventory syncs (counts sent, rows the server marked
+  gone, or the failure).
 - **MainThreadWatchdog** — logs `main-thread stall BEGIN/END (max no-frame gap Nms)`
   for stalls over 400 ms. Mid-recording stalls ≥4 s independently hard-trip the VIO
   guard (that is a capture-safety mechanism, always on).

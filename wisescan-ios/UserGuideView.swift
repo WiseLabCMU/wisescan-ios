@@ -87,7 +87,10 @@ struct UserGuideView: View {
                         title: "Save or Upload",
                         text: "Save locally to Files, AirDrop to another device, or upload to your " +
                               "configured server. A cloud badge on each location shows upload state: " +
-                              "solid when every scan is uploaded, dimmed when only some are."
+                              "solid when every scan is uploaded, dimmed when only some are. With a " +
+                              "control plane server set in Settings, the app also keeps your lab's " +
+                              "server up to date with the spaces and scans on this phone (names, " +
+                              "times and poses; no photos), never during a scan."
                     )
                 } header: {
                     Text("HOW TO USE")
