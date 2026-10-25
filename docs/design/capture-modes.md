@@ -54,9 +54,10 @@ rescan does today, then diverge at Start.
 - **Configuration.** Every `session.run` in `ARCoverageView` builds its configuration through one
   function for the active session role, so no re-run can drop scene depth or the mode's semantics.
   (The AR Capture depth loss came from a re-run with the pre-record configuration.)
-- **Exposure policy.** `CaptureExposurePolicy` owns the cap: fixed 1/120 or short exposure, applied
-  at Start, re-checked every 0.3 s and re-applied if a session re-run reset it (RoomPlan re-runs
-  the session), and restored to the device default at Stop. Both modes use it.
+- **Exposure policy.** `CaptureExposurePolicy` owns the cap: short exposure (1/500 to 1/120 s by
+  the light; in dim light it is the 1/120 cap, so there is no separate fixed mode or field switch),
+  applied at Start, re-checked every 0.3 s and re-applied if a session re-run reset it (RoomPlan
+  re-runs the session), and restored to the device default at Stop. Both modes use it.
 
 ## Focus scan
 

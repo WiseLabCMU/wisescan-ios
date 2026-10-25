@@ -86,12 +86,12 @@ wisescan-ios/
 ├── VoxelGrid+Extraction.swift   # Mesh-extraction packing for the VR voxel grid
 ├── FaceBlurOverlay.swift        # Live red-eye privacy indicator (ARKit stencil) + pixelation utility for exports
 ├── FrameCaptureSession.swift    # Room-scan capture: automatic 12MP stills, depth, poses, the rig's tapped still
-├── CaptureExposurePolicy.swift  # Exposure cap on ARKit's camera (fixed or short exposure), both capture modes
+├── CaptureExposurePolicy.swift  # Short-exposure cap on ARKit's camera (1/500 to 1/120 s), both capture modes
 ├── DelegateWorkMeter.swift      # Per-frame AR delegate timing during a room scan
 ├── StillnessReticle.swift       # Capture-quality reticle: ring fills as device settles (360° rig tap)
 ├── ARStillCaptureSession.swift  # Focus-scan still engine: blur/region/spacing gates, coverage, logs, manifest
 ├── ARStillCaptureGates.swift    # Pure gate math (image-motion smear, gyro peak, region view, coverage bins)
-├── ARStillCaptureView.swift     # Focus-scan controller + developer panel
+├── ARStillCaptureController.swift # Focus-scan controller (start/stop, stats polling)
 ├── CaptureView+StillCapture.swift # Focus scan start/stop, filing as a scan, region box placement
 ├── FocusRegion.swift            # Focus region box, detail levels, placement in a map's raw frame
 ├── FocusRegionEditorView.swift  # Draw a focus region on a room scan's mesh

@@ -272,25 +272,14 @@ extension CaptureView {
 
     // MARK: Views
 
-    /// The capture HUD near the top while a focus scan is set up or running; with Perf Diagnostics
-    /// also the developer panel mid-screen and the short-exposure switch on the trailing edge.
+    /// The capture HUD near the top while a focus scan is set up or running.
     @ViewBuilder var stillCaptureOverlay: some View {
         if let region = scanStore.activeFocusRequest?.region,
            scanStore.activeScanKind == .focus || stillCapture.phase != .idle {
-            ZStack {
-                VStack {
-                    FocusCaptureHUD(region: region, stats: stillCapture.stats, isCapturing: isStillCapturing)
-                        .padding(.top, AppConstants.focusHUDTopPadding)
-                    Spacer()
-                }
-                if PerfDiag.enabled {
-                    ARStillCaptureOverlay(controller: stillCapture)
-                    HStack {
-                        Spacer()
-                        ARStillShortExposureToggle(controller: stillCapture)
-                            .padding(.trailing, 12)
-                    }
-                }
+            VStack {
+                FocusCaptureHUD(region: region, stats: stillCapture.stats, isCapturing: isStillCapturing)
+                    .padding(.top, AppConstants.focusHUDTopPadding)
+                Spacer()
             }
         }
     }

@@ -137,7 +137,7 @@ nonisolated enum ARStillCaptureGates {
         }
     }
 
-    /// Exposure cap for the short-exposure experiment: Auto ISO with a minimum shutter speed, run
+    /// The short-exposure cap: Auto ISO with a minimum shutter speed, run
     /// the other way round. Returns the shortest exposure the scene's light allows at `isoCeiling`,
     /// clamped to [`floor`, `cap`]. Light is exposure x ISO (auto exposure holds it constant for a
     /// given brightness, so the answer does not depend on the cap currently applied), corrected by

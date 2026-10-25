@@ -2,26 +2,26 @@ import ARKit
 import AVFoundation
 import CoreMedia
 import Foundation
-import Synchronization
 import os
 
 /// The exposure cap both capture modes put on ARKit's own camera (docs/design/capture-modes.md).
 /// Auto exposure keeps metering; the cap only bounds how long it may expose, so it raises ISO
 /// instead (`configurableCaptureDeviceForPrimaryCamera.activeMaxExposureDuration`).
 ///
-/// - Fixed: `arStillMaxExposureSeconds` (1/120 s, one full 120 Hz mains-flicker cycle).
-/// - Short exposure (the default): the shortest exposure the light allows at
-///   `arStillShortExposureISOCeiling`, clamped between `arStillShortExposureFloorSeconds` and the
-///   fixed cap (`ARStillCaptureGates.shortExposureCap`), re-evaluated every
-///   `arStillShortExposureUpdateSeconds`.
+/// The cap is short exposure: the shortest exposure the light allows at
+/// `arStillShortExposureISOCeiling`, clamped between `arStillShortExposureFloorSeconds` and
+/// `arStillMaxExposureSeconds` (1/120 s, one full 120 Hz mains-flicker cycle;
+/// `ARStillCaptureGates.shortExposureCap`), re-evaluated every `arStillShortExposureUpdateSeconds`.
+/// In dim light it settles on the 1/120 cap, so there is no separate fixed mode to fall back to;
+/// `AppConstants.arStillShortExposure` = false holds 1/120 throughout, for a baseline.
 ///
 /// A session re-run can hand the camera back with its default limit (RoomPlan re-runs the session
 /// at record start), so each evaluation also checks the device still carries the cap and puts it
 /// back if not.
 ///
-/// Threading: `begin`, `setShortExposure`, `report` and `restore` from any queue; `update` from the
-/// AR delegate queue only, where its timing state lives. `begin` resets that state while the owner
-/// is not feeding frames, the same pattern as the capture engine's gate state.
+/// Threading: `begin`, `report` and `restore` from any queue; `update` from the AR delegate queue
+/// only, where its timing state lives. `begin` resets that state while the owner is not feeding
+/// frames, the same pattern as the capture engine's gate state.
 nonisolated final class CaptureExposurePolicy: @unchecked Sendable {
 
     struct Report: Equatable, Sendable {
@@ -32,16 +32,13 @@ nonisolated final class CaptureExposurePolicy: @unchecked Sendable {
     /// Lines for the owner's event log (exposure-cap changes and re-applies).
     var onEvent: (@Sendable (String) -> Void)?
 
-    private let shortExposure = Atomic<Bool>(AppConstants.arStillShortExposureDefault)
-    /// Raised when the switch flips so the next tracked frame re-applies the cap.
-    private let modeChanged = Atomic<Bool>(false)
     private let applied = OSAllocatedUnfairLock(initialState: Report())
 
     // Delegate-queue-owned (reset by `begin`).
     private var capApplied = false
     private var lastUpdate: TimeInterval = -1
 
-    var isShortExposure: Bool { shortExposure.load(ordering: .acquiring) }
+    var isShortExposure: Bool { AppConstants.arStillShortExposure }
 
     /// The cap in force and why (0 = none applied).
     var report: Report { applied.withLock { $0 } }
@@ -53,21 +50,12 @@ nonisolated final class CaptureExposurePolicy: @unchecked Sendable {
         applied.withLock { $0 = Report() }
     }
 
-    /// Short exposure on or off, any time; takes effect on the next tracked frame.
-    func setShortExposure(_ on: Bool) {
-        shortExposure.store(on, ordering: .releasing)
-        modeChanged.store(true, ordering: .releasing)
-    }
-
-    /// Per normally tracked frame (delegate queue). The fixed cap goes on first, and again whenever
-    /// the switch flips; with short exposure on, the cap then follows the light.
+    /// Per normally tracked frame (delegate queue). The 1/120 cap goes on first; the cap then
+    /// follows the light.
     func update(at t: TimeInterval) {
-        let toggled = modeChanged.exchange(false, ordering: .acquiringAndReleasing)
-        let short = shortExposure.load(ordering: .acquiring)
-        if !capApplied || toggled {
+        if !capApplied {
             applyFixedCap()
             lastUpdate = t
-            if toggled { onEvent?("short exposure \(short ? "ON" : "OFF")") }
             return
         }
         guard AppConstants.arStillMaxExposureSeconds > 0,
@@ -82,7 +70,7 @@ nonisolated final class CaptureExposurePolicy: @unchecked Sendable {
             setMaxExposure(current, why: "re-applied after a reset")
             return
         }
-        guard short else { return }
+        guard isShortExposure else { return }
         let exposure = CMTimeGetSeconds(device.exposureDuration)
         let iso = Double(device.iso)
         let offset = Double(device.exposureTargetOffset)

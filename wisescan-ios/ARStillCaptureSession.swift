@@ -148,7 +148,6 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var handlerMaxMs = 0.0
         var engineMeanMs = 0.0
         var engineMaxMs = 0.0
-        var shortExposure = false
         var stillsShortExposure = 0
         var sceneDepthPresent = false
         var depthDropouts = 0
@@ -382,14 +381,12 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         icpBakeNoted.withLock { $0 = nil }
         regionPlacement.withLock { $0 = nil }
         detail = context.region?.detail
-        let shortOn = exposurePolicy.isShortExposure
         let thermal = Self.thermalName(ProcessInfo.processInfo.thermalState)
         setup.thermalStateAtStart = thermal
         let level = detail
         let cells = level == nil ? 0 : AppConstants.focusCoverageAzimuthBins * (AppConstants.focusCoverageElevationEdgesDeg.count + 1)
         live.withLock {
             $0 = LiveStats()
-            $0.shortExposure = shortOn
             $0.thermalState = thermal
             $0.hasRegion = level != nil
             $0.detailLevel = level
@@ -415,13 +412,6 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         guard captureDirectory != nil, live.withLock({ $0.recording }) else { return }
         recording.store(true, ordering: .releasing)
         event("accepting frames (bakes applied)")
-    }
-
-    /// Short exposure on or off (any time; it takes effect on the next tracked frame while
-    /// capturing, and is recorded per still).
-    func setShortExposure(_ on: Bool) {
-        exposurePolicy.setShortExposure(on)
-        live.withLock { $0.shortExposure = on }
     }
 
     /// Focus scan: where the region's box sits in this capture's world, once the AR view has
@@ -604,7 +594,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         // the peak rate over the last few samples, which catches the hand shake the pose term's
         // 0.1 s average smooths out.
         // Computed as an ANGLE (focal 1: normalized image plane), so the budget means the same real
-        // sharpness at any still resolution; the pixel figure is for the panel and the log.
+        // sharpness at any still resolution; the pixel figure is for the log.
         var poseSmear = 0.0
         if let past, t > past.t, gateDepth > 0, fStream > 0 {
             poseSmear = ARStillCaptureGates.imageMotionSmear(

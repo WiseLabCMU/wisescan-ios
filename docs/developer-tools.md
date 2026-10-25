@@ -72,9 +72,9 @@ the camera's open AP is the weakest place to leave raw equirects.
 ## Focus scan still capture (developer view)
 
 Design and decisions: [docs/design/capture-modes.md](design/capture-modes.md); requirements
-REQ-035 to REQ-037. This section is the engine's developer view: what it logs and why. The
-developer panel (mid-screen) and the SHORT EXP switch appear only with Perf Diagnostics on; the
-operator sees the focus HUD. The room scan's automatic stills (REQ-036) reuse the same blur gate
+REQ-035 to REQ-037. This section is the engine's developer view: what it logs and why. There is
+no on-screen developer panel any more (the operator sees the focus HUD); the dump below records
+what it showed (per-still gate inputs in `photos.csv`, counts and timing in the manifest). The room scan's automatic stills (REQ-036) reuse the same blur gate
 and `CaptureExposurePolicy`; their counters land in `scan4d_metadata.json` (`auto_stills`,
 `frame_work_ms`) and `[RoomStills]` PerfDiag lines.
 
@@ -180,19 +180,22 @@ near depth for `arStillDepthHoldSeconds` (10 s), so sidesteps and parallax still
 Pose drift after initialization is accepted: the poses are a prior for the image-based pose
 solve, not ground truth.
 
-**Short exposure** (the yellow SHORT EXP switch on the trailing edge, mid-height; on by default,
-usable before Start and during a capture, and kept across captures in a session). With it on,
-the exposure cap follows the light instead of sitting at 1/120: every
+**Short exposure** (always on, both capture modes; the field switch that turned it off was
+removed once the A/B below settled it). The exposure cap follows the light instead of sitting at
+1/120: every
 `arStillShortExposureUpdateSeconds` the cap becomes exposure x ISO / `arStillShortExposureISOCeiling`
 (ISO 800), corrected by auto exposure's own target offset and clamped between
 `arStillShortExposureFloorSeconds` (1/500) and 1/120 (`ARStillCaptureGates.shortExposureCap`,
 unit tested). Auto exposure keeps running and raises ISO to match. The blur gate needs no change:
 it reads each frame's real exposure, so a shorter exposure loosens it in proportion. Replaying
 the first capture's light, ISO 800 would have meant a median exposure of 1/611 s, held at the
-1/500 floor. Each still records `short_exposure` and the cap in force (`exposure_cap_s`), so one
-capture can mix both settings; `totals.stills_short_exposure` counts them.
+1/500 floor. In dim light the cap settles back on 1/120, so "off" only ever differed in good
+light, trading blur for a lower ISO. Each still still records `short_exposure` and the cap in
+force (`exposure_cap_s`), and `totals.stills_short_exposure` counts them, so older dumps that mix
+both settings read the same way. `AppConstants.arStillShortExposure` = false brings the 1/120
+baseline back in code.
 
-Why it is on by default: in the iPhone 17 Pro Max office capture (all 202 stills at about 1/500,
+Why it stays on: in the iPhone 17 Pro Max office capture (all 202 stills at about 1/500,
 ISO median 229) the stills came out blur-free at about 2.4 times the rate of the 1/120 iPad
 captures (1.06 against 0.44 stills/s). The gate turns a shorter exposure into faster movement,
 not sharper stills. No flicker banding showed. The cost is texture: the ISP denoises, so noise
@@ -201,19 +204,14 @@ same 3D point across stills, comes out 14% weaker at 2.5 to 4 times the ISO and 
 beyond that. The pose solve showed no trend with ISO. Still untested: a room lit only by LEDs.
 1/120 s integrates exactly one cycle of the 120 Hz flicker of mains-powered LED and fluorescent
 light (60 Hz countries); shorter exposures can show rolling-shutter bands and frame-to-frame
-brightness pulses there (that office had a lot of daylight). Switch it off if stills band.
-
-**Developer panel** (mid-screen during a focus scan, with Perf Diagnostics on). Its large first line is the point of
-the experiment: the last still's resolution, exposure and ISO; the next line is the stream's
-size and exposure against the cap. Below: still counts and rate, latency, why the last still
-fired, frames held by each gate, the gate inputs, the last still's blur at capture, the
-per-frame work timing, and the exposure-cap note.
+brightness pulses there (that office had a lot of daylight). If stills band, look at
+`exposure_cap_s` against the flicker before reaching for the code switch.
 
 **Per-frame work timing.** ARKit hands frames to the capture view's delegate on its own serial
 queue; a handler that runs long holds frames back, and a starved session can degrade tracking.
 While capturing, the app times the whole delegate handler and the capture engine's share of it
-(`offer`), each frame. The panel shows mean and max; at Stop `events.log` and the manifest's
-`frame_work_ms` give frames, mean, p99 and max for both. For scale: the iPhone office capture's
+(`offer`), each frame. At Stop `events.log` and the manifest's `frame_work_ms` give frames,
+mean, p99 and max for both. For scale: the iPhone office capture's
 stream ran at 30 Hz (33 ms a frame) with no gap between frames across its 202 stills.
 
 | Path | What |
