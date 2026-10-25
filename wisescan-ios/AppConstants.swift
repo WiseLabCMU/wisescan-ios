@@ -501,9 +501,9 @@ enum AppConstants {
     static let arStillBlurBudgetRad: Double = 0.0009           // blur gate on predicted IMAGE MOTION during the exposure, as an ANGLE (the larger of the pose term, rotation and translation as vectors at centre + corners at the near depth, and the gyro peak x exposure). 0.9 mrad = 3 px at the 12MP still's 3,346 px focal. Angular so a 48MP still is held to the same real sharpness (6 px) instead of silently twice as strict. The first capture's sharp stills moved up to 2.8 px (p90); replaying its motion, 3 px fired every 1.37 s vs 2.05 s for the original 2 px magnitude sum.
     // Short exposure (both capture modes): instead of holding the exposure at arStillMaxExposureSeconds (1/120),
     // shorten it to whatever reaches this ISO in the current light. The gate reads the real exposure, so it loosens in proportion.
-    // In dim light the cap settles back on 1/120, so turning it off only trades blur for lower ISO in good light.
+    // In dim light the cap settles back on 1/120. iPhone office capture: blur-free at ~2.4x the stills/s of a fixed 1/120, no banding
+    // found (daylight room); costs fine texture at high ISO (denoiser).
     // Caveat: 1/120 integrates one full 120 Hz mains-flicker cycle; shorter exposures can band or pulse under flickering LED/fluorescent light.
-    static let arStillShortExposure = true // iPhone office capture: blur-free at ~2.4x the stills/s of 1/120, no banding found (daylight room); costs fine texture at high ISO (denoiser). false = a 1/120 baseline (code only; the field switch was removed)
     static let arStillShortExposureISOCeiling: Double = 800   // the first capture's noise grew only as ISO^0.29 (0.45 -> ~1.1 of 255 over ISO 50-700; the ISP denoises)
     static let arStillShortExposureFloorSeconds: Double = 1.0 / 500 // never shorter: at 1/500 the 3 px budget already allows ~26 deg/s; spacing and walking pace bind first
     static let arStillShortExposureUpdateSeconds: TimeInterval = 0.3 // re-evaluate the cap this often; changes under 10% are ignored

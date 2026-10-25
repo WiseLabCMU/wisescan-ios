@@ -1668,7 +1668,6 @@ class FrameCaptureSession {
                 "spacing_deg": AppConstants.roomStillSpacingDeg,
                 "warmup_s": AppConstants.roomStillWarmupSeconds,
                 "blur_budget_rad": AppConstants.arStillBlurBudgetRad,
-                "short_exposure": exposurePolicy.isShortExposure,
                 "exposure_cap_s": cap.appliedSeconds,
                 "exposure_cap_note": cap.note
             ] as [String: Any]

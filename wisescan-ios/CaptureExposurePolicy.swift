@@ -12,8 +12,7 @@ import os
 /// `arStillShortExposureISOCeiling`, clamped between `arStillShortExposureFloorSeconds` and
 /// `arStillMaxExposureSeconds` (1/120 s, one full 120 Hz mains-flicker cycle;
 /// `ARStillCaptureGates.shortExposureCap`), re-evaluated every `arStillShortExposureUpdateSeconds`.
-/// In dim light it settles on the 1/120 cap, so there is no separate fixed mode to fall back to;
-/// `AppConstants.arStillShortExposure` = false holds 1/120 throughout, for a baseline.
+/// In dim light it settles on the 1/120 cap, so there is no separate fixed mode to fall back to.
 ///
 /// A session re-run can hand the camera back with its default limit (RoomPlan re-runs the session
 /// at record start), so each evaluation also checks the device still carries the cap and puts it
@@ -37,8 +36,6 @@ nonisolated final class CaptureExposurePolicy: @unchecked Sendable {
     // Delegate-queue-owned (reset by `begin`).
     private var capApplied = false
     private var lastUpdate: TimeInterval = -1
-
-    var isShortExposure: Bool { AppConstants.arStillShortExposure }
 
     /// The cap in force and why (0 = none applied).
     var report: Report { applied.withLock { $0 } }
@@ -70,7 +67,6 @@ nonisolated final class CaptureExposurePolicy: @unchecked Sendable {
             setMaxExposure(current, why: "re-applied after a reset")
             return
         }
-        guard isShortExposure else { return }
         let exposure = CMTimeGetSeconds(device.exposureDuration)
         let iso = Double(device.iso)
         let offset = Double(device.exposureTargetOffset)

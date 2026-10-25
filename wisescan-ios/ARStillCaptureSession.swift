@@ -148,7 +148,6 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var handlerMaxMs = 0.0
         var engineMeanMs = 0.0
         var engineMaxMs = 0.0
-        var stillsShortExposure = 0
         var sceneDepthPresent = false
         var depthDropouts = 0
         var framesWithoutDepth = 0
@@ -729,7 +728,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                                    angularRate: omega, lateralSpeed: lateral, gateDepth: gateDepth,
                                    streamExposure: exposure, smear: smear, imageSmear: imageSmear, sinceLast: sinceLast,
                                    rotationDeg: view.rotationDeg, parallaxDeg: view.parallaxDeg,
-                                   angularSmear: angularSmear, shortExposure: exposurePolicy.isShortExposure,
+                                   angularSmear: angularSmear,
                                    exposureCap: exposurePolicy.report.appliedSeconds,
                                    depthHeld: depthHeld,
                                    thermalState: Self.thermalName(ProcessInfo.processInfo.thermalState),
@@ -753,7 +752,6 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         var rotationDeg: Double
         var parallaxDeg: Double
         var angularSmear: Double
-        var shortExposure: Bool
         var exposureCap: Double
         var depthHeld: Bool
         var thermalState: String
@@ -842,7 +840,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             row += [Fmt.f3(request.smear.rotationPx), Fmt.f3(request.smear.translationPx)]
             row += [request.sinceLast.isFinite ? Fmt.f3(request.sinceLast) : "inf"]
             row += [Fmt.f3(request.rotationDeg), Fmt.f3(request.parallaxDeg), request.reason, Fmt.f3(request.imageSmear)]
-            row += [Fmt.f6(request.angularSmear), request.shortExposure ? "1" : "0", Fmt.f6(request.exposureCap)]
+            row += [Fmt.f6(request.angularSmear), Fmt.f6(request.exposureCap)]
             row += [request.depthHeld ? "1" : "0", request.thermalState]
             row += [Fmt.f6(request.poseSmear), Fmt.f4(request.gyroPeak), Fmt.f6(request.gyroSmear)]
             row += [captureRate.map(Fmt.f4) ?? "", captureSmear.map(Fmt.f6) ?? "", overBudget.map { $0 ? "1" : "0" } ?? ""]
@@ -861,14 +859,12 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                 writers["photos.csv"]?.append(line)
             }
             let hasDepth = depth != nil
-            let wasShort = request.shortExposure
             let capturePx = captureSmear.map { $0 * Double(k[0][0]) }
             let wasOverBudget = overBudget == true
             let cell = request.regionCell
             live.withLock {
                 $0.stillsSaved += 1
                 if cell >= 0, cell < $0.coverageCounts.count { $0.coverageCounts[cell] += 1 }
-                if wasShort { $0.stillsShortExposure += 1 }
                 if hasDepth { $0.stillsWithDepth += 1 }
                 $0.lastStillDimensions = "\(width)x\(height)"
                 $0.lastLatencySeconds = latency
@@ -1037,7 +1033,7 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
         let pose = "c2w_00,c2w_01,c2w_02,c2w_03,c2w_10,c2w_11,c2w_12,c2w_13,c2w_20,c2w_21,c2w_22,c2w_23"
         let photosHeader = "index,file,host_ts,request_host_ts,latency_s,width,height,exposure_s,iso,tracking,depth_file,confidence_file,depth_width,depth_height,fx,fy,cx,cy,"
             + pose
-            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason,predicted_image_motion_smear_px,predicted_image_motion_smear_rad,short_exposure,exposure_cap_s,gate_depth_held,thermal_state,pose_smear_rad,gate_gyro_peak_rad_s,gate_gyro_smear_rad,capture_gyro_rad_s,capture_gyro_smear_rad,capture_over_budget,region_frame_coverage,region_distance_m,region_azimuth_deg,region_elevation_deg,region_cell,region_aim_hits"
+            + ",request_gyro_rad_s,request_lateral_speed_m_s,request_gate_depth_m,request_stream_exposure_s,predicted_rotation_smear_px,predicted_translation_smear_px,interval_since_prev_s,rotation_since_prev_deg,parallax_since_prev_deg,reason,predicted_image_motion_smear_px,predicted_image_motion_smear_rad,exposure_cap_s,gate_depth_held,thermal_state,pose_smear_rad,gate_gyro_peak_rad_s,gate_gyro_smear_rad,capture_gyro_rad_s,capture_gyro_smear_rad,capture_over_budget,region_frame_coverage,region_distance_m,region_azimuth_deg,region_elevation_deg,region_cell,region_aim_hits"
         writers = [
             "photos.csv": ARStillCSVWriter(url: directory.appendingPathComponent("photos.csv"), header: photosHeader),
             "frames.csv": ARStillCSVWriter(url: directory.appendingPathComponent("frames.csv"),
@@ -1109,7 +1105,6 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
             "stills_failed": stats.stillsFailed, "stills_with_depth": stats.stillsWithDepth,
             "frames_held_blur": stats.heldBlurFrames, "frames_held_spacing": stats.heldSpacingFrames,
             "frames_held_backpressure": stats.heldBackpressureFrames,
-            "stills_short_exposure": stats.stillsShortExposure,
             "depth_dropouts": stats.depthDropouts, "frames_without_depth": stats.framesWithoutDepth,
             "tracking_changes": stats.trackingChanges, "frame_lost": stats.frameLost,
             "thermal_state_at_stop": stats.thermalState,

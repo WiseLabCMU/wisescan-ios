@@ -97,7 +97,6 @@
         "spacing_deg": { "type": "number" },
         "warmup_s": { "type": "number" },
         "blur_budget_rad": { "type": "number" },
-        "short_exposure": { "type": "boolean" },
         "exposure_cap_s": { "type": "number", "description": "The exposure cap in force at stop, seconds (0 = none applied)." },
         "exposure_cap_note": { "type": "string" }
       }

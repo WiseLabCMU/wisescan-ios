@@ -180,9 +180,8 @@ near depth for `arStillDepthHoldSeconds` (10 s), so sidesteps and parallax still
 Pose drift after initialization is accepted: the poses are a prior for the image-based pose
 solve, not ground truth.
 
-**Short exposure** (always on, both capture modes; the field switch that turned it off was
-removed once the A/B below settled it). The exposure cap follows the light instead of sitting at
-1/120: every
+**Short exposure** (always on, both capture modes; the experiment's off switch was removed once
+the A/B below settled it). The exposure cap follows the light instead of sitting at 1/120: every
 `arStillShortExposureUpdateSeconds` the cap becomes exposure x ISO / `arStillShortExposureISOCeiling`
 (ISO 800), corrected by auto exposure's own target offset and clamped between
 `arStillShortExposureFloorSeconds` (1/500) and 1/120 (`ARStillCaptureGates.shortExposureCap`,
@@ -190,10 +189,7 @@ unit tested). Auto exposure keeps running and raises ISO to match. The blur gate
 it reads each frame's real exposure, so a shorter exposure loosens it in proportion. Replaying
 the first capture's light, ISO 800 would have meant a median exposure of 1/611 s, held at the
 1/500 floor. In dim light the cap settles back on 1/120, so "off" only ever differed in good
-light, trading blur for a lower ISO. Each still still records `short_exposure` and the cap in
-force (`exposure_cap_s`), and `totals.stills_short_exposure` counts them, so older dumps that mix
-both settings read the same way. `AppConstants.arStillShortExposure` = false brings the 1/120
-baseline back in code.
+light, trading blur for a lower ISO. Each still records the cap in force (`exposure_cap_s`).
 
 Why it stays on: in the iPhone 17 Pro Max office capture (all 202 stills at about 1/500,
 ISO median 229) the stills came out blur-free at about 2.4 times the rate of the 1/120 iPad
@@ -204,8 +200,8 @@ same 3D point across stills, comes out 14% weaker at 2.5 to 4 times the ISO and 
 beyond that. The pose solve showed no trend with ISO. Still untested: a room lit only by LEDs.
 1/120 s integrates exactly one cycle of the 120 Hz flicker of mains-powered LED and fluorescent
 light (60 Hz countries); shorter exposures can show rolling-shutter bands and frame-to-frame
-brightness pulses there (that office had a lot of daylight). If stills band, look at
-`exposure_cap_s` against the flicker before reaching for the code switch.
+brightness pulses there (that office had a lot of daylight). If stills band, `exposure_cap_s`
+shows which ones ran shorter than 1/120; the fix would be a flicker-aware cap, not an off switch.
 
 **Per-frame work timing.** ARKit hands frames to the capture view's delegate on its own serial
 queue; a handler that runs long holds frames back, and a starved session can degrade tracking.
@@ -218,7 +214,7 @@ stream ran at 30 Hz (33 ms a frame) with no gap between frames across its 202 st
 |---|---|
 | `manifest.json` | `setup` (device, stream format, world-map scan and id, original scan id, bakes, exposure cap requested / applied / note, gate settings, `deviceSupportedPhotoDimensions` vs `arkitDefaultPhotoDimensions`, frame and pose conventions), `totals`, and `frame_work_ms` (per-frame delegate work: frames, mean, p99, max) |
 | `photos/photo_NNNNN.jpg` | Full-resolution ARKit still, sensor (landscape) orientation |
-| `photos.csv` | Per still: `host_ts`, request time, latency, size, exposure, ISO, tracking, depth and confidence files, intrinsics, `c2w_00..c2w_23` pose, and what the gates measured (gyro, sideways speed, near depth, stream exposure, predicted rotation and translation smear, interval, turn, parallax, reason), the angular prediction, `short_exposure` and `exposure_cap_s`, and `gate_depth_held` (1 = a held depth from before a dropout) and `thermal_state`, the blur gate's two terms (`pose_smear_rad`, `gate_gyro_peak_rad_s`, `gate_gyro_smear_rad`), and the check at capture (`capture_gyro_rad_s`, `capture_gyro_smear_rad`, `capture_over_budget`) |
+| `photos.csv` | Per still: `host_ts`, request time, latency, size, exposure, ISO, tracking, depth and confidence files, intrinsics, `c2w_00..c2w_23` pose, and what the gates measured (gyro, sideways speed, near depth, stream exposure, predicted rotation and translation smear, interval, turn, parallax, reason), the angular prediction, `exposure_cap_s`, and `gate_depth_held` (1 = a held depth from before a dropout) and `thermal_state`, the blur gate's two terms (`pose_smear_rad`, `gate_gyro_peak_rad_s`, `gate_gyro_smear_rad`), and the check at capture (`capture_gyro_rad_s`, `capture_gyro_smear_rad`, `capture_over_budget`) |
 | `photo_depth/photo_NNNNN.png` | 16-bit mm LiDAR depth of the same ARFrame, 256x192, unsmoothed |
 | `photo_confidence/photo_NNNNN.png` | 8-bit ARKit confidence of the same ARFrame: 0 low, 1 medium, 2 high |
 | `frames.csv` | Text-only pose log of every tracking frame while capturing (the trajectory between stills); no stream images |
