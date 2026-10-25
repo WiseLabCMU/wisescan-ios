@@ -202,8 +202,10 @@ result the pipeline's cloud does.
 
 The JSON the app sends the control plane on every sync, `POST /v1/devices/{device_id}/sync`
 (REQ-038), is this device's whole inventory. It carries spaces with base/tip, scans with their
-`registration.json` transform and `focus_region.json`, and stitch links with the same anchors as
-`stitching.json`. Its contract is defined by the server: the `scan4d-server` repo's README
+`registration.json` transform, `focus_region.json` and map-package file list, and stitch links
+with the same anchors as `stitching.json` plus the fine-tune's server revision. The response
+carries the files the server wants, fine-tune updates, focus-scan tasks (each region a
+`focus_region.json` with `task_id`) and the export upload route. Its contract is defined by the server: the `scan4d-server` repo's README
 ("Sync"), with the live schema at the server's `/openapi.json`. The app side is
 `ControlPlaneManifest.swift`, encoded snake_case with ISO 8601 times.
 

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftData
+import simd
 import XCTest
 @testable import wisescan_ios
 
@@ -60,7 +61,8 @@ final class ControlPlaneTests: XCTestCase {
             links: [.init(linkId: UUID(), scanAId: scanA, scanBId: scanB, locationAId: location, locationBId: nil,
                           anchorA: Array(repeating: 0, count: 16), anchorB: Array(repeating: 0, count: 16),
                           anchorAId: UUID(), anchorBId: UUID(), anchorAHeading: 12, anchorBHeading: nil,
-                          sourceIsA: true, manual: .init(yawDeg: 1, dx: 0, dy: 0, dz: 0),
+                          sourceIsA: true, manual: .init(yawDeg: 1, dx: 0, dy: 0, dz: 0), manualRevision: 3,
+                          effectiveNudge: .init(yawDeg: 1, dx: 0, dy: 0, dz: 0),
                           linkType: "mid_session", linkedAt: Date(timeIntervalSince1970: 0))])
         let data = try ControlPlaneManifest.encoder.encode(manifest)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -83,10 +85,118 @@ final class ControlPlaneTests: XCTestCase {
 
         let link = try XCTUnwrap((json["links"] as? [[String: Any]])?.first)
         for key in ["link_id", "scan_a_id", "location_a_id", "anchor_a", "anchor_a_id", "anchor_a_heading",
-                    "source_is_a", "link_type", "linked_at"] {
+                    "source_is_a", "link_type", "linked_at", "effective_nudge"] {
             XCTAssertNotNil(link[key], key)
         }
         XCTAssertEqual((link["manual"] as? [String: Any])?["yaw_deg"] as? Double, 1)
+        XCTAssertEqual(link["manual_revision"] as? Int, 3)
+    }
+
+    /// A sync response as scan4d-server sends it: fine-tunes to apply, the upload route, and a
+    /// task whose region is a focus_region.json (decoded with its own keys).
+    func testSyncReplyCarriesUpdatesUploadsAndTasks() throws {
+        let task = UUID(), map = UUID(), link = UUID()
+        let body = """
+        {"server_time": "2026-10-25T08:00:00Z", "device_id": "\(UUID().uuidString.lowercased())",
+         "maps": 2, "scans": 4, "links": 1, "marked_gone": 0, "wanted": [],
+         "link_updates": [{"link_id": "\(link.uuidString.lowercased())", "revision": 2,
+                           "manual": {"yaw_deg": 2.0, "dx": 0.05, "dy": 0.0, "dz": -0.02}}],
+         "upload_target": {"available": true, "revoked": false, "bucket": "scan4d"},
+         "tasks": [{"task_id": "\(task.uuidString.lowercased())", "map_id": "\(map.uuidString.lowercased())",
+                    "map_name": "Lab 2F", "reason": "change near the window", "status": "delivered",
+                    "created_at": "2026-10-25T08:00:00Z",
+                    "region": {"version": 1, "location_id": "\(map.uuidString.lowercased())",
+                               "center_m": [1.2, 0.45, -2.3], "yaw_rad": 0.0, "size_m": [1.0, 0.9, 1.2],
+                               "label": "change: 207 new", "source": "import", "detail_level": "detail",
+                               "frame_is_canonical": true, "task_id": "\(task.uuidString.lowercased())"}}]}
+        """
+        let data = Data(body.utf8)
+        let reply = try ControlPlaneClient.decode(ControlPlaneClient.SyncReply.self, from: data)
+        XCTAssertEqual(reply.linkUpdates?.first?.revision, 2)
+        XCTAssertEqual(reply.linkUpdates?.first?.manual.dz, -0.02)
+        XCTAssertEqual(UUID(uuidString: reply.linkUpdates?.first?.linkId ?? ""), link)
+        XCTAssertEqual(reply.uploadTarget, .init(available: true, revoked: false, bucket: "scan4d"))
+
+        let tasks = ControlPlaneClient.tasks(from: data)
+        XCTAssertEqual(tasks.count, 1)
+        let region = try XCTUnwrap(tasks.first?.region)
+        XCTAssertEqual(tasks.first?.id, task)
+        XCTAssertEqual(region.taskId, task)
+        XCTAssertEqual(region.locationId, map)
+        XCTAssertEqual(region.detail, .detail)
+        XCTAssertEqual(region.size.z, 1.2, accuracy: 1e-6)
+    }
+
+    /// The task id rides the region through save and sync: that is how the server learns the
+    /// focus scan answered it.
+    func testFocusRegionKeepsItsTaskId() throws {
+        let task = UUID()
+        let region = FocusRegion(center: SIMD3(0, 0.5, 0), size: SIMD3(1, 1, 1), taskId: task)
+        let data = try XCTUnwrap(region.encoded())
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["task_id"] as? String, task.uuidString)
+        XCTAssertEqual(FocusRegion.decode(data)?.taskId, task)
+        let plain = FocusRegion(center: .zero, size: SIMD3(1, 1, 1))
+        XCTAssertNil(FocusRegion.decode(try XCTUnwrap(plain.encoded()))?.taskId)
+    }
+
+    func testManualUploadURLIsThePlainPut() throws {
+        let target = try XCTUnwrap(ExportUploadTarget.manual("https://wiselambda4.lan.cmu.edu/wisescan-uploads",
+                                                              filename: "a.zip", contentType: "application/zip"))
+        XCTAssertEqual(target.request.url?.absoluteString, "https://wiselambda4.lan.cmu.edu/wisescan-uploads/a.zip")
+        XCTAssertEqual(target.request.httpMethod, "PUT")
+        XCTAssertEqual(target.request.value(forHTTPHeaderField: "Content-Type"), "application/zip")
+        XCTAssertNil(ExportUploadTarget.manual("  ", filename: "a.zip", contentType: "application/zip"))
+        XCTAssertTrue(ExportUploadTarget.isConfigured(manualURL: "", controlPlaneHost: "192.168.1.40:8000"))
+        XCTAssertFalse(ExportUploadTarget.isConfigured(manualURL: "", controlPlaneHost: ""))
+    }
+
+    /// The certificate override is scoped to hosts the control plane named.
+    func testTrustIsOnlyForNamedHosts() {
+        ControlPlaneSession.allow(host: "Versity.LAN.cmu.edu")
+        XCTAssertTrue(ControlPlaneSession.isAllowed(host: "versity.lan.cmu.edu"))
+        XCTAssertFalse(ControlPlaneSession.isAllowed(host: "example.com"))
+        _ = ControlPlaneClient(baseURL: URL(string: "https://scan4d.lan.cmu.edu:8443")!)
+        XCTAssertTrue(ControlPlaneSession.isAllowed(host: "scan4d.lan.cmu.edu"))
+    }
+
+    // MARK: - Stitch math, against scan4d-server's reference vectors (api/tests/stitch.vectors.json)
+
+    private func matrix(_ values: [Float]) -> simd_float4x4 {
+        simd_float4x4(SIMD4(values[0], values[1], values[2], values[3]), SIMD4(values[4], values[5], values[6], values[7]),
+                      SIMD4(values[8], values[9], values[10], values[11]), SIMD4(values[12], values[13], values[14], values[15]))
+    }
+
+    private func assertClose(_ a: simd_float4x4, _ b: simd_float4x4, file: StaticString = #filePath, line: UInt = #line) {
+        for col in 0..<4 {
+            XCTAssertLessThan(simd_length(a[col] - b[col]), 1e-5, "column \(col)", file: file, line: line)
+        }
+    }
+
+    /// The web composes joins with a port of this math; both are checked against one reference.
+    func testNudgeMatrixMatchesTheServerReference() {
+        let nudge = ManualNudge(yawDeg: 12, dx: 0.2, dy: 0, dz: -0.1)
+        let expected = matrix([0.978147600734, 0, -0.207911690818, 0, 0, 1, 0, 0,
+                               0.207911690818, 0, 0.978147600734, 0, 0.637675780902, 0, 0.064206892285, 1])
+        assertClose(nudge.matrix(pivot: SIMD3(1, 0.5, -2)), expected)
+    }
+
+    /// `StitchGraphModel.placeScans`' edge: (T_src . A_src) . inverse(T_tgt . A_tgt), the nudge
+    /// applied about the source pin.
+    func testCorrectedEdgeMatchesTheServerReference() {
+        let tSrc = matrix([0.999390827019, 0, -0.034899496703, 0, 0, 1, 0, 0, 0.034899496703, 0, 0.999390827019, 0, 0.03, 0, 0.01, 1])
+        let aSrc = matrix([0.984807753012, 0, -0.173648177667, 0, 0, 1, 0, 0, 0.173648177667, 0, 0.984807753012, 0, 1, 0, 2, 1])
+        let tTgt = matrix([0.998629534755, 0, 0.052335956243, 0, 0, 1, 0, 0, -0.052335956243, 0, 0.998629534755, 0, 0, 0.02, 0.1, 1])
+        let aTgt = matrix([-0.087155742748, 0, -0.996194698092, 0, 0, 1, 0, 0, 0.996194698092, 0, -0.087155742748, 0, -0.5, 0, 0.3, 1])
+        let expected = matrix([0.300705799504, 0, 0.953716950748, 0, 0, 1, 0, 0,
+                               -0.953716950748, 0, 0.300705799504, 0, 1.66019580964, -0.04, 2.452771396358, 1])
+        let mSrc = tSrc * aSrc
+        let r = mSrc * simd_inverse(tTgt * aTgt)
+        let pin = mSrc.columns.3
+        let edge = ManualNudge(yawDeg: 7.5, dx: 0.05, dy: -0.02, dz: 0.1).matrix(pivot: SIMD3(pin.x, pin.y, pin.z)) * r
+        assertClose(edge, expected)
+        // The flattening the manifest uses is the same column-major layout.
+        XCTAssertEqual(StitchLink.flatten(expected)[12], Float(1.66019580964), accuracy: 1e-6)
     }
 
     /// Base is the first room scan, tip the newest; a focus scan is neither.

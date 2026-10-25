@@ -98,6 +98,10 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
         var anchorBHeading: Double?
         var sourceIsA: Bool
         var manual: Manual
+        // The control plane revision `manual` was last synced to; the server resolves edits on it.
+        var manualRevision: Int
+        // What this device renders for the join: `manual`, or the solver's auto fix on an untuned one.
+        var effectiveNudge: Manual
         var linkType: String
         var linkedAt: Date
     }
@@ -218,12 +222,34 @@ extension ControlPlaneManifest {
                  anchorBHeading: link.anchorBCompassHeading,
                  sourceIsA: link.sourceIsA,
                  manual: Manual(yawDeg: link.manualYawDeg, dx: link.manualDX, dy: link.manualDY, dz: link.manualDZ),
+                 manualRevision: link.manualRevision,
+                 effectiveNudge: effectiveNudge(link),
                  linkType: link.linkTypeStr,
                  linkedAt: link.linkedAt)
         }
         let manifest = ControlPlaneManifest(device: device, generatedAt: now,
                                             locations: entries, links: linkEntries)
         return (manifest, files)
+    }
+
+    /// The join as the app draws it (`StitchGraphModel.effectiveNudge`): the fine-tune, or the
+    /// solver's auto fix when "always autocorrect" seeds an untuned join. The solve reads two RoomPlan
+    /// files, so it runs once per link per launch.
+    @MainActor
+    static func effectiveNudge(_ link: StitchLink) -> Manual {
+        let manual = link.manualNudge
+        if !manual.isZero { return asManual(manual) }
+        if let cached = autoNudgeCache[link.id] { return cached }
+        let auto = asManual(StitchGraphModel.effectiveNudge(for: link))
+        autoNudgeCache[link.id] = auto
+        return auto
+    }
+
+    @MainActor private static var autoNudgeCache: [UUID: Manual] = [:]
+
+    @MainActor
+    static func asManual(_ nudge: ManualNudge) -> Manual {
+        Manual(yawDeg: Double(nudge.yawDeg), dx: Double(nudge.dx), dy: Double(nudge.dy), dz: Double(nudge.dz))
     }
 
     /// A scan's map-package files (scan4d-server README, "Map packages"), smallest first. Room
@@ -241,7 +267,10 @@ extension ControlPlaneManifest {
                                    raw.appendingPathComponent("registration.json")]),
             ("roomplan.json", [scan.roomPlanFileURL, raw.appendingPathComponent("roomplan.json")]),
             ("arworldmap.map", [scan.worldMapURL]),
-            ("mesh.obj", [scan.meshFileURL])
+            ("mesh.obj", [scan.meshFileURL]),
+            // What the change evaluator joins on id, and (once recorded) where the sweep looked.
+            (FeaturePointCloudFile.filename, [dir.appendingPathComponent(FeaturePointCloudFile.filename)]),
+            ("sweep_coverage.bin", [dir.appendingPathComponent("sweep_coverage.bin")])
         ]
     }
 

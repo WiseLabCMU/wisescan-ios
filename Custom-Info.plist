@@ -41,6 +41,21 @@
 		     it does NOT weaken ATS for internet domains. -->
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
+		<!-- The lab's internal network: the control plane and its Versity upload gateway may run
+		     plain http or https with the lab's own (self-signed) certificate. This exception lets
+		     ControlPlaneSession's trust override apply; it accepts such a certificate only with
+		     Settings → Control plane → Allow untrusted certificates on, and only from the hosts the
+		     control plane names. -->
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>lan.cmu.edu</key>
+			<dict>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+			</dict>
+		</dict>
 	</dict>
 	<key>CFBundleURLTypes</key>
 	<array>

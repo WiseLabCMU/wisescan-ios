@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
     @AppStorage(AppConstants.Key.developerMode) private var developerMode = false
     @State private var showSettings = false
     @State private var serverStatus: ServerStatus = .unknown
@@ -34,7 +35,7 @@ struct DashboardView: View {
                                     .frame(width: 40)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Upload Server")
+                                    Text(usesControlPlane ? "Control Plane" : "Upload Server")
                                         .font(.headline)
                                         .foregroundColor(.white)
                                     Text(serverStatusLabel)
@@ -55,16 +56,16 @@ struct DashboardView: View {
                                     }
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 8)
-                                    .background(uploadURL.isEmpty ? Color.gray.opacity(0.2) : Color.cyan.opacity(0.2))
-                                    .foregroundColor(uploadURL.isEmpty ? .gray : .cyan)
+                                    .background(!serverConfigured ? Color.gray.opacity(0.2) : Color.cyan.opacity(0.2))
+                                    .foregroundColor(!serverConfigured ? .gray : .cyan)
                                     .cornerRadius(8)
                                 }
-                                .disabled(serverStatus == .checking || uploadURL.isEmpty)
+                                .disabled(serverStatus == .checking || !serverConfigured)
                             }
 
-                            Text(uploadURL.isEmpty ? "No upload server configured — set in Settings" : uploadURL)
+                            Text(serverCaption)
                                 .font(.caption2)
-                                .foregroundColor(uploadURL.isEmpty ? .orange : .white.opacity(0.7))
+                                .foregroundColor(!serverConfigured ? .orange : .white.opacity(0.7))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
@@ -242,7 +243,7 @@ struct DashboardView: View {
             }
             .preferredColorScheme(.dark)
             .onAppear {
-                if !uploadURL.isEmpty { checkServer() }
+                if serverConfigured { checkServer() }
                 // Refresh wearable state when returning to this tab
                 wearableManager.refreshDevices()
             }
@@ -286,7 +287,22 @@ struct DashboardView: View {
         }
     }
 
+    /// With a control plane set it is the server that matters: it hands out upload destinations.
+    private var usesControlPlane: Bool { ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil }
+
+    private var serverConfigured: Bool { usesControlPlane || !uploadURL.isEmpty }
+
+    private var serverCaption: String {
+        if usesControlPlane { return controlPlaneHost }
+        return uploadURL.isEmpty ? "No upload server configured — set in Settings" : uploadURL
+    }
+
     private func checkServer() {
+        if usesControlPlane {
+            serverStatus = .checking
+            Task { serverStatus = await ControlPlaneSync.shared.isReachable() ? .available : .unavailable }
+            return
+        }
         guard !uploadURL.isEmpty, let url = URL(string: uploadURL) else {
             serverStatus = .unknown
             return

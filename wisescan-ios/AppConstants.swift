@@ -33,6 +33,7 @@ enum AppConstants {
         static let controlPlaneDeviceLabel = "controlPlaneDeviceLabel" // this phone's name in the fleet (iOS gives apps only "iPhone")
         static let controlPlaneDeviceId = "controlPlaneDeviceId"      // fallback copy of the Keychain device id (DeviceIdentity)
         static let controlPlaneSendPackages = "controlPlaneSendPackages" // upload map packages (mesh, room layout, relocalization map) the server asks for
+        static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
         static let rawOverlapMax = "rawOverlapMax"
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"

@@ -74,7 +74,10 @@ struct UserGuideView: View {
                               "location (no mesh of its own) that you can save or upload like any other. " +
                               "Once a space has focus scans, its list switches between Room, Focus and All " +
                               "(Room is the default; the list opens on a scan you just saved). " +
-                              "A region file from another tool can be imported from the same menu."
+                              "A region file from another tool can be imported from the same menu. " +
+                              "With a control plane set, the lab can also ask for a focus scan: the " +
+                              "app shows the request, and Open takes you to the region in the editor " +
+                              "(open requests are also listed under Settings > Control plane)."
                     )
                     guideRow(
                         icon: "6.circle.fill",

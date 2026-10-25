@@ -73,7 +73,7 @@ struct SettingsView: View {
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
                     .keyboardType(.URL)
-                Text("HTTP(S) endpoint for scan uploads. Used by the Upload button on scan cards.")
+                Text("HTTP(S) endpoint for scan uploads. With a control plane set below, it says where exports go (the lab bucket) and this URL is only the fallback.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }

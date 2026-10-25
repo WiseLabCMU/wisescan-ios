@@ -25,6 +25,12 @@ final class ControlPlaneSync {
     }
 
     private(set) var status: Status = .idle
+    /// Whether exports go through the server's grants (from the last sync).
+    private(set) var uploadTarget: ControlPlaneClient.UploadTarget?
+    /// Focus scans the server asked this device for, not yet answered or done.
+    private(set) var openTasks: [ControlPlaneClient.ScanTask] = []
+    /// The task ContentView asks about now (each once per launch).
+    private(set) var taskToPrompt: ControlPlaneClient.ScanTask?
 
     @ObservationIgnored private var captureActive = false
     @ObservationIgnored private var container: ModelContainer?
@@ -33,6 +39,7 @@ final class ControlPlaneSync {
     @ObservationIgnored private var running = false
     @ObservationIgnored private var rerun = false
     @ObservationIgnored private var deferredForCapture = false
+    @ObservationIgnored private var promptedTasks: Set<UUID> = []
 
     private init() {}
 
@@ -104,12 +111,16 @@ final class ControlPlaneSync {
         let packages = sendPackages
         do {
             // Encoding and the file reads off main (an async call from here would stay on it).
-            let (reply, local) = try await Task.detached(priority: .utility) {
+            let (result, local) = try await Task.detached(priority: .utility) {
                 var manifest = draft
                 let local = manifest.readScanFiles(files, packages: packages)
-                let reply = try await client.sync(manifest)
-                return (reply, local)
+                let result = try await client.sync(manifest)
+                return (result, local)
             }.value
+            let reply = result.reply
+            uploadTarget = reply.uploadTarget
+            applyLinkUpdates(reply.linkUpdates ?? [])
+            receive(result.tasks)
             var summary = "\(reply.maps) spaces, \(reply.scans) scans, \(reply.links) links"
             PerfDiag.log("[ControlPlane] synced: \(summary), \(reply.markedGone) marked gone, "
                          + "\(reply.wanted?.count ?? 0) files wanted")
@@ -151,6 +162,71 @@ final class ControlPlaneSync {
         }
         PerfDiag.log("[ControlPlane] uploaded \(wanted.count) map files")
         return wanted.count
+    }
+
+    /// Fine-tunes the server resolved for this device's links: the web's edits, or the revision
+    /// number its own edit became (scan4d-server README, "Shared edits"). Saving prompts the
+    /// next sync, which then reports them in step.
+    private func applyLinkUpdates(_ updates: [ControlPlaneClient.LinkUpdate]) {
+        guard !updates.isEmpty, let context = container?.mainContext else { return }
+        var applied = 0
+        for update in updates {
+            guard let id = UUID(uuidString: update.linkId) else { continue }
+            let descriptor = FetchDescriptor<StitchLink>(predicate: #Predicate { $0.id == id })
+            guard let link = try? context.fetch(descriptor).first else { continue }
+            link.manualYawDeg = update.manual.yawDeg
+            link.manualDX = update.manual.dx
+            link.manualDY = update.manual.dy
+            link.manualDZ = update.manual.dz
+            link.manualRevision = update.revision
+            applied += 1
+        }
+        if applied > 0 {
+            try? context.save()
+            PerfDiag.log("[ControlPlane] applied \(applied) join fine-tune update(s)")
+        }
+    }
+
+    private func receive(_ tasks: [ControlPlaneClient.ScanTask]) {
+        openTasks = tasks
+        guard taskToPrompt == nil,
+              let next = tasks.first(where: { $0.status != "accepted" && !promptedTasks.contains($0.id) }) else { return }
+        promptedTasks.insert(next.id)
+        taskToPrompt = next
+    }
+
+    /// Opens the task's region in its space's editor (the deep-link path) and tells the server.
+    func open(_ task: ControlPlaneClient.ScanTask) {
+        taskToPrompt = nil
+        FocusRegionInbox.shared.pending = task.region
+        answer(task, "accepted")
+    }
+
+    func decline(_ task: ControlPlaneClient.ScanTask) {
+        taskToPrompt = nil
+        openTasks.removeAll { $0.id == task.id }
+        answer(task, "declined")
+    }
+
+    func dismissPrompt() {
+        taskToPrompt = nil
+    }
+
+    private func answer(_ task: ControlPlaneClient.ScanTask, _ status: String) {
+        guard let client else { return }
+        Task {
+            do {
+                try await client.setTaskStatus(task.id, status: status)
+            } catch {
+                PerfDiag.log("[ControlPlane] task \(status) not sent: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// The Dashboard's check: is the control plane up?
+    func isReachable() async -> Bool {
+        guard let client else { return false }
+        return (try? await client.health()) != nil
     }
 
     /// Settings' Test connection: the server's health, as a line to show.

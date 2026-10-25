@@ -188,6 +188,8 @@ struct FocusRegionEditorView: View {
         placed.frameIsCanonical = frameIsCanonical
         placed.locationId = scan.location?.id
         placed.detail = detail
+        // A box the control plane asked for stays its task's answer however it is adjusted.
+        placed.taskId = initialRegion?.taskId
         anchor = placed.center
         offset = .zero
         sizeCeiling = max(AppConstants.focusRegionEditorMaxSizeM, placed.size.max())

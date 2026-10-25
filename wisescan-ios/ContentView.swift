@@ -97,6 +97,24 @@ struct ContentView: View {
         } message: {
             Text(FocusRegionInbox.shared.lastError ?? "")
         }
+        // The control plane asking for a focus scan (a task): Open takes the region into its
+        // space's editor through the same inbox as a deep link.
+        .alert("Focus scan requested", isPresented: Binding(
+            get: { ControlPlaneSync.shared.taskToPrompt != nil },
+            set: { if !$0 { ControlPlaneSync.shared.dismissPrompt() } }),
+               presenting: ControlPlaneSync.shared.taskToPrompt) { task in
+            Button("Open") { ControlPlaneSync.shared.open(task) }
+            Button("Decline", role: .destructive) { ControlPlaneSync.shared.decline(task) }
+            Button("Later", role: .cancel) { ControlPlaneSync.shared.dismissPrompt() }
+        } message: { task in
+            Text(taskPromptMessage(task))
+        }
+    }
+
+    private func taskPromptMessage(_ task: ControlPlaneClient.ScanTask) -> String {
+        let what = task.region.label.isEmpty ? "A region" : task.region.label
+        let reason = task.reason.isEmpty ? "" : "\n\n\(task.reason)"
+        return "\(what) in \(task.mapName), at \(task.region.detail.title) detail.\(reason)\n\nLater: Settings → Control plane."
     }
 
     /// The space a handed-over region names; without a known one the region is refused (a file
