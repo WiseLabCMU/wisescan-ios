@@ -283,6 +283,10 @@ comparing it with the mesh or RoomPlan. The on-device registration bake never re
 viewing-direction or ground-sample-distance binning. Direction-binned / GSD coverage, and
 *achievability* (which unobserved cells a sweep could have reached — free-space erosion plus
 flood-fill), are planned as later layers on top of this file, not encoded in it.
+Until then, coverage is quantified **relative to a reference scan** rather than absolutely: the
+control plane compares a rescan's grid with the grid of the scan it relocalized against
+(re-coverage of the reference's surfaces as the comparability gate, extension, gaps, and cells
+whose occupancy flipped). See the `scan4d-server` README, "Coverage".
 
 ### Control plane sync (not a file)
 
