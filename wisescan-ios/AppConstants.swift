@@ -38,6 +38,7 @@ enum AppConstants {
         static let privacyFilter = "privacyFilter"
         static let mockWearable = "mockWearable"
         static let selectedExportFormat = "selectedExportFormat"
+        static let locationScanFilter = "locationScanFilter"   // a space's scan list: Room / Focus / All (ScanListFilter)
         static let activeMeshColor = "activeMeshColor"
         static let ghostMeshColor = "ghostMeshColor"
         static let metaWearablesFPS = "metaWearablesFPS"

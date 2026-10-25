@@ -2,6 +2,32 @@ import SwiftUI
 import SwiftData
 import UniformTypeIdentifiers
 
+/// Which scans a space's list shows. Room scans are the ones you act on (process, color, rescan,
+/// connect); focus scans only save, upload and delete, so Room is the default. Remembered across
+/// spaces; the picker appears only in a space that has a focus scan.
+enum ScanListFilter: String, CaseIterable {
+    case room = "Room"
+    case focus = "Focus"
+    case all = "All"
+
+    func includes(_ kind: ScanKind) -> Bool {
+        switch self {
+        case .room: return kind == .room
+        case .focus: return kind == .focus
+        case .all: return true
+        }
+    }
+
+    /// A save is about to open its space: switch to the new scan's kind if the remembered filter
+    /// would hide it (All stays All).
+    static func reveal(_ kind: ScanKind) {
+        let defaults = UserDefaults.standard
+        let current = ScanListFilter(rawValue: defaults.string(forKey: AppConstants.Key.locationScanFilter) ?? "") ?? .room
+        guard !current.includes(kind) else { return }
+        defaults.set((kind == .focus ? ScanListFilter.focus : .room).rawValue, forKey: AppConstants.Key.locationScanFilter)
+    }
+}
+
 // swiftlint:disable type_body_length
 struct LocationDetailView: View {
     let location: ScanLocation
@@ -47,6 +73,7 @@ struct LocationDetailView: View {
     /// hands each card its slice, mirroring `bulkColoringMessages`.
     @State private var bulkExportPhases: [PersistentIdentifier: ExportPhase] = [:]
 
+    @AppStorage(AppConstants.Key.locationScanFilter) private var scanFilterRaw = ScanListFilter.room.rawValue
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
@@ -74,13 +101,25 @@ struct LocationDetailView: View {
         detailDialogs(detailSheets(detailChrome(detailRoot)))
     }
 
+    /// The filter in force: the remembered one in a space with a focus scan, otherwise everything.
+    private var scanFilter: ScanListFilter {
+        guard location.scans.contains(where: \.isFocusScan) else { return .all }
+        return ScanListFilter(rawValue: scanFilterRaw) ?? .room
+    }
+
+    /// The scans the list shows (and selection and bulk actions cover), newest first.
+    private var visibleScans: [CapturedScan] {
+        let filter = scanFilter
+        return location.scans.filter { filter.includes($0.scanKind) }.sorted { $0.capturedAt > $1.capturedAt }
+    }
+
     /// The scan list itself (sorting statements included — hence @ViewBuilder).
     @ViewBuilder
     private var detailRoot: some View {
         // Sort once per body evaluation and reuse for both the scroll content and the
         // bottom toolbar (which is a sibling of the ScrollView). Previously this sort ran
         // twice per redraw — and redraws are frequent during uploads/selection toggles.
-        let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
+        let sortedScans = visibleScans
         ZStack {
             Color.black.ignoresSafeArea()
 
@@ -126,7 +165,7 @@ struct LocationDetailView: View {
                             }
                         }
 
-                        if !isEditing && !sortedScans.isEmpty {
+                        if !isEditing && !location.scans.isEmpty {
                             // Linked badge. Read straight off the object graph in body — it's a
                             // cheap in-memory walk of `location.scans` relationships (no disk I/O),
                             // and accessing those relationships here registers them as observation
@@ -210,12 +249,13 @@ struct LocationDetailView: View {
                     .padding(.top, 16)
 
                     // MARK: - Scan Cards
+                    scanFilterPicker
                     if sortedScans.isEmpty {
                         VStack(spacing: 16) {
                             Image(systemName: "tray")
                                 .font(.system(size: 48))
                                 .foregroundColor(.gray)
-                            Text("No scans found in this location.")
+                            Text(emptyListMessage)
                                 .foregroundColor(.gray)
                         }
                         .padding(.top, 60)
@@ -313,6 +353,36 @@ struct LocationDetailView: View {
         }
     }
 
+    /// Room / Focus / All, with counts, in a space that has a focus scan.
+    @ViewBuilder
+    private var scanFilterPicker: some View {
+        let focusCount = location.scans.filter(\.isFocusScan).count
+        if focusCount > 0 {
+            let counts: [ScanListFilter: Int] = [.room: location.scans.count - focusCount, .focus: focusCount,
+                                                 .all: location.scans.count]
+            Picker("Show", selection: $scanFilterRaw) {
+                ForEach(ScanListFilter.allCases, id: \.self) { filter in
+                    Text("\(filter.rawValue) (\(counts[filter] ?? 0))").tag(filter.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+            .colorScheme(.dark)
+            .padding(.horizontal)
+            // Selection and bulk actions cover what is shown: drop what the new filter hides.
+            .onChange(of: scanFilterRaw) { _, _ in
+                selectedScans.formIntersection(visibleScans.map(\.persistentModelID))
+            }
+        }
+    }
+
+    private var emptyListMessage: String {
+        switch scanFilter {
+        case .room where !location.scans.isEmpty: return "No room scans in this space."
+        case .focus where !location.scans.isEmpty: return "No focus scans in this space."
+        default: return "No scans found in this location."
+        }
+    }
+
     /// Navigation title/mode, toolbar, and the appear hook.
     private func detailChrome(_ content: some View) -> some View {
         content
@@ -322,14 +392,17 @@ struct LocationDetailView: View {
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 if isEditing {
+                    // Select All covers the scans the filter shows.
+                    let shown = Set<PersistentIdentifier>(visibleScans.map(\.persistentModelID))
+                    let allSelected = !shown.isEmpty && shown.isSubset(of: selectedScans)
                     Button(action: {
-                        if selectedScans.count == location.scans.count {
+                        if allSelected {
                             selectedScans.removeAll()
                         } else {
-                            selectedScans = Set(location.scans.map { $0.id })
+                            selectedScans = shown
                         }
                     }, label: {
-                        Text(selectedScans.count == location.scans.count ? "Deselect All" : "Select All")
+                        Text(allSelected ? "Deselect All" : "Select All")
                             .font(.subheadline)
                     })
                 }

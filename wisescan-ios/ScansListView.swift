@@ -839,6 +839,14 @@ struct LocationGridTile: View {
         location.latestRoomScan
     }
 
+    /// "3 scans", or "3 room · 2 focus" once the space has focus scans.
+    private var scanCountLabel: String {
+        let total = location.scans.count
+        let focus = location.scans.filter(\.isFocusScan).count
+        guard focus > 0 else { return "\(total) scan\(total == 1 ? "" : "s")" }
+        return "\(total - focus) room · \(focus) focus"
+    }
+
     /// Any scan's world map flagged suspect at save (tracking excursion baked into the
     /// feature cloud) — rolls into the yellow relocalization-concern badge.
     private var hasSuspectWorldMap: Bool {
@@ -884,7 +892,7 @@ struct LocationGridTile: View {
                     .lineLimit(1)
 
                 HStack {
-                    Text("\(location.scans.count) scan\(location.scans.count == 1 ? "" : "s")")
+                    Text(scanCountLabel)
                         .font(.caption2)
                         .foregroundColor(.white.opacity(0.7))
                     Spacer()

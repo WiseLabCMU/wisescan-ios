@@ -209,6 +209,7 @@ extension CaptureView {
                 guard !Task.isCancelled else { return }
                 selectedTab = 2
                 if let location {
+                    ScanListFilter.reveal(.focus)   // the space's list must show the new scan
                     scanStore.navigationPath = NavigationPath()
                     scanStore.navigationPath.append(location)
                 }

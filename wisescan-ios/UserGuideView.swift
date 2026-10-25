@@ -72,6 +72,8 @@ struct UserGuideView: View {
                               "Photos are taken only while the box is in view; the dial fills with " +
                               "the directions you have covered. The result is a partial scan in the same " +
                               "location (no mesh of its own) that you can save or upload like any other. " +
+                              "Once a space has focus scans, its list switches between Room, Focus and All " +
+                              "(Room is the default; the list opens on a scan you just saved). " +
                               "A region file from another tool can be imported from the same menu."
                     )
                     guideRow(
