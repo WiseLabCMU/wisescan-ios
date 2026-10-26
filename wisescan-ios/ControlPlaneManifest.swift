@@ -268,6 +268,9 @@ extension ControlPlaneManifest {
             ("roomplan.json", [scan.roomPlanFileURL, raw.appendingPathComponent("roomplan.json")]),
             ("arworldmap.map", [scan.worldMapURL]),
             ("mesh.obj", [scan.meshFileURL]),
+            // The mesh's vertex colours from the Color step (exports merge them in; mesh.obj never
+            // carries them). The server asks for them together with the mesh.
+            ("colors.bin", [scan.colorsFileURL]),
             // What the change evaluator joins on id, and (once recorded) where the sweep looked.
             (FeaturePointCloudFile.filename, [dir.appendingPathComponent(FeaturePointCloudFile.filename)]),
             ("sweep_coverage.bin", [dir.appendingPathComponent("sweep_coverage.bin")])

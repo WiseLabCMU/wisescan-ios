@@ -96,7 +96,7 @@ struct UserGuideView: View {
                               "a space, or Sync on a stitched map in the graph view. Settings > Auto " +
                               "sync adds every space (All), the ones you start after joining (New, " +
                               "the default) or none (Off). It sends names, times, poses, the " +
-                              "small files the server reads, and a room's mesh or map when the lab " +
+                              "small files the server reads, and a room's mesh (with its colors) or map when the lab " +
                               "asks for it, over Wi-Fi; no photos, and never during a scan."
                     )
                 } header: {
