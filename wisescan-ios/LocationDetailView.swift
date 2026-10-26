@@ -75,6 +75,7 @@ struct LocationDetailView: View {
 
     @AppStorage(AppConstants.Key.locationScanFilter) private var scanFilterRaw = ScanListFilter.room.rawValue
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @State private var isBulkExporting = false
@@ -213,6 +214,11 @@ struct LocationDetailView: View {
                                     })
                                     .buttonStyle(FilledActionButtonStyle(background: Color.orange.opacity(0.8)))
                                 }
+                            }
+
+                            // Control plane: send this space to the lab server, as Upload sends an export.
+                            if ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil {
+                                ControlPlaneSpaceSyncButton(spaceIds: [location.id])
                             }
 
                             // Global Export Settings
@@ -697,13 +703,17 @@ struct LocationDetailView: View {
         }
     }
 
+    /// The control plane hands out upload destinations; the manual URL is the fallback.
+    private var uploadsConfigured: Bool {
+        ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost)
+    }
+
     private func bulkUpload(scans: [CapturedScan]) {
         // Re-entrancy: this view tracks per-scan status (no bulk flag) — refuse while any
         // selected scan's export/upload is already in flight.
         guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
-        guard !scans.isEmpty, !uploadURL.isEmpty else { return }
+        guard !scans.isEmpty, uploadsConfigured else { return }
         let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
-        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         // In flight from the start, so the guard above holds while colorize runs.
@@ -716,13 +726,18 @@ struct LocationDetailView: View {
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             for scan in scans {
-                guard let url = URL(string: baseURLString + scan.makeExportFilename(format: format)) else {
-                    scan.uploadStatus = .failed("Bad upload URL")
+                // Where it goes: the control plane's grant, or the manual Upload URL.
+                let target: ExportUploadTarget
+                do {
+                    target = try await ExportUploadTarget.resolve(
+                        scanId: scan.id, filename: scan.makeExportFilename(format: format),
+                        contentType: format.effective(for: scan).contentType, format: format, manualURL: uploadURL)
+                } catch {
+                    scan.uploadStatus = .failed(error.localizedDescription)
                     continue
                 }
                 scan.uploadStatus = .zipping
                 let colorsFromCapture = scan.isColored
-                let contentType = format.effective(for: scan).contentType   // read on main (SwiftData)
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     let filename = scan.makeExportFilename(format: format)
@@ -743,11 +758,7 @@ struct LocationDetailView: View {
                         scan.uploadStatus = .uploading(progress: 0.0)
                     }
 
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "PUT"
-                    request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-
-                    let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
+                    let task = target.session.uploadTask(with: target.request, fromFile: exportURL) { _, response, error in
                         try? FileManager.default.removeItem(at: exportURL)
                         DispatchQueue.main.async {
                             if let error = error {
@@ -755,6 +766,7 @@ struct LocationDetailView: View {
                             } else if let httpResponse = response as? HTTPURLResponse,
                                       (200...299).contains(httpResponse.statusCode) {
                                 scan.uploadStatus = .success
+                                target.reportCompleted()
                                 scan.lastUploadedAt = Date()
                             } else {
                                 scan.uploadStatus = .failed("Server error")
@@ -795,11 +807,11 @@ struct LocationDetailView: View {
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
-                    .background(selectedScans.isEmpty || uploadURL.isEmpty ? Color.gray.opacity(0.3) : Color.blue)
-                    .foregroundColor(selectedScans.isEmpty || uploadURL.isEmpty ? .gray : .white)
+                    .background(selectedScans.isEmpty || !uploadsConfigured ? Color.gray.opacity(0.3) : Color.blue)
+                    .foregroundColor(selectedScans.isEmpty || !uploadsConfigured ? .gray : .white)
                     .cornerRadius(10)
             })
-            .disabled(selectedScans.isEmpty || uploadURL.isEmpty)
+            .disabled(selectedScans.isEmpty || !uploadsConfigured)
 
             Button(action: {
                 let scansToSave = sortedScans.filter { selectedScans.contains($0.id) }

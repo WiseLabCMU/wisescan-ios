@@ -163,6 +163,16 @@ struct ARCoverageView: UIViewRepresentable {
         scanStore?.setRoomDataPersistDir = { [weak coordinator = context.coordinator] dir in
             coordinator?.currentDeferredRoomBox()?.setPersistDirectory(dir)
         }
+        // Sweep coverage: freeze the recorder and hand back its snapshot (SweepCoverageSnapshot?).
+        // Main-thread, called at the Stop tap.
+        scanStore?.freezeSweepCoverage = { [weak coordinator = context.coordinator] in
+            coordinator?.sweepCoverage.freezeAndSnapshot()
+        }
+        // Non-freezing read for the developer coverage readout (lock-guarded mirror, never the
+        // recorder's queue). Main-thread, ~1 Hz while that readout is visible.
+        scanStore?.sweepCoverageLiveStats = { [weak coordinator = context.coordinator] in
+            coordinator?.sweepCoverage.liveStats()
+        }
         // Record-tap escape hatch: lets CaptureView revive a wedged capture graph (no frames
         // flowing) when the "establishing tracking" gate keeps bouncing the record button.
         scanStore?.reviveARSession = { [weak coordinator = context.coordinator] in
@@ -1214,6 +1224,9 @@ struct ARCoverageView: UIViewRepresentable {
         /// Coalescing flag: prevents queuing multiple main-actor dispatches
         /// that each hold CVPixelBuffer references → ARFrame retention.
         private var pendingVRUpdate = false
+        /// Sweep-derived observed-space record: the null-case field for change detection (space
+        /// that was looked at and found unchanged). Built from poses + depth only.
+        let sweepCoverage = SweepCoverageRecorder()
         /// Per-anchor vertex/face counts — avoids reading geometry from session.currentFrame
         /// which pins ARFrame memory alive and triggers "retaining N ARFrames" warnings.
         private var anchorVertexCounts: [UUID: Int] = [:]
@@ -1722,6 +1735,9 @@ struct ARCoverageView: UIViewRepresentable {
                 // correction) survives into recording rather than being clobbered by a record-time
                 // re-run. If alignment never fired it (e.g. too little mesh pre-record), it's still
                 // armed and fires during recording as before. (Settle flags likewise reset at load.)
+                // Sweep coverage: start a fresh record. This hop runs after record-start's
+                // session.run and both setWorldOrigin bakes, so no pre-bake frame is stamped.
+                self.sweepCoverage.begin()
             }
             // Clear any stale wireframe entities from a previous recording (RealityKit → main)
             removeAllActiveMeshEntities()
@@ -3198,6 +3214,10 @@ struct ARCoverageView: UIViewRepresentable {
                 vioGuardArmed = false
                 vioDegradedSince = 0
             }
+
+            // Sweep coverage (AR + VR): stamp this recording frame's observed space. offer() only
+            // copies poses + depth and dispatches; it must stay above the VR-only guard below.
+            if isRecording.load(ordering: .relaxed) { sweepCoverage.offer(frame) }
 
             // ── VR Mode: update point cloud ──
             // IMPORTANT: Extract pixel buffers and camera data HERE (on the delegate queue)

@@ -74,7 +74,10 @@ struct UserGuideView: View {
                               "location (no mesh of its own) that you can save or upload like any other. " +
                               "Once a space has focus scans, its list switches between Room, Focus and All " +
                               "(Room is the default; the list opens on a scan you just saved). " +
-                              "A region file from another tool can be imported from the same menu."
+                              "A region file from another tool can be imported from the same menu. " +
+                              "With a control plane set, the lab can also ask for a focus scan: the " +
+                              "request waits in the To do list on the Dashboard, even offline (an urgent one also " +
+                              "alerts once), and Open takes you to the region in the editor."
                     )
                     guideRow(
                         icon: "6.circle.fill",
@@ -87,7 +90,14 @@ struct UserGuideView: View {
                         title: "Save or Upload",
                         text: "Save locally to Files, AirDrop to another device, or upload to your " +
                               "configured server. A cloud badge on each location shows upload state: " +
-                              "solid when every scan is uploaded, dimmed when only some are."
+                              "solid when every scan is uploaded, dimmed when only some are. With a " +
+                              "control plane server set in Settings, the app also keeps your lab's " +
+                              "server up to date with the spaces you sync: tap Sync to Lab Server in " +
+                              "a space, or Sync on a stitched map in the graph view. Settings > Auto " +
+                              "sync adds every space (All), the ones you start after joining (New, " +
+                              "the default) or none (Off). It sends names, times, poses, the " +
+                              "small files the server reads, and a room's mesh (with its colors) or map when the lab " +
+                              "asks for it, over Wi-Fi; no photos, and never during a scan."
                     )
                 } header: {
                     Text("HOW TO USE")

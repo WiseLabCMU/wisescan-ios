@@ -154,6 +154,7 @@ struct CaptureView: View {
     @State var scanCoach = ScanCoach()
     @AppStorage(AppConstants.Key.scanCoachingEnabled) var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
+    @AppStorage(AppConstants.Key.sweepCoverageLiveReadout) private var sweepCoverageLiveReadout: Bool = AppConstants.sweepCoverageLiveReadout
 
     // MARK: - Space Analysis (pre-scan staging check)
     @State var isAnalyzing = false
@@ -179,6 +180,9 @@ struct CaptureView: View {
         let worldMapURL: URL?
         let thumbnailData: Data?
         let scanCase: ScanCase
+        // Sweep-coverage grid frozen at the Stop tap; nil only when the capture view was gone.
+        // A `let` with no default so the memberwise init makes every construction site decide.
+        let sweepCoverage: SweepCoverageSnapshot?
         // Map saved with a wandering outlier cluster in its feature cloud (tracking excursion,
         // e.g. an OS interruption with motion) — persisted so rescan/link can warn (default lets
         // the VIO-recovery construction sites, which save no map, omit it).
@@ -1787,6 +1791,8 @@ struct CaptureView: View {
                 }
             }
 
+            sweepCoverageReadoutRow
+
             Spacer()
 
             // ScanCoach Bar (above HUD, only during recording)
@@ -1940,6 +1946,26 @@ struct CaptureView: View {
                 .shadow(radius: 5)
                 .transition(.scale.combined(with: .opacity))
                 .animation(.easeInOut(duration: 0.2), value: unreliable)
+        }
+    }
+
+    /// Developer sweep-coverage readout (Perf Diagnostics › Live Coverage Readout): numbers only,
+    /// left edge, recording only. It sits in the top chrome's flow AFTER the privacy pill, the
+    /// location label and the trailing wearable/360° column, so it lands below whichever of
+    /// those are showing and cannot overlap them; its height comes out of the Spacer, so nothing
+    /// above or below moves. The left edge below the top chrome is the one region no recording
+    /// chrome uses: top-right is REC + the wearable/360° column, bottom-left the Ghost Mesh chip,
+    /// the bottom the coach bar + stats HUD, the center the reticle and tracking pills.
+    /// The perf half gates on `PerfDiag.enabled` (applied at capture entry, like the other
+    /// perfDiag-only chrome here). When either switch is off the readout is not in the tree at
+    /// all — no timer, no reads.
+    @ViewBuilder private var sweepCoverageReadoutRow: some View {
+        if isRecording, PerfDiag.enabled, sweepCoverageLiveReadout {
+            HStack {
+                SweepCoverageReadout(scanStore: scanStore)
+                Spacer()
+            }
+            .padding(.horizontal)
         }
     }
 

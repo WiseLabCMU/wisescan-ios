@@ -17,12 +17,26 @@ Release, which is what the field mostly runs. ON enables:
   yaw, zncc, per-still yaw spread, rails), `[VertexColor]` frame selection + gray
   fraction, `[Colorize]` face generation, `[PerfTimer]` step timings, `[TrackStab]`
   tracking jumps and mesh purges, `[LocDiag]` relocalization/map health, `[Session]`
-  interruptions.
+  interruptions, `[ControlPlane]` inventory syncs (counts sent, rows the server marked
+  gone, or the failure).
 - **MainThreadWatchdog** — logs `main-thread stall BEGIN/END (max no-frame gap Nms)`
   for stalls over 400 ms. Mid-recording stalls ≥4 s independently hard-trip the VIO
   guard (that is a capture-safety mechanism, always on).
 - **MemDiag** — 1 Hz `footprint/resident/faces/verts/anchors/fps/cpu/thermal` telemetry
   plus lifecycle events (`RECORD-START`, `RP-STOP`, …) and per-thread CPU breakdowns.
+- **`[Coverage]` sweep lines** — the sweep-coverage recorder's measured cost, every 25
+  integrated updates while recording: per-update CPU (`last/mean/max` ms), `cpu_total` as a
+  share of one core, cell count, the throttle's `drop_busy`/`drop_rate` drops and the
+  `skip_tracking`/`skip_nodepth` skips. One `sweep FINAL` line at the Stop tap adds the
+  frame and ray totals that land in `sweep_coverage.bin`'s header. Only the lines are gated —
+  the grid itself is always recorded and saved.
+- **Live Coverage Readout** (sub-toggle, shown under Perf Diagnostics, off by default) — the
+  same counters on screen while recording, refreshed once a second in a small monospaced
+  block at the left edge under the top chrome: `cov surf/free` cells (with `nodepth` until a
+  depth frame arrives), `upd`, `drop busy/rate`, `skip tracking/nodepth`, and per-update
+  `cpu` last/avg/max ms. It reads a lock-guarded copy the recorder republishes per update —
+  never the recorder's queue, never the Stop-time freeze — so watching it does not pause or
+  slow the sweep.
 - **os_signpost intervals** for the Instruments timeline when a cable IS available.
 
 Decision-bearing lines (map-suspect verdicts, link drops, calibration rails) log at

@@ -29,6 +29,16 @@ enum AppConstants {
     // MARK: - AppStorage Keys
     enum Key {
         static let uploadURL = "uploadURL"
+        static let controlPlaneHost = "controlPlaneHost"              // the lab's control plane server (host[:port] or URL); empty = sync off
+        static let controlPlaneDeviceLabel = "controlPlaneDeviceLabel" // this phone's name in the fleet (iOS gives apps only "iPhone")
+        static let controlPlanePromptedTasks = "controlPlanePromptedTasks" // urgent tasks already alerted (each alerts once; then the to-do list)
+        static let controlPlaneOpenTasks = "controlPlaneOpenTasks"    // the to-do list as of the last sync (JSON), shown while the server can't be reached
+        static let controlPlaneTaskAnswers = "controlPlaneTaskAnswers" // open/decline answers the server hasn't had yet, sent with the next sync
+        static let controlPlaneSyncedSpaces = "controlPlaneSyncedSpaces" // ids of the spaces reported to the control plane (Sync on a space or stitched map)
+        static let controlPlaneAutoSync = "controlPlaneAutoSync"      // which spaces start syncing without a tap: all / new / off (ControlPlaneAutoSync)
+        static let controlPlaneJoinedAt = "controlPlaneJoinedAt"      // first successful sync (seconds since 1970): what counts as a new space
+        static let controlPlaneSendPackages = "controlPlaneSendPackages" // upload map packages (mesh, room layout, relocalization map) the server asks for
+        static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
         static let rawOverlapMax = "rawOverlapMax"
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"
@@ -47,6 +57,7 @@ enum AppConstants {
         static let hideLivePoints = "hideLivePoints"
         static let perfDiagnostics = "perfDiagnostics"
         static let perfSampleUnderDebugger = "perfSampleUnderDebugger"  // Developer Mode: let the stall sampler send SIGUSR1 even when lldb is attached (requires lldb set to pass the signal)
+        static let sweepCoverageLiveReadout = "sweepCoverageLiveReadout"  // Developer Mode: on-screen sweep-coverage counters while recording (shown only with perfDiagnostics also on)
         static let pauseVRCompute = "pauseVRCompute"
         static let vrBloomEnabled = "vrBloomEnabled"
         static let semanticLabeling = "semanticLabeling"
@@ -97,7 +108,11 @@ enum AppConstants {
     private static let retiredDefaultsKeys = [
         // Retired 2026-08-28 with the coarse/full label toggle: the mesh preview now always names
         // its RoomPlan boxes with the full vocabulary, so there is no granularity left to persist.
-        "semanticLabelDetail"
+        "semanticLabelDetail",
+        // Retired 2026-10-25: a copy of the control plane device id. Defaults ride backups, so a
+        // phone restored from another's would have synced as it (DeviceIdentity now falls back to
+        // a file excluded from backups).
+        "controlPlaneDeviceId"
     ]
 
     /// Drop every retired key. Cheap, idempotent, and called once from the app's `init`.
@@ -131,6 +146,7 @@ enum AppConstants {
     static let hideLivePoints: Bool = false
     static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
     static let perfSampleUnderDebugger: Bool = false   // Developer Mode: stall sampler fires under a debugger too (lldb must pass SIGUSR1, else it pauses)
+    static let sweepCoverageLiveReadout: Bool = false  // Developer Mode: live sweep-coverage readout while recording; a Perf Diagnostics sub-option, inert unless that is on too
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
     static let vrBloomEnabled: Bool = false     // Developer Mode: VR point-cloud bloom post-process (off by default — device A/B found it unmissed with live points visible; helps most when Hide Live Points is on)
     static let semanticLabeling: Bool = true    // Developer Mode: disable entire RoomPlan pipeline to reduce memory
@@ -585,6 +601,14 @@ enum AppConstants {
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)
     static let stillOverlapFloor: Double = 0.4                 // coach nudges "overlap your photos" while mean still-to-still overlap is below this (photogrammetry target ~0.6)
     static let stillParallaxDiversityFloor: Double = 0.15      // coach nudges "step sideways" while under this fraction of photo-covered voxels has ≥2 standpoints
+    static let sweepCoverageCellSize: Float = 0.5              // m — sweep-coverage cell (room-relocalization profile; finer 0.1-0.2 m guidance is a constant change)
+    static let sweepCoverageMaxHz: Double = 5.0                // max sweep-coverage integrations per second (frames above this rate are dropped)
+    static let sweepCoverageRayColumns: Int = 20               // depth-ray grid columns per frame (20×15 = 300 rays/frame)
+    static let sweepCoverageRayRows: Int = 15                  // depth-ray grid rows per frame
+    static let sweepCoverageMaxRange: Float = 5.0              // m — rays longer than this are truncated: free space to the cap, no surface
+    static let sweepCoverageMinDepth: Float = 0.1              // m — depth at or below this is invalid (sensor floor / zero fill)
+    static let sweepCoverageMinConfidence: UInt8 = 1           // skip ARConfidenceLevel.low only — a High-only filter blanked the cloud under thermal duty-cycling (Shaders/PointCloud.metal:123-128)
+    static let sweepCoverageLogEveryUpdates: Int = 25          // emit a sweep-coverage diagnostic line every N integrated updates
     static let keyframeFrustumDepth: Float = 0.25             // m — length of the still-capture frustum wedge in the preview
     static let keyframeStillColor = SIMD4<Float>(0.2, 0.85, 1.0, 1.0)  // cyan — sharp still (keyframe) capture markers
     static let keyframeMotionColor = SIMD4<Float>(1.0, 0.6, 0.15, 1.0) // amber — motion (sweep) frame markers
@@ -628,6 +652,16 @@ enum AppConstants {
     // MARK: - 360° Still Source (Theta OSC spike — feat/still-source-360)
     static let thetaCaptureTimeout: TimeInterval = 20            // max wait for a takePicture command to reach "done"
     static let thetaStatusPollInterval: TimeInterval = 0.4       // /osc/commands/status poll cadence while a capture is inProgress
+
+    // MARK: - Control plane (scan4d-server)
+    static let controlPlaneSyncDebounceS: Double = 5             // saves within this window share one sync
+    static let controlPlaneRequestTimeoutS: TimeInterval = 15
+    static let controlPlaneUploadBypassS: TimeInterval = 60      // after the control plane is unreachable, exports go straight to the Upload URL this long
+    static let controlPlaneUploadTimeoutS: TimeInterval = 60     // idle time allowed mid map-package upload (tens of MB)
+    static let controlPlaneSendPackages = true                   // map packages go up with the sync unless turned off
+    static let controlPlaneAutoSync = "new"                      // new spaces sync on their own; the backlog from before joining waits for Sync
+    static let controlPlaneLargeFileBytes: Int64 = 5_000_000     // package files this big go up only on an unmetered network (Wi-Fi)
+    static let controlPlanePollIntervalS: Double = 300           // while the app is open, sync this often so the lab's requests are picked up
 }
 
 // MARK: - Semantic View Mode

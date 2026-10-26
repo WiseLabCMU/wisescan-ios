@@ -52,6 +52,7 @@ struct ScansListView: View {
     @State private var bulkUploadCompleted = 0
     @State private var bulkUploadTotal = 0
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @Binding var selectedTab: Int
@@ -393,7 +394,7 @@ struct ScansListView: View {
     }
 
     private var uploadDisabled: Bool {
-        selectedLocations.isEmpty || uploadURL.isEmpty
+        selectedLocations.isEmpty || !ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost)
     }
 
     private var bulkRunDisabled: Bool {
@@ -589,9 +590,9 @@ struct ScansListView: View {
     /// independently on a background queue. Banner tracks per-scan completion and upload progress.
     private func bulkUpload(scans: [CapturedScan]) {
         guard !isBulkUploading else { return }   // re-entrancy: double-tap = concurrent export+upload batches
-        guard !scans.isEmpty, !uploadURL.isEmpty else { return }
+        guard !scans.isEmpty,
+              ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost) else { return }
         let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
-        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
 
         isBulkUploading = true
         bulkUploadCompleted = 0
@@ -610,7 +611,14 @@ struct ScansListView: View {
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             for scan in scans {
                 let filename = scan.makeExportFilename(format: format)
-                guard let url = URL(string: baseURLString + filename) else {
+                // Where it goes: the control plane's grant, or the manual Upload URL.
+                let target: ExportUploadTarget
+                do {
+                    target = try await ExportUploadTarget.resolve(
+                        scanId: scan.id, filename: filename, contentType: format.effective(for: scan).contentType,
+                        format: format, manualURL: uploadURL)
+                } catch {
+                    scan.uploadStatus = .failed(error.localizedDescription)
                     bulkUploadCompleted += 1
                     checkBulkUploadCompletion()
                     continue
@@ -618,7 +626,6 @@ struct ScansListView: View {
                 scan.uploadStatus = .zipping
                 let scanDir = scan.scanDirectory
                 let colorsFromCapture = scan.isColored
-                let contentType = format.effective(for: scan).contentType   // read on main (SwiftData)
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     guard let exportURL = ScanExportManager.prepareExport(
@@ -638,11 +645,7 @@ struct ScansListView: View {
 
                     DispatchQueue.main.async { scan.uploadStatus = .uploading(progress: 0.0) }
 
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "PUT"
-                    request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-
-                    let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
+                    let task = target.session.uploadTask(with: target.request, fromFile: exportURL) { _, response, error in
                         try? FileManager.default.removeItem(at: exportURL)
                         DispatchQueue.main.async {
                             if let error = error {
@@ -650,6 +653,7 @@ struct ScansListView: View {
                             } else if let httpResponse = response as? HTTPURLResponse,
                                       (200...299).contains(httpResponse.statusCode) {
                                 scan.uploadStatus = .success
+                                target.reportCompleted()
                                 scan.lastUploadedAt = Date()
                             } else {
                                 scan.uploadStatus = .failed("Server error")
@@ -1016,6 +1020,7 @@ struct ScanCard: View {
     var onUpdate: (CapturedScan) -> Void
     var onDelete: (CapturedScan) -> Void
 
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
     @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
     @AppStorage(AppConstants.Key.forceRebuildArtifacts) private var forceRebuildArtifacts: Bool = AppConstants.forceRebuildArtifacts
     @Environment(\.modelContext) private var modelContext
@@ -1636,7 +1641,12 @@ struct ScanCard: View {
     }
 
     private var uploadButtonDisabled: Bool {
-        isEditing || uploadURL.isEmpty || scan.uploadStatus.isUploading
+        isEditing || !uploadsConfigured || scan.uploadStatus.isUploading
+    }
+
+    /// The control plane hands out upload destinations; the manual URL is the fallback.
+    private var uploadsConfigured: Bool {
+        ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost)
     }
 
     @ViewBuilder
@@ -1704,7 +1714,7 @@ struct ScanCard: View {
     }
 
     private func uploadScan() {
-        guard !uploadURL.isEmpty else { return }
+        guard uploadsConfigured else { return }
         // Re-entrancy: an export/upload for this scan is already running — a second concurrent
         // prepareExport doubles the privacy-blur working set (OOM on phones; see UploadStatus.isInFlight).
         guard !scan.uploadStatus.isInFlight else { return }
@@ -1724,25 +1734,26 @@ struct ScanCard: View {
                 [scan], format: format, modelContext: modelContext,
                 progress: { _, msg in exportPhase = msg.map { ExportPhase($0) } })
             exportPhase = nil
-            uploadExport(format: format)
+            // Where it goes: the control plane's grant, or the manual Upload URL.
+            do {
+                let target = try await ExportUploadTarget.resolve(
+                    scanId: scan.id, filename: scan.makeExportFilename(format: format),
+                    contentType: format.effective(for: scan).contentType, format: format, manualURL: uploadURL)
+                uploadExport(format: format, to: target)
+            } catch {
+                scan.uploadStatus = .failed(error.localizedDescription)
+                onUpdate(scan)
+            }
         }
     }
 
-    /// The upload proper, once `uploadScan` has the scan ready to export.
-    private func uploadExport(format: ExportFormat) {
+    /// The upload proper, once `uploadScan` has the scan ready to export and somewhere to send it.
+    private func uploadExport(format: ExportFormat, to target: ExportUploadTarget) {
         let filename = scan.makeExportFilename(format: format)
-
-        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
-        guard let url = URL(string: baseURLString + filename) else {
-            scan.uploadStatus = .failed("Invalid URL")
-            onUpdate(scan)
-            return
-        }
 
         // Capture scan directory on main thread (SwiftData models aren't thread-safe)
         let scanDir = scan.scanDirectory
         let colorsFromCapture = scan.isColored
-        let contentType = format.effective(for: scan).contentType
         print("[Upload] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
         guard FileManager.default.fileExists(atPath: scanDir.path) else {
             scan.uploadStatus = .failed("No scan data")
@@ -1771,16 +1782,12 @@ struct ScanCard: View {
                 self.onUpdate(self.scan)
             }
 
-            // Upload natively via streaming
-            var request = URLRequest(url: url)
-            request.httpMethod = "PUT"
-            request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-
             // Track upload progress using KVO
             class ObserverBox { var observer: NSKeyValueObservation? }
             let box = ObserverBox()
 
-            let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, uploadError in
+            // Upload natively via streaming
+            let task = target.session.uploadTask(with: target.request, fromFile: exportURL) { _, response, uploadError in
                 _ = box
 
                 try? FileManager.default.removeItem(at: exportURL)
@@ -1790,6 +1797,7 @@ struct ScanCard: View {
                         self.scan.uploadStatus = .failed(uploadError.localizedDescription)
                     } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
                         self.scan.uploadStatus = .success
+                        target.reportCompleted()
                         self.scan.lastUploadedAt = Date()
                     } else {
                         self.scan.uploadStatus = .failed("Server error")

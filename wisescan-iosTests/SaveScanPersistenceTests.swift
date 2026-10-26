@@ -58,7 +58,8 @@ final class SaveScanPersistenceTests: XCTestCase {
             ScanFileManager.shared.saveScan(
                 context: context, locationId: locId, name: "Garage",
                 meshData: meshBytes, vertexCount: 3, faceCount: 1,
-                rawDataPath: rawDir, vertexColors: nil, worldMapURL: nil
+                rawDataPath: rawDir, vertexColors: nil, worldMapURL: nil,
+                sweepCoverage: .empty()
             ),
             "saveScan should return a scan when the mesh write succeeds"
         )
@@ -90,6 +91,35 @@ final class SaveScanPersistenceTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: rawMesh.path),
                       "raw_data/mesh.obj mirror missing at \(rawMesh.path)")
         XCTAssertEqual(try Data(contentsOf: rawMesh), meshBytes)
+
+        // Sweep coverage is written straight from the snapshot even on a map-less save, and an
+        // empty grid round-trips as a valid header-only file rather than being skipped.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: scan.sweepCoverageURL.path),
+                      "\(SweepCoverageFile.filename) missing at \(scan.sweepCoverageURL.path)")
+        XCTAssertEqual(try SweepCoverageFile.decode(Data(contentsOf: scan.sweepCoverageURL)), .empty())
+    }
+
+    /// A save that received no coverage snapshot (capture view gone at Stop) must say so in
+    /// incomplete_artifacts, not ship silently without the file.
+    func testSaveScan_nilSweepCoverage_isNamedAsMissingArtifact() throws {
+        let context = try StitchTestSupport.makeInMemoryContext()
+        let locId = UUID()
+        context.insert(ScanLocation(id: locId, name: "Garage"))
+        let rawDir = try makeRawDataDir(depthBytes: depthBytes)
+
+        let scan = try XCTUnwrap(
+            ScanFileManager.shared.saveScan(
+                context: context, locationId: locId, name: "Garage",
+                meshData: meshBytes, vertexCount: 3, faceCount: 1,
+                rawDataPath: rawDir, vertexColors: nil, worldMapURL: nil,
+                sweepCoverage: nil
+            )
+        )
+        cleanupAfter(scan)
+
+        XCTAssertTrue(ScanFileManager.shared.lastSaveArtifactFailures.contains(SweepCoverageFile.filename),
+                      "missing snapshot should be recorded: \(ScanFileManager.shared.lastSaveArtifactFailures)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: scan.sweepCoverageURL.path))
     }
 
     func testSaveScan_newLocationByName_createsLocationAndPlacesFiles() throws {
@@ -100,7 +130,8 @@ final class SaveScanPersistenceTests: XCTestCase {
             ScanFileManager.shared.saveScan(
                 context: context, locationId: nil, name: "New Space",
                 meshData: meshBytes, vertexCount: 3, faceCount: 1,
-                rawDataPath: rawDir, vertexColors: nil, worldMapURL: nil
+                rawDataPath: rawDir, vertexColors: nil, worldMapURL: nil,
+                sweepCoverage: .empty()
             )
         )
         cleanupAfter(scan)

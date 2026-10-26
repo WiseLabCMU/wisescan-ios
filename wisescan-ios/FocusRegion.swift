@@ -88,6 +88,9 @@ nonisolated struct FocusRegion: Codable, Equatable, Sendable {
     var frameIsCanonical: Bool
     /// UTC epoch milliseconds.
     var createdAtMs: Int64
+    /// The control plane task that asked for this region (scan4d-server README, "Tasks"). Kept
+    /// through the editor into the saved scan, so the scan's sync tells the server it is done.
+    var taskId: UUID?
 
     enum CodingKeys: String, CodingKey {
         case version
@@ -101,11 +104,13 @@ nonisolated struct FocusRegion: Codable, Equatable, Sendable {
         case frameScanId = "frame_scan_id"
         case frameIsCanonical = "frame_is_canonical"
         case createdAtMs = "created_at_ms"
+        case taskId = "task_id"
     }
 
     init(center: SIMD3<Float>, yaw: Float = 0, size: SIMD3<Float>, label: String = "", source: Source = .user,
          detail: FocusDetailLevel = .check, locationId: UUID? = nil, frameScanId: UUID? = nil,
-         frameIsCanonical: Bool = true, createdAtMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) {
+         frameIsCanonical: Bool = true, createdAtMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000),
+         taskId: UUID? = nil) {
         self.center = center
         self.yaw = yaw
         self.size = size
@@ -116,6 +121,7 @@ nonisolated struct FocusRegion: Codable, Equatable, Sendable {
         self.frameScanId = frameScanId
         self.frameIsCanonical = frameIsCanonical
         self.createdAtMs = createdAtMs
+        self.taskId = taskId
     }
 
     /// Lenient: only the box (centre, size) is required, so a hand-written or VLM-written file
@@ -134,6 +140,7 @@ nonisolated struct FocusRegion: Codable, Equatable, Sendable {
         frameIsCanonical = try c.decodeIfPresent(Bool.self, forKey: .frameIsCanonical) ?? true
         createdAtMs = try c.decodeIfPresent(Int64.self, forKey: .createdAtMs)
             ?? Int64(Date().timeIntervalSince1970 * 1000)
+        taskId = try c.decodeIfPresent(UUID.self, forKey: .taskId)
     }
 
     /// A usable box: finite, positive size no larger than `focusRegionMaxSizeM` on any side.

@@ -4,6 +4,7 @@ import ARKit
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
     @State private var scanStore = ScanStore()
     @State private var selectedTab = 0
     @State private var showLiDARWarning = false
@@ -14,6 +15,12 @@ struct ContentView: View {
         ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
     }
 
+    /// The AR session runs whenever the Capture tab is up, relocalizing before any recording
+    /// starts; control plane syncs wait it out (ControlPlaneSync).
+    private var arSessionBusy: Bool {
+        scanStore.isCaptureActive || selectedTab == 1
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             TabView(selection: $selectedTab) {
@@ -21,6 +28,8 @@ struct ContentView: View {
                     .tabItem {
                         Label("Dashboard", systemImage: "square.grid.2x2")
                     }
+                    // The lab's unanswered focus-scan requests (the Dashboard's to-do list).
+                    .badge(ControlPlaneSync.shared.unansweredTasks)
                     .tag(0)
 
                 CaptureView(selectedTab: $selectedTab)
@@ -60,6 +69,17 @@ struct ContentView: View {
             // Sweep "Adjacent to …" locations orphaned with 0 scans when a freeze/crash hit the
             // extend flow's record→save (the location is persisted before its scan is recorded).
             StitchLinkStore.reconcileOrphanedAdjacentLocations(context: modelContext)
+            // Control plane: report this phone's inventory now and after every save.
+            ControlPlaneSync.shared.captureStateChanged(active: arSessionBusy)
+            ControlPlaneSync.shared.start(container: modelContext.container)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                ControlPlaneSync.shared.requestSync(after: .seconds(1))
+            }
+        }
+        .onChange(of: arSessionBusy) { _, busy in
+            ControlPlaneSync.shared.captureStateChanged(active: busy)
         }
         .alert("Lite Mode — No LiDAR", isPresented: $showLiDARWarning) {
             Button("Got it", role: .cancel) {}
@@ -79,6 +99,25 @@ struct ContentView: View {
         } message: {
             Text(FocusRegionInbox.shared.lastError ?? "")
         }
+        // An urgent focus scan the lab asked for (a high-priority task), alerted once ever; every
+        // request also waits in the Dashboard's to-do list. Open takes the region into its
+        // space's editor through the same inbox as a deep link.
+        .alert("Urgent focus scan requested", isPresented: Binding(
+            get: { ControlPlaneSync.shared.taskToPrompt != nil },
+            set: { if !$0 { ControlPlaneSync.shared.dismissPrompt() } }),
+               presenting: ControlPlaneSync.shared.taskToPrompt) { task in
+            Button("Open") { ControlPlaneSync.shared.open(task) }
+            Button("Decline", role: .destructive) { ControlPlaneSync.shared.decline(task) }
+            Button("Later", role: .cancel) { ControlPlaneSync.shared.dismissPrompt() }
+        } message: { task in
+            Text(taskPromptMessage(task))
+        }
+    }
+
+    private func taskPromptMessage(_ task: ControlPlaneClient.ScanTask) -> String {
+        let what = task.region.label.isEmpty ? "A region" : task.region.label
+        let reason = task.reason.isEmpty ? "" : "\n\n\(task.reason)"
+        return "\(what) in \(task.mapName), at \(task.region.detail.title) detail.\(reason)\n\nLater: it waits in the to-do list on the Dashboard."
     }
 
     /// The space a handed-over region names; without a known one the region is refused (a file
