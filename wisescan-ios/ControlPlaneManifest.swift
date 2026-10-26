@@ -271,6 +271,11 @@ extension ControlPlaneManifest {
             // The mesh's vertex colours from the Color step (exports merge them in; mesh.obj never
             // carries them). The server asks for them together with the mesh.
             ("colors.bin", [scan.colorsFileURL]),
+            // The preview's other mesh sources (MeshSourceMode), written at Post-process: the ghost
+            // proxy and the dynamic (content-only) mesh. The lab's 3D view asks for them.
+            ("mesh_proxy.obj", [dir.appendingPathComponent("mesh_proxy.obj"), raw.appendingPathComponent("mesh_proxy.obj")]),
+            ("mesh_dynamic.obj", [dir.appendingPathComponent("mesh_dynamic.obj"),
+                                  raw.appendingPathComponent("mesh_dynamic.obj")]),
             // What the change evaluator joins on id, and (once recorded) where the sweep looked.
             (FeaturePointCloudFile.filename, [dir.appendingPathComponent(FeaturePointCloudFile.filename)]),
             ("sweep_coverage.bin", [dir.appendingPathComponent("sweep_coverage.bin")])

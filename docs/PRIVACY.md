@@ -22,7 +22,7 @@ The inventory holds no images or depth maps.
 
 With **Send map packages** on (the default), the app also uploads the files the server asks for, and only those:
 - right after a sync, the small files the server reads itself: each room scan's alignment and room layout, its sparse feature-point cloud and sweep-coverage grid (points and cells, not images), and each focus scan's box;
-- only when the lab requests them (for example, to view a room in 3D): a room scan's mesh (with its captured vertex colours, people already removed at capture) and its ARKit relocalization map.
+- only when the lab requests them (for example, to view a room in 3D): a room scan's mesh (with its captured vertex colours, people already removed at capture), the simplified and content-only versions of it built at Post-process, and its ARKit relocalization map.
 
 Large files go only over Wi-Fi.
 

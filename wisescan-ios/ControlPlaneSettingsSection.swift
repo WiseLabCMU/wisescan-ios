@@ -76,7 +76,7 @@ struct ControlPlaneSettingsSection: View {
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Send map packages", isOn: $sendPackages)
                     .foregroundColor(.white)
-                Text("What the server asks for: the small files it reads itself (alignment, room layout, feature cloud, coverage, focus box) after each sync; the mesh (with its colors) and relocalization map only when the lab needs them, and large files only over Wi-Fi.")
+                Text("What the server asks for: the small files it reads itself (alignment, room layout, feature cloud, coverage, focus box) after each sync; the meshes (with their colors) and relocalization map only when the lab needs them, and large files only over Wi-Fi.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
