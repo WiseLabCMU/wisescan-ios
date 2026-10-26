@@ -10,6 +10,11 @@ import os
 extension CaptureView {
 
     func toggleRecording() {
+        // A focus scan's one divergence from a rescan is what Start and Stop do.
+        if scanStore.activeScanKind == .focus {
+            toggleStillCapture()
+            return
+        }
         if isRecording {
             // Every user-initiated stop confirms via the menu — the old rescan bypass saved
             // immediately on an accidental tap with no way to cancel/discard (2026-07-22 field
@@ -1035,6 +1040,7 @@ extension CaptureView {
             guard !Task.isCancelled else { return }
             selectedTab = 2
             if let loc = savedLoc {
+                ScanListFilter.reveal(.room)   // the space's list must show the new scan
                 scanStore.navigationPath = NavigationPath()
                 scanStore.navigationPath.append(loc)
             }

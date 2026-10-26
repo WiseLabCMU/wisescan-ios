@@ -43,6 +43,20 @@ struct CaptureView: View {
     /// where `totalVertices` already starts high (would otherwise never cross an absolute threshold).
     @State var verticesAtRecordStart = 0
     @State var isRecording = false
+    /// Focus scan: the still-capture branch of a rescan (see CaptureView+StillCapture).
+    @State var stillCapture = ARStillCaptureController()
+    @State var isStillCapturing = false
+    /// Focus scan: the region's box in the loaded map's raw frame (refreshFocusBoxPlacement, off
+    /// the body: it reads the map scan's registration sidecar).
+    @State var focusBoxPlacement: FocusBoxPlacement?
+    /// Focus scan: where the capture files, snapshotted at Start, so leaving the tab (which resets
+    /// the capture state) cannot strand the stills.
+    @State var focusScanTarget: FocusScanTarget?
+    /// Recording a room scan or capturing a focus scan. The one state the pre-record safeguards read
+    /// (relocalization watchdog, Try Again, Re-relocalize, idle teardown, the leave-capture config
+    /// swap): each of those reloads the map or swaps the configuration, which mid-capture resets
+    /// tracking or drops scene depth.
+    var isCapturing: Bool { isRecording || isStillCapturing }
     // Set true by ARCoverageView's coordinator when VIO tracking is lost mid‑recording; observed
     // below to halt the scan and prompt save/rescan (data after VIO loss is corrupt).
     @State var vioCompromised = false
@@ -533,11 +547,11 @@ struct CaptureView: View {
         // via the rescan→latest chain). Today rescan always targets latest, so this aggregates all —
         // but if a non-latest scan ever becomes the target, restrict to ITS connectors so we never
         // render another scan's connectors in the wrong frame (the failure the comment above warns of).
-        let latestId = location.scans.max(by: { $0.capturedAt < $1.capturedAt })?.id
+        let latestId = location.latestRoomScan?.id
         let target = scanStore.activeScanToExtend
         let scansForConnectors: [CapturedScan] = (target == nil || target == latestId)
-            ? location.scans
-            : location.scans.filter { $0.id == target }
+            ? location.roomScans
+            : location.roomScans.filter { $0.id == target }
         var seenConnectors = Set<UUID>()
         connectorAnchors = scansForConnectors
             .flatMap { StitchLinkStore.connectorAnchors(for: $0, from: linkIndex[$0.id] ?? []) }
@@ -551,8 +565,9 @@ struct CaptureView: View {
     /// flips); it stands down — and clears any timed-out flag — the moment relocalization succeeds
     /// (`.normal`), recording starts, or the ghost is cleared.
     private func evaluateRelocalizationTimeout() {
+        // Stands down while capturing: its Try Again reloads the map.
         let relocalizing = cachedGhostMeshData != nil
-            && !isRecording
+            && !isCapturing
             && scanStats.trackingStatus == .limited(reason: .relocalizing)
         if relocalizing {
             // Arm once. Don't restart if already running or already timed out.
@@ -563,7 +578,7 @@ struct CaptureView: View {
             ) { _ in
                 // Fires on the main run loop. Re-check we're still stuck (a success/back-out would
                 // have cancelled us via onChange, but guard against the race).
-                if cachedGhostMeshData != nil && !isRecording
+                if cachedGhostMeshData != nil && !isCapturing
                     && scanStats.trackingStatus == .limited(reason: .relocalizing) {
                     relocTimedOut = true
                 }
@@ -583,6 +598,7 @@ struct CaptureView: View {
     /// "Try Again" — restart relocalization from scratch by reloading the world map (toggling the
     /// ghost data, the proven `showRelocDialog` Re-relocalize path). Re-arms the watchdog.
     private func retryRelocalization() {
+        guard !isCapturing else { return }   // a map reload mid-capture resets tracking
         relocTimeoutTimer?.invalidate()
         relocTimeoutTimer = nil
         relocTimedOut = false
@@ -646,7 +662,10 @@ struct CaptureView: View {
                 dismissGhostMesh: dismissGhostMesh,
                 bakedGhostTransform: bakedGhostTransform,
                 pauseARSession: pauseARSession,
-                isAnalyzing: $isAnalyzing
+                isAnalyzing: $isAnalyzing,
+                isStillCapturing: isStillCapturing,
+                stillCapture: stillCapture.engine,
+                focusBox: focusBoxPlacement
             )
         .alert(rigMeasuredDyMeters < 0.01 ? "Rig height not set" : "Rig height looks wrong",
                isPresented: $showRigHeightPrompt) {
@@ -728,8 +747,12 @@ struct CaptureView: View {
             // stillness pause yields a co-timed phone-hi-res + 360° pair with a shared
             // phone pose — the calibration raw material this branch exists for. A
             // refused tap fires neither, keeping the pair invariant.
+            //
+            // Automatic room stills (docs/design/capture-modes.md): phone stills fire on their
+            // own, so the tap is the 360° rig's shutter only. With a camera connected it still
+            // arms the phone still too, keeping the co-timed pair the rig calibration needs.
             .onTapGesture {
-                guard isRecording else { return }
+                guard isRecording, thetaManager.isConnected else { return }
                 if frameCaptureSession.requestStillCapture() {
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     captureThetaStill()
@@ -797,7 +820,9 @@ struct CaptureView: View {
         // "Capturing…" while a tapped still is in flight. Shown in both AR and VR
         // modes: keyframes are captured in both. Wrapped in a host view so the 10Hz
         // progress updates re-evaluate only the reticle's body, not this entire view.
-        if isRecording && isARSessionReady {
+        // Only with a 360° camera connected: phone stills are otherwise automatic, and the
+        // tap is the rig's shutter alone.
+        if isRecording && isARSessionReady && thetaManager.isConnected {
             StillnessReticleHost(session: frameCaptureSession)
                 .allowsHitTesting(false)
         }
@@ -860,7 +885,9 @@ struct CaptureView: View {
         // alignment dialog, plus a slider overlay to rotate/translate the ghost when
         // relocalization is imperfect. Complements the anchor-based AlignmentOverlayView above;
         // startRecording bakes any offset into the world origin so mesh + world map stay co-framed.
-        if cachedGhostMeshData != nil && !dismissGhostMesh {
+        // Hidden during a focus scan: the ghost only initializes the pose and leaves the scene at
+        // Start. (A room recording keeps the chip for Dismiss; its Re-relocalize is a no-op then.)
+        if cachedGhostMeshData != nil && !dismissGhostMesh && !isStillCapturing {
             ghostMeshChipStack
         }
 
@@ -879,7 +906,8 @@ struct CaptureView: View {
     /// Appearance, appear/disappear wiring, and the ghost-alignment dialog.
     private func captureLifecycle(_ content: some View) -> some View {
         content
-        .onChange(of: frameCaptureSession.sharpFrameCount) { oldCount, newCount in
+        // Announced stills only (the rig's tapped ones): automatic stills land about once a second.
+        .onChange(of: frameCaptureSession.shutterFeedbackCount) { oldCount, newCount in
             guard newCount > oldCount else { return } // ignore session-start reset to 0
             // Two-phase so the peak actually renders: commit the peak opacity this
             // update, then animate down on the next runloop turn — writing both in one
@@ -894,6 +922,7 @@ struct CaptureView: View {
         .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
             Button("Re-relocalize") {
                 // Reset transform and reload the world map by toggling the ghost data.
+                guard !isCapturing else { return }   // would reset tracking mid-capture
                 ghostYRotation = 0
                 ghostXOffset = 0
                 ghostZOffset = 0
@@ -914,6 +943,12 @@ struct CaptureView: View {
             Text("The ghost mesh from your previous scan may not be perfectly aligned. Choose an option:")
         }
         .preferredColorScheme(.dark)
+        // Focus scan: the HUD, Check's auto-finish, the stop on a frame loss, and the region box.
+        // All in CaptureView+StillCapture (the stop's completion files the scan).
+        .overlay { stillCaptureOverlay }
+        .onChange(of: stillCapture.stats.stillsSaved) { _, saved in finishFocusScanIfTargetReached(saved) }
+        .onChange(of: stillCapture.stats.frameLost) { _, reason in handleFocusFrameLost(reason) }
+        .onChange(of: scanStore.activeFocusRequest) { _, _ in refreshFocusBoxPlacement() }
         .onAppear {
             // Pick up any Settings change to the diagnostics flag, then start the main-thread
             // stall watchdog for this capture session (both no-ops unless Perf Diagnostics is on).
@@ -930,6 +965,7 @@ struct CaptureView: View {
             // the save-flow and tab-tap stalls it exists to catch happen outside capture.
             MainThreadWatchdog.shared.start()
             memoryPressureMonitor.start()
+            refreshFocusBoxPlacement()
 
             // Battery: returning to the capture tab — cancel any pending idle teardown and resume
             // the AR session if it was paused while we were away.
@@ -1035,7 +1071,7 @@ struct CaptureView: View {
                 // unused by the capture path, so gate on the flags this pipeline actually maintains:
                 // isProcessingMesh (export/color in flight) and a pendingScan awaiting its name/save.
                 let processing = isProcessingMesh || pendingScan != nil
-                if selectedTab != 1 && !isRecording && !processing && !scanStore.isProcessingScan {
+                if selectedTab != 1 && !isCapturing && !processing && !scanStore.isProcessingScan {
                     pauseARSession = true
                     // Same idle moment: let the camera nap too (sleepDelay restored).
                     Task { @MainActor in ThetaCameraManager.shared.setKeepAwake(false) }
@@ -1072,6 +1108,9 @@ struct CaptureView: View {
                 if isRecording {
                     stopRecording(force: true)
                 }
+                // Mid-focus-scan: finish it. The stills drain and file into the scan target
+                // snapshotted at Start (focusScanTarget), so the reset below cannot orphan them.
+                if isStillCapturing { stopStillCapture() }
                 // Always clear ghost state when leaving Capture.
                 // Preserve pendingStitchLink for in-flight saves — the async pipeline
                 // needs it to write stitching.json. It's consumed and nilled out by
@@ -1108,7 +1147,7 @@ struct CaptureView: View {
                 // still reads the live session's mesh anchors and exports its world map, and this
                 // config swap drops scene reconstruction. When something IS in flight the recording
                 // ends normally, and the stop/save teardown's purge covers it.
-                if !isRecording && !isProcessingMesh && pendingScan == nil && !scanStore.isProcessingScan {
+                if !isCapturing && !isProcessingMesh && pendingScan == nil && !scanStore.isProcessingScan {
                     currentARSession?.run(ARCoverageView.makeConfiguration())
                 }
                 showExtendOverlay = false
@@ -1793,9 +1832,9 @@ struct CaptureView: View {
                                 Circle()
                                     .fill(.ultraThinMaterial)
                                     .frame(width: 80, height: 80)
-                                    .overlay(Circle().stroke(isRecording ? Color.red : Color.cyan, lineWidth: 2))
+                                    .overlay(Circle().stroke(isCapturing ? Color.red : Color.cyan, lineWidth: 2))
 
-                                if isRecording {
+                                if isCapturing {
                                     RoundedRectangle(cornerRadius: 4)
                                         .fill(Color.red)
                                         .frame(width: 28, height: 28)
@@ -1880,6 +1919,8 @@ struct CaptureView: View {
         // the meaningful transitions (loaded / cleared / reloaded).
         .onChange(of: cachedGhostMeshData?.count) { _, _ in evaluateRelocalizationTimeout() }
         .onChange(of: isRecording) { _, _ in evaluateRelocalizationTimeout() }
+        .onChange(of: isStillCapturing) { _, _ in evaluateRelocalizationTimeout() }
+        .onChange(of: isCapturing) { _, active in scanStore.isCaptureActive = active }
     }
 
     // Item 2 (perfDiag-gated during dev validation; reframed 2026-06-25 to a STORM signal):
@@ -2057,6 +2098,7 @@ struct CaptureView: View {
     /// Caption under the record button. A computed String (not a chained ternary in `body`) so the
     /// body expression stays type-checkable.
     private var recordButtonCaption: String {
+        if scanStore.activeScanKind == .focus { return isStillCapturing ? "Tap to stop focus scan" : "Tap to start focus scan" }
         if isRecording { return "Tap to stop" }
         if isProcessingMesh || isWaitingToSave { return "Processing previous scan…" }
         return "Tap to scan"
@@ -2205,12 +2247,16 @@ struct CaptureView: View {
             alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
                 self.discardInProgressScan(isExtendFlow: false, completion: nil)
             })
-        } else if capturedCount > 0 {
+        } else if capturedCount > 0 || scanStats.totalVertices > verticesAtRecordStart {
+            // Photos are automatic and start a few seconds in, so a scan can hold mesh before its
+            // first photo: that is still worth offering to save.
+            let captured = capturedCount > 0
+                ? "the \(capturedCount) photo\(capturedCount == 1 ? "" : "s") and mesh"
+                : "the mesh (no photos yet)"
             alert = UIAlertController(
                 title: "Tracking Lost",
                 message: "AR tracking was interrupted during this scan, so anything captured after that "
-                    + "point is unreliable. Save the \(capturedCount) frame\(capturedCount == 1 ? "" : "s") "
-                    + "captured so far, or discard and rescan?",
+                    + "point is unreliable. Save \(captured) captured so far, or discard and rescan?",
                 preferredStyle: .alert
             )
             alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in

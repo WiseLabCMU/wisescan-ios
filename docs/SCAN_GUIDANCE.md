@@ -77,7 +77,13 @@ Real-time tips during recording, evaluated at ~1 Hz by the `ScanCoach` rules eng
 | `guidance.semantic.scanFloor` | Semantic ON, walls detected but no floor | "🪟 Walls detected, try scanning the floor" |
 | `guidance.semantic.scanObjects` | Semantic ON, ≥3 surfaces but 0 objects | "🛋️ Don't forget furniture — scan objects up close" |
 | `guidance.semantic.lowerAngle` | Semantic ON, floor detected, <3 objects | "🔽 Try scanning from a lower angle for floor objects" |
-| `guidance.pauseForPhoto` | Mid-scan, >30s since last sharp frame, user moving | "📸 Pause here for a sharp photo" |
+| `guidance.pauseForPhoto` | Mid-scan, user moving, photo coverage below `photoCoverageDebtFraction` (0.3) of the mesh with at least `photoCoverageDebtMinVoxels` voxels (the amber areas outrun the stills) | "Slow down over amber areas so photos can land" |
+| `guidance.stillOverlap` | ≥ `stillOverlapMinStills` stills, mean still-to-still overlap below `stillOverlapFloor` | "Move more slowly so photos overlap" |
+| `guidance.stillParallax` | ≥ `stillOverlapMinStills` stills, multi-standpoint fraction below `stillParallaxDiversityFloor` | "Step sideways across covered areas for new angles" |
+
+Photos are automatic in a room scan (REQ-036): 12MP stills fire whenever the device is steady
+enough for the exposure and the view has turned about 15° (or shifted as much) since the last one.
+There is no shutter tap, except as the 360° rig's shutter when a Theta is connected.
 
 #### 🟢 INFO — auto-dismiss 5s, 60s cooldown (suppressed when coaching OFF)
 
@@ -95,3 +101,22 @@ Real-time tips during recording, evaluated at ~1 Hz by the `ScanCoach` rules eng
 | INFO | Green | 5s | 60s | Suppressed when OFF |
 
 Anti-nag: tips are suppressed after 2 manual dismissals (swipe-up) per session. Cooldown timers are in [AppConstants.swift](../wisescan-ios/AppConstants.swift).
+
+## Focus scan status line
+
+A focus scan (REQ-035) has no coach tips; its HUD carries one status line, the reason the last
+frame did not take a still (`ARStillCaptureSession.Hold`), plus a coverage dial of the directions
+the region has been photographed from.
+
+| Hold | Shown when | Message |
+|:-----|:-----------|:--------|
+| (before Start) | Relocalized, waiting for the record tap | "Line up on the box, then tap record" |
+| `none` / `saving` | A still was taken or is being saved | "Capturing" |
+| `tracking` | Tracking not normal | "Hold on, finding tracking" |
+| `motion` | Blur gate: the camera moves too fast for the exposure | "Hold steadier" |
+| `outOfView` | The LiDAR depth along the image centre and four inner rays misses the box (without depth: its centre is not in the frame, 10% margin) | "Point at the box" |
+| `tooFar` | The box fills less than `focusMinFrameCoverage` (4%) of the frame | "Move closer" |
+| `sameView` | The view of the box has not changed by the detail level's spacing | "Move to a new angle" |
+
+Check (about 5 stills) finishes by itself at its target; Detail and Splat run until the operator
+stops.

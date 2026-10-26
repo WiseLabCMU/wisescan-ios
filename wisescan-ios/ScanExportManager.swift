@@ -565,7 +565,7 @@ struct ScanExportManager {
     /// Zeros person regions of one staged 16-bit depth map in place. Returns true when the
     /// masked PNG was written. (Split from the per-frame loop for the same autoreleasepool
     /// reason as `blurStagedImage`.)
-    private static func maskStagedDepth(named frameName: String, maskCGImage: CGImage,
+    static func maskStagedDepth(named frameName: String, maskCGImage: CGImage,
                                         depthDir: URL) -> Bool {
         let fm = FileManager.default
         let depthURL = depthDir.appendingPathComponent("\(frameName).png")
@@ -668,6 +668,11 @@ struct ScanExportManager {
                               bulkStitch: BulkStitchArtifacts? = nil,
                               phase: ((ExportPhase) -> Void)? = nil) -> URL? {
         let fm = FileManager.default
+        // A focus scan has one export, its still-capture folder, whatever the format
+        // (ScanExportManager+Focus). Every Save/Upload path reaches it through here.
+        if fm.fileExists(atPath: scanDir.appendingPathComponent(AppConstants.focusCaptureFolder).path) {
+            return prepareFocusExport(filename: filename, scanDir: scanDir, phase: phase)
+        }
         let rawDataDir = scanDir.appendingPathComponent("raw_data")
 
         // Locate scan4d_metadata.json
@@ -997,6 +1002,7 @@ struct ScanExportManager {
 
 extension CapturedScan {
     func makeExportFilename(format: ExportFormat) -> String {
+        let format = format.effective(for: self)   // a focus scan always ships its zip
         let locationName = self.location?.name.replacingOccurrences(of: " ", with: "_") ?? "Unknown_Location"
         let scanName = self.name.replacingOccurrences(of: " ", with: "_")
         let formatStr = format.rawValue.lowercased()

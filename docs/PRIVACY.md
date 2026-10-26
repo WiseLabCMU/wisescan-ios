@@ -22,11 +22,23 @@ Raw (unblurred) images exist temporarily in the app's sandboxed container betwee
 
 Person-shaped geometry is also excluded from the exported mesh, and a live on-screen indicator shows detected people during scanning. Mesh exports carry per-vertex colors sampled from the captured frames; with Privacy Filtering on, that sampling skips the same person masks (with a margin around each person), and skips any frame whose mask is missing, so no person's appearance is baked into the mesh colors. All privacy processing occurs entirely on-device.
 
+### Focus Scan Stills
+
+A focus scan (photos of one region) captures full-resolution stills without running ARKit's person
+segmentation during capture. When Privacy Filtering is enabled, every still receives a person check
+at export time instead: Vision's person segmentation runs on an upright copy of the still, detected
+person regions are pixelated on the full-resolution image, and the same regions are zeroed in its
+depth map. The check fails closed: a still that cannot be verified or blurred is left out of the
+export (with its depth and confidence), and the export lists it in `privacy_excluded.json`. A still
+with no person detected ships unchanged. Because nothing is filtered while capturing, the toggle stays
+live during a focus scan, and the scan records it as it stands when the scan stops (a change made
+mid-capture is noted in its `events.log`).
+
 ### 360° Camera Stills
 
 When an external 360° camera (e.g. Ricoh Theta) is connected, its equirectangular stills capture everyone around the operator — including people who never appeared in the phone's viewfinder. When Privacy Filtering is enabled, each still receives a person-privacy pass at export time: it is resampled into perspective cube faces, person segmentation runs per face, and detected person regions are pixelated on the full-resolution image before it is included in any export. A still that cannot be verified is excluded from the export entirely — with the filter on, raw 360° imagery never leaves the device.
 
-Disabling Privacy Filtering is an explicit, per-scan choice — supporting captures where people are the subject (for example a posed group-photo 3D model). The capture screen warns that people in view will be captured unblurred and that a 360° camera captures every direction, including behind the operator; the setting is locked for the duration of each scan; and each scan's privacy state is recorded in its export metadata (`privacy_filter`) so downstream processing can honor it.
+Disabling Privacy Filtering is an explicit, per-scan choice — supporting captures where people are the subject (for example a posed group-photo 3D model). The capture screen warns that people in view will be captured unblurred and that a 360° camera captures every direction, including behind the operator; the setting is locked for the duration of each room scan (a focus scan takes its value at Stop, see above); and each scan's privacy state is recorded in its export metadata (`privacy_filter`) so downstream processing can honor it.
 
 ## Location Data
 

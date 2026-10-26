@@ -1,5 +1,32 @@
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
+
+/// Which scans a space's list shows. Room scans are the ones you act on (process, color, rescan,
+/// connect); focus scans only save, upload and delete, so Room is the default. Remembered across
+/// spaces; the picker appears only in a space that has a focus scan.
+enum ScanListFilter: String, CaseIterable {
+    case room = "Room"
+    case focus = "Focus"
+    case all = "All"
+
+    func includes(_ kind: ScanKind) -> Bool {
+        switch self {
+        case .room: return kind == .room
+        case .focus: return kind == .focus
+        case .all: return true
+        }
+    }
+
+    /// A save is about to open its space: switch to the new scan's kind if the remembered filter
+    /// would hide it (All stays All).
+    static func reveal(_ kind: ScanKind) {
+        let defaults = UserDefaults.standard
+        let current = ScanListFilter(rawValue: defaults.string(forKey: AppConstants.Key.locationScanFilter) ?? "") ?? .room
+        guard !current.includes(kind) else { return }
+        defaults.set((kind == .focus ? ScanListFilter.focus : .room).rawValue, forKey: AppConstants.Key.locationScanFilter)
+    }
+}
 
 // swiftlint:disable type_body_length
 struct LocationDetailView: View {
@@ -46,12 +73,23 @@ struct LocationDetailView: View {
     /// hands each card its slice, mirroring `bulkColoringMessages`.
     @State private var bulkExportPhases: [PersistentIdentifier: ExportPhase] = [:]
 
+    @AppStorage(AppConstants.Key.locationScanFilter) private var scanFilterRaw = ScanListFilter.room.rawValue
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @State private var isBulkExporting = false
     @State private var exportItems: [ZipExportItem] = []
     @State private var showExportSheet = false
+    /// Rescan asks what to capture: the whole room, or a focus region (drawn in the editor, or
+    /// imported from a focus_region.json and opened in the editor to check).
+    @State private var showRescanChoice = false
+    @State private var showRegionEditor = false
+    @State private var showRegionImporter = false
+    @State private var importedRegion: FocusRegion?
+    @State private var regionImportError: String?
+    /// The region the editor's Scan returned; the focus scan starts once the editor has closed,
+    /// so the rescan's suspect-map confirm presents over this view, not a dismissing cover.
+    @State private var pendingFocusScan: FocusRegion?
 
     /// Composed from four independently type-checked pieces — same surgery as
     /// CaptureView.body (#56): measured at **14,345 ms** to type-check, second only to
@@ -63,13 +101,25 @@ struct LocationDetailView: View {
         detailDialogs(detailSheets(detailChrome(detailRoot)))
     }
 
+    /// The filter in force: the remembered one in a space with a focus scan, otherwise everything.
+    private var scanFilter: ScanListFilter {
+        guard location.scans.contains(where: \.isFocusScan) else { return .all }
+        return ScanListFilter(rawValue: scanFilterRaw) ?? .room
+    }
+
+    /// The scans the list shows (and selection and bulk actions cover), newest first.
+    private var visibleScans: [CapturedScan] {
+        let filter = scanFilter
+        return location.scans.filter { filter.includes($0.scanKind) }.sorted { $0.capturedAt > $1.capturedAt }
+    }
+
     /// The scan list itself (sorting statements included — hence @ViewBuilder).
     @ViewBuilder
     private var detailRoot: some View {
         // Sort once per body evaluation and reuse for both the scroll content and the
         // bottom toolbar (which is a sibling of the ScrollView). Previously this sort ran
         // twice per redraw — and redraws are frequent during uploads/selection toggles.
-        let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
+        let sortedScans = visibleScans
         ZStack {
             Color.black.ignoresSafeArea()
 
@@ -115,7 +165,7 @@ struct LocationDetailView: View {
                             }
                         }
 
-                        if !isEditing && !sortedScans.isEmpty {
+                        if !isEditing && !location.scans.isEmpty {
                             // Linked badge. Read straight off the object graph in body — it's a
                             // cheap in-memory walk of `location.scans` relationships (no disk I/O),
                             // and accessing those relationships here registers them as observation
@@ -135,13 +185,13 @@ struct LocationDetailView: View {
                             }
 
                             // Extend / Rescan Latest Scan
-                            if let latestScan = sortedScans.first,
+                            if let latestScan = location.latestRoomScan,
                                !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("ray ban") &&
                                !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("glass") {
                                 HStack(spacing: 12) {
-                                    // Rescan Space button
+                                    // Rescan Space: whole room or a focus region (showRescanChoice)
                                     Button(action: {
-                                        startRescan(latestScan)
+                                        showRescanChoice = true
                                     }, label: {
                                         HStack {
                                             Image(systemName: "plus.viewfinder")
@@ -199,12 +249,13 @@ struct LocationDetailView: View {
                     .padding(.top, 16)
 
                     // MARK: - Scan Cards
+                    scanFilterPicker
                     if sortedScans.isEmpty {
                         VStack(spacing: 16) {
                             Image(systemName: "tray")
                                 .font(.system(size: 48))
                                 .foregroundColor(.gray)
-                            Text("No scans found in this location.")
+                            Text(emptyListMessage)
                                 .foregroundColor(.gray)
                         }
                         .padding(.top, 60)
@@ -302,6 +353,36 @@ struct LocationDetailView: View {
         }
     }
 
+    /// Room / Focus / All, with counts, in a space that has a focus scan.
+    @ViewBuilder
+    private var scanFilterPicker: some View {
+        let focusCount = location.scans.filter(\.isFocusScan).count
+        if focusCount > 0 {
+            let counts: [ScanListFilter: Int] = [.room: location.scans.count - focusCount, .focus: focusCount,
+                                                 .all: location.scans.count]
+            Picker("Show", selection: $scanFilterRaw) {
+                ForEach(ScanListFilter.allCases, id: \.self) { filter in
+                    Text("\(filter.rawValue) (\(counts[filter] ?? 0))").tag(filter.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+            .colorScheme(.dark)
+            .padding(.horizontal)
+            // Selection and bulk actions cover what is shown: drop what the new filter hides.
+            .onChange(of: scanFilterRaw) { _, _ in
+                selectedScans.formIntersection(visibleScans.map(\.persistentModelID))
+            }
+        }
+    }
+
+    private var emptyListMessage: String {
+        switch scanFilter {
+        case .room where !location.scans.isEmpty: return "No room scans in this space."
+        case .focus where !location.scans.isEmpty: return "No focus scans in this space."
+        default: return "No scans found in this location."
+        }
+    }
+
     /// Navigation title/mode, toolbar, and the appear hook.
     private func detailChrome(_ content: some View) -> some View {
         content
@@ -311,14 +392,17 @@ struct LocationDetailView: View {
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 if isEditing {
+                    // Select All covers the scans the filter shows.
+                    let shown = Set<PersistentIdentifier>(visibleScans.map(\.persistentModelID))
+                    let allSelected = !shown.isEmpty && shown.isSubset(of: selectedScans)
                     Button(action: {
-                        if selectedScans.count == location.scans.count {
+                        if allSelected {
                             selectedScans.removeAll()
                         } else {
-                            selectedScans = Set(location.scans.map { $0.id })
+                            selectedScans = shown
                         }
                     }, label: {
-                        Text(selectedScans.count == location.scans.count ? "Deselect All" : "Select All")
+                        Text(allSelected ? "Deselect All" : "Select All")
                             .font(.subheadline)
                     })
                 }
@@ -356,6 +440,84 @@ struct LocationDetailView: View {
                 isBulkExporting = false
             }
         }
+        .fullScreenCover(isPresented: $showRegionEditor, onDismiss: {
+            importedRegion = nil
+            if let region = pendingFocusScan, let latest = location.latestRoomScan {
+                pendingFocusScan = nil
+                startRescan(latest, focus: region)
+            }
+        }) {
+            if let latest = location.latestRoomScan {
+                FocusRegionEditorView(scan: latest, initialRegion: importedRegion, onScan: { region in
+                    pendingFocusScan = region
+                    showRegionEditor = false
+                }, onCancel: { showRegionEditor = false })
+            }
+        }
+        .confirmationDialog("Rescan", isPresented: $showRescanChoice, titleVisibility: .visible) {
+            if let latest = location.latestRoomScan {
+                Button("Whole room") { startRescan(latest) }
+                Button("Focus on a region") { if focusScanGatesAllow(latest) { showRegionEditor = true } }
+                Button("Import a region file") { if focusScanGatesAllow(latest) { showRegionImporter = true } }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("A whole-room scan updates the room's mesh and photos. A focus scan photographs one region in detail (a partial scan).")
+        }
+        .fileImporter(isPresented: $showRegionImporter, allowedContentTypes: [.json]) { result in
+            importRegionFile(result)
+        }
+        .alert("Region not imported", isPresented: Binding(get: { regionImportError != nil },
+                                                           set: { if !$0 { regionImportError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(regionImportError ?? "")
+        }
+        // A region handed over by deep link for this space (ContentView opened it).
+        .onAppear { takeInboxRegion() }
+        .onChange(of: FocusRegionInbox.shared.pending) { _, _ in takeInboxRegion() }
+    }
+
+    /// A focus_region.json picked from Files: opened in the editor on this space's latest room
+    /// scan, to check and adjust before scanning.
+    private func importRegionFile(_ result: Result<URL, Error>) {
+        switch result {
+        case .failure(let error):
+            regionImportError = error.localizedDescription
+        case .success(let url):
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url) else {
+                regionImportError = "The file could not be read."
+                return
+            }
+            switch FocusRegionInbox.region(fromJSON: data) {
+            case .success(let region):
+                importedRegion = region
+                showRegionEditor = true
+            case .failure(let error):
+                regionImportError = error.localizedDescription
+            }
+        }
+    }
+
+    private func takeInboxRegion() {
+        guard let region = FocusRegionInbox.shared.pending, region.locationId == location.id,
+              let latest = location.latestRoomScan else { return }
+        FocusRegionInbox.shared.pending = nil
+        guard focusScanGatesAllow(latest) else { return }
+        importedRegion = region
+        showRegionEditor = true
+    }
+
+    /// The rescan's own gates (world map on disk, post-processing done), checked BEFORE a region
+    /// is drawn or imported, so a refusal never costs the operator a drawn box.
+    private func focusScanGatesAllow(_ latestScan: CapturedScan) -> Bool {
+        guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
+            showNoWorldMapAlert = true
+            return false
+        }
+        return postprocessGateAllows()
     }
 
     /// Rename/world-map alerts, the gate/bulk modifier stack, and the confirmation dialog.
@@ -560,6 +722,7 @@ struct LocationDetailView: View {
                 }
                 scan.uploadStatus = .zipping
                 let colorsFromCapture = scan.isColored
+                let contentType = format.effective(for: scan).contentType   // read on main (SwiftData)
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     let filename = scan.makeExportFilename(format: format)
@@ -582,7 +745,7 @@ struct LocationDetailView: View {
 
                     var request = URLRequest(url: url)
                     request.httpMethod = "PUT"
-                    request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
+                    request.setValue(contentType, forHTTPHeaderField: "Content-Type")
 
                     let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
                         try? FileManager.default.removeItem(at: exportURL)
@@ -759,7 +922,9 @@ struct LocationDetailView: View {
     /// guard first. DECISION 3 hard gate: the rescan consumes the LATEST scan's proxy/roomplan
     /// (ghost + auto-align reference) and the ORIGINAL's roomplan (registration target) — all
     /// post-process products. A suspect map (tracking excursion baked in) warns before proceeding.
-    private func startRescan(_ latestScan: CapturedScan) {
+    /// `focus`: a focus scan of that region, the identical rescan entry (same map, gates and
+    /// suspect-map confirm); only the capture view's Start differs (the still-capture branch).
+    private func startRescan(_ latestScan: CapturedScan, focus: FocusRegion? = nil) {
         guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
             showNoWorldMapAlert = true
             return
@@ -770,6 +935,8 @@ struct LocationDetailView: View {
             scanStore.activeRelocalizationMap = latestScan.worldMapURL
             scanStore.activeScanToExtend = latestScan.id
             scanStore.activeScanCase = .rescanSpace
+            scanStore.activeScanKind = focus == nil ? .room : .focus
+            scanStore.activeFocusRequest = focus.map { FocusCaptureRequest(region: $0) }
             selectedTab = 1
         }
         if latestScan.worldMapSuspect {
@@ -815,7 +982,7 @@ struct LocationDetailView: View {
     private func postprocessGateAllows() -> Bool {
         // Same deterministic comparator as ScanPostprocessor.original(of:) — on a capturedAt tie
         // the gate must bad-check the SAME scan registration will target.
-        let ordered = location.scans.sorted(by: CapturedScan.canonicalOrder)
+        let ordered = location.roomScans.sorted(by: CapturedScan.canonicalOrder)
         let prerequisites = [ordered.first, ordered.last].compactMap { $0 }
         if prerequisites.contains(where: { ScanPostprocessor.isBad($0) }) {
             showBadScanGate = true

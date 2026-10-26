@@ -38,6 +38,7 @@ enum AppConstants {
         static let privacyFilter = "privacyFilter"
         static let mockWearable = "mockWearable"
         static let selectedExportFormat = "selectedExportFormat"
+        static let locationScanFilter = "locationScanFilter"   // a space's scan list: Room / Focus / All (ScanListFilter)
         static let activeMeshColor = "activeMeshColor"
         static let ghostMeshColor = "ghostMeshColor"
         static let metaWearablesFPS = "metaWearablesFPS"
@@ -480,6 +481,107 @@ enum AppConstants {
     static let photoCoverageDebtMinVoxels: Int = 40            // min mesh voxels before the coverage-debt coach tip can fire (too little geometry below this)
     static let photoCoverageDebtFraction: Double = 0.3         // coach nudges "pause for photos" while photo coverage is below this fraction of mesh
     static let photoCoverageStandpointCell: Float = 0.5        // m — camera-position quantization for the per-voxel standpoint (parallax) mask
+
+    // ── AR still capture (EXPERIMENT: the capture-only branch of a rescan, see ARStillCaptureSession) ──
+    static let arStillFolder = "ARStillCaptures"               // Documents/<folder>/ — capture directories and their zips
+    static let arStillMaxExposureSeconds: Double = 1.0 / 120   // longest exposure auto exposure may use on ARKit's camera (activeMaxExposureDuration, clamped to the format); AE raises ISO instead. 1/120 integrates one 120 Hz mains-flicker cycle. 0 = no cap. An uncapped 1/30 s was blurry.
+    static let arStillMinIntervalSeconds: TimeInterval = 0     // hard floor between stills regardless of motion (0 = none)
+    static let arStillMaxIntervalSeconds: TimeInterval = 1.0   // also fire after this long without a still however little the view changed: a pause yields one still per second (unspaced, a pause gave 3-5 near-identical stills). 0 = one still per pause.
+    static let arStillIMUUpdateInterval: TimeInterval = 0.0001 // requested CoreMotion interval, far below any sensor's minimum, so the gyro and accelerometer run at the hardware maximum (CoreMotion clamps)
+    static let arStillStatsRefreshSeconds: TimeInterval = 0.5  // debug-panel counters refresh
+    static let arStillViewpointThresholdDeg: Double = 6         // next still once the view has rotated this much, OR a sideways move subtends this much at the scene (pose + LiDAR depth, so sidesteps count)
+    static let arStillJPEGQuality: CGFloat = 0.95              // still encode quality (the ARKit still arrives as raw YCbCr; we encode it)
+    static let arStillMaxPendingEncodes: Int = 2               // hold new stills while this many 12MP encodes are queued (each holds ~18 MB until written)
+    static let arStillGateMinConfidence: UInt8 = 1             // LiDAR confidence floor for the depth the gates use (0 low, 1 medium, 2 high)
+    static let arStillGateDepthPercentile: Double = 0.25       // gates use the nearer part of the scene: near content smears and shifts most
+    static let arStillVelocityWindowSeconds: TimeInterval = 0.1 // device velocity = pose difference over this window (ARKit pose jitter dominates shorter windows)
+    static let arStillDepthHoldSeconds: TimeInterval = 10      // through a scene-depth dropout the gates hold the last good near depth this long (keeps the sidestep and parallax terms), then fall back to rotation only
+    static let arStillDepthRequestCooldownSeconds: TimeInterval = 2 // while depth is missing, re-check the live configuration this often and re-request scene depth if a re-run dropped it
+    static let arStillGyroPeakWindowSeconds: TimeInterval = 0.05 // the blur gate also takes the gyro's peak rate over this window (the pose term's 0.1 s average smooths hand shake out). iPhone office replay: stills passing the gate that turned too fast at capture, 30% pose-only -> 21% with a 30 ms peak, 7% at 50 ms, 6% at 100 ms
+    static let arStillGyroHistoryCapacity: Int = 512           // gyro samples kept for the gate's peak and the per-still rate at capture (~5 s at 100 Hz; a still's completion lands within ~0.7 s of its exposure)
+    static let arStillBlurBudgetRad: Double = 0.0009           // blur gate on predicted IMAGE MOTION during the exposure, as an ANGLE (the larger of the pose term, rotation and translation as vectors at centre + corners at the near depth, and the gyro peak x exposure). 0.9 mrad = 3 px at the 12MP still's 3,346 px focal. Angular so a 48MP still is held to the same real sharpness (6 px) instead of silently twice as strict. The first capture's sharp stills moved up to 2.8 px (p90); replaying its motion, 3 px fired every 1.37 s vs 2.05 s for the original 2 px magnitude sum.
+    // Short exposure (both capture modes): instead of holding the exposure at arStillMaxExposureSeconds (1/120),
+    // shorten it to whatever reaches this ISO in the current light. The gate reads the real exposure, so it loosens in proportion.
+    // In dim light the cap settles back on 1/120. iPhone office capture: blur-free at ~2.4x the stills/s of a fixed 1/120, no banding
+    // found (daylight room); costs fine texture at high ISO (denoiser).
+    // Caveat: 1/120 integrates one full 120 Hz mains-flicker cycle; shorter exposures can band or pulse under flickering LED/fluorescent light.
+    static let arStillShortExposureISOCeiling: Double = 800   // the first capture's noise grew only as ISO^0.29 (0.45 -> ~1.1 of 255 over ISO 50-700; the ISP denoises)
+    static let arStillShortExposureFloorSeconds: Double = 1.0 / 500 // never shorter: at 1/500 the 3 px budget already allows ~26 deg/s; spacing and walking pace bind first
+    static let arStillShortExposureUpdateSeconds: TimeInterval = 0.3 // re-evaluate the cap this often; changes under 10% are ignored
+    // ── Room scan automatic stills (docs/design/capture-modes.md) ── replace the video-stream frames
+    static let roomScanAutoStills = true                       // 12MP stills fire on their own (blur gate + spacing); no stream frames are saved. The rig's tap still stays.
+    static let roomStillSpacingDeg: Double = 15                // next still once the view turned this much, or a sideways move subtends this at the near depth (focus Splat: 5)
+    static let roomStillWarmupSeconds: TimeInterval = 10       // none in the first seconds of recording: RoomPlan + segmentation model loads (the bring-up storm, capture-quality-triage.md)
+    static let roomStillWalkMeters: Double = 0.5               // ...or after walking this far (straight down a hallway turns nothing and has no parallax)
+    static let roomStillMinIntervalSeconds: TimeInterval = 0.5 // between automatic requests (a blur-rejected still saves nothing, so this times requests)
+    static let roomStillHotMinIntervalSeconds: TimeInterval = 2 // at thermal state serious or worse
+    static let roomStillSlowEncodeMs: Double = 400             // a 12MP encode slower than this means CPU contention...
+    static let roomStillBackoffSeconds: TimeInterval = 3       // ...or a frame gap: hold automatic stills this long
+    static let roomStillFrameGapSeconds: TimeInterval = 0.3    // ARKit frame timestamps jumping more than this between 0.1 s capture ticks = a stall
+
+    // ── Focus scan (docs/design/capture-modes.md) ── starting values per detail level, to tune from field captures
+    static let focusCheckSpacingDeg: Double = 25               // Check: next still once the view of the region changed this much (turn or parallax)
+    static let focusDetailSpacingDeg: Double = 12
+    static let focusSplatSpacingDeg: Double = 5                // Splat: the AR Capture experiment ran 6 deg; the iPhone replay favoured 4
+    static let focusCheckTargetStills: Int = 5                 // Check finishes by itself here ("which tools are on the table")
+    static let focusDetailTargetStills: Int = 30
+    static let focusSplatTargetStills: Int = 150
+    static let focusRegionMaxSizeM: Float = 10                 // a region larger than this on any side is rejected (a room scan's job)
+    static let focusRegionNearPlaneM: Double = 0.05            // a box corner this close to the camera (or behind it) means "up against the box"
+    static let focusRegionCentreMargin: Double = 0.1           // the box centre must project at least this far (fraction of the image) inside every edge
+    static let focusMinFrameCoverage: Double = 0.04            // and the box must fill at least this share of the frame (else "move closer"); not applied up close or inside the box
+    static let focusAimRayOffset: Double = 0.2                 // "looking at the region" = LiDAR depth along the image centre and 4 rays this far (fraction of the image) toward the corners lands in the box
+    static let focusAimWindowRadius: Int = 2                   // each aim point is the median of a (2r+1)^2 window of confident depth pixels
+    static let focusRegionAimMarginM: Float = 0.05             // the box counts this much larger for the aim test (surfaces on its faces)
+    static let focusCoverageAzimuthBins: Int = 12              // coverage dial: 30-degree sectors around the region
+    static let focusCoverageElevationEdgesDeg: [Double] = [20, 50] // and three rings: low (< 20 deg above the region's middle), mid, high (>= 50)
+    static let focusRegionURLScheme = "scan4d"                 // scan4d://focus-region?data=<base64url focus_region.json> (Custom-Info.plist CFBundleURLTypes)
+    static let focusRegionURLHost = "focus-region"
+    static let focusCaptureFolder = "focus_capture"            // a focus scan's still-capture dump, inside its scan folder
+    static let focusRegionFilename = "focus_region.json"       // its region, beside it (and at the export zip's root)
+    static let focusThumbnailMaxPixel: Int = 640               // card thumbnail: the best still, downsampled during decode
+    static let focusThumbnailIdealCoverage: Double = 0.35      // best still = the sharp one whose region share of the frame is nearest this
+    static let focusThumbnailJPEGQuality: CGFloat = 0.85
+    static let focusPrivacyWorkingMaxPixel: Int = 1024         // export person check: Vision runs on a decode this size (its model's working scale)
+    static let focusPrivacyDilateRadiusPx: Float = 24          // person mask grown by this many full-resolution pixels before pixelation (12MP stills)
+    static let focusPrivacyPixelateScale: Float = 60           // pixelation block size at 12MP (the 3MP frame pass uses 40)
+    // Focus scan HUD and AR box
+    static let focusHUDTopPadding: CGFloat = 96                // below the capture view's top status pills
+    static let focusHUDDialSize: CGFloat = 76
+    static let focusHUDBackgroundOpacity: Double = 0.6
+    static let focusHUDDialHoleFraction: CGFloat = 0.3         // the dial's empty middle, as a share of its radius (the region sits there)
+    static let focusHUDDialBoxFraction: CGFloat = 0.45         // the region square drawn in that middle, as a share of the hole
+    static let focusHUDDialGap: CGFloat = 1.5                  // points between rings
+    static let focusHUDDialGapDeg: Double = 2                  // degrees between sectors
+    static let focusHUDEmptyCellOpacity: Double = 0.18
+    static let focusHUDFilledCellMinOpacity: Double = 0.45     // a cell with one still; full green at its share of the target
+    static let focusHUDDialDotSize: CGFloat = 7                // the camera's current direction
+    static let focusBoxEdgeThicknessM: Float = 0.006           // AR wireframe edge of the region box
+    static let focusPhotoGridMinCell: CGFloat = 96             // focus scan photo grid
+    static let focusPhotoGridSpacing: CGFloat = 6
+    static let focusPhotoGridMaxPixel: CGFloat = 300
+    static let focusPhotoPagerMaxPixel: CGFloat = 2048         // full-screen still, downsampled to about screen size
+    static let focusStillUprightAspect: CGFloat = 0.75         // a 4:3 still held upright (portrait)
+    static let focusCardInsetSize: CGFloat = 64                // the room scan's preview in a focus scan's card
+    // Focus region editor (draw the box on a room scan's mesh)
+    static let focusRegionObjectMarginM: Float = 0.1           // a RoomPlan object's box grows by this on each side...
+    static let focusRegionObjectHeadroomM: Float = 0.4         // ...and this upward, for what sits on it (tools on a table)
+    static let focusRegionDefaultSizeM = SIMD3<Float>(0.8, 0.6, 0.8) // box dropped on a mesh tap
+    static let focusRegionDropSinkM: Float = 0.05              // that box's bottom sits this far below the tapped surface
+    static let focusRegionMinSizeM: Float = 0.1
+    static let focusRegionEditorMaxSizeM: Float = 4            // slider range; a region over this is a room scan's job
+    static let focusRegionEditorMoveRangeM: Float = 1          // position sliders move the box this far from where it was placed
+    static let focusEditorPanelOpacity: Double = 0.75
+    static let focusEditorLabelWidth: CGFloat = 96
+    static let focusEditorValueWidth: CGFloat = 64
+    static let focusEditorObjectOpacity: CGFloat = 0.12        // RoomPlan objects as faint tap targets
+    static let focusEditorRegionOpacity: CGFloat = 0.22
+    static let focusEditorEdgeThicknessM: Float = 0.01
+    static let focusEditorMinFramingM: Float = 2               // editor camera frames at least this much
+    static let focusEditorCameraRise: Float = 0.6              // camera placed this many room spans above the centre...
+    static let focusEditorCameraBack: Float = 0.8              // ...and this many back
+    static let exposureCapChangeTolerance: Double = 0.1       // CaptureExposurePolicy: a new short-exposure target within this fraction of the applied cap is ignored
+    static let exposureCapReapplyTolerance: Double = 0.02      // CaptureExposurePolicy: the device's cap drifted further than this from what was applied -> a session re-run reset it; re-apply
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)
     static let stillOverlapFloor: Double = 0.4                 // coach nudges "overlap your photos" while mean still-to-still overlap is below this (photogrammetry target ~0.6)
     static let stillParallaxDiversityFloor: Double = 0.15      // coach nudges "step sideways" while under this fraction of photo-covered voxels has ≥2 standpoints

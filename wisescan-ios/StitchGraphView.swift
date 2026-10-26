@@ -399,7 +399,7 @@ private struct CompactLocationTile: View {
     @State private var hasMissingWorldMap = false
 
     private var latestScan: CapturedScan? {
-        location.scans.max(by: { $0.capturedAt < $1.capturedAt })
+        location.latestRoomScan
     }
 
     var body: some View {
@@ -510,7 +510,7 @@ private struct CompactLocationTile: View {
             let fm = FileManager.default
             let url = [latest.modelPreviewURL, latest.thumbnailURL]
                 .first(where: { fm.fileExists(atPath: $0.path) }) ?? latest.thumbnailURL
-            let worldMapPaths = location.scans.map { $0.worldMapURL.path }
+            let worldMapPaths = location.roomScans.map { $0.worldMapURL.path }   // focus scans have no map by design
 
             let resolved = await Task.detached(priority: .utility) {
                 let fm = FileManager.default

@@ -88,6 +88,11 @@ extension MeshPreviewView {
         let globalFL = (root["fl_x"] as? NSNumber)?.floatValue ?? 0
         let globalW = (root["w"] as? NSNumber)?.floatValue ?? 0
 
+        // The poses are in the scan's RAW capture frame; a registered scan's mesh.obj was baked
+        // into the location's canonical frame, so lift the poses by the same transform or every
+        // wedge sits offset from the mesh by the registration (decimeters on a rescan).
+        let registration = appliedRegistration(scanDirectory: scanDir) ?? matrix_identity_float4x4
+
         var stillNodes: [SCNNode] = []
         var motionNodes: [SCNNode] = []
         // Frames overwhelmingly share intrinsics (per-session video format; stills one hi-res
@@ -129,18 +134,37 @@ extension MeshPreviewView {
                 geometryCache[cacheKey] = geometry
             }
             let node = makeFrustumNode(geometry: geometry)
-            node.simdTransform = pose
+            node.simdTransform = registration * pose
             if isStill { stillNodes.append(node) } else { motionNodes.append(node) }
         }
 
         // Build equirect face frustums from sidecar JSONs (pure pose math, no pixel data).
-        let equirectNodes = buildEquirectFaceNodes(scanDirectoryURL: scanDir, rigProfile: rigProfile)
+        let equirectNodes = buildEquirectFaceNodes(scanDirectoryURL: scanDir, rigProfile: rigProfile, registration: registration)
 
         return KeyframeMarkerNodes(
             stills: container(named: "keyframeStills", nodes: stillNodes),
             motion: container(named: "keyframeMotion", nodes: motionNodes),
             equirectFaces: equirectNodes
         )
+    }
+
+    /// The raw-to-canonical transform baked into this scan's mesh, from `registration.json`
+    /// (`SaveRegistration.Sidecar`: `applied` and a column-major `transform`), read directly so
+    /// this off-main builder touches nothing main-actor. nil when none was applied.
+    nonisolated static func appliedRegistration(scanDirectory: URL) -> simd_float4x4? {
+        let candidates = [scanDirectory.appendingPathComponent("registration.json"),
+                          scanDirectory.appendingPathComponent("raw_data").appendingPathComponent("registration.json")]
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            guard (json["applied"] as? Bool) == true,
+                  let values = (json["transform"] as? [NSNumber])?.map(\.floatValue), values.count == 16 else { return nil }
+            return simd_float4x4(SIMD4(values[0], values[1], values[2], values[3]),
+                                 SIMD4(values[4], values[5], values[6], values[7]),
+                                 SIMD4(values[8], values[9], values[10], values[11]),
+                                 SIMD4(values[12], values[13], values[14], values[15]))
+        }
+        return nil
     }
 
     /// Wraps marker nodes in a named container (nil if empty; positioned at attach time).
@@ -299,7 +323,8 @@ extension MeshPreviewView {
     /// camera's −Z (the equirect's front/identity direction). Replaced the 5-frustum
     /// rendering, which was too busy to read at a glance. Poses come from the sidecar's
     /// baked `cam_transform` (Process-step calibration) or the prior. Runs off-main.
-    private nonisolated static func buildEquirectFaceNodes(scanDirectoryURL: URL, rigProfile: RigProfile?) -> SCNNode? {
+    private nonisolated static func buildEquirectFaceNodes(scanDirectoryURL: URL, rigProfile: RigProfile?,
+                                                          registration: simd_float4x4 = matrix_identity_float4x4) -> SCNNode? {
         let fileMgr = FileManager.default
         let equirectDir = scanDirectoryURL
             .appendingPathComponent("raw_data")
@@ -351,7 +376,7 @@ extension MeshPreviewView {
             }
 
             let node = makeEquirectSphereNode(marker: marker)
-            node.simdTransform = camTransform
+            node.simdTransform = registration * camTransform   // raw capture frame -> the mesh's (see buildKeyframeMarkerNodes)
             allNodes.append(node)
         }
 

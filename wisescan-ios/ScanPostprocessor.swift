@@ -71,7 +71,7 @@ enum ScanPostprocessor {
     /// launches (the SwiftData relationship array is unordered); MeshPreviewView.canonicalFrameCenter
     /// uses the identical comparator so the two never disagree.
     static func original(of scan: CapturedScan) -> CapturedScan? {
-        scan.location?.scans.min(by: CapturedScan.canonicalOrder)
+        scan.location?.roomScans.min(by: CapturedScan.canonicalOrder)
     }
 
     /// Whether this scan should register into its location's canonical frame. Rescans yes; the
@@ -88,7 +88,7 @@ enum ScanPostprocessor {
     /// link-adjacent-typed LOCATIONS stay excluded via the location-level scanCase, which
     /// predates the per-scan field.
     static func wantsRegistration(_ scan: CapturedScan) -> Bool {
-        guard let orig = original(of: scan), orig.id != scan.id else { return false }
+        guard !scan.isFocusScan, let orig = original(of: scan), orig.id != scan.id else { return false }
         switch scan.scanCaseRaw {
         case ScanCase.rescanSpace.rawValue:
             return true
@@ -120,7 +120,7 @@ enum ScanPostprocessor {
         // Lite devices (no LiDAR) can never run RoomPlan: roomless is the NORM there, not a
         // failure — flagging it would false-warn every Lite scan and block Lite rescans.
         guard RoomCaptureSession.isSupported else { return false }
-        guard !scan.scanCaseRaw.isEmpty else { return false }
+        guard !scan.scanCaseRaw.isEmpty, !scan.isFocusScan else { return false }   // a focus scan has no room by design
         guard Date().timeIntervalSince(scan.capturedAt) > AppConstants.roomDataBadScanGraceSeconds else {
             return false
         }
@@ -138,6 +138,8 @@ enum ScanPostprocessor {
     /// re-running it against already-canonical artifacts would double-bake.
     static func pendingSteps(for scan: CapturedScan, includeColorize: Bool,
                              forceRebuild: Bool = false) -> [Step] {
+        // A focus scan is stills only: nothing room-derived, nothing to colour, complete as saved.
+        guard !scan.isFocusScan else { return [] }
         var steps: [Step] = []
         let fm = FileManager.default
         let roomDone = artifactURL("roomplan.json", in: scan) != nil
@@ -593,6 +595,7 @@ enum ScanPostprocessor {
         // disk first. A "latest only" selection may not include that original — pull in any
         // original with pending structural work so the batch is self-sufficient (the pulled-in
         // scan runs the same step set as the rest, colorize included per the toggle).
+        let scans = scans.filter { !$0.isFocusScan }   // nothing to post-process (see pendingSteps)
         var batch = scans
         var seen = Set(scans.map(\.id))
         for scan in scans {

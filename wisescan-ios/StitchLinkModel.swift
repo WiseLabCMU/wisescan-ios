@@ -375,7 +375,7 @@ enum StitchLinkStore {
         var changed = false
         for scan in deleteSet {
             guard let location = scan.location,
-                  let target = location.scans.filter({ !doomed.contains($0.id) }).min(by: CapturedScan.canonicalOrder)
+                  let target = location.roomScans.filter({ !doomed.contains($0.id) }).min(by: CapturedScan.canonicalOrder)
             else { continue }   // no surviving generation in this room → cascade bisects, as intended
             let tOld = SaveRegistration.appliedTransform(scanDirectory: scan.scanDirectory) ?? matrix_identity_float4x4
             let tNewInv = simd_inverse(SaveRegistration.appliedTransform(scanDirectory: target.scanDirectory) ?? matrix_identity_float4x4)

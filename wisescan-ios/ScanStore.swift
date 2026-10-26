@@ -38,6 +38,17 @@ class CapturedScan {
     /// rescan/link seated on this map can inherit an offset frame — the rescan/connect
     /// buttons warn before proceeding. Defaulted for lightweight migration of existing scans.
     var worldMapSuspect: Bool = false
+    /// `ScanKind` raw value: a room scan (mesh, RoomPlan, photos) or a focus scan (stills of one
+    /// region, no mesh or map of its own). "" for scans saved before focus scans existed: room.
+    var scanKindRaw: String = ""
+    /// Focus scans: the room scan whose world map the capture relocalized into, and so whose
+    /// frame its poses are in ("" otherwise).
+    var parentScanIdRaw: String = ""
+    /// Focus scans: the captured region as `FocusRegion` JSON ("" otherwise). Inline so cards
+    /// read it without file I/O; `focus_region.json` in the scan folder is the export copy.
+    var focusRegionJSON: String = ""
+    /// Focus scans: stills saved.
+    var stillCount: Int = 0
 
     @Relationship(inverse: \ScanLocation.scans)
     var location: ScanLocation?
@@ -108,6 +119,22 @@ class CapturedScan {
         }
     }
 
+    @Transient var scanKind: ScanKind {
+        get { ScanKind(rawValue: scanKindRaw) ?? .room }
+        set { scanKindRaw = newValue.rawValue }
+    }
+
+    /// Stills of one region: no mesh, world map or RoomPlan of its own. Never a relocalization
+    /// source, never the canonical frame owner, never post-processed or colored.
+    @Transient var isFocusScan: Bool { scanKind == .focus }
+
+    @Transient var parentScanId: UUID? { UUID(uuidString: parentScanIdRaw) }
+
+    @Transient var focusRegion: FocusRegion? {
+        get { focusRegionJSON.isEmpty ? nil : FocusRegion.decode(Data(focusRegionJSON.utf8)) }
+        set { focusRegionJSON = newValue?.encoded().flatMap { String(data: $0, encoding: .utf8) } ?? "" }
+    }
+
     @Transient var isUploaded: Bool { lastUploadedAt != nil }
 
     @Transient var formattedUploadDate: String? {
@@ -138,6 +165,11 @@ class CapturedScan {
     @Transient var modelPreviewURL: URL { scanDirectory.appendingPathComponent("model_preview.jpg") }
     @Transient var thumbnailURL: URL { scanDirectory.appendingPathComponent("thumbnail.jpg") }
     @Transient var rawDataPath: URL { scanDirectory.appendingPathComponent("raw_data") }
+
+    /// Focus scans: the still-capture dump (photos/, photo_depth/, photo_confidence/, CSVs, logs,
+    /// manifest.json), as `ARStillCaptureSession` wrote it.
+    @Transient var focusCaptureURL: URL { scanDirectory.appendingPathComponent(AppConstants.focusCaptureFolder) }
+    @Transient var focusRegionFileURL: URL { scanDirectory.appendingPathComponent(AppConstants.focusRegionFilename) }
 
     @Transient var roomPlanFileURL: URL { scanDirectory.appendingPathComponent("roomplan.json") }
     @Transient var roomPlanRawFileURL: URL { scanDirectory.appendingPathComponent("roomplan_raw.json") }
@@ -236,6 +268,13 @@ enum ExportFormat: String, CaseIterable, Codable {
         if let format = ExportFormat(rawValue: rawValue) { return format }
         return rawValue == "RAW" ? .nerfstudio : nil
     }
+
+    /// The format a scan actually exports in. A focus scan has one export, its still-capture zip
+    /// (`ScanExportManager.prepareFocusExport`), whatever format is selected, so its filename and
+    /// upload content type follow `.scan4d`'s zip.
+    func effective(for scan: CapturedScan) -> ExportFormat {
+        scan.isFocusScan ? .scan4d : self
+    }
 }
 
 /// One export-pipeline phase for UI: a human-readable label plus, when the phase is
@@ -311,6 +350,14 @@ enum ScanCase: String, Codable, CaseIterable {
     case linkAdjacent = "LinkAdjacent"
 }
 
+/// What a capture produces. A room scan records mesh, RoomPlan and photos of the whole space; a
+/// focus scan is full-resolution stills of one box-shaped region, with no mesh or RoomPlan of its
+/// own (docs/design/capture-modes.md). Stored raw on `CapturedScan`; "" (legacy) reads as room.
+enum ScanKind: String, Codable, CaseIterable {
+    case room = "Room"
+    case focus = "Focus"
+}
+
 // MARK: - Scan Hierarchy Model
 
 @Model
@@ -343,6 +390,16 @@ class ScanLocation {
             return ScanCase(rawValue: scanCaseStr) ?? .rescanSpace
         }
         set { scanCaseStr = newValue.rawValue }
+    }
+
+    /// The scans that carry the room: mesh, world map, RoomPlan. Everything that assumes those
+    /// (the original / canonical-frame owner, the rescan's map, the history scrubber, stitching,
+    /// post-processing) reads this, not `scans`; focus scans only appear in the scan list.
+    @Transient var roomScans: [CapturedScan] { scans.filter { !$0.isFocusScan } }
+
+    /// The newest room scan: a rescan's or focus scan's world map and ghost come from it.
+    @Transient var latestRoomScan: CapturedScan? {
+        roomScans.max(by: { $0.capturedAt < $1.capturedAt })
     }
 }
 
@@ -403,6 +460,15 @@ class ScanStore {
     var activeScanToExtend: UUID?
     /// Whether the user chose "Rescan Space" or "Link Adjacent Space".
     var activeScanCase: ScanCase = .rescanSpace
+    /// What this capture produces. Everything up to Start is the ordinary Rescan flow for both; at
+    /// Start a focus scan runs the still-capture branch (ARStillCaptureSession) instead of
+    /// recording mesh and RoomPlan. Cleared with the rest of the capture state.
+    var activeScanKind: ScanKind = .room
+    /// Focus scan: the region and detail level to capture (nil for a room scan).
+    var activeFocusRequest: FocusCaptureRequest?
+    /// A room scan is recording or a focus scan is capturing (mirrored from CaptureView's
+    /// `isCapturing`), so app-level navigation (a region deep link) can refuse to leave it.
+    var isCaptureActive = false
 
     // MARK: Capture Phase
 
@@ -421,6 +487,11 @@ class ScanStore {
     /// - **Mesh-ICP refine** (legacy, perfDiagnostics-only, engages only for scans with no proxy
     ///   artifact): a trusted correction queued to bake into the world origin at record-start.
     var icpAlignReady: ICPAlignReady?
+
+    /// The AR session has relocalized into the loaded world map and is still in its frame
+    /// (ARCoverageView.Coordinator.inMapFrame). A focus scan's region and stills are only
+    /// meaningful in that frame, so its Start waits for this.
+    var sessionInMapFrame = false
 
     /// Set by the VIO-compromised halt (`handleVIOCompromised`): tracking collapsed hard enough
     /// to kill the scan (snap storm / RoomPlan DriftDetection), so ARKit's internal map is
@@ -527,6 +598,8 @@ class ScanStore {
         activeRelocalizationMap = nil
         activeScanToExtend = nil
         activeScanCase = .rescanSpace
+        activeScanKind = .room
+        activeFocusRequest = nil
         capturePhase = .idle
         boundaryAnchorTransform = nil
         boundaryAnchorId = nil

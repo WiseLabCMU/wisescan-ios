@@ -2,6 +2,7 @@ import Foundation
 import ARKit
 import UIKit
 import AudioToolbox
+import CoreMotion
 import Observation
 import os
 
@@ -119,6 +120,9 @@ class FrameCaptureSession {
     private(set) var totalCapturedFrameCount: Int = 0
     /// Time of last sharp frame capture (for ScanCoach "pause for photo" guidance).
     private(set) var lastSharpFrameTime: Date?
+    /// Stills that announced themselves (shutter click, flash): the tapped rig stills. Automatic
+    /// stills land quietly, about one a second, so the capture view's flash keys off this.
+    private(set) var shutterFeedbackCount = 0
 
     // ── High-resolution keyframe capture ──
     // While the AR video stream runs a standard mesh-friendly format (1920×1440),
@@ -145,6 +149,59 @@ class FrameCaptureSession {
     /// blurs the photo — the sharpness gate rejects those and retries (bounded), and after
     /// the budget we accept the best we got with its measured quality recorded.
     private var keyframeRetryCount = 0
+
+    // ── Automatic room stills (docs/design/capture-modes.md) ──
+    // A room scan no longer saves video-stream frames (shared auto exposure up to 1/30 s: blurred
+    // at walking pace). Instead 12MP stills fire on their own, under the focus scan's blur gate
+    // (pose term + gyro peak against the angular budget) and exposure policy, spaced by
+    // `roomStillSpacingDeg` of turn or parallax, one in flight. Protecting tracking: none in the
+    // first `roomStillWarmupSeconds` (model-load storm), a back-off after a slow encode or an
+    // ARKit frame gap, a longer minimum interval when hot. Mock captures keep the stream path.
+    // All main-thread (the capture tick and the hi-res completion's main hops).
+    struct AutoStillStats {
+        var requested = 0
+        var saved = 0
+        var heldBlur = 0
+        var heldSpacing = 0
+        var slowEncodes = 0
+        var frameGaps = 0
+    }
+    @ObservationIgnored private var autoStillsActive = false
+    @ObservationIgnored private var recordingStartTimestamp: TimeInterval = -1
+    @ObservationIgnored private var lastTickTransform: simd_float4x4?
+    @ObservationIgnored private var lastTickTimestamp: TimeInterval = -1
+    @ObservationIgnored private var lastStillTransform: simd_float4x4?
+    @ObservationIgnored private var lastStillTimestamp: TimeInterval = -1
+    /// The last automatic request, for the minimum interval: a blur-rejected still saves nothing,
+    /// so timing from the last SAVED still would let rejections repeat back to back.
+    @ObservationIgnored private var lastAutoRequestTimestamp: TimeInterval = -1
+    /// Stillness (reticle, rig tap) measures motion against a held pose, as it did when stream
+    /// frames were saved: re-anchored only once the camera moves past the overlap threshold, so
+    /// a held pose averages sway out instead of judging every 0.1 s tick on its own.
+    @ObservationIgnored private var stillnessBase: (transform: simd_float4x4, time: TimeInterval)?
+    /// The hi-res still in flight is an automatic one; a rig tap arriving meanwhile adopts it as
+    /// the tap's phone still instead of being refused.
+    @ObservationIgnored private var hiResInFlightAutomatic = false
+    @ObservationIgnored private var adoptInFlightStillForTap = false
+    /// No automatic still before this (seconds since boot, the ARFrame clock).
+    @ObservationIgnored private var autoStillBackoffUntil: TimeInterval = -1
+    /// Read by the metadata writer on the I/O queue, so behind a lock.
+    @ObservationIgnored private let autoStillStats = OSAllocatedUnfairLock(initialState: AutoStillStats())
+    @ObservationIgnored private var motion: CMMotionManager?
+    @ObservationIgnored private let motionQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        queue.qualityOfService = .userInitiated
+        queue.name = "com.scan4d.capture.motion"
+        return queue
+    }()
+    @ObservationIgnored private let gyroHistory = OSAllocatedUnfairLock(
+        initialState: ARStillCaptureGates.GyroHistory(capacity: AppConstants.arStillGyroHistoryCapacity))
+    /// The exposure cap on ARKit's camera for the recording (shared with the focus scan).
+    let exposurePolicy = CaptureExposurePolicy()
+    /// The AR view's per-frame handler time while recording (its coordinator feeds it).
+    let delegateWorkMeter = DelegateWorkMeter()
+
     /// A saved sharp keyframe (hi-res still or stream fallback), as delivered to the
     /// coverage overlay via `onKeyframeCaptured`.
     struct KeyframeStill {
@@ -177,7 +234,18 @@ class FrameCaptureSession {
         // each with its own shutter click (2026-07-23 field reports ×2) — and every extra
         // cycle sustains the hi-res encode load behind the mid-scan starvation class
         // (triage item 3). To deliberately re-shoot a spot: move slightly and settle again.
-        guard !isStillCapturePending, !hiResCaptureInFlight, !hasStillnessKeyframe else { return false }
+        guard !isStillCapturePending, !hasStillnessKeyframe else { return false }
+        if hiResCaptureInFlight {
+            // An automatic still already on its way from this pause becomes the tap's phone still
+            // (its completion gives the tap's feedback); any other in-flight still refuses the tap.
+            guard hiResInFlightAutomatic, !adoptInFlightStillForTap else { return false }
+            adoptInFlightStillForTap = true
+            hasStillnessKeyframe = true
+            stillCaptureRequested = true
+            isStillCapturePending = true
+            keyframeRetryCount = 0
+            return true
+        }
         stillCaptureRequested = true
         isStillCapturePending = true
         // Fresh blur-retry allowance for this tap (failure paths manage their own re-arms).
@@ -386,6 +454,7 @@ class FrameCaptureSession {
         self.stillCaptureRequested = false
         self.isStillCapturePending = false
         self.sharpFrameCount = 0
+        self.shutterFeedbackCount = 0
         self.totalCapturedFrameCount = 0
         self.lastSharpFrameTime = nil
         self.hiResCaptureInFlight = false
@@ -420,6 +489,29 @@ class FrameCaptureSession {
         self.isMockingImages = mockCameraImages
         self.isMockingDepth = mockDepthMaps
         self.testSequenceIndex = 0
+
+        // Automatic stills (and with them the exposure cap and the gyro) for real captures only.
+        autoStillsActive = AppConstants.roomScanAutoStills && !mockIMU && !mockCameraImages
+        recordingStartTimestamp = -1
+        lastTickTransform = nil
+        lastTickTimestamp = -1
+        lastStillTransform = nil
+        lastStillTimestamp = -1
+        lastAutoRequestTimestamp = -1
+        stillnessBase = nil
+        hiResInFlightAutomatic = false
+        adoptInFlightStillForTap = false
+        autoStillBackoffUntil = -1
+        autoStillStats.withLock { $0 = AutoStillStats() }
+        gyroHistory.withLock { $0 = ARStillCaptureGates.GyroHistory(capacity: AppConstants.arStillGyroHistoryCapacity) }
+        delegateWorkMeter.begin()
+        if autoStillsActive {
+            exposurePolicy.onEvent = { message in
+                if PerfDiag.enabled { PerfDiag.log("[RoomStills] \(message)") }
+            }
+            exposurePolicy.begin()
+            startGyro()
+        }
 
         // Check for new frames at 10fps, but only capture when sufficient movement
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -458,6 +550,7 @@ class FrameCaptureSession {
         timer?.invalidate()
         timer = nil
         captureEnded = true // a late hi-res completion must not save past this point
+        endAutoStills()
     }
 
     /// Abandon the in-progress capture without finalizing: stop the timer and delete the capture
@@ -466,6 +559,7 @@ class FrameCaptureSession {
         timer?.invalidate()
         timer = nil
         captureEnded = true
+        endAutoStills()
         let dir = captureDir
         ioQueue.async {
             if let dir = dir { try? FileManager.default.removeItem(at: dir) }
@@ -517,18 +611,54 @@ class FrameCaptureSession {
         // Checks both translational velocity (fast walking) AND rotational velocity
         // (panning in place) — the rotational check catches the common indoor scanning
         // pattern where users stand still but rotate quickly.
+        //
+        // With automatic stills nothing is saved between stills, so motion is measured tick to
+        // tick (0.1 s) instead of against the last saved frame. The same ARFrame seen twice (a
+        // tick faster than the stream) carries no motion information, so that tick is skipped.
+        let previousTick = lastTickTransform.map { (transform: $0, time: lastTickTimestamp) }
+        if autoStillsActive {
+            if let previousTick, frameTimestamp <= previousTick.time { return }
+            if let previousTick, frameTimestamp - previousTick.time > AppConstants.roomStillFrameGapSeconds {
+                // ARKit's frames (or the main thread) stalled: hold the stills a moment, since
+                // their capture and encode may be part of the load.
+                autoStillBackoffUntil = frameTimestamp + AppConstants.roomStillBackoffSeconds
+                autoStillStats.withLock { $0.frameGaps += 1 }
+                if PerfDiag.enabled {
+                    PerfDiag.log(String(format: "[RoomStills] frame gap %.0f ms: stills held %.0f s",
+                                        (frameTimestamp - previousTick.time) * 1000, AppConstants.roomStillBackoffSeconds))
+                }
+            }
+            lastTickTransform = transform
+            lastTickTimestamp = frameTimestamp
+            if recordingStartTimestamp < 0 { recordingStartTimestamp = frameTimestamp }
+        }
+        // Stillness and the motion warning keep their old baseline semantics (see stillnessBase);
+        // the automatic stills' blur gate uses the tick (`previousTick`) plus the gyro.
+        let motionBase: (transform: simd_float4x4, time: TimeInterval)? = autoStillsActive
+            ? stillnessBase
+            : lastCaptureTransform.map { (transform: $0, time: lastCaptureTime) }
         var velocity: Float = 0
         var angularVelocity: Float = 0
         var hasMotionBaseline = false
-        if !isMockingIMU, let lastTransform = lastCaptureTransform {
-            let timeDelta = frameTimestamp - lastCaptureTime
+        if !isMockingIMU, let base = motionBase {
+            let timeDelta = frameTimestamp - base.time
             if timeDelta > 0 {
-                velocity = cameraMovement(from: lastTransform, to: transform) / Float(timeDelta)
-                angularVelocity = extractRotationAngle(from: lastTransform, to: transform) / Float(timeDelta)
+                velocity = cameraMovement(from: base.transform, to: transform) / Float(timeDelta)
+                angularVelocity = extractRotationAngle(from: base.transform, to: transform) / Float(timeDelta)
                 hasMotionBaseline = true
             }
         }
+        if autoStillsActive {
+            // Re-anchor once past the same movement threshold that used to decide a stream save.
+            let threshold = Float(Double(AppConstants.overlapBaseThreshold) * (1.0 - overlapMax / 100.0)) + AppConstants.overlapMinThreshold
+            if stillnessBase.map({ cameraMovement(from: $0.transform, to: transform) >= threshold }) ?? true {
+                stillnessBase = (transform: transform, time: frameTimestamp)
+            }
+        }
         let trackingNormal = trackingState == nil || trackingState == .normal
+        if autoStillsActive && trackingNormal {
+            exposurePolicy.update(at: frameTimestamp)
+        }
 
         // ── Stillness detection ──
         // Still only when we have a motion baseline, tracking is reliable, and both
@@ -621,6 +751,15 @@ class FrameCaptureSession {
             isStillnessKeyframe = true
         }
 
+        // A room scan with automatic stills saves stills only (plus the rig's tap-armed still
+        // above); video-stream frames are no longer written.
+        if autoStillsActive && !isStillnessKeyframe {
+            if let frame {
+                considerAutoStill(session: session, frame: frame, previousTick: previousTick, confirmedStill: confirmedStill)
+            }
+            return
+        }
+
         // Skip frame if camera hasn't moved enough (based on overlap setting).
         // Never skips a tap-requested keyframe — the tap is explicit intent.
         if !isStillnessKeyframe, let lastTransform = lastCaptureTransform {
@@ -701,11 +840,123 @@ class FrameCaptureSession {
         if progress != stillnessProgress {
             DispatchQueue.main.async { self.stillnessProgress = progress }
         }
-        // Play audio + haptic feedback on stillness transitions
-        if confirmedStill && !wasStill {
+        // Play audio + haptic feedback on stillness transitions: the hold-still-then-tap rhythm,
+        // so only where a tap captures (the 360° rig) once phone stills are automatic.
+        if confirmedStill && !wasStill && (!autoStillsActive || rigLeverArmMeters != nil) {
             playStillnessChime()
         }
         return confirmedStill
+    }
+
+    /// One capture tick's automatic-still decision (main thread). Gates, in order: tracking,
+    /// warm-up, back-off, one in flight (with the hi-res watchdog), minimum interval (longer when
+    /// hot), the blur gate, then spacing since the last saved still. A pause yields one still;
+    /// there is no time trigger.
+    private func considerAutoStill(session: ARSession, frame: ARFrame,
+                                   previousTick: (transform: simd_float4x4, time: TimeInterval)?,
+                                   confirmedStill: Bool) {
+        guard !captureEnded, frame.camera.trackingState == .normal else { return }
+        // On the 360° rig a held pause belongs to the tap (phone + 360° pair), not to the
+        // automatic stills.
+        guard !(confirmedStill && rigLeverArmMeters != nil) else { return }
+        let t = frame.timestamp
+        guard recordingStartTimestamp >= 0, t - recordingStartTimestamp >= AppConstants.roomStillWarmupSeconds,
+              t >= autoStillBackoffUntil else { return }
+        if hiResCaptureInFlight {
+            // Watchdog: a dropped completion (session interruption) must not stall stills for
+            // the rest of the scan. A zombie completion landing later costs one extra still.
+            guard let requested = hiResRequestTime, t - requested > AppConstants.hiResCaptureTimeoutSeconds else { return }
+            print("[FrameCapture] Automatic still timed out after \(Int(AppConstants.hiResCaptureTimeoutSeconds))s — re-arming")
+            hiResCaptureInFlight = false
+            adoptInFlightStillForTap = false
+        }
+        let hot = ProcessInfo.processInfo.thermalState.rawValue >= ProcessInfo.ThermalState.serious.rawValue
+        let minInterval = hot ? AppConstants.roomStillHotMinIntervalSeconds : AppConstants.roomStillMinIntervalSeconds
+        let sinceLast = lastStillTimestamp < 0 ? Double.infinity : t - lastStillTimestamp
+        let sinceRequest = lastAutoRequestTimestamp < 0 ? Double.infinity : t - lastAutoRequestTimestamp
+        guard sinceLast >= minInterval, sinceRequest >= minInterval else { return }
+
+        // Blur gate: image motion as an angle, the larger of the pose term (rotation and
+        // sideways motion at the near depth, over the last tick) and the gyro's recent peak.
+        let camera = frame.camera
+        let exposure = camera.exposureDuration
+        let nearDepth = frame.sceneDepth.flatMap { ARStillCaptureSession.sampleDepth($0) } ?? 0
+        var poseSmear = 0.0
+        if let previousTick, t > previousTick.time, nearDepth > 0, camera.intrinsics[0][0] > 0 {
+            poseSmear = ARStillCaptureGates.imageMotionSmear(
+                from: previousTick.transform, to: camera.transform, dt: t - previousTick.time,
+                depth: nearDepth, exposure: exposure, focalPx: 1,
+                halfWidthNorm: Double(camera.imageResolution.width) / 2 / Double(camera.intrinsics[0][0]),
+                halfHeightNorm: Double(camera.imageResolution.height) / 2 / Double(camera.intrinsics[1][1]))
+        }
+        let gyroPeak = gyroHistory.withLock { $0.peak(window: AppConstants.arStillGyroPeakWindowSeconds) }
+        if exposure > 0, max(poseSmear, gyroPeak * exposure) > AppConstants.arStillBlurBudgetRad {
+            autoStillStats.withLock { $0.heldBlur += 1 }
+            return
+        }
+
+        // Spacing: a new view since the last saved still, by turn or by parallax at the near depth,
+        // or by walking far enough (straight down a hallway turns nothing and has no parallax).
+        let view = lastStillTransform.map {
+            ARStillCaptureGates.viewpointChange(from: $0, to: camera.transform, depth: nearDepth)
+        } ?? (rotationDeg: 0.0, parallaxDeg: 0.0)
+        let walked = lastStillTransform.map {
+            Double(simd_distance(ARStillCaptureGates.position($0), ARStillCaptureGates.position(camera.transform)))
+        } ?? 0
+        let newView = ARStillCaptureGates.spacingDecision(
+            sinceLast: sinceLast, rotationDeg: view.rotationDeg, parallaxDeg: view.parallaxDeg,
+            minInterval: 0, viewpointThresholdDeg: AppConstants.roomStillSpacingDeg, maxInterval: 0) != nil
+        guard newView || walked >= AppConstants.roomStillWalkMeters else {
+            autoStillStats.withLock { $0.heldSpacing += 1 }
+            return
+        }
+
+        autoStillStats.withLock { $0.requested += 1 }
+        lastAutoRequestTimestamp = t
+        if !hiResUnavailable {
+            hiResRequestTime = t
+            requestHighResolutionKeyframe(from: session, automatic: true)
+            return
+        }
+        // Hi-res latched off for this session: the stream frame is the still (the fallback the
+        // tap path has always had).
+        let pixelBuffer = frame.capturedImage
+        let camW = CVPixelBufferGetWidth(pixelBuffer), camH = CVPixelBufferGetHeight(pixelBuffer)
+        let admitted = processAndSaveFrame(
+            pixelBuffer: pixelBuffer, camW: camW, camH: camH,
+            transform: camera.transform, intrinsics: camera.intrinsics,
+            depthMap: frame.sceneDepth?.depthMap, confidenceMap: frame.sceneDepth?.confidenceMap,
+            segBuffer: privacyFilter ? frame.segmentationBuffer : nil,
+            currentIndex: 0, isKeyframe: true)
+        if admitted {
+            noteKeyframeSaved(transform: camera.transform, intrinsics: camera.intrinsics, width: camW, height: camH,
+                              depthMap: frame.sceneDepth?.depthMap, feedback: false)
+        }
+    }
+
+    /// The gyro feeding the automatic stills' blur gate (its recent peak rate).
+    private func startGyro() {
+        let manager = motion ?? CMMotionManager()
+        motion = manager
+        guard manager.isGyroAvailable else { return }
+        manager.gyroUpdateInterval = AppConstants.arStillIMUUpdateInterval
+        let history = gyroHistory
+        manager.startGyroUpdates(to: motionQueue) { data, _ in
+            guard let data else { return }
+            let r = data.rotationRate
+            let rate = (r.x * r.x + r.y * r.y + r.z * r.z).squareRoot()
+            let time = data.timestamp
+            history.withLock { $0.append(time: time, rate: rate) }
+        }
+    }
+
+    /// Recording over: gyro off, the camera's exposure limit back to its default, timing stopped.
+    private func endAutoStills() {
+        motion?.stopGyroUpdates()
+        delegateWorkMeter.end()
+        if autoStillsActive {
+            exposurePolicy.restore()
+        }
     }
 
     /// Shared bookkeeping for a saved stillness keyframe (hi-res still or stream
@@ -716,13 +967,21 @@ class FrameCaptureSession {
         intrinsics: simd_float3x3,
         width: Int,
         height: Int,
-        depthMap: CVPixelBuffer?
+        depthMap: CVPixelBuffer?,
+        feedback: Bool = true
     ) {
         sharpFrameCount += 1
         totalCapturedFrameCount += 1
         lastSharpFrameTime = Date()
-        clearStillCaptureRequest() // the tapped request delivered its still
-        playShutterClick()
+        // Every saved still anchors the automatic stills' spacing, tapped ones included.
+        lastStillTransform = transform
+        lastStillTimestamp = ProcessInfo.processInfo.systemUptime
+        if !feedback { autoStillStats.withLock { $0.saved += 1 } }   // automatic ones (tapped are counted as keyframes)
+        if feedback {
+            clearStillCaptureRequest() // the tapped request delivered its still
+            playShutterClick()
+            shutterFeedbackCount += 1
+        }
         onKeyframeCaptured?(KeyframeStill(
             transform: transform, intrinsics: intrinsics,
             width: width, height: height, depthMap: depthMap
@@ -733,14 +992,19 @@ class FrameCaptureSession {
     /// keyframe for the current stillness period. The AR video stream is unaffected — this
     /// is how we get 4K+ sharp frames without switching to a hiRes video format (which
     /// breaks Recon3D mesh integration on iPads).
-    private func requestHighResolutionKeyframe(from session: ARSession) {
+    /// `automatic`: a room scan's automatic still (no shutter feedback; a slow encode backs the
+    /// automatic stills off for `roomStillBackoffSeconds`).
+    private func requestHighResolutionKeyframe(from session: ARSession, automatic: Bool = false) {
         hiResCaptureInFlight = true
+        hiResInFlightAutomatic = automatic
+        adoptInFlightStillForTap = false
         session.captureHighResolutionFrame { [weak self] frame, error in
             guard let self = self else { return }
 
             guard let frame = frame, error == nil else {
                 DispatchQueue.main.async {
                     self.hiResCaptureInFlight = false
+                    self.adoptInFlightStillForTap = false
                     self.hiResFailureCount += 1
                     print("[FrameCapture] Hi-res capture failed (\(error?.localizedDescription ?? "nil frame")) — attempt \(self.hiResFailureCount)/\(AppConstants.hiResMaxFailures)")
                     // Transient failures happen (session interruptions, RoomPlan
@@ -799,6 +1063,7 @@ class FrameCaptureSession {
                 DispatchQueue.main.async {
                     guard !self.captureEnded else {
                         self.hiResCaptureInFlight = false
+                        self.adoptInFlightStillForTap = false
                         return
                     }
                     if sharpness < AppConstants.keyframeSharpnessFloor,
@@ -807,6 +1072,7 @@ class FrameCaptureSession {
                         // (bounded). No shutter feedback for a rejected still.
                         self.keyframeRetryCount += 1
                         self.hiResCaptureInFlight = false
+                        self.adoptInFlightStillForTap = false
                         self.hasStillnessKeyframe = false
                         print("[FrameCapture] Keyframe below sharpness floor (\(String(format: "%.0f", sharpness)) < \(String(format: "%.0f", AppConstants.keyframeSharpnessFloor))) — retry \(self.keyframeRetryCount)/\(AppConstants.keyframeMaxRetries)")
                         return
@@ -815,10 +1081,27 @@ class FrameCaptureSession {
                     // Accepted (sharp enough, or retry budget exhausted — keep the best we
                     // got, with its measured quality recorded for downstream weighting).
                     self.keyframeEncodeQueue.async {
-                        guard let keyframeJPEG = PerfDiag.timed("jpeg_encode_hires", warnOverMs: 250, { self.hiResKeyframeJPEG(from: pixelBuffer) }) else {
+                        let encodeStart = CFAbsoluteTimeGetCurrent()
+                        let encoded = PerfDiag.timed("jpeg_encode_hires", warnOverMs: 250, { self.hiResKeyframeJPEG(from: pixelBuffer) })
+                        let encodeMs = (CFAbsoluteTimeGetCurrent() - encodeStart) * 1000
+                        if automatic, encodeMs > AppConstants.roomStillSlowEncodeMs {
+                            // The encode is contending with mesh, RoomPlan and segmentation for the
+                            // CPU (a 1.2 s one once held 11-13 ARFrames and re-initialized tracking):
+                            // give the session room before the next still.
+                            DispatchQueue.main.async {
+                                self.autoStillBackoffUntil = ProcessInfo.processInfo.systemUptime + AppConstants.roomStillBackoffSeconds
+                                self.autoStillStats.withLock { $0.slowEncodes += 1 }
+                                if PerfDiag.enabled {
+                                    PerfDiag.log(String(format: "[RoomStills] slow encode %.0f ms: stills held %.0f s",
+                                                        encodeMs, AppConstants.roomStillBackoffSeconds))
+                                }
+                            }
+                        }
+                        guard let keyframeJPEG = encoded else {
                             print("[FrameCapture] Hi-res keyframe JPEG encode failed — dropping")
                             DispatchQueue.main.async {
                                 self.hiResCaptureInFlight = false
+                                self.adoptInFlightStillForTap = false
                                 self.hasStillnessKeyframe = false // let the stillness period retry
                             }
                             return
@@ -826,6 +1109,9 @@ class FrameCaptureSession {
 
                         DispatchQueue.main.async {
                             self.hiResCaptureInFlight = false
+                            // An automatic still a rig tap adopted gives the tap's feedback.
+                            let adoptedByTap = self.adoptInFlightStillForTap
+                            self.adoptInFlightStillForTap = false
                             self.hiResFailureCount = 0
                             // Recording may have stopped while the encode ran — the metadata
                             // writers have already run, so a late save would write an orphan
@@ -850,7 +1136,8 @@ class FrameCaptureSession {
                             // Feedback and coverage marking only for frames that actually entered
                             // the save pipeline — a backlog drop re-arms the stillness period instead.
                             if admitted {
-                                self.noteKeyframeSaved(transform: transform, intrinsics: intrinsics, width: camW, height: camH, depthMap: depthMap)
+                                self.noteKeyframeSaved(transform: transform, intrinsics: intrinsics, width: camW, height: camH,
+                                                       depthMap: depthMap, feedback: !automatic || adoptedByTap)
                             } else {
                                 self.hasStillnessKeyframe = false
                             }
@@ -943,6 +1230,10 @@ class FrameCaptureSession {
         // starvation and must not be dropped by transient stream backlog. Stream-fallback
         // keyframes (hiResUnavailable latched) DO carry the live-pool buffer, so they queue
         // like any stream frame.
+        // With automatic stills there are no stream frames to seed the session-global intrinsics
+        // (transforms.json and the Polycam cameras are written only once they exist), so the first
+        // still seeds them: every image of the session is then a still.
+        let stillsSeedGlobals = autoStillsActive
         let exemptKeyframe = isKeyframe && preEncodedJPEG != nil
         let admittedDepth: Int? = inFlightSaves.withLock { count -> Int? in
             guard exemptKeyframe || count < AppConstants.maxFramesInFlight else { return nil }
@@ -1104,7 +1395,7 @@ class FrameCaptureSession {
                 // Session-global intrinsics describe the video stream. Hi-res keyframes have
                 // different dimensions/intrinsics, so never let one seed the globals — writers
                 // emit per-frame overrides for frames that differ from the globals.
-                if self.globalIntrinsics == nil && !isKeyframe {
+                if self.globalIntrinsics == nil && (!isKeyframe || stillsSeedGlobals) {
                     self.imageWidth = camW
                     self.imageHeight = camH
                     self.globalIntrinsics = frameIntrinsics
@@ -1208,8 +1499,12 @@ class FrameCaptureSession {
             if frame.hasDepth { entry["depth_file_path"] = "depth/frame_\(paddedIndex).png" }
             if frame.hasConfidence { entry["confidence_file_path"] = "confidence/frame_\(paddedIndex).png" }
             // Hi-res keyframes differ from the session-global (video stream) resolution:
-            // emit per-frame intrinsics/dimensions, which Nerfstudio reads as overrides.
-            if frame.width != imageWidth || frame.height != imageHeight {
+            // emit per-frame intrinsics/dimensions, which Nerfstudio reads as overrides. With
+            // automatic stills the first still seeds the globals, so stills of the same size
+            // still carry their own values whenever ARKit's focal or principal point moved.
+            if frame.width != imageWidth || frame.height != imageHeight
+                || frame.intrinsics.fx != intrinsics.fx || frame.intrinsics.fy != intrinsics.fy
+                || frame.intrinsics.cx != intrinsics.cx || frame.intrinsics.cy != intrinsics.cy {
                 entry["fl_x"] = frame.intrinsics.fx
                 entry["fl_y"] = frame.intrinsics.fy
                 entry["cx"] = frame.intrinsics.cx
@@ -1360,6 +1655,24 @@ class FrameCaptureSession {
         // Sharp stillness keyframes (hi-res stills when supported) — counted from the frames
         // array (ioQueue-owned) rather than the main-thread UI counter to avoid a data race.
         metadata["keyframe_count"] = frames.filter { $0.isKeyframe }.count
+
+        // Automatic stills (docs/design/capture-modes.md): how the gates behaved, the exposure
+        // cap they ran under, and what the AR delegate's per-frame work cost while recording.
+        if autoStillsActive {
+            let stills = autoStillStats.withLock { $0 }
+            let cap = exposurePolicy.report
+            metadata["auto_stills"] = [
+                "requested": stills.requested, "saved": stills.saved,
+                "ticks_held_blur": stills.heldBlur, "ticks_held_spacing": stills.heldSpacing,
+                "slow_encode_backoffs": stills.slowEncodes, "frame_gap_backoffs": stills.frameGaps,
+                "spacing_deg": AppConstants.roomStillSpacingDeg,
+                "warmup_s": AppConstants.roomStillWarmupSeconds,
+                "blur_budget_rad": AppConstants.arStillBlurBudgetRad,
+                "exposure_cap_s": cap.appliedSeconds,
+                "exposure_cap_note": cap.note
+            ] as [String: Any]
+        }
+        metadata["frame_work_ms"] = delegateWorkMeter.snapshot.summary
 
         // Photo-coverage voxel stats: how much of the depth-scanned geometry was covered
         // by sharp keyframes. Lets the backend triage datasets (low fraction = splat

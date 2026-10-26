@@ -618,6 +618,7 @@ struct ScansListView: View {
                 scan.uploadStatus = .zipping
                 let scanDir = scan.scanDirectory
                 let colorsFromCapture = scan.isColored
+                let contentType = format.effective(for: scan).contentType   // read on main (SwiftData)
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     guard let exportURL = ScanExportManager.prepareExport(
@@ -639,7 +640,7 @@ struct ScansListView: View {
 
                     var request = URLRequest(url: url)
                     request.httpMethod = "PUT"
-                    request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
+                    request.setValue(contentType, forHTTPHeaderField: "Content-Type")
 
                     let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
                         try? FileManager.default.removeItem(at: exportURL)
@@ -834,7 +835,16 @@ struct LocationGridTile: View {
     var latestScan: CapturedScan? {
         // Single O(n) pass with no intermediate sorted-array allocation; this is read
         // multiple times per body evaluation.
-        location.scans.max(by: { $0.capturedAt < $1.capturedAt })
+        // Room scans: the tile shows the room, and its world-map checks are a room scan's.
+        location.latestRoomScan
+    }
+
+    /// "3 scans", or "3 room · 2 focus" once the space has focus scans.
+    private var scanCountLabel: String {
+        let total = location.scans.count
+        let focus = location.scans.filter(\.isFocusScan).count
+        guard focus > 0 else { return "\(total) scan\(total == 1 ? "" : "s")" }
+        return "\(total - focus) room · \(focus) focus"
     }
 
     /// Any scan's world map flagged suspect at save (tracking excursion baked into the
@@ -882,7 +892,7 @@ struct LocationGridTile: View {
                     .lineLimit(1)
 
                 HStack {
-                    Text("\(location.scans.count) scan\(location.scans.count == 1 ? "" : "s")")
+                    Text(scanCountLabel)
                         .font(.caption2)
                         .foregroundColor(.white.opacity(0.7))
                     Spacer()
@@ -955,8 +965,8 @@ struct LocationGridTile: View {
             }
             let previewURL = latest.modelPreviewURL
             let fallbackURL = latest.thumbnailURL
-            let worldMapPaths = location.scans.map { $0.worldMapURL.path }
-            let rawDirs = location.scans.map { $0.rawDataPath }
+            let worldMapPaths = location.roomScans.map { $0.worldMapURL.path }   // focus scans have no map by design
+            let rawDirs = location.roomScans.map { $0.rawDataPath }
 
             // Missing-worldmap flag off-main.
             hasMissingWorldMap = await Task.detached(priority: .utility) {
@@ -1029,6 +1039,10 @@ struct ScanCard: View {
     @State private var exportPhase: ExportPhase?
     /// DECISION 3 hard gate: upload requires this scan post-processed.
     @State private var showPostprocessAlert = false
+    /// Focus scans: the photo viewer (in place of the mesh preview), and the room scan the
+    /// capture relocalized into, shown small beside the photo.
+    @State private var showFocusPhotos = false
+    @State private var parentPreviewImage: UIImage?
 
     private var selectedFormat: ExportFormat {
         get { ExportFormat.persisted(selectedFormatStr) ?? .polycam }
@@ -1148,6 +1162,25 @@ struct ScanCard: View {
             Text("The scan data may have been deleted.")
         }
         .task(id: scan.id) {
+            // A focus scan's data is its still-capture folder: count stills and depth there and
+            // size the folder; it has no map, so nothing is "missing".
+            if scan.isFocusScan {
+                let captureDir = scan.focusCaptureURL
+                let focus = await Task.detached(priority: .utility) { () -> (counts: (Int, Int, Int, Int, Int, Int), sizeMB: Double) in
+                    let fm = FileManager.default
+                    func count(_ sub: String) -> Int {
+                        (try? fm.contentsOfDirectory(atPath: captureDir.appendingPathComponent(sub).path))?.count ?? 0
+                    }
+                    let files = (fm.enumerator(at: captureDir, includingPropertiesForKeys: [.fileSizeKey])?.allObjects as? [URL]) ?? []
+                    let bytes = files.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+                    let photos = count("photos")
+                    return ((photos, 0, count("photo_depth"), count("photo_confidence"), 0, 0), Double(bytes) / (1024.0 * 1024.0))
+                }.value
+                itemCounts = focus.counts
+                isRelocMissing = false
+                sizeMB = focus.sizeMB
+                return
+            }
             // Resolve all disk-derived values off the main thread in a single detached
             // pass, so the view body performs no synchronous FileManager I/O during
             // layout/scroll (previously: previewURL existence, reloc-warning existence,
@@ -1198,12 +1231,22 @@ struct ScanCard: View {
             } else {
                 previewImage = await ThumbnailCache.image(for: thumbURL)
             }
+            // A focus scan's photo is the thumbnail above; the inset is its room scan's preview.
+            if scan.isFocusScan, let parentId = scan.parentScanId,
+               let parent = scan.location?.scans.first(where: { $0.id == parentId }) {
+                let parentPreview = parent.modelPreviewURL, parentThumb = parent.thumbnailURL
+                if let img = await ThumbnailCache.image(for: parentPreview) {
+                    parentPreviewImage = img
+                } else {
+                    parentPreviewImage = await ThumbnailCache.image(for: parentThumb)
+                }
+            }
         }
     }
 
     @ViewBuilder
     private var previewImageSection: some View {
-        Button(action: { showMeshPreview = true }) {
+        Button(action: { if scan.isFocusScan { showFocusPhotos = true } else { showMeshPreview = true } }) {
             Group {
                 if let image = previewImage {
                     Image(uiImage: image)
@@ -1225,6 +1268,18 @@ struct ScanCard: View {
         .contentShape(Rectangle())
         .overlay(editingOverlay)
         .overlay(alignment: .topLeading) { warningsOverlay }
+        .overlay(alignment: .bottomLeading) { focusScanOverlay }
+        .fullScreenCover(isPresented: $showFocusPhotos) {
+            NavigationView {
+                FocusScanPhotosView(scan: scan)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("Done") { showFocusPhotos = false }
+                        }
+                    }
+            }
+        }
         .overlay {
             if let msg = activeColoringMessage {
                 ZStack {
@@ -1260,8 +1315,43 @@ struct ScanCard: View {
         }
     }
 
+    /// Focus scans: what kind of scan this is (it looks like nothing else in the list: no mesh, no
+    /// reconstruction), and the room scan it was taken in, small, under the photo.
+    @ViewBuilder
+    private var focusScanOverlay: some View {
+        if scan.isFocusScan {
+            HStack(alignment: .bottom, spacing: 6) {
+                if let parent = parentPreviewImage {
+                    Image(uiImage: parent)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: AppConstants.focusCardInsetSize, height: AppConstants.focusCardInsetSize)
+                        .clipped()
+                        .cornerRadius(6)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.yellow.opacity(0.8), lineWidth: 1))
+                }
+                Label("Focus · partial", systemImage: "scope")
+                    .font(.caption2.bold())
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.yellow)
+                    .cornerRadius(6)
+            }
+            .padding(8)
+            .allowsHitTesting(false)
+        }
+    }
+
     @ViewBuilder
     private var warningsOverlay: some View {
+        if !scan.isFocusScan {
+            roomScanWarnings
+        }
+    }
+
+    @ViewBuilder
+    private var roomScanWarnings: some View {
         VStack(alignment: .leading, spacing: 6) {
             if isRelocMissing {
                 warningBadge(color: .yellow) { showMissingRelocAlert = true }
@@ -1320,12 +1410,25 @@ struct ScanCard: View {
                 Text(scan.name)
                     .font(.subheadline).bold()
                     .foregroundColor(.white)
-                HStack(spacing: 8) {
-                    Text(String(format: "%.1f MB", sizeMB))
-                    Text("\(formattedCount(scan.faceCount)) polys")
+                if scan.isFocusScan, let region = scan.focusRegion {
+                    Text(region.displayName)
+                        .font(.caption.bold())
+                        .foregroundColor(.yellow)
+                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text(String(format: "%.1f MB", sizeMB))
+                        Text("\(scan.stillCount) photos · \(region.detail.title)")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.7))
+                } else {
+                    HStack(spacing: 8) {
+                        Text(String(format: "%.1f MB", sizeMB))
+                        Text("\(formattedCount(scan.faceCount)) polys")
+                    }
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.7))
                 }
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.7))
                 Text(scan.timeSinceCapture)
                     .font(.caption)
                     .foregroundColor(.white.opacity(0.7))
@@ -1427,7 +1530,8 @@ struct ScanCard: View {
             // deferred RoomBuilder often lands roomplan.json after auto-process ran,
             // leaving registration/proxy pending; that used to cost a mystery first
             // click). Manual re-runs live in the long-press menu for recovery cases.
-            do {
+            // A focus scan has nothing to color or process.
+            if !scan.isFocusScan {
                 let processDisabled = isEditing || activeColoringMessage != nil
                 Menu {
                     Button(action: { reRunProcessing() }, label: {
@@ -1638,6 +1742,7 @@ struct ScanCard: View {
         // Capture scan directory on main thread (SwiftData models aren't thread-safe)
         let scanDir = scan.scanDirectory
         let colorsFromCapture = scan.isColored
+        let contentType = format.effective(for: scan).contentType
         print("[Upload] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
         guard FileManager.default.fileExists(atPath: scanDir.path) else {
             scan.uploadStatus = .failed("No scan data")
@@ -1669,7 +1774,7 @@ struct ScanCard: View {
             // Upload natively via streaming
             var request = URLRequest(url: url)
             request.httpMethod = "PUT"
-            request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
+            request.setValue(contentType, forHTTPHeaderField: "Content-Type")
 
             // Track upload progress using KVO
             class ObserverBox { var observer: NSKeyValueObservation? }
