@@ -280,9 +280,9 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(files.count, 3)
     }
 
-    /// Only the spaces sent with Sync are reported, plus those started since the phone joined; a
-    /// stitch goes when both of its spaces do.
-    func testOnlySyncedAndNewSpacesAreReported() throws {
+    /// The spaces sent with Sync are reported, plus what Auto sync adds (all, those started since
+    /// the phone joined, or none); a stitch goes when both of its spaces do.
+    func testOnlySyncedAndAutoSyncedSpacesAreReported() throws {
         let context = try StitchTestSupport.makeInMemoryContext()
         let old = StitchTestSupport.makeLocation(id: UUID(), name: "Old", scanId: UUID(), in: context)
         let sent = StitchTestSupport.makeLocation(id: UUID(), name: "Sent", scanId: UUID(), in: context)
@@ -301,13 +301,18 @@ final class ControlPlaneTests: XCTestCase {
         let locations = [old.location, sent.location, new.location]
         let joined = Date(timeIntervalSince1970: 1_000)
 
-        let reported = ControlPlaneSync.spacesToReport(locations, synced: [sent.location.id], newSince: joined)
-        XCTAssertEqual(Set(reported.map(\.id)), [sent.location.id, new.location.id])
-        let tapOnly = ControlPlaneSync.spacesToReport(locations, synced: [sent.location.id], newSince: nil)
-        XCTAssertEqual(tapOnly.map(\.id), [sent.location.id])
+        func reported(_ mode: ControlPlaneAutoSync) -> Set<UUID> {
+            Set(ControlPlaneSync.spacesToReport(locations, synced: [sent.location.id],
+                                                newSince: mode.newSince(joinedAt: joined)).map(\.id))
+        }
+        XCTAssertEqual(reported(.all), [old.location.id, sent.location.id, new.location.id])
+        XCTAssertEqual(reported(.new), [sent.location.id, new.location.id])
+        XCTAssertEqual(reported(.off), [sent.location.id])
+        // Before the first sync nothing is new yet: only what was sent.
+        XCTAssertNil(ControlPlaneAutoSync.new.newSince(joinedAt: nil))
 
         let links = ControlPlaneSync.linksToReport(try context.fetch(FetchDescriptor<StitchLink>()),
-                                                   spaces: Set(reported.map(\.id)))
+                                                   spaces: reported(.new))
         XCTAssertEqual(links.count, 1)
         let ends = Set([links.first?.endpointAScan?.id, links.first?.endpointBScan?.id].compactMap { $0 })
         XCTAssertEqual(ends, [sent.scan.id, new.scan.id])

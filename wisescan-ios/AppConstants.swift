@@ -35,7 +35,7 @@ enum AppConstants {
         static let controlPlaneOpenTasks = "controlPlaneOpenTasks"    // the to-do list as of the last sync (JSON), shown while the server can't be reached
         static let controlPlaneTaskAnswers = "controlPlaneTaskAnswers" // open/decline answers the server hasn't had yet, sent with the next sync
         static let controlPlaneSyncedSpaces = "controlPlaneSyncedSpaces" // ids of the spaces reported to the control plane (Sync on a space or stitched map)
-        static let controlPlaneSyncNewSpaces = "controlPlaneSyncNewSpaces" // spaces started after the phone joined sync without a tap
+        static let controlPlaneAutoSync = "controlPlaneAutoSync"      // which spaces start syncing without a tap: all / new / off (ControlPlaneAutoSync)
         static let controlPlaneJoinedAt = "controlPlaneJoinedAt"      // first successful sync (seconds since 1970): what counts as a new space
         static let controlPlaneSendPackages = "controlPlaneSendPackages" // upload map packages (mesh, room layout, relocalization map) the server asks for
         static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
@@ -659,7 +659,7 @@ enum AppConstants {
     static let controlPlaneUploadBypassS: TimeInterval = 60      // after the control plane is unreachable, exports go straight to the Upload URL this long
     static let controlPlaneUploadTimeoutS: TimeInterval = 60     // idle time allowed mid map-package upload (tens of MB)
     static let controlPlaneSendPackages = true                   // map packages go up with the sync unless turned off
-    static let controlPlaneSyncNewSpaces = true                  // new spaces sync on their own; the backlog from before joining waits for Sync
+    static let controlPlaneAutoSync = "new"                      // new spaces sync on their own; the backlog from before joining waits for Sync
     static let controlPlaneLargeFileBytes: Int64 = 5_000_000     // package files this big go up only on an unmetered network (Wi-Fi)
     static let controlPlanePollIntervalS: Double = 300           // while the app is open, sync this often so the lab's requests are picked up
 }

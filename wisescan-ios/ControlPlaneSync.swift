@@ -4,7 +4,35 @@ import SwiftData
 
 // MARK: - When and how the app syncs with the control plane (scan4d-server README, "Sync")
 
-/// Sends the whole local inventory (`ControlPlaneManifest`) to the control plane: on launch and
+/// Which spaces start syncing without a tap (Settings → Auto sync). A synced space keeps syncing
+/// in every mode; this only decides which spaces become synced besides the Sync buttons.
+nonisolated enum ControlPlaneAutoSync: String, CaseIterable, Sendable {
+    /// Every space on the phone, the backlog from before it joined too.
+    case all
+    /// Spaces started after the phone joined (its first successful sync).
+    case new
+    /// Only the spaces sent with Sync.
+    case off
+
+    var title: String {
+        switch self {
+        case .all: return "All"
+        case .new: return "New"
+        case .off: return "Off"
+        }
+    }
+
+    /// A space whose first scan is at or after this syncs on its own; nil: none does.
+    func newSince(joinedAt: Date?) -> Date? {
+        switch self {
+        case .all: return .distantPast
+        case .new: return joinedAt
+        case .off: return nil
+        }
+    }
+}
+
+/// Sends the synced spaces' inventory (`ControlPlaneManifest`) to the control plane: on launch and
 /// return to the foreground, a few seconds after SwiftData saves (coalesced), and from Settings.
 /// Then uploads the map-package files the server answers that it wants, one at a time (Settings →
 /// Send map packages). Never during a capture: a request then waits for the capture to end, so
@@ -39,7 +67,7 @@ final class ControlPlaneSync {
     private(set) var waitingForWiFi = 0
 
     /// The spaces this phone reports: the ones sent with Sync (a space, or a stitched map in the
-    /// graph view) and, while new spaces sync on their own, those started after the phone joined.
+    /// graph view) and those Auto sync picked up (all, or the ones started after the phone joined).
     /// The rest stay off the server; an export's Upload is separate.
     private(set) var syncedSpaces: Set<UUID> = ControlPlaneSync.storedSpaces()
 
@@ -64,9 +92,9 @@ final class ControlPlaneSync {
             ?? AppConstants.controlPlaneSendPackages
     }
     var client: ControlPlaneClient? { ControlPlaneClient.baseURL(fromHost: host).map { ControlPlaneClient(baseURL: $0) } }
-    var syncNewSpaces: Bool {
-        UserDefaults.standard.object(forKey: AppConstants.Key.controlPlaneSyncNewSpaces) as? Bool
-            ?? AppConstants.controlPlaneSyncNewSpaces
+    var autoSync: ControlPlaneAutoSync {
+        ControlPlaneAutoSync(rawValue: UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneAutoSync)
+                             ?? AppConstants.controlPlaneAutoSync) ?? .new
     }
     /// The first successful sync: a space whose first scan comes after it is new.
     var joinedAt: Date? {
@@ -137,7 +165,7 @@ final class ControlPlaneSync {
         let allLocations = (try? context.fetch(FetchDescriptor<ScanLocation>())) ?? []
         let allLinks = (try? context.fetch(FetchDescriptor<StitchLink>())) ?? []
         let locations = Self.spacesToReport(allLocations, synced: syncedSpaces,
-                                            newSince: syncNewSpaces ? joinedAt : nil)
+                                            newSince: autoSync.newSince(joinedAt: joinedAt))
         let reported = Set(locations.map(\.id))
         if !reported.isSubset(of: syncedSpaces) {
             setSyncedSpaces(syncedSpaces.union(reported))   // a new space, once reported, stays synced

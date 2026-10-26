@@ -8,7 +8,7 @@ struct ControlPlaneSettingsSection: View {
     @AppStorage(AppConstants.Key.controlPlaneDeviceLabel) private var deviceLabel = ""
     @AppStorage(AppConstants.Key.controlPlaneSendPackages) private var sendPackages = AppConstants.controlPlaneSendPackages
     @AppStorage(AppConstants.Key.controlPlaneAllowUntrusted) private var allowUntrusted = false
-    @AppStorage(AppConstants.Key.controlPlaneSyncNewSpaces) private var syncNewSpaces = AppConstants.controlPlaneSyncNewSpaces
+    @AppStorage(AppConstants.Key.controlPlaneAutoSync) private var autoSyncRaw = AppConstants.controlPlaneAutoSync
     @State private var password = ControlPlaneSecret.password
     @State private var connectionMessage: String?
     @State private var isTesting = false
@@ -55,9 +55,19 @@ struct ControlPlaneSettingsSection: View {
             .padding(.vertical, 4)
 
             VStack(alignment: .leading, spacing: 4) {
-                Toggle("Sync new spaces automatically", isOn: $syncNewSpaces)
-                    .foregroundColor(.white)
-                Text("Spaces started after this phone joined the server sync on their own. Earlier ones go when you tap Sync to Lab Server in the space, or Sync on a stitched map in the graph view. Once synced, a space keeps syncing. \(sync.syncedSpaces.count) space(s) synced so far.")
+                HStack {
+                    Text("Auto sync")
+                        .foregroundColor(.white)
+                    Spacer()
+                    Picker("Auto sync", selection: $autoSyncRaw) {
+                        ForEach(ControlPlaneAutoSync.allCases, id: \.self) { mode in
+                            Text(mode.title).tag(mode.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .fixedSize()
+                }
+                Text("\(autoSyncCaption) Once synced, a space keeps syncing. \(sync.syncedSpaces.count) space(s) synced so far.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
@@ -131,7 +141,7 @@ struct ControlPlaneSettingsSection: View {
         .onChange(of: sendPackages) { _, _ in
             sync.requestSync(after: .seconds(1))
         }
-        .onChange(of: syncNewSpaces) { _, _ in
+        .onChange(of: autoSyncRaw) { _, _ in
             sync.requestSync(after: .seconds(1))
         }
         .onChange(of: allowUntrusted) { _, _ in
@@ -148,6 +158,15 @@ struct ControlPlaneSettingsSection: View {
         ControlPlaneSecret.setPassword(password)
         connectionMessage = nil
         sync.requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
+    }
+
+    /// What Auto sync does in the chosen mode.
+    private var autoSyncCaption: String {
+        switch ControlPlaneAutoSync(rawValue: autoSyncRaw) ?? .new {
+        case .all: return "Every space on this phone syncs on its own, those from before it joined too."
+        case .new: return "Spaces started after this phone joined sync on their own; earlier ones go when you tap Sync to Lab Server in the space, or Sync on a stitched map in the graph view."
+        case .off: return "Only the spaces you send with Sync to Lab Server in a space, or Sync on a stitched map in the graph view."
+        }
     }
 
     /// Where the Upload buttons send exports, once a sync has said.
