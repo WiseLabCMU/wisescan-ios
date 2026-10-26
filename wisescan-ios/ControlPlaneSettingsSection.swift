@@ -139,7 +139,9 @@ struct ControlPlaneSettingsSection: View {
 
     /// Where the Upload buttons send exports, once a sync has said.
     private var uploadsLine: String? {
-        guard !host.isEmpty, let target = sync.uploadTarget else { return nil }
+        guard !host.isEmpty else { return nil }
+        if case .failed = sync.status { return "While the control plane isn't working, exports go to the upload URL above, if one is set." }
+        guard let target = sync.uploadTarget else { return nil }
         if target.revoked { return "Uploads are turned off for this device on the control plane." }
         if target.available { return "Exports upload to the lab bucket \(target.bucket ?? "") through the control plane." }
         return "The control plane has no upload target: exports use the upload URL above."

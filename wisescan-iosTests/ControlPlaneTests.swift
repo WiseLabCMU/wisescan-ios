@@ -166,6 +166,27 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertFalse(ExportUploadTarget.isConfigured(manualURL: "", controlPlaneHost: ""))
     }
 
+    /// Without a working control plane an export goes where it did before one existed.
+    func testDeadControlPlaneFallsBackToTheUploadURL() async throws {
+        let defaults = UserDefaults.standard
+        let saved = defaults.string(forKey: AppConstants.Key.controlPlaneHost)
+        defer { defaults.set(saved, forKey: AppConstants.Key.controlPlaneHost) }
+        defaults.set("127.0.0.1:9", forKey: AppConstants.Key.controlPlaneHost)   // nothing listens: refused at once
+        let target = try await ExportUploadTarget.resolve(
+            scanId: UUID(), filename: "a.zip", contentType: "application/zip", format: .scan4d,
+            manualURL: "https://wiselambda4.lan.cmu.edu/wisescan-uploads/")
+        XCTAssertEqual(target.request.url?.absoluteString, "https://wiselambda4.lan.cmu.edu/wisescan-uploads/a.zip")
+        XCTAssertNil(target.exportId)
+        // With no Upload URL there is nothing to fall back to: the control plane's reason surfaces.
+        do {
+            _ = try await ExportUploadTarget.resolve(scanId: UUID(), filename: "a.zip", contentType: "application/zip",
+                                                     format: .scan4d, manualURL: "")
+            XCTFail("expected the control plane's error")
+        } catch {
+            XCTAssertNotNil(error as? ControlPlaneClient.Failure, "\(error)")
+        }
+    }
+
     /// The certificate override is scoped to hosts the control plane named.
     func testTrustIsOnlyForNamedHosts() {
         ControlPlaneSession.allow(host: "Versity.LAN.cmu.edu")

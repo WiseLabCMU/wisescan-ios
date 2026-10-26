@@ -6,8 +6,10 @@ import Foundation
 /// into the lab's Versity bucket, under this device's `exports/<format>/` in the shared working
 /// directory, so no bucket credentials live on the phone and uploads can be revoked per device.
 /// When the PUT succeeds, `reportCompleted` tells the server, which checks the bucket and signals
-/// its pipelines. The manual Upload URL (Settings) is the fallback: with no control plane, or one
-/// with no upload target.
+/// its pipelines. Without a working control plane uploads behave as they did before one existed:
+/// they go to the manual Upload URL (Settings; the lab's default bucket on TestFlight). That covers
+/// no host, an unreachable or failing one, a wrong password, and a server with no upload target.
+/// Only a revocation (403) stops them, since falling back would defeat it.
 nonisolated struct ExportUploadTarget: Sendable {
     /// The PUT, its headers set; the caller streams the export file with it.
     let request: URLRequest
@@ -47,10 +49,16 @@ nonisolated struct ExportUploadTarget: Sendable {
             || ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil
     }
 
+    /// Set when the control plane could not be reached: until then the uploads that have a manual
+    /// URL skip it, so a bulk upload does not wait out the request timeout once per scan.
+    @MainActor private static var unreachableUntil: Date?
+
     @MainActor
     static func resolve(scanId: UUID, filename: String, contentType: String, format: ExportFormat,
                         manualURL: String) async throws -> ExportUploadTarget {
-        if let client = ControlPlaneSync.shared.client {
+        let fallback = manual(manualURL, filename: filename, contentType: contentType)
+        let skip = fallback != nil && (unreachableUntil.map { $0 > .now } ?? false)
+        if let client = ControlPlaneSync.shared.client, !skip {
             do {
                 let grant = try await client.exportGrant(deviceId: DeviceIdentity.id, scanId: scanId, filename: filename,
                                                          contentType: contentType, format: format.rawValue)
@@ -59,18 +67,23 @@ nonisolated struct ExportUploadTarget: Sendable {
                 for (field, value) in grant.headers {
                     request.setValue(value, forHTTPHeaderField: field)
                 }
+                unreachableUntil = nil
                 return ExportUploadTarget(request: request, session: ControlPlaneSession.session,
                                           exportId: grant.exportId, client: client)
             } catch ControlPlaneClient.Failure.server(let status, _) where status == 403 {
                 throw Failure.revoked
-            } catch ControlPlaneClient.Failure.server(let status, _) where status == 503 && !manualURL.isEmpty {
-                // The control plane has no upload target: the manual URL stands in.
+            } catch {
+                // No grant: the manual URL stands in, or, without one, the reason is the error.
+                guard let fallback else { throw error }
+                if case ControlPlaneClient.Failure.unreachable = error {
+                    unreachableUntil = Date.now + AppConstants.controlPlaneUploadBypassS
+                }
+                print("[ControlPlane] no upload grant (\(error.localizedDescription)); using the Upload URL")
+                return fallback
             }
         }
-        guard let target = manual(manualURL, filename: filename, contentType: contentType) else {
-            throw Failure.nowhere
-        }
-        return target
+        guard let fallback else { throw Failure.nowhere }
+        return fallback
     }
 
     /// The manual Upload URL: a plain PUT of the file under it.

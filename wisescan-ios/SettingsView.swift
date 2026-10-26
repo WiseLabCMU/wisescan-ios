@@ -74,7 +74,7 @@ struct SettingsView: View {
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
                     .keyboardType(.URL)
-                Text("HTTP(S) endpoint for scan uploads. With a control plane set below, it says where exports go (the lab bucket) and this URL is only the fallback.")
+                Text("HTTP(S) endpoint for scan uploads. With a working control plane set below, it says where exports go (the lab bucket); whenever it can't, exports come here as before.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }

@@ -651,6 +651,7 @@ enum AppConstants {
     // MARK: - Control plane (scan4d-server)
     static let controlPlaneSyncDebounceS: Double = 5             // saves within this window share one sync
     static let controlPlaneRequestTimeoutS: TimeInterval = 15
+    static let controlPlaneUploadBypassS: TimeInterval = 60      // after the control plane is unreachable, exports go straight to the Upload URL this long
     static let controlPlaneUploadTimeoutS: TimeInterval = 60     // idle time allowed mid map-package upload (tens of MB)
     static let controlPlaneSendPackages = true                   // map packages go up with the sync unless turned off
     static let controlPlaneLargeFileBytes: Int64 = 5_000_000     // package files this big go up only on an unmetered network (Wi-Fi)

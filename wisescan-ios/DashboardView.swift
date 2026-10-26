@@ -6,6 +6,8 @@ struct DashboardView: View {
     @AppStorage(AppConstants.Key.developerMode) private var developerMode = false
     @State private var showSettings = false
     @State private var serverStatus: ServerStatus = .unknown
+    /// The control plane didn't answer and there is an Upload URL: the card shows that instead.
+    @State private var controlPlaneDown = false
     @State private var wearableManager = MetaWearableManager.shared
     @State private var thetaManager = ThetaCameraManager.shared
     @State private var bleManager = ThetaBLEManager.shared
@@ -35,7 +37,7 @@ struct DashboardView: View {
                                     .frame(width: 40)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(usesControlPlane ? "Control Plane" : "Upload Server")
+                                    Text(usesControlPlane && !controlPlaneDown ? "Control Plane" : "Upload Server")
                                         .font(.headline)
                                         .foregroundColor(.white)
                                     Text(serverStatusLabel)
@@ -291,11 +293,13 @@ struct DashboardView: View {
     }
 
     /// With a control plane set it is the server that matters: it hands out upload destinations.
+    /// While it is down, exports go to the Upload URL (ExportUploadTarget), so that is checked.
     private var usesControlPlane: Bool { ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil }
 
     private var serverConfigured: Bool { usesControlPlane || !uploadURL.isEmpty }
 
     private var serverCaption: String {
+        if usesControlPlane && controlPlaneDown { return "Control plane unreachable — uploading to \(uploadURL)" }
         if usesControlPlane { return controlPlaneHost }
         return uploadURL.isEmpty ? "No upload server configured — set in Settings" : uploadURL
     }
@@ -303,9 +307,23 @@ struct DashboardView: View {
     private func checkServer() {
         if usesControlPlane {
             serverStatus = .checking
-            Task { serverStatus = await ControlPlaneSync.shared.isReachable() ? .available : .unavailable }
+            Task {
+                let reachable = await ControlPlaneSync.shared.isReachable()
+                controlPlaneDown = !reachable && !uploadURL.isEmpty
+                if controlPlaneDown {
+                    checkUploadURL()
+                } else {
+                    serverStatus = reachable ? .available : .unavailable
+                }
+            }
             return
         }
+        controlPlaneDown = false
+        checkUploadURL()
+    }
+
+    /// Any HTTP answer from the Upload URL counts as reachable.
+    private func checkUploadURL() {
         guard !uploadURL.isEmpty, let url = URL(string: uploadURL) else {
             serverStatus = .unknown
             return
