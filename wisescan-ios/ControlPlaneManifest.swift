@@ -232,7 +232,7 @@ extension ControlPlaneManifest {
         return (manifest, files)
     }
 
-    /// The join as the app draws it (`StitchGraphModel.effectiveNudge`): the fine-tune, or the
+    /// The join as the app draws it (`StitchGraphBuilder.effectiveNudge`): the fine-tune, or the
     /// solver's auto fix when "always autocorrect" seeds an untuned join. The solve reads two RoomPlan
     /// files, so it runs once per link per launch.
     @MainActor
@@ -240,7 +240,7 @@ extension ControlPlaneManifest {
         let manual = link.manualNudge
         if !manual.isZero { return asManual(manual) }
         if let cached = autoNudgeCache[link.id] { return cached }
-        let auto = asManual(StitchGraphModel.effectiveNudge(for: link))
+        let auto = asManual(StitchGraphBuilder.effectiveNudge(for: link))
         autoNudgeCache[link.id] = auto
         return auto
     }

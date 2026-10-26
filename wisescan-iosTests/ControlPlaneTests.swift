@@ -236,7 +236,7 @@ final class ControlPlaneTests: XCTestCase {
         assertClose(nudge.matrix(pivot: SIMD3(1, 0.5, -2)), expected)
     }
 
-    /// `StitchGraphModel.placeScans`' edge: (T_src . A_src) . inverse(T_tgt . A_tgt), the nudge
+    /// `StitchGraphBuilder.placeScans`' edge: (T_src . A_src) . inverse(T_tgt . A_tgt), the nudge
     /// applied about the source pin.
     func testCorrectedEdgeMatchesTheServerReference() {
         let tSrc = matrix([0.999390827019, 0, -0.034899496703, 0, 0, 1, 0, 0, 0.034899496703, 0, 0.999390827019, 0, 0.03, 0, 0.01, 1])
