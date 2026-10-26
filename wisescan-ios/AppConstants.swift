@@ -32,6 +32,8 @@ enum AppConstants {
         static let controlPlaneHost = "controlPlaneHost"              // the lab's control plane server (host[:port] or URL); empty = sync off
         static let controlPlaneDeviceLabel = "controlPlaneDeviceLabel" // this phone's name in the fleet (iOS gives apps only "iPhone")
         static let controlPlanePromptedTasks = "controlPlanePromptedTasks" // urgent tasks already alerted (each alerts once; then the to-do list)
+        static let controlPlaneOpenTasks = "controlPlaneOpenTasks"    // the to-do list as of the last sync (JSON), shown while the server can't be reached
+        static let controlPlaneTaskAnswers = "controlPlaneTaskAnswers" // open/decline answers the server hasn't had yet, sent with the next sync
         static let controlPlaneSendPackages = "controlPlaneSendPackages" // upload map packages (mesh, room layout, relocalization map) the server asks for
         static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
         static let rawOverlapMax = "rawOverlapMax"

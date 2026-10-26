@@ -27,9 +27,10 @@ final class ControlPlaneSync {
     private(set) var status: Status = .idle
     /// Whether exports go through the server's grants (from the last sync).
     private(set) var uploadTarget: ControlPlaneClient.UploadTarget?
-    /// Focus scans the server asked this device for, not yet answered or done: the to-do list
-    /// (Dashboard), a worker's queue.
-    private(set) var openTasks: [ControlPlaneClient.ScanTask] = []
+    /// Focus scans the server asked this device for, not yet declined or done: the to-do list
+    /// (Dashboard), a worker's queue. Kept on the phone, so the list survives a relaunch while the
+    /// control plane can't be reached; each sync replaces it.
+    private(set) var openTasks: [ControlPlaneClient.ScanTask] = ControlPlaneSync.storedTasks()
     /// The urgent task ContentView alerts about now. Each urgent task alerts once, ever; after that,
     /// and for every normal one, the to-do list is where it waits.
     private(set) var taskToPrompt: ControlPlaneClient.ScanTask?
@@ -37,8 +38,8 @@ final class ControlPlaneSync {
     /// an unmetered network), as of the last sync.
     private(set) var waitingForWiFi = 0
 
-    /// To-dos not yet answered (the Dashboard tab's badge).
-    var unansweredTasks: Int { openTasks.filter { $0.status != "accepted" }.count }
+    /// To-dos not yet answered (the Dashboard tab's badge); none without a control plane.
+    var unansweredTasks: Int { client == nil ? 0 : openTasks.filter { $0.status != "accepted" }.count }
 
     @ObservationIgnored private var captureActive = false
     @ObservationIgnored private var container: ModelContainer?
@@ -103,6 +104,7 @@ final class ControlPlaneSync {
     func syncNow() async {
         guard let client else {
             status = .off
+            if !openTasks.isEmpty { setOpenTasks([]) }   // the host was cleared: its list goes with it
             return
         }
         guard !captureActive else {
@@ -224,10 +226,13 @@ final class ControlPlaneSync {
         }
     }
 
-    /// The to-do list from the server. Only an urgent task the device has never alerted about
-    /// interrupts; it alerts once (remembered across launches), then waits in the list like the rest.
-    private func receive(_ tasks: [ControlPlaneClient.ScanTask]) {
-        openTasks = tasks
+    /// The to-do list from the server, with the answers it hasn't had yet applied (a request
+    /// declined offline does not come back). Only an urgent task the device has never alerted
+    /// about interrupts; it alerts once (remembered across launches), then waits in the list.
+    private func receive(_ received: [ControlPlaneClient.ScanTask]) {
+        let tasks = Self.applying(Self.unsentAnswers(), to: received)
+        setOpenTasks(tasks)
+        sendAnswers()
         let defaults = UserDefaults.standard
         var alerted = Set(defaults.stringArray(forKey: AppConstants.Key.controlPlanePromptedTasks) ?? [])
         guard taskToPrompt == nil,
@@ -241,29 +246,80 @@ final class ControlPlaneSync {
     }
 
     /// Opens the task's region in its space's editor (the deep-link path) and tells the server.
+    /// The task stays in the list, marked opened, until the server has the focus scan.
     func open(_ task: ControlPlaneClient.ScanTask) {
         taskToPrompt = nil
         FocusRegionInbox.shared.pending = task.region
-        answer(task, "accepted")
+        answer(task.id, "accepted")
+        setOpenTasks(Self.applying(Self.unsentAnswers(), to: openTasks))
     }
 
     func decline(_ task: ControlPlaneClient.ScanTask) {
         taskToPrompt = nil
-        openTasks.removeAll { $0.id == task.id }
-        answer(task, "declined")
+        answer(task.id, "declined")
+        setOpenTasks(Self.applying(Self.unsentAnswers(), to: openTasks))
     }
 
     func dismissPrompt() {
         taskToPrompt = nil
     }
 
-    private func answer(_ task: ControlPlaneClient.ScanTask, _ status: String) {
+    private func setOpenTasks(_ tasks: [ControlPlaneClient.ScanTask]) {
+        openTasks = tasks
+        UserDefaults.standard.set(try? JSONEncoder().encode(tasks), forKey: AppConstants.Key.controlPlaneOpenTasks)
+    }
+
+    nonisolated private static func storedTasks() -> [ControlPlaneClient.ScanTask] {
+        guard let data = UserDefaults.standard.data(forKey: AppConstants.Key.controlPlaneOpenTasks) else { return [] }
+        return (try? JSONDecoder().decode([ControlPlaneClient.ScanTask].self, from: data)) ?? []
+    }
+
+    // MARK: Answers to tasks, kept until the server has them
+
+    /// Answers by task id ("accepted" / "declined"), on the phone until the server takes them.
+    nonisolated private static func unsentAnswers() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: AppConstants.Key.controlPlaneTaskAnswers) as? [String: String] ?? [:]
+    }
+
+    /// The list as the device sees it: declined tasks gone, opened ones marked.
+    nonisolated static func applying(_ answers: [String: String],
+                                     to tasks: [ControlPlaneClient.ScanTask]) -> [ControlPlaneClient.ScanTask] {
+        tasks.compactMap { task in
+            guard let answer = answers[task.id.uuidString] else { return task }
+            if answer == "declined" { return nil }
+            var answered = task
+            answered.status = answer
+            return answered
+        }
+    }
+
+    private func answer(_ taskId: UUID, _ status: String) {
+        var unsent = Self.unsentAnswers()
+        unsent[taskId.uuidString] = status
+        UserDefaults.standard.set(unsent, forKey: AppConstants.Key.controlPlaneTaskAnswers)
+        sendAnswers()
+    }
+
+    /// Sends the answers waiting on the phone. One the server took, or refused because the task is
+    /// gone or finished (404/409), is forgotten; on any other failure the rest wait for the next sync.
+    private func sendAnswers() {
         guard let client else { return }
+        let unsent = Self.unsentAnswers()
+        guard !unsent.isEmpty else { return }
         Task {
-            do {
-                try await client.setTaskStatus(task.id, status: status)
-            } catch {
-                PerfDiag.log("[ControlPlane] task \(status) not sent: \(error.localizedDescription)")
+            for (id, status) in unsent {
+                guard let taskId = UUID(uuidString: id) else { continue }
+                do {
+                    try await client.setTaskStatus(taskId, status: status)
+                } catch ControlPlaneClient.Failure.server(let code, _) where (400..<500).contains(code) {
+                    PerfDiag.log("[ControlPlane] task \(status) refused (\(code)); dropped")
+                } catch {
+                    PerfDiag.log("[ControlPlane] task \(status) not sent, kept for the next sync: \(error.localizedDescription)")
+                    return
+                }
+                var left = Self.unsentAnswers()
+                if left[id] == status { left[id] = nil }
+                UserDefaults.standard.set(left, forKey: AppConstants.Key.controlPlaneTaskAnswers)
             }
         }
     }

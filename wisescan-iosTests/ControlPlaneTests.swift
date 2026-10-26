@@ -141,6 +141,25 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertNil(FocusRegion.decode(try XCTUnwrap(plain.encoded()))?.taskId)
     }
 
+    /// The to-do list is the phone's copy: it survives a relaunch, and answers the server hasn't had
+    /// yet still apply to what a sync brings (a request declined offline does not come back).
+    func testTodoListKeepsItsAnswers() throws {
+        func task() -> ControlPlaneClient.ScanTask {
+            let id = UUID()
+            return ControlPlaneClient.ScanTask(id: id, mapId: UUID(), mapName: "Lab 2F", reason: "change", status: "delivered",
+                                               priority: "normal",
+                                               region: FocusRegion(center: SIMD3(0, 0.5, 0), size: SIMD3(1, 1, 1), taskId: id))
+        }
+        let kept = task(), opened = task(), declined = task()
+        let stored = try JSONDecoder().decode([ControlPlaneClient.ScanTask].self, from: JSONEncoder().encode([kept, opened]))
+        XCTAssertEqual(stored, [kept, opened])
+
+        let answers = [opened.id.uuidString: "accepted", declined.id.uuidString: "declined"]
+        let list = ControlPlaneSync.applying(answers, to: [kept, opened, declined])
+        XCTAssertEqual(list.map(\.id), [kept.id, opened.id])
+        XCTAssertEqual(list.map(\.status), ["delivered", "accepted"])
+    }
+
     /// Partial packages: the server says why it wants a file; a large one held back on a metered
     /// network is "waiting", not a failure.
     func testWantedReasonAndTheWiFiWait() throws {

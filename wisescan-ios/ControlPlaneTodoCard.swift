@@ -4,11 +4,14 @@ import SwiftUI
 /// scan4d-server README, "Tasks"). The device is a worker with a queue: requests wait here,
 /// and only an urgent one also alerts, once (ContentView). Open takes the region into its
 /// space's editor, the same way a region link does; Decline tells the lab it will not be done.
+/// Shown whenever a control plane is set; the list is the phone's copy, so it stays while the
+/// server can't be reached, and answers given meanwhile go with the next sync.
 struct ControlPlaneTodoCard: View {
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var host = ""
     private var sync: ControlPlaneSync { ControlPlaneSync.shared }
 
     var body: some View {
-        if !sync.openTasks.isEmpty {
+        if ControlPlaneClient.baseURL(fromHost: host) != nil {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Image(systemName: "checklist")
@@ -21,8 +24,19 @@ struct ControlPlaneTodoCard: View {
                         .font(.subheadline)
                         .foregroundColor(.gray)
                 }
-                ForEach(sync.openTasks) { task in
-                    row(task)
+                if sync.openTasks.isEmpty {
+                    Text("No focus scans requested by the lab.")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                } else {
+                    ForEach(sync.openTasks) { task in
+                        row(task)
+                    }
+                    if case .failed = sync.status {
+                        Text("From the last sync: the control plane isn't answering now.")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
                 }
             }
             .padding()

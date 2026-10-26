@@ -74,12 +74,13 @@ nonisolated struct ControlPlaneClient: Sendable {
     }
 
     /// The server asking this device to scan a region (scan4d-server README, "Tasks").
-    nonisolated struct ScanTask: Sendable, Identifiable, Equatable {
+    /// Codable for the copy the phone keeps (ControlPlaneSync); the wire is read by `tasks(from:)`.
+    nonisolated struct ScanTask: Sendable, Identifiable, Equatable, Codable {
         let id: UUID
         let mapId: UUID
         let mapName: String
         let reason: String
-        let status: String
+        var status: String
         /// "high" alerts once; "normal" waits in the to-do list.
         let priority: String
         let region: FocusRegion

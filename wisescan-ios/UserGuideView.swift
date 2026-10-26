@@ -76,7 +76,7 @@ struct UserGuideView: View {
                               "(Room is the default; the list opens on a scan you just saved). " +
                               "A region file from another tool can be imported from the same menu. " +
                               "With a control plane set, the lab can also ask for a focus scan: the " +
-                              "request waits in the To do list on the Dashboard (an urgent one also " +
+                              "request waits in the To do list on the Dashboard, even offline (an urgent one also " +
                               "alerts once), and Open takes you to the region in the editor."
                     )
                     guideRow(
