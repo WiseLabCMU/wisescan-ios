@@ -280,6 +280,39 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(files.count, 3)
     }
 
+    /// Only the spaces sent with Sync are reported, plus those started since the phone joined; a
+    /// stitch goes when both of its spaces do.
+    func testOnlySyncedAndNewSpacesAreReported() throws {
+        let context = try StitchTestSupport.makeInMemoryContext()
+        let old = StitchTestSupport.makeLocation(id: UUID(), name: "Old", scanId: UUID(), in: context)
+        let sent = StitchTestSupport.makeLocation(id: UUID(), name: "Sent", scanId: UUID(), in: context)
+        let new = StitchTestSupport.makeLocation(id: UUID(), name: "New", scanId: UUID(), in: context)
+        old.scan.capturedAt = Date(timeIntervalSince1970: 500)
+        sent.scan.capturedAt = Date(timeIntervalSince1970: 600)
+        new.scan.capturedAt = Date(timeIntervalSince1970: 2_000)
+        for target in [old.scan, new.scan] {
+            _ = try StitchLinkStore.create(
+                sourceScan: sent.scan, targetScan: target,
+                sourceAnchor: matrix_identity_float4x4, targetAnchor: matrix_identity_float4x4,
+                sourceAnchorId: UUID(), targetAnchorId: UUID(),
+                sourceCompassHeading: nil, targetCompassHeading: nil,
+                linkType: .midSession, in: context)
+        }
+        let locations = [old.location, sent.location, new.location]
+        let joined = Date(timeIntervalSince1970: 1_000)
+
+        let reported = ControlPlaneSync.spacesToReport(locations, synced: [sent.location.id], newSince: joined)
+        XCTAssertEqual(Set(reported.map(\.id)), [sent.location.id, new.location.id])
+        let tapOnly = ControlPlaneSync.spacesToReport(locations, synced: [sent.location.id], newSince: nil)
+        XCTAssertEqual(tapOnly.map(\.id), [sent.location.id])
+
+        let links = ControlPlaneSync.linksToReport(try context.fetch(FetchDescriptor<StitchLink>()),
+                                                   spaces: Set(reported.map(\.id)))
+        XCTAssertEqual(links.count, 1)
+        let ends = Set([links.first?.endpointAScan?.id, links.first?.endpointBScan?.id].compactMap { $0 })
+        XCTAssertEqual(ends, [sent.scan.id, new.scan.id])
+    }
+
     /// The sidecar is written with SaveRegistration's own (camelCase) keys, at the scan's top level
     /// or under raw_data/.
     func testRegistrationSidecarIsReadFromEitherPlace() throws {

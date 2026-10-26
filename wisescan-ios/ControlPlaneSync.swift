@@ -38,6 +38,11 @@ final class ControlPlaneSync {
     /// an unmetered network), as of the last sync.
     private(set) var waitingForWiFi = 0
 
+    /// The spaces this phone reports: the ones sent with Sync (a space, or a stitched map in the
+    /// graph view) and, while new spaces sync on their own, those started after the phone joined.
+    /// The rest stay off the server; an export's Upload is separate.
+    private(set) var syncedSpaces: Set<UUID> = ControlPlaneSync.storedSpaces()
+
     /// To-dos not yet answered (the Dashboard tab's badge); none without a control plane.
     var unansweredTasks: Int { client == nil ? 0 : openTasks.filter { $0.status != "accepted" }.count }
 
@@ -59,6 +64,15 @@ final class ControlPlaneSync {
             ?? AppConstants.controlPlaneSendPackages
     }
     var client: ControlPlaneClient? { ControlPlaneClient.baseURL(fromHost: host).map { ControlPlaneClient(baseURL: $0) } }
+    var syncNewSpaces: Bool {
+        UserDefaults.standard.object(forKey: AppConstants.Key.controlPlaneSyncNewSpaces) as? Bool
+            ?? AppConstants.controlPlaneSyncNewSpaces
+    }
+    /// The first successful sync: a space whose first scan comes after it is new.
+    var joinedAt: Date? {
+        (UserDefaults.standard.object(forKey: AppConstants.Key.controlPlaneJoinedAt) as? Double)
+            .map(Date.init(timeIntervalSince1970:))
+    }
 
     /// Once, at launch: watch SwiftData saves and sync now, then every few minutes while the app is
     /// open, so a request from the lab (a file it needs, a task) is picked up without a save. A
@@ -120,8 +134,15 @@ final class ControlPlaneSync {
         status = .syncing
 
         let context = container.mainContext
-        let locations = (try? context.fetch(FetchDescriptor<ScanLocation>())) ?? []
-        let links = (try? context.fetch(FetchDescriptor<StitchLink>())) ?? []
+        let allLocations = (try? context.fetch(FetchDescriptor<ScanLocation>())) ?? []
+        let allLinks = (try? context.fetch(FetchDescriptor<StitchLink>())) ?? []
+        let locations = Self.spacesToReport(allLocations, synced: syncedSpaces,
+                                            newSince: syncNewSpaces ? joinedAt : nil)
+        let reported = Set(locations.map(\.id))
+        if !reported.isSubset(of: syncedSpaces) {
+            setSyncedSpaces(syncedSpaces.union(reported))   // a new space, once reported, stays synced
+        }
+        let links = Self.linksToReport(allLinks, spaces: reported)
         let snapshot = ControlPlaneManifest.snapshot(locations: locations, links: links,
                                                      device: DeviceIdentity.manifestDevice(label: deviceLabel))
         let draft = snapshot.manifest
@@ -136,6 +157,9 @@ final class ControlPlaneSync {
                 return (result, local)
             }.value
             let reply = result.reply
+            if joinedAt == nil {
+                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: AppConstants.Key.controlPlaneJoinedAt)
+            }
             uploadTarget = reply.uploadTarget
             applyLinkUpdates(reply.linkUpdates ?? [])
             receive(result.tasks)
@@ -225,6 +249,62 @@ final class ControlPlaneSync {
             PerfDiag.log("[ControlPlane] applied \(applied) join fine-tune update(s)")
         }
     }
+
+    // MARK: Spaces sent to the control plane
+
+    /// A space's (or a stitched map's) standing with the control plane, for its Sync button.
+    enum SpaceState: Equatable {
+        case notSynced, partlySynced, syncing, synced, failed
+    }
+
+    /// Sync on a space or a stitched map, like Upload for an export: from now on these spaces are
+    /// reported (rescans, focus scans and stitches with them), and a sync runs at once.
+    func sync(spaces ids: [UUID]) {
+        let all = syncedSpaces.union(ids)
+        if all != syncedSpaces { setSyncedSpaces(all) }
+        requestSync(after: .zero)
+    }
+
+    func state(of spaces: [UUID]) -> SpaceState {
+        let synced = spaces.filter { syncedSpaces.contains($0) }.count
+        if synced == 0 { return .notSynced }
+        if synced < spaces.count { return .partlySynced }
+        switch status {
+        case .syncing, .uploading: return .syncing
+        case .failed: return .failed
+        default: return .synced
+        }
+    }
+
+    /// The spaces a sync reports: the synced ones, and with `newSince` those whose first scan
+    /// came after it (they join the synced set once reported).
+    static func spacesToReport(_ locations: [ScanLocation], synced: Set<UUID>, newSince: Date?) -> [ScanLocation] {
+        locations.filter { location in
+            if synced.contains(location.id) { return true }
+            guard let newSince, let first = location.scans.map(\.capturedAt).min() else { return false }
+            return first >= newSince
+        }
+    }
+
+    /// A stitch goes when both of its spaces do: Sync on the stitched map sends them together.
+    static func linksToReport(_ links: [StitchLink], spaces: Set<UUID>) -> [StitchLink] {
+        links.filter { link in
+            guard let a = link.endpointAScan?.location?.id, let b = link.endpointBScan?.location?.id else { return false }
+            return spaces.contains(a) && spaces.contains(b)
+        }
+    }
+
+    private func setSyncedSpaces(_ ids: Set<UUID>) {
+        syncedSpaces = ids
+        UserDefaults.standard.set(ids.map(\.uuidString), forKey: AppConstants.Key.controlPlaneSyncedSpaces)
+    }
+
+    nonisolated private static func storedSpaces() -> Set<UUID> {
+        let ids = UserDefaults.standard.stringArray(forKey: AppConstants.Key.controlPlaneSyncedSpaces) ?? []
+        return Set(ids.compactMap(UUID.init(uuidString:)))
+    }
+
+    // MARK: To-do list
 
     /// The to-do list from the server, with the answers it hasn't had yet applied (a request
     /// declined offline does not come back). Only an urgent task the device has never alerted

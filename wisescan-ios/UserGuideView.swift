@@ -92,9 +92,11 @@ struct UserGuideView: View {
                               "configured server. A cloud badge on each location shows upload state: " +
                               "solid when every scan is uploaded, dimmed when only some are. With a " +
                               "control plane server set in Settings, the app also keeps your lab's " +
-                              "server up to date with the spaces and scans on this phone (names, " +
-                              "times, poses, the small files it reads, and a room's mesh or map when " +
-                              "the lab asks for it, over Wi-Fi; no photos), never during a scan."
+                              "server up to date with the spaces you sync: tap Sync to Lab Server in " +
+                              "a space, or Sync on a stitched map in the graph view; spaces you start " +
+                              "after joining sync on their own. It sends names, times, poses, the " +
+                              "small files the server reads, and a room's mesh or map when the lab " +
+                              "asks for it, over Wi-Fi; no photos, and never during a scan."
                     )
                 } header: {
                     Text("HOW TO USE")

@@ -216,6 +216,11 @@ struct LocationDetailView: View {
                                 }
                             }
 
+                            // Control plane: send this space to the lab server, as Upload sends an export.
+                            if ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil {
+                                ControlPlaneSpaceSyncButton(spaceIds: [location.id])
+                            }
+
                             // Global Export Settings
                             VStack(spacing: 12) {
                                 HStack {

@@ -8,6 +8,7 @@ struct ControlPlaneSettingsSection: View {
     @AppStorage(AppConstants.Key.controlPlaneDeviceLabel) private var deviceLabel = ""
     @AppStorage(AppConstants.Key.controlPlaneSendPackages) private var sendPackages = AppConstants.controlPlaneSendPackages
     @AppStorage(AppConstants.Key.controlPlaneAllowUntrusted) private var allowUntrusted = false
+    @AppStorage(AppConstants.Key.controlPlaneSyncNewSpaces) private var syncNewSpaces = AppConstants.controlPlaneSyncNewSpaces
     @State private var password = ControlPlaneSecret.password
     @State private var connectionMessage: String?
     @State private var isTesting = false
@@ -48,6 +49,15 @@ struct ControlPlaneSettingsSection: View {
                 Toggle("Allow untrusted certificates", isOn: $allowUntrusted)
                     .foregroundColor(.white)
                 Text("For servers on the lab's local network with their own (self-signed) certificate, reached by IP address or a .local name: accepted from this server and the upload hosts it names, nowhere else.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+            .padding(.vertical, 4)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Sync new spaces automatically", isOn: $syncNewSpaces)
+                    .foregroundColor(.white)
+                Text("Spaces started after this phone joined the server sync on their own. Earlier ones go when you tap Sync to Lab Server in the space, or Sync on a stitched map in the graph view. Once synced, a space keeps syncing. \(sync.syncedSpaces.count) space(s) synced so far.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
@@ -105,7 +115,7 @@ struct ControlPlaneSettingsSection: View {
         } header: {
             Text("CONTROL PLANE")
         } footer: {
-            Text("Sends this phone's spaces, scans and stitches to the server: names, times, IDs, poses and focus regions, plus the map package files it asks for when on. Never photos. Never during a scan.")
+            Text("Sends the spaces you sync, with their scans and stitches, to the server: names, times, IDs, poses and focus regions, plus the map package files it asks for when on. Other spaces stay on the phone. Never photos. Never during a scan.")
                 .font(.caption2)
                 .foregroundColor(.gray)
         }
@@ -119,6 +129,9 @@ struct ControlPlaneSettingsSection: View {
             sync.requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
         }
         .onChange(of: sendPackages) { _, _ in
+            sync.requestSync(after: .seconds(1))
+        }
+        .onChange(of: syncNewSpaces) { _, _ in
             sync.requestSync(after: .seconds(1))
         }
         .onChange(of: allowUntrusted) { _, _ in

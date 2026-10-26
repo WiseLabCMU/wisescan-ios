@@ -10,7 +10,7 @@ All scan data (images, depth maps, meshes, and camera poses) is stored locally o
 
 ### Control Plane Sync
 
-If you enter a control plane server in Settings → Control plane, the app keeps that server up to date with an inventory of this device's scans. It sends this on launch and after changes, and never during a scan. The inventory holds:
+If you enter a control plane server in Settings → Control plane, the app keeps that server up to date with an inventory of the spaces you sync: those you send with Sync to Lab Server in a space or Sync on a stitched map, and those you start after the phone joined (unless you turn that off in Settings). Other spaces stay on the phone. It sends this on launch and after changes, and never during a scan. The inventory holds:
 - space and scan names and times;
 - scan and space IDs;
 - each scan's alignment transform and stitch-link anchor poses;
