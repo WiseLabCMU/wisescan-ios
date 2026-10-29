@@ -1,12 +1,14 @@
 # Scan4D Privacy Policy
 
-*Last updated: April 30, 2026*
+*Last updated: October 29, 2026*
 
 ## Data Collection
 
 Scan4D does not collect, store, or transmit any personal data to our servers.
 
 All scan data (images, depth maps, meshes, and camera poses) is stored locally on your device and is only uploaded when you explicitly configure a server URL and tap the Upload button.
+
+Exports may include the scan and location identifiers, capture-completion time, and coordinate-frame provenance already stored with the scan. These values remain on-device unless you explicitly save, share, or upload that export.
 
 ## Camera & LiDAR
 

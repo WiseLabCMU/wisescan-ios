@@ -78,7 +78,9 @@ import tempfile
 import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from uuid import UUID
 
 try:
     import numpy as np
@@ -91,6 +93,113 @@ CONVERTER_VERSION = 1
 # Small sidecars flame3d does not read yet but that describe the same scene: RoomPlan
 # object boxes (canonical frame) and the registration record itself.
 SIDECARS = ("registration.json", "roomplan.json")
+
+
+def _validate_capture_manifest(data: object, source: Path) -> dict:
+    """Validate known v1 identity/frame fields without adding a jsonschema dependency."""
+    if not isinstance(data, dict):
+        raise ValueError(f"{source}: capture metadata must be a JSON object")
+    required = {
+        "schema_version", "scan_id", "captured_at", "captured_at_basis", "location_id",
+        "frame_id", "frame_status", "coordinate_system", "registration",
+    }
+    if missing := required.difference(data):
+        raise ValueError(f"{source}: capture metadata missing {', '.join(sorted(missing))}")
+    if data.get("schema_version") != 1:
+        raise ValueError(f"{source}: unsupported capture metadata schema_version")
+    try:
+        UUID(data["scan_id"])
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"{source}: scan_id must be a full UUID") from exc
+    captured_at = data.get("captured_at")
+    basis = data.get("captured_at_basis")
+    if basis not in {"capture-start", "capture-completion", "manual", "legacy-unknown"}:
+        raise ValueError(f"{source}: invalid captured_at_basis")
+    if captured_at is not None:
+        if basis == "legacy-unknown":
+            raise ValueError(f"{source}: legacy-unknown basis requires captured_at=null")
+        try:
+            parsed = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+        except (AttributeError, ValueError) as exc:
+            raise ValueError(f"{source}: captured_at must be ISO-8601") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError(f"{source}: captured_at must include a timezone")
+    elif basis != "legacy-unknown":
+        raise ValueError(f"{source}: null captured_at requires legacy-unknown basis")
+    if not isinstance(data.get("frame_id"), str) or not data["frame_id"]:
+        raise ValueError(f"{source}: frame_id must be a non-empty string")
+    if data.get("frame_status") not in {"canonical", "registered", "scan-local", "unverified"}:
+        raise ValueError(f"{source}: invalid frame_status")
+    coordinate_system = data.get("coordinate_system")
+    if (not isinstance(coordinate_system, dict)
+            or coordinate_system.get("units") != "meters"
+            or not coordinate_system.get("bundle")
+            or not coordinate_system.get("processed")):
+        raise ValueError(f"{source}: coordinate_system must declare units=meters")
+    if set(coordinate_system) != {"units", "bundle", "processed"}:
+        raise ValueError(f"{source}: coordinate_system contains unsupported fields")
+    registration = data.get("registration")
+    if not isinstance(registration, dict) or registration.get("status") not in {
+        "canonical-base", "successful", "already-aligned", "refused", "unknown"
+    }:
+        raise ValueError(f"{source}: invalid registration provenance")
+    registration_required = {"status", "applied", "canonical_frame_id", "reason", "sidecar"}
+    if missing := registration_required.difference(registration):
+        raise ValueError(f"{source}: registration missing {', '.join(sorted(missing))}")
+    registration_status = registration["status"]
+    applied = registration.get("applied")
+    if applied is not None and not isinstance(applied, bool):
+        raise ValueError(f"{source}: registration.applied must be boolean or null")
+    expected_frame_status = {
+        "canonical-base": "canonical",
+        "successful": "registered",
+        "already-aligned": "registered",
+        "refused": "scan-local",
+        "unknown": "unverified",
+    }
+    if data["frame_status"] != expected_frame_status[registration_status]:
+        raise ValueError(f"{source}: frame_status conflicts with registration.status")
+    if registration_status == "successful" and applied is not True:
+        raise ValueError(f"{source}: successful registration requires applied=true")
+    if registration_status != "successful" and applied is True:
+        raise ValueError(f"{source}: {registration_status} registration cannot be applied")
+    for field in ("canonical_frame_id", "reason", "sidecar"):
+        value = registration.get(field)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"{source}: registration.{field} must be non-empty or null")
+    canonical_frame_id = registration.get("canonical_frame_id")
+    if (registration_status in {"canonical-base", "successful", "already-aligned"}
+            and canonical_frame_id != data["frame_id"]):
+        raise ValueError(f"{source}: verified frame_id must equal registration.canonical_frame_id")
+    location_id = data.get("location_id")
+    if location_id is not None and (not isinstance(location_id, str) or not location_id.strip()):
+        raise ValueError(f"{source}: location_id must be non-empty or null")
+    return data
+
+
+def load_capture_manifest(root: Path, explicit: Path | None) -> tuple[bytes | None, dict | None]:
+    """Preserve a bundled manifest or use explicit metadata for a legacy export."""
+    bundled = next(
+        (path for path in (root / "scan4d" / "scan.json", root / "scan.json") if path.is_file()),
+        None,
+    )
+    selected = explicit or bundled
+    if selected is None:
+        return None, None
+    try:
+        selected_data = _validate_capture_manifest(json.loads(selected.read_text()), selected)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{selected}: malformed capture metadata: {exc}") from exc
+    if explicit is not None and bundled is not None:
+        try:
+            bundled_data = _validate_capture_manifest(json.loads(bundled.read_text()), bundled)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{bundled}: malformed capture metadata: {exc}") from exc
+        if selected_data != bundled_data:
+            raise ValueError(
+                f"explicit capture metadata {explicit} conflicts with bundled manifest {bundled}"
+            )
+    return selected.read_bytes(), selected_data
 
 # flame3d-core's transform chain, copied from data_processor/vendor_specific/polycam.py so
 # the check reproduces exactly what the loader computes.
@@ -850,7 +959,7 @@ class Sink:
 
 def convert(bundle: Path, out: Path, *, frames_mode: str = "stream+stills", stride: int = 1,
             max_size: int = 1920, depth_mode: str = "lidar", check: bool = True,
-            colors: bool = True) -> dict:
+            colors: bool = True, capture_metadata: Path | None = None) -> dict:
     tmp = None
     try:
         if bundle.is_file() and bundle.suffix.lower() == ".zip":
@@ -864,14 +973,15 @@ def convert(bundle: Path, out: Path, *, frames_mode: str = "stream+stills", stri
             sys.exit(f"{bundle}: not a directory or .zip")
         return _convert_root(root, bundle.name, out, frames_mode=frames_mode, stride=stride,
                              max_size=max_size, depth_mode=depth_mode, check=check,
-                             colors=colors)
+                             colors=colors, capture_metadata=capture_metadata)
     finally:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _convert_root(root: Path, source_name: str, out: Path, *, frames_mode: str, stride: int,
-                  max_size: int, depth_mode: str, check: bool, colors: bool) -> dict:
+                  max_size: int, depth_mode: str, check: bool, colors: bool,
+                  capture_metadata: Path | None) -> dict:
     mesh_path = root / "mesh.obj"
     if not mesh_path.is_file():
         sys.exit(f"{root}: no mesh.obj — flame3d needs the scan mesh (re-export as Nerfstudio)")
@@ -882,6 +992,7 @@ def _convert_root(root: Path, source_name: str, out: Path, *, frames_mode: str, 
     if not frames:
         sys.exit(f"no frames left after --frames {frames_mode} --stride {stride}")
     alignment, registration = load_registration(root)
+    capture_manifest, capture_manifest_data = load_capture_manifest(root, capture_metadata)
     vertices, triangles, mesh_colours = load_obj(mesh_path)
 
     lidar = lidar_sizes(frames, (out_w, out_h))
@@ -948,6 +1059,8 @@ def _convert_root(root: Path, source_name: str, out: Path, *, frames_mode: str, 
         for name in SIDECARS:
             if (root / name).is_file():
                 sink.write(f"scan4d/{name}", (root / name).read_bytes())
+        if capture_manifest is not None:
+            sink.write("scan4d/scan.json", capture_manifest)
 
         report = run_check(vertices, samples, alignment) if check else None
         summary = {
@@ -969,6 +1082,10 @@ def _convert_root(root: Path, source_name: str, out: Path, *, frames_mode: str, 
                 "translation_cm": None if alignment is None
                 else round(100 * float(np.linalg.norm(alignment[:3, 3])), 2),
                 "yaw_deg": registration.get("yawDeg"),
+            },
+            "capture_manifest": None if capture_manifest_data is None else {
+                "scan_id": capture_manifest_data["scan_id"],
+                "captured_at": capture_manifest_data.get("captured_at"),
             },
             "check": report,
         }
@@ -1008,6 +1125,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="write the mesh without vertex colours (skips sampling them from the frames)")
     ap.add_argument("--no-check", action="store_true",
                     help="skip the mesh-vs-LiDAR alignment check")
+    ap.add_argument("--capture-metadata", type=Path,
+                    help="explicit v1 scan.json for a legacy export; never inferred from names or export time")
     args = ap.parse_args(argv)
 
     if args.verify:
@@ -1020,7 +1139,7 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = convert(args.bundle, out, frames_mode=args.frames, stride=args.stride,
                       max_size=args.max_size, depth_mode=args.depth, check=not args.no_check,
-                      colors=not args.no_colors)
+                      colors=not args.no_colors, capture_metadata=args.capture_metadata)
 
     fo = summary["frames_out"]
     w, h = summary["image_size"]

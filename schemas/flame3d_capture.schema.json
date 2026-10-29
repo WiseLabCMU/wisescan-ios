@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openflam.org/schemas/scan4d-capture-manifest-v1.json",
+  "title": "Scan4D capture manifest",
+  "type": "object",
+  "required": ["schema_version", "scan_id", "captured_at", "captured_at_basis", "location_id", "frame_id", "frame_status", "coordinate_system", "registration"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "scan_id": {"type": "string", "format": "uuid"},
+    "captured_at": {"type": ["string", "null"], "format": "date-time"},
+    "captured_at_basis": {"enum": ["capture-start", "capture-completion", "manual", "legacy-unknown"]},
+    "location_id": {"type": ["string", "null"], "minLength": 1},
+    "frame_id": {"type": "string", "minLength": 1},
+    "frame_status": {"enum": ["canonical", "registered", "scan-local", "unverified"]},
+    "coordinate_system": {
+      "type": "object",
+      "required": ["units", "bundle", "processed"],
+      "properties": {
+        "units": {"const": "meters"},
+        "bundle": {"type": "string", "minLength": 1},
+        "processed": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "registration": {
+      "type": "object",
+      "required": ["status", "applied", "canonical_frame_id", "reason", "sidecar"],
+      "properties": {
+        "status": {"enum": ["canonical-base", "successful", "already-aligned", "refused", "unknown"]},
+        "applied": {"type": ["boolean", "null"]},
+        "canonical_frame_id": {"type": ["string", "null"]},
+        "reason": {"type": ["string", "null"]},
+        "sidecar": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

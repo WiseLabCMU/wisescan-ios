@@ -663,7 +663,9 @@ struct ScanExportManager {
     /// once colors.bin holds colors sampled from the captured frames instead of the save-time
     /// normals preview. Mesh exports carry vertex colors only when it is true. It defaults to
     /// false so a caller that forgets it exports geometry alone rather than preview colors.
-    static func prepareExport(filename: String, scanDir: URL, format: ExportFormat,
+    static func prepareExport(filename: String, scanDir: URL,
+                              captureIdentity: Flame3DExport.CaptureIdentity,
+                              format: ExportFormat,
                               vertexColorsFromCapture: Bool = false,
                               bulkStitch: BulkStitchArtifacts? = nil,
                               phase: ((ExportPhase) -> Void)? = nil) -> URL? {
@@ -860,6 +862,7 @@ struct ScanExportManager {
                 stagePolycamPayload(to: stagingDir)
                 let zipURL = fm.temporaryDirectory.appendingPathComponent(filename)
                 return Flame3DExport.build(stagedDir: stagingDir, scanDir: scanDir,
+                                           captureIdentity: captureIdentity,
                                            vertexColorsFromCapture: vertexColorsFromCapture,
                                            zipURL: zipURL, phase: phase) ? zipURL : nil
             }

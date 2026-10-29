@@ -33,6 +33,23 @@ def stems(zf: zipfile.ZipFile, folder: str) -> list[str]:
                   for n in zf.namelist() if n.startswith(f"keyframes/{folder}/"))
 
 
+def capture_manifest(scan_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"):
+    return {
+        "schema_version": 1,
+        "scan_id": scan_id,
+        "captured_at": "2026-10-10T10:00:00Z",
+        "captured_at_basis": "manual",
+        "location_id": None,
+        "frame_id": f"scan:{scan_id}",
+        "frame_status": "unverified",
+        "coordinate_system": {"units": "meters", "bundle": "Y-up", "processed": "Z-up"},
+        "registration": {
+            "status": "unknown", "applied": None, "canonical_frame_id": None,
+            "reason": "explicit legacy metadata", "sidecar": None,
+        },
+    }
+
+
 
 
 def test_frame_selection(converted):
@@ -73,6 +90,46 @@ def test_alignment_is_registration_verbatim(converted, bundle):
     assert info["alignmentTransform"] == pytest.approx(reg["transform"])
     assert summary["registration"]["applied"] is True
     assert json.loads(zf.read("scan4d/registration.json")) == reg
+
+
+def test_explicit_capture_metadata_is_preserved(bundle, tmp_path):
+    metadata = tmp_path / "legacy-scan.json"
+    metadata.write_text(json.dumps(capture_manifest()))
+    out = tmp_path / "with-metadata.zip"
+    summary = conv.convert(bundle, out, check=False, capture_metadata=metadata)
+    with zipfile.ZipFile(out) as zf:
+        assert json.loads(zf.read("scan4d/scan.json")) == capture_manifest()
+    assert summary["capture_manifest"]["scan_id"] == capture_manifest()["scan_id"]
+
+
+def test_capture_metadata_conflicts_and_malformed_values_fail(bundle, tmp_path):
+    copied = tmp_path / "bundle"
+    shutil.copytree(bundle, copied)
+    bundled = copied / "scan4d" / "scan.json"
+    bundled.parent.mkdir()
+    bundled.write_text(json.dumps(capture_manifest()))
+    explicit = tmp_path / "different.json"
+    explicit.write_text(json.dumps(capture_manifest("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")))
+    with pytest.raises(ValueError, match="conflicts"):
+        conv.convert(copied, tmp_path / "conflict.zip", check=False, capture_metadata=explicit)
+    malformed = capture_manifest()
+    malformed["schema_version"] = 99
+    explicit.write_text(json.dumps(malformed))
+    shutil.rmtree(copied / "scan4d")
+    with pytest.raises(ValueError, match="unsupported"):
+        conv.convert(copied, tmp_path / "malformed.zip", check=False, capture_metadata=explicit)
+    inconsistent = capture_manifest()
+    inconsistent["registration"]["status"] = "successful"
+    explicit.write_text(json.dumps(inconsistent))
+    with pytest.raises(ValueError, match="frame_status conflicts"):
+        conv.convert(copied, tmp_path / "inconsistent.zip", check=False,
+                     capture_metadata=explicit)
+    incomplete = capture_manifest()
+    del incomplete["location_id"]
+    explicit.write_text(json.dumps(incomplete))
+    with pytest.raises(ValueError, match="missing location_id"):
+        conv.convert(copied, tmp_path / "incomplete.zip", check=False,
+                     capture_metadata=explicit)
 
 
 def test_glb_matches_obj(converted, bundle):

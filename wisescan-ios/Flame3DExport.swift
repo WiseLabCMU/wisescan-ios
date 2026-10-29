@@ -13,6 +13,7 @@ import simd
 ///     keyframes/depth/<stem>.png               16-bit mm LiDAR depth, native raster
 ///     raw.glb                                  mesh.obj + captured vertex colors (COLOR_0)
 ///     mesh_info.json                           alignmentTransform = registration raw→canonical
+///     scan4d/scan.json                        capture identity, time, frame and registration provenance
 ///     scan4d/                                  registration.json, roomplan.json, export.json
 ///
 /// Entries sit at the ZIP ROOT: flame3d extracts the upload as-is and expects `keyframes/`
@@ -26,10 +27,29 @@ import simd
 /// frame number), and stems without a unique frame number are left out.
 enum Flame3DExport {
 
+    /// Stable capture identity copied from SwiftData on the main actor before export work moves
+    /// to a background queue. Export never derives identity or capture time from a filename.
+    struct CaptureIdentity: Sendable {
+        let scanId: UUID
+        let capturedAt: Date
+        let locationId: UUID?
+        let canonicalScanId: UUID?
+        let isCanonicalBase: Bool
+
+        init(scan: CapturedScan) {
+            scanId = scan.id
+            capturedAt = scan.capturedAt
+            locationId = scan.location?.id
+            canonicalScanId = scan.location?.roomScans.min(by: CapturedScan.canonicalOrder)?.id
+            isCanonicalBase = canonicalScanId == scan.id
+        }
+    }
+
     /// `stagedDir` holds the Polycam payload after `stagePolycamPayload`, so its images and
     /// depth have already been through the export-time privacy passes. `scanDir` supplies the
     /// mesh, its colors and the registration. Writes the bundle to `zipURL`.
-    static func build(stagedDir: URL, scanDir: URL, vertexColorsFromCapture: Bool,
+    static func build(stagedDir: URL, scanDir: URL, captureIdentity: CaptureIdentity,
+                      vertexColorsFromCapture: Bool,
                       zipURL: URL, phase: ((ExportPhase) -> Void)? = nil) -> Bool {
         let fm = FileManager.default
         let camerasDir = stagedDir.appendingPathComponent("cameras")
@@ -133,6 +153,81 @@ enum Flame3DExport {
         if let data = try? JSONSerialization.data(withJSONObject: meshInfo, options: [.prettyPrinted, .sortedKeys]) {
             zip.add("mesh_info.json", data)
         }
+
+        // Versioned capture identity/frame contract consumed by flame3d history. This describes
+        // the transform chain already encoded above; it never applies geometry a second time.
+        let canonicalOwnerId = captureIdentity.canonicalScanId
+            ?? registration.flatMap { UUID(uuidString: $0.targetScanId) }
+        let canonicalFrameId = canonicalOwnerId.map { "scan:\($0.uuidString.lowercased())" }
+        let registrationStatus: String
+        let frameStatus: String
+        let frameId: String
+        let registrationApplied: Any
+        if let registration, registration.applied, let canonicalFrameId {
+            registrationStatus = "successful"
+            frameStatus = "registered"
+            frameId = canonicalFrameId
+            registrationApplied = true
+        } else if let registration,
+                  registration.reason.lowercased().hasPrefix("already aligned"),
+                  let canonicalFrameId {
+            registrationStatus = "already-aligned"
+            frameStatus = "registered"
+            frameId = canonicalFrameId
+            registrationApplied = false
+        } else if registration != nil {
+            registrationStatus = "refused"
+            frameStatus = "scan-local"
+            frameId = "scan:\(captureIdentity.scanId.uuidString.lowercased())"
+            registrationApplied = false
+        } else if captureIdentity.isCanonicalBase, let canonicalFrameId {
+            registrationStatus = "canonical-base"
+            frameStatus = "canonical"
+            frameId = canonicalFrameId
+            registrationApplied = false
+        } else {
+            registrationStatus = "unknown"
+            frameStatus = "unverified"
+            frameId = "scan:\(captureIdentity.scanId.uuidString.lowercased())"
+            registrationApplied = NSNull()
+        }
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        func nullable(_ value: String?) -> Any {
+            if let value { return value }
+            return NSNull()
+        }
+        let captureManifest: [String: Any] = [
+            "schema_version": 1,
+            "scan_id": captureIdentity.scanId.uuidString.lowercased(),
+            "captured_at": dateFormatter.string(from: captureIdentity.capturedAt),
+            "captured_at_basis": "capture-completion",
+            "location_id": nullable(captureIdentity.locationId?.uuidString.lowercased()),
+            "frame_id": frameId,
+            "frame_status": frameStatus,
+            "coordinate_system": [
+                "units": "meters",
+                "bundle": "ARKit right-handed Y-up; cameras raw; "
+                    + "mesh frame follows mesh_info raw-to-canonical alignment",
+                "processed": "Flame3D right-handed Z-up world coordinates"
+            ],
+            "registration": [
+                "status": registrationStatus,
+                "applied": registrationApplied,
+                "canonical_frame_id": nullable(canonicalFrameId),
+                "reason": nullable(registration?.reason),
+                "sidecar": nullable(registration == nil ? nil : "registration.json")
+            ]
+        ]
+        guard let captureData = try? JSONSerialization.data(
+            withJSONObject: captureManifest,
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        ) else {
+            zip.fail("capture manifest")
+            _ = zip.finish()
+            return false
+        }
+        zip.add("scan4d/scan.json", captureData)
 
         for name in ["registration.json", "roomplan.json"] {
             let candidates = [scanDir.appendingPathComponent(name),

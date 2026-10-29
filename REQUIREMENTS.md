@@ -328,8 +328,8 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | ✅ Complete |
-| **Description** | Each export format includes only the data relevant to that format. Scan4D bundles metadata + relocalization + Polycam payload. Polycam exports raw import data. RAW exports Nerfstudio-compatible poses. OBJ exports the raw mesh file. PLY and USDZ are converted from OBJ on-device via `MeshConverter`. Every format that includes the mesh (Nerfstudio, OBJ, PLY, USDZ) carries per-vertex colors sampled from the captured frames: exporting colorizes an uncolored scan first (`ScanExportManager.colorizeForExport`, the Color button's pass), and the save-time normals preview colors are never exported. Flame3D writes flame3d-core's `polycam` input (contract: `tools/scan4d-to-flame3d`) via `Flame3DExport` from the privacy-processed Polycam payload: stream frames + stills at one resolution, native LiDAR depth, a GLB of the colored mesh, and the registration as `alignmentTransform`, in its own root-level zip. |
-| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `exportMeshOBJ()` · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `writeTransformsJSON()` · [ScansListView.swift](wisescan-ios/ScansListView.swift) — `prepareExport()` · [MeshConverter.swift](wisescan-ios/MeshConverter.swift) — `objToPLY()`, `objToUSDZ()`, `objWithVertexColors()` · [ScanExportManager.swift](wisescan-ios/ScanExportManager.swift) — `colorizeForExport()` · [Flame3DExport.swift](wisescan-ios/Flame3DExport.swift) — `build()`, `glb()` |
+| **Description** | Each export format includes only the data relevant to that format. Scan4D bundles metadata + relocalization + Polycam payload. Polycam exports raw import data. RAW exports Nerfstudio-compatible poses. OBJ exports the raw mesh file. PLY and USDZ are converted from OBJ on-device via `MeshConverter`. Every format that includes the mesh (Nerfstudio, OBJ, PLY, USDZ) carries per-vertex colors sampled from the captured frames: exporting colorizes an uncolored scan first (`ScanExportManager.colorizeForExport`, the Color button's pass), and the save-time normals preview colors are never exported. Flame3D writes flame3d-core's `polycam` input (contract: `tools/scan4d-to-flame3d`) via `Flame3DExport` from the privacy-processed Polycam payload: stream frames + stills at one resolution, native LiDAR depth, a GLB of the colored mesh, the registration as `alignmentTransform`, and `scan4d/scan.json` sourced from persisted scan identity/time/frame, in its own root-level zip. |
+| **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `exportMeshOBJ()` · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `writeTransformsJSON()` · [ScansListView.swift](wisescan-ios/ScansListView.swift) — `prepareExport()` · [MeshConverter.swift](wisescan-ios/MeshConverter.swift) — `objToPLY()`, `objToUSDZ()`, `objWithVertexColors()` · [ScanExportManager.swift](wisescan-ios/ScanExportManager.swift) — `colorizeForExport()` · [Flame3DExport.swift](wisescan-ios/Flame3DExport.swift) — `build()`, `glb()` · [flame3d_capture.schema.json](schemas/flame3d_capture.schema.json) — capture identity/frame contract · [scan4d_to_flame3d.py](tools/scan4d-to-flame3d/scan4d_to_flame3d.py) — legacy conversion and validation |
 
 ### REQ-007: Save & Upload
 | | |
@@ -774,6 +774,14 @@ item is "does the mermaid still tell the truth?". Names are grep-able anchors.
 | **Description** | A region defined downstream (e.g. a VLM picking out "the work table") reaches the app as `focus_region.json` ([schema](schemas/focus_region.schema.json)): by deep link `scan4d://focus-region?data=<base64url JSON>` (or `json=<percent-encoded JSON>`), which opens the space its `location_id` names, or as a file imported from a space's Rescan sheet. Either way the region opens in the region editor on that space's latest room scan, to check and adjust before scanning. A link with no known space or an unusable box (each side positive, at most 10 m) is refused with an alert. |
 | **Source** | [FocusRegionInbox.swift](wisescan-ios/FocusRegionInbox.swift) — link parsing and validation · [AppDelegate.swift](wisescan-ios/AppDelegate.swift) — `onOpenURL` routing (Wearables links unchanged) · [ContentView.swift](wisescan-ios/ContentView.swift) — opening the space · [LocationDetailView.swift](wisescan-ios/LocationDetailView.swift) — file import, handing the region to the editor · [Custom-Info.plist](Custom-Info.plist) — `scan4d` URL scheme |
 
+### REQ-038: Flame3D Capture Identity & Frame Provenance
+
+| | |
+|:--|:--|
+| **Status** | Complete |
+| **Description** | Every native Flame3D export includes `scan4d/scan.json`, preserving the persisted full scan UUID, capture-completion time, location identity, actual canonical or scan-local frame, metric coordinate conventions, and conservative registration provenance. Export time and filenames never supply capture identity. The Python converter preserves bundled metadata, accepts an explicit v1 manifest for legacy exports, rejects conflicts and malformed known fields, and never invents missing identity or time. Existing privacy-filtered image/depth staging and geometry transforms are unchanged. |
+| **Source** | [Flame3DExport.swift](wisescan-ios/Flame3DExport.swift) — native manifest generation · [ScanExportManager.swift](wisescan-ios/ScanExportManager.swift) — privacy-processed Flame3D staging · [flame3d_capture.schema.json](schemas/flame3d_capture.schema.json) — v1 contract · [scan4d_to_flame3d.py](tools/scan4d-to-flame3d/scan4d_to_flame3d.py) — preservation and legacy input · [test_convert.py](tools/scan4d-to-flame3d/tests/test_convert.py) — converter coverage |
+
 ---
 
 ## Data Model
@@ -858,7 +866,7 @@ Each format includes only its own payload — no universal base.
 | Scan4D | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, `images/`, `depth/`, `cameras/`, `mesh_info.json` | Scan4D server workflows |
 | Polycam | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
 | RAW | `.zip` | `images/`, `depth/`, `transforms.json` | Nerfstudio, COLMAP |
-| Flame3D | `.zip` | `keyframes/{images,corrected_cameras,depth}/`, `raw.glb` (colored mesh), `mesh_info.json` at the zip root | flame3d-core (`polycam` data source) |
+| Flame3D | `.zip` | `keyframes/{images,corrected_cameras,depth}/`, `raw.glb` (colored mesh), `mesh_info.json`, `scan4d/scan.json` (stable capture identity/time/frame) at the zip root | flame3d-core (`polycam` data source) |
 | OBJ | `.obj` | Single mesh file with captured vertex colors | MeshLab, Blender |
 | PLY | `.ply` | Converted mesh with captured vertex colors | MeshLab, CloudCompare |
 | USDZ | `.usdz` | Converted mesh via ModelIO, with vertex colors | iOS Quick Look |

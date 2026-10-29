@@ -41,8 +41,8 @@ and Polycam exports don't work: neither carries `mesh.obj`, and flame3d needs th
 
 ## The bundle
 
-This is the contract a future in-app "flame3d" export should produce. Every entry is a change
-of representation of something the Nerfstudio export already holds.
+This is the contract the in-app Flame3D export produces. Every geometry entry is a change of
+representation of something the Nerfstudio export already holds.
 
 ```
 input.zip                                   (entries at the root; flame3d extracts as-is)
@@ -57,6 +57,18 @@ input.zip                                   (entries at the root; flame3d extrac
     ├── conversion.json                     options, frame counts, check result
     ├── registration.json, roomplan.json    copied when present; flame3d ignores them today
 ```
+
+The native bundle also contains `scan4d/scan.json`: the versioned capture-history contract
+with persisted scan UUID, capture time, location, and frame/registration provenance. The Python
+converter preserves it when present. Legacy exports must supply trustworthy metadata explicitly;
+it never parses identity from a filename or substitutes conversion time:
+
+```bash
+python3 scan4d_to_flame3d.py legacy_nerfstudio.zip -o legacy_flame3d.zip \
+  --capture-metadata /path/to/scan.json
+```
+
+An explicit file that conflicts with a bundled manifest is rejected.
 
 | flame3d reads | Written from | Notes |
 |---|---|---|

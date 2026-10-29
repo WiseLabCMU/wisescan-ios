@@ -72,7 +72,7 @@ FLEXIBLE EXPORT FORMATS
 • Scan4D: Full bundle with metadata, ARKit feature points, images, depth, confidence, and camera data
 • Polycam: Raw data import compatible with Polycam
 • RAW: Nerfstudio/COLMAP-compatible transforms.json + images + depth
-• Flame3D: Upload-ready input for flame3d 3D object segmentation and semantic search
+• Flame3D: Upload-ready input for 3D object segmentation and semantic search, with stable capture identity and coordinate-frame provenance
 • OBJ / PLY / USDZ: Native mesh formats, in the scan's real colors, for MeshLab, Blender, and iOS Quick Look
 
 SERVER INTEGRATION

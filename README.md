@@ -61,6 +61,7 @@ To check a device: the `[ARConfig]` launch log lists every supported format with
 - **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
 - **Developer Mode:** Toggleable debugging tools — synthetic IMU/camera/depth injection for Simulator testing, performance diagnostics, and a **Force Rebuild Artifacts** switch that re-runs the derived-artifact build (ghost proxy, dynamic mesh, derived surfaces) on an already-current scan so its build diagnostics can be re-read — with a persistent banner across all views.
 - **Export & Scan Capture Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses governed by motion-blur rejection and overlapping metrics.
+- **Flame3D Capture History:** Flame3D bundles carry the scan's persisted UUID, capture-completion time, location UUID, coordinate frame, and registration provenance in `scan4d/scan.json`; repeated exports preserve capture identity instead of deriving it from filenames or export time.
 - **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration.
 
 > **Note:** For a comprehensive list of all features, architecture diagrams, and detailed implementation status, please see [REQUIREMENTS.md](REQUIREMENTS.md).
@@ -127,6 +128,7 @@ wisescan-ios/
 ├── ThumbnailCache.swift         # Scan card thumbnail cache
 ├── ScanStore.swift              # Data models (ScanLocation, CapturedScan, ScanStats, capacity)
 ├── ScanExportManager.swift      # Export packaging (Scan4D, Polycam, RAW, OBJ, PLY, USDZ)
+├── Flame3DExport.swift          # Flame3D bundle, capture identity, frame/registration provenance
 ├── MeshConverter.swift          # OBJ→PLY and OBJ→USDZ mesh conversion
 ├── MeshParser.swift             # Wavefront OBJ parser for RealityKit MeshResource
 ├── VertexColorAccumulator.swift # Vertex coloring: frame selection, top-K observations, consensus-median reduce
@@ -164,7 +166,7 @@ Each export format includes **only** the data relevant to that format. The filen
 | :--- | :--- | :--- | :--- |
 | **Scan4D** | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
 | **Polycam** | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
-| **Flame3D** | `.zip` | `keyframes/images/`, `keyframes/corrected_cameras/`, `keyframes/depth/` (native LiDAR), `raw.glb` (mesh with captured vertex colors), `mesh_info.json` (registration as `alignmentTransform`); entries at the zip root | [flame3d-core](https://github.com/openflam/flame3d-core)'s `polycam` data source, as-is; contract in `tools/scan4d-to-flame3d` |
+| **Flame3D** | `.zip` | `keyframes/images/`, `keyframes/corrected_cameras/`, `keyframes/depth/` (native LiDAR), `raw.glb` (mesh with captured vertex colors), `mesh_info.json` (registration as `alignmentTransform`), `scan4d/scan.json` (stable capture identity/time/frame); entries at the zip root | [flame3d-core](https://github.com/openflam/flame3d-core)'s `polycam` data source, as-is; contract in `tools/scan4d-to-flame3d` |
 | **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `cameras/`, + raw geometry: `mesh.obj` (with captured vertex colors), `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin` | Nerfstudio and LichtFeld Studio, as-is; training-side pipeline in `tools/` |
 | **OBJ** | `.obj` | Single mesh file with captured vertex colors | MeshLab, Blender |
 | **PLY** | `.ply` | Converted mesh with captured vertex colors | MeshLab, CloudCompare |

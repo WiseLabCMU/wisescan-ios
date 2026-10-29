@@ -664,16 +664,21 @@ struct LocationDetailView: View {
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             // Read on main, after colorizing: SwiftData models aren't thread-safe.
-            let capturedColorIds = Set(scans.filter { $0.isColored }.map(\.id))
+            let scanInfos = scans.map {
+                (id: $0.id, directory: $0.scanDirectory,
+                 filename: $0.makeExportFilename(format: format),
+                 colorsFromCapture: $0.isColored,
+                 captureIdentity: Flame3DExport.CaptureIdentity(scan: $0))
+            }
             DispatchQueue.global(qos: .userInitiated).async {
                 var urls: [ZipExportItem] = []
-                for scan in scans {
+                for (scan, info) in zip(scans, scanInfos) {
                     DispatchQueue.main.async { scan.uploadStatus = .zipping }
-                    let filename = scan.makeExportFilename(format: format)
                     if let url = ScanExportManager.prepareExport(
-                        filename: filename, scanDir: scan.scanDirectory, format: format,
-                        vertexColorsFromCapture: capturedColorIds.contains(scan.id), bulkStitch: bulkStitch,
-                        phase: { step in DispatchQueue.main.async { bulkExportPhases[scan.id] = step } }
+                        filename: info.filename, scanDir: info.directory,
+                        captureIdentity: info.captureIdentity, format: format,
+                        vertexColorsFromCapture: info.colorsFromCapture, bulkStitch: bulkStitch,
+                        phase: { step in DispatchQueue.main.async { bulkExportPhases[info.id] = step } }
                     ) {
                         urls.append(ZipExportItem(url: url))
                         DispatchQueue.main.async {
@@ -722,12 +727,14 @@ struct LocationDetailView: View {
                 }
                 scan.uploadStatus = .zipping
                 let colorsFromCapture = scan.isColored
+                let captureIdentity = Flame3DExport.CaptureIdentity(scan: scan)
                 let contentType = format.effective(for: scan).contentType   // read on main (SwiftData)
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     let filename = scan.makeExportFilename(format: format)
                     guard let exportURL = ScanExportManager.prepareExport(
-                        filename: filename, scanDir: scan.scanDirectory, format: format,
+                        filename: filename, scanDir: scan.scanDirectory,
+                        captureIdentity: captureIdentity, format: format,
                         vertexColorsFromCapture: colorsFromCapture, bulkStitch: bulkStitch,
                         phase: { step in DispatchQueue.main.async { bulkExportPhases[scan.id] = step } }
                     ) else {

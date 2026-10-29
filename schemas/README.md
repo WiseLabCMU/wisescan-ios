@@ -108,8 +108,13 @@ root**, because flame3d extracts the upload as-is:
 - `raw.glb`: the mesh in the canonical frame, with captured vertex colors as `COLOR_0` (linear).
 - `mesh_info.json`: `alignmentTransform`, the registration's raw→canonical transform,
   column-major (identity for an original scan), plus the frame count and image size.
-- `scan4d/`: `registration.json`, `roomplan.json` and `export.json`, which records what was
-  exported and what was left out.
+- `scan4d/`: `scan.json` ([schema](flame3d_capture.schema.json)) carries the persisted scan UUID,
+  capture-completion time, location and conservative coordinate-frame provenance;
+  `registration.json`, `roomplan.json` and `export.json` retain supporting provenance.
+
+`scan.json` never derives identity or time from the export filename/current clock. A canonical
+base needs no registration sidecar; `applied=false` is normalized separately as already aligned
+or refused from the persisted sidecar reason. Uncertain evidence remains scan-local/unverified.
 
 Check a bundle before uploading with
 `python3 tools/scan4d-to-flame3d/scan4d_to_flame3d.py --verify <bundle>.zip`.

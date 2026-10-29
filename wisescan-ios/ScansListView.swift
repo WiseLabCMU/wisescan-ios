@@ -554,7 +554,8 @@ struct ScansListView: View {
                 progress: { scan, msg in if let msg { bulkProgressMessage = "\(scan.name): \(msg)" } })
             // Capture scan directories on main, after colorizing (SwiftData model access).
             let scanInfos = scans.map { (dir: $0.scanDirectory, filename: $0.makeExportFilename(format: format),
-                                         colorsFromCapture: $0.isColored) }
+                                         colorsFromCapture: $0.isColored,
+                                         captureIdentity: Flame3DExport.CaptureIdentity(scan: $0)) }
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             DispatchQueue.global(qos: .userInitiated).async {
@@ -564,7 +565,8 @@ struct ScansListView: View {
                         self.bulkProgressMessage = "Preparing \(idx + 1)/\(totalScans)…"
                     }
                     if let url = ScanExportManager.prepareExport(
-                        filename: info.filename, scanDir: info.dir, format: format,
+                        filename: info.filename, scanDir: info.dir,
+                        captureIdentity: info.captureIdentity, format: format,
                         vertexColorsFromCapture: info.colorsFromCapture, bulkStitch: bulkStitch
                     ) {
                         urls.append(ZipExportItem(url: url))
@@ -618,6 +620,7 @@ struct ScansListView: View {
                 scan.uploadStatus = .zipping
                 let scanDir = scan.scanDirectory
                 let colorsFromCapture = scan.isColored
+                let captureIdentity = Flame3DExport.CaptureIdentity(scan: scan)
                 let contentType = format.effective(for: scan).contentType   // read on main (SwiftData)
 
                 DispatchQueue.global(qos: .userInitiated).async {
@@ -625,7 +628,8 @@ struct ScansListView: View {
                         // No phase callback: this screen shows LOCATION tiles, not scan cards —
                         // there's no per-scan pill here to report into (LocationDetailView's
                         // bulk flows drive `bulkExportPhases`).
-                        filename: filename, scanDir: scanDir, format: format,
+                        filename: filename, scanDir: scanDir,
+                        captureIdentity: captureIdentity, format: format,
                         vertexColorsFromCapture: colorsFromCapture, bulkStitch: bulkStitch
                     ) else {
                         DispatchQueue.main.async {
@@ -1742,6 +1746,7 @@ struct ScanCard: View {
         // Capture scan directory on main thread (SwiftData models aren't thread-safe)
         let scanDir = scan.scanDirectory
         let colorsFromCapture = scan.isColored
+        let captureIdentity = Flame3DExport.CaptureIdentity(scan: scan)
         let contentType = format.effective(for: scan).contentType
         print("[Upload] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
         guard FileManager.default.fileExists(atPath: scanDir.path) else {
@@ -1752,7 +1757,8 @@ struct ScanCard: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             guard let exportURL = ScanExportManager.prepareExport(
-                filename: filename, scanDir: scanDir, format: format,
+                filename: filename, scanDir: scanDir,
+                captureIdentity: captureIdentity, format: format,
                 vertexColorsFromCapture: colorsFromCapture,
                 phase: { step in DispatchQueue.main.async { self.exportPhase = step } }
             ) else {
@@ -1843,6 +1849,7 @@ struct ScanCard: View {
 
         let scanDir = scan.scanDirectory
         let colorsFromCapture = scan.isColored
+        let captureIdentity = Flame3DExport.CaptureIdentity(scan: scan)
         print("[SaveToFiles] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
         print("[SaveToFiles] location?.id: \(scan.location?.id.uuidString ?? "nil")")
         print("[SaveToFiles] meshFileURL: \(scan.meshFileURL.path) exists=\(FileManager.default.fileExists(atPath: scan.meshFileURL.path))")
@@ -1858,7 +1865,8 @@ struct ScanCard: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             if let exportURL = ScanExportManager.prepareExport(
-                filename: filename, scanDir: scanDir, format: format,
+                filename: filename, scanDir: scanDir,
+                captureIdentity: captureIdentity, format: format,
                 vertexColorsFromCapture: colorsFromCapture,
                 phase: { step in DispatchQueue.main.async { self.exportPhase = step } }
             ) {
