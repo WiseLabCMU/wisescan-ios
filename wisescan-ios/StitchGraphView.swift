@@ -28,6 +28,7 @@ struct StitchGraphView: View {
     /// path (mixed-color prompt included). Per-scan Color stays on the location's cards.
     var onColorScans: ([CapturedScan]) -> Void = { _ in }
 
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
     @State private var graph: StitchGraph?
 
     /// scanId → CapturedScan, for resolving mesh files during combined render.
@@ -51,7 +52,9 @@ struct StitchGraphView: View {
                                     selectedLocations: $selectedLocations,
                                     processingByLocation: processingByLocation,
                                     onRender: { presentRender(for: component) },
-                                    onColor: { colorCluster(component) }
+                                    onColor: { colorCluster(component) },
+                                    onSync: ControlPlaneClient.baseURL(fromHost: controlPlaneHost) == nil ? nil
+                                        : { ControlPlaneSync.shared.sync(spaces: component) }
                                 )
                             }
                         }
@@ -176,6 +179,9 @@ private struct ClusterView: View {
     var processingByLocation: [UUID: String] = [:]
     let onRender: () -> Void
     let onColor: () -> Void
+    /// Sync on the stitched map: every space in the cluster goes to the control plane. nil
+    /// without one.
+    var onSync: (() -> Void)? = nil
 
     // Layout metrics
     private let nodeWidth: CGFloat = 150
@@ -289,6 +295,11 @@ private struct ClusterView: View {
             // when the canvas is wider than the screen.
             .frame(width: max(canvasSize.width, UIScreen.main.bounds.width - 60), alignment: .leading)
 
+            if let onSync, !isEditing {
+                syncRow(onSync)
+                    .frame(width: max(canvasSize.width, UIScreen.main.bounds.width - 60), alignment: .leading)
+            }
+
             // Breathing room between the tappable header and the node canvas so taps on the
             // header / render button don't accidentally land on the map tiles below.
             Divider()
@@ -345,6 +356,38 @@ private struct ClusterView: View {
                 .fill(Color.white.opacity(0.05))
                 .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.green.opacity(0.25), lineWidth: 1))
         )
+    }
+
+    /// The stitched map's Sync, on its own row so the header keeps fitting a phone: a capsule
+    /// with the same tap treatment as Render together, and how many of its maps the lab has.
+    private func syncRow(_ onSync: @escaping () -> Void) -> some View {
+        let sync = ControlPlaneSync.shared
+        let state = sync.state(of: component)
+        let synced = component.filter { sync.syncedSpaces.contains($0) }.count
+        return HStack(spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: state.symbol)
+                Text(state.shortTitle)
+            }
+            .font(.subheadline.bold())
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+            .foregroundColor(.teal)
+            .background(Color.teal.opacity(0.2))
+            .clipShape(Capsule())
+            .contentShape(Capsule())
+            .simultaneousGesture(TapGesture().onEnded { if state != .syncing { onSync() } })
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(state.title)
+            .accessibilityHint("Sends every map in this cluster to the lab's control plane")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { onSync() }
+
+            Text("\(synced) of \(component.count) on the lab server")
+                .font(.caption)
+                .foregroundColor(.gray)
+            Spacer(minLength: 0)
+        }
     }
 
     private func toggleClusterSelection() {

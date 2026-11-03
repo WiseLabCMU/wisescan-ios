@@ -62,6 +62,14 @@ To check a device: the `[ARConfig]` launch log lists every supported format with
 - **Developer Mode:** Toggleable debugging tools — synthetic IMU/camera/depth injection for Simulator testing, performance diagnostics, and a **Force Rebuild Artifacts** switch that re-runs the derived-artifact build (ghost proxy, dynamic mesh, derived surfaces) on an already-current scan so its build diagnostics can be re-read — with a persistent banner across all views.
 - **Export & Scan Capture Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses governed by motion-blur rejection and overlapping metrics.
 - **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration.
+- **Control Plane Sync:** Set the lab's control plane server in Settings and the phone reports the spaces you sync to it (Sync to Lab Server in a space, or Sync on a stitched map in the graph view; Settings → Auto sync adds every space, the ones started after joining (the default), or none): each with its base and tip scans, its scans and its stitch links. It also uploads the parts of each scan's map package the server asks for (a Settings toggle, no photos):
+- the small files it reads itself right away;
+- the mesh and relocalization map only when the lab needs them, and large files only over Wi-Fi.
+
+Nothing is sent during a capture. The server then:
+- hands out each export's upload address in the lab's Versity bucket, revocable per device;
+- shares join fine-tunes edited on its web 3D view back to the phone;
+- can ask for a focus scan of a region, for example where its toy change evaluator saw a rescan differ. The server (the `scan4d-server` repo) keeps the fleet's devices, maps and scans in one place, the start of server-directed scanning. See REQ-038.
 
 > **Note:** For a comprehensive list of all features, architecture diagrams, and detailed implementation status, please see [REQUIREMENTS.md](REQUIREMENTS.md).
 >
@@ -162,10 +170,10 @@ Each export format includes **only** the data relevant to that format. The filen
 
 | Format | Extension | Contents | Viewer |
 | :--- | :--- | :--- | :--- |
-| **Scan4D** | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
+| **Scan4D** | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, `sweep_coverage.bin`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
 | **Polycam** | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
 | **Flame3D** | `.zip` | `keyframes/images/`, `keyframes/corrected_cameras/`, `keyframes/depth/` (native LiDAR), `raw.glb` (mesh with captured vertex colors), `mesh_info.json` (registration as `alignmentTransform`); entries at the zip root | [flame3d-core](https://github.com/openflam/flame3d-core)'s `polycam` data source, as-is; contract in `tools/scan4d-to-flame3d` |
-| **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `cameras/`, + raw geometry: `mesh.obj` (with captured vertex colors), `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin` | Nerfstudio and LichtFeld Studio, as-is; training-side pipeline in `tools/` |
+| **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `cameras/`, + raw geometry: `mesh.obj` (with captured vertex colors), `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin`, `sweep_coverage.bin` | Nerfstudio and LichtFeld Studio, as-is; training-side pipeline in `tools/` |
 | **OBJ** | `.obj` | Single mesh file with captured vertex colors | MeshLab, Blender |
 | **PLY** | `.ply` | Converted mesh with captured vertex colors | MeshLab, CloudCompare |
 | **USDZ** | `.usdz` | Converted mesh via ModelIO, with vertex colors | iOS Quick Look (native) |
@@ -175,6 +183,7 @@ Each export format includes **only** the data relevant to that format. The filen
 scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
 ├── scan4d_metadata.json    # GPS tags, Location ID, `export_format`, `hardware_device_model`, & `face_anchors`
 ├── arkit_features.bin       # ARKit sparse feature cloud (id + xyz, raw capture frame)
+├── sweep_coverage.bin       # Where the sweep looked: per-cell free/surface/visit counts (raw capture frame)
 ├── images/                 # RGB frames (JPEG, ~2fps adaptive)
 │   ├── frame_00000.jpg
 │   └── ...
