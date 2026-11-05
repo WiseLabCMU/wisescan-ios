@@ -348,7 +348,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Capture Audio")
                             .foregroundColor(.white)
-                        Text("Play shutter click when a sharp frame is captured at a stillness point, and a chime when entering stillness.")
+                        Text("Play a shutter click for a tapped 360° rig still, and a chime when entering stillness. Automatic stills make the system camera sound, which the silent switch mutes. The screen flashes for every saved still either way.")
                             .font(.caption)
                             .foregroundColor(.gray)
                     }

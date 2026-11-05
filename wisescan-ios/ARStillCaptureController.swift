@@ -18,9 +18,15 @@ final class ARStillCaptureController {
     let engine = ARStillCaptureSession()
     var phase: Phase = .idle
     var stats = ARStillCaptureSession.LiveStats()
+    /// Stills saved since launch, bumped as each lands (not polled): the capture view flashes on
+    /// every increase (CaptureFlashHost). Only ever grows.
+    private(set) var savedStillCount = 0
     private var timer: Timer?
 
     func begin(session: ARSession, label: String, context: ARStillCaptureSession.FrameContext) -> Bool {
+        engine.setStillSavedHandler { [weak self] in
+            Task { @MainActor [weak self] in self?.savedStillCount += 1 }
+        }
         do {
             try engine.begin(session: session, label: label, context: context)
             phase = .running

@@ -68,8 +68,6 @@ struct CaptureView: View {
     @State var recordingSeconds = 0
     @State var recordingTimer: Timer?
     @State var frameCaptureSession = FrameCaptureSession()
-    /// Opacity of the white shutter-flash overlay shown when a sharp keyframe is captured.
-    @State private var captureFlashOpacity: Double = 0
     // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
     /// [MemDiag] logs a MEM-PRESSURE marker (footprint + headroom) when the OS flags the app near its
     /// jetsam limit — the redline trip-flag. No-op unless Perf Diagnostics is on.
@@ -898,31 +896,16 @@ struct CaptureView: View {
         // Manual alignment slider overlay
         manualAdjustOverlay
 
-        // Keyframe capture flash — a brief white blink (camera-app shutter language)
-        // each time a sharp keyframe is saved. Drawn last so it covers the full view.
-        Color.white
-            .opacity(captureFlashOpacity)
-            .ignoresSafeArea()
-            .allowsHitTesting(false)
+        // Still capture flash: a brief white blink (camera-app shutter language) for every saved
+        // still, so captures show even with the sound muted. Drawn last so it covers the full view;
+        // its own host, so a flash never re-evaluates this body.
+        CaptureFlashHost(frameCaptureSession: frameCaptureSession, stillCapture: stillCapture)
     }
     }
 
     /// Appearance, appear/disappear wiring, and the ghost-alignment dialog.
     private func captureLifecycle(_ content: some View) -> some View {
         content
-        // Announced stills only (the rig's tapped ones): automatic stills land about once a second.
-        .onChange(of: frameCaptureSession.shutterFeedbackCount) { oldCount, newCount in
-            guard newCount > oldCount else { return } // ignore session-start reset to 0
-            // Two-phase so the peak actually renders: commit the peak opacity this
-            // update, then animate down on the next runloop turn — writing both in one
-            // transaction can coalesce to 0→0 and skip the flash entirely.
-            captureFlashOpacity = AppConstants.captureFlashOpacity
-            DispatchQueue.main.async {
-                withAnimation(.easeOut(duration: AppConstants.captureFlashDuration)) {
-                    captureFlashOpacity = 0
-                }
-            }
-        }
         .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
             Button("Re-relocalize") {
                 // Reset transform and reload the world map by toggling the ghost data.

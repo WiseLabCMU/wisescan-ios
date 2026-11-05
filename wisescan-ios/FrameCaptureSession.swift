@@ -120,9 +120,12 @@ class FrameCaptureSession {
     private(set) var totalCapturedFrameCount: Int = 0
     /// Time of last sharp frame capture (for ScanCoach "pause for photo" guidance).
     private(set) var lastSharpFrameTime: Date?
-    /// Stills that announced themselves (shutter click, flash): the tapped rig stills. Automatic
-    /// stills land quietly, about one a second, so the capture view's flash keys off this.
+    /// Stills that announced themselves (shutter click, haptic, full flash): the tapped rig stills.
     private(set) var shutterFeedbackCount = 0
+    /// Automatic room stills saved this session. No click or haptic (they land up to about twice a
+    /// second, and ARKit already plays the system camera sound for each), but the capture view
+    /// gives each a softer flash, so they show even with the sound muted (CaptureFlash).
+    private(set) var automaticStillCount = 0
 
     // ── High-resolution keyframe capture ──
     // While the AR video stream runs a standard mesh-friendly format (1920×1440),
@@ -455,6 +458,7 @@ class FrameCaptureSession {
         self.isStillCapturePending = false
         self.sharpFrameCount = 0
         self.shutterFeedbackCount = 0
+        self.automaticStillCount = 0
         self.totalCapturedFrameCount = 0
         self.lastSharpFrameTime = nil
         self.hiResCaptureInFlight = false
@@ -981,6 +985,8 @@ class FrameCaptureSession {
             clearStillCaptureRequest() // the tapped request delivered its still
             playShutterClick()
             shutterFeedbackCount += 1
+        } else {
+            automaticStillCount += 1
         }
         onKeyframeCaptured?(KeyframeStill(
             transform: transform, intrinsics: intrinsics,

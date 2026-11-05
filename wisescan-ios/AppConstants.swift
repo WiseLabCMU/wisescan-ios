@@ -485,6 +485,10 @@ enum AppConstants {
     static let stillnessHapticIntensity: CGFloat = 0.6         // soft haptic strength on entering confirmed stillness
     static let captureFlashOpacity: Double = 0.5               // peak opacity of the white shutter flash on keyframe capture
     static let captureFlashDuration: TimeInterval = 0.35       // fade-out duration of the shutter flash
+    static let autoStillFlashOpacity: Double = 0.25            // peak of the softer flash for automatic room and focus-scan stills (up to ~2/s)
+    static let autoStillFlashDuration: TimeInterval = 0.2      // fade-out of the automatic-still flash
+    static let captureFlashDimmedOpacity: Double = 0.1         // every flash's peak with Accessibility > Dim Flashing Lights on
+    static let captureFlashDimmedDuration: TimeInterval = 0.5  // slower, gentler fade with Dim Flashing Lights on
     static let photoCoverageMaxDistance: Float = 4.0           // m — max distance a keyframe photo credibly captures texture detail
     static let photoTintColor = SIMD4<Float>(1.0, 0.72, 0.2, 1.0) // amber overlay marking depth-covered-but-unphotographed mesh
     static let photoTintAlpha: CGFloat = 0.28                  // opacity of the amber "depth only" tint
