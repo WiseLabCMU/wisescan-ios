@@ -90,7 +90,9 @@ struct UserGuideView: View {
                         title: "Save or Upload",
                         text: "Save locally to Files, AirDrop to another device, or upload to your " +
                               "configured server. A cloud badge on each location shows upload state: " +
-                              "solid when every scan is uploaded, dimmed when only some are. With a " +
+                              "solid when every scan is uploaded, dimmed when only some are. An upload " +
+                              "keeps going if you lock the screen or switch apps, and the screen stays " +
+                              "on while a scan is being converted. With a " +
                               "control plane server set in Settings, the app also keeps your lab's " +
                               "server up to date with the spaces you sync: tap Sync to Lab Server in " +
                               "a space, or Sync on a stitched map in the graph view. Settings > Auto " +
@@ -128,7 +130,9 @@ struct UserGuideView: View {
                               "clears where photos land. Slow down over amber areas and step sideways " +
                               "now and then so surfaces are seen from more than one spot. With a 360° " +
                               "camera connected, tapping the screen while holding still takes a 360° " +
-                              "still and a matching phone photo. In the mesh preview, the camera toggle " +
+                              "still and a matching phone photo. The screen flashes briefly for every " +
+                              "photo kept, so you can follow along with the sound off; the screen stays " +
+                              "on while you record. In the mesh preview, the camera toggle " +
                               "shows where each photo was captured."
                     )
                     guideRow(

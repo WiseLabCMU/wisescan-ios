@@ -77,7 +77,7 @@ FLEXIBLE EXPORT FORMATS
 
 SERVER INTEGRATION
 • Configure any HTTP(S) upload endpoint in Settings
-• Direct PUT upload with live progress tracking
+• Direct PUT upload with live progress tracking that finishes even with the screen locked
 • Save to Files or AirDrop for offline workflows
 • Compatible with self-hosted reconstruction pipelines
 

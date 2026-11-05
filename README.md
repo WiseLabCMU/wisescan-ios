@@ -61,7 +61,7 @@ To check a device: the `[ARConfig]` launch log lists every supported format with
 - **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
 - **Developer Mode:** Toggleable debugging tools — synthetic IMU/camera/depth injection for Simulator testing, performance diagnostics, and a **Force Rebuild Artifacts** switch that re-runs the derived-artifact build (ghost proxy, dynamic mesh, derived surfaces) on an already-current scan so its build diagnostics can be re-read — with a persistent banner across all views.
 - **Export & Scan Capture Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses governed by motion-blur rejection and overlapping metrics.
-- **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration.
+- **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration. Uploads run in a background session, so they finish with the screen locked or the app in the background, and the screen stays on while a scan is converted for upload.
 - **Control Plane Sync:** Set the lab's control plane server in Settings and the phone reports the spaces you sync to it (Sync to Lab Server in a space, or Sync on a stitched map in the graph view; Settings → Auto sync adds every space, the ones started after joining (the default), or none): each with its base and tip scans, its scans and its stitch links. It also uploads the parts of each scan's map package the server asks for (a Settings toggle, no photos):
 - the small files it reads itself right away;
 - the mesh and relocalization map only when the lab needs them, and large files only over Wi-Fi.
@@ -97,6 +97,8 @@ wisescan-ios/
 ├── CaptureExposurePolicy.swift  # Short-exposure cap on ARKit's camera (1/500 to 1/120 s), both capture modes
 ├── DelegateWorkMeter.swift      # Per-frame AR delegate timing during a room scan
 ├── StillnessReticle.swift       # Capture-quality reticle: ring fills as device settles (360° rig tap)
+├── CaptureFlash.swift           # Screen flash for every saved still (full for a tapped still, softer for automatic ones)
+├── ScreenAwake.swift            # Keeps auto-lock off while recording or exporting/uploading
 ├── ARStillCaptureSession.swift  # Focus-scan still engine: blur/region/spacing gates, coverage, logs, manifest
 ├── ARStillCaptureGates.swift    # Pure gate math (image-motion smear, gyro peak, region view, coverage bins)
 ├── ARStillCaptureController.swift # Focus-scan controller (start/stop, stats polling)
@@ -135,6 +137,7 @@ wisescan-ios/
 ├── ThumbnailCache.swift         # Scan card thumbnail cache
 ├── ScanStore.swift              # Data models (ScanLocation, CapturedScan, ScanStats, capacity)
 ├── ScanExportManager.swift      # Export packaging (Scan4D, Polycam, RAW, OBJ, PLY, USDZ)
+├── ExportUploader.swift         # Background-session export uploads that survive a locked screen
 ├── MeshConverter.swift          # OBJ→PLY and OBJ→USDZ mesh conversion
 ├── MeshParser.swift             # Wavefront OBJ parser for RealityKit MeshResource
 ├── VertexColorAccumulator.swift # Vertex coloring: frame selection, top-K observations, consensus-median reduce
