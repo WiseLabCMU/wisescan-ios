@@ -202,6 +202,8 @@ When adding a new feature, update the following docs alongside the source code:
 2. **[REQUIREMENTS.md](REQUIREMENTS.md)** — Add a REQ-NNN entry (feature matrix row + detailed section) with source map entries.
 3. **[docs/APPSTORE.md](docs/APPSTORE.md)** — Add a line to the App Store description.
 4. **[docs/PRIVACY.md](docs/PRIVACY.md)** — Update if the feature touches data collection, camera usage, or personal data processing.
+5. **[wisescan-ios/UserGuideView.swift](wisescan-ios/UserGuideView.swift)** — The in-app guide is documentation that lives in SwiftUI; update it with any user-facing workflow, tip, or export change.
+6. **[AGENTS.md](AGENTS.md)** — Index any new doc, design note, or tool so agents and new contributors can find it.
 
 ## Stitching / Scan Linking — Implementation Contract
 
