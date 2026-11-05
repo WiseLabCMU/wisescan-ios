@@ -12,44 +12,42 @@ Scan4D is a time-series reality capture application built on the WiSEScan resear
 
 ```mermaid
 graph LR
-    subgraph "Reality Capture Devices"
-        Phone["Scan4D"]
-        MetaAI["Meta AI App"]
-        Glasses["Meta/Ray-Ban"]
-        Cam360["360 Camera"]
+    subgraph Capture["Capture devices"]
+        Phone["Scan4D (iPhone / iPad)"]
+        Glasses["Meta Ray-Ban glasses"]
+        MetaAI["Meta AI app"]
+        Cam360["360 camera (Ricoh Theta; Insta360 X6 in progress)"]
     end
-
-    subgraph "Hackable Backend"
-        Server["Self-Hosted Server"]
-        Prefect["Prefect.io"]
-        Dashboard["Web Dashboard"]
+    subgraph Stack["scan4d-server stack (private repo)"]
+        API["Control plane API (FastAPI)"]
+        S3["Working directory (Versity S3)"]
+        Prefect["Prefect + docker worker"]
+        Web["Web app: fleet, 3D map, Files, Runs"]
     end
-
-    subgraph "ARENA Ecosystem"
-        Arena["ARENA"]
-        Mesh["Mesh"]
-        Splat["Gaussian Splat"]
-        SpatialIdx["Spatial Index"]
-        Hloc["hloc Cloud"]
+    subgraph Flows["scan4d-flows (private repo)"]
+        Splat["scan4d-splat: SfM poses, priors, region masks, LichtFeld training"]
+        Eagle["eagle-splat"]
+        LOD["spark-build-lod (.rad for ARENA)"]
     end
-
-    Glasses -.->|Paired| MetaAI
-    MetaAI -.->|Auth/Permissions| Phone
-    Glasses -->|DAT SDK Proxy| Phone
+    Glasses -.->|paired| MetaAI
+    MetaAI -.->|auth / permissions| Phone
+    Glasses -->|DAT SDK stream| Phone
     Cam360 -->|BLE + Wi-Fi| Phone
-    Phone -->|Pose/Depth/RGB| Server
-    Server -.->|mDNS| Phone
-    Server --- Dashboard
-    Server --- Prefect
-    Server -->|Sync| Arena
-    Arena --> Mesh
-    Arena --> Splat
-    Arena --> SpatialIdx
-    Arena --> Hloc
+    Phone -->|sync: inventory, map packages, tasks| API
+    Phone -->|export uploads at granted addresses| S3
+    API --- Web
+    API -->|events| Prefect
+    Prefect --> Splat
+    Prefect --> Eagle
+    Prefect --> LOD
+    Splat --> S3
+    LOD --> Arena["ARENA"]
 ```
 
 **Related docs:**
-- `wiselab-scan/ARCHITECTURE.md` (sibling checkout, not on GitHub) — full system design
+- `scan4d-server/README.md` (private sibling repo) — the control plane: architecture, concepts, sync, map packages, export uploads, shared edits, tasks, events, pipelines, auth, change evaluator, coverage, web app, API, data model, roadmap
+- `scan4d-flows/README.md` (private sibling repo) — the Prefect flows deployed into the stack: `scan4d-splat`, `eagle-splat`, `spark-build-lod`
+- `wiselab-scan/ARCHITECTURE.md` (sibling checkout, not on GitHub) — the original platform-wide design
 - `wiselab-scan/wisescan-architecture.puml` (sibling checkout) — rendered system diagram
 - [iOS Design Spec](docs/design/DESIGN.md) — Original UI/UX design document
 - [Troubleshooting Guide](docs/TROUBLESHOOTING.md) — Hardware quirks and recovery steps
@@ -249,7 +247,7 @@ graph TD
 ### REQ-001b: Lite Mode (No LiDAR)
 | | |
 |:--|:--|
-| **Status** | Complete |
+| **Status** | Complete as a test harness: debug builds only; a photogrammetry pipeline for non-LiDAR captures is under a feasibility study |
 | **Description** | Non-LiDAR devices (iPhone 16/17 non-Pro, older iPads) run in Lite Mode: camera passthrough + image/pose capture for server-side photogrammetry, including hi-res tap stills. No mesh, depth, coverage overlay, or 3D face anchors (the mesh coaching cue is suppressed). Saving follows the full flow — naming dialog and a **feature-based `ARWorldMap`** are persisted (visual features only, no mesh anchors), so Lite scans remain relocalizable for rescan/link workflows. A blue "Lite Mode" banner is shown at the top of CaptureView, clear of the stillness reticle. ContentView shows an informational alert on launch. **Note:** Lite mode is limited to Local Debug builds. TestFlight and App Store (Release builds) enforce a LiDAR hardware requirement via `UIRequiredDeviceCapabilities`. |
 | **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `supportsLiDAR`, [CaptureView.swift](wisescan-ios/CaptureView.swift) — lite mode banner, [CaptureView+Recording.swift](wisescan-ios/CaptureView+Recording.swift) — Lite save path (world map + images/poses), [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — optional depth |
 | **Dependencies** | ARKit (required), LiDAR (optional) |
@@ -343,7 +341,7 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | Complete |
-| **Description** | Person segmentation removes humans from the mesh and zeroes them out of depth maps. All three privacy outputs (live indicator, saved JPEG blur, depth cutout) are driven by ARKit's already-computed `.personSegmentationWithDepth` stencil (`ARFrame.segmentationBuffer`), **not** a separate per-frame Vision pass (the old `.accurate VNGeneratePersonSegmentationRequest` cost 180–360 ms/frame and starved VIO — see REQ-027). **Live indicator:** a cheap **red-eye marker** per detected person, rendered over the camera feed — no Vision, no CoreImage render; a retained confidence grid (`PrivacyEyeTracker`) debounces the markers so they don't flicker. **Saved JPEGs (the actual guarantee):** person regions are pixelated from the stencil; a **Vision fallback** (`pixelatePersonsAndGetFaceCenters`) covers any frame where the stencil is unavailable (unsupported device / momentary gap) so a detected person is never written unblurred. **3D anchors:** one confidence-weighted, observation-gated body-center centroid **per person** (union-find–merged from the stencil, not per grid cell), unprojected against the 16-bit depth buffer; these `face_anchors` bypass mesh inclusion and mark the preview mesh as red indicators before the server deletes the bodies downstream. Persistent toggle via `@AppStorage`. The capture view is locked to portrait for consistent orientation alignment across the RealityKit scene, the overlay, and scene geometry (see REQ-026). |
+| **Description** | Person segmentation removes humans from the mesh and zeroes them out of depth maps. All three privacy outputs (live indicator, saved JPEG blur, depth cutout) are driven by ARKit's already-computed `.personSegmentationWithDepth` stencil (`ARFrame.segmentationBuffer`), **not** a separate per-frame Vision pass (the old `.accurate VNGeneratePersonSegmentationRequest` cost 180–360 ms/frame and starved VIO — see REQ-027). **Live indicator:** a cheap **red-eye marker** per detected person, rendered over the camera feed — no Vision, no CoreImage render; a retained confidence grid (`PrivacyEyeTracker`) debounces the markers so they don't flicker. **Saved JPEGs (the actual guarantee):** person regions are pixelated from the stencil; a **Vision fallback** (`pixelatePersonsAndGetFaceCenters`) covers any frame where the stencil is unavailable (unsupported device / momentary gap) so a detected person is never written unblurred. **3D anchors:** one confidence-weighted, observation-gated body-center centroid **per person** (union-find–merged from the stencil, not per grid cell), unprojected against the 16-bit depth buffer; these `face_anchors` bypass mesh inclusion and mark the preview mesh as red indicators before the server deletes the bodies downstream. Persistent toggle via `@AppStorage`. The capture view is locked to portrait for consistent orientation alignment across the RealityKit scene, the overlay, and scene geometry (see REQ-026). The metadata key `face_anchors` carries these body-center anchors (one per person); the name predates body-center detection and is kept for compatibility. |
 | **Source** | [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `privacyFilter`, stencil-based mesh/point-cloud exclusion · [FaceBlurOverlay.swift](wisescan-ios/FaceBlurOverlay.swift) — `PrivacyEyeOverlay`, `PrivacyEyeTracker`, `PrivacyBlurUtil.pixelatePersonsWithMask()` / `pixelatePersonsAndGetFaceCenters()` (fallback) · [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — privacy-aware frame capture + 3D anchor accumulation |
 
 ### REQ-005: 3D Scan Preview
@@ -431,7 +429,7 @@ sequenceDiagram
 ### REQ-017: Wearable Proxy
 | | |
 |:--|:--|
-| **Status** | Complete |
+| **Status** | Complete as a test harness: proxy frames are captured and exported; reconstruction from them is part of the same feasibility study as REQ-001b |
 | **Description** | Proxy Mode Data Collection connects to Meta Ray-Ban glasses using the Meta Wearables DAT SDK. Connections are managed in the background via the dashboard's connection card. Listens for hardware shutter button presses to start/stop recordings and streams RGB frames natively into the app, eliminating the need for a WebRTC receiver loop. Includes a 15 FPS manual rate limiter to prevent massive proxy image bloat, strict frame-isolation by saving Wearable frames to a separate `proxy_images/` directory in the export payload, and an immediate session teardown mechanism when unregistering to prevent stale UI state. |
 | **Source** | `MetaWearableManager.swift` (SDK Lifecycle) · `FrameCaptureSession.swift` (Frame Ingestion) · `ScansListView.swift` (Zipping/Export Management) |
 
@@ -464,10 +462,10 @@ sequenceDiagram
 
 | ID | Feature | Description | Priority |
 |:---|:--------|:------------|:---------|
-| REQ-016 | Server Discovery | Detect local Prefect servers via mDNS/Bonjour | Medium |
+| ~~REQ-016~~ | ~~Server Discovery~~ | Superseded by REQ-038: the control plane address is set in Settings; no mDNS | — |
 | REQ-018 | Streaming Mode | Real-time lower-res tracking data to server | Medium |
-| REQ-019 | Workflow Orchestration | Select preset server pipelines (Mesh, Splat, Spatial Indexing) | High |
-| REQ-020 | Job Observability | Display remote Prefect job status locally | Medium |
+| ~~REQ-019~~ | ~~Workflow Orchestration~~ | Superseded: pipelines are Prefect flows (`scan4d-flows`) started from the control plane's web on a file; the app does not choose pipelines | — |
+| ~~REQ-020~~ | ~~Job Observability~~ | Superseded: the control plane's Runs page shows flow runs; no in-app job status | — |
 | ~~REQ-021~~ | ~~Scan4D Ghost Overlay~~ | **Implemented** — Red translucent overlay renders previous scan during Rescan / Link Adjacent | — |
 | REQ-022 | Scan4D Ground Truth Offset | Capture GPS or AprilTag data alongside scans for backend alignment seeding | High |
 | REQ-023 | OpenFLAME Live Relocalization | Use backend server to stream visual localization back to device, bypassing ARKit maps | Low |
@@ -482,10 +480,10 @@ sequenceDiagram
 | REQ-032 | Post-Save Processing & Plane Registration | **Implemented** — see REQ-032 below | — |
 | REQ-033 | 360° Still Source (Ricoh Theta) | **Implemented** — see REQ-033 below | — |
 | REQ-034 | Derived Levels & Ramps (Multi-Level Ghost Proxy) | **Implemented** — see REQ-034 below | — |
-| REQ-035 | Focus Scan (Partial Scan of One Region) | **Implemented** — see REQ-035 below (device test pending) | — |
-| REQ-036 | Room-Scan Automatic Stills | **Implemented** — see REQ-036 below (device test pending) | — |
+| REQ-035 | Focus Scan (Partial Scan of One Region) | **Implemented** — see REQ-035 below | — |
+| REQ-036 | Room-Scan Automatic Stills | **Implemented** — see REQ-036 below | — |
 | REQ-037 | Focus Region Import (Deep Link / File) | **Implemented** — see REQ-037 below; the server delivers regions as control-plane tasks (REQ-038) | — |
-| REQ-038 | Control Plane Sync (Device Registry & Inventory) | **Implemented** — see REQ-038 below (device test pending); server in the `scan4d-server` repo | — |
+| REQ-038 | Control Plane Sync (Device Registry & Inventory) | **Implemented** — see REQ-038 below; server in the `scan4d-server` repo | — |
 | REQ-039 | Sweep Coverage Export | **Implemented** — see REQ-039 below | — |
 | REQ-040 | Feature Point Cloud Export | **Implemented** — see REQ-040 below | — |
 
@@ -787,7 +785,7 @@ item is "does the mermaid still tell the truth?". Names are grep-able anchors.
 ### REQ-035: Focus Scan (Partial Scan of One Region)
 | | |
 |:--|:--|
-| **Status** | Implemented (device test pending). Design: [docs/design/capture-modes.md](docs/design/capture-modes.md) |
+| **Status** | Complete (device-tested, 2026-11). Design: [docs/design/capture-modes.md](docs/design/capture-modes.md) |
 | **Description** | **Rescan Space** asks *Whole room* (REQ-003 rescan) or *Focus on a region*. A focus scan photographs one box-shaped region in full-resolution stills, from a few photos ("which tools are on the table") to splat-grade coverage, with no mesh or RoomPlan of its own. **Region:** a gravity-aligned box (centre, yaw about +Y, size, metres) in the frame of the room-scan mesh it was drawn on (the location's canonical frame once that scan's registration applied); drawn in the region editor on the latest room scan's mesh by tapping a RoomPlan object (its box plus a margin and headroom) or the mesh (a default box), then adjusted with sliders; or imported (REQ-037). **Detail level:** Check (25° spacing, 5 stills, finishes by itself), Detail (12°, 30), Splat (5°, 150). **Capture:** the rescan's relocalization, ghost and alignment unchanged, except that the region and every still must be in the room scan's frame: the yellow box appears only once the session has relocalized into the map (and goes at any tracking reset), and Start waits for that too (a room rescan may start while relocalizing; its save re-registers the mesh). At Start the session re-runs with LiDAR depth only, the record-start bakes apply, and the region's box (on the ghost's seat until then) is placed in the capture world. Mid-capture, tracking that comes back without relocalizing into the map, an interruption or a 4 s frame gap stops the capture, keeping the stills taken before it (`frame_lost` in the manifest). Stills (`captureHighResolutionFrame`, 12MP) fire while the camera looks into the box: the LiDAR depth along the image centre and four inner rays lands inside it (so a large box seen in part, from inside it or from under a desk counts; only without depth does the box centre have to be in frame), and the box is not tiny in the frame. Then the blur gate (image motion as an angle, 0.9 mrad: the larger of a pose term and the gyro's 50 ms peak) and the level's spacing: a turn, a sideways move's parallax at the near depth, or an orbit around the region (the view angle at its centre); no time trigger. The exposure cap (`CaptureExposurePolicy`, short exposure: 1/500 floor, ISO ceiling 800, 1/120 in dim light) bounds blur. A HUD shows the region, the count against the target, one status line (point at the box, move closer, hold steadier, new angle) and a coverage dial of view directions around the region (12 sectors x 3 elevation rings). **Result:** a `CapturedScan` of kind focus in the same location (badge "Focus · partial"), holding `focus_capture/` (stills, LiDAR depth and confidence per still, photos.csv, frames.csv, IMU logs, events.log, manifest.json, the map scan's registration), `focus_region.json` and the best still as the thumbnail; its card shows that photo with the room scan's preview, and opens a photo grid. Once a space has a focus scan, its scan list gets a Room / Focus / All filter (`ScanListFilter`; remembered, Room by default; Select All and bulk actions cover what is shown; a save switches it to the new scan's kind if hidden), and its tile reads "N room · M focus". Focus scans are never a relocalization source or the canonical owner and are skipped by post-processing, colouring, the history scrubber, stitching and mesh exports (`ScanLocation.roomScans`). **Export:** one format, the capture zip with `focus_region.json`; with the privacy filter on, every still gets a Vision person check on an upright copy, fail-closed (unverifiable stills are left out and listed in `privacy_excluded.json`), and blurred people are zeroed in depth. Nothing is filtered during capture, so the privacy toggle is not locked during a focus scan: the manifest records it as it stands at Stop. |
 | **Source** | [FocusRegion.swift](wisescan-ios/FocusRegion.swift) — `FocusRegion`, `FocusDetailLevel`, `FocusBoxPlacement` · [FocusRegionEditorView.swift](wisescan-ios/FocusRegionEditorView.swift) — region drawing · [LocationDetailView.swift](wisescan-ios/LocationDetailView.swift) — Rescan choice, `startRescan(_:focus:)` · [CaptureView+StillCapture.swift](wisescan-ios/CaptureView+StillCapture.swift) — start/stop, filing, Check auto-finish, box placement · [ARCoverageView.swift](wisescan-ios/ARCoverageView.swift) — `beginStillCapture`, `makeFocusBoxEntity`, `SessionRole` / `runSession` · [ARStillCaptureSession.swift](wisescan-ios/ARStillCaptureSession.swift) — the still engine (gates, region gate, coverage counts, logs, manifest) · [ARStillCaptureGates.swift](wisescan-ios/ARStillCaptureGates.swift) — pure gate math (`imageMotionSmear`, `GyroHistory`, `regionView`, `coverageBin`) · [CaptureExposurePolicy.swift](wisescan-ios/CaptureExposurePolicy.swift) · [FocusCaptureHUD.swift](wisescan-ios/FocusCaptureHUD.swift) · [FocusScanStorage.swift](wisescan-ios/FocusScanStorage.swift) — `saveFocusScan`, best-still thumbnail · [FocusScanViews.swift](wisescan-ios/FocusScanViews.swift) — photo grid · [ScansListView.swift](wisescan-ios/ScansListView.swift) — focus card branch · [ScanExportManager+Focus.swift](wisescan-ios/ScanExportManager+Focus.swift) — `prepareFocusExport`, `FocusStillPrivacy` · [ScanStore.swift](wisescan-ios/ScanStore.swift) — `ScanKind`, focus fields on `CapturedScan`, `roomScans` / `latestRoomScan`, `activeScanKind` / `activeFocusRequest` · [schemas/focus_region.schema.json](schemas/focus_region.schema.json) |
 | **Notes** | Regions are not catalogued yet: each focus scan carries its own, and scans of the same region are not grouped. Drawing is MVP (tap + sliders); drag handles on the box are the next step. The coverage dial is the start of the coverage guidance for both modes. |
@@ -795,7 +793,7 @@ item is "does the mermaid still tell the truth?". Names are grep-able anchors.
 ### REQ-036: Room-Scan Automatic Stills
 | | |
 |:--|:--|
-| **Status** | Implemented (device test pending) |
+| **Status** | Complete (device-tested, 2026-11) |
 | **Description** | The room scan no longer saves video-stream frames (they share ARKit's auto exposure, up to 1/30 s, and blur at walking pace) and no longer needs a tap for photos. 12MP stills fire on their own on the 0.1 s capture tick when tracking is normal, past a 10 s warm-up (the RoomPlan + segmentation bring-up), under the focus scan's blur gate (pose term over the last tick + gyro peak, 0.9 mrad) and exposure policy, at 15° of turn or parallax, or 0.5 m walked, since the last still, one in flight, at most one request per 0.5 s (2 s at thermal state serious). On the 360° rig a held pause belongs to the tap: no automatic still fires while the device is confirmed still, and a tap during an automatic still in flight adopts it as the pair's phone still. Stillness (reticle, rig tap) is measured against a held pose, as before; the blur gate uses the 0.1 s tick plus the gyro. **Protecting tracking:** a 12MP encode over 400 ms or an ARKit frame gap over 0.3 s holds stills for 3 s; the stream-frame fallback stays for when stills keep failing. The amber photo-coverage overlay (REQ-031) fills from these stills, and mesh colouring uses them, so grey (uncoloured) areas mark the coverage gaps. The tap is now the 360° rig's shutter only: with a Theta connected it still arms the co-timed phone still for the rig calibration; the stillness reticle and chime follow it, and automatic stills make no click or flash. The first still seeds the session intrinsics so `transforms.json` and the Polycam cameras are written without stream frames. `scan4d_metadata.json` gains `auto_stills` (gate counts, back-offs, exposure cap) and `frame_work_ms` (the AR delegate's per-frame time while recording). |
 | **Source** | [FrameCaptureSession.swift](wisescan-ios/FrameCaptureSession.swift) — `considerAutoStill`, `requestHighResolutionKeyframe(automatic:)`, tick-to-tick motion, gyro, metadata · [CaptureExposurePolicy.swift](wisescan-ios/CaptureExposurePolicy.swift) · [DelegateWorkMeter.swift](wisescan-ios/DelegateWorkMeter.swift) · [CaptureView.swift](wisescan-ios/CaptureView.swift) — rig-only tap, reticle, flash · [ScanCoach.swift](wisescan-ios/ScanCoach.swift) — coverage-debt and overlap copy · [AppConstants.swift](wisescan-ios/AppConstants.swift) — `roomScanAutoStills`, `roomStill*` |
 | **Notes** | The exposure cap also applies to the video stream that VIO, mesh and RoomPlan see (shorter exposure, higher ISO); check tracking in dim rooms. Room spacing is looser than a focus scan's: enough stills to paint the mesh and show a VLM the room, not to reconstruct it. |
@@ -810,7 +808,7 @@ item is "does the mermaid still tell the truth?". Names are grep-able anchors.
 ### REQ-038: Control Plane Sync (Device Registry & Inventory)
 | | |
 |:--|:--|
-| **Status** | Implemented (phase 1 of the control plane; device test pending) |
+| **Status** | Complete (phase 1 of the control plane; device-tested, 2026-11) |
 | **Description** | The phone reports the spaces it syncs to the lab's control plane server (the `scan4d-server` repo, whose README is the design and API). **Which spaces:** **Sync to Lab Server** in a space, or **Sync** on a stitched map in the graph view (every space in the cluster), sends it, like Upload sends an export; a synced space keeps syncing (its rescans, focus scans and stitches). Settings → **Auto sync** picks which spaces sync without a tap: **All** (every space, the backlog from before joining too), **New** (the default: spaces whose first scan comes after the phone joined, its first successful sync) or **Off** (only what you send); a synced space keeps syncing in every mode. Other spaces never reach the server, a stitch goes when both of its spaces do, and an export's Upload is independent of all this. **What:** every synced space with its **base** (the first room scan, whose frame is the canonical frame and whose RoomPlan every rescan registers against) and **tip** (the newest room scan, whose world map a rescan or focus scan relocalizes against); every room and focus scan (kind, time, parent, whether its world map is on disk, the registration sidecar's raw→canonical transform, the focus region, upload state); every stitch link (endpoint scans and spaces, anchors, compass headings, the manual fine-tune). The snapshot lists each scan's **map-package** files (room scans: `registration.json`, `roomplan.json`, `arworldmap.map`, `mesh.obj`, `colors.bin` (the mesh's vertex colours from the Color step, which exports merge in and `mesh.obj` never carries), and the previewer's other mesh sources from Post-process, `mesh_proxy.obj` and `mesh_dynamic.obj`; focus scans: `focus_region.json`; name, size, whole-second modification time); **Partial by design:** the server keeps every listed file as a placeholder and asks at once only for the small files its own logic reads (registration, room layout, focus region, feature cloud, coverage grid); the mesh (with its `colors.bin`), the proxy and dynamic meshes, and the world map wait until something needs them (the web's 3D view, a pipeline) and the server requests them. The app uploads what is asked one file at a time (`PUT /v1/scans/{id}/files/{name}`), files of 5 MB or more only on an unmetered network (held back on cellular or Low Data and counted as waiting for Wi-Fi in Settings), stopping if a capture begins and resuming after it; while the app is open it syncs every 5 minutes so requests are picked up. Settings → Send map packages (on by default) turns the uploads off; room scans also send their `arkit_features.bin` and (once recorded) `sweep_coverage.bin`, which the server's change evaluator compares between a rescan and the scan before it; it also quantifies coverage against that reference scan (re-coverage as the comparability gate, gaps it turns into "re-cover" requests, cells whose occupancy flipped). Never images or depth. **Export uploads:** with a control plane set, every Upload button asks it for a grant: a presigned PUT into the lab's Versity bucket, under `devices/<device>/exports/<format>/` in the same working directory as the map packages; no bucket credentials on the phone, revocable per device from the server (the sync reports the state, Settings shows it). **Without a working control plane, uploads behave as before it existed:** no host, an unreachable or failing one, a wrong password, or no upload target, and the export goes to the manual Upload URL (the lab's default bucket on TestFlight); after an unreachable host, exports skip it for a minute so a bulk upload does not wait out the timeout per scan. Only a revocation stops uploads, since falling back would defeat it. **Shared join fine-tunes:** each stitch link reports its fine-tune with the server revision it last synced (`StitchLink.manualRevision`) and the correction the app renders (the fine-tune, or the auto fix on an untuned join); the server resolves edits from devices and the web and sends back `link_updates`, which the app applies to the link. **Tasks:** the sync response can carry requests for a focus scan (from the web: a box drawn on the map, as in the app's region editor). They wait in a **to-do list** on the Dashboard (with a badge on its tab; the section shows whenever a control plane is set); only an urgent one (high priority) also alerts, once ever (Open / Decline / Later). The list is kept on the phone, so it survives a relaunch while the control plane can't be reached; Open and Decline work offline, and an answer the server hasn't had waits on the phone and goes with the next sync (one refused because the task is gone or finished is dropped). Open takes the region into its space's editor through the deep-link inbox, and the region keeps its `task_id` into the saved scan so the server marks the task done. **Certificates:** Settings → Allow untrusted certificates accepts the lab's own certificate from the control plane and the upload hosts it names only (`ControlPlaneSession`), for hosts on the lab's local network reached by IP address or a `.local` or bare name (exempt from ATS by `NSAllowsLocalNetworking`); a publicly named host gets a real certificate, and the app carries no ATS exception domains. **Password:** the server's shared password, entered in Settings and kept in the Keychain (`ControlPlaneSecret`), goes as a bearer token on every control plane request. **Export completed:** after a successful PUT through a grant, the app reports it (`POST /v1/exports/{id}/complete`); the server checks the bucket and signals its pipelines. The snapshot of the synced spaces is whole every time, so a missed sync heals on the next; the server marks gone (never deletes) what a device stops reporting. **Identity:** a UUID made once and kept in the Keychain (`ThisDeviceOnly`, so a backup restored to another phone does not clone it), a user-set device name (iOS gives apps only "iPhone"), model, iOS and app version, LiDAR. **When:** launch, return to the foreground, a few seconds after SwiftData saves (coalesced), and Settings → Sync now. Never while the Capture tab is up (its AR session relocalizes there before any recording) or a capture runs: the request waits for that to end. Off while no host is set. **Settings → Control plane:** the host (`host:port` or a URL; no scheme means http; plain http works to an IP address, a `.local` or bare host name under the existing `NSAllowsLocalNetworking`, while a fully-qualified name needs https), the server password, the device name and ID, Allow untrusted certificates, Auto sync (All / New / Off, with the number of spaces synced), Send map packages, the upload route, files waiting for Wi-Fi, the number of open requests, sync status, Test connection. |
 | **Source** | [ControlPlaneManifest.swift](wisescan-ios/ControlPlaneManifest.swift) — the snapshot (SwiftData on main, files off main) · [ControlPlaneClient.swift](wisescan-ios/ControlPlaneClient.swift) — host parsing, HTTP, error text · [ControlPlaneSync.swift](wisescan-ios/ControlPlaneSync.swift) — triggers, coalescing, capture deferral · [DeviceIdentity.swift](wisescan-ios/DeviceIdentity.swift) — Keychain ID, device attributes · [ControlPlaneSession.swift](wisescan-ios/ControlPlaneSession.swift) — host-scoped certificate override · [ExportUploadTarget.swift](wisescan-ios/ExportUploadTarget.swift) — where an export upload goes · [ControlPlaneSettingsSection.swift](wisescan-ios/ControlPlaneSettingsSection.swift) · [ControlPlaneTodoCard.swift](wisescan-ios/ControlPlaneTodoCard.swift) — the Dashboard's to-do list · [ControlPlaneSpaceSyncButton.swift](wisescan-ios/ControlPlaneSpaceSyncButton.swift) — Sync to Lab Server on a space (the stitched map's Sync is in StitchGraphView) · [ContentView.swift](wisescan-ios/ContentView.swift) — start, foreground, capture state · [ControlPlaneTests.swift](wisescan-iosTests/ControlPlaneTests.swift) |
 

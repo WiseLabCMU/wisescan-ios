@@ -6,7 +6,7 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 **Recommended:** LiDAR-equipped device (iPhone/iPad Pro) for full mesh + depth capture  
 **Optional:** rig-mounted Ricoh Theta X or Z1 as a 360° still source (BLE wake and shutter plus Wi-Fi transfer on both)
 
-**Backend Integration:** the lab's control plane (`scan4d-server`, private) registers devices and keeps the inventory of spaces, maps, scans and links (REQ-038); exports upload to the lab's S3 bucket through the [wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload) gateway at addresses the control plane hands out; [wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion) is the time-series stream stack. See [Backend Receivers](#backend-receivers).
+**Backend Integration:** the lab's control plane (`scan4d-server`, private) registers devices, keeps the inventory of spaces, maps, scans and links, hands out export upload addresses in its working directory, and asks devices for focus scans (REQ-038). Processing runs in the same stack as Prefect flows from `scan4d-flows` (private): `scan4d-splat` takes a room-scan export or focus-scan dump through SfM poses, priors, region masks and LichtFeld training to a Gaussian splat. See [Backend Receivers](#backend-receivers).
 
 ## Device Support
 
@@ -20,7 +20,7 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 | **Coverage Overlay** | Yes: Wireframe | No | No |
 | **Privacy Markers** | Yes: 3D body-center anchors | No (2D blur only) | No |
 | **Mesh Preview** | Yes: Colored 3D model | No | No |
-| **Server Reconstruction** | Full pipeline | Photogrammetry only | Photogrammetry only |
+| **Server Reconstruction** | `scan4d-splat` flow (SfM poses, LiDAR priors, splat) | Planned: photogrammetry from images and poses (Lite Mode is a test harness today) | Planned: photogrammetry from images alone (proxy mode is a test harness today) |
 
 ### Hi-Res Still Keyframe Resolution
 
@@ -254,11 +254,12 @@ scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
 
 ### Backend Receivers
 
-Scan4D uploads these packages to the lab's servers. The sibling repos, as they describe themselves today:
+Scan4D uploads these packages to the lab's stack. The sibling repos, as they describe themselves today:
 
-- **`scan4d-server`** (private): the control plane. Device registry, the inventory of spaces, maps, scans and links, export upload addresses, join fine-tunes shared back to the phone, and focus-scan tasks. Its README is the design and the API contract (REQ-038).
-- **[wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload):** an HTTP/3 upload gateway (Caddy in front of VersityGW, a POSIX-backed S3 store). Export uploads land here at the addresses the control plane hands out, or at a URL configured in Settings.
-- **[wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion):** a NATS JetStream stack that persists time-series binary streams (video, point clouds) with per-session JWT authentication. It is not on the export path today.
+- **`scan4d-server`** (private): the control plane. Device registry, the inventory of spaces, maps, scans and links, a working directory served as S3 by its own Versity, export upload addresses granted per device, join fine-tunes shared back to the phone, focus-scan tasks, a web app with a 3D map view, and Prefect with a docker worker for the flows. Its README is the design and the API contract (REQ-038).
+- **`scan4d-flows`** (private): the flows deployed into that Prefect. `scan4d-splat` (room-scan export or focus-scan dump to a trained Gaussian splat: unzip, normalize, SfM poses, priors, region masks, LichtFeld training; GPU), `eagle-splat` (Eagle Max captures), `spark-build-lod` (a Spark level-of-detail fileset for ARENA).
+- **[wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload):** an HTTP/3 upload gateway (Caddy in front of VersityGW) for exports sent to a URL configured in Settings rather than to a control-plane grant.
+- **[wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion):** a NATS JetStream stack that persists time-series binary streams with per-session JWT authentication. Not on the export path today; the candidate receiver for a streaming mode (REQ-018).
 
 ## Privacy Filtering
 
@@ -289,7 +290,7 @@ The Meta Wearables DAT SDK relies on specific Xcode build configurations that ca
    In Xcode, go to `File > Add Package Dependencies...` and enter the repository URL: `https://github.com/facebook/meta-wearables-dat-ios`. Add the `meta-wearables-dat-ios` library to the `wisescan-ios` target.
 
 2. **Gather Meta Credentials (Optional)**
-   Ensure you have your `MetaAppID`, `ClientToken`, and `TeamID` registered from the Meta Wearables Developer Center. Inject these into `Custom-Info.plist` (or keep them blank to function in Developer Mode). 
+   Ensure you have your `MetaAppID`, `ClientToken`, and `TeamID` registered from the Meta Wearables Developer Center. Keep the real values on your machine only: the privacy guard refuses a staged plist that carries them (see CONTRIBUTING, Credentials). Inject these into `Custom-Info.plist` locally without staging the file (or keep them blank to function in Developer Mode). 
 
 3. **Enable Developer Mode in Meta View App**
    If you are testing without registered production credentials:

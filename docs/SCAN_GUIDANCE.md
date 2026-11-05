@@ -75,9 +75,9 @@ Real-time tips during recording, evaluated at ~1 Hz by the `ScanCoach` rules eng
 | Tip ID | Condition | Message |
 |:-------|:----------|:--------|
 | `guidance.scanWalls` | Early scan, <8 anchors, <3m spatial extent | "Scan all 4 walls quickly for layout context" |
-| `guidance.systematicSweep` | Early scan, erratic movement pattern (<0.3 ratio) | "↔ Walk the room for depth, pause at each area for photos" |
+| `guidance.systematicSweep` | Early scan, erratic movement pattern (<0.3 ratio) | "Walk the room for depth, pause at each area for photos" |
 | `guidance.moveCloser` | Mid-scan, <200 faces/anchor (coarse geometry) | "Move closer to capture fine details" |
-| `guidance.varyHeight` | Mid-scan, height variance <0.02 (flat scanning) | "↕ Try scanning from a different height" |
+| `guidance.varyHeight` | Mid-scan, height variance <0.02 (flat scanning) | "Try scanning from a different height" |
 | `guidance.semantic.scanFloor` | Semantic ON, walls detected but no floor | "Walls detected, try scanning the floor" |
 | `guidance.semantic.scanObjects` | Semantic ON, ≥3 surfaces but 0 objects | "Don't forget furniture — scan objects up close" |
 | `guidance.semantic.lowerAngle` | Semantic ON, floor detected, <3 objects | "Try scanning from a lower angle for floor objects" |

@@ -4,7 +4,7 @@
 #
 # Two guards:
 #   1. release-please version markers in project.pbxproj (Xcode strips them).
-#   2. Privacy: block debug-only file-sharing plist keys and raw capture artifacts.
+#   2. Privacy: block debug-only file-sharing plist keys, raw capture artifacts, and credentials.
 
 HOOK_DIR="$(dirname "$0")"
 FAIL=0
@@ -37,6 +37,14 @@ while IFS= read -r -d '' f; do
     #     `git add -p` that leaves the debug hunk unstaged passes cleanly.
     case "$f" in
     *.plist)
+        shits=$(pg_plist_secret_violations "$(git show ":$f" 2>/dev/null)")
+        if [ -n "$shits" ]; then
+            echo ""
+            echo "ERROR: credential value(s) staged in $f:$shits"
+            echo "   Credentials never enter the repo. Leave the tracked value empty and set yours locally"
+            echo "   without staging the file (CONTRIBUTING.md -> Credentials)."
+            FAIL=1
+        fi
         hits=$(pg_plist_violations "$(git show ":$f" 2>/dev/null)")
         if [ -n "$hits" ]; then
             echo ""
@@ -44,6 +52,15 @@ while IFS= read -r -d '' f; do
             echo "   These expose the app's Documents (raw, unblurred 360° stills) via Files/Finder."
             echo "   Keep them as a LOCAL edit for debugging — do not commit them."
             echo "   Unstage:  git restore --staged \"$f\"   (or stage other hunks with: git add -p)"
+            FAIL=1
+        fi
+        ;;
+    *.swift)
+        lines=$(pg_swift_secret_violations "$(git show ":$f" 2>/dev/null)")
+        if [ -n "$lines" ]; then
+            echo ""
+            echo "ERROR: literal SDK app id + secret staged in $f (line $lines)"
+            echo "   Credentials never enter the repo (CONTRIBUTING.md -> Credentials)."
             FAIL=1
         fi
         ;;

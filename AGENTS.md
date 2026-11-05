@@ -4,10 +4,10 @@ Orientation for agents (and humans) working in this repo. Detailed docs live in 
 
 ## Non-negotiables (details in CONTRIBUTING.md)
 - Conventional Commits for every commit and PR title. Never `BREAKING CHANGE` in a body and never a `!` type: release-please would bump the major version, and that is the maintainer's call.
-- No emoji in docs, code comments, commit messages, PR text, or rendered UI text (SF Symbols in the UI).
+- Icons yes, emoji no: no emoji characters inside text (docs, comments, commits, PR text, UI strings), because their rendering and parsing is not universal and the first one laid out in a session has cost the main thread seconds. In the app, attach a graphic next to the text (`Image(systemName:)`, `CoachTip.icon`) instead.
 - `#NN` only when it names a real GitHub issue or PR.
 - `project.pbxproj` carries two `/* x-release-please-version */` markers that Xcode strips on save. The pre-commit hook and CI both refuse a commit without them; run `./scripts/install-hooks.sh` once after cloning.
-- Never commit debug-only file-sharing Info.plist keys, raw capture artifacts, vendor SDK binaries, or credentials. The privacy guard (`scripts/privacy-guard.sh`) is the pattern library the hook and CI share.
+- Never commit debug-only file-sharing Info.plist keys, raw capture artifacts, vendor SDK binaries, or credentials (Meta `MetaAppID` / `ClientToken` values, any SDK app secret). The privacy guard (`scripts/privacy-guard.sh`) is the pattern library the hook and CI share, and it refuses all of these.
 - Rewrite only your own unpushed commits; never rebase, amend, or force-push someone else's.
 - Documentation ships with the feature: README features and tree, a REQ entry, the App Store copy, PRIVACY.md when data handling changes, the in-app user guide, and this index.
 
@@ -27,7 +27,7 @@ Orientation for agents (and humans) working in this repo. Detailed docs live in 
 - [docs/APPSTORE.md](docs/APPSTORE.md) — App Store / TestFlight listing copy and submission notes.
 
 ## Architecture & design
-- [docs/design/Scan4D_Architecture.md](docs/design/Scan4D_Architecture.md) — design rationale (Backend-First philosophy, large-space stitching strategies). The backend has since moved to the control plane; read it as history.
+- [docs/design/Scan4D_Architecture.md](docs/design/Scan4D_Architecture.md) — the historical plan: design rationale (Backend-First philosophy, anchoring strategy, large-space stitching strategies). The backend it sketches became the control plane in `scan4d-server`.
 - [docs/design/DESIGN.md](docs/design/DESIGN.md) — original UI/UX design spec.
 - [docs/design/fix-localization-plan.md](docs/design/fix-localization-plan.md) — the save-pipeline split (RAW-persist vs derived artifacts, "DECISION 3") that `ScanPostprocessor` implements.
 - [docs/design/capture-quality-triage.md](docs/design/capture-quality-triage.md) — device-test triage for the hi-res keyframe work: what was verified and the watch items (thermal ceiling, teardown stalls, OS interruptions corrupting the map).
@@ -39,7 +39,8 @@ Orientation for agents (and humans) working in this repo. Detailed docs live in 
 
 ## Export formats, data contracts & sibling repos
 - [schemas/README.md](schemas/README.md) — export archive structure and JSON schemas for every persisted/exported file: `scan4d_metadata.json`, `stitching.json` (spatial links), `transforms.json`, Polycam `cameras/*.json`, `mesh_info.json`, plus the binary sidecars `arkit_features.bin` and `sweep_coverage.bin`. JSON Schema files live alongside it in [schemas/](schemas/).
-- `scan4d-server` (private sibling repo) — the control plane the app syncs its inventory with (REQ-038): device registry, base/tip maps, scans, links, gone-marking, export upload addresses, tasks. Its README is the design and the API contract; the app side is `ControlPlaneSync.swift` / `ControlPlaneManifest.swift` / `ControlPlaneClient.swift`.
+- `scan4d-server` (private sibling repo) — the control plane the app syncs its inventory with (REQ-038): device registry, base/tip maps, scans, links, gone-marking, export upload addresses, tasks, events, the web app, and Prefect for the flows. Its README is the design and the API contract; the app side is `ControlPlaneSync.swift` / `ControlPlaneManifest.swift` / `ControlPlaneClient.swift`.
+- `scan4d-flows` (private sibling repo) — the Prefect flows deployed into that stack: `scan4d-splat` (export to trained splat), `eagle-splat`, `spark-build-lod`.
 - [wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload) — HTTP/3 upload gateway (Caddy + VersityGW S3) where export uploads land.
 - [wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion) — NATS JetStream stack for time-series binary streams; not on the export path.
 - `wiselab-scan` (sibling checkout, not on GitHub) — platform-wide architecture notes referenced from REQUIREMENTS.md.
