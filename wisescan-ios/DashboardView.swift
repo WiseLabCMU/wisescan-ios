@@ -2,7 +2,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
-    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.developerMode) private var developerMode = false
     @State private var showSettings = false
     @State private var serverStatus: ServerStatus = .unknown

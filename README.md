@@ -63,7 +63,7 @@ To check a device: the `[ARConfig]` launch log lists every supported format with
 - **Sweep Coverage:** A room scan records where the LiDAR sweep actually looked, as per-cell free, surface and visit counts in the raw capture frame, and ships it as `sweep_coverage.bin` in every Scan4D export (a Developer Mode readout shows the live counters).
 - **Feature Point Cloud:** Every save serializes ARKit's sparse feature cloud to `arkit_features.bin` (a 128-byte header over packed id and xyz records) in place of the opaque world map, which only ARKit could read. Feature ids survive map save and load, so clouds from successive scans of one location join on id for change detection. Process backfills the file for scans saved before it existed.
 - **Export & Scan Capture Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses governed by motion-blur rejection and overlapping metrics.
-- **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration.
+- **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration. Uploads run in a background session, so they finish with the screen locked or the app in the background, and the screen stays on while a scan is converted for upload.
 - **Control Plane Sync:** Set the lab's control plane server in Settings and the phone reports the spaces you sync to it (Sync to Lab Server in a space, or Sync on a stitched map in the graph view; Settings → Auto sync adds every space, the ones started after joining (the default), or none): each with its base and tip scans, its scans and its stitch links. It also uploads the parts of each scan's map package the server asks for (a Settings toggle, no photos):
 - the small files it reads itself right away;
 - the mesh and relocalization map only when the lab needs them, and large files only over Wi-Fi.
@@ -72,6 +72,8 @@ Nothing is sent during a capture. The server then:
 - hands out each export's upload address in the lab's Versity bucket, revocable per device;
 - shares join fine-tunes edited on its web 3D view back to the phone;
 - can ask for a focus scan of a region, for example where its toy change evaluator saw a rescan differ. The server (the `scan4d-server` repo) keeps the fleet's devices, maps and scans in one place, the start of server-directed scanning. See REQ-038.
+
+TestFlight builds start with the lab's server set, as they do the Upload URL; App Store and Xcode builds start with none. When the server asks for its password and none is stored, a tapped Upload or Sync opens Settings at the password field first, then goes on when Settings closes.
 
 > **Note:** For a comprehensive list of all features, architecture diagrams, and detailed implementation status, please see [REQUIREMENTS.md](REQUIREMENTS.md).
 >
@@ -121,6 +123,8 @@ wisescan-ios/
 ├── CoachBarView.swift           # Coach bar UI: color-coded tip banner with swipe-to-dismiss
 ├── SpaceAnalyzer.swift          # Pre-scan analysis engine: 360° yaw tracker, report builder
 ├── ScanAnalysisReportView.swift # Space analysis report modal: per-check pass/warn/skip cards
+├── CaptureFlash.swift           # Screen flash for every saved still (full for a tapped still, softer for automatic ones)
+├── ScreenAwake.swift            # Keeps auto-lock off while recording or exporting/uploading
 │  # Focus scan (partial scan of one region)
 ├── ARStillCaptureSession.swift  # Focus-scan still engine: blur/region/spacing gates, coverage, logs, manifest
 ├── ARStillCaptureGates.swift    # Pure gate math (image-motion smear, gyro peak, region view, coverage bins)
@@ -186,6 +190,7 @@ wisescan-ios/
 ├── NerfstudioExport.swift       # transforms.json bundle for Nerfstudio and LichtFeld Studio
 ├── Flame3DExport.swift          # flame3d-core input bundle
 ├── ExportUploadTarget.swift     # Where an export upload goes (control-plane-issued address or configured URL)
+├── ExportUploader.swift         # Background-session export uploads that survive a locked screen
 ├── MeshConverter.swift          # OBJ→PLY and OBJ→USDZ mesh conversion
 ├── MeshParser.swift             # Wavefront OBJ parser for RealityKit MeshResource
 ├── VertexColorAccumulator.swift # Vertex coloring: frame selection, top-K observations, consensus-median reduce
@@ -197,6 +202,7 @@ wisescan-ios/
 ├── ControlPlaneManifest.swift   # Sync manifest snapshot (SwiftData on main, files off main)
 ├── DeviceIdentity.swift         # This phone's identity for the control plane
 ├── ControlPlaneSettingsSection.swift # Settings → Control plane
+├── ControlPlanePasswordPrompt.swift # Password retry prompt and deferred action replay
 ├── ControlPlaneSpaceSyncButton.swift # Sync to Lab Server on a space
 ├── ControlPlaneTodoCard.swift   # Dashboard to-do list: focus scans the lab asked for
 │  # Peripherals and diagnostics
