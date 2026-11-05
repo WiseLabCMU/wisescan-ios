@@ -130,6 +130,11 @@ enum AppConstants {
     static var uploadURL: String {
         isTestFlight ? "https://wiselambda4.lan.cmu.edu/wisescan-uploads/" : ""
     }
+    /// The lab's control plane (scan4d-server), on TestFlight only, like the upload URL: App Store
+    /// and Xcode builds start with none. A host the user typed, or cleared, stays theirs.
+    static var controlPlaneHost: String {
+        isTestFlight ? "https://wiselambda4.lan.cmu.edu" : ""
+    }
     static let overlapMax: Double = 60.0                           // 60%: fewer redundant motion frames now that sharp stills carry texture detail (photogrammetry overlap rule of thumb)
     static let rejectBlur: Bool = true
     static let developerMode: Bool = false

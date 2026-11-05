@@ -28,7 +28,7 @@ struct StitchGraphView: View {
     /// path (mixed-color prompt included). Per-scan Color stays on the location's cards.
     var onColorScans: ([CapturedScan]) -> Void = { _ in }
 
-    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @State private var graph: StitchGraph?
 
     /// scanId → CapturedScan, for resolving mesh files during combined render.

@@ -75,7 +75,7 @@ struct LocationDetailView: View {
 
     @AppStorage(AppConstants.Key.locationScanFilter) private var scanFilterRaw = ScanListFilter.room.rawValue
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
-    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @State private var isBulkExporting = false

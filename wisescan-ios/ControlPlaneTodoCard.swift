@@ -7,7 +7,7 @@ import SwiftUI
 /// Shown whenever a control plane is set; the list is the phone's copy, so it stays while the
 /// server can't be reached, and answers given meanwhile go with the next sync.
 struct ControlPlaneTodoCard: View {
-    @AppStorage(AppConstants.Key.controlPlaneHost) private var host = ""
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var host = AppConstants.controlPlaneHost
     private var sync: ControlPlaneSync { ControlPlaneSync.shared }
 
     var body: some View {

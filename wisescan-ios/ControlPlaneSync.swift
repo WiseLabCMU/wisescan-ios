@@ -85,7 +85,9 @@ final class ControlPlaneSync {
 
     private init() {}
 
-    var host: String { UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneHost) ?? "" }
+    var host: String {
+        UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneHost) ?? AppConstants.controlPlaneHost
+    }
     var deviceLabel: String { UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneDeviceLabel) ?? "" }
     var sendPackages: Bool {
         UserDefaults.standard.object(forKey: AppConstants.Key.controlPlaneSendPackages) as? Bool

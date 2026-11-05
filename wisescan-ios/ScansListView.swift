@@ -52,7 +52,7 @@ struct ScansListView: View {
     @State private var bulkUploadCompleted = 0
     @State private var bulkUploadTotal = 0
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
-    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @Binding var selectedTab: Int
@@ -1009,7 +1009,7 @@ struct ScanCard: View {
     var onUpdate: (CapturedScan) -> Void
     var onDelete: (CapturedScan) -> Void
 
-    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
     @AppStorage(AppConstants.Key.forceRebuildArtifacts) private var forceRebuildArtifacts: Bool = AppConstants.forceRebuildArtifacts
     @Environment(\.modelContext) private var modelContext

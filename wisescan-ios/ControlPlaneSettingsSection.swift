@@ -4,7 +4,7 @@ import SwiftUI
 /// (`ControlPlaneSync`; scan4d-server README). Its host, and the shared password it may want
 /// (kept in the Keychain).
 struct ControlPlaneSettingsSection: View {
-    @AppStorage(AppConstants.Key.controlPlaneHost) private var host = ""
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var host = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.controlPlaneDeviceLabel) private var deviceLabel = ""
     @AppStorage(AppConstants.Key.controlPlaneSendPackages) private var sendPackages = AppConstants.controlPlaneSendPackages
     @AppStorage(AppConstants.Key.controlPlaneAllowUntrusted) private var allowUntrusted = false
