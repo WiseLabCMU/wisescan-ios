@@ -1253,6 +1253,12 @@ struct CaptureView: View {
     /// Scan-coach and space-analysis observers, and the analysis report sheet.
     private func captureObservers(_ content: some View) -> some View {
         content
+        // Keep the screen on while recording: automatic stills need no taps, and if the screen
+        // auto-locks iOS suspends the app and the scan ends. Covers every stop path (Stop, halt,
+        // discard), since all of them clear the flag.
+        .onChange(of: isCapturing, initial: true) { _, capturing in
+            ScreenAwake.set(ScreenAwake.captureHolder, held: capturing)
+        }
         .onChange(of: scanStats.anchorCount) {
             evaluateScanCoach()
         }

@@ -116,6 +116,9 @@ class CapturedScan {
                 uploadStatusStr = "uploading"
                 uploadProgress = prog
             }
+            // Every export and upload the user starts passes through here, on every exit path,
+            // so the screen stays awake exactly while this scan's pipeline owns it.
+            ScreenAwake.set(ScreenAwake.uploadHolder(id), held: newValue.isInFlight)
         }
     }
 
