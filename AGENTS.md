@@ -26,6 +26,7 @@ Orientation for agents (and humans) working in this repo. Detailed docs live in 
 
 ## Export formats & data contracts
 - [schemas/README.md](schemas/README.md) — export archive structure and JSON schemas for every persisted/exported file: `scan4d_metadata.json`, `stitching.json` (spatial links), `transforms.json`, Polycam `cameras/*.json`, `mesh_info.json`. JSON Schema files live alongside it in [schemas/](schemas/).
+- `scan4d-server` (sibling repo) — the control plane the app syncs its inventory with (REQ-038): device registry, base/tip maps, scans, links, gone-marking, and the roadmap (map packages, web app, shared edits, tasks). Its README is the design and the API contract; the app side is `ControlPlaneSync.swift` / `ControlPlaneManifest.swift`.
 
 ## In-app user guide (documentation written in Swift)
 - [wisescan-ios/UserGuideView.swift](wisescan-ios/UserGuideView.swift) — the in-app **User Guide** (Settings → User Guide & Documentation): the user-facing walkthrough (capture → save → rescan/link → export), scan-technique tips, export-format descriptions, supported wearables, and recommended viewers. Treat it as **documentation that happens to live in SwiftUI**: when user-facing workflows, scan suggestions, or export formats change, update it in the same change set — exactly as you would [README.md](README.md), [REQUIREMENTS.md](REQUIREMENTS.md), and [docs/APPSTORE.md](docs/APPSTORE.md). Its scan tips should stay consistent with [docs/SCAN_GUIDANCE.md](docs/SCAN_GUIDANCE.md) (the coaching/analyzer reference).
