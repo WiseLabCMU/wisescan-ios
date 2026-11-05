@@ -71,7 +71,7 @@ Nothing is sent during a capture. The server then:
 - shares join fine-tunes edited on its web 3D view back to the phone;
 - can ask for a focus scan of a region, for example where its toy change evaluator saw a rescan differ. The server (the `scan4d-server` repo) keeps the fleet's devices, maps and scans in one place, the start of server-directed scanning. See REQ-038.
 
-TestFlight builds start with the lab's server set, as they do the Upload URL; App Store and Xcode builds start with none.
+TestFlight builds start with the lab's server set, as they do the Upload URL; App Store and Xcode builds start with none. When the server asks for its password and none is stored, a tapped Upload or Sync opens Settings at the password field first, then goes on when Settings closes.
 
 > **Note:** For a comprehensive list of all features, architecture diagrams, and detailed implementation status, please see [REQUIREMENTS.md](REQUIREMENTS.md).
 >

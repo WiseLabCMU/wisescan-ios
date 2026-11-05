@@ -42,6 +42,7 @@ struct LocationDetailView: View {
     /// the user taps delete). > 0 means the cascade will silently remove those spatial links.
     @State private var bulkDeleteLinkedMapCount = 0
     @State private var showSettings = false
+    @State private var passwordPrompt: ControlPlanePendingAction?
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
     @State private var showNoWorldMapAlert = false
@@ -440,6 +441,7 @@ struct LocationDetailView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .controlPlanePasswordPrompt($passwordPrompt)
         .sheet(isPresented: $showExportSheet) {
             ShareSheet(activityItems: exportItems.map { $0.url }) { _, _, _, _ in
                 // Cleanup
@@ -713,6 +715,12 @@ struct LocationDetailView: View {
         // selected scan's export/upload is already in flight.
         guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
         guard !scans.isEmpty, uploadsConfigured else { return }
+        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) { startBulkUpload(scans: scans) }
+    }
+
+    /// The batch, once `bulkUpload` has passed its checks and any password prompt.
+    private func startBulkUpload(scans: [CapturedScan]) {
+        guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
         let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
         let locationIds = Set(scans.compactMap { $0.location?.id })
 

@@ -99,7 +99,9 @@ struct UserGuideView: View {
                               "sync adds every space (All), the ones you start after joining (New, " +
                               "the default) or none (Off). It sends names, times, poses, the " +
                               "small files the server reads, and a room's mesh (with its colors) or map when the lab " +
-                              "asks for it, over Wi-Fi; no photos, and never during a scan."
+                              "asks for it, over Wi-Fi; no photos, and never during a scan. If the server " +
+                              "wants its password, Upload and Sync open Settings at the password field " +
+                              "first, then carry on when you tap Done."
                     )
                 } header: {
                     Text("HOW TO USE")

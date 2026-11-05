@@ -39,6 +39,7 @@ enum AppConstants {
         static let controlPlaneJoinedAt = "controlPlaneJoinedAt"      // first successful sync (seconds since 1970): what counts as a new space
         static let controlPlaneSendPackages = "controlPlaneSendPackages" // upload map packages (mesh, room layout, relocalization map) the server asks for
         static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
+        nonisolated static let controlPlanePasswordWanted = "controlPlanePasswordWanted" // read by ControlPlaneSecret off the main actor; the control plane (base URL) that refused a request for want of a password; tapped Upload and Sync ask for it first
         static let rawOverlapMax = "rawOverlapMax"
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"

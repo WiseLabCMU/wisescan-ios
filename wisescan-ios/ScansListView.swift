@@ -51,6 +51,7 @@ struct ScansListView: View {
     @State private var isBulkUploading = false
     @State private var bulkUploadCompleted = 0
     @State private var bulkUploadTotal = 0
+    @State private var passwordPrompt: ControlPlanePendingAction?
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat)
@@ -188,6 +189,7 @@ struct ScansListView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView()
             }
+            .controlPlanePasswordPrompt($passwordPrompt)
             .sheet(isPresented: $showExportSheet, onDismiss: {
                 // Safety net: if dismissed via swipe-down before the completion handler fires,
                 // reset so the Save button isn't stuck disabled.
@@ -592,6 +594,12 @@ struct ScansListView: View {
         guard !isBulkUploading else { return }   // re-entrancy: double-tap = concurrent export+upload batches
         guard !scans.isEmpty,
               ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost) else { return }
+        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) { startBulkUpload(scans: scans) }
+    }
+
+    /// The batch, once `bulkUpload` has passed its checks and any password prompt.
+    private func startBulkUpload(scans: [CapturedScan]) {
+        guard !isBulkUploading else { return }
         let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
 
         isBulkUploading = true
@@ -1033,6 +1041,7 @@ struct ScanCard: View {
     @State private var exportPhase: ExportPhase?
     /// DECISION 3 hard gate: upload requires this scan post-processed.
     @State private var showPostprocessAlert = false
+    @State private var passwordPrompt: ControlPlanePendingAction?
     /// Focus scans: the photo viewer (in place of the mesh preview), and the room scan the
     /// capture relocalized into, shown small beside the photo.
     @State private var showFocusPhotos = false
@@ -1544,6 +1553,7 @@ struct ScanCard: View {
                 .disabled(processDisabled)
             }
         }
+        .controlPlanePasswordPrompt($passwordPrompt)
         .alert("Post-process Required", isPresented: $showPostprocessAlert) {
             Button("Post-process Now") { reRunProcessing() }
             Button("Cancel", role: .cancel) {}
@@ -1713,6 +1723,12 @@ struct ScanCard: View {
             showPostprocessAlert = true
             return
         }
+        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) { startUpload() }
+    }
+
+    /// The export and upload, once `uploadScan` has passed its checks and any password prompt.
+    private func startUpload() {
+        guard !scan.uploadStatus.isInFlight else { return }
         scan.uploadStatus = .zipping
         onUpdate(scan)
 
