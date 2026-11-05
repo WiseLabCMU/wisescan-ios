@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.9.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.8.0...v0.9.0) (2026-11-05)
+
+
+### Features
+
+* background uploads, screen kept on, still flash, lab server password ([7f92134](https://github.com/WiseLabCMU/wisescan-ios/commit/7f921340d8aef36c6b3fd4acc7085ff67c19bc46))
+* **capture:** flash the screen for every saved still ([36e9e4f](https://github.com/WiseLabCMU/wisescan-ios/commit/36e9e4f1d12a1486f0b16d1bda25e339f62eca1e))
+* **control-plane:** ask for the server password before a tapped upload ([98affa5](https://github.com/WiseLabCMU/wisescan-ios/commit/98affa54c24aa0a5054c84fc61c825a29545bc69))
+* **control-plane:** start TestFlight builds with the lab's server ([3de3b17](https://github.com/WiseLabCMU/wisescan-ios/commit/3de3b17a56cde4403363faadc87aa46b50ebfe9f))
+* **upload:** finish uploads in a background session ([eb243ca](https://github.com/WiseLabCMU/wisescan-ios/commit/eb243ca9eacd0284562e9e16133fe124a27b980d))
+
+
+### Bug Fixes
+
+* keep the screen on while recording or uploading ([e0b30ca](https://github.com/WiseLabCMU/wisescan-ios/commit/e0b30ca2d8b7b679c5e7706b6f59f6afefafb974))
+
 ## [0.8.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.7.0...v0.8.0) (2026-11-03)
 
 
