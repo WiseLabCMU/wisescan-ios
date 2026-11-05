@@ -60,7 +60,7 @@
     },
     "face_anchors": {
       "type": "array",
-      "description": "3D locations of detected faces for privacy filtering.",
+      "description": "3D body-center locations of detected people (one per person) for privacy markers. The key name predates body-center detection and is kept for compatibility.",
       "items": {
         "type": "object",
         "properties": {

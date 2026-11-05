@@ -63,6 +63,16 @@ The same keys can also leak via **Xcode build settings**: `INFOPLIST_KEY_UIFileS
 - `scripts/pre-push` re-checks the pushed branch tip as a backstop against `git commit --no-verify`.
 - The same paths are also `.gitignore`d as defense-in-depth.
 
+### Credentials never enter the repo
+
+The Meta Wearables toolkit reads `MetaAppID`, `ClientToken` and `TeamID` from the app's Info.plist (README, Testing Guidelines); the Insta360 SDK, if it is ever integrated, takes an App ID and secret in code. Real values stay on the developer's machine. The privacy guard refuses, locally and in CI:
+
+- a `.plist` whose `MetaAppID` or `ClientToken` carries a value (an empty string or a `$(BUILD_SETTING)` placeholder is fine);
+- a Swift file with a literal `setAppid(_:secret:)` call that is not the vendor's placeholder;
+- any `*.secrets.xcconfig` file.
+
+The workflow for keeping a local value out of a tracked file is not finalized. The intended shape: an untracked `Credentials.secrets.xcconfig` whose settings feed the Info.plist keys through build-setting substitution, so the tracked plist holds `$(META_APP_ID)` and never a value. Until that is wired, keep the tracked values empty, set yours locally, and never stage the file (`git add -p` and skip the hunk).
+
 ### 3. Code Style & Architecture
 
 - **SwiftUI First:** All new views should be written using SwiftUI rather than storyboards.
@@ -182,7 +192,7 @@ The `wisescan-ios` repository uses [Release Please](https://github.com/googleapi
 > Only use `#NN` notation in commit messages, PR titles, and PR descriptions if they correspond to actual GitHub issues or pull requests. Do **not** use `#NN` notation for internal enumerations of planning docs or triage items (e.g., use `REQ-NNN`, `Task NN`, or plain text instead), as this creates erroneous links and may result in unintended automatic actions.
 
 > [!IMPORTANT]
-> **No emoji in documentation, code comments, commit messages, or GitHub issue/PR titles and descriptions.**
+> **Icons yes, emoji no.** No emoji characters inside text: documentation, code comments, commit messages, GitHub issue/PR titles and descriptions, and rendered UI strings. Icons are welcome as graphics objects next to the text (`Image(systemName:)`, `Label`, `CoachTip.icon`); see "No emoji in rendered UI text" above for the UI rule and the reason it was measured.
 > Write plain text. Emoji render inconsistently across editors, terminals, diffs, and generated release notes, and add nothing a plain word does not. This applies to all contributors, including automated/agentic coding tools. Icons in the software's own user interface are fine, but they must follow the project's existing conventions for UI icons (here: SF Symbols, see [No emoji in rendered UI text](#no-emoji-in-rendered-ui-text--use-sf-symbols)).
 
 > [!WARNING]
@@ -202,6 +212,8 @@ When adding a new feature, update the following docs alongside the source code:
 2. **[REQUIREMENTS.md](REQUIREMENTS.md)** — Add a REQ-NNN entry (feature matrix row + detailed section) with source map entries.
 3. **[docs/APPSTORE.md](docs/APPSTORE.md)** — Add a line to the App Store description.
 4. **[docs/PRIVACY.md](docs/PRIVACY.md)** — Update if the feature touches data collection, camera usage, or personal data processing.
+5. **[wisescan-ios/UserGuideView.swift](wisescan-ios/UserGuideView.swift)** — The in-app guide is documentation that lives in SwiftUI; update it with any user-facing workflow, tip, or export change.
+6. **[AGENTS.md](AGENTS.md)** — Index any new doc, design note, or tool so agents and new contributors can find it.
 
 ## Stitching / Scan Linking — Implementation Contract
 

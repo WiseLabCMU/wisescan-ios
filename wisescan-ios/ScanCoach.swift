@@ -463,7 +463,7 @@ class ScanCoach {
             let pattern = cameraMovementPattern(recentTransforms)
             if pattern < 0.3 { // Erratic movement (low directional progress ratio)
                 if let t = tip("guidance.systematicSweep",
-                               "↔️ Walk the room for depth, pause at each area for photos",
+                               "Walk the room for depth, pause at each area for photos",
                                icon: "arrow.left.and.right",
                                priority: .guidance, now: now) { return t }
             }
@@ -485,7 +485,7 @@ class ScanCoach {
             let heightVar = cameraHeightVariance(recentTransforms)
             if heightVar < 0.02 { // Less than ~14cm std dev — very flat scanning
                 if let t = tip("guidance.varyHeight",
-                               "↕️ Try scanning from a different height",
+                               "Try scanning from a different height",
                                icon: "arrow.up.and.down",
                                priority: .guidance, now: now) { return t }
             }
