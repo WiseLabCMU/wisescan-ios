@@ -244,6 +244,9 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
 
     private let recording = Atomic<Bool>(false)
     private let live = OSAllocatedUnfairLock(initialState: LiveStats())
+    /// Called on the encode queue each time a still is saved; drives the capture view's flash
+    /// without waiting for the stats poll (which would merge stills and lag up to half a second).
+    private let stillSavedHandler = OSAllocatedUnfairLock<(@Sendable () -> Void)?>(initialState: nil)
     /// Written by the gyro callback; read per frame by the gate and per still by the capture check.
     private let gyroHistory = OSAllocatedUnfairLock(initialState: ARStillCaptureGates.GyroHistory(capacity: AppConstants.arStillGyroHistoryCapacity))
     /// Per-frame delegate work while capturing (delegate queue writes; `liveStats` and Stop read).
@@ -877,7 +880,13 @@ nonisolated final class ARStillCaptureSession: @unchecked Sendable {
                     $0.stillsCaptureBlurUnknown += 1
                 }
             }
+            stillSavedHandler.withLock { $0 }?()
         }
+    }
+
+    /// Set from main before `begin`; nil stops the calls.
+    func setStillSavedHandler(_ handler: (@Sendable () -> Void)?) {
+        stillSavedHandler.withLock { $0 = handler }
     }
 
     /// JPEG with the still's exposure time and ISO in its EXIF, so photo tools and pipelines see

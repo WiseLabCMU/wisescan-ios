@@ -26,6 +26,13 @@ nonisolated enum ControlPlaneSession {
     static func isAllowed(host: String) -> Bool {
         trust.contains(host)
     }
+
+    /// The same rule for another session's challenges: `ExportUploader`'s background session
+    /// sends the uploads this one used to, to the same granted hosts.
+    static func disposition(for challenge: URLAuthenticationChallenge)
+        -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        trust.disposition(for: challenge)
+    }
 }
 
 nonisolated final class TrustDelegate: NSObject, URLSessionDelegate, Sendable {
@@ -43,6 +50,10 @@ nonisolated final class TrustDelegate: NSObject, URLSessionDelegate, Sendable {
 
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge)
         async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        disposition(for: challenge)
+    }
+
+    func disposition(for challenge: URLAuthenticationChallenge) -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         let space = challenge.protectionSpace
         guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
               let trust = space.serverTrust,
@@ -90,5 +101,32 @@ nonisolated enum ControlPlaneSecret {
         if status != errSecSuccess {
             print("[ControlPlane] server password not stored (\(status))")
         }
+    }
+
+    // MARK: Whether the server wants one
+
+    /// What a request sent without a password learned (`ControlPlaneClient`): a 401 means this
+    /// server wants one, a success that it runs open (a development server, its master password
+    /// unset). Other answers, requests sent with a password and routes open either way teach nothing.
+    static func noteReply(from server: URL, refused: Bool) {
+        let defaults = UserDefaults.standard
+        let key = AppConstants.Key.controlPlanePasswordWanted
+        if refused {
+            defaults.set(server.absoluteString, forKey: key)
+        } else if defaults.string(forKey: key) == server.absoluteString {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    /// Whether this server has refused a request for want of a password.
+    static func isWanted(by server: URL) -> Bool {
+        UserDefaults.standard.string(forKey: AppConstants.Key.controlPlanePasswordWanted) == server.absoluteString
+    }
+
+    /// A control plane is set, it wants a password, and none is stored: a tapped Upload or Sync
+    /// asks for it before going (`ControlPlanePasswordPrompt`).
+    static func isMissing(forHost host: String, password: String = ControlPlaneSecret.password) -> Bool {
+        guard password.isEmpty, let server = ControlPlaneClient.baseURL(fromHost: host) else { return false }
+        return isWanted(by: server)
     }
 }

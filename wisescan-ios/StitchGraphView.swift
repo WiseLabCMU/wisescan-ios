@@ -28,8 +28,9 @@ struct StitchGraphView: View {
     /// path (mixed-color prompt included). Per-scan Color stays on the location's cards.
     var onColorScans: ([CapturedScan]) -> Void = { _ in }
 
-    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @State private var graph: StitchGraph?
+    @State private var passwordPrompt: ControlPlanePendingAction?
 
     /// scanId → CapturedScan, for resolving mesh files during combined render.
     private var scanLookup: [UUID: CapturedScan] {
@@ -54,7 +55,7 @@ struct StitchGraphView: View {
                                     onRender: { presentRender(for: component) },
                                     onColor: { colorCluster(component) },
                                     onSync: ControlPlaneClient.baseURL(fromHost: controlPlaneHost) == nil ? nil
-                                        : { ControlPlaneSync.shared.sync(spaces: component) }
+                                        : { syncToLab(component) }
                                 )
                             }
                         }
@@ -67,6 +68,7 @@ struct StitchGraphView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .controlPlanePasswordPrompt($passwordPrompt)
         .task(id: locations.map(\.id)) {
             graph = await StitchGraphBuilder.build(from: locations)
             // Publish which locations are visible as graph nodes so the parent's
@@ -77,6 +79,13 @@ struct StitchGraphView: View {
             } else {
                 visibleLocationIds = []
             }
+        }
+    }
+
+    /// Sync on a stitched map: every space in the cluster, after the password if the server wants one.
+    private func syncToLab(_ component: [UUID]) {
+        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) {
+            ControlPlaneSync.shared.sync(spaces: component)
         }
     }
 

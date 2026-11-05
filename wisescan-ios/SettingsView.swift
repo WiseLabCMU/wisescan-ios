@@ -4,6 +4,9 @@ import ARKit
 
 struct SettingsView: View {
     var scrollToDevMode: Bool = false
+    /// Opened by a tapped Upload or Sync whose server wants a password (ControlPlanePasswordPrompt):
+    /// scroll to Control plane and put the cursor in its password field.
+    var focusControlPlanePassword: Bool = false
     @Environment(\.modelContext) private var modelContext
     @Query private var locations: [ScanLocation]
 
@@ -348,7 +351,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Capture Audio")
                             .foregroundColor(.white)
-                        Text("Play shutter click when a sharp frame is captured at a stillness point, and a chime when entering stillness.")
+                        Text("Play a shutter click for a tapped 360° rig still, and a chime when entering stillness. Automatic stills make the system camera sound, which the silent switch mutes. The screen flashes for every saved still either way.")
                             .font(.caption)
                             .foregroundColor(.gray)
                     }
@@ -727,7 +730,8 @@ struct SettingsView: View {
                     // MARK: - General Settings
                     settingsSection2
 
-                    ControlPlaneSettingsSection()
+                    ControlPlaneSettingsSection(focusPassword: focusControlPlanePassword)
+                        .id("controlPlaneSection")
 
                     appearanceSection
 
@@ -746,6 +750,12 @@ struct SettingsView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             withAnimation {
                                 proxy.scrollTo("devModeSection", anchor: .top)
+                            }
+                        }
+                    } else if focusControlPlanePassword {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            withAnimation {
+                                proxy.scrollTo("controlPlaneSection", anchor: .top)
                             }
                         }
                     }

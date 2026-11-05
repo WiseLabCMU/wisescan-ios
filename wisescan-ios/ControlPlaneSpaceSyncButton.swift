@@ -6,11 +6,14 @@ import SwiftUI
 /// control plane set.
 struct ControlPlaneSpaceSyncButton: View {
     let spaceIds: [UUID]
+    @State private var passwordPrompt: ControlPlanePendingAction?
     private var sync: ControlPlaneSync { ControlPlaneSync.shared }
 
     var body: some View {
         let state = sync.state(of: spaceIds)
-        Button(action: { sync.sync(spaces: spaceIds) }, label: {
+        Button(action: {
+            passwordPrompt = ControlPlanePendingAction.runOrHold(host: sync.host) { sync.sync(spaces: spaceIds) }
+        }, label: {
             HStack {
                 Image(systemName: state.symbol)
                 Text(state.title)
@@ -19,6 +22,7 @@ struct ControlPlaneSpaceSyncButton: View {
         })
         .buttonStyle(FilledActionButtonStyle(background: state.isSynced ? Color.teal.opacity(0.25) : Color.teal.opacity(0.8)))
         .disabled(state == .syncing)
+        .controlPlanePasswordPrompt($passwordPrompt)
     }
 }
 

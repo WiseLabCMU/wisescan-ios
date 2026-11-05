@@ -2,9 +2,8 @@ import Foundation
 
 // MARK: - Control plane HTTP client (scan4d-server README, "API")
 
-/// Talks to the lab's control plane server. No auth yet: the server lives on the internal
-/// network and the app knows only its host (Settings → Control plane). Requests go through
-/// `ControlPlaneSession`, which can accept the lab's own certificate.
+/// Talks to the lab's control plane server: its host and password come from Settings → Control
+/// plane. Requests go through `ControlPlaneSession`, which can accept the lab's own certificate.
 nonisolated struct ControlPlaneClient: Sendable {
     let baseURL: URL
 
@@ -139,7 +138,8 @@ nonisolated struct ControlPlaneClient: Sendable {
     }
 
     func health() async throws -> Health {
-        try await send(URLRequest(url: baseURL.appending(path: "v1/health")))
+        // Open on every server, so its answer says nothing about the password.
+        try await send(URLRequest(url: baseURL.appending(path: "v1/health")), authenticated: false)
     }
 
     func sync(_ manifest: ControlPlaneManifest) async throws -> SyncResult {
@@ -197,11 +197,15 @@ nonisolated struct ControlPlaneClient: Sendable {
         _ = try await perform(request)
     }
 
-    private func send<Reply: Decodable>(_ request: URLRequest, uploading file: URL? = nil) async throws -> Reply {
-        try Self.decode(Reply.self, from: try await perform(request, uploading: file))
+    private func send<Reply: Decodable>(_ request: URLRequest, uploading file: URL? = nil,
+                                        authenticated: Bool = true) async throws -> Reply {
+        try Self.decode(Reply.self, from: try await perform(request, uploading: file, authenticated: authenticated))
     }
 
-    private func perform(_ request: URLRequest, uploading file: URL? = nil) async throws -> Data {
+    /// `authenticated`: the route needs the password when the server has one, so an answer to a
+    /// request sent without it says whether the server wants one (`ControlPlaneSecret.noteReply`).
+    private func perform(_ request: URLRequest, uploading file: URL? = nil,
+                         authenticated: Bool = true) async throws -> Data {
         var request = request
         request.timeoutInterval = file == nil ? AppConstants.controlPlaneRequestTimeoutS
             : AppConstants.controlPlaneUploadTimeoutS
@@ -209,6 +213,7 @@ nonisolated struct ControlPlaneClient: Sendable {
         if !password.isEmpty {
             request.setValue("Bearer \(password)", forHTTPHeaderField: "Authorization")
         }
+        let teaches = authenticated && password.isEmpty
         let session = ControlPlaneSession.session
         let data: Data
         let response: URLResponse
@@ -222,6 +227,9 @@ nonisolated struct ControlPlaneClient: Sendable {
             throw Self.failure(for: error, host: request.url?.host() ?? baseURL.absoluteString)
         }
         guard let http = response as? HTTPURLResponse else { throw Failure.unreadableReply }
+        if teaches && (http.statusCode == 401 || (200..<300).contains(http.statusCode)) {
+            ControlPlaneSecret.noteReply(from: baseURL, refused: http.statusCode == 401)
+        }
         if http.statusCode == 401 { throw Failure.unauthorized }
         guard (200..<300).contains(http.statusCode) else {
             throw Failure.server(status: http.statusCode, detail: Self.detail(from: data))

@@ -39,6 +39,7 @@ enum AppConstants {
         static let controlPlaneJoinedAt = "controlPlaneJoinedAt"      // first successful sync (seconds since 1970): what counts as a new space
         static let controlPlaneSendPackages = "controlPlaneSendPackages" // upload map packages (mesh, room layout, relocalization map) the server asks for
         static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
+        nonisolated static let controlPlanePasswordWanted = "controlPlanePasswordWanted" // read by ControlPlaneSecret off the main actor; the control plane (base URL) that refused a request for want of a password; tapped Upload and Sync ask for it first
         static let rawOverlapMax = "rawOverlapMax"
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"
@@ -129,6 +130,11 @@ enum AppConstants {
 
     static var uploadURL: String {
         isTestFlight ? "https://wiselambda4.lan.cmu.edu/wisescan-uploads/" : ""
+    }
+    /// The lab's control plane (scan4d-server), on TestFlight only, like the upload URL: App Store
+    /// and Xcode builds start with none. A host the user typed, or cleared, stays theirs.
+    static var controlPlaneHost: String {
+        isTestFlight ? "https://wiselambda4.lan.cmu.edu" : ""
     }
     static let overlapMax: Double = 60.0                           // 60%: fewer redundant motion frames now that sharp stills carry texture detail (photogrammetry overlap rule of thumb)
     static let rejectBlur: Bool = true
@@ -485,6 +491,10 @@ enum AppConstants {
     static let stillnessHapticIntensity: CGFloat = 0.6         // soft haptic strength on entering confirmed stillness
     static let captureFlashOpacity: Double = 0.5               // peak opacity of the white shutter flash on keyframe capture
     static let captureFlashDuration: TimeInterval = 0.35       // fade-out duration of the shutter flash
+    static let autoStillFlashOpacity: Double = 0.25            // peak of the softer flash for automatic room and focus-scan stills (up to ~2/s)
+    static let autoStillFlashDuration: TimeInterval = 0.2      // fade-out of the automatic-still flash
+    static let captureFlashDimmedOpacity: Double = 0.1         // every flash's peak with Accessibility > Dim Flashing Lights on
+    static let captureFlashDimmedDuration: TimeInterval = 0.5  // slower, gentler fade with Dim Flashing Lights on
     static let photoCoverageMaxDistance: Float = 4.0           // m — max distance a keyframe photo credibly captures texture detail
     static let photoTintColor = SIMD4<Float>(1.0, 0.72, 0.2, 1.0) // amber overlay marking depth-covered-but-unphotographed mesh
     static let photoTintAlpha: CGFloat = 0.28                  // opacity of the amber "depth only" tint
@@ -662,6 +672,12 @@ enum AppConstants {
     static let controlPlaneAutoSync = "new"                      // new spaces sync on their own; the backlog from before joining waits for Sync
     static let controlPlaneLargeFileBytes: Int64 = 5_000_000     // package files this big go up only on an unmetered network (Wi-Fi)
     static let controlPlanePollIntervalS: Double = 300           // while the app is open, sync this often so the lab's requests are picked up
+
+    // MARK: - Export uploads (background URLSession, ExportUploader)
+    static let exportUploadSessionId = "edu.cmu.wiselab.wisescan-ios.export-upload" // stable: iOS reattaches a relaunched app's transfers by it
+    static let exportUploadResourceTimeoutS: TimeInterval = 3600 // give up after this long in total; matches scan4d-server's grant lifetime (SCAN4D_EXPORT_URL_TTL_S default), past which a retry is refused anyway
+    static let exportUploadProgressStep: Double = 0.01           // write the scan's progress only when it moves this much (each write is a SwiftData change)
+    static let exportUploadPendingDirectory = "PendingUploads"   // Application Support subfolder holding exports until their transfer ends
 }
 
 // MARK: - Semantic View Mode

@@ -4,7 +4,12 @@ import SwiftUI
 /// (`ControlPlaneSync`; scan4d-server README). Its host, and the shared password it may want
 /// (kept in the Keychain).
 struct ControlPlaneSettingsSection: View {
-    @AppStorage(AppConstants.Key.controlPlaneHost) private var host = ""
+    /// Opened for a tapped Upload or Sync whose server wants a password (ControlPlanePasswordPrompt):
+    /// say so and put the cursor in the password field.
+    var focusPassword = false
+
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var host = AppConstants.controlPlaneHost
+    @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.controlPlaneDeviceLabel) private var deviceLabel = ""
     @AppStorage(AppConstants.Key.controlPlaneSendPackages) private var sendPackages = AppConstants.controlPlaneSendPackages
     @AppStorage(AppConstants.Key.controlPlaneAllowUntrusted) private var allowUntrusted = false
@@ -12,11 +17,18 @@ struct ControlPlaneSettingsSection: View {
     @State private var password = ControlPlaneSecret.password
     @State private var connectionMessage: String?
     @State private var isTesting = false
+    @FocusState private var passwordFocused: Bool
 
     private var sync: ControlPlaneSync { ControlPlaneSync.shared }
 
     var body: some View {
         Section {
+            if focusPassword {
+                Label(passwordRequestText, systemImage: "key.fill")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
+
             VStack(alignment: .leading, spacing: 8) {
                 TextField("192.168.1.40:8000", text: $host)
                     .foregroundColor(.white)
@@ -30,9 +42,16 @@ struct ControlPlaneSettingsSection: View {
                     .foregroundColor(.white)
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
+                    .focused($passwordFocused)
                     .onSubmit { savePassword() }
             }
             .padding(.vertical, 4)
+            .task {
+                // After the sheet has slid up and Settings has scrolled here.
+                guard focusPassword else { return }
+                try? await Task.sleep(for: .milliseconds(600))
+                passwordFocused = true
+            }
 
             VStack(alignment: .leading, spacing: 8) {
                 TextField("This phone's name, e.g. Lab iPhone 3", text: $deviceLabel)
@@ -158,6 +177,14 @@ struct ControlPlaneSettingsSection: View {
         ControlPlaneSecret.setPassword(password)
         connectionMessage = nil
         sync.requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
+    }
+
+    /// Why Settings opened at the password: the server asked, and what Done does next.
+    private var passwordRequestText: String {
+        let server = ControlPlaneClient.baseURL(fromHost: host)?.host() ?? "The control plane"
+        let ask = "\(server) needs its password. Enter it below, then tap Done to go on."
+        let hasUploadURL = !uploadURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return hasUploadURL ? ask + " Without one, uploads go to the upload URL above." : ask
     }
 
     /// What Auto sync does in the chosen mode.

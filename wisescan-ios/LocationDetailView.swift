@@ -42,6 +42,7 @@ struct LocationDetailView: View {
     /// the user taps delete). > 0 means the cascade will silently remove those spatial links.
     @State private var bulkDeleteLinkedMapCount = 0
     @State private var showSettings = false
+    @State private var passwordPrompt: ControlPlanePendingAction?
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
     @State private var showNoWorldMapAlert = false
@@ -75,7 +76,7 @@ struct LocationDetailView: View {
 
     @AppStorage(AppConstants.Key.locationScanFilter) private var scanFilterRaw = ScanListFilter.room.rawValue
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
-    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = ""
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @State private var isBulkExporting = false
@@ -440,6 +441,7 @@ struct LocationDetailView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .controlPlanePasswordPrompt($passwordPrompt)
         .sheet(isPresented: $showExportSheet) {
             ShareSheet(activityItems: exportItems.map { $0.url }) { _, _, _, _ in
                 // Cleanup
@@ -713,6 +715,12 @@ struct LocationDetailView: View {
         // selected scan's export/upload is already in flight.
         guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
         guard !scans.isEmpty, uploadsConfigured else { return }
+        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) { startBulkUpload(scans: scans) }
+    }
+
+    /// The batch, once `bulkUpload` has passed its checks and any password prompt.
+    private func startBulkUpload(scans: [CapturedScan]) {
+        guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
         let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
@@ -756,24 +764,10 @@ struct LocationDetailView: View {
                     DispatchQueue.main.async {
                         self.bulkExportPhases[scan.id] = nil
                         scan.uploadStatus = .uploading(progress: 0.0)
+                        // Background transfer; the uploader sets the scan's status (see ExportUploader).
+                        ExportUploader.shared.upload(exportURL, request: target.request, scanId: scan.id,
+                                                     exportId: target.exportId)
                     }
-
-                    let task = target.session.uploadTask(with: target.request, fromFile: exportURL) { _, response, error in
-                        try? FileManager.default.removeItem(at: exportURL)
-                        DispatchQueue.main.async {
-                            if let error = error {
-                                scan.uploadStatus = .failed(error.localizedDescription)
-                            } else if let httpResponse = response as? HTTPURLResponse,
-                                      (200...299).contains(httpResponse.statusCode) {
-                                scan.uploadStatus = .success
-                                target.reportCompleted()
-                                scan.lastUploadedAt = Date()
-                            } else {
-                                scan.uploadStatus = .failed("Server error")
-                            }
-                        }
-                    }
-                    task.resume()
                 }
             }
         }
