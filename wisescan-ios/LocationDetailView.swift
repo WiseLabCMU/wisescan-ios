@@ -756,24 +756,10 @@ struct LocationDetailView: View {
                     DispatchQueue.main.async {
                         self.bulkExportPhases[scan.id] = nil
                         scan.uploadStatus = .uploading(progress: 0.0)
+                        // Background transfer; the uploader sets the scan's status (see ExportUploader).
+                        ExportUploader.shared.upload(exportURL, request: target.request, scanId: scan.id,
+                                                     exportId: target.exportId)
                     }
-
-                    let task = target.session.uploadTask(with: target.request, fromFile: exportURL) { _, response, error in
-                        try? FileManager.default.removeItem(at: exportURL)
-                        DispatchQueue.main.async {
-                            if let error = error {
-                                scan.uploadStatus = .failed(error.localizedDescription)
-                            } else if let httpResponse = response as? HTTPURLResponse,
-                                      (200...299).contains(httpResponse.statusCode) {
-                                scan.uploadStatus = .success
-                                target.reportCompleted()
-                                scan.lastUploadedAt = Date()
-                            } else {
-                                scan.uploadStatus = .failed("Server error")
-                            }
-                        }
-                    }
-                    task.resume()
                 }
             }
         }

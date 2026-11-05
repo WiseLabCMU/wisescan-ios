@@ -26,6 +26,13 @@ nonisolated enum ControlPlaneSession {
     static func isAllowed(host: String) -> Bool {
         trust.contains(host)
     }
+
+    /// The same rule for another session's challenges: `ExportUploader`'s background session
+    /// sends the uploads this one used to, to the same granted hosts.
+    static func disposition(for challenge: URLAuthenticationChallenge)
+        -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        trust.disposition(for: challenge)
+    }
 }
 
 nonisolated final class TrustDelegate: NSObject, URLSessionDelegate, Sendable {
@@ -43,6 +50,10 @@ nonisolated final class TrustDelegate: NSObject, URLSessionDelegate, Sendable {
 
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge)
         async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        disposition(for: challenge)
+    }
+
+    func disposition(for challenge: URLAuthenticationChallenge) -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         let space = challenge.protectionSpace
         guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
               let trust = space.serverTrust,

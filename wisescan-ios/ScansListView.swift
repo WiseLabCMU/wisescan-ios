@@ -643,26 +643,15 @@ struct ScansListView: View {
                         return
                     }
 
-                    DispatchQueue.main.async { scan.uploadStatus = .uploading(progress: 0.0) }
-
-                    let task = target.session.uploadTask(with: target.request, fromFile: exportURL) { _, response, error in
-                        try? FileManager.default.removeItem(at: exportURL)
-                        DispatchQueue.main.async {
-                            if let error = error {
-                                scan.uploadStatus = .failed(error.localizedDescription)
-                            } else if let httpResponse = response as? HTTPURLResponse,
-                                      (200...299).contains(httpResponse.statusCode) {
-                                scan.uploadStatus = .success
-                                target.reportCompleted()
-                                scan.lastUploadedAt = Date()
-                            } else {
-                                scan.uploadStatus = .failed("Server error")
-                            }
+                    DispatchQueue.main.async {
+                        scan.uploadStatus = .uploading(progress: 0.0)
+                        // Background transfer; the uploader sets the scan's status (see ExportUploader).
+                        ExportUploader.shared.upload(exportURL, request: target.request, scanId: scan.id,
+                                                     exportId: target.exportId) { _ in
                             self.bulkUploadCompleted += 1
                             self.checkBulkUploadCompletion()
                         }
                     }
-                    task.resume()
                 }
             }
         }
@@ -1780,42 +1769,14 @@ struct ScanCard: View {
                 self.exportPhase = nil
                 self.scan.uploadStatus = .uploading(progress: 0.0)
                 self.onUpdate(self.scan)
-            }
-
-            // Track upload progress using KVO
-            class ObserverBox { var observer: NSKeyValueObservation? }
-            let box = ObserverBox()
-
-            // Upload natively via streaming
-            let task = target.session.uploadTask(with: target.request, fromFile: exportURL) { _, response, uploadError in
-                _ = box
-
-                try? FileManager.default.removeItem(at: exportURL)
-                DispatchQueue.main.async {
+                // A background transfer: it finishes with the screen locked or the app closed, and
+                // the uploader sets the scan's progress, status and lastUploadedAt itself.
+                ExportUploader.shared.upload(exportURL, request: target.request, scanId: self.scan.id,
+                                             exportId: target.exportId) { _ in
                     self.scan.selectedFormat = self.selectedFormat
-                    if let uploadError = uploadError {
-                        self.scan.uploadStatus = .failed(uploadError.localizedDescription)
-                    } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-                        self.scan.uploadStatus = .success
-                        target.reportCompleted()
-                        self.scan.lastUploadedAt = Date()
-                    } else {
-                        self.scan.uploadStatus = .failed("Server error")
-                    }
                     self.onUpdate(self.scan)
                 }
             }
-
-            box.observer = task.progress.observe(\.fractionCompleted) { progress, _ in
-                DispatchQueue.main.async {
-                    if case .uploading = self.scan.uploadStatus {
-                        self.scan.uploadStatus = .uploading(progress: progress.fractionCompleted)
-                        self.onUpdate(self.scan)
-                    }
-                }
-            }
-
-            task.resume()
         }
     }
 

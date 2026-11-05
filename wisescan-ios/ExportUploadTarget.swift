@@ -5,31 +5,16 @@ import Foundation
 /// With a control plane set, the server hands out each export's destination: a presigned PUT
 /// into the lab's Versity bucket, under this device's `exports/<format>/` in the shared working
 /// directory, so no bucket credentials live on the phone and uploads can be revoked per device.
-/// When the PUT succeeds, `reportCompleted` tells the server, which checks the bucket and signals
+/// When the PUT succeeds, `ExportUploader` tells the server, which checks the bucket and signals
 /// its pipelines. Without a working control plane uploads behave as they did before one existed:
 /// they go to the manual Upload URL (Settings; the lab's default bucket on TestFlight). That covers
 /// no host, an unreachable or failing one, a wrong password, and a server with no upload target.
 /// Only a revocation (403) stops them, since falling back would defeat it.
 nonisolated struct ExportUploadTarget: Sendable {
-    /// The PUT, its headers set; the caller streams the export file with it.
+    /// The PUT, its headers set; `ExportUploader` streams the export file with it.
     let request: URLRequest
-    let session: URLSession
     /// The control plane's grant, when it handed out the destination.
     var exportId: String? = nil
-    var client: ControlPlaneClient? = nil
-
-    /// After a successful PUT: the server checks the object and announces `export.completed`.
-    /// Best-effort; a missed report leaves the export uploaded but unannounced.
-    func reportCompleted() {
-        guard let exportId, let client else { return }
-        Task {
-            do {
-                try await client.completeExport(exportId)
-            } catch {
-                print("[ControlPlane] export \(exportId) completion not reported: \(error.localizedDescription)")
-            }
-        }
-    }
 
     nonisolated enum Failure: LocalizedError, Equatable {
         case revoked
@@ -68,8 +53,7 @@ nonisolated struct ExportUploadTarget: Sendable {
                     request.setValue(value, forHTTPHeaderField: field)
                 }
                 unreachableUntil = nil
-                return ExportUploadTarget(request: request, session: ControlPlaneSession.session,
-                                          exportId: grant.exportId, client: client)
+                return ExportUploadTarget(request: request, exportId: grant.exportId)
             } catch ControlPlaneClient.Failure.server(let status, _) where status == 403 {
                 throw Failure.revoked
             } catch {
@@ -93,6 +77,6 @@ nonisolated struct ExportUploadTarget: Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-        return ExportUploadTarget(request: request, session: URLSession.shared)
+        return ExportUploadTarget(request: request)
     }
 }

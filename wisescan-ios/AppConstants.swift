@@ -662,6 +662,12 @@ enum AppConstants {
     static let controlPlaneAutoSync = "new"                      // new spaces sync on their own; the backlog from before joining waits for Sync
     static let controlPlaneLargeFileBytes: Int64 = 5_000_000     // package files this big go up only on an unmetered network (Wi-Fi)
     static let controlPlanePollIntervalS: Double = 300           // while the app is open, sync this often so the lab's requests are picked up
+
+    // MARK: - Export uploads (background URLSession, ExportUploader)
+    static let exportUploadSessionId = "edu.cmu.wiselab.wisescan-ios.export-upload" // stable: iOS reattaches a relaunched app's transfers by it
+    static let exportUploadResourceTimeoutS: TimeInterval = 3600 // give up after this long in total; matches scan4d-server's grant lifetime (SCAN4D_EXPORT_URL_TTL_S default), past which a retry is refused anyway
+    static let exportUploadProgressStep: Double = 0.01           // write the scan's progress only when it moves this much (each write is a SwiftData change)
+    static let exportUploadPendingDirectory = "PendingUploads"   // Application Support subfolder holding exports until their transfer ends
 }
 
 // MARK: - Semantic View Mode
