@@ -69,10 +69,12 @@ pg_plist_secret_violations() {
 # pg_swift_secret_violations <swift-content>
 #   4. A literal SDK app id + secret in code (the Insta360 SDK's activation call). The
 #      vendor's own placeholders ("Appid", "secret", YOUR_..., <...>) are allowed.
+#   Always returns 0: grep exits 1 when nothing matches, and under check-privacy.sh's
+#   `set -eo pipefail` that status would end the whole scan, silently, at the first clean file.
 pg_swift_secret_violations() {
     local content="$1"
     printf '%s\n' "$content" | grep -nE 'setAppid\("[^"]{4,}",[[:space:]]*secret:[[:space:]]*"[^"]{8,}"' \
-        | grep -vE '"(Appid|secret|YOUR_[A-Za-z_]+|<[^>]+>)"' | cut -d: -f1 | tr '\n' ' '
+        | grep -vE '"(Appid|secret|YOUR_[A-Za-z_]+|<[^>]+>)"' | cut -d: -f1 | tr '\n' ' ' || true
 }
 
 # pg_is_forbidden_path <path>  -> exit 0 if the path is a raw capture artifact.
