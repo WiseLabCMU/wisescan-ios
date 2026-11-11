@@ -39,17 +39,18 @@ struct UserGuideView: View {
                     )
                     guideRow(
                         icon: "4.circle.fill",
-                        title: "Process",
-                        text: "Tap 'Process' on the scan card (or 'Process All' on a location) to finish " +
-                              "the scan on-device: it aligns rescans into the location's shared coordinate " +
-                              "frame, prepares the rescan ghost, and applies camera-based color. Upload, " +
-                              "export, and rescan unlock once processing completes."
+                        title: "Process & Color",
+                        text: "Processing runs by itself after you save: it aligns rescans into the " +
+                              "location's shared coordinate frame and prepares the rescan ghost. Tap " +
+                              "'Color' on a scan card to color its mesh from your photos (it finishes any " +
+                              "processing still left first); long-press it to re-run processing. If a scan " +
+                              "isn't processed yet, Upload, Save and Rescan ask to process it first."
                     )
                     guideRow(
                         icon: "5.circle.fill",
                         title: "Rescan Space / Connect Adjacent Space",
                         text: "Tap 'Rescan Space' on any location to re-scan the identical area over time " +
-                              "— a colored ghost overlay (default magenta, configurable in Settings) shows " +
+                              "— a magenta ghost overlay shows " +
                               "your previous scan for reference, and each new scan is auto-aligned into " +
                               "the location's shared frame using detected walls and floors. " +
                               "Rescan asks what to capture: the whole room, or one region (a focus scan, " +
@@ -57,8 +58,8 @@ struct UserGuideView: View {
                               "Tap 'Connect Adjacent Space' to scan a neighboring room: relocalize with your " +
                               "previous scan, walk to where the new connector should be, " +
                               "and confirm to place the connector and start scanning the new space. " +
-                              "You can also tap 'Pin & Extend' mid-scan to drop a connector and continue " +
-                              "into the next space without stopping."
+                              "Or, when you stop a scan, choose 'Save & Scan Adjacent' to drop a connector " +
+                              "and carry straight on into the next space."
                     )
                     guideRow(
                         icon: "scope",
@@ -84,8 +85,9 @@ struct UserGuideView: View {
                     guideRow(
                         icon: "6.circle.fill",
                         title: "Choose Format",
-                        text: "Select an export format (Scan4D, Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ) " +
-                              "using the format picker on each scan card."
+                        text: "Pick the export format with Global Export Format on a space's screen: Scan4D " +
+                              "(the default), Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ. It applies " +
+                              "to every space."
                     )
                     guideRow(
                         icon: "7.circle.fill",
@@ -159,7 +161,7 @@ struct UserGuideView: View {
                         title: "Watch the Capacity Bar",
                         text: "Long scans approach session limits — save when the capacity warning appears. " +
                               "For large or multi-room spaces, capture several linked scans " +
-                              "(Pin & Extend or Connect Adjacent Space) instead of one huge scan."
+                              "(Save & Scan Adjacent or Connect Adjacent Space) instead of one huge scan."
                     )
                 } header: {
                     Text("SCAN TIPS")
@@ -179,7 +181,7 @@ struct UserGuideView: View {
                 } header: {
                     Text("SEMANTIC COLORS")
                 } footer: {
-                    Text("Room-structure classes detected while scanning (with Semantic Labeling on), " +
+                    Text("Room-structure classes detected while scanning, " +
                          "shown in these colors in the mesh preview's semantics view and listed on the " +
                          "scan HUD. All detected classes are always included in exports. " +
                          "The mesh preview names each box with RoomPlan's full label set " +

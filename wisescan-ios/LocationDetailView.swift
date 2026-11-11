@@ -151,19 +151,6 @@ struct LocationDetailView: View {
                                     verticalPadding: 12,
                                     border: Color.orange.opacity(0.3)
                                 ))
-
-                                Picker("Use Case", selection: Binding(
-                                    get: { location.scanCase },
-                                    set: { newValue in
-                                        location.scanCase = newValue
-                                        try? modelContext.save()
-                                    }
-                                )) {
-                                    Text("Rescan Space").tag(ScanCase.rescanSpace)
-                                    Text("Connect Adjacent Space").tag(ScanCase.linkAdjacent)
-                                }
-                                .pickerStyle(.segmented)
-                                .colorScheme(.dark)
                             }
                         }
 
@@ -280,15 +267,6 @@ struct LocationDetailView: View {
                                     bulkColoringMessage: bulkColoringMessages[scan.id],
                                     bulkExportPhase: bulkExportPhases[scan.id],
                                     onUpdate: { _ in try? modelContext.save() },
-                                    onDelete: { scanToDelete in
-                                        ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
-                                        // Auto-delete location if no scans remain
-                                        if location.scans.isEmpty {
-                                            modelContext.delete(location)
-                                            try? modelContext.save()
-                                            dismiss()
-                                        }
-                                    },
                                     onSelect: {
                                         if selectedScans.contains(scan.id) {
                                             selectedScans.remove(scan.id)
@@ -301,51 +279,6 @@ struct LocationDetailView: View {
                             }
                         }
                     }
-
-                    // MARK: - Server Workflows
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("SERVER WORKFLOWS (COMING SOON)")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
-                            .padding(.horizontal)
-
-                        VStack(spacing: 16) {
-                            WorkflowCard(
-                                icon: "arrow.triangle.2.circlepath.camera.fill",
-                                title: "Quick Mesh",
-                                description: "Fast photogrammetry pipeline optimized for immediate preview. " +
-                                             "Lower resolution textures.",
-                                time: "~5 mins",
-                                buttonText: "Run Workflow",
-                                isPrimary: true,
-                                isDisabled: true
-                            )
-
-                            WorkflowCard(
-                                icon: "camera.macro",
-                                title: "Gaussian Splat",
-                                description: "High-fidelity radiance field reconstruction for " +
-                                             "photo-realistic novel view synthesis.",
-                                time: "~25 mins",
-                                buttonText: "Run Workflow",
-                                isDisabled: true
-                            )
-
-                            WorkflowCard(
-                                icon: "map.fill",
-                                title: "Spatial Indexing",
-                                description: "OpenFLAME spatial indexing with automatic semantic labelling. " +
-                                             "Identifies and tags objects, surfaces, and regions for " +
-                                             "spatial queries and AR anchoring.",
-                                time: "~10 mins",
-                                buttonText: "Run Workflow",
-                                isDisabled: true
-                            )
-                        }
-                        .padding(.horizontal)
-                    }
-                    .padding(.top, 16)
-                    .opacity(isEditing ? 0.3 : 1.0)
 
                     Spacer().frame(height: 100)
                 }
@@ -1174,68 +1107,6 @@ private struct BulkUploadMixedDialog: ViewModifier {
             Text("\(uploaded.count) of the selected scans have already been uploaded. " +
                  "Upload only the un-uploaded scans, or re-upload everything?")
         }
-    }
-}
-
-// MARK: - Workflow Card
-
-struct WorkflowCard: View {
-    var icon: String
-    var title: String
-    var description: String
-    var time: String
-    var buttonText: String
-    var isPrimary: Bool = false
-    var isDisabled: Bool = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            Image(systemName: icon)
-                .font(.title)
-                .foregroundColor(isPrimary ? .cyan : .white)
-                .frame(width: 40)
-                .padding(.top, 4)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(title)
-                    .font(.headline)
-                    .foregroundColor(.white)
-
-                Text(description)
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.7))
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack {
-                    Label("Time: \(time)", systemImage: "clock")
-                        .font(.caption)
-                        .foregroundColor(.green)
-
-                    Spacer()
-
-                    Button(action: {}, label: {
-                        Text(buttonText)
-                            .font(.caption).bold()
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(isDisabled ? Color.gray.opacity(0.3) :
-                                        (isPrimary ? Color.blue : Color.white.opacity(0.2)))
-                            .foregroundColor(isDisabled ? .white.opacity(0.45) : .white)
-                            .cornerRadius(8)
-                    })
-                    .disabled(isDisabled)
-                }
-                .padding(.top, 4)
-            }
-        }
-        .padding()
-        .background(.ultraThinMaterial)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(isPrimary ? Color.cyan.opacity(0.3) : Color.white.opacity(0.1), lineWidth: 1)
-        )
-        .cornerRadius(16)
-        .opacity(isDisabled ? 0.6 : 1.0)
     }
 }
 

@@ -587,6 +587,10 @@ struct WearableCard: View {
 /// connected. Camera management (add another / edit Wi-Fi / forget) is always
 /// reachable via the Manage menu. See ThetaCameraManager.
 struct ThetaCameraCard: View {
+    /// The camera bench (still resolution, Test Shutter, its timings and Download & Preview) is
+    /// Developer Mode only: the app already forces maximum resolution on every connect, and a test
+    /// shot is removed from the camera only by Download, so the three go together.
+    @AppStorage(AppConstants.Key.developerMode) private var developerMode = AppConstants.developerMode
     @Bindable var manager: ThetaCameraManager
     @State private var showNetworkSheet = false
     @State private var sheetSSID = ""
@@ -1031,8 +1035,9 @@ struct ThetaCameraCard: View {
                     .foregroundColor(.orange)
             }
 
-            // Still resolution — read from the camera, changeable via a preset menu.
-            if manager.isConnected {
+            // Still resolution — read from the camera, changeable via a preset menu. The app forces the
+            // maximum on every connect (forceMaxStillResolution), so this is a bench override.
+            if developerMode, manager.isConnected {
                 HStack {
                     Text("Still resolution")
                         .font(.caption)
@@ -1095,8 +1100,9 @@ struct ThetaCameraCard: View {
                 .disabled(manager.state == .connecting)
 
                 // Rendered only once the Wi-Fi connection completes (field spec) —
-                // a permanently disabled gray button earned its keep never.
-                if manager.isConnected {
+                // a permanently disabled gray button earned its keep never. Developer Mode only,
+                // with the Download that removes its shot from the camera.
+                if developerMode, manager.isConnected {
                     Button(action: { manager.takePicture() }, label: {
                         HStack {
                             if manager.isCapturing {
@@ -1117,8 +1123,9 @@ struct ThetaCameraCard: View {
                 }
             }
 
-            // Last trigger result — the P2 spike's headline number (round-trip latency).
-            if let capture = manager.lastCapture {
+            // Last trigger result — the P2 spike's headline number (round-trip latency). Developer
+            // Mode only; an error still shows for everyone.
+            if developerMode, let capture = manager.lastCapture {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
                     Text("Captured in \(capture.roundTripMs) ms")

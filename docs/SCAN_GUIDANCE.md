@@ -9,7 +9,7 @@ This document lists all pre-scan analysis checks and mid-scan coaching tips. The
 
 ## Pre-Scan Space Analysis
 
-Tap **Analyze** (scope icon) near the Record button to begin. The user pans 360° while the app measures ambient lighting, detects room features via RoomPlan, and checks for people using person segmentation. A report modal presents results as pass/warn/alert/skipped cards.
+Tap **Analyze** (scope icon) near the Record button to begin. It is offered only before a new space's scan, not during a rescan, a connect or a focus scan. The user pans 360° while the app measures ambient lighting, detects room features via RoomPlan, and checks for people using person segmentation. A report modal presents results as pass/warn/alert/skipped cards.
 
 **Source:** [SpaceAnalyzer.swift](../wisescan-ios/SpaceAnalyzer.swift) · [ScanAnalysisReportView.swift](../wisescan-ios/ScanAnalysisReportView.swift)
 

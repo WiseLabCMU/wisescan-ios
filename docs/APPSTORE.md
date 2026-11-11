@@ -205,7 +205,7 @@ https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md
 | 5 | **Scans List** (location grid with multi-select active) | "Organize scans by location with bulk Save, Upload, and Delete" |
 | 6 | **Link Adjacent Space** (ghost overlay + tracking banner) | "Re-scan over time or link adjacent areas with guided alignment" |
 | 7 | **Meta Ray-Ban PiP** (glasses stream + capture view) | "Stream frames from Meta Ray-Ban Smart Glasses via Bluetooth" |
-| 8 | **Export Format Picker** (scan card with format dropdown) | "Export to Scan4D, Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ" |
+| 8 | **Export Format Picker** (space screen, Global Export Format dropdown) | "Export to Scan4D, Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ" |
 | 9 | **Dashboard** (server status + glasses connection) | "Connect to your server and pair Meta Ray-Ban Smart Glasses" |
 | 10 | **Settings** (upload URL + capture mode + glasses) | "Full control over capture quality, mode, and device pairing" |
 

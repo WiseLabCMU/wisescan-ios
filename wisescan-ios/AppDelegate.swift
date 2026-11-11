@@ -46,9 +46,8 @@ struct Scan4DApp: App {
         // @AppStorage provides its own default, but direct UserDefaults reads need registration.
         // Every developer option is registered, which is what lets Restore Default Developer
         // Options simply remove the stored values (see AppConstants.developerOptionDefaults).
-        var registeredDefaults = AppConstants.developerOptionDefaults
-        registeredDefaults[AppConstants.Key.semanticLabeling] = AppConstants.semanticLabeling
-        UserDefaults.standard.register(defaults: registeredDefaults)
+        UserDefaults.standard.register(defaults: AppConstants.developerOptionDefaults)
+        AppConstants.restoreDeveloperDefaultsOutsideDeveloperMode()
         AppConstants.pruneRetiredDefaults()
         print("Application directory: \(NSHomeDirectory())")
         // Main-thread stall watchdog, app-wide from first frame (no-op unless Perf

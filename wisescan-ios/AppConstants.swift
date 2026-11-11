@@ -71,6 +71,7 @@ enum AppConstants {
         static let registerLegacyScans = "registerLegacyScans"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
+        static let liteModeNoticeShown = "liteModeNoticeShown"       // the "Lite Mode — No LiDAR" notice was shown (once per install)
         static let rigMeasuredDyDateMs = "rigMeasuredDyDateMs"        // when the rig height was last entered/confirmed, UTC epoch ms — drives the staleness nudge (2026-08-19: a 28.5-inch entry outlived its rig by a day and a half, and poses shipped ~8 cm long with nothing anywhere to say the number had gone stale)
         static let rigMeasuredDyMeters = "rigMeasuredDyMeters"        // user's tape-measured iPad-camera→360°-lens distance — ALWAYS persisted in METERS (UI may display/accept imperial); 0 = unmeasured
         static let rigHeightUnitImperial = "rigHeightUnitImperial"    // display/entry unit preference for the rig height field (false = metric)
@@ -139,8 +140,11 @@ enum AppConstants {
     /// Registered at launch (Scan4DApp.init), so code that reads a key straight from UserDefaults
     /// gets the right default with no fallback of its own; that is also why a restore can simply
     /// remove the stored values. Left out on purpose: `developerMode` itself (a restore keeps
-    /// Developer Mode on) and Semantic Labeling, a Scan Capture setting since it left the
-    /// developer section.
+    /// Developer Mode on).
+    ///
+    /// Outside Developer Mode every option here is at its default: turning Developer Mode off
+    /// restores them, and so does every launch with it off (`restoreDeveloperDefaultsOutsideDeveloperMode`),
+    /// which also covers a setting that moved here from everyday Settings with a changed value.
     static let developerOptionDefaults: [String: Any] = [
         // Simulation
         Key.mockIMU: mockIMU,
@@ -163,12 +167,28 @@ enum AppConstants {
         Key.vrBloomEnabled: vrBloomEnabled,
         Key.memDiagForceReclaim: memDiagForceReclaim,
         Key.forceRebuildArtifacts: forceRebuildArtifacts,
+        // Capture tuning, moved here from everyday Settings (fewest controls, CONTRIBUTING §3)
+        Key.rawOverlapMax: overlapMax,
+        Key.rawRejectBlur: rejectBlur,
+        Key.semanticLabeling: semanticLabeling,
+        Key.activeMeshColor: activeMeshColor,
+        Key.ghostMeshColor: ghostMeshColor,
+        Key.metaWearablesFPS: metaWearablesFPS,
         // Capture quality and processing
         Key.videoFormatIndex: videoFormatIndex,
         Key.captureAudioEnabled: captureAudioEnabled,
         Key.meshClassifier: meshClassifier,
         Key.registerLegacyScans: registerLegacyScans
     ]
+
+    /// At launch: with Developer Mode off, every developer option goes back to its default. Turning
+    /// Developer Mode off already did that for the options it had then; this catches a setting that
+    /// later moved into Developer Mode from everyday Settings, which a user may have changed and
+    /// could no longer see or change back (Semantic Labeling off blocks every rescan).
+    static func restoreDeveloperDefaultsOutsideDeveloperMode(in defaults: UserDefaults = .standard) {
+        guard !defaults.bool(forKey: Key.developerMode) else { return }
+        restoreDeveloperDefaults(in: defaults)
+    }
 
     /// Restore Default Developer Options, which is also what turning Developer Mode off does:
     /// removes every developer option's stored value, so each reads its registered default again.
@@ -785,13 +805,16 @@ enum SemanticViewMode: String, CaseIterable {
     var showFills: Bool { self == .semanticOnly }
 }
 
-/// Four-tier toggle for capture-pose frustum markers in the mesh preview.
-/// Mirrors `SemanticViewMode`'s cycle-button pattern; defaults to hidden so the preview
-/// stays clean until the user opts in. The `.equirectFaces` tier is skipped for scans
-/// without 360° stills (controlled by `next(hasEquirects:)`).
+/// Capture-pose frustum markers in the mesh preview, hidden by default so the preview stays
+/// clean until the user opts in. Everyone gets one on/off toggle between `.none` and `.photos`
+/// (where each photo was taken: stills and 360° stills, `photoPositionsToggled`). Developer Mode
+/// cycles every tier with `next(hasEquirects:)`, which skips `.equirectFaces` for scans without
+/// 360° stills; motion frames are hundreds of wedges and are only there.
 enum KeyframeMarkerMode: String, CaseIterable {
     /// No capture markers.
     case none
+    /// Every photo: sharp stills and 360° stills (the everyday "photo positions" toggle).
+    case photos
     /// Sharp still (keyframe) capture poses only.
     case stills
     /// 360° equirect sphere markers (one translucent sphere + forward arrow per still).
@@ -805,6 +828,7 @@ enum KeyframeMarkerMode: String, CaseIterable {
     var iconName: String {
         switch self {
         case .none:          return "camera.metering.none"
+        case .photos:        return "camera.metering.partial"
         case .stills:        return "camera.metering.partial"
         case .equirectFaces: return "pano"
         case .motion:        return "camera.metering.center.weighted"
@@ -816,6 +840,7 @@ enum KeyframeMarkerMode: String, CaseIterable {
     func next(hasEquirects: Bool) -> KeyframeMarkerMode {
         switch self {
         case .none:          return .stills
+        case .photos:        return .motion
         case .stills:        return hasEquirects ? .equirectFaces : .motion
         case .equirectFaces: return .motion
         case .motion:        return .all
@@ -823,9 +848,12 @@ enum KeyframeMarkerMode: String, CaseIterable {
         }
     }
 
-    var showStills: Bool { self == .stills || self == .all }
+    /// The everyday toggle: off, or every photo's position.
+    var photoPositionsToggled: KeyframeMarkerMode { self == .none ? .photos : .none }
+
+    var showStills: Bool { self == .stills || self == .photos || self == .all }
     var showMotion: Bool { self == .motion || self == .all }
-    var showEquirectFaces: Bool { self == .equirectFaces || self == .all }
+    var showEquirectFaces: Bool { self == .equirectFaces || self == .photos || self == .all }
 }
 
 /// Which GEOMETRY the mesh preview draws — an axis ORTHOGONAL to `SemanticViewMode` (which
