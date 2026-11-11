@@ -5,9 +5,13 @@ reachable **on device, without a debug session** — that constraint shaped most
 
 ## Settings → Developer Mode (master toggle)
 
-Reveals the developer section in Settings and the BLE Probe card on the Dashboard.
+Reveals the developer sections in Settings and the BLE Probe card on the Dashboard. The
+sections are grouped like the everyday Settings: under the Developer Mode switch, the field
+diagnostics (Export Diagnostics Log, Perf Diagnostics and its sub-options); then Capture,
+Privacy & 360° camera, Color, Display & VR, Simulation and Processing, each with an orange
+icon header; Restore Default Developer Options last.
 Turning Developer Mode off restores every developer option to its default, and so does
-**Restore Default Developer Options**, the section's last row (it asks first, keeps
+**Restore Default Developer Options**, Developer Mode's last section (it asks first, keeps
 Developer Mode on, and is greyed out while nothing differs from the defaults). Both reset
 the same list, `AppConstants.developerOptionDefaults`, diagnostics toggles included: they
 gate on their own keys, so a left-on one would keep recording and costing after Developer
