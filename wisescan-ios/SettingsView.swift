@@ -21,7 +21,6 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.rawRejectBlur) private var rejectBlur: Bool = AppConstants.rejectBlur
     @AppStorage(AppConstants.Key.captureMode) private var captureMode: String = AppConstants.captureMode
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
-    @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedExportFormat: String = AppConstants.selectedExportFormat
     @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
     @AppStorage(AppConstants.Key.mockIMU) private var mockIMU: Bool = AppConstants.mockIMU
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
@@ -58,32 +57,6 @@ struct SettingsView: View {
     @State private var diagnosticsLogURL: URL?
     @State private var showRestoreDeveloperDefaults = false
 
-    /// The export format every Save and Upload uses. It used to sit on each space's screen as
-    /// "Global Export Format", which was app-wide anyway, and changing it there also rewrote the
-    /// recorded format of that space's scans (reported to the lab as their upload format). Here it
-    /// is one setting with Scan4D as the default; a scan card's Upload records the format it sent.
-    private var exportFormatPicker: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Export Format")
-                    .foregroundColor(.white)
-                Spacer()
-                Picker("Export Format", selection: $selectedExportFormat) {
-                    ForEach(ExportFormat.allCases, id: \.self) { (format: ExportFormat) in
-                        Text(format.rawValue).tag(format.rawValue)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .tint(.cyan)
-            }
-            Text("What Save and Upload produce. Scan4D (the default) carries everything; the User Guide describes each format. Focus scans always export as one zip.")
-                .font(.caption)
-                .foregroundColor(.gray)
-        }
-        .padding(.vertical, 4)
-    }
-
     @ViewBuilder
     private var settingsSection1: some View {
         Section {
@@ -115,10 +88,8 @@ struct SettingsView: View {
                     .foregroundColor(.gray)
             }
             .padding(.vertical, 4)
-
-            exportFormatPicker
         } header: {
-            Text("UPLOAD & EXPORT")
+            Text("UPLOAD SERVER")
         }
         .listRowBackground(Color.white.opacity(0.05))
     }

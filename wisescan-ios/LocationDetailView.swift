@@ -209,6 +209,34 @@ struct LocationDetailView: View {
                                 ControlPlaneSpaceSyncButton(spaceIds: [location.id])
                             }
 
+                            // Global Export Settings
+                            VStack(spacing: 12) {
+                                HStack {
+                                    Text("Global Export Format")
+                                        .font(.caption)
+                                        .foregroundColor(.white.opacity(0.7))
+                                    Spacer()
+                                    Picker("Format", selection: $globalSelectedFormatStr) {
+                                        ForEach(ExportFormat.allCases, id: \.self) { (format: ExportFormat) in
+                                            Text(format.rawValue).tag(format.rawValue)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .tint(.cyan)
+                                    .onChange(of: globalSelectedFormatStr) { _, newValue in
+                                        for scan in location.scans {
+                                            scan.selectedFormat = ExportFormat.persisted(newValue) ?? .scan4d
+                                        }
+                                        try? modelContext.save()
+                                    }
+                                }
+
+                                // Bulk actions moved to bottom toolbar in edit mode
+                            }
+                            .padding()
+                            .background(Color.white.opacity(0.05))
+                            .cornerRadius(12)
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 1))
                         }
                     }
                     .padding(.horizontal)

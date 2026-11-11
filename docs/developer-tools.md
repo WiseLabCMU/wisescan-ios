@@ -26,8 +26,8 @@ room data and Rescan / Connect Adjacent refuse them as bad scans), the active an
 wireframe colours, and the Meta Wearables stream rate. Developer Mode also shows the
 360° camera bench on the Dashboard card (still resolution, Test Shutter, its timings
 and Download & Preview, which is what removes a test shot from the camera) and, in the
-3D viewers, the full / proxy / dynamic mesh switch and the full camera-marker cycle
-(motion frames); everyone else gets one photo-positions toggle.
+3D preview, the full camera-marker cycle (motion frames); everyone else gets one
+photo-positions toggle.
 
 ### Performance Diagnostics (the big one)
 Gates on the **setting, not the build configuration** — it works identically in

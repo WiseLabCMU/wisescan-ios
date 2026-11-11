@@ -66,8 +66,6 @@ private struct StitchRoomRow: Identifiable {
 
 struct CombinedMeshScreen: View {
     let request: ComponentRenderRequest
-    /// Mesh-source switching (full / proxy / dynamic) is an inspection tool: Developer Mode only.
-    @AppStorage(AppConstants.Key.developerMode) private var developerMode = AppConstants.developerMode
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
@@ -426,7 +424,7 @@ struct CombinedMeshScreen: View {
                 }
                 .disabled(present.isEmpty)
 
-                if developerMode, proxyAvailability?.any == true {
+                if proxyAvailability?.any == true {
                     Button { meshSourceMode = meshSourceMode.next } label: {
                         Image(systemName: meshSourceMode.iconName)
                             .foregroundColor(meshSourceMode == .full ? .gray : .yellow)

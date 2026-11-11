@@ -85,8 +85,9 @@ struct UserGuideView: View {
                     guideRow(
                         icon: "6.circle.fill",
                         title: "Choose Format",
-                        text: "Pick the export format once in Settings > Upload & Export: Scan4D (the " +
-                              "default), Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ."
+                        text: "Pick the export format with Global Export Format on a space's screen: Scan4D " +
+                              "(the default), Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ. It applies " +
+                              "to every space."
                     )
                     guideRow(
                         icon: "7.circle.fill",
