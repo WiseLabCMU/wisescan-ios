@@ -663,6 +663,8 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
+                // The row's own title names it; a menu picker would print its label again beside the value.
+                .labelsHidden()
                 .tint(.orange)
             }
             Text("Switched off on the capture screen, the Privacy Filter turns itself back on after this long, so a switch left off by mistake doesn't keep capturing people unblurred. None keeps it off until switched back on. A space set to Always use Privacy Filter ignores this.")
