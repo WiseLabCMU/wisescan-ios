@@ -47,6 +47,8 @@ enum AppConstants {
         static let mockCameraImages = "mockCameraImages"
         static let mockDepthMaps = "mockDepthMaps"
         static let privacyFilter = "privacyFilter"
+        static let privacyFilterOffAt = "privacyFilterOffAt"          // when the Privacy Filter was last switched off (seconds since 1970); cleared when it goes back on (PrivacyFilterTimer)
+        static let privacyFilterTimeLimitHours = "privacyFilterTimeLimitHours" // Developer Mode: hours the Privacy Filter may stay off before it turns itself back on; 0 = no limit
         static let mockWearable = "mockWearable"
         static let selectedExportFormat = "selectedExportFormat"
         static let locationScanFilter = "locationScanFilter"   // a space's scan list: Room / Focus / All (ScanListFilter)
@@ -148,6 +150,7 @@ enum AppConstants {
         // 360° and colorize probes
         Key.colorizeFrom360Faces: colorizeFrom360Faces,
         Key.keepCameraOriginals: keepCameraOriginals,
+        Key.privacyFilterTimeLimitHours: privacyFilterTimeLimitHours,
         Key.gpuColorize: gpuColorize,
         Key.keyframeWeightBonus: keyframeWeightBonus,
         Key.robustColorMedian: robustColorMedian,
@@ -203,6 +206,12 @@ enum AppConstants {
     static let mockCameraImages: Bool = false
     static let mockDepthMaps: Bool = false
     static let privacyFilter: Bool = true
+    /// Switched off, the Privacy Filter turns itself back on after this many hours (field
+    /// report 2026-11-11: it was being left off by mistake and scans caught too many people).
+    /// Developer Mode can pick another limit from `privacyFilterTimeLimitChoices`.
+    static let privacyFilterTimeLimitHours: Int = 24
+    /// The Developer Mode choices, in hours; 0 = no limit.
+    static let privacyFilterTimeLimitChoices: [Int] = [12, 24, 168, 0]
     static let mockWearable: Bool = false
     static let selectedExportFormat = "Scan4D" // ExportFormat.scan4d.rawValue
     static let activeMeshColor: String = "Green"

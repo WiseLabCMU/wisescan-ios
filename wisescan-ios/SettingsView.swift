@@ -30,6 +30,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.meshClassifier) private var meshClassifier: Bool = AppConstants.meshClassifier
     @AppStorage(AppConstants.Key.colorizeFrom360Faces) private var colorizeFrom360Faces: Bool = AppConstants.colorizeFrom360Faces
     @AppStorage(AppConstants.Key.keepCameraOriginals) private var keepCameraOriginals: Bool = AppConstants.keepCameraOriginals
+    @AppStorage(AppConstants.Key.privacyFilterTimeLimitHours) private var privacyFilterTimeLimitHours: Int = AppConstants.privacyFilterTimeLimitHours
     @AppStorage(AppConstants.Key.gpuColorize) private var gpuColorize: Bool = AppConstants.gpuColorize
     @AppStorage(AppConstants.Key.keyframeWeightBonus) private var keyframeWeightBonus: Bool = AppConstants.keyframeWeightBonus
     @AppStorage(AppConstants.Key.robustColorMedian) private var robustColorMedian: Bool = AppConstants.robustColorMedian
@@ -211,6 +212,8 @@ struct SettingsView: View {
                 }
                 .tint(.orange)
                 .padding(.vertical, 4)
+
+                privacyTimeLimitPicker
 
                 diagnosticsExportRow
 
@@ -643,6 +646,32 @@ struct SettingsView: View {
                  "diagnostics, colorize and VR switches, Video Format and Capture Audio. " +
                  "Developer Mode stays on.")
         }
+    }
+
+    /// How long the Privacy Filter may stay off before it turns itself back on (PrivacyFilterTimer).
+    /// A developer option, so it is in AppConstants.developerOptionDefaults and a restore puts it
+    /// back to 24 h. Extracted to keep the Developer section inside the type checker's budget.
+    private var privacyTimeLimitPicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Privacy Filter Time Limit")
+                    .foregroundColor(.white)
+                Spacer()
+                Picker("Privacy Filter Time Limit", selection: $privacyFilterTimeLimitHours) {
+                    ForEach(AppConstants.privacyFilterTimeLimitChoices, id: \.self) { hours in
+                        Text(hours == 0 ? "None" : PrivacyFilterTimer.describe(hours: hours)).tag(hours)
+                    }
+                }
+                .pickerStyle(.menu)
+                // The row's own title names it; a menu picker would print its label again beside the value.
+                .labelsHidden()
+                .tint(.orange)
+            }
+            Text("Switched off on the capture screen, the Privacy Filter turns itself back on after this long, so a switch left off by mistake doesn't keep capturing people unblurred. None keeps it off until switched back on.")
+                .font(.caption)
+                .foregroundColor(.gray)
+        }
+        .padding(.vertical, 4)
     }
 
     /// Extracted alongside the diagnostics row: this section is long enough that the

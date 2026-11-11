@@ -8,6 +8,7 @@ import SwiftData
 struct CaptureView: View {
     @Environment(ScanStore.self) var scanStore
     @Environment(\.modelContext) var modelContext
+    @Environment(\.scenePhase) var scenePhase
     @State var scanStats = ScanStats()
     @State var locationManager = LocationManager()
     @AppStorage(AppConstants.Key.privacyFilter) var isPrivacyFilterOn = AppConstants.privacyFilter
@@ -964,6 +965,8 @@ struct CaptureView: View {
             // below restores its auto-sleep, mirroring the AR session's own ethos.
             thetaManager.setKeepAwake(true)
 
+            // The Privacy Filter's time limit (CaptureView+Privacy).
+            enforcePrivacyFilterRules()
             if let locId = scanStore.activeLocationForScan {
                 let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
                 if let loc = try? modelContext.fetch(descriptor).first {
@@ -1164,6 +1167,10 @@ struct CaptureView: View {
             } else {
                 activeLocationName = nil
             }
+        }
+        .onChange(of: isPrivacyFilterOn) { _, isOn in PrivacyFilterTimer.noteSwitch(isOn: isOn) }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { enforcePrivacyFilterRules() }
         }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
@@ -1595,7 +1602,7 @@ struct CaptureView: View {
             // Top Controls
             HStack {
                 PrivacyFilterPill(isOn: $isPrivacyFilterOn,
-                                  locked: isRecording,
+                                  recording: isRecording,
                                   show360Note: thetaManager.isConnected)
 
                 Spacer()
@@ -2506,10 +2513,11 @@ private struct CaptureStatsHUD: View {
 /// sees. LOCKED while recording: the setting must describe the whole scan as one binary state —
 /// a mid-scan flip half-masks the capture (segmentation masks exist only for the ON portion)
 /// while the exported `privacy_filter` flag records just the stop-time value, so the export
-/// blur gate would mis-reason about the unmasked half.
+/// blur gate would mis-reason about the unmasked half. Switched off, the filter turns itself
+/// back on after its time limit (PrivacyFilterTimer), which the warning says.
 private struct PrivacyFilterPill: View {
     @Binding var isOn: Bool
-    let locked: Bool
+    let recording: Bool
     let show360Note: Bool
 
     var body: some View {
@@ -2521,7 +2529,7 @@ private struct PrivacyFilterPill: View {
                 Toggle("", isOn: $isOn)
                     .labelsHidden()
                     .tint(.green)
-                    .disabled(locked)
+                    .disabled(recording)
             }
             if !isOn {
                 Text(warningText)
@@ -2535,7 +2543,9 @@ private struct PrivacyFilterPill: View {
         .background(.ultraThinMaterial)
         .cornerRadius(16)
         .frame(maxWidth: 260, alignment: .leading)
-        .opacity(locked ? 0.5 : 1)
+        // Dimmed while recording, but only to 75%: the off warning must stay readable mid-scan
+        // (field report 2026-11-11: at 50% it went unnoticed and scans caught too many people).
+        .opacity(recording ? 0.75 : 1)
         .animation(.easeInOut(duration: 0.2), value: isOn)
     }
 
@@ -2543,6 +2553,10 @@ private struct PrivacyFilterPill: View {
         var text = "People in view will be captured unblurred — moving people will corrupt texture maps."
         if show360Note {
             text += " The connected 360° camera captures ALL directions, including people behind you."
+        }
+        let limit = PrivacyFilterTimer.currentLimitDescription()
+        if limit != PrivacyFilterTimer.describe(hours: 0) {
+            text += " Turns back on by itself \(limit) after being switched off."
         }
         return text
     }
@@ -2552,9 +2566,9 @@ private struct PrivacyFilterPill: View {
     ZStack {
         Color.black.ignoresSafeArea()
         VStack(spacing: 12) {
-            PrivacyFilterPill(isOn: .constant(true), locked: false, show360Note: false)
-            PrivacyFilterPill(isOn: .constant(false), locked: false, show360Note: false)
-            PrivacyFilterPill(isOn: .constant(false), locked: true, show360Note: true)
+            PrivacyFilterPill(isOn: .constant(true), recording: false, show360Note: false)
+            PrivacyFilterPill(isOn: .constant(false), recording: false, show360Note: false)
+            PrivacyFilterPill(isOn: .constant(false), recording: true, show360Note: true)
         }
     }
 }

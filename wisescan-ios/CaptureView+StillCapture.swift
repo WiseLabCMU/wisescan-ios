@@ -32,6 +32,8 @@ extension CaptureView {
         case .running, .stopping: return
         case .idle, .done, .failed: break
         }
+        // As at a room scan's record tap: a filter back on after its time limit cancels this start.
+        if enforcePrivacyFilterRules(atRecordStart: true) { return }
         guard scanStore.activeFocusRequest != nil else {
             showTransientMessage("No focus region: start a focus scan from the space's Rescan button", duration: 4,
                                  systemImage: "exclamationmark.triangle.fill", tint: .orange)
