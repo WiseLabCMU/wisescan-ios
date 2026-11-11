@@ -44,15 +44,11 @@ struct Scan4DApp: App {
         
         // Register defaults for keys read via UserDefaults.standard.bool() (not @AppStorage).
         // @AppStorage provides its own default, but direct UserDefaults reads need registration.
-        UserDefaults.standard.register(defaults: [
-            AppConstants.Key.semanticLabeling: AppConstants.semanticLabeling,
-            AppConstants.Key.meshClassifier: AppConstants.meshClassifier,
-            AppConstants.Key.registerLegacyScans: AppConstants.registerLegacyScans,
-            AppConstants.Key.colorizeFrom360Faces: AppConstants.colorizeFrom360Faces,
-            AppConstants.Key.gpuColorize: AppConstants.gpuColorize,
-            AppConstants.Key.keyframeWeightBonus: AppConstants.keyframeWeightBonus,
-            AppConstants.Key.robustColorMedian: AppConstants.robustColorMedian
-        ])
+        // Every developer option is registered, which is what lets Restore Default Developer
+        // Options simply remove the stored values (see AppConstants.developerOptionDefaults).
+        var registeredDefaults = AppConstants.developerOptionDefaults
+        registeredDefaults[AppConstants.Key.semanticLabeling] = AppConstants.semanticLabeling
+        UserDefaults.standard.register(defaults: registeredDefaults)
         AppConstants.pruneRetiredDefaults()
         print("Application directory: \(NSHomeDirectory())")
         // Main-thread stall watchdog, app-wide from first frame (no-op unless Perf

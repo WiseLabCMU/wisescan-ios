@@ -10,6 +10,7 @@ Orientation for agents (and humans) working in this repo. Detailed docs live in 
 - Never commit debug-only file-sharing Info.plist keys, raw capture artifacts, vendor SDK binaries, or credentials (Meta `MetaAppID` / `ClientToken` values, any SDK app secret). The privacy guard (`scripts/privacy-guard.sh`) is the pattern library the hook and CI share, and it refuses all of these.
 - Rewrite only your own unpushed commits; never rebase, amend, or force-push someone else's.
 - Documentation ships with the feature: README features and tree, a REQ entry, the App Store copy, PRIVACY.md when data handling changes, the in-app user guide, and this index.
+- A new Developer Mode option (Settings) goes into `AppConstants.developerOptionDefaults`, key and default, in the same change. Restore Default Developer Options and turning Developer Mode off reset only that list, so an option missing from it keeps its bench value in production use.
 
 ## Start here
 - [README.md](README.md) — what Scan4D is, device-support matrix, features, architecture tree, export formats, backend receivers, quick start.

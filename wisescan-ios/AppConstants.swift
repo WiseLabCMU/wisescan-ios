@@ -123,6 +123,66 @@ enum AppConstants {
         }
     }
 
+    // MARK: - Developer options
+
+    /// Every option in Settings > Developer Mode, with its default.
+    ///
+    /// RULE: a new Developer Mode option goes in here (key and default) in the same change that
+    /// adds its row. This list is all that Restore Default Developer Options and turning Developer
+    /// Mode off reset, so an option missing from it keeps its bench value outside Developer Mode.
+    /// That matters: Keep 360° Originals left on leaves raw equirects on the camera, Mesh
+    /// Classifier left off drops the wall labels registration needs, and the diagnostics switches
+    /// gate on their own keys, so a left-on one keeps costing.
+    ///
+    /// Registered at launch (Scan4DApp.init), so code that reads a key straight from UserDefaults
+    /// gets the right default with no fallback of its own; that is also why a restore can simply
+    /// remove the stored values. Left out on purpose: `developerMode` itself (a restore keeps
+    /// Developer Mode on) and Semantic Labeling, a Scan Capture setting since it left the
+    /// developer section.
+    static let developerOptionDefaults: [String: Any] = [
+        // Simulation
+        Key.mockIMU: mockIMU,
+        Key.mockCameraImages: mockCameraImages,
+        Key.mockDepthMaps: mockDepthMaps,
+        Key.mockWearable: mockWearable,
+        // 360° and colorize probes
+        Key.colorizeFrom360Faces: colorizeFrom360Faces,
+        Key.keepCameraOriginals: keepCameraOriginals,
+        Key.gpuColorize: gpuColorize,
+        Key.keyframeWeightBonus: keyframeWeightBonus,
+        Key.robustColorMedian: robustColorMedian,
+        // VR, diagnostics and isolation switches
+        Key.hideLivePoints: hideLivePoints,
+        Key.perfDiagnostics: perfDiagnostics,
+        Key.perfSampleUnderDebugger: perfSampleUnderDebugger,
+        Key.sweepCoverageLiveReadout: sweepCoverageLiveReadout,
+        Key.pauseVRCompute: pauseVRCompute,
+        Key.vrBloomEnabled: vrBloomEnabled,
+        Key.memDiagForceReclaim: memDiagForceReclaim,
+        Key.forceRebuildArtifacts: forceRebuildArtifacts,
+        // Capture quality and processing
+        Key.videoFormatIndex: videoFormatIndex,
+        Key.captureAudioEnabled: captureAudioEnabled,
+        Key.meshClassifier: meshClassifier,
+        Key.registerLegacyScans: registerLegacyScans
+    ]
+
+    /// Restore Default Developer Options, which is also what turning Developer Mode off does:
+    /// removes every developer option's stored value, so each reads its registered default again.
+    static func restoreDeveloperDefaults(in defaults: UserDefaults = .standard) {
+        for key in developerOptionDefaults.keys {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    /// True when every developer option reads its default, so a restore would change nothing.
+    static func developerOptionsAreDefault(in defaults: UserDefaults = .standard) -> Bool {
+        developerOptionDefaults.allSatisfy { key, value in
+            guard let stored = defaults.object(forKey: key) else { return true }
+            return (stored as AnyObject).isEqual(value)
+        }
+    }
+
     // MARK: - Default Values
     static var isTestFlight: Bool {
         Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
@@ -477,6 +537,7 @@ enum AppConstants {
     static let coachNearDepthSustainSeconds: TimeInterval = 4  // obstruction must persist this long before the coach warns — a hand passing the lens must not fire it
     static let scanCoachingEnabled: Bool = true                // default for the scan coaching toggle
     static let captureAudioEnabled: Bool = true                // default for shutter-click + chime sounds
+    static let videoFormatIndex: Int = 0                       // Developer Mode video format: 0 = Auto (no override); N = force supportedVideoFormats[N-1]
 
     // MARK: - Capture Quality Constants
     static let motionBlurAngularVelocity: Float = 0.5          // rad/s (~30°/s) — rotational velocity above which frames are rejected as blurry

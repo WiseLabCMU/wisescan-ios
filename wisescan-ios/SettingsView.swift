@@ -35,7 +35,8 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.robustColorMedian) private var robustColorMedian: Bool = AppConstants.robustColorMedian
     @AppStorage(AppConstants.Key.activeMeshColor) private var activeMeshColor: String = AppConstants.activeMeshColor
     // 0 = Auto (no override); N = force format index N-1 of supportedVideoFormats.
-    @AppStorage(AppConstants.Key.videoFormatIndex) private var videoFormatIndex: Int = 0
+    @AppStorage(AppConstants.Key.videoFormatIndex) private var videoFormatIndex: Int = AppConstants.videoFormatIndex
+    @AppStorage(AppConstants.Key.captureAudioEnabled) private var captureAudioEnabled: Bool = AppConstants.captureAudioEnabled
     @AppStorage(AppConstants.Key.ghostMeshColor) private var ghostMeshColor: String = AppConstants.ghostMeshColor
     @AppStorage(AppConstants.Key.metaWearablesFPS) private var metaWearablesFPS: Double = AppConstants.metaWearablesFPS
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
@@ -50,6 +51,7 @@ struct SettingsView: View {
     @State private var showRigHeightSheet = false
     @State private var isExportingLog = false
     @State private var diagnosticsLogURL: URL?
+    @State private var showRestoreDeveloperDefaults = false
 
     @ViewBuilder
     private var settingsSection1: some View {
@@ -117,33 +119,10 @@ struct SettingsView: View {
                 set: { newValue in
                     self.developerMode = newValue
                     if !newValue {
-                        // Reset all dev options to defaults when disabled
-                        self.mockIMU = AppConstants.mockIMU
-                        self.mockCameraImages = AppConstants.mockCameraImages
-                        self.mockDepthMaps = AppConstants.mockDepthMaps
-                        self.mockWearable = AppConstants.mockWearable
-                        self.semanticLabeling = AppConstants.semanticLabeling
-                        self.registerLegacyScans = AppConstants.registerLegacyScans
-                        // Default-TRUE dev toggle: a bench-OFF value must not leak into
-                        // production, where it would silently drop per-face classification
-                        // (the wall/non-wall labels plane registration depends on).
-                        self.meshClassifier = AppConstants.meshClassifier
-                        // Default-TRUE dev toggle: same leak rule as meshClassifier —
-                        // a bench-OFF value must not survive dev-mode exit.
-                        self.gpuColorize = AppConstants.gpuColorize
-                        self.keyframeWeightBonus = AppConstants.keyframeWeightBonus
-                        self.robustColorMedian = AppConstants.robustColorMedian
-                        // Diagnostics toggles gate on their own keys (not developerMode),
-                        // so a bench-ON value would keep costing after dev-mode exit.
-                        self.hideLivePoints = AppConstants.hideLivePoints
-                        self.colorizeFrom360Faces = AppConstants.colorizeFrom360Faces
-                        // Security-relevant: a bench-ON value outside dev mode would
-                        // silently leave raw equirects on the camera (P1 sweep off).
-                        self.keepCameraOriginals = AppConstants.keepCameraOriginals
-                        self.perfDiagnostics = AppConstants.perfDiagnostics
-                        self.pauseVRCompute = AppConstants.pauseVRCompute
-                        self.memDiagForceReclaim = AppConstants.memDiagForceReclaim
-                        self.forceRebuildArtifacts = AppConstants.forceRebuildArtifacts
+                        // Leaving Developer Mode restores every developer option, the same
+                        // list as the Restore button: no bench value may outlive dev mode
+                        // (why each one matters: AppConstants.developerOptionDefaults).
+                        AppConstants.restoreDeveloperDefaults()
                     }
                 }
             )) {
@@ -339,15 +318,9 @@ struct SettingsView: View {
 
                 videoFormatPicker
 
-                Toggle(isOn: Binding(
-                    get: {
-                        // Default to true when key hasn't been set yet
-                        UserDefaults.standard.object(forKey: AppConstants.Key.captureAudioEnabled) == nil
-                            ? AppConstants.captureAudioEnabled
-                            : UserDefaults.standard.bool(forKey: AppConstants.Key.captureAudioEnabled)
-                    },
-                    set: { UserDefaults.standard.set($0, forKey: AppConstants.Key.captureAudioEnabled) }
-                )) {
+                // @AppStorage (not a raw UserDefaults Binding) so the switch redraws when a
+                // restore removes the stored value.
+                Toggle(isOn: $captureAudioEnabled) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Capture Audio")
                             .foregroundColor(.white)
@@ -382,6 +355,10 @@ struct SettingsView: View {
                 }
                 .tint(.orange)
                 .padding(.vertical, 4)
+
+                // Keep this the LAST row. A new developer option goes ABOVE it and into
+                // AppConstants.developerOptionDefaults, or this button won't reset it.
+                restoreDeveloperDefaultsRow
             }
         } header: {
             Text("DEVELOPER MODE")
@@ -640,6 +617,31 @@ struct SettingsView: View {
         }
         .tint(.orange)
         .padding(.vertical, 4)
+        }
+    }
+
+    /// The Developer Mode section's last row: puts every option in
+    /// AppConstants.developerOptionDefaults back to its default after a confirm, and leaves
+    /// Developer Mode on. Greyed out while everything is already default. Its alert rides on the
+    /// row so the section's modifier chain stays inside the type checker's budget.
+    private var restoreDeveloperDefaultsRow: some View {
+        Button(role: .destructive, action: { showRestoreDeveloperDefaults = true }, label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Restore Default Developer Options", systemImage: "arrow.counterclockwise")
+                Text("Puts every developer option above back to its default. Developer Mode stays on.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+        })
+        .disabled(AppConstants.developerOptionsAreDefault())
+        .padding(.vertical, 4)
+        .alert("Restore Developer Defaults?", isPresented: $showRestoreDeveloperDefaults) {
+            Button("Restore Defaults", role: .destructive) { AppConstants.restoreDeveloperDefaults() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every developer option goes back to its default, including the simulation, " +
+                 "diagnostics, colorize and VR switches, Video Format and Capture Audio. " +
+                 "Developer Mode stays on.")
         }
     }
 

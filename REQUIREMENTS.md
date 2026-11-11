@@ -408,8 +408,8 @@ sequenceDiagram
 | | |
 |:--|:--|
 | **Status** | Complete |
-| **Description** | Toggleable debugging section in Settings with persistent `@AppStorage` switches: synthetic IMU / camera / depth injection for Simulator testing, Perf Diagnostics, and Pause VR Compute. A persistent orange banner across all tabs indicates dev mode and taps-to-disable (auto-scrolls to the Settings section). (The former "Flip Camera" front/back toggle was removed — person-segmentation privacy is now trivially tested by putting a hand or foot in frame on the rear camera.) |
-| **Source** | [SettingsView.swift](wisescan-ios/SettingsView.swift) — `developerMode` + dev toggles · [ContentView.swift](wisescan-ios/ContentView.swift) — banner overlay · [PerfDiag.swift](wisescan-ios/PerfDiag.swift) — diagnostics |
+| **Description** | Toggleable debugging section in Settings with persistent `@AppStorage` switches: synthetic IMU / camera / depth injection for Simulator testing, Perf Diagnostics, and Pause VR Compute. A persistent orange banner across all tabs indicates dev mode and taps-to-disable (auto-scrolls to the Settings section). The section ends with **Restore Default Developer Options** (asks first, keeps Developer Mode on, greyed out when nothing differs), and turning Developer Mode off does the same restore: both reset the one list `AppConstants.developerOptionDefaults`, which every new developer option must join. (The former "Flip Camera" front/back toggle was removed — person-segmentation privacy is now trivially tested by putting a hand or foot in frame on the rear camera.) |
+| **Source** | [SettingsView.swift](wisescan-ios/SettingsView.swift) — `developerMode` + dev toggles + `restoreDeveloperDefaultsRow` · [AppConstants.swift](wisescan-ios/AppConstants.swift) — `developerOptionDefaults`, `restoreDeveloperDefaults` · [ContentView.swift](wisescan-ios/ContentView.swift) — banner overlay · [PerfDiag.swift](wisescan-ios/PerfDiag.swift) — diagnostics · [DeveloperOptionDefaultsTests.swift](wisescan-iosTests/DeveloperOptionDefaultsTests.swift) |
 
 ### REQ-014: Scan Capacity Metrics
 | | |
