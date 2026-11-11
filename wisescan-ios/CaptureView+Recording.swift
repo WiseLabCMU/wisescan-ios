@@ -269,9 +269,6 @@ extension CaptureView {
         // Start a timer to track recording duration
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             recordingSeconds += 1
-            if recordingSeconds > 4 {
-                showExtendPrompt = false // Auto-dismiss after recording starts
-            }
         }
     }
 

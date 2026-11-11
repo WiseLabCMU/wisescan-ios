@@ -201,13 +201,8 @@ struct ScansListView: View {
                 }
             }
             .fullScreenCover(item: $renderRequest) { req in
-                // Color from the render view: resolve item ids back to scans and run the
-                // shared bulk path. The cover dismisses so the tile progress is visible.
-                CombinedMeshScreen(request: req, onColor: { ids in
-                    let idSet = Set(ids)
-                    let scans = locations.flatMap(\.scans).filter { idSet.contains($0.id) }
-                    requestBulkColorize(scans: scans)
-                })
+                // Coloring is the cluster card's and each scan card's job, not the render's.
+                CombinedMeshScreen(request: req)
             }
             .confirmationDialog(
                 "Delete \(bulkScope == .allScans ? "Locations" : "Scans")",
@@ -1031,7 +1026,6 @@ struct ScanCard: View {
     var uploadURL: String
     var isEditing: Bool
     var onUpdate: (CapturedScan) -> Void
-    var onDelete: (CapturedScan) -> Void
 
     @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
@@ -1039,7 +1033,6 @@ struct ScanCard: View {
     @Environment(\.modelContext) private var modelContext
     @State private var exportItem: ZipExportItem?
     @State private var showExportError = false
-    @State private var showDeleteConfirm = false
     @State private var itemCounts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int, equirect: Int)?
     @State private var showDataIntegrityAlert = false
     @State private var showMeshPreview = false
@@ -1085,7 +1078,7 @@ struct ScanCard: View {
     /// Single-card save/upload uses the local `exportPhase` @State.
     var bulkExportPhase: ExportPhase?
 
-    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, bulkColoringMessage: String? = nil, bulkExportPhase: ExportPhase? = nil, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
+    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, bulkColoringMessage: String? = nil, bulkExportPhase: ExportPhase? = nil, onUpdate: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
         self.scan = scan
         self.isLatest = isLatest
         self.uploadURL = uploadURL
@@ -1094,7 +1087,6 @@ struct ScanCard: View {
         self.bulkColoringMessage = bulkColoringMessage
         self.bulkExportPhase = bulkExportPhase
         self.onUpdate = onUpdate
-        self.onDelete = onDelete
         self.onSelect = onSelect
     }
 
@@ -1313,17 +1305,6 @@ struct ScanCard: View {
                     }
                 }
             }
-        }
-        .confirmationDialog(
-            "Delete Scan",
-            isPresented: $showDeleteConfirm
-        ) {
-            Button("Delete \"\(scan.name)\"", role: .destructive) {
-                onDelete(scan)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This will permanently delete this scan and its data.")
         }
     }
 
@@ -1924,8 +1905,7 @@ struct ShareSheet: UIViewControllerRepresentable {
         isLatest: true,
         uploadURL: "https://example.com/upload",
         isEditing: false,
-        onUpdate: { _ in },
-        onDelete: { _ in }
+        onUpdate: { _ in }
     )
     .padding()
     .background(Color.black)

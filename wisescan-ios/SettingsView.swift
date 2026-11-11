@@ -14,6 +14,7 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.rawRejectBlur) private var rejectBlur: Bool = AppConstants.rejectBlur
     @AppStorage(AppConstants.Key.captureMode) private var captureMode: String = AppConstants.captureMode
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedExportFormat: String = AppConstants.selectedExportFormat
     @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
     @AppStorage(AppConstants.Key.mockIMU) private var mockIMU: Bool = AppConstants.mockIMU
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
@@ -44,15 +45,37 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.scanCoachingEnabled) private var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
     @AppStorage(AppConstants.Key.rigMeasuredDyMeters) private var rigMeasuredDyMeters: Double = 0
     @AppStorage(AppConstants.Key.rigHeightUnitImperial) private var rigHeightUnitImperial: Bool = false
-    /// Edit buffer for the rig-height field. A value-bound TextField re-formats through
-    /// the m⇄in conversion on EVERY keystroke — the trailing "." vanishes as you type
-    /// and the first digit resurrects on delete (field report 2026-08-05, "26.5 in").
-    /// The buffer is free text while editing; it parses and persists (metric, always)
-    /// only on commit: focus loss, unit flip, or leaving Settings.
+    /// The rig-height editor (RigHeightSheet: keypad, m/in, commit on Set).
     @State private var showRigHeightSheet = false
     @State private var isExportingLog = false
     @State private var diagnosticsLogURL: URL?
     @State private var showRestoreDeveloperDefaults = false
+
+    /// The export format every Save and Upload uses. It used to sit on each space's screen as
+    /// "Global Export Format", which was app-wide anyway, and changing it there also rewrote the
+    /// recorded format of that space's scans (reported to the lab as their upload format). Here it
+    /// is one setting with Scan4D as the default; a scan card's Upload records the format it sent.
+    private var exportFormatPicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Export Format")
+                    .foregroundColor(.white)
+                Spacer()
+                Picker("Export Format", selection: $selectedExportFormat) {
+                    ForEach(ExportFormat.allCases, id: \.self) { (format: ExportFormat) in
+                        Text(format.rawValue).tag(format.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .tint(.cyan)
+            }
+            Text("What Save and Upload produce. Scan4D (the default) carries everything; the User Guide describes each format. Focus scans always export as one zip.")
+                .font(.caption)
+                .foregroundColor(.gray)
+        }
+        .padding(.vertical, 4)
+    }
 
     @ViewBuilder
     private var settingsSection1: some View {
@@ -85,8 +108,10 @@ struct SettingsView: View {
                     .foregroundColor(.gray)
             }
             .padding(.vertical, 4)
+
+            exportFormatPicker
         } header: {
-            Text("UPLOAD SERVER")
+            Text("UPLOAD & EXPORT")
         }
         .listRowBackground(Color.white.opacity(0.05))
     }
@@ -267,6 +292,18 @@ struct SettingsView: View {
                     }
                     .tint(.orange)
                     .padding(.vertical, 4)
+
+                    Toggle(isOn: $memDiagForceReclaim) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("MemDiag Force Reclaim")
+                                .foregroundColor(.white)
+                            Text("Memory attribution only. Forces freed pages back to the OS before [MemDiag] teardown snapshots so free-deltas reflect real reclaim, not cached pages. Expensive — leave OFF except when profiling. Needs Perf Diagnostics on.")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                        }
+                    }
+                    .tint(.orange)
+                    .padding(.vertical, 4)
                 }
 
                 Toggle(isOn: $pauseVRCompute) {
@@ -293,18 +330,6 @@ struct SettingsView: View {
                 .tint(.orange)
                 .padding(.vertical, 4)
 
-                Toggle(isOn: $memDiagForceReclaim) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("MemDiag Force Reclaim")
-                            .foregroundColor(.white)
-                        Text("Memory attribution only. Forces freed pages back to the OS before [MemDiag] teardown snapshots so free-deltas reflect real reclaim, not cached pages. Expensive — leave OFF except when profiling. Needs Perf Diagnostics on.")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                    }
-                }
-                .tint(.orange)
-                .padding(.vertical, 4)
-
                 Toggle(isOn: $forceRebuildArtifacts) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Force Rebuild Artifacts")
@@ -318,6 +343,8 @@ struct SettingsView: View {
                 .padding(.vertical, 4)
 
                 // ── Capture Quality ──
+
+                captureTuningRows
 
                 videoFormatPicker
 
@@ -415,23 +442,6 @@ struct SettingsView: View {
     private var appearanceSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Image Overlap Maximum")
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text("\(Int(overlapMax))%")
-                        .foregroundColor(.cyan)
-                        .font(.headline)
-                }
-                Slider(value: $overlapMax, in: 10...100, step: 5)
-                    .tint(.cyan)
-                Text("Controls maximum overlap between consecutive captured frames. Lower values capture fewer, more distinct frames. Higher values capture more frames with greater overlap.")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            }
-            .padding(.vertical, 4)
-
-            VStack(alignment: .leading, spacing: 12) {
                 Text("Capture View Mode")
                     .font(.headline)
                     .foregroundColor(.white)
@@ -447,102 +457,11 @@ struct SettingsView: View {
             }
             .padding(.vertical, 4)
 
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Meta Wearables Stream FPS")
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text("\(Int(metaWearablesFPS)) FPS")
-                        .foregroundColor(.cyan)
-                        .font(.headline)
-                }
-                Slider(value: $metaWearablesFPS, in: 1...15, step: 1)
-                    .tint(.cyan)
-                Text("Limits the incoming streaming frame rate to save battery and processing power.")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            }
-            .padding(.vertical, 4)
-
-            Toggle(isOn: $rejectBlur) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Reject Blurred Frames")
-                        .foregroundColor(.white)
-                    Text("Automatically discard frames with motion blur or camera shake during capture.")
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                }
-            }
-            .tint(.cyan)
-            .padding(.vertical, 4)
-
-            // Mesh Visualization Colors
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Mesh Visualization")
-                    .font(.headline)
-                    .foregroundColor(.white)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Active Scan Wireframe")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Picker("", selection: $activeMeshColor) {
-                        ForEach(meshColorOptions, id: \.self) { color in
-                            HStack {
-                                Circle()
-                                    .fill(color.swiftUIColor)
-                                    .frame(width: 12, height: 12)
-                                Text(color)
-                            }.tag(color)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .colorScheme(.dark)
-                    Text("Color of the live depth mesh shown during scanning.")
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Ghost Scan Wireframe")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Picker("", selection: $ghostMeshColor) {
-                        ForEach(meshColorOptions, id: \.self) { color in
-                            HStack {
-                                Circle()
-                                    .fill(color.swiftUIColor)
-                                    .frame(width: 12, height: 12)
-                                Text(color)
-                            }.tag(color)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .colorScheme(.dark)
-                    Text("Color of the previous scan overlay used for alignment.")
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                }
-            }
-            .padding(.vertical, 4)
-
             Toggle(isOn: $scanCoachingEnabled) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Scan Coaching")
                         .foregroundColor(.white)
                     Text("Show real-time scanning tips and guidance during capture. Critical warnings (tracking, capacity) always display.")
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                }
-            }
-            .tint(.cyan)
-            .padding(.vertical, 4)
-
-            Toggle(isOn: $semanticLabeling) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Semantic Labeling")
-                        .foregroundColor(.white)
-                    Text("Enables room structure detection (walls, floors, doors) during scanning for semantic labels in exports and AR overlays.")
                         .font(.caption)
                         .foregroundColor(.gray)
                 }
@@ -578,6 +497,124 @@ struct SettingsView: View {
             Text("SCAN CAPTURE")
         }
         .listRowBackground(Color.white.opacity(0.05))
+    }
+
+    /// Capture tuning that used to sit in Scan Capture, where every user saw it: frame spacing and
+    /// blur rejection (60% and on are the tuned values), Semantic Labeling (off, scans get no room
+    /// data and Rescan / Connect Adjacent are then blocked as a bad scan), the wireframe colours and
+    /// the Meta glasses frame rate. Developer options, so they are in
+    /// AppConstants.developerOptionDefaults and a restore puts them back. Extracted to keep the
+    /// Developer section inside the type checker's budget.
+    private var captureTuningRows: some View {
+        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Image Overlap Maximum")
+                    .foregroundColor(.white)
+                Spacer()
+                Text("\(Int(overlapMax))%")
+                    .foregroundColor(.orange)
+                    .font(.headline)
+            }
+            Slider(value: $overlapMax, in: 10...100, step: 5)
+                .tint(.orange)
+            Text("Controls maximum overlap between consecutive captured frames. Lower values capture fewer, more distinct frames. Higher values capture more frames with greater overlap.")
+                .font(.caption)
+                .foregroundColor(.gray)
+        }
+        .padding(.vertical, 4)
+
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Meta Wearables Stream FPS")
+                    .foregroundColor(.white)
+                Spacer()
+                Text("\(Int(metaWearablesFPS)) FPS")
+                    .foregroundColor(.orange)
+                    .font(.headline)
+            }
+            Slider(value: $metaWearablesFPS, in: 1...15, step: 1)
+                .tint(.orange)
+            Text("Limits the incoming streaming frame rate to save battery and processing power.")
+                .font(.caption)
+                .foregroundColor(.gray)
+        }
+        .padding(.vertical, 4)
+
+        Toggle(isOn: $rejectBlur) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Reject Blurred Frames")
+                    .foregroundColor(.white)
+                Text("Automatically discard frames with motion blur or camera shake during capture.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+        }
+        .tint(.orange)
+        .padding(.vertical, 4)
+
+        // Mesh Visualization Colors
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Mesh Visualization")
+                .font(.headline)
+                .foregroundColor(.white)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Active Scan Wireframe")
+                    .font(.subheadline)
+                    .foregroundColor(.white)
+                Picker("", selection: $activeMeshColor) {
+                    ForEach(meshColorOptions, id: \.self) { color in
+                        HStack {
+                            Circle()
+                                .fill(color.swiftUIColor)
+                                .frame(width: 12, height: 12)
+                            Text(color)
+                        }.tag(color)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .colorScheme(.dark)
+                Text("Color of the live depth mesh shown during scanning.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Ghost Scan Wireframe")
+                    .font(.subheadline)
+                    .foregroundColor(.white)
+                Picker("", selection: $ghostMeshColor) {
+                    ForEach(meshColorOptions, id: \.self) { color in
+                        HStack {
+                            Circle()
+                                .fill(color.swiftUIColor)
+                                .frame(width: 12, height: 12)
+                            Text(color)
+                        }.tag(color)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .colorScheme(.dark)
+                Text("Color of the previous scan overlay used for alignment.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+        }
+        .padding(.vertical, 4)
+
+        Toggle(isOn: $semanticLabeling) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Semantic Labeling")
+                    .foregroundColor(.white)
+                Text("Room structure detection (RoomPlan: walls, floors, doors) during scanning, for semantic labels, registration and the rescan reference. ON by default. Off saves memory, but scans then get no room data and Rescan / Connect Adjacent treat them as bad scans.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+        }
+        .tint(.orange)
+        .padding(.vertical, 4)
+        }
     }
 
     /// The three colorize A/B switches, grouped: they are one experiment (projection

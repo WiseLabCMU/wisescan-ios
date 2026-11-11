@@ -117,7 +117,6 @@ struct CaptureView: View {
     @State var messageVersion = 0
     @State var hapticGenerator = UIImpactFeedbackGenerator(style: .medium)
 
-    @State var showExtendPrompt = false
     @State var showExtendOverlay = false // Semi-transparent overlay during Pin & Extend save
     @State var extendPhaseText = "" // Text shown in the extend overlay
     @State var showInsufficientTrackingAlert = false // SwiftUI alert for poor mapping status
@@ -127,7 +126,6 @@ struct CaptureView: View {
     @State var showStopMenu = false
     @State var showDiscardConfirm = false // destructive Discard from the stop menu → confirm first
     @State var showPendingDiscardConfirm = false // destructive Discard from the naming dialog → confirm first
-    @State var showExtendErrorAlert = false
     @State var isAwaitingAlignment = false // Phase 2.1 (perfDiag): briefly holding record for the auto-align correction
 
     @State private var showSettings = false
@@ -889,7 +887,7 @@ struct CaptureView: View {
         // relocalization is imperfect. Complements the anchor-based AlignmentOverlayView above;
         // startRecording bakes any offset into the world origin so mesh + world map stay co-framed.
         // Hidden during a focus scan: the ghost only initializes the pose and leaves the scene at
-        // Start. (A room recording keeps the chip for Dismiss; its Re-relocalize is a no-op then.)
+        // Start. (A room recording keeps the chip for Dismiss, the only action its dialog offers then.)
         if cachedGhostMeshData != nil && !dismissGhostMesh && !isStillCapturing {
             ghostMeshChipStack
         }
@@ -908,20 +906,23 @@ struct CaptureView: View {
     private func captureLifecycle(_ content: some View) -> some View {
         content
         .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
-            Button("Re-relocalize") {
-                // Reset transform and reload the world map by toggling the ghost data.
-                guard !isCapturing else { return }   // would reset tracking mid-capture
-                ghostYRotation = 0
-                ghostXOffset = 0
-                ghostZOffset = 0
-                let savedData = cachedGhostMeshData
-                cachedGhostMeshData = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    cachedGhostMeshData = savedData
+            // While capturing only Dismiss means anything: Re-relocalize would reset tracking mid-scan,
+            // and a manual nudge is baked in only at record start.
+            if !isCapturing {
+                Button("Re-relocalize") {
+                    // Reset transform and reload the world map by toggling the ghost data.
+                    ghostYRotation = 0
+                    ghostXOffset = 0
+                    ghostZOffset = 0
+                    let savedData = cachedGhostMeshData
+                    cachedGhostMeshData = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        cachedGhostMeshData = savedData
+                    }
                 }
-            }
-            Button("Manual Adjust") {
-                showManualAdjust = true
+                Button("Manual Adjust") {
+                    showManualAdjust = true
+                }
             }
             Button("Dismiss Ghost Mesh", role: .destructive) {
                 dismissGhostMesh = true
@@ -1011,8 +1012,6 @@ struct CaptureView: View {
 
             // Start GPS/heading updates for scan metadata
             locationManager.startUpdating()
-
-            showExtendPrompt = (scanStore.activeScanToExtend != nil)
 
             // Prepare haptic engine for pin drop
             hapticGenerator.prepare()
@@ -1225,11 +1224,6 @@ struct CaptureView: View {
                 + "don't track) — and sweep slowly until tracking improves, then stop again. Or discard "
                 + "and start over. Discarding deletes this recording's frames and photos and cannot be undone.")
         }
-        .alert("Not Enough Features", isPresented: $showExtendErrorAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text("Move the device around to map more of the environment before placing a connector.")
-        }
         .sheet(isPresented: $showRigHeightSheet) {
             RigHeightSheet()
         }
@@ -1423,7 +1417,8 @@ struct CaptureView: View {
                             if scanStats.hasEnoughFeaturesForRelocalization {
                                 pinAndExtend()
                             } else {
-                                showExtendErrorAlert = true
+                                showTransientMessage("Not enough mapped yet: move around to map more, then tap Save & Scan Adjacent again",
+                                                     duration: 4, systemImage: "exclamationmark.triangle.fill", tint: .orange)
                             }
                         }, label: {
                             Text("Save & Scan Adjacent")
@@ -1562,43 +1557,6 @@ struct CaptureView: View {
     @ViewBuilder
     private var captureChromeOverlay: some View {
         VStack {
-            // Scan Mode Prompt (transient)
-            if showExtendPrompt {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(scanStore.activeScanCase == .linkAdjacent ? "Connect Adjacent Space" : "Rescan Space")
-                            .font(.headline)
-                            .foregroundColor(.white)
-                        Text(scanStore.activeScanCase == .linkAdjacent
-                             ? """
-                               Connect Adjacent Space: Relocalize with the \
-                               previous scan, walk to where the new connector should be, and \
-                               confirm to connect this adjacent \
-                               space.
-                               """
-                             : """
-                               Rescan Space: Re-scan the previous area \
-                               to capture changes over time.
-                               """)
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.8))
-                    }
-                    Spacer()
-                    Button(action: { showExtendPrompt = false }, label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title2)
-                            .foregroundColor(.white.opacity(0.6))
-                    })
-                }
-                .padding()
-                .background(Color.indigo.opacity(0.9))
-                .cornerRadius(16)
-                .padding(.horizontal)
-                .padding(.top, developerMode ? 60 : 20) // Leave room for top controls
-                .transition(.move(edge: .top).combined(with: .opacity))
-                .animation(.spring(), value: showExtendPrompt)
-            }
-
             // Top Controls
             HStack {
                 PrivacyFilterPill(isOn: $isPrivacyFilterOn,
@@ -1808,8 +1766,11 @@ struct CaptureView: View {
 
                     // Capture Button + Analyze Space Button
                     HStack(spacing: 24) {
-                        // Analyze Space button — visible when not recording
-                        if !isRecording {
+                        // Analyze Space: only before a new space's scan. It re-runs the shared session
+                        // with RoomPlan, which upsets a rescan's or connect's relocalization and has
+                        // nothing to stage in a space already scanned (fix-localization-plan.md, the
+                        // 2026-07-07 decision), and a focus scan is a capture of its own.
+                        if !isCapturing && scanStore.activeScanToExtend == nil && cachedGhostMeshData == nil {
                             Button(action: { startAnalysis() }, label: {
                                 VStack(spacing: 4) {
                                     Image(systemName: "scope")
@@ -1991,8 +1952,9 @@ struct CaptureView: View {
     private var ghostMeshChipStack: some View {
         VStack {
             Spacer()
-            // Phase 2.1 (perfDiagnostics-only): "alignment sweep done — correction locked"
-            // cue. icpAlignReady is set only when a trusted ICP refine has converged during
+            // Phase 2.1: "alignment sweep done — correction locked" cue, shown to everyone (the
+            // "Aligning — wait for green" chip before it is Perf Diagnostics only).
+            // icpAlignReady is set only when a trusted ICP refine has converged during
             // the pre-record phase; its appearance tells the user it's safe to record (the
             // gravity-locked correction will bake into the world origin at record-start).
             if !isRecording, let align = scanStore.icpAlignReady {

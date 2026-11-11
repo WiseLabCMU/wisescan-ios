@@ -41,6 +41,9 @@ struct MeshPreviewContainer: View {
     @State private var hasPrivacyMarkers = false
     @State private var isMeshLoaded = false
     @State private var keyframeMarkerMode: KeyframeMarkerMode = .none
+    /// Developer Mode adds the inspection controls: the full marker cycle (motion frames) and the
+    /// mesh-source switch. Everyone else gets one photo-positions toggle and the full mesh.
+    @AppStorage(AppConstants.Key.developerMode) private var developerMode = AppConstants.developerMode
     @State private var sceneBox = SceneViewBox()
     @State private var hasKeyframeMarkers = false
     @State private var hasEquirects = false
@@ -363,16 +366,17 @@ struct MeshPreviewContainer: View {
             if hasKeyframeMarkers || timelineState.offers.keyframes {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        keyframeMarkerMode = keyframeMarkerMode.next(
-                            hasEquirects: hasEquirects || timelineState.offers.equirects
-                        )
+                        keyframeMarkerMode = developerMode
+                            ? keyframeMarkerMode.next(hasEquirects: hasEquirects || timelineState.offers.equirects)
+                            : keyframeMarkerMode.photoPositionsToggled
                     } label: {
                         Image(systemName: keyframeMarkerMode.iconName)
                             .foregroundColor(keyframeMarkerMode == .none ? .gray : .cyan)
                     }
+                    .accessibilityLabel("Photo positions")
                 }
             }
-            if hasProxyMesh || hasDynamicMesh || timelineState.offers.proxy || timelineState.offers.dynamic {
+            if developerMode, hasProxyMesh || hasDynamicMesh || timelineState.offers.proxy || timelineState.offers.dynamic {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         meshSourceMode = meshSourceMode.next

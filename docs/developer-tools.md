@@ -12,8 +12,18 @@ Developer Mode on, and is greyed out while nothing differs from the defaults). B
 the same list, `AppConstants.developerOptionDefaults`, diagnostics toggles included: they
 gate on their own keys, so a left-on one would keep recording and costing after Developer
 Mode is off. A new developer option has to join that list (see CONTRIBUTING.md); one
-that doesn't is left set by both. Semantic Labeling is a Scan Capture setting and is
-not reset.
+that doesn't is left set by both. Every launch with Developer Mode off restores the list
+as well, so a setting that moved here from everyday Settings cannot stay changed where
+its user can no longer see it.
+
+Moved here from everyday Settings (fewest controls, CONTRIBUTING.md section 3):
+Image Overlap Maximum, Reject Blurred Frames, **Semantic Labeling** (off, scans get no
+room data and Rescan / Connect Adjacent refuse them as bad scans), the active and ghost
+wireframe colours, and the Meta Wearables stream rate. Developer Mode also shows the
+360° camera bench on the Dashboard card (still resolution, Test Shutter, its timings
+and Download & Preview, which is what removes a test shot from the camera) and, in the
+3D viewers, the full / proxy / dynamic mesh switch and the full camera-marker cycle
+(motion frames); everyone else gets one photo-positions toggle.
 
 ### Performance Diagnostics (the big one)
 Gates on the **setting, not the build configuration** — it works identically in

@@ -56,8 +56,10 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .onAppear {
             DemoDataSeeder.seedIfNeeded(context: modelContext)
-            if !hasLiDAR {
+            // Once per install: it explains the device, asks for nothing, and does not change.
+            if !hasLiDAR, !UserDefaults.standard.bool(forKey: AppConstants.Key.liteModeNoticeShown) {
                 showLiDARWarning = true
+                UserDefaults.standard.set(true, forKey: AppConstants.Key.liteModeNoticeShown)
             }
         }
         .task {
