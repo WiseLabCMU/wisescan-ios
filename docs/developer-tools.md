@@ -86,8 +86,7 @@ How long the Privacy Filter may stay off before it turns itself back on: 12 h, 2
 default), 1 week or None. `PrivacyFilterTimer` records when the switch went off
 (`privacyFilterOffAt`) and checks when the capture screen opens, on return to the
 foreground and at a record tap, never mid-scan; an unknown switch-off time counts as
-expired. It is a developer option, so leaving Developer Mode puts it back to 24 h. A space
-set to Always use Privacy Filter ignores it.
+expired. It is a developer option, so leaving Developer Mode puts it back to 24 h.
 
 ## Dashboard (Developer Mode)
 

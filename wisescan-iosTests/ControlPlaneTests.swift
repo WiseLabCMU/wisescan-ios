@@ -58,8 +58,7 @@ final class ControlPlaneTests: XCTestCase {
                                                                 targetScanId: scanB.uuidString),
                                             focusRegion: region,
                                             upload: .init(status: "pending", lastUploadedAt: nil, format: "Scan4D"),
-                                            privacyFilter: false)],
-                              requiresPrivacyFilter: true)],
+                                            privacyFilter: false)])],
             links: [.init(linkId: UUID(), scanAId: scanA, scanBId: scanB, locationAId: location, locationBId: nil,
                           anchorA: Array(repeating: 0, count: 16), anchorB: Array(repeating: 0, count: 16),
                           anchorAId: UUID(), anchorBId: UUID(), anchorAHeading: 12, anchorBHeading: nil,
@@ -76,7 +75,6 @@ final class ControlPlaneTests: XCTestCase {
 
         let loc = try XCTUnwrap((json["locations"] as? [[String: Any]])?.first)
         XCTAssertEqual(loc["base_scan_id"] as? String, scanA.uuidString)
-        XCTAssertEqual(loc["requires_privacy_filter"] as? Bool, true)
         let scan = try XCTUnwrap((loc["scans"] as? [[String: Any]])?.first)
         XCTAssertEqual(scan["parent_scan_id"] as? String, scanB.uuidString)
         XCTAssertEqual(scan["privacy_filter"] as? Bool, false)

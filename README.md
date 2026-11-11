@@ -269,7 +269,7 @@ Scan4D uploads these packages to the lab's stack. The sibling repos, as they des
 
 ## Privacy Filtering
 
-On by default. Switched off on the Capture screen, it turns itself back on after 24 hours (Developer Mode: 12 h, 24 h, 1 week or none), and a space set to **Always use Privacy Filter** keeps it on, locked, for every scan started from it. Each synced scan tells the lab server whether the filter was on.
+On by default. Switched off on the Capture screen, it turns itself back on after 24 hours (Developer Mode: 12 h, 24 h, 1 week or none). Each synced scan tells the lab server whether the filter was on.
 
 When enabled (toggle on Capture screen):
 

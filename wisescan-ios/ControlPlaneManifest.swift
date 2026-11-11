@@ -7,9 +7,9 @@ import SwiftData
 /// "map") with its base and tip, every scan, every stitch link. Sent whole on every sync, so a
 /// missed or failed one heals on the next and neither side tracks changes.
 ///
-/// Metadata: names, times, IDs, poses, the focus box, whether each scan had the Privacy Filter on
-/// (and whether its space requires it), and which map-package files each scan has (the files
-/// themselves go up separately, when the server asks; `ControlPlaneSync`). No images.
+/// Metadata: names, times, IDs, poses, the focus box, whether each scan had the Privacy Filter on,
+/// and which map-package files each scan has (the files themselves go up separately, when the
+/// server asks; `ControlPlaneSync`). No images.
 nonisolated struct ControlPlaneManifest: Encodable, Sendable {
     var version = 1
     var device: Device
@@ -37,8 +37,6 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
         /// The newest room scan: a rescan or focus scan relocalizes against its world map.
         var tipScanId: UUID?
         var scans: [Scan]
-        /// The space is set to Always use Privacy Filter (its scans record with the filter on).
-        var requiresPrivacyFilter = false
     }
 
     nonisolated struct Scan: Encodable, Sendable {
@@ -245,8 +243,7 @@ extension ControlPlaneManifest {
                                            format: scan.selectedFormat.rawValue))
             }
             return Location(locationId: location.id, name: location.name, updatedAt: location.updatedAt,
-                            baseScanId: base?.id, tipScanId: location.latestRoomScan?.id, scans: scans,
-                            requiresPrivacyFilter: location.requiresPrivacyFilter)
+                            baseScanId: base?.id, tipScanId: location.latestRoomScan?.id, scans: scans)
         }
         let linkEntries = links.map { link in
             Link(linkId: link.id,

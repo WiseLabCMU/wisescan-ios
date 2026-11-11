@@ -2,8 +2,8 @@ import Foundation
 import XCTest
 @testable import wisescan_ios
 
-/// The privacy fields of the control plane sync: each scan's Privacy Filter state and its
-/// space's requirement, so the server can show which scans may have people unblurred.
+/// The privacy field of the control plane sync: each scan's Privacy Filter state, so the server
+/// can show which scans may have people unblurred.
 @MainActor
 final class ControlPlanePrivacyTests: XCTestCase {
     /// Each scan's Privacy Filter state as the server gets it: a room scan's masks or metadata

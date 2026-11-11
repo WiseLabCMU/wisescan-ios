@@ -62,8 +62,6 @@ extension CaptureView {
         // Create new location for the adjacent space
         let sourceName = resolveCurrentLocationName()
         let newLocation = ScanLocation(name: "Adjacent to \(sourceName)", scanCase: .linkAdjacent)
-        // A space that requires the Privacy Filter passes it on to the room next door.
-        newLocation.requiresPrivacyFilter = activeLocationRequiresPrivacy
         modelContext.insert(newLocation)
         do {
             try modelContext.save()

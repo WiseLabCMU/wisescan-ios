@@ -23,8 +23,7 @@ struct UserGuideView: View {
                         text: "Point your device at a scene. The Privacy Filter (on by default) masks " +
                               "people out of the captured data. Switched off, it turns itself back on " +
                               "24 hours later, so a switch left off by mistake doesn't keep capturing " +
-                              "people; a space set to Always use Privacy Filter keeps it on for every " +
-                              "scan of that space. Tap the capture button to start recording — " +
+                              "people. Tap the capture button to start recording — " +
                               "the mesh overlay shows scanning progress in real-time, and coaching tips " +
                               "appear when the scan needs attention (moving too fast, session near capacity). " +
                               "The overlay color tells you what each area still needs: green = not yet " +
