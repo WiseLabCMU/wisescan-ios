@@ -6,8 +6,14 @@ reachable **on device, without a debug session** — that constraint shaped most
 ## Settings → Developer Mode (master toggle)
 
 Reveals the developer section in Settings and the BLE Probe card on the Dashboard.
-The two diagnostics toggles below persist on their own keys, so turning Developer
-Mode off does not silently change what a field build records.
+Turning Developer Mode off restores every developer option to its default, and so does
+**Restore Default Developer Options**, the section's last row (it asks first, keeps
+Developer Mode on, and is greyed out while nothing differs from the defaults). Both reset
+the same list, `AppConstants.developerOptionDefaults`, diagnostics toggles included: they
+gate on their own keys, so a left-on one would keep recording and costing after Developer
+Mode is off. A new developer option has to join that list (see CONTRIBUTING.md); one
+that doesn't is left set by both. Semantic Labeling is a Scan Capture setting and is
+not reset.
 
 ### Performance Diagnostics (the big one)
 Gates on the **setting, not the build configuration** — it works identically in
