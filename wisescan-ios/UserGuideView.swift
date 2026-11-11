@@ -90,7 +90,8 @@ struct UserGuideView: View {
                         title: "Save or Upload",
                         text: "Save locally to Files, AirDrop to another device, or upload to your " +
                               "configured server. A cloud badge on each location shows upload state: " +
-                              "solid when every scan is uploaded, dimmed when only some are. An upload " +
+                              "solid when every scan is uploaded, dimmed when only some are " +
+                              "(Troubleshooting, below, explains every badge). An upload " +
                               "keeps going if you lock the screen or switch apps, and the screen stays " +
                               "on while a scan is being converted. With a " +
                               "control plane server set in Settings, the app also keeps your lab's " +
@@ -187,6 +188,9 @@ struct UserGuideView: View {
                         .foregroundColor(.gray)
                 }
                 .listRowBackground(Color.white.opacity(0.05))
+
+                // MARK: - Troubleshooting: status icons (UserGuideStatusIcons.swift)
+                StatusIconsGuideSections()
 
                 // MARK: - Export Formats
                 Section {

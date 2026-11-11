@@ -822,6 +822,22 @@ enum CaptureIntegrity {
     }
 }
 
+// MARK: - Upload status color
+// Shared by the scan card's status label and the User Guide's sample of it (UserGuideStatusIcons).
+
+extension UploadStatus {
+    var tint: Color {
+        switch self {
+        case .pending: return .white.opacity(0.6)   // was .gray — unreadable on the badge's own gray tint
+        case .zipping: return .cyan
+        case .savedLocally: return .green
+        case .uploading: return .blue
+        case .success: return .green
+        case .failed: return .red
+        }
+    }
+}
+
 // MARK: - Location Grid Tile
 
 struct LocationGridTile: View {
@@ -1695,16 +1711,7 @@ struct ScanCard: View {
         .animation(.easeInOut(duration: 0.15), value: label)
     }
 
-    private var statusColor: Color {
-        switch scan.uploadStatus {
-        case .pending: return .white.opacity(0.6)   // was .gray — unreadable on the badge's own gray tint
-        case .zipping: return .cyan
-        case .savedLocally: return .green
-        case .uploading: return .blue
-        case .success: return .green
-        case .failed: return .red
-        }
-    }
+    private var statusColor: Color { scan.uploadStatus.tint }
 
     private func formattedCount(_ count: Int) -> String {
         if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000.0) }
