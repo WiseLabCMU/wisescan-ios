@@ -91,18 +91,17 @@ struct ScanExportManager {
         return makeArtifacts(for: location, graph: graph, encoder: makeStitchEncoder())
     }
 
-    /// Mesh exports ship the mesh's vertex colors, and only colors sampled from the captured
-    /// frames — the save-time normals colors are an in-app preview. So before exporting a
-    /// format that `includesMesh`, colorize every scan that hasn't been, through the same engine
-    /// pass as the Color button (pending structural steps run first, as they do there).
-    /// Returns once all are done; read `isColored` afterwards for
-    /// `prepareExport(vertexColorsFromCapture:)`. A scan colorize can't run on (no saved frames,
-    /// or already mid-process) stays uncolored and exports geometry only.
+    /// Every export ships the mesh's vertex colors, and only colors sampled from the captured
+    /// frames — the save-time normals colors are an in-app preview. So before an export,
+    /// colorize every scan that hasn't been, through the same engine pass as the Color button
+    /// (pending structural steps run first, as they do there). Returns once all are done; read
+    /// `isColored` afterwards for `prepareExport(vertexColorsFromCapture:)`. A scan colorize
+    /// can't run on (no saved frames, a focus scan, or already mid-process) stays uncolored and
+    /// exports geometry only.
     @MainActor
-    static func colorizeForExport(_ scans: [CapturedScan], format: ExportFormat,
-                                  modelContext: ModelContext,
+    static func colorizeForExport(_ scans: [CapturedScan], modelContext: ModelContext,
                                   progress: ((CapturedScan, String?) -> Void)? = nil) async {
-        let uncolored = format.includesMesh ? scans.filter { !$0.isColored } : []
+        let uncolored = scans.filter { !$0.isColored }
         guard !uncolored.isEmpty else { return }
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
             ScanPostprocessor.run(scans: uncolored, colorize: true, modelContext: modelContext,
@@ -747,7 +746,14 @@ struct ScanExportManager {
 
         switch format {
         case .scan4d:
-            // scan4d_metadata.json + arkit_features.bin + sweep_coverage.bin + full Polycam payload.
+            // The one capture bundle, a superset of everything the capture holds:
+            // scan4d_metadata.json + the full Polycam payload + the mesh (with its captured vertex
+            // colors) and its face classes + RoomPlan + registration + arkit_features.bin +
+            // sweep_coverage.bin + stitching/graph + the 360° stills with their cube faces. The
+            // export changes representation, never information: the layouts other tools read (a
+            // Nerfstudio dataset, flame3d-core's input) are built from it on the lab server
+            // (scan4d-flows: scan4d-normalize, scan4d-convert), and so are debiasing, hole
+            // filling, seeding and every other training-side prior.
             // The opaque ARWorldMap itself is NOT exported — it is an on-device bootstrap only
             // (rescan/link relocalization still read it from scanDir); what ships instead is the
             // feature cloud serialized from it, which downstream consumers can actually read.
@@ -811,16 +817,19 @@ struct ScanExportManager {
                     }
                 }
 
-                // Include roomplan.json + roomplan_raw.json if RoomPlan data was captured, the
-                // registration.json sidecar (save-time canonical registration: the raw→canonical
-                // transform + fit stats a downstream consumer needs to relate mesh/roomplan — which
-                // are canonical-frame — to the world map, which stays in the raw capture frame),
-                // the ARKit feature cloud, and the sweep-coverage grid.
+                // Raw geometry, shipped unmodified: the ARKit mesh (+ its face-aligned
+                // classification sidecar), roomplan.json + roomplan_raw.json if RoomPlan data was
+                // captured, the registration.json sidecar (save-time canonical registration: the
+                // raw→canonical transform + fit stats a downstream consumer needs to relate
+                // mesh/roomplan — which are canonical-frame — to the world map and cameras/, which
+                // stay in the raw capture frame), the ARKit feature cloud, and the sweep-coverage
+                // grid.
                 //
                 // FRAME: arkit_features.bin is RAW — it is serialized from the ARWorldMap before
                 // save-time registration runs, so it shares the frame of cameras/ and the world
                 // map, NOT the canonical frame of mesh.obj / roomplan.json. registration.json is
                 // what relates the two; a consumer mixing the cloud with the mesh must apply it.
+                // The points are shipped as data, never wired in as a training seed.
                 // sweep_coverage.bin is RAW too — it is accumulated from capture poses + depth
                 // during the sweep, co-framed with cameras/, and never rewritten by registration.
                 // It ships beside the cloud because it is what makes the cloud interpretable:
@@ -828,89 +837,8 @@ struct ScanExportManager {
                 //
                 // The fileExists guard below is what lets legacy scans (saved before the cloud
                 // or the coverage grid existed) degrade quietly instead of logging a miss.
-                for rpFile in ["roomplan.json", "roomplan_raw.json", "registration.json",
-                               FeaturePointCloudFile.filename, SweepCoverageFile.filename] {
-                    let rpURL = scanDir.appendingPathComponent(rpFile)
-                    if fm.fileExists(atPath: rpURL.path) {
-                        do {
-                            try fm.copyItem(at: rpURL, to: stagingDir.appendingPathComponent(rpFile))
-                            print("[prepareExport] ✓ included \(rpFile)")
-                        } catch {
-                            print("[prepareExport] ✗ failed to copy \(rpFile): \(error.localizedDescription)")
-                        }
-                    }
-                }
-
-                // 360° stills (any equirect camera): staged through the toggle-governed privacy
-                // pass — stageEquirectStills enforces the invariant internally (filter ON ⇒
-                // blur or exclude; OFF ⇒ informed per-scan consent).
-                stageEquirectStills(rawDataDir: rawDataDir, stagingDir: stagingDir, phase: phase)
-
-                return zipStaging(stagingDir)
-            }
-
-        case .polycam:
-            // Polycam raw data import: images/, depth/, cameras/, mesh_info.json
-            return withStagingDir { stagingDir in
-                stagePolycamPayload(to: stagingDir)
-                return zipStaging(stagingDir)
-            }
-
-        case .flame3d:
-            // flame3d-core's `polycam` input (see Flame3DExport). Built from the staged Polycam
-            // payload so frames and depth have been through the privacy passes; written as its
-            // own archive with the entries at the root, where flame3d looks for them.
-            return withStagingDir { stagingDir in
-                stagePolycamPayload(to: stagingDir)
-                let zipURL = fm.temporaryDirectory.appendingPathComponent(filename)
-                return Flame3DExport.build(stagedDir: stagingDir, scanDir: scanDir,
-                                           vertexColorsFromCapture: vertexColorsFromCapture,
-                                           zipURL: zipURL, phase: phase) ? zipURL : nil
-            }
-
-        case .nerfstudio:
-            // A bundle Nerfstudio and LichtFeld Studio load as-is: images/, depth/,
-            // confidence/, masks/, transforms.json, plus the raw geometry sidecars staged
-            // below (mesh.obj, face_classes.bin, roomplan*.json, registration.json,
-            // arkit_features.bin, sweep_coverage.bin). No seed cloud is written and
-            // transforms.json deliberately carries no "ply_file_path": LichtFeld auto-loads a
-            // seed the moment that key appears, which would change training behavior in one
-            // engine and not the other.
-            //
-            // Built from the staged Polycam payload rather than copying capture's own
-            // transforms.json, which emits the pose matrix transposed and has never
-            // actually loaded (see NerfstudioExport). Staging the Polycam payload also
-            // brings cameras/ — the correct per-frame poses this rebuilds from — plus the
-            // 360° cube faces that emitCubeFaces adds, so the rig stills come along.
-            return withStagingDir { stagingDir in
-                // Order matters and mirrors .scan4d: the Polycam payload first (it runs the
-                // frame privacy pass itself), then the 360° stage, which is what emits the
-                // cube faces into images/ + cameras/ + masks/. Without that second call the
-                // rig cameras never reach the bundle at all.
-                stagePolycamPayload(to: stagingDir)
-                stageEquirectStills(rawDataDir: rawDataDir, stagingDir: stagingDir, phase: phase)
-
-                // Raw geometry the downstream splat pipeline consumes as-is: the ARKit mesh
-                // (+ its face-aligned classification sidecar), RoomPlan, the registration
-                // that relates mesh/RoomPlan (canonical frame) to the cameras (raw frame),
-                // the ARKit feature cloud, and the sweep-coverage grid.
-                // Shipped unmodified — the export changes representation, never information;
-                // debiasing, hole filling, seeding and prior rendering are training-side.
-                //
-                // FRAME: arkit_features.bin is RAW — serialized from the ARWorldMap before
-                // save-time registration, so it is in the same frame as cameras/ (and the
-                // on-device world map), NOT the canonical frame of mesh.obj / roomplan.json.
-                // registration.json is the transform between them. The points are shipped as
-                // data, never wired in as a training seed (see the bundle note above).
-                // sweep_coverage.bin is RAW as well — accumulated from capture poses + depth,
-                // co-framed with cameras/ — and ships so the cloud's absences are readable:
-                // no features where coverage says we looked is a real observation.
-                //
-                // The fileExists guard below lets legacy scans with no feature cloud or
-                // coverage grid through unchanged.
-                for artifact in ["mesh.obj", "face_classes.bin", "roomplan.json",
-                                 "roomplan_raw.json", "registration.json",
-                                 FeaturePointCloudFile.filename, SweepCoverageFile.filename] {
+                for artifact in ["mesh.obj", "face_classes.bin", "roomplan.json", "roomplan_raw.json",
+                                 "registration.json", FeaturePointCloudFile.filename, SweepCoverageFile.filename] {
                     let src = scanDir.appendingPathComponent(artifact)
                     guard fm.fileExists(atPath: src.path) else { continue }
                     // The mesh carries its captured vertex colors (`v x y z r g b`) once the
@@ -930,18 +858,11 @@ struct ScanExportManager {
                     }
                 }
 
-                if !NerfstudioExport.build(stagingDir: stagingDir,
-                                           masksSourceDir: stagingDir.appendingPathComponent("masks"),
-                                           phase: phase) {
-                    print("[prepareExport] ✗ Nerfstudio build failed — shipping the staged payload as-is")
-                }
+                // 360° stills (any equirect camera): staged through the toggle-governed privacy
+                // pass — stageEquirectStills enforces the invariant internally (filter ON ⇒
+                // blur or exclude; OFF ⇒ informed per-scan consent).
+                stageEquirectStills(rawDataDir: rawDataDir, stagingDir: stagingDir, phase: phase)
 
-                // The equirects were staged only so the cube faces could be reprojected off
-                // them. Neither engine reads an equirect from this layout, and at 6720×3360
-                // they would dominate the archive — the faces carry the same pixels. Scan4D
-                // remains the format that keeps the originals.
-                try? fm.removeItem(at: stagingDir.appendingPathComponent("equirect_stills"))
-                try? fm.removeItem(at: stagingDir.appendingPathComponent("equirect_masks"))
                 return zipStaging(stagingDir)
             }
 

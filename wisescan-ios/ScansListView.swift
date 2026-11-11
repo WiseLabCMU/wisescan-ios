@@ -546,9 +546,9 @@ struct ScansListView: View {
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         Task { @MainActor in
-            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            // Exports ship the mesh's captured colors: colorize any scan that isn't yet.
             await ScanExportManager.colorizeForExport(
-                scans, format: format, modelContext: modelContext,
+                scans, modelContext: modelContext,
                 progress: { scan, msg in if let msg { bulkProgressMessage = "\(scan.name): \(msg)" } })
             // Capture scan directories on main, after colorizing (SwiftData model access).
             let scanInfos = scans.map { (dir: $0.scanDirectory, filename: $0.makeExportFilename(format: format),
@@ -605,9 +605,9 @@ struct ScansListView: View {
 
         let locationIds = Set(scans.compactMap { $0.location?.id })
         Task { @MainActor in
-            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            // Exports ship the mesh's captured colors: colorize any scan that isn't yet.
             await ScanExportManager.colorizeForExport(
-                scans, format: format, modelContext: modelContext,
+                scans, modelContext: modelContext,
                 progress: { scan, msg in if let msg { bulkProgressMessage = "\(scan.name): \(msg)" } })
             bulkProgressMessage = "Uploading 0/\(scans.count)…"
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
@@ -1057,7 +1057,7 @@ struct ScanCard: View {
     @State private var parentPreviewImage: UIImage?
 
     private var selectedFormat: ExportFormat {
-        get { ExportFormat.persisted(selectedFormatStr) ?? .polycam }
+        get { ExportFormat.persisted(selectedFormatStr) ?? .scan4d }
         nonmutating set { selectedFormatStr = newValue.rawValue }
     }
 
@@ -1722,9 +1722,9 @@ struct ScanCard: View {
 
         let format = selectedFormat
         Task { @MainActor in
-            // Mesh exports ship captured colors: colorize first if the scan isn't yet.
+            // Exports ship the mesh's captured colors: colorize first if the scan isn't yet.
             await ScanExportManager.colorizeForExport(
-                [scan], format: format, modelContext: modelContext,
+                [scan], modelContext: modelContext,
                 progress: { _, msg in exportPhase = msg.map { ExportPhase($0) } })
             exportPhase = nil
             // Where it goes: the control plane's grant, or the manual Upload URL.
@@ -1801,9 +1801,9 @@ struct ScanCard: View {
 
         let format = selectedFormat
         Task { @MainActor in
-            // Mesh exports ship captured colors: colorize first if the scan isn't yet.
+            // Exports ship the mesh's captured colors: colorize first if the scan isn't yet.
             await ScanExportManager.colorizeForExport(
-                [scan], format: format, modelContext: modelContext,
+                [scan], modelContext: modelContext,
                 progress: { _, msg in exportPhase = msg.map { ExportPhase($0) } })
             exportPhase = nil
             saveExportToFiles(format: format)

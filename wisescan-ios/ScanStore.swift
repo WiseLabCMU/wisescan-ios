@@ -226,11 +226,16 @@ class CapturedScan {
     }
 }
 
+/// What a scan exports as. Scan4D is the one capture bundle, a superset of everything the
+/// capture holds; the layouts other tools read (a Nerfstudio dataset, flame3d-core's input)
+/// are made from it on the lab server (scan4d-flows: scan4d-normalize, scan4d-convert). The
+/// rest are single mesh files for viewing and sharing.
+///
+/// Every format carries the scan's mesh, and with it the mesh's vertex colors, so exporting
+/// colorizes the scan first if it hasn't been (`ScanExportManager.colorizeForExport`): the
+/// colors that ship are sampled from the frames, never the normals preview.
 enum ExportFormat: String, CaseIterable, Codable {
     case scan4d = "Scan4D"
-    case polycam = "Polycam"
-    case nerfstudio = "Nerfstudio"
-    case flame3d = "Flame3D"
     case usdz = "USDZ"
     case ply = "PLY"
     case obj = "OBJ"
@@ -240,7 +245,7 @@ enum ExportFormat: String, CaseIterable, Codable {
         case .usdz: return "usdz"
         case .ply: return "ply"
         case .obj: return "obj"
-        case .scan4d, .polycam, .nerfstudio, .flame3d: return "zip"
+        case .scan4d: return "zip"
         }
     }
 
@@ -249,30 +254,20 @@ enum ExportFormat: String, CaseIterable, Codable {
         case .usdz: return "model/vnd.usdz+zip"
         case .ply: return "application/x-ply"
         case .obj: return "application/x-wavefront-obj"
-        case .scan4d, .polycam, .nerfstudio, .flame3d: return "application/zip"
-        }
-    }
-
-    /// The export carries the scan's mesh, and with it the mesh's vertex colors. Exporting
-    /// one colorizes the scan first if it hasn't been (`ScanExportManager.colorizeForExport`),
-    /// so the colors that ship are sampled from the frames, never the normals preview.
-    var includesMesh: Bool {
-        switch self {
-        case .nerfstudio, .flame3d, .usdz, .ply, .obj: return true
-        case .scan4d, .polycam: return false
+        case .scan4d: return "application/zip"
         }
     }
 
     /// Decodes a persisted raw value, mapping names that have changed.
     ///
-    /// This format was called "RAW" until it was rebuilt into a bundle that actually loads
-    /// (it had shipped transposed poses since it was introduced). The name is persisted in
-    /// SwiftData (`CapturedScan.selectedFormatStr`) and in `@AppStorage`, so without this
-    /// mapping every scan and preference holding "RAW" would silently fall back to Scan4D —
-    /// quietly switching the user to a different export.
+    /// The name is persisted in SwiftData (`CapturedScan.selectedFormatStr`) and in
+    /// `@AppStorage`. Polycam, Nerfstudio and Flame3D (and "RAW", Nerfstudio's name before it
+    /// was rebuilt into a bundle that loads) were folded into Scan4D, which holds all they
+    /// did; the server makes their layouts from it. They map to Scan4D by name here, so a scan
+    /// or preference holding one exports the bundle that replaced it.
     static func persisted(_ rawValue: String) -> ExportFormat? {
         if let format = ExportFormat(rawValue: rawValue) { return format }
-        return rawValue == "RAW" ? .nerfstudio : nil
+        return ["Polycam", "Nerfstudio", "Flame3D", "RAW"].contains(rawValue) ? .scan4d : nil
     }
 
     /// The format a scan actually exports in. A focus scan has one export, its still-capture zip

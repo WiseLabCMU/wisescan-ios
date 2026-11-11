@@ -23,7 +23,7 @@ import RoomPlan
 ///   (`inverseForGhost`) so ghost + live stay co-framed (visual overlay, manual nudge, ICP probe).
 /// - `arkit_features.bin` — RAW. The feature cloud is serialized from that same `ARWorldMap` at
 ///   save time, BEFORE registration runs, so it is permanently in this scan's raw capture frame —
-///   even though the Nerfstudio bundle ships it beside the canonical `mesh.obj` / `roomplan.json`.
+///   even though the Scan4D export ships it beside the canonical `mesh.obj` / `roomplan.json`.
 /// - `sweep_coverage.bin` — RAW. The sweep-coverage grid is accumulated from capture poses + depth
 ///   during the sweep, so it is co-framed with `cameras/` at capture time. Nothing here re-bases it,
 ///   and the ScanPostprocessor registration bake rewrites only `mesh.obj` / `roomplan.json` — it

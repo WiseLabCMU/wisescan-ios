@@ -1,8 +1,8 @@
-"""Synthetic Scan4D Nerfstudio export with exactly known geometry.
+"""Synthetic Scan4D Nerfstudio dataset with exactly known geometry.
 
 A box room with a table in it, captured by a ring of cameras. Depth and colour are ray-cast
 analytically, so every pixel's true depth is known in closed form. The layout follows
-NerfstudioExport:
+scan4d-normalize's output (and the app's older Nerfstudio export):
 
 - cameras in the scan's RAW frame; mesh.obj in the CANONICAL frame, related by an applied
   registration.json (column-major raw->canonical)

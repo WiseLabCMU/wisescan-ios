@@ -598,9 +598,9 @@ struct LocationDetailView: View {
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         Task { @MainActor in
-            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            // Exports ship the mesh's captured colors: colorize any scan that isn't yet.
             await ScanExportManager.colorizeForExport(
-                scans, format: format, modelContext: modelContext,
+                scans, modelContext: modelContext,
                 progress: { scan, msg in bulkExportPhases[scan.id] = msg.map { ExportPhase($0) } })
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
@@ -660,9 +660,9 @@ struct LocationDetailView: View {
         // In flight from the start, so the guard above holds while colorize runs.
         for scan in scans { scan.uploadStatus = .zipping }
         Task { @MainActor in
-            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            // Exports ship the mesh's captured colors: colorize any scan that isn't yet.
             await ScanExportManager.colorizeForExport(
-                scans, format: format, modelContext: modelContext,
+                scans, modelContext: modelContext,
                 progress: { scan, msg in bulkExportPhases[scan.id] = msg.map { ExportPhase($0) } })
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)

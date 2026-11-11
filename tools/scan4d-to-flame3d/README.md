@@ -3,21 +3,26 @@
 [flame3d-core](https://github.com/openflam/flame3d-core) turns a 3D capture into a queryable scene: it
 finds objects in every frame with a VLM, tracks them with SAM3, lifts the masks onto the
 mesh, and stores captioned, CLIP-embedded 3D components in PostGIS for spatial, semantic and
-LLM search. `scan4d_to_flame3d.py` converts a Scan4D **Nerfstudio** export into the input
-flame3d's existing **`polycam`** data source reads, so a Scan4D capture runs through flame3d
-with no flame3d change.
+LLM search. `scan4d_to_flame3d.py` converts a Scan4D capture, as a **Nerfstudio dataset**, into
+the input flame3d's existing **`polycam`** data source reads, so a Scan4D capture runs through
+flame3d with no flame3d change.
 
-The app now writes this bundle itself: the **Flame3D** export format (`Flame3DExport.swift`)
-follows the contract below. This script stays for Nerfstudio exports, and `--verify` checks
-any bundle, the app's included, before you upload it:
+The app exports one bundle, **Scan4D**, and the lab server makes this one from it: the
+`scan4d-convert` pipeline in scan4d-flows (`target=flame3d`) runs `scan4d-normalize`, which
+builds the Nerfstudio dataset from the export, then the `scan4d-flame3d` flow, which runs a copy
+of this script. This README is the bundle's contract, and its tests are the converter's. The app
+had its own Flame3D export until it was folded into Scan4D; `--verify` checks any bundle, one of
+those included, before you upload it:
 
 ```bash
 python3 scan4d_to_flame3d.py --verify scan4d_Lab_Room_flame3d_....zip
 ```
 
+By hand, from a dataset scan4d-normalize wrote (or an older app Nerfstudio export):
+
 ```bash
 pip install numpy pillow
-python3 scan4d_to_flame3d.py scan4d_Lab_Room_nerfstudio_....zip -o lab_room.zip
+python3 scan4d_to_flame3d.py /work/out/<run>/norm -o lab_room.zip
 # then, on the flame3d box (stack running):
 scripts/start_pipeline.sh --data lab_room.zip --config my_config.json --wait
 ```
@@ -26,9 +31,11 @@ scripts/start_pipeline.sh --data lab_room.zip --config my_config.json --wait
 and your `dataset_name`. See [flame3d settings](#flame3d-settings-worth-knowing) for two
 values worth knowing.
 
-The input is the Nerfstudio export as a `.zip` or an unpacked `staging_*` folder. The Scan4D
-and Polycam exports don't work: neither carries `mesh.obj`, and flame3d needs the mesh. Pass
-`-o some_dir` without `.zip` to get an unpacked folder for inspection.
+The input is a Nerfstudio dataset with the scan's `mesh.obj`, as a `.zip` or a folder: what
+scan4d-normalize writes, or an older app Nerfstudio export. A Scan4D export needs
+scan4d-normalize first (it has no `transforms.json`), and one from before the export carried
+the mesh can't be converted: flame3d needs the mesh. Pass `-o some_dir` without `.zip` to get an
+unpacked folder for inspection.
 
 | Option | Default | Effect |
 |---|---|---|
@@ -41,8 +48,9 @@ and Polycam exports don't work: neither carries `mesh.obj`, and flame3d needs th
 
 ## The bundle
 
-This is the contract a future in-app "flame3d" export should produce. Every entry is a change
-of representation of something the Nerfstudio export already holds.
+This is the contract any producer of the bundle follows: this script, the server's
+`scan4d-flame3d` flow (a copy of it), and the app's former Flame3D export. Every entry is a
+change of representation of something the Scan4D export already holds.
 
 ```
 input.zip                                   (entries at the root; flame3d extracts as-is)
@@ -93,16 +101,16 @@ canonical-frame. `registration.json` holds raw→canonical in the same column-ma
 **Why depth at the LiDAR raster.** flame3d renders depth from the mesh
 (`use_rendered_depth=True`) and only needs each frame to have a readable depth PNG. It
 still holds every map in RAM as float32: 11 MB per frame at 1920×1440, 0.2 MB at 256×192.
-The Nerfstudio export upsampled depth nearest-neighbour to the image size. Sampling it back
-down at pixel centres recovers the measured values exactly, and the tests assert this.
+The Nerfstudio dataset has depth upsampled nearest-neighbour to the image size. Sampling it
+back down at pixel centres recovers the measured values exactly, and the tests assert this.
 
 ## Vertex colors
 
 flame3d shows `raw.glb` as its 3D view. Its viewer uses a texture when the GLB has one and
 per-vertex colors (`COLOR_0`) otherwise, so an uncolored mesh shows up gray.
 
-The app colorizes a scan before any mesh export and writes the captured colors into the
-Nerfstudio export's `mesh.obj` as `v x y z r g b`. The converter uses those as they are
+The app colorizes a scan before any export and writes the captured colors into the
+export's `mesh.obj` as `v x y z r g b`. The converter uses those as they are
 (`colors: {"source": "mesh.obj"}` in `conversion.json`). Exports made before that carry no
 color, so for them the converter samples it from the captured frames, the way the app's
 colorize step does:
@@ -150,7 +158,7 @@ the same capture scores 7% against 8% nudged, and warns.
 
 ## Tests
 
-`tests/` builds a synthetic Nerfstudio export with exactly known geometry: a box room with
+`tests/` builds a synthetic Nerfstudio dataset with exactly known geometry: a box room with
 a table, a raw→canonical registration, stream frames, hi-res stills (one at 16:9) and cube
 faces.
 
@@ -202,22 +210,31 @@ RUN pip install --no-cache-dir numpy pillow pytest opencv-python-headless tqdm s
 - **`identify_objects.max_frames`.** It samples frames uniformly before the VLM pass, which
   makes one API call per frame. `--stride` does the same at conversion time.
 
-## In the app: the Flame3D export
+## On the server: scan4d-flame3d
 
-`Flame3DExport.swift` writes the bundle above from the same data the other exports stage.
-Keep it and this script in step:
+The app exports Scan4D, and the lab server makes this bundle from it. scan4d-flows'
+`scan4d-convert` pipeline (`target=flame3d`) runs:
 
-- **Frames.** It starts from the staged Polycam payload, after the export-time privacy
-  passes, so people are already pixelated and their depth zeroed. It keeps the stream frames
-  and stills, resizing stills to the stream size and scaling their intrinsics. It skips the
-  cube faces and any still whose aspect ratio differs from the stream's.
-- **Depth.** The LiDAR depth at its native raster, unchanged.
-- **Mesh.** `raw.glb` from `mesh.obj`, with `COLOR_0` from `colors.bin` converted to linear.
-  Like every mesh export, it colorizes the scan first if needed, so the colors are captured
-  ones, never the normals preview.
-- **Alignment.** `alignmentTransform` from the registration sidecar.
-- **Archive.** Its own uncompressed zip with the entries at the root. The app's usual
-  directory zip puts the folder itself at the top, and flame3d would not find `keyframes/`.
+- **`scan4d-normalize`**, which builds the Nerfstudio dataset from the export. It builds
+  `transforms.json` from `cameras/` and corrects the 12 MP stills' focal per device. It
+  enlarges depth to each image's size, which this script samples back down exactly. The
+  export's privacy passes already ran on the phone, so people are pixelated and their depth
+  zeroed.
+- **`scan4d-flame3d`**, which runs a copy of this script in `flows/scan4d_flame3d/tools/`. It
+  writes `<export>_flame3d.zip` with the entries at the root and puts `conversion.json` in its
+  manifest.
+
+Change the script here, where its tests are, and copy it there. How the bundle reaches flame3d
+is not decided yet; the flow only writes it.
+
+On room `7A49` (109 iPad stills, its mesh carrying captured colors), the pipeline's bundle
+passes `--verify`. Its check scores 9.8% within 2 cm, against 9.9% for the app's own export of
+the same scan without the focal correction. So the correction makes no measurable difference
+there; that room's per-view ARKit pose error dominates the check either way.
+
+The app's former Flame3D export (`Flame3DExport.swift`, removed) followed the same contract. It
+started from the staged payload after the privacy passes and kept the depth at its native
+raster. It wrote `raw.glb` with `COLOR_0` from `colors.bin`, converted to linear.
 
 Cube faces are a planned follow-up. To use them without breaking flame3d, each face would
 need cropping to the stream's aspect and size, and frame numbers in blocks after the

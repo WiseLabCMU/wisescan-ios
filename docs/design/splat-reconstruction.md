@@ -1,7 +1,7 @@
 # Design: Splat Reconstruction from Scan4D Captures
 
 **Status:** Findings and recommendations (2026-09-29)
-**Scope:** Training Gaussian splats from the Nerfstudio export, with LichtFeld Studio as the primary trainer and Nerfstudio as the secondary one.
+**Scope:** Training Gaussian splats from the Nerfstudio export, with LichtFeld Studio as the primary trainer and Nerfstudio as the secondary one. (2026-11-09: the app's Nerfstudio export has since been folded into Scan4D; the same dataset is made from a Scan4D export on the lab server, by scan4d-flows' `scan4d-normalize`.)
 **Evidence:** Four captures of the same lab room (`CEE18488`, `68DD2EBE`, `FE934DEC`, `35B52835`). Quality verdicts are visual A/Bs by one reviewer; numbers are measured. The [Evidence](#evidence) section maps each claim to its runs.
 
 ## Bottom line

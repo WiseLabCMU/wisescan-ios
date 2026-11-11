@@ -186,9 +186,7 @@ wisescan-ios/
 ├── MeshPreviewView+Timeline.swift # Time scrubber across a location's room generations
 ├── ScanTimelineBar.swift        # The preview's bottom-docked time scrubber
 │  # Export
-├── ScanExportManager.swift      # Export packaging (Scan4D, Polycam, Nerfstudio, Flame3D, OBJ, PLY, USDZ)
-├── NerfstudioExport.swift       # transforms.json bundle for Nerfstudio and LichtFeld Studio
-├── Flame3DExport.swift          # flame3d-core input bundle
+├── ScanExportManager.swift      # Export packaging (Scan4D, OBJ, PLY, USDZ)
 ├── ExportUploadTarget.swift     # Where an export upload goes (control-plane-issued address or configured URL)
 ├── ExportUploader.swift         # Background-session export uploads that survive a locked screen
 ├── MeshConverter.swift          # OBJ→PLY and OBJ→USDZ mesh conversion
@@ -220,23 +218,32 @@ wisescan-ios/
 
 ## Export Formats & Backend Ingestion
 
-Each export format includes **only** the data relevant to that format. The filename convention is:
+The app has one capture export, **Scan4D**, a superset of everything the scan captured, plus three
+single-file mesh exports. The filename convention is:
 `scan4d_{locationName}_{scanName}_{format}_{timestamp}_{uuid}.{ext}`
 
 | Format | Extension | Contents | Viewer |
 | :--- | :--- | :--- | :--- |
-| **Scan4D** | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, `sweep_coverage.bin`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
-| **Polycam** | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
-| **Flame3D** | `.zip` | `keyframes/images/`, `keyframes/corrected_cameras/`, `keyframes/depth/` (native LiDAR), `raw.glb` (mesh with captured vertex colors), `mesh_info.json` (registration as `alignmentTransform`); entries at the zip root | [flame3d-core](https://github.com/openflam/flame3d-core)'s `polycam` data source, as-is; contract in `tools/scan4d-to-flame3d` |
-| **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `cameras/`, + raw geometry: `mesh.obj` (with captured vertex colors), `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin`, `sweep_coverage.bin` | Nerfstudio and LichtFeld Studio, as-is; training-side pipeline in `tools/` |
+| **Scan4D** | `.zip` | `scan4d_metadata.json`, the Polycam payload (`images/`, `depth/`, `confidence/`, `cameras/`, `mesh_info.json`), `mesh.obj` (with captured vertex colors) + `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin`, `sweep_coverage.bin`, `stitching.json`; 360° scans add `equirect_stills/` + cube faces at baked poses with their masks | The lab server (scan4d-flows), which trains splats from it and makes the formats below |
 | **OBJ** | `.obj` | Single mesh file with captured vertex colors | MeshLab, Blender |
 | **PLY** | `.ply` | Converted mesh with captured vertex colors | MeshLab, CloudCompare |
 | **USDZ** | `.usdz` | Converted mesh via ModelIO, with vertex colors | iOS Quick Look (native) |
+
+The layouts other tools read are made from the Scan4D export on the lab server, by the
+`scan4d-convert` pipeline in the flows repo (scan4d-flows): a **Nerfstudio dataset** that
+Nerfstudio and LichtFeld Studio load as-is, and the input bundle
+[flame3d-core](https://github.com/openflam/flame3d-core) reads (its contract is in
+[tools/scan4d-to-flame3d](tools/scan4d-to-flame3d/README.md)). The app exported those itself until
+they were folded into Scan4D, along with Polycam; scans and settings that held one of those
+formats export Scan4D. See [schemas/README.md](schemas/README.md).
 
 ### Example: Scan4D Export
 ```
 scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
 ├── scan4d_metadata.json    # GPS tags, Location ID, `export_format`, `hardware_device_model`, & `face_anchors`
+├── mesh.obj                # ARKit mesh with captured vertex colors (canonical frame), + face_classes.bin
+├── roomplan.json           # RoomPlan surfaces and objects (+ roomplan_raw.json)
+├── registration.json       # raw→canonical transform relating the mesh to the cameras
 ├── arkit_features.bin       # ARKit sparse feature cloud (id + xyz, raw capture frame)
 ├── sweep_coverage.bin       # Where the sweep looked: per-cell free/surface/visit counts (raw capture frame)
 ├── images/                 # RGB frames (JPEG, ~2fps adaptive)
@@ -251,6 +258,7 @@ scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
 ├── cameras/                # Per-frame Polycam JSON configs
 │   ├── frame_00000.json
 │   └── ...
+├── masks/                  # 360° scans only: operator/rig keep-masks for the cube faces
 ├── equirect_stills/        # 360° scans only: privacy-passed equirects + pose sidecars
 │   ├── still_0000.JPG
 │   ├── still_0000.json

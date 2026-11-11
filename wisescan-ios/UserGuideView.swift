@@ -86,8 +86,9 @@ struct UserGuideView: View {
                         icon: "6.circle.fill",
                         title: "Choose Format",
                         text: "Pick the export format with Global Export Format on a space's screen: Scan4D " +
-                              "(the default), Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ. It applies " +
-                              "to every space."
+                              "(the default), OBJ, PLY, or USDZ. It applies to every space. Scan4D carries " +
+                              "everything the scan captured; the lab server turns it into a Nerfstudio " +
+                              "dataset or a flame3d bundle."
                     )
                     guideRow(
                         icon: "7.circle.fill",
@@ -200,28 +201,12 @@ struct UserGuideView: View {
                 Section {
                     formatRow(
                         format: "Scan4D",
-                        desc: "Default format. Includes scan4d_metadata, ARKit feature points, " +
-                              "room layout (roomplan) and spatial-link (stitching) metadata, " +
-                              "plus the full Polycam raw import payload " +
-                              "(images, depth, cameras, mesh_info). Zip archive."
-                    )
-                    formatRow(
-                        format: "Polycam",
-                        desc: "Polycam raw data import only: RGB images, depth maps, per-frame camera JSONs " +
-                              "(cameras/), and mesh_info.json. Zip archive."
-                    )
-                    formatRow(
-                        format: "Nerfstudio",
-                        desc: "Trains as-is in Nerfstudio and LichtFeld Studio — no conversion. " +
-                              "RGB images, camera poses (transforms.json), 16-bit depth, " +
-                              "operator masks for 360° frames, plus the ARKit mesh with its colors, " +
-                              "RoomPlan and registration for the training-side pipeline."
-                    )
-                    formatRow(
-                        format: "Flame3D",
-                        desc: "Upload-ready input for flame3d, which finds, captions and lets you " +
-                              "search the objects in your scan. Frames, camera poses, depth and the " +
-                              "colored mesh, in the layout flame3d reads. Zip archive."
+                        desc: "Default format: everything the scan captured, in one zip. RGB frames and " +
+                              "stills, 16-bit LiDAR depth and confidence, a camera pose for every image, " +
+                              "the mesh with its colors, room layout (RoomPlan), ARKit feature points, " +
+                              "spatial links (stitching), 360° stills with their cube faces, and " +
+                              "scan4d_metadata. The lab server turns it into what other tools read: a " +
+                              "Nerfstudio dataset for training, or the input flame3d searches objects in."
                     )
                     formatRow(
                         format: "USDZ",
@@ -247,9 +232,8 @@ struct UserGuideView: View {
                 } header: {
                     Text("EXPORT FORMATS")
                 } footer: {
-                    Text("Mesh exports (Nerfstudio, Flame3D, USDZ, PLY, OBJ) color the mesh from your captured " +
-                         "frames first if the scan hasn't been colored yet, so the first such export " +
-                         "of a scan takes a little longer.")
+                    Text("Every export carries the mesh, colored from your captured frames: a scan that " +
+                         "hasn't been colored yet is colored first, so its first export takes a little longer.")
                 }
                 .listRowBackground(Color.white.opacity(0.05))
 
@@ -306,14 +290,15 @@ struct UserGuideView: View {
                            appStore: "https://apps.apple.com/us/app/polycam-lidar-3d-scanner/id1532482376",
                            website: "https://poly.cam")
                     appRow(name: "Nerfstudio", icon: "desktopcomputer", color: .green,
-                           desc: "Desktop tool for NeRF/3DGS training. Use RAW exports with ns-process-data.",
+                           desc: "Desktop tool for NeRF/3DGS training. Train on the Nerfstudio dataset " +
+                                 "the lab server makes from a Scan4D export.",
                            appStore: nil, website: "https://docs.nerf.studio")
                 } header: {
                     Text("RECOMMENDED VIEWERS")
                 } footer: {
                     Text("USDZ files can be previewed directly in the Files app. For OBJ/PLY, " +
-                         "install MeshLab or Polycam. RAW exports are designed " +
-                         "for desktop processing with Nerfstudio or COLMAP.")
+                         "install MeshLab or Polycam. Scan4D exports are for the lab server, which " +
+                         "turns them into a Nerfstudio dataset or a flame3d bundle.")
                         .font(.caption2)
                         .foregroundColor(.gray)
                 }
