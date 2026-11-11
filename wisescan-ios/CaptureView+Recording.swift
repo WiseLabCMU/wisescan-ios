@@ -23,6 +23,9 @@ extension CaptureView {
             // stopRecording()/performStopRecording directly and are unaffected.
             showStopMenu = true
         } else {
+            // Privacy Filter past its time limit (or required here): back on, and this tap
+            // doesn't start, so the change is seen before anything is captured.
+            if enforcePrivacyFilterRules(atRecordStart: true) { return }
             // Link-adjacent recording ALWAYS starts programmatically after the user aligns to the
             // previous scan: confirmAlignment / pinAndExtend capture Pin A, reset into the new map,
             // place Pin B, then call startRecording() directly (awaitStabilizationAndPlacePinB),

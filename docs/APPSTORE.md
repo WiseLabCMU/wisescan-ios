@@ -42,7 +42,7 @@ Scan4D is a professional-grade reality capture app for iPhone and iPad. It turns
 • Focus scans: draw a box around one area (a work table, a shelf) on a previous scan and photograph it in detail — from a quick check of a few photos to dense coverage for 3D reconstruction — with a live dial of the angles covered
 • Space staging analyzer: optional pre-scan 360° sweep checks lighting, doors, screens, and people; presents a report with actionable tips before recording
 • Interactive 3D mesh preview with camera-sampled vertex coloring and loading indicator
-• Privacy filtering: person segmentation removes humans from meshes, face blurring in RGB exports
+• Privacy filtering: person segmentation removes humans from meshes, face blurring in RGB exports; switched off, it turns itself back on after 24 hours, and a space can require it
 • VIO tracking guard: automatic halt and save prompt on mid-scan tracking loss
 
 PROXY MODE (Meta Ray-Ban Smart Glasses)

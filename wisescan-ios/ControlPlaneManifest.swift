@@ -7,8 +7,9 @@ import SwiftData
 /// "map") with its base and tip, every scan, every stitch link. Sent whole on every sync, so a
 /// missed or failed one heals on the next and neither side tracks changes.
 ///
-/// Metadata: names, times, IDs, poses, the focus box, and which map-package files each scan has
-/// (the files themselves go up separately, when the server asks; `ControlPlaneSync`). No images.
+/// Metadata: names, times, IDs, poses, the focus box, whether each scan had the Privacy Filter on
+/// (and whether its space requires it), and which map-package files each scan has (the files
+/// themselves go up separately, when the server asks; `ControlPlaneSync`). No images.
 nonisolated struct ControlPlaneManifest: Encodable, Sendable {
     var version = 1
     var device: Device
@@ -36,6 +37,8 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
         /// The newest room scan: a rescan or focus scan relocalizes against its world map.
         var tipScanId: UUID?
         var scans: [Scan]
+        /// The space is set to Always use Privacy Filter (its scans record with the filter on).
+        var requiresPrivacyFilter = false
     }
 
     nonisolated struct Scan: Encodable, Sendable {
@@ -52,6 +55,10 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
         var focusRegion: FocusRegion?
         var upload: Upload
         var files: [PackageFile] = []    // read from disk off main (`readScanFiles`)
+        /// Whether the Privacy Filter was on for this capture, as the scan recorded it; left out
+        /// (nil) when it can't tell, as for scans older than the flag. Read from disk off main
+        /// (`readScanFiles`). Lets the server show which scans may have people unblurred.
+        var privacyFilter: Bool?
     }
 
     /// A map-package file this scan has (scan4d-server README, "Map packages"). The server
@@ -120,6 +127,16 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
         var directory: URL
         var worldMap: URL
         var package: [(name: String, candidates: [URL])]
+        /// Where the scan recorded its Privacy Filter state.
+        var privacyRecord: PrivacyRecord?
+    }
+
+    /// A room scan records the filter in raw_data/ (segmentation masks exist only when it was
+    /// on, and scan4d_metadata.json's `privacy_filter`); a focus scan in its capture folder's
+    /// manifest.json (`setup.privacyFilter`).
+    nonisolated enum PrivacyRecord: Sendable {
+        case room(rawData: URL)
+        case focus(captureFolder: URL)
     }
 
     static var encoder: JSONEncoder {
@@ -141,6 +158,7 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
                 guard let paths = files[scanId] else { continue }
                 locations[l].scans[s].hasWorldMap = fm.fileExists(atPath: paths.worldMap.path)
                 locations[l].scans[s].registration = Self.readRegistration(scanDirectory: paths.directory)
+                locations[l].scans[s].privacyFilter = paths.privacyRecord.flatMap(Self.readPrivacyFilter)
                 guard packages else { continue }
                 for (name, candidates) in paths.package {
                     guard let found = candidates.lazy.compactMap(Self.localFile).first else { continue }
@@ -160,6 +178,25 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
               let size = (attributes[.size] as? NSNumber)?.int64Value,
               let modified = attributes[.modificationDate] as? Date else { return nil }
         return LocalFile(url: url, size: size, modifiedAt: Date(timeIntervalSince1970: modified.timeIntervalSince1970.rounded(.down)))
+    }
+
+    /// Whether the Privacy Filter was on for the capture, or nil when the scan can't say. Unlike
+    /// the export's blur gate (ScanExportManager.privacyFilterWasOn), which fails closed and
+    /// blurs anything uncertain, this reports: an unknown state is sent as unknown.
+    static func readPrivacyFilter(_ record: PrivacyRecord) -> Bool? {
+        switch record {
+        case .room(let rawData):
+            let masks = (try? FileManager.default.contentsOfDirectory(atPath: rawData.appendingPathComponent("masks").path)) ?? []
+            if masks.contains(where: { $0.hasSuffix(".png") }) { return true }
+            guard let data = try? Data(contentsOf: rawData.appendingPathComponent("scan4d_metadata.json")),
+                  let meta = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return meta["privacy_filter"] as? Bool
+        case .focus(let captureFolder):
+            guard let data = try? Data(contentsOf: captureFolder.appendingPathComponent("manifest.json")),
+                  let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let setup = manifest["setup"] as? [String: Any] else { return nil }
+            return setup["privacyFilter"] as? Bool
+        }
     }
 
     /// The scan's registration sidecar, where `SaveRegistration.loadSidecar` looks for it (top
@@ -191,7 +228,9 @@ extension ControlPlaneManifest {
             let base = location.roomScans.min(by: CapturedScan.canonicalOrder)
             let scans = location.scans.sorted(by: CapturedScan.canonicalOrder).map { scan -> Scan in
                 files[scan.id] = ScanFiles(directory: scan.scanDirectory, worldMap: scan.worldMapURL,
-                                           package: packageCandidates(scan))
+                                           package: packageCandidates(scan),
+                                           privacyRecord: scan.isFocusScan ? .focus(captureFolder: scan.focusCaptureURL)
+                                                                           : .room(rawData: scan.rawDataPath))
                 return Scan(scanId: scan.id,
                             kind: scan.isFocusScan ? "focus" : "room",
                             name: scan.name,
@@ -206,7 +245,8 @@ extension ControlPlaneManifest {
                                            format: scan.selectedFormat.rawValue))
             }
             return Location(locationId: location.id, name: location.name, updatedAt: location.updatedAt,
-                            baseScanId: base?.id, tipScanId: location.latestRoomScan?.id, scans: scans)
+                            baseScanId: base?.id, tipScanId: location.latestRoomScan?.id, scans: scans,
+                            requiresPrivacyFilter: location.requiresPrivacyFilter)
         }
         let linkEntries = links.map { link in
             Link(linkId: link.id,

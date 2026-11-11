@@ -374,6 +374,9 @@ class ScanLocation {
     var remoteLocationId: String?
     var scanCaseStr: String = ScanCase.rescanSpace.rawValue
     var imagingPoseMatrix: [Float]?
+    /// "Always use Privacy Filter" for this space: its rescans and focus scans record with the
+    /// filter on and the switch locked, and Connect Adjacent passes it on to the new space.
+    var requiresPrivacyFilter: Bool = false
 
     @Relationship(deleteRule: .cascade)
     var scans: [CapturedScan] = []

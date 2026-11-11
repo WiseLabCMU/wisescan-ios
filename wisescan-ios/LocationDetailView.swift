@@ -217,6 +217,8 @@ struct LocationDetailView: View {
                                 }
                             }
 
+                            privacyRequirementToggle
+
                             // Control plane: send this space to the lab server, as Upload sends an export.
                             if ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil {
                                 ControlPlaneSpaceSyncButton(spaceIds: [location.id])
@@ -358,6 +360,33 @@ struct LocationDetailView: View {
                 }
             }
         }
+    }
+
+    /// Always use Privacy Filter: rescans, focus scans and Connect Adjacent from this space record
+    /// with the filter on and its switch locked (CaptureView+Privacy), whatever the app-wide switch
+    /// says. Extracted so the detail body stays inside the type checker's budget.
+    private var privacyRequirementToggle: some View {
+        Toggle(isOn: Binding(
+            get: { location.requiresPrivacyFilter },
+            set: { required in
+                location.requiresPrivacyFilter = required
+                try? modelContext.save()
+            }
+        )) {
+            VStack(alignment: .leading, spacing: 2) {
+                Label("Always use Privacy Filter", systemImage: "hand.raised.fill")
+                    .font(.subheadline)
+                    .foregroundColor(.white)
+                Text("Scans of this space always blur people; the capture switch is locked on here.")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.6))
+            }
+        }
+        .tint(.green)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.white.opacity(0.05))
+        .cornerRadius(10)
     }
 
     /// Room / Focus / All, with counts, in a space that has a focus scan.

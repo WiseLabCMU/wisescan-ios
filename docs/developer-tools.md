@@ -81,6 +81,14 @@ Debug-only escape from the security sweep that deletes each transferred still fr
 camera. Leave OFF except when comparing device bytes against camera-side originals —
 the camera's open AP is the weakest place to leave raw equirects.
 
+### Privacy Filter Time Limit
+How long the Privacy Filter may stay off before it turns itself back on: 12 h, 24 h (the
+default), 1 week or None. `PrivacyFilterTimer` records when the switch went off
+(`privacyFilterOffAt`) and checks when the capture screen opens, on return to the
+foreground and at a record tap, never mid-scan; an unknown switch-off time counts as
+expired. It is a developer option, so leaving Developer Mode puts it back to 24 h. A space
+set to Always use Privacy Filter ignores it.
+
 ## Dashboard (Developer Mode)
 
 - **BLE Probe card** (`ThetaBLEProbe`) — the GATT bench that established the whole

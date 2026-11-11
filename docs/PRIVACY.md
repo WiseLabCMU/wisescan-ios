@@ -15,6 +15,7 @@ If you enter a control plane server in Settings → Control plane, the app keeps
 - scan and space IDs;
 - each scan's alignment transform and stitch-link anchor poses;
 - focus-scan regions (a box);
+- whether each scan had Privacy Filtering on, and whether its space is set to require it (so the lab can see which scans may show people unblurred);
 - upload state;
 - the device's model, iOS and app version, the device name you enter, and a random device ID the app makes once.
 
@@ -65,6 +66,8 @@ mid-capture is noted in its `events.log`).
 When an external 360° camera (e.g. Ricoh Theta) is connected, its equirectangular stills capture everyone around the operator — including people who never appeared in the phone's viewfinder. When Privacy Filtering is enabled, each still receives a person-privacy pass at export time: it is resampled into perspective cube faces, person segmentation runs per face, and detected person regions are pixelated on the full-resolution image before it is included in any export. A still that cannot be verified is excluded from the export entirely — with the filter on, raw 360° imagery never leaves the device.
 
 Disabling Privacy Filtering is an explicit, per-scan choice — supporting captures where people are the subject (for example a posed group-photo 3D model). The capture screen warns that people in view will be captured unblurred and that a 360° camera captures every direction, including behind the operator; the setting is locked for the duration of each room scan (a focus scan takes its value at Stop, see above); and each scan's privacy state is recorded in its export metadata (`privacy_filter`) so downstream processing can honor it.
+
+Because a switch left off by mistake would keep capturing everyone in later scans, the choice expires: switched off, Privacy Filtering turns itself back on 24 hours later (checked when the capture screen opens, when the app returns to the foreground and when a scan is about to start, never during a scan; a scan about to start with an expired choice does not start until the operator has seen the filter is back on). The capture screen's warning stays readable while recording, and says when the filter will turn back on. A space can also be set to **Always use Privacy Filter**: every rescan, focus scan and adjacent space started from it records with the filter on, and the switch cannot be turned off there.
 
 ## Location Data
 
