@@ -1,6 +1,7 @@
 # Design: Sync the Whole Scan as One Bundle
 
-**Status:** Decided, not built (2026-11-11)
+**Status:** Built, device test pending (2026-11-11). Where the build departed from the plan, this
+doc says what was built and why.
 **Scope:** How a scan reaches the lab server (the control plane in `scan4d-server`), what Share is,
 and what goes away. It builds on [export-consolidation.md](export-consolidation.md), which made
 Scan4D the one capture export.
@@ -84,13 +85,12 @@ answers with the state of each scan's bundle:
 - current;
 - stale: it holds an older version.
 
-**Format.** A zip with the files stored, not compressed: JPEG and PNG don't shrink, and storing
-keeps building and extracting I/O-bound. The entries sit under one known root folder. The stored
-zip writer from the removed `Flame3DExport.swift` can come back from git.
+**Format.** The Scan4D export's own zip, its entries under one top folder, which the server
+strips. *(Planned: a stored zip from a revived writer. Built: the export's zip as it is, which is
+proven in the field and keeps one way of packing; storing instead is an optimisation for later.)*
 
-**Size.** Hundreds of MB for a room scan, 1–3 GB with 360° stills. A single presigned PUT
-covers that (S3 allows up to 5 GB). Multipart upload comes if failures on large bundles show it
-is needed.
+**Size.** Hundreds of MB for a room scan, 1–3 GB with 360° stills, in one PUT. A resumable or
+multipart upload comes if failures on large bundles show it is needed.
 
 ## On the phone
 
@@ -100,7 +100,7 @@ is needed.
   - its scan's fingerprint changes, or
   - a timeout passes (7 days).
 
-  So a failed upload retries without rebuilding; today's export re-zips on every failure. iOS
+  So a failed upload retries without rebuilding; the old Upload re-zipped on every failure. iOS
   may purge Caches under storage pressure, which only means a rebuild.
 - **Upload in a background URLSession** from the file, so it continues while the app is
   suspended. Never during a capture (today's rule).
@@ -110,6 +110,12 @@ is needed.
   and state, all selected by default. Deselected scans wait until selected again. New scans
   join selected. The checklist replaces today's "N waiting for Wi-Fi" count, and with it the
   worry about Auto sync's All mode flooding the server with a backlog.
+- **Uncoloured scans.** A scan offers its version once processed. The uploader colours it, if it
+  can, just before building, and sends the coloured version, so a scan the app can't colour
+  still syncs.
+- **Failures.** A failed upload waits 15 minutes, then tries again from the cache. A bundle the
+  server couldn't unpack (`failed`) is not wanted again unasked: **Retry** in the checklist builds
+  it afresh, so a broken bundle can't cost gigabytes every few minutes.
 
 ## The sync indicator
 
@@ -141,23 +147,24 @@ holds. Today it shows exports uploaded: none, some or all. Share needs no indica
 
 ## On the server
 
-1. **Grant.** `POST` a bundle grant for a scan and fingerprint. The answer is a presigned PUT to
-   `devices/<device>/maps/<map>/<scan>/.incoming/<fingerprint>.zip`, through the same grants and
-   per-device revocation exports use today.
-2. **Complete.** The phone reports the upload. The server confirms the object with a HEAD and
-   queues an ingest job in the same transaction.
-3. **Ingest**, by a job queue in Postgres, with no new service:
+1. **Upload.** The phone streams the zip to `PUT /v1/scans/{id}/bundle` with its fingerprint in
+   `X-Scan4D-Bundle-Fingerprint`, under the server password and the per-device revocation. It
+   lands as `<map>/.incoming/<scan>.<fingerprint>.zip`, and the ingest job is queued in the
+   transaction that records it. *(Planned: an S3 grant, then a completion report. Built: a PUT
+   to the API, as map-package files already went. That needs no bucket configured and no
+   round trips, and the server knows the upload is whole the moment the body ends.)*
+2. **Ingest**, by a job queue in Postgres, with no new service:
    - **The queue.** A jobs table with status, attempts and error. One worker in the API process
      claims jobs (`SELECT … FOR UPDATE SKIP LOCKED`, so more workers stay safe) and runs one at
      a time, in a thread, off the event loop. At startup, jobs left running go back to queued.
      Evaluations and webhook delivery, which today are fire-and-forget background tasks, can
      move onto the same table later.
-   - **Extraction.** It goes into `<scan>/.ingest-<fingerprint>/`, then that folder is swapped
+   - **Extraction.** It goes into a hidden folder beside `<scan>/`, then that folder is swapped
      in as `<scan>/` and the zip deleted. A rerun does no harm.
    - **Checks.** Every entry stays under the root, with no links and no absolute paths. Sizes
      are capped, and there must be free space for the whole bundle.
    - **The event.** It emits `bundle.ingested`.
-4. **Readers.** The extracted files keep today's names and place (`mesh.obj`, `colors.bin`,
+3. **Readers.** The extracted files keep today's names and place (`mesh.obj`, `colors.bin`,
    `arkit_features.bin`, …), so the 3D view and the change evaluator read them as they do now.
    The flows read the same folder: `scan4d-normalize` takes it as it is. `bundle.ingested` is
    where an automatic `scan4d-splat` run hangs later.
@@ -184,7 +191,7 @@ Files page.
 
 1. **Server:**
    - the jobs table and worker;
-   - bundle grant, complete and ingest;
+   - bundle upload and ingest;
    - bundle state in the sync response;
    - the README's Sync and Map packages sections rewritten to match.
 2. **App:**

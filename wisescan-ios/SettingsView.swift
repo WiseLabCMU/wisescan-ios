@@ -11,7 +11,7 @@ private struct DevSliderScale {
 
 struct SettingsView: View {
     var scrollToDevMode: Bool = false
-    /// Opened by a tapped Upload or Sync whose server wants a password (ControlPlanePasswordPrompt):
+    /// Opened by a tapped Sync whose server wants a password (ControlPlanePasswordPrompt):
     /// scroll to Control plane and put the cursor in its password field.
     var focusControlPlanePassword: Bool = false
     @Environment(\.modelContext) private var modelContext
@@ -20,7 +20,6 @@ struct SettingsView: View {
     @AppStorage(AppConstants.Key.rawOverlapMax) private var overlapMax: Double = AppConstants.overlapMax
     @AppStorage(AppConstants.Key.rawRejectBlur) private var rejectBlur: Bool = AppConstants.rejectBlur
     @AppStorage(AppConstants.Key.captureMode) private var captureMode: String = AppConstants.captureMode
-    @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
     @AppStorage(AppConstants.Key.mockIMU) private var mockIMU: Bool = AppConstants.mockIMU
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
@@ -70,26 +69,6 @@ struct SettingsView: View {
                 }
                 .padding(.vertical, 4)
             }
-        }
-        .listRowBackground(Color.white.opacity(0.05))
-    }
-
-    @ViewBuilder
-    private var settingsSection2: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 8) {
-                TextField("https://your-server.example.com/uploads/", text: $uploadURL)
-                    .foregroundColor(.white)
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
-                    .keyboardType(.URL)
-                Text("HTTP(S) endpoint for scan uploads. With a working control plane set below, it says where exports go (the lab bucket); whenever it can't, exports come here as before.")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            }
-            .padding(.vertical, 4)
-        } header: {
-            Text("UPLOAD SERVER")
         }
         .listRowBackground(Color.white.opacity(0.05))
     }
@@ -577,9 +556,6 @@ struct SettingsView: View {
                 List {
                     // MARK: - User Guide Link
                     settingsSection1
-
-                    // MARK: - General Settings
-                    settingsSection2
 
                     ControlPlaneSettingsSection(focusPassword: focusControlPlanePassword)
                         .id("controlPlaneSection")

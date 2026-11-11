@@ -4,14 +4,13 @@ import SwiftUI
 /// (`ControlPlaneSync`; scan4d-server README). Its host, and the shared password it may want
 /// (kept in the Keychain).
 struct ControlPlaneSettingsSection: View {
-    /// Opened for a tapped Upload or Sync whose server wants a password (ControlPlanePasswordPrompt):
-    /// say so and put the cursor in the password field.
+    /// Opened for a tapped Sync whose server wants a password (ControlPlanePasswordPrompt): say so
+    /// and put the cursor in the password field.
     var focusPassword = false
 
     @AppStorage(AppConstants.Key.controlPlaneHost) private var host = AppConstants.controlPlaneHost
-    @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.controlPlaneDeviceLabel) private var deviceLabel = ""
-    @AppStorage(AppConstants.Key.controlPlaneSendPackages) private var sendPackages = AppConstants.controlPlaneSendPackages
+    @AppStorage(AppConstants.Key.controlPlaneBundlesWifiOnly) private var bundlesWifiOnly = AppConstants.controlPlaneBundlesWifiOnly
     @AppStorage(AppConstants.Key.controlPlaneAllowUntrusted) private var allowUntrusted = false
     @AppStorage(AppConstants.Key.controlPlaneAutoSync) private var autoSyncRaw = AppConstants.controlPlaneAutoSync
     @State private var password = ControlPlaneSecret.password
@@ -67,7 +66,7 @@ struct ControlPlaneSettingsSection: View {
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Allow untrusted certificates", isOn: $allowUntrusted)
                     .foregroundColor(.white)
-                Text("For servers on the lab's local network with their own (self-signed) certificate, reached by IP address or a .local name: accepted from this server and the upload hosts it names, nowhere else.")
+                Text("For servers on the lab's local network with their own (self-signed) certificate, reached by IP address or a .local name: accepted from this server, nowhere else.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
@@ -93,18 +92,23 @@ struct ControlPlaneSettingsSection: View {
             .padding(.vertical, 4)
 
             VStack(alignment: .leading, spacing: 4) {
-                Toggle("Send map packages", isOn: $sendPackages)
+                Toggle("Upload data bundles only on Wi-Fi", isOn: $bundlesWifiOnly)
                     .foregroundColor(.white)
-                Text("What the server asks for: the small files it reads itself (alignment, room layout, feature cloud, coverage, focus box) after each sync; the meshes (with their colors) and relocalization map only when the lab needs them, and large files only over Wi-Fi.")
+                    .onChange(of: bundlesWifiOnly) { _, _ in BundleSync.shared.wifiOnlyChanged() }
+                Text("Each processed scan goes up as one bundle: everything it holds, photos included, hundreds of MB or more. The map itself and its room layout go on any network.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
             .padding(.vertical, 4)
 
-            if let uploads = uploadsLine {
-                Label(uploads, systemImage: "arrow.up.doc")
-                    .font(.caption)
-                    .foregroundColor(.gray)
+            NavigationLink(destination: PendingBundlesView()) {
+                HStack {
+                    Text("Pending bundles")
+                        .foregroundColor(.white)
+                    Spacer()
+                    Text("\(pendingBundles)")
+                        .foregroundColor(.gray)
+                }
             }
 
             if sync.waitingForWiFi > 0 {
@@ -144,7 +148,7 @@ struct ControlPlaneSettingsSection: View {
         } header: {
             Text("CONTROL PLANE")
         } footer: {
-            Text("Sends the spaces you sync, with their scans and stitches, to the server: names, times, IDs, poses and focus regions, plus the map package files it asks for when on. Other spaces stay on the phone. Never photos. Never during a scan.")
+            Text("Sends the spaces you sync to the server. First their map: names, times, IDs, poses, stitches, focus regions and each scan's room layout. Then each processed scan's bundle: everything it holds, photos included, with people blurred when the Privacy Filter is on. Other spaces stay on the phone. Never during a scan.")
                 .font(.caption2)
                 .foregroundColor(.gray)
         }
@@ -156,9 +160,6 @@ struct ControlPlaneSettingsSection: View {
         }
         .onChange(of: deviceLabel) { _, _ in
             sync.requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
-        }
-        .onChange(of: sendPackages) { _, _ in
-            sync.requestSync(after: .seconds(1))
         }
         .onChange(of: autoSyncRaw) { _, _ in
             sync.requestSync(after: .seconds(1))
@@ -182,9 +183,7 @@ struct ControlPlaneSettingsSection: View {
     /// Why Settings opened at the password: the server asked, and what Done does next.
     private var passwordRequestText: String {
         let server = ControlPlaneClient.baseURL(fromHost: host)?.host() ?? "The control plane"
-        let ask = "\(server) needs its password. Enter it below, then tap Done to go on."
-        let hasUploadURL = !uploadURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return hasUploadURL ? ask + " Without one, uploads go to the upload URL above." : ask
+        return "\(server) needs its password. Enter it below, then tap Done to go on."
     }
 
     /// What Auto sync does in the chosen mode.
@@ -196,14 +195,9 @@ struct ControlPlaneSettingsSection: View {
         }
     }
 
-    /// Where the Upload buttons send exports, once a sync has said.
-    private var uploadsLine: String? {
-        guard !host.isEmpty else { return nil }
-        if case .failed = sync.status { return "While the control plane isn't working, exports go to the upload URL above, if one is set." }
-        guard let target = sync.uploadTarget else { return nil }
-        if target.revoked { return "Uploads are turned off for this device on the control plane." }
-        if target.available { return "Exports upload to the lab bucket \(target.bucket ?? "") through the control plane." }
-        return "The control plane has no upload target: exports use the upload URL above."
+    /// Scans whose bundle the server wants or couldn't unpack (the pending checklist's rows).
+    private var pendingBundles: Int {
+        BundleSync.shared.remote.values.filter { $0.wanted || $0.state == "failed" }.count
     }
 
     private var isBusy: Bool {
@@ -227,7 +221,7 @@ struct ControlPlaneSettingsSection: View {
         case .off: return "Off: no server set."
         case .idle: return "Not synced yet."
         case .syncing: return "Syncing…"
-        case .uploading(let done, let total): return "Uploading map files: \(done + 1) of \(total)…"
+        case .uploading(let done, let total): return "Uploading room layouts: \(done + 1) of \(total)…"
         case .synced(let date, let summary):
             return "Synced at \(date.formatted(date: .omitted, time: .shortened)): \(summary)."
         case .failed(let message): return message

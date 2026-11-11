@@ -505,23 +505,11 @@ private struct CompactLocationTile: View {
                 }
             }
             .overlay(alignment: .topTrailing) {
-                // Three-state upload rollup: no icon = nothing uploaded; DIMMED cloud-check =
-                // partial (1+ uploaded but not all — e.g. bulk upload's default "Latest" scope
-                // uploads only the newest scan per location); solid green = every scan
-                // uploaded. The earlier binary badge either rounded partial down (allSatisfy:
-                // read "never uploaded" forever) or up (latest-only: hid stale older scans) —
-                // the dim state is the honest middle. Per-scan detail lives in
-                // LocationDetailView.
-                let uploadedCount = location.scans.filter(\.isUploaded).count
-                if !isEditing, uploadedCount > 0 {
-                    Image(systemName: "checkmark.icloud.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(uploadedCount == location.scans.count
-                                         ? .green : .green.opacity(0.4))
-                        .padding(4)
-                        .background(Color.black.opacity(0.5))
-                        .clipShape(Circle())
-                        .padding(4)
+                // How much of the space the lab server holds (SyncBadge): none, its map, or
+                // everything. A partly sent space shows its map: the badge never claims more
+                // than is there. Per-scan detail lives on the scan cards.
+                if !isEditing {
+                    SyncBadge(location: location, compact: true)
                 }
             }
             .overlay(alignment: .bottom) {

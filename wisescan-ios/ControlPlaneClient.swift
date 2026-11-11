@@ -23,11 +23,28 @@ nonisolated struct ControlPlaneClient: Sendable {
         let scans: Int
         let links: Int
         let markedGone: Int
-        /// Map-package files the server asks for (absent from servers before map packages).
+        /// Map-package files the server asks for: the RoomPlan preview (absent from servers before
+        /// map packages).
         let wanted: [WantedFile]?
+        /// Each reported scan's bundle: what the server holds, and whether to send this device's
+        /// version (absent from servers before bundles).
+        let bundles: [BundleState]?
         /// Fine-tunes to apply: the web's edits, or the revision number of this device's own.
         let linkUpdates: [LinkUpdate]?
-        let uploadTarget: UploadTarget?
+    }
+
+    /// A scan's bundle as the server reports it (scan4d-server README, "Bundles"): `none`,
+    /// `missing`, `queued`, `ingesting`, `current`, `stale` or `failed`.
+    nonisolated struct BundleState: Decodable, Sendable {
+        let scanId: String
+        let state: String
+        let wanted: Bool
+        /// The version the server holds, or is extracting.
+        let fingerprint: String?
+        /// The version this device offered in the sync.
+        let deviceFingerprint: String?
+        let error: String?
+        let ingestedAt: String?
     }
 
     nonisolated struct WantedFile: Decodable, Sendable {
@@ -54,22 +71,6 @@ nonisolated struct ControlPlaneClient: Sendable {
         let linkId: String
         let revision: Int
         let manual: Nudge
-    }
-
-    /// Whether exports go through the server's grants (scan4d-server README, "Export uploads").
-    nonisolated struct UploadTarget: Decodable, Sendable, Equatable {
-        let available: Bool
-        let revoked: Bool
-        let bucket: String?
-    }
-
-    /// A presigned PUT for one export.
-    nonisolated struct ExportGrant: Decodable, Sendable {
-        let exportId: String
-        let method: String
-        let url: URL
-        let headers: [String: String]
-        let key: String
     }
 
     /// The server asking this device to scan a region (scan4d-server README, "Tasks").
@@ -166,26 +167,21 @@ nonisolated struct ControlPlaneClient: Sendable {
         return try await send(request, uploading: file.url)
     }
 
-    /// The export's PUT succeeded: the server checks the bucket and tells its pipelines.
-    func completeExport(_ exportId: String) async throws {
-        var request = URLRequest(url: baseURL.appending(path: "v1/exports/\(exportId)/complete"))
-        request.httpMethod = "POST"
-        _ = try await perform(request)
-    }
-
-    /// A grant to upload one export: where to PUT it and with which headers. The grant's host is
-    /// one the control plane named, so `ControlPlaneSession` may trust its certificate.
-    func exportGrant(deviceId: UUID, scanId: UUID, filename: String, contentType: String,
-                     format: String) async throws -> ExportGrant {
-        var request = URLRequest(url: baseURL.appending(path: "v1/devices/\(deviceId.uuidString)/exports"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "scan_id": scanId.uuidString, "filename": filename, "content_type": contentType, "format": format
-        ])
-        let grant: ExportGrant = try await send(request)
-        ControlPlaneSession.allow(host: grant.url.host())
-        return grant
+    /// The PUT that sends a scan's bundle (the zip is the body, streamed from its file by the
+    /// background session; `BundleSync`). With `wifiOnly` it waits for an unmetered network.
+    func bundleRequest(scanId: UUID, fingerprint: String, wifiOnly: Bool) -> URLRequest {
+        var request = URLRequest(url: baseURL.appending(path: "v1/scans/\(scanId.uuidString)/bundle"))
+        request.httpMethod = "PUT"
+        request.setValue("application/zip", forHTTPHeaderField: "Content-Type")
+        request.setValue(fingerprint, forHTTPHeaderField: "X-Scan4D-Bundle-Fingerprint")
+        let password = ControlPlaneSecret.password
+        if !password.isEmpty {
+            request.setValue("Bearer \(password)", forHTTPHeaderField: "Authorization")
+        }
+        request.allowsCellularAccess = !wifiOnly
+        request.allowsExpensiveNetworkAccess = !wifiOnly
+        request.allowsConstrainedNetworkAccess = !wifiOnly
+        return request
     }
 
     /// The device's answer to a task: "accepted" or "declined".

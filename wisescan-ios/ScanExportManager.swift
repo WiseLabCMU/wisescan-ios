@@ -668,7 +668,7 @@ struct ScanExportManager {
                               phase: ((ExportPhase) -> Void)? = nil) -> URL? {
         let fm = FileManager.default
         // A focus scan has one export, its still-capture folder, whatever the format
-        // (ScanExportManager+Focus). Every Save/Upload path reaches it through here.
+        // (ScanExportManager+Focus). Every Share and sync-bundle path reaches it through here.
         if fm.fileExists(atPath: scanDir.appendingPathComponent(AppConstants.focusCaptureFolder).path) {
             return prepareFocusExport(filename: filename, scanDir: scanDir, phase: phase)
         }
@@ -754,9 +754,10 @@ struct ScanExportManager {
             // Nerfstudio dataset, flame3d-core's input) are built from it on the lab server
             // (scan4d-flows: scan4d-normalize, scan4d-convert), and so are debiasing, hole
             // filling, seeding and every other training-side prior.
-            // The opaque ARWorldMap itself is NOT exported — it is an on-device bootstrap only
-            // (rescan/link relocalization still read it from scanDir); what ships instead is the
-            // feature cloud serialized from it, which downstream consumers can actually read.
+            // It is also the scan's sync bundle (BundleSync; docs/design/sync-bundle.md), so it
+            // carries what only the phone kept too: the relocalization map (arworldmap.map, what
+            // lets another device load the map), the raw colors.bin, and the ghost proxy and
+            // dynamic meshes. Their names are the map-package names the lab server reads.
             return withStagingDir { stagingDir in
                 if let metaURL = findMetadata() {
                     do {
@@ -855,6 +856,31 @@ struct ScanExportManager {
                         print("[prepareExport] ✓ included \(artifact)")
                     } catch {
                         print("[prepareExport] ✗ failed to copy \(artifact): \(error.localizedDescription)")
+                    }
+                }
+
+                // What only the phone kept until bundles: the relocalization map (RAW frame, like
+                // cameras/), the ghost proxy and dynamic meshes (canonical, like mesh.obj; top level,
+                // else raw_data/), and colors.bin, the mesh's colours per vertex, which the lab's 3D
+                // view draws. colors.bin holds the normals preview until the scan is colorized, and
+                // the preview never ships, so it goes only with captured colours.
+                var phoneOnly: [(name: String, candidates: [URL])] = [
+                    ("arworldmap.map", [scanDir.appendingPathComponent("arworldmap.map")]),
+                    ("mesh_proxy.obj", [scanDir.appendingPathComponent("mesh_proxy.obj"),
+                                        rawDataDir.appendingPathComponent("mesh_proxy.obj")]),
+                    ("mesh_dynamic.obj", [scanDir.appendingPathComponent("mesh_dynamic.obj"),
+                                          rawDataDir.appendingPathComponent("mesh_dynamic.obj")])
+                ]
+                if vertexColorsFromCapture {
+                    phoneOnly.append(("colors.bin", [scanDir.appendingPathComponent("colors.bin")]))
+                }
+                for (name, candidates) in phoneOnly {
+                    guard let src = candidates.first(where: { fm.fileExists(atPath: $0.path) }) else { continue }
+                    do {
+                        try fm.copyItem(at: src, to: stagingDir.appendingPathComponent(name))
+                        print("[prepareExport] ✓ included \(name)")
+                    } catch {
+                        print("[prepareExport] ✗ failed to copy \(name): \(error.localizedDescription)")
                     }
                 }
 

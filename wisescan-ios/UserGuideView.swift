@@ -44,7 +44,8 @@ struct UserGuideView: View {
                               "location's shared coordinate frame and prepares the rescan ghost. Tap " +
                               "'Color' on a scan card to color its mesh from your photos (it finishes any " +
                               "processing still left first); long-press it to re-run processing. If a scan " +
-                              "isn't processed yet, Upload, Save and Rescan ask to process it first."
+                              "isn't processed yet, Share and Rescan ask to process it first, and its " +
+                              "bundle for the lab server waits until it is."
                     )
                     guideRow(
                         icon: "5.circle.fill",
@@ -74,7 +75,7 @@ struct UserGuideView: View {
                               "scan stops and keeps the photos taken so far. " +
                               "Photos are taken only while the box is in view; the dial fills with " +
                               "the directions you have covered. The result is a partial scan in the same " +
-                              "location (no mesh of its own) that you can save or upload like any other. " +
+                              "location (no mesh of its own) that you can share or sync like any other. " +
                               "Once a space has focus scans, its list switches between Room, Focus and All " +
                               "(Room is the default; the list opens on a scan you just saved). " +
                               "A region file from another tool can be imported from the same menu. " +
@@ -92,22 +93,23 @@ struct UserGuideView: View {
                     )
                     guideRow(
                         icon: "7.circle.fill",
-                        title: "Save or Upload",
-                        text: "Save locally to Files, AirDrop to another device, or upload to your " +
-                              "configured server. A cloud badge on each location shows upload state: " +
-                              "solid when every scan is uploaded, dimmed when only some are " +
-                              "(Troubleshooting, below, explains every badge). An upload " +
-                              "keeps going if you lock the screen or switch apps, and the screen stays " +
-                              "on while a scan is being converted. With a " +
-                              "control plane server set in Settings, the app also keeps your lab's " +
-                              "server up to date with the spaces you sync: tap Sync to Lab Server in " +
-                              "a space, or Sync on a stitched map in the graph view. Settings > Auto " +
-                              "sync adds every space (All), the ones you start after joining (New, " +
-                              "the default) or none (Off). It sends names, times, poses, the " +
-                              "small files the server reads, and a room's mesh (with its colors) or map when the lab " +
-                              "asks for it, over Wi-Fi; no photos, and never during a scan. If the server " +
-                              "wants its password, Upload and Sync open Settings at the password field " +
-                              "first, then carry on when you tap Done."
+                        title: "Share or Sync",
+                        text: "Share sends the selected format to another app or device: Files, AirDrop, " +
+                              "Mail. The screen stays on while a scan is being converted. Sync keeps your " +
+                              "lab's server up to date with everything in the spaces you sync. Set the " +
+                              "server in Settings > Control plane, then tap Sync to Lab Server in a space, " +
+                              "or Sync on a stitched map in the graph view; Settings > Auto sync adds every " +
+                              "space (All), the ones you start after joining (New, the default) or none " +
+                              "(Off). The server gets each space's map first: names, times, poses, links " +
+                              "and room layouts. Then each processed scan goes up as one bundle, photos " +
+                              "included, with people blurred when the Privacy Filter is on. A bundle keeps " +
+                              "going if you lock the screen or switch apps. Bundles wait for Wi-Fi unless " +
+                              "you turn that off, and you choose which go in Settings > Control plane > " +
+                              "Pending bundles; nothing goes during a scan. A cloud on each space shows " +
+                              "what the server has: an outline for its map, a green check for everything, " +
+                              "an arrow while a bundle goes up (Troubleshooting, below, explains every " +
+                              "badge). If the server wants its password, Sync opens Settings at the " +
+                              "password field first, then carries on when you tap Done."
                     )
                 } header: {
                     Text("HOW TO USE")

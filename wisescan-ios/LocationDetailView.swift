@@ -42,7 +42,6 @@ struct LocationDetailView: View {
     /// the user taps delete). > 0 means the cascade will silently remove those spatial links.
     @State private var bulkDeleteLinkedMapCount = 0
     @State private var showSettings = false
-    @State private var passwordPrompt: ControlPlanePendingAction?
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
     @State private var showNoWorldMapAlert = false
@@ -65,7 +64,6 @@ struct LocationDetailView: View {
     /// so the user can choose to color only the uncolored ones or recolor everything.
     @State private var showBulkColorMixedPrompt = false
     /// Shown when a bulk-upload selection mixes already-uploaded and un-uploaded scans.
-    @State private var showBulkUploadMixedPrompt = false
     /// Per-scan coloring progress during a bulk colorize, keyed by scan id. SwiftUI @State so the
     /// cards reliably re-render as it updates (a SwiftData @Transient model prop is not observed).
     @State private var bulkColoringMessages: [PersistentIdentifier: String] = [:]
@@ -75,7 +73,6 @@ struct LocationDetailView: View {
     @State private var bulkExportPhases: [PersistentIdentifier: ExportPhase] = [:]
 
     @AppStorage(AppConstants.Key.locationScanFilter) private var scanFilterRaw = ScanListFilter.room.rawValue
-    @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
@@ -204,7 +201,7 @@ struct LocationDetailView: View {
                                 }
                             }
 
-                            // Control plane: send this space to the lab server, as Upload sends an export.
+                            // Control plane: keep this space in sync with the lab server.
                             if ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil {
                                 ControlPlaneSpaceSyncButton(spaceIds: [location.id])
                             }
@@ -261,7 +258,6 @@ struct LocationDetailView: View {
                                 ScanCard(
                                     scan: scan,
                                     isLatest: index == 0,
-                                    uploadURL: uploadURL,
                                     isEditing: isEditing,
                                     isSelected: selectedScans.contains(scan.id),
                                     bulkColoringMessage: bulkColoringMessages[scan.id],
@@ -374,7 +370,6 @@ struct LocationDetailView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
-        .controlPlanePasswordPrompt($passwordPrompt)
         .sheet(isPresented: $showExportSheet) {
             ShareSheet(activityItems: exportItems.map { $0.url }) { _, _, _, _ in
                 // Cleanup
@@ -504,16 +499,6 @@ struct LocationDetailView: View {
             colored: selectedColorSplit.colored,
             colorize: { bulkPostprocess(scans: $0, colorize: true) }
         ))
-        .modifier(BulkUploadMixedDialog(
-            isPresented: $showBulkUploadMixedPrompt,
-            notUploaded: selectedUploadSplit.notUploaded,
-            uploaded: selectedUploadSplit.uploaded,
-            upload: { scans in
-                bulkUpload(scans: scans)
-                isEditing = false
-                selectedScans.removeAll()
-            }
-        ))
         .confirmationDialog(
             "Delete Scans",
             isPresented: $showBulkDeleteConfirm
@@ -588,7 +573,7 @@ struct LocationDetailView: View {
         guard !isBulkExporting else { return }   // re-entrancy: double-tap = concurrent exports (OOM class)
         guard !scans.isEmpty else { return }
         // DECISION 3 hard gate: never export a scan with pending structural post-process work
-        // (mirrors requestBulkUpload — the export zip is the same bundle upload sends).
+        // (a Scan4D export is the same bundle Sync sends, which waits for processing too).
         if scans.contains(where: { ScanPostprocessor.needsPostprocess($0) }) {
             showPostprocessGate = true
             return
@@ -638,74 +623,6 @@ struct LocationDetailView: View {
         }
     }
 
-    /// The control plane hands out upload destinations; the manual URL is the fallback.
-    private var uploadsConfigured: Bool {
-        ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost)
-    }
-
-    private func bulkUpload(scans: [CapturedScan]) {
-        // Re-entrancy: this view tracks per-scan status (no bulk flag) — refuse while any
-        // selected scan's export/upload is already in flight.
-        guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
-        guard !scans.isEmpty, uploadsConfigured else { return }
-        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) { startBulkUpload(scans: scans) }
-    }
-
-    /// The batch, once `bulkUpload` has passed its checks and any password prompt.
-    private func startBulkUpload(scans: [CapturedScan]) {
-        guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
-        let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
-        let locationIds = Set(scans.compactMap { $0.location?.id })
-
-        // In flight from the start, so the guard above holds while colorize runs.
-        for scan in scans { scan.uploadStatus = .zipping }
-        Task { @MainActor in
-            // Exports ship the mesh's captured colors: colorize any scan that isn't yet.
-            await ScanExportManager.colorizeForExport(
-                scans, modelContext: modelContext,
-                progress: { scan, msg in bulkExportPhases[scan.id] = msg.map { ExportPhase($0) } })
-            // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
-            let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
-            for scan in scans {
-                // Where it goes: the control plane's grant, or the manual Upload URL.
-                let target: ExportUploadTarget
-                do {
-                    target = try await ExportUploadTarget.resolve(
-                        scanId: scan.id, filename: scan.makeExportFilename(format: format),
-                        contentType: format.effective(for: scan).contentType, format: format, manualURL: uploadURL)
-                } catch {
-                    scan.uploadStatus = .failed(error.localizedDescription)
-                    continue
-                }
-                scan.uploadStatus = .zipping
-                let colorsFromCapture = scan.isColored
-
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let filename = scan.makeExportFilename(format: format)
-                    guard let exportURL = ScanExportManager.prepareExport(
-                        filename: filename, scanDir: scan.scanDirectory, format: format,
-                        vertexColorsFromCapture: colorsFromCapture, bulkStitch: bulkStitch,
-                        phase: { step in DispatchQueue.main.async { bulkExportPhases[scan.id] = step } }
-                    ) else {
-                        DispatchQueue.main.async {
-                            self.bulkExportPhases[scan.id] = nil
-                            scan.uploadStatus = .failed("Export failed")
-                        }
-                        return
-                    }
-
-                    DispatchQueue.main.async {
-                        self.bulkExportPhases[scan.id] = nil
-                        scan.uploadStatus = .uploading(progress: 0.0)
-                        // Background transfer; the uploader sets the scan's status (see ExportUploader).
-                        ExportUploader.shared.upload(exportURL, request: target.request, scanId: scan.id,
-                                                     exportId: target.exportId)
-                    }
-                }
-            }
-        }
-    }
-
     // MARK: - Bottom Action Toolbar
     @ViewBuilder
     private func bottomActionToolbar(sortedScans: [CapturedScan]) -> some View {
@@ -728,25 +645,14 @@ struct LocationDetailView: View {
             .disabled(selectedScans.isEmpty)
 
             Button(action: {
-                requestBulkUpload(sortedScans: sortedScans)
-            }, label: {
-                Text("Upload")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(selectedScans.isEmpty || !uploadsConfigured ? Color.gray.opacity(0.3) : Color.blue)
-                    .foregroundColor(selectedScans.isEmpty || !uploadsConfigured ? .gray : .white)
-                    .cornerRadius(10)
-            })
-            .disabled(selectedScans.isEmpty || !uploadsConfigured)
-
-            Button(action: {
                 let scansToSave = sortedScans.filter { selectedScans.contains($0.id) }
                 bulkSaveToFiles(scans: scansToSave)
                 isEditing = false
                 selectedScans.removeAll()
             }, label: {
-                Text("Save")
+                // Share: the selected format's files, to the share sheet. The lab server gets
+                // the space through its Sync button.
+                Text("Share")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -793,34 +699,6 @@ struct LocationDetailView: View {
     private var selectedColorSplit: (uncolored: [CapturedScan], colored: [CapturedScan]) {
         let selected = location.scans.filter { selectedScans.contains($0.id) }
         return (selected.filter { !$0.isColored }, selected.filter { $0.isColored })
-    }
-
-    /// Selected scans, split into already-uploaded and not-yet-uploaded.
-    private var selectedUploadSplit: (notUploaded: [CapturedScan], uploaded: [CapturedScan]) {
-        let selected = location.scans.filter { selectedScans.contains($0.id) }
-        return (selected.filter { !$0.isUploaded }, selected.filter { $0.isUploaded })
-    }
-
-    /// Entry point for the bulk Upload button. Uploads directly when the selection is
-    /// uniform (all uploaded or all un-uploaded); when it's mixed, prompts the user.
-    private func requestBulkUpload(sortedScans: [CapturedScan]) {
-        let scansToUpload = sortedScans.filter { selectedScans.contains($0.id) }
-        // DECISION 3 hard gate: never upload a scan with pending structural post-process work
-        // (its roomplan/registration/proxy artifacts would be missing from the export).
-        if scansToUpload.contains(where: { ScanPostprocessor.needsPostprocess($0) }) {
-            showPostprocessGate = true
-            return
-        }
-        let split = (notUploaded: scansToUpload.filter { !$0.isUploaded },
-                     uploaded: scansToUpload.filter { $0.isUploaded })
-        guard !scansToUpload.isEmpty else { return }
-        if split.notUploaded.isEmpty || split.uploaded.isEmpty {
-            bulkUpload(scans: scansToUpload)
-            isEditing = false
-            selectedScans.removeAll()
-        } else {
-            showBulkUploadMixedPrompt = true
-        }
     }
 
     // MARK: - Post-process (DECISION 3)
@@ -1084,28 +962,6 @@ private struct BulkColorMixedDialog: ViewModifier {
         } message: {
             Text("\(colored.count) of the selected scans are already colored. " +
                  "Color only the uncolored scans, or recolor everything?")
-        }
-    }
-}
-
-private struct BulkUploadMixedDialog: ViewModifier {
-    @Binding var isPresented: Bool
-    let notUploaded: [CapturedScan]
-    let uploaded: [CapturedScan]
-    let upload: ([CapturedScan]) -> Void
-
-    func body(content: Content) -> some View {
-        content.confirmationDialog(
-            "Upload Scans",
-            isPresented: $isPresented,
-            titleVisibility: .visible
-        ) {
-            Button("Upload \(notUploaded.count) Un-uploaded Only") { upload(notUploaded) }
-            Button("Re-upload All \(notUploaded.count + uploaded.count)") { upload(notUploaded + uploaded) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("\(uploaded.count) of the selected scans have already been uploaded. " +
-                 "Upload only the un-uploaded scans, or re-upload everything?")
         }
     }
 }

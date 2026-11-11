@@ -33,7 +33,7 @@ makes those layouts from the Scan4D export, in the flows repo (scan4d-flows, the
 ## What it costs
 
 - **No zip that trains as-is straight from the phone.** A laptop user gets it from the
-  server, or runs `scan4d-normalize`'s `normalize.py` on the export.
+  server, or runs [tools/scan4d-convert](../../tools/scan4d-convert/README.md) on the Scan4D file.
 - **Bigger uploads for 360° captures.** Scan4D keeps the equirect originals, which the
   Nerfstudio export dropped. The server's Nerfstudio zip still leaves them out.
 - **Every export colorizes first.** Scan4D now carries the mesh, so an uncolored scan is

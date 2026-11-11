@@ -8,8 +8,9 @@ import SwiftData
 /// missed or failed one heals on the next and neither side tracks changes.
 ///
 /// Metadata: names, times, IDs, poses, the focus box, whether each scan had the Privacy Filter on,
-/// and which map-package files each scan has (the files themselves go up separately, when the
-/// server asks; `ControlPlaneSync`). No images.
+/// the RoomPlan preview's version, and each settled scan's bundle version. The files go up
+/// separately: the preview when the server asks, the bundle (everything else, images included)
+/// through `BundleSync`.
 nonisolated struct ControlPlaneManifest: Encodable, Sendable {
     var version = 1
     var device: Device
@@ -51,16 +52,23 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
         var stillCount: Int
         var registration: Registration?  // read from disk off main (`readScanFiles`)
         var focusRegion: FocusRegion?
-        var upload: Upload
         var files: [PackageFile] = []    // read from disk off main (`readScanFiles`)
         /// Whether the Privacy Filter was on for this capture, as the scan recorded it; left out
         /// (nil) when it can't tell, as for scans older than the flag. Read from disk off main
         /// (`readScanFiles`). Lets the server show which scans may have people unblurred.
         var privacyFilter: Bool?
+        var bundle: BundleOffer?         // read from disk off main (`readScanFiles`), once settled
     }
 
-    /// A map-package file this scan has (scan4d-server README, "Map packages"). The server
-    /// answers with the ones it wants; size and time tell it which version it holds.
+    /// The version of the scan's bundle this device holds (scan4d-server README, "Bundles"):
+    /// offered once the scan is processed; the reply says whether the server wants it.
+    nonisolated struct BundleOffer: Encodable, Sendable {
+        var fingerprint: String
+        var size: Int64
+    }
+
+    /// A map-package file this scan has (scan4d-server README, "Map packages"): the RoomPlan
+    /// preview. The server answers when it wants it; size and time tell it which version it holds.
     nonisolated struct PackageFile: Encodable, Sendable {
         var name: String
         var size: Int64
@@ -81,12 +89,6 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
         var applied: Bool
         var transform: [Float]?       // column-major; present iff applied
         var targetScanId: String?     // the space's base scan
-    }
-
-    nonisolated struct Upload: Encodable, Sendable {
-        var status: String
-        var lastUploadedAt: Date?
-        var format: String
     }
 
     nonisolated struct Link: Encodable, Sendable {
@@ -120,13 +122,15 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
     }
 
     /// Where a scan's files are, captured on main with the snapshot. `package`: each map-package
-    /// file's name and where to look for it, first match wins.
+    /// file's name and where to look for it, first match wins. `settled`: processed, so its
+    /// bundle version is offered.
     nonisolated struct ScanFiles: Sendable {
         var directory: URL
         var worldMap: URL
         var package: [(name: String, candidates: [URL])]
         /// Where the scan recorded its Privacy Filter state.
         var privacyRecord: PrivacyRecord?
+        var settled = false
     }
 
     /// A room scan records the filter in raw_data/ (segmentation masks exist only when it was
@@ -144,10 +148,11 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
         return encoder
     }
 
-    /// Fills the file-backed fields. File I/O, so off main. With `packages`, lists each scan's
-    /// map-package files and returns where they are, for the uploads the server then asks for.
+    /// Fills the file-backed fields. File I/O, so off main. Lists each scan's map-package files
+    /// and returns where they are, for the uploads the server then asks for, and fingerprints each
+    /// settled scan's bundle (`ScanBundle.version`).
     @discardableResult
-    mutating func readScanFiles(_ files: [UUID: ScanFiles], packages: Bool) -> [UUID: [String: LocalFile]] {
+    mutating func readScanFiles(_ files: [UUID: ScanFiles]) -> [UUID: [String: LocalFile]] {
         let fm = FileManager.default
         var local: [UUID: [String: LocalFile]] = [:]
         for l in locations.indices {
@@ -157,7 +162,9 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
                 locations[l].scans[s].hasWorldMap = fm.fileExists(atPath: paths.worldMap.path)
                 locations[l].scans[s].registration = Self.readRegistration(scanDirectory: paths.directory)
                 locations[l].scans[s].privacyFilter = paths.privacyRecord.flatMap(Self.readPrivacyFilter)
-                guard packages else { continue }
+                if paths.settled, let version = ScanBundle.version(scanDirectory: paths.directory) {
+                    locations[l].scans[s].bundle = BundleOffer(fingerprint: version.fingerprint, size: version.size)
+                }
                 for (name, candidates) in paths.package {
                     guard let found = candidates.lazy.compactMap(Self.localFile).first else { continue }
                     locations[l].scans[s].files.append(PackageFile(name: name, size: found.size,
@@ -225,10 +232,12 @@ extension ControlPlaneManifest {
         let entries = locations.map { location -> Location in
             let base = location.roomScans.min(by: CapturedScan.canonicalOrder)
             let scans = location.scans.sorted(by: CapturedScan.canonicalOrder).map { scan -> Scan in
+                // A focus scan is complete as saved; a room scan once its structural steps are done.
                 files[scan.id] = ScanFiles(directory: scan.scanDirectory, worldMap: scan.worldMapURL,
                                            package: packageCandidates(scan),
                                            privacyRecord: scan.isFocusScan ? .focus(captureFolder: scan.focusCaptureURL)
-                                                                           : .room(rawData: scan.rawDataPath))
+                                                                           : .room(rawData: scan.rawDataPath),
+                                           settled: scan.isFocusScan || !ScanPostprocessor.needsPostprocess(scan))
                 return Scan(scanId: scan.id,
                             kind: scan.isFocusScan ? "focus" : "room",
                             name: scan.name,
@@ -237,10 +246,7 @@ extension ControlPlaneManifest {
                             captureSource: scan.hardwareDeviceModel,
                             worldMapSuspect: scan.worldMapSuspect,
                             stillCount: scan.stillCount,
-                            focusRegion: scan.isFocusScan ? scan.focusRegion : nil,
-                            upload: Upload(status: uploadStatusName(scan.uploadStatus),
-                                           lastUploadedAt: scan.lastUploadedAt,
-                                           format: scan.selectedFormat.rawValue))
+                            focusRegion: scan.isFocusScan ? scan.focusRegion : nil)
             }
             return Location(locationId: location.id, name: location.name, updatedAt: location.updatedAt,
                             baseScanId: base?.id, tipScanId: location.latestRoomScan?.id, scans: scans)
@@ -289,46 +295,14 @@ extension ControlPlaneManifest {
         Manual(yawDeg: Double(nudge.yawDeg), dx: Double(nudge.dx), dy: Double(nudge.dy), dz: Double(nudge.dz))
     }
 
-    /// A scan's map-package files (scan4d-server README, "Map packages"), smallest first. Room
-    /// scans: the registration and room layout (top level, else raw_data/ like the export), the
-    /// relocalization map, the mesh. Focus scans: the region.
+    /// A scan's map-package files sent on their own (scan4d-server README, "Map packages"): only
+    /// the RoomPlan preview (top level, else raw_data/ like the export), a few KB that give the
+    /// lab a quick sense of the map before any bundle lands. Everything else, the focus region's
+    /// file included, goes in the scan's bundle.
     @MainActor
     static func packageCandidates(_ scan: CapturedScan) -> [(name: String, candidates: [URL])] {
-        let dir = scan.scanDirectory
-        let raw = dir.appendingPathComponent("raw_data")
-        if scan.isFocusScan {
-            return [(AppConstants.focusRegionFilename, [scan.focusRegionFileURL])]
-        }
-        return [
-            ("registration.json", [dir.appendingPathComponent("registration.json"),
-                                   raw.appendingPathComponent("registration.json")]),
-            ("roomplan.json", [scan.roomPlanFileURL, raw.appendingPathComponent("roomplan.json")]),
-            ("arworldmap.map", [scan.worldMapURL]),
-            ("mesh.obj", [scan.meshFileURL]),
-            // The mesh's vertex colours from the Color step (exports merge them in; mesh.obj never
-            // carries them). The server asks for them together with the mesh.
-            ("colors.bin", [scan.colorsFileURL]),
-            // The preview's other mesh sources (MeshSourceMode), written at Post-process: the ghost
-            // proxy and the dynamic (content-only) mesh. The lab's 3D view asks for them.
-            ("mesh_proxy.obj", [dir.appendingPathComponent("mesh_proxy.obj"), raw.appendingPathComponent("mesh_proxy.obj")]),
-            ("mesh_dynamic.obj", [dir.appendingPathComponent("mesh_dynamic.obj"),
-                                  raw.appendingPathComponent("mesh_dynamic.obj")]),
-            // What the change evaluator joins on id, and (once recorded) where the sweep looked.
-            (FeaturePointCloudFile.filename, [dir.appendingPathComponent(FeaturePointCloudFile.filename)]),
-            ("sweep_coverage.bin", [dir.appendingPathComponent("sweep_coverage.bin")])
-        ]
-    }
-
-    /// The stored status without its failure message: what the fleet view sorts on.
-    @MainActor
-    static func uploadStatusName(_ status: UploadStatus) -> String {
-        switch status {
-        case .pending: return "pending"
-        case .zipping: return "zipping"
-        case .uploading: return "uploading"
-        case .savedLocally: return "saved_locally"
-        case .success: return "success"
-        case .failed: return "failed"
-        }
+        guard !scan.isFocusScan else { return [] }
+        let raw = scan.scanDirectory.appendingPathComponent("raw_data")
+        return [("roomplan.json", [scan.roomPlanFileURL, raw.appendingPathComponent("roomplan.json")])]
     }
 }

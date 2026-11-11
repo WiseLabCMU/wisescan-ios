@@ -19,8 +19,8 @@ class CapturedScan {
     var uploadStatusStr: String
     var uploadProgress: Double
     var isColored: Bool = false
-    /// Timestamp of the last successful upload to the server. `nil` means never uploaded.
-    /// Updated automatically on HTTP 2xx; persists across launches for server cross-reference.
+    /// When an app before bundles last uploaded this scan's export. Nothing sets it now: what the
+    /// lab server holds comes from the sync (`BundleSync`). Kept because SwiftData persists it.
     var lastUploadedAt: Date?
     /// DECISION 3: timestamp of the last completed Post-process run (structural steps — room /
     /// registration / proxy — done to the tier achievable for this scan). `nil` = never run; the
@@ -136,16 +136,6 @@ class CapturedScan {
     @Transient var focusRegion: FocusRegion? {
         get { focusRegionJSON.isEmpty ? nil : FocusRegion.decode(Data(focusRegionJSON.utf8)) }
         set { focusRegionJSON = newValue?.encoded().flatMap { String(data: $0, encoding: .utf8) } ?? "" }
-    }
-
-    @Transient var isUploaded: Bool { lastUploadedAt != nil }
-
-    @Transient var formattedUploadDate: String? {
-        guard let date = lastUploadedAt else { return nil }
-        let fmt = DateFormatter()
-        fmt.dateStyle = .medium
-        fmt.timeStyle = .short
-        return fmt.string(from: date)
     }
 
     // Configurable base Directory

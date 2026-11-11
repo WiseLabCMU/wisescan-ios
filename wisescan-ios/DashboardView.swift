@@ -1,13 +1,10 @@
 import SwiftUI
 
 struct DashboardView: View {
-    @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.developerMode) private var developerMode = false
     @State private var showSettings = false
     @State private var serverStatus: ServerStatus = .unknown
-    /// The control plane didn't answer and there is an Upload URL: the card shows that instead.
-    @State private var controlPlaneDown = false
     @State private var wearableManager = MetaWearableManager.shared
     @State private var thetaManager = ThetaCameraManager.shared
     @State private var bleManager = ThetaBLEManager.shared
@@ -28,7 +25,7 @@ struct DashboardView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
 
-                        // Upload Server Status Card
+                        // Lab Server Status Card
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
                                 Image(systemName: serverStatusIcon)
@@ -37,7 +34,7 @@ struct DashboardView: View {
                                     .frame(width: 40)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(usesControlPlane && !controlPlaneDown ? "Control Plane" : "Upload Server")
+                                    Text("Lab Server")
                                         .font(.headline)
                                         .foregroundColor(.white)
                                     Text(serverStatusLabel)
@@ -292,61 +289,22 @@ struct DashboardView: View {
         }
     }
 
-    /// With a control plane set it is the server that matters: it hands out upload destinations.
-    /// While it is down, exports go to the Upload URL (ExportUploadTarget), so that is checked.
-    private var usesControlPlane: Bool { ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil }
-
-    private var serverConfigured: Bool { usesControlPlane || !uploadURL.isEmpty }
+    /// The lab server (the control plane): what Sync sends spaces and their bundles to.
+    private var serverConfigured: Bool { ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil }
 
     private var serverCaption: String {
-        if usesControlPlane && controlPlaneDown { return "Control plane unreachable — uploading to \(uploadURL)" }
-        if usesControlPlane { return controlPlaneHost }
-        return uploadURL.isEmpty ? "No upload server configured — set in Settings" : uploadURL
+        serverConfigured ? controlPlaneHost : "No lab server set: Settings → Control plane"
     }
 
     private func checkServer() {
-        if usesControlPlane {
-            serverStatus = .checking
-            Task {
-                let reachable = await ControlPlaneSync.shared.isReachable()
-                controlPlaneDown = !reachable && !uploadURL.isEmpty
-                if controlPlaneDown {
-                    checkUploadURL()
-                } else {
-                    serverStatus = reachable ? .available : .unavailable
-                }
-            }
-            return
-        }
-        controlPlaneDown = false
-        checkUploadURL()
-    }
-
-    /// Any HTTP answer from the Upload URL counts as reachable.
-    private func checkUploadURL() {
-        guard !uploadURL.isEmpty, let url = URL(string: uploadURL) else {
+        guard serverConfigured else {
             serverStatus = .unknown
             return
         }
-
         serverStatus = .checking
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = 5
-
-        URLSession.shared.dataTask(with: request) { _, response, _ in
-            DispatchQueue.main.async {
-                if let httpResponse = response as? HTTPURLResponse,
-                   (200...499).contains(httpResponse.statusCode) {
-                    // Any HTTP response means server is reachable
-                    // (even 4xx means the server itself is running)
-                    serverStatus = .available
-                } else {
-                    serverStatus = .unavailable
-                }
-            }
-        }.resume()
+        Task {
+            serverStatus = await ControlPlaneSync.shared.isReachable() ? .available : .unavailable
+        }
     }
 }
 

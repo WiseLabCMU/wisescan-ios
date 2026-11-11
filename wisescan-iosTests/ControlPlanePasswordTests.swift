@@ -2,12 +2,12 @@ import Foundation
 import XCTest
 @testable import wisescan_ios
 
-/// The control plane host's TestFlight default and the password prompt's rule: a tapped Upload or
-/// Sync waits for Settings only when its server has refused a request for want of a password.
+/// The control plane host's TestFlight default and the password prompt's rule: a tapped Sync
+/// waits for Settings only when its server has refused a request for want of a password.
 @MainActor
 final class ControlPlanePasswordTests: XCTestCase {
 
-    /// Only TestFlight builds start with the lab's control plane set, as with the Upload URL;
+    /// Only TestFlight builds start with the lab's control plane set;
     /// tests, like Xcode and App Store builds, start with none.
     func testControlPlaneHostIsEmptyOutsideTestFlight() {
         XCTAssertFalse(AppConstants.isTestFlight)
@@ -38,7 +38,7 @@ final class ControlPlanePasswordTests: XCTestCase {
         XCTAssertFalse(ControlPlaneSecret.isWanted(by: lab))
     }
 
-    /// A tapped Upload or Sync runs at once unless its server wants a password the phone lacks;
+    /// A tapped Sync runs at once unless its server wants a password the phone lacks;
     /// then it waits for the prompt, which runs it when Settings closes.
     func testTappedActionWaitsOnlyForAWantedPassword() throws {
         let key = AppConstants.Key.controlPlanePasswordWanted

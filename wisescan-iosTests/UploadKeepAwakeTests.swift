@@ -1,55 +1,41 @@
 import Foundation
+import SwiftData
 import UIKit
 import XCTest
 @testable import wisescan_ios
 
-/// The device-side rules behind finishing uploads with the screen locked and flashing for every
-/// saved still: what a background transfer carries, how its result reads, which scans a relaunch
-/// marks interrupted, the screen-awake holders, and the flash strengths.
+/// The device-side rules behind keeping the screen on and flashing for every saved still: which
+/// scans a relaunch marks interrupted, the screen-awake holders, and the flash strengths.
 @MainActor
 final class UploadKeepAwakeTests: XCTestCase {
 
-    // MARK: ExportUploader
+    // MARK: InterruptedExports
 
-    func testTicketRoundTripsThroughTheTaskDescription() throws {
-        let ticket = ExportUploader.Ticket(scanId: UUID(), exportId: "exp-42", file: "ABC-scan.zip")
-        let description = try XCTUnwrap(ticket.encoded)
-        XCTAssertEqual(ExportUploader.Ticket.decode(description), ticket)
-        let manual = ExportUploader.Ticket(scanId: UUID(), exportId: nil, file: "x.zip")
-        XCTAssertEqual(ExportUploader.Ticket.decode(manual.encoded), manual)
-    }
+    /// At launch no process is building an export any more, and nothing sends an older build's
+    /// upload. Before this sweep such scans stayed in flight and refused every retry.
+    func testLaunchSweepFailsOnlyWhatDiedWithTheApp() throws {
+        XCTAssertTrue(InterruptedExports.isInterrupted(status: "zipping"))
+        XCTAssertTrue(InterruptedExports.isInterrupted(status: "uploading"))
+        for done in ["pending", "savedLocally", "success", "failed:Export failed"] {
+            XCTAssertFalse(InterruptedExports.isInterrupted(status: done), done)
+        }
 
-    /// A task from some other code path, or none at all, is not ours to act on.
-    func testForeignTaskDescriptionsAreIgnored() {
-        XCTAssertNil(ExportUploader.Ticket.decode(nil))
-        XCTAssertNil(ExportUploader.Ticket.decode(""))
-        XCTAssertNil(ExportUploader.Ticket.decode("upload of scan 7"))
-        XCTAssertNil(ExportUploader.Ticket.decode(#"{"scanId":"not-a-uuid","file":"a.zip"}"#))
-    }
+        let container = try ModelContainer(for: ScanLocation.self, CapturedScan.self,
+                                           configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+        let context = container.mainContext
+        let converting = CapturedScan(name: "converting", vertexCount: 0, faceCount: 0)
+        let orphaned = CapturedScan(name: "an older build's upload", vertexCount: 0, faceCount: 0)
+        let shared = CapturedScan(name: "shared", vertexCount: 0, faceCount: 0)
+        for scan in [converting, orphaned, shared] { context.insert(scan) }
+        converting.uploadStatus = .zipping
+        orphaned.uploadStatus = .uploading(progress: 0.3)
+        shared.uploadStatus = .savedLocally
 
-    func testOnlyA2xxWithoutAnErrorIsSuccess() {
-        XCTAssertEqual(ExportUploader.Outcome.of(statusCode: 200, error: nil), .success)
-        XCTAssertEqual(ExportUploader.Outcome.of(statusCode: 204, error: nil), .success)
-        // An expired grant answers 403; the code is kept so the card says why.
-        XCTAssertEqual(ExportUploader.Outcome.of(statusCode: 403, error: nil), .failed("Server error (403)"))
-        XCTAssertEqual(ExportUploader.Outcome.of(statusCode: nil, error: nil), .failed("No response"))
-        let lost = URLError(.networkConnectionLost)
-        XCTAssertEqual(ExportUploader.Outcome.of(statusCode: 200, error: lost), .failed(lost.localizedDescription))
-    }
-
-    /// At launch: no process is building a zip any more, and an upload with no transfer left
-    /// will never finish. Before this sweep such scans stayed in flight and refused every retry.
-    func testLaunchSweepFailsOnlyWhatDiedWithTheApp() {
-        let converting = UUID(), orphaned = UUID(), stillSending = UUID()
-        let stale = ExportUploader.interrupted(
-            inFlight: [(id: converting, status: "zipping"), (id: orphaned, status: "uploading"),
-                       (id: stillSending, status: "uploading")],
-            liveScanIds: [stillSending])
-        XCTAssertEqual(Set(stale), [converting, orphaned])
-        // A live transfer cannot rescue a zip build: the zip was never handed to it.
-        XCTAssertEqual(ExportUploader.interrupted(inFlight: [(id: converting, status: "zipping")],
-                                                  liveScanIds: [converting]), [converting])
-        XCTAssertTrue(ExportUploader.interrupted(inFlight: [], liveScanIds: [UUID()]).isEmpty)
+        InterruptedExports.sweep(context)
+        XCTAssertEqual(converting.uploadStatus, .failed(InterruptedExports.message))
+        XCTAssertEqual(orphaned.uploadStatus, .failed(InterruptedExports.message))
+        XCTAssertEqual(shared.uploadStatus, .savedLocally)
+        XCTAssertFalse(converting.uploadStatus.isInFlight, "Share can run again")
     }
 
     // MARK: ScreenAwake
@@ -73,7 +59,7 @@ final class UploadKeepAwakeTests: XCTestCase {
         XCTAssertFalse(UIApplication.shared.isIdleTimerDisabled)
     }
 
-    /// Every export and upload passes through the status setter, so it is the one place the
+    /// Every export passes through the status setter, so it is the one place the
     /// screen lease follows the pipeline, on every exit path.
     func testUploadStatusHoldsTheScreenWhileInFlight() {
         let before = UIApplication.shared.isIdleTimerDisabled

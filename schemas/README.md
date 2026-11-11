@@ -14,6 +14,9 @@ filename is:
 ### Scan4D (`.zip`)
 Our native format and the one capture bundle: the full Polycam raw import payload, the mesh, and
 the Scan4D-specific spatial sidecars. The zip holds one top-level folder with the bundle in it.
+It is also each scan's **sync bundle**, what the lab server holds of it
+([docs/design/sync-bundle.md](../docs/design/sync-bundle.md)), so it carries what only the phone
+used to keep too: the relocalization map, the raw vertex colours, and the proxy and dynamic meshes.
 - `scan4d_metadata.json`: Global metadata for the scan (see schema below).
 - `images/`: Time-aligned RGB frames (e.g., `frame_00000.jpg`) and hi-res stills, plus the 360° cube faces (`still_0001_front.jpg`) when a rig was used.
 - `proxy_images/`: Low-resolution or external camera proxy frames (e.g., from Wearables).
@@ -30,6 +33,9 @@ the Scan4D-specific spatial sidecars. The zip holds one top-level folder with th
 - `sweep_coverage.bin`: Where the capture sweep actually looked — a coarse cell grid of free-space / surface / visit counts built from camera poses + LiDAR depth, in the scan's **raw** capture frame (see format below). It is what makes `arkit_features.bin` interpretable: an absence of features means something only where coverage says we looked.
 - `stitching.json`: Per-location manifest of spatial boundary links to other scans (present when this scan's location participates in a Pin & Extend or Link Adjacent stitch; see schema below). `graph.json` beside it aggregates the location's connected scans.
 - `equirect_stills/`: Time-aligned 360° equirectangular panoramas (`still_0001.JPG`) and sidecar metadata (`still_0001.json`), with their operator/rig masks in `equirect_masks/`. Present when external 360° camera integration was active during capture.
+- `arworldmap.map`: The ARKit relocalization map (`ARWorldMap`, opaque), in the scan's **raw** capture frame: what a rescan relocalizes against, and what lets another device load the map.
+- `colors.bin`: The mesh's vertex colours as the app stores them (float32 RGBA per vertex, sRGB, in `mesh.obj`'s vertex order). Present only once the scan is colorized: before that it holds the normals preview, which never ships.
+- `mesh_proxy.obj`, `mesh_dynamic.obj`: The ghost proxy (RoomPlan quads standing in for walls and floors) and the content-only mesh, both built at Process, in the **canonical** frame.
 - `semantics.json`: *(Removed in v0.4)* Previously contained per-face mesh classification; replaced by `roomplan.json`.
 
 **Frames.** `cameras/`, `arkit_features.bin` and `sweep_coverage.bin` are in the scan's **raw**
@@ -79,7 +85,9 @@ Scan4D, so a scan or preference that held one exports the bundle that replaced i
   flow runs. Check a bundle with
   `python3 tools/scan4d-to-flame3d/scan4d_to_flame3d.py --verify <bundle>.zip`.
 
-The server still reads the Nerfstudio exports older app versions uploaded.
+The server still reads the Nerfstudio exports older app versions uploaded. Without a server,
+[tools/scan4d-convert](../tools/scan4d-convert/README.md) makes either layout from a Scan4D file in
+one command, with the same `normalize.py`.
 
 ### OBJ (`.obj`)
 Single mesh file export, with vertex colors.
@@ -254,13 +262,23 @@ whose occupancy flipped). See the `scan4d-server` README, "Coverage".
 ### Control plane sync (not a file)
 
 The JSON the app sends the control plane on every sync, `POST /v1/devices/{device_id}/sync`
-(REQ-038), is this device's whole inventory. It carries spaces with base/tip, scans with their
-`registration.json` transform, `focus_region.json` and map-package file list, and stitch links
-with the same anchors as `stitching.json` plus the fine-tune's server revision. The response
-carries the files the server wants, fine-tune updates, focus-scan tasks (each region a
-`focus_region.json` with `task_id`) and the export upload route. Its contract is defined by the server: the `scan4d-server` repo's README
-("Sync"), with the live schema at the server's `/openapi.json`. The app side is
-`ControlPlaneManifest.swift`, encoded snake_case with ISO 8601 times.
+(REQ-038), is this device's whole inventory: the map. It carries:
+- spaces with base/tip;
+- scans with their `registration.json` transform, `focus_region.json`, their one package file
+  (`roomplan.json`, the preview) and, once processed, their bundle's version (`bundle.fingerprint`);
+- stitch links with the same anchors as `stitching.json` plus the fine-tune's server revision.
+
+The response carries:
+- the preview files the server wants;
+- each scan's bundle state;
+- fine-tune updates;
+- focus-scan tasks (each region a `focus_region.json` with `task_id`).
+
+Each scan's bundle is the Scan4D export above, uploaded on its own (`PUT /v1/scans/{id}/bundle`;
+[docs/design/sync-bundle.md](../docs/design/sync-bundle.md)). The contract is defined by the
+server: the `scan4d-server` repo's README ("Sync", "Bundles"), with the live schema at the
+server's `/openapi.json`. The app side is `ControlPlaneManifest.swift` and `ScanBundle.swift`,
+encoded snake_case with ISO 8601 times.
 
 ---
 

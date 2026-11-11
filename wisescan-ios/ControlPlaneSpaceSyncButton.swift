@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Sync to Lab Server on a space: sends it to the control plane, as Upload sends an export. A
-/// synced space keeps syncing (rescans, focus scans, stitches); tapping again syncs now. The
+/// Sync to Lab Server on a space: sends it to the control plane, everything in it: its map at
+/// once, then each processed scan's bundle (`BundleSync`). A synced space keeps syncing
+/// (rescans, focus scans, stitches); tapping again syncs now. The
 /// stitched map's version is the Sync row in the graph view (StitchGraphView). Shown only with a
 /// control plane set.
 struct ControlPlaneSpaceSyncButton: View {

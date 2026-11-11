@@ -57,8 +57,8 @@ final class ControlPlaneTests: XCTestCase {
                                             registration: .init(applied: true, transform: Array(repeating: 0, count: 16),
                                                                 targetScanId: scanB.uuidString),
                                             focusRegion: region,
-                                            upload: .init(status: "pending", lastUploadedAt: nil, format: "Scan4D"),
-                                            privacyFilter: false)])],
+                                            privacyFilter: false,
+                                            bundle: .init(fingerprint: "9f2c41d0a7b3e851", size: 812_345_678))])],
             links: [.init(linkId: UUID(), scanAId: scanA, scanBId: scanB, locationAId: location, locationBId: nil,
                           anchorA: Array(repeating: 0, count: 16), anchorB: Array(repeating: 0, count: 16),
                           anchorAId: UUID(), anchorBId: UUID(), anchorAHeading: 12, anchorBHeading: nil,
@@ -80,6 +80,10 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(scan["privacy_filter"] as? Bool, false)
         XCTAssertEqual(scan["has_world_map"] as? Bool, false)
         XCTAssertEqual((scan["registration"] as? [String: Any])?["target_scan_id"] as? String, scanB.uuidString)
+        // The bundle's version, as the server's BundleOffer takes it; no export upload status any more.
+        XCTAssertEqual((scan["bundle"] as? [String: Any])?["fingerprint"] as? String, "9f2c41d0a7b3e851")
+        XCTAssertEqual((scan["bundle"] as? [String: Any])?["size"] as? Int, 812_345_678)
+        XCTAssertNil(scan["upload"])
         // The focus region goes as focus_region.json, its own keys untouched.
         let focus = try XCTUnwrap(scan["focus_region"] as? [String: Any])
         XCTAssertEqual(focus["detail_level"] as? String, "detail")
@@ -94,15 +98,18 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(link["manual_revision"] as? Int, 3)
     }
 
-    /// A sync response as scan4d-server sends it: fine-tunes to apply, the upload route, and a
+    /// A sync response as scan4d-server sends it: fine-tunes to apply, each scan's bundle, and a
     /// task whose region is a focus_region.json (decoded with its own keys).
-    func testSyncReplyCarriesUpdatesUploadsAndTasks() throws {
-        let task = UUID(), map = UUID(), link = UUID()
+    func testSyncReplyCarriesUpdatesBundlesAndTasks() throws {
+        let task = UUID(), map = UUID(), link = UUID(), scan = UUID()
         let body = """
         {"server_time": "2026-10-25T08:00:00Z", "device_id": "\(UUID().uuidString.lowercased())",
          "maps": 2, "scans": 4, "links": 1, "marked_gone": 0, "wanted": [],
          "link_updates": [{"link_id": "\(link.uuidString.lowercased())", "revision": 2,
                            "manual": {"yaw_deg": 2.0, "dx": 0.05, "dy": 0.0, "dz": -0.02}}],
+         "bundles": [{"scan_id": "\(scan.uuidString.lowercased())", "state": "stale", "wanted": true,
+                      "fingerprint": "v1", "device_fingerprint": "v2", "size": 1234, "files": 6, "error": "",
+                      "uploaded_at": "2026-10-25T07:00:00Z", "ingested_at": "2026-10-25T07:01:00Z"}],
          "upload_target": {"available": true, "revoked": false, "bucket": "scan4d"},
          "tasks": [{"task_id": "\(task.uuidString.lowercased())", "map_id": "\(map.uuidString.lowercased())",
                     "map_name": "Lab 2F", "reason": "change near the window", "status": "delivered", "priority": "high",
@@ -117,7 +124,12 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(reply.linkUpdates?.first?.revision, 2)
         XCTAssertEqual(reply.linkUpdates?.first?.manual.dz, -0.02)
         XCTAssertEqual(UUID(uuidString: reply.linkUpdates?.first?.linkId ?? ""), link)
-        XCTAssertEqual(reply.uploadTarget, .init(available: true, revoked: false, bucket: "scan4d"))
+        let bundle = try XCTUnwrap(reply.bundles?.first)
+        XCTAssertEqual(UUID(uuidString: bundle.scanId), scan)
+        XCTAssertEqual(bundle.state, "stale")
+        XCTAssertTrue(bundle.wanted)
+        XCTAssertEqual(bundle.deviceFingerprint, "v2")
+        XCTAssertEqual(bundle.ingestedAt, "2026-10-25T07:01:00Z")
 
         let tasks = ControlPlaneClient.tasks(from: data)
         XCTAssertEqual(tasks.count, 1)
@@ -176,36 +188,43 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(ControlPlaneClient.failure(for: URLError(.notConnectedToInternet), host: "h"), .unreachable("h"))
     }
 
-    func testManualUploadURLIsThePlainPut() throws {
-        let target = try XCTUnwrap(ExportUploadTarget.manual("https://wiselambda4.lan.cmu.edu/wisescan-uploads",
-                                                              filename: "a.zip", contentType: "application/zip"))
-        XCTAssertEqual(target.request.url?.absoluteString, "https://wiselambda4.lan.cmu.edu/wisescan-uploads/a.zip")
-        XCTAssertEqual(target.request.httpMethod, "PUT")
-        XCTAssertEqual(target.request.value(forHTTPHeaderField: "Content-Type"), "application/zip")
-        XCTAssertNil(ExportUploadTarget.manual("  ", filename: "a.zip", contentType: "application/zip"))
-        XCTAssertTrue(ExportUploadTarget.isConfigured(manualURL: "", controlPlaneHost: "192.168.1.40:8000"))
-        XCTAssertFalse(ExportUploadTarget.isConfigured(manualURL: "", controlPlaneHost: ""))
+    /// A bundle goes to the scan's bundle endpoint with its version; Wi-Fi only keeps it off
+    /// cellular and Low Data networks.
+    func testBundleRequestCarriesItsVersionAndTheWiFiRule() throws {
+        let client = ControlPlaneClient(baseURL: try XCTUnwrap(ControlPlaneClient.baseURL(fromHost: "192.168.1.40:8000")))
+        let scan = UUID()
+        let request = client.bundleRequest(scanId: scan, fingerprint: "9f2c41d0", wifiOnly: true)
+        XCTAssertEqual(request.url?.absoluteString, "http://192.168.1.40:8000/v1/scans/\(scan.uuidString)/bundle")
+        XCTAssertEqual(request.httpMethod, "PUT")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Scan4D-Bundle-Fingerprint"), "9f2c41d0")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/zip")
+        XCTAssertFalse(request.allowsCellularAccess)
+        XCTAssertFalse(request.allowsExpensiveNetworkAccess)
+        XCTAssertFalse(request.allowsConstrainedNetworkAccess)
+        XCTAssertTrue(client.bundleRequest(scanId: scan, fingerprint: "9f2c41d0", wifiOnly: false).allowsCellularAccess)
     }
 
-    /// Without a working control plane an export goes where it did before one existed.
-    func testDeadControlPlaneFallsBackToTheUploadURL() async throws {
-        let defaults = UserDefaults.standard
-        let saved = defaults.string(forKey: AppConstants.Key.controlPlaneHost)
-        defer { defaults.set(saved, forKey: AppConstants.Key.controlPlaneHost) }
-        defaults.set("127.0.0.1:9", forKey: AppConstants.Key.controlPlaneHost)   // nothing listens: refused at once
-        let target = try await ExportUploadTarget.resolve(
-            scanId: UUID(), filename: "a.zip", contentType: "application/zip", format: .scan4d,
-            manualURL: "https://wiselambda4.lan.cmu.edu/wisescan-uploads/")
-        XCTAssertEqual(target.request.url?.absoluteString, "https://wiselambda4.lan.cmu.edu/wisescan-uploads/a.zip")
-        XCTAssertNil(target.exportId)
-        // With no Upload URL there is nothing to fall back to: the control plane's reason surfaces.
-        do {
-            _ = try await ExportUploadTarget.resolve(scanId: UUID(), filename: "a.zip", contentType: "application/zip",
-                                                     format: .scan4d, manualURL: "")
-            XCTFail("expected the control plane's error")
-        } catch {
-            XCTAssertNotNil(error as? ControlPlaneClient.Failure, "\(error)")
-        }
+    /// A bundle's version moves with any file of the scan and only with them: previews the app
+    /// regenerates don't count, and the fingerprint is one the server's pattern takes.
+    func testBundleVersionFollowsTheScansFiles() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cp_\(UUID().uuidString)")
+        let raw = dir.appendingPathComponent("raw_data/images")
+        try FileManager.default.createDirectory(at: raw, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertNil(ScanBundle.version(scanDirectory: dir))   // no files: nothing to offer
+
+        try Data("v 0 0 0\n".utf8).write(to: dir.appendingPathComponent("mesh.obj"))
+        try Data(repeating: 1, count: 100).write(to: raw.appendingPathComponent("frame_00000.jpg"))
+        let first = try XCTUnwrap(ScanBundle.version(scanDirectory: dir))
+        XCTAssertEqual(first.size, 108)
+        XCTAssertNotNil(first.fingerprint.range(of: "^[0-9a-f]{32}$", options: .regularExpression))
+        XCTAssertEqual(ScanBundle.version(scanDirectory: dir), first)
+
+        try Data(repeating: 2, count: 10).write(to: dir.appendingPathComponent("thumbnail.jpg"))
+        XCTAssertEqual(ScanBundle.version(scanDirectory: dir), first)
+
+        try Data(repeating: 3, count: 48).write(to: dir.appendingPathComponent("colors.bin"))
+        XCTAssertNotEqual(ScanBundle.version(scanDirectory: dir)?.fingerprint, first.fingerprint)
     }
 
     /// The certificate override is scoped to hosts the control plane named.
@@ -342,8 +361,8 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(registration.targetScanId, target)
     }
 
-    /// Map-package files: first existing candidate wins, times are whole seconds (what the
-    /// manifest's ISO 8601 and the upload header carry), nothing is listed with packages off.
+    /// Map-package files: first existing candidate wins, and times are whole seconds (what the
+    /// manifest's ISO 8601 and the upload header carry). A settled scan offers its bundle's version.
     func testPackageFilesAreListedFromTheFirstCandidate() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cp_\(UUID().uuidString)")
         let raw = dir.appendingPathComponent("raw_data")
@@ -355,7 +374,7 @@ final class ControlPlaneTests: XCTestCase {
         let scanId = UUID()
         let scan = ControlPlaneManifest.Scan(scanId: scanId, kind: "room", name: "s", capturedAt: Date(), parentScanId: nil,
                                              captureSource: "Native iOS", worldMapSuspect: false, stillCount: 0,
-                                             focusRegion: nil, upload: .init(status: "pending", lastUploadedAt: nil, format: "Scan4D"))
+                                             focusRegion: nil)
         let draft = ControlPlaneManifest(
             device: DeviceIdentity.manifestDevice(label: "test"), generatedAt: Date(),
             locations: [.init(locationId: UUID(), name: "Lab", updatedAt: Date(), baseScanId: scanId, tipScanId: scanId, scans: [scan])],
@@ -367,7 +386,7 @@ final class ControlPlaneTests: XCTestCase {
                       ("mesh.obj", [dir.appendingPathComponent("mesh.obj")])])]
 
         var manifest = draft
-        let local = manifest.readScanFiles(files, packages: true)
+        let local = manifest.readScanFiles(files)
         let listed = try XCTUnwrap(manifest.locations.first?.scans.first)
         XCTAssertEqual(listed.files.map(\.name), ["registration.json", "mesh.obj"])
         XCTAssertEqual(listed.files.last?.size, 8)
@@ -377,10 +396,27 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(local[scanId]?["registration.json"]?.url.deletingLastPathComponent().lastPathComponent, "raw_data")
         let time = try XCTUnwrap(listed.files.first?.modifiedAt.timeIntervalSince1970)
         XCTAssertEqual(time, time.rounded(.down))
+        // Not settled (still processing): no bundle offered yet.
+        XCTAssertNil(listed.bundle)
 
-        var off = draft
-        XCTAssertTrue(off.readScanFiles(files, packages: false).isEmpty)
-        XCTAssertEqual(off.locations.first?.scans.first?.files.count, 0)
+        // Settled: its bundle's version goes with it, over every file of the scan.
+        var settled = draft
+        var settledFiles = files
+        settledFiles[scanId]?.settled = true
+        settled.readScanFiles(settledFiles)
+        let offered = try XCTUnwrap(settled.locations.first?.scans.first?.bundle)
+        XCTAssertEqual(offered.fingerprint, ScanBundle.version(scanDirectory: dir)?.fingerprint)
+        XCTAssertEqual(offered.size, 8 + Int64(#"{"applied": false, "targetScanId": "x"}"#.utf8.count))
+    }
+
+    /// Only the RoomPlan preview goes on its own; everything else, the focus region included, is
+    /// in the bundle.
+    func testOnlyTheRoomPlanPreviewIsAPackageFile() throws {
+        let room = CapturedScan(name: "room", vertexCount: 0, faceCount: 0)
+        XCTAssertEqual(ControlPlaneManifest.packageCandidates(room).map(\.name), ["roomplan.json"])
+        let focus = CapturedScan(name: "focus", vertexCount: 0, faceCount: 0)
+        focus.scanKind = .focus
+        XCTAssertTrue(ControlPlaneManifest.packageCandidates(focus).isEmpty)
     }
 
     func testDeviceIdIsStable() {

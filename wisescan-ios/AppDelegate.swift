@@ -22,15 +22,17 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         return AppDelegate.orientationLocked ? .portrait : .all
     }
 
-    /// iOS relaunched the app (or woke it) because export uploads ended in the background. The
-    /// uploader's session, created at launch, receives the events and calls this handler when done.
+    /// A bundle upload (`BundleSync`) finished or needs attention while the app was in the
+    /// background: reconnect to its session, whose delegate calls `completionHandler` once the
+    /// events are delivered.
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
-        guard identifier == AppConstants.exportUploadSessionId else {
+        guard identifier == BundleUploadSession.identifier else {
             completionHandler()
             return
         }
-        ExportUploader.shared.backgroundEventsCompletion = completionHandler
+        BundleUploadSession.completion.withLock { $0 = completionHandler }
+        _ = BundleUploadSession.session
     }
 }
 
@@ -79,11 +81,10 @@ struct Scan4DApp: App {
         } catch {
             print("Failed to configure Meta Wearables SDK: \(error)")
         }
-        // Export uploads run in a background session: re-attach to transfers from an earlier run
-        // (and clear scans left converting or uploading by it) before any UI. Not under unit tests,
-        // which must not touch the real store.
+        // Clear scans an earlier run left converting before any UI can start an export. Not under
+        // unit tests, which must not touch the real store.
         if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
-            ExportUploader.shared.start()
+            InterruptedExports.sweep(Scan4DApp.sharedModelContainer.mainContext)
         }
     }
 

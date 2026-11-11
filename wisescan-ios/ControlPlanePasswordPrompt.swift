@@ -1,10 +1,10 @@
 import SwiftUI
 
-// MARK: - Asking for the control plane password before a tapped Upload or Sync
+// MARK: - Asking for the control plane password before a tapped Sync
 
-/// A tapped Upload or Sync held while Settings asks for the control plane password. It runs when
-/// Settings closes, with a password or without: without one an upload falls back to the Upload
-/// URL and a sync reports that the server wants its password, as before the prompt existed.
+/// A tapped Sync held while Settings asks for the control plane password. It runs when Settings
+/// closes, with a password or without: without one the sync reports that the server wants its
+/// password, as before the prompt existed.
 ///
 /// The prompt comes only when the server has refused a request for want of a password
 /// (`ControlPlaneSecret.isMissing`), so an open development server never asks. Background syncs

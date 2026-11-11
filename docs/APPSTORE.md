@@ -64,18 +64,18 @@ TIME-SERIES SCANNING
 
 BULK OPERATIONS
 • Multi-select locations for bulk delete
-• Multi-select scans for bulk Process, Save, Upload, and Delete with per-tile progress
-• Three-state upload badge per location: none, partially, or fully uploaded
+• Multi-select scans for bulk Process, Share, Sync, and Delete with per-tile progress
+• Sync badge per space: whether your lab server has its map or everything in it
 • Background post-scan processing with per-card progress
 
 FLEXIBLE EXPORT FORMATS
 • Scan4D: Everything a scan captured in one bundle: images, depth, confidence, camera poses, the colored mesh, room layout, ARKit feature points, 360° stills and metadata. A Scan4D server turns it into Nerfstudio training data or flame3d object-search input
 • OBJ / PLY / USDZ: Native mesh formats, in the scan's real colors, for MeshLab, Blender, and iOS Quick Look
 
-SERVER INTEGRATION
-• Configure any HTTP(S) upload endpoint in Settings
-• Direct PUT upload with live progress tracking that finishes even with the screen locked
-• Save to Files or AirDrop for offline workflows
+LAB SERVER SYNC
+• Sync spaces to your own lab server: each space's map, then every processed scan as one bundle
+• Bundles upload in the background over Wi-Fi, even with the screen locked, from a checklist you control
+• Share to Files or AirDrop for offline workflows
 • Compatible with self-hosted reconstruction pipelines
 
 DEVELOPER MODE
@@ -93,18 +93,18 @@ Requires a LiDAR-equipped iPhone or iPad Pro. Meta Ray-Ban Smart Glasses support
 ## What's New (version 0.5.0 — upcoming release)
 
 ```
-• Process step: finish scans on-device — room layout, plane-based registration into a shared per-location frame, rescan ghost, and vertex coloring — with upload/export gated until complete
+• Process step: finish scans on-device — room layout, plane-based registration into a shared per-location frame, rescan ghost, and vertex coloring — with sharing and sync gated until complete
 • Automatic rescan alignment: walls and floors register each rescan into the location's canonical coordinate frame; unreliable fits are refused, never guessed
 • Multi-level rooms: steps, landings, and ramps are recovered from the scan mesh, and curved walls keep their real geometry instead of being flattened
-• Focus scans: Rescan Space can now photograph one region in detail — draw a box on the previous scan, pick Check, Detail or Splat, and walk around it; saved as a partial scan you can export or upload
+• Focus scans: Rescan Space can now photograph one region in detail — draw a box on the previous scan, pick Check, Detail or Splat, and walk around it; saved as a partial scan you can share or sync
 • Automatic hi-res photos: room scans take native-resolution stills on their own, sharp at walking pace; no more tapping (a tap remains the 360° camera's shutter)
 • Photo coverage tracking: occlusion-correct world-space coverage grid with overlap and parallax coaching, exported for dataset triage
 • Stop safety: the stop button always asks — Save & End, Save & Scan Adjacent, Discard, or Cancel
 • Naming after save: the name prompt now waits for the save pipeline, eliminating the frozen-keyboard stall on stop
 • Bad-scan warning right after save so a failed capture can be redone on the spot
-• Three-state upload badge per location (none / partial / all uploaded) and per-tile bulk progress
+• Lab server sync: each space's map, then each processed scan as one bundle, in the background over Wi-Fi; a cloud on each space shows whether the server has its map or everything (replaces Upload and the upload URL)
 • Space analyzer: sweep progress in real degrees with honest partial results on timeout
-• Faster, safer exports: memory-bounded blur pipeline and double-tap guards on process, save, upload, and delete
+• Faster, safer exports: memory-bounded blur pipeline and double-tap guards on process, share, and delete
 • Tracking recovery: automatic session re-bootstrap after a mid-scan tracking collapse
 • Many stability fixes across save, rescan, and VR capture
 ```
@@ -199,12 +199,12 @@ https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md
 | 2 | **VR Capture View** (point cloud on black background) | "Accumulated depth point cloud with bloom and confidence decay" |
 | 3 | **Capture View** (privacy filter on, red-eye markers) | "Built-in privacy filtering with person detection and face blurring" |
 | 4 | **3D Mesh Preview** (colored mesh in SceneKit viewer) | "Interactive 3D preview with camera-sampled vertex coloring" |
-| 5 | **Scans List** (location grid with multi-select active) | "Organize scans by location with bulk Save, Upload, and Delete" |
+| 5 | **Scans List** (location grid with multi-select active) | "Organize scans by location with bulk Share, Sync, and Delete" |
 | 6 | **Link Adjacent Space** (ghost overlay + tracking banner) | "Re-scan over time or link adjacent areas with guided alignment" |
 | 7 | **Meta Ray-Ban PiP** (glasses stream + capture view) | "Stream frames from Meta Ray-Ban Smart Glasses via Bluetooth" |
 | 8 | **Export Format Picker** (space screen, Global Export Format dropdown) | "Export to Scan4D, OBJ, PLY, or USDZ" |
 | 9 | **Dashboard** (server status + glasses connection) | "Connect to your server and pair Meta Ray-Ban Smart Glasses" |
-| 10 | **Settings** (upload URL + capture mode + glasses) | "Full control over capture quality, mode, and device pairing" |
+| 10 | **Settings** (lab server + capture mode + glasses) | "Full control over capture quality, mode, and device pairing" |
 
 ---
 
