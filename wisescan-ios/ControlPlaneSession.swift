@@ -2,11 +2,11 @@ import Foundation
 import Security
 import os
 
-// MARK: - The URLSession for the control plane and the uploads it hands out
+// MARK: - The URLSession for the control plane
 
-/// With Settings → Control plane → Allow untrusted certificates on, a server certificate iOS
+/// With the Server tab's Allow untrusted certificates on, a server certificate iOS
 /// cannot verify (a lab's self-signed or locally-signed one) is accepted, but only from the
-/// control plane's own host and the hosts it hands out upload grants for. Every other host, and
+/// control plane's own host, for its API and for the bundles sent to it. Every other host, and
 /// every host while the switch is off, gets the system's evaluation.
 ///
 /// This is for hosts on the lab's local network or VLAN, reached by IP address or a `.local` or
@@ -18,7 +18,7 @@ nonisolated enum ControlPlaneSession {
 
     static let session = URLSession(configuration: .default, delegate: trust, delegateQueue: nil)
 
-    /// A host the control plane named (its own, or an upload grant's): eligible for the override.
+    /// The control plane's host: eligible for the override.
     static func allow(host: String?) {
         trust.allow(host)
     }
@@ -27,8 +27,8 @@ nonisolated enum ControlPlaneSession {
         trust.contains(host)
     }
 
-    /// The same rule for another session's challenges: `ExportUploader`'s background session
-    /// sends the uploads this one used to, to the same granted hosts.
+    /// The same rule for another session's challenges: the background session that sends scans'
+    /// bundles to the control plane (`BundleUploadSession`).
     static func disposition(for challenge: URLAuthenticationChallenge)
         -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         trust.disposition(for: challenge)
@@ -123,7 +123,7 @@ nonisolated enum ControlPlaneSecret {
         UserDefaults.standard.string(forKey: AppConstants.Key.controlPlanePasswordWanted) == server.absoluteString
     }
 
-    /// A control plane is set, it wants a password, and none is stored: a tapped Upload or Sync
+    /// A control plane is set, it wants a password, and none is stored: a tapped Sync
     /// asks for it before going (`ControlPlanePasswordPrompt`).
     static func isMissing(forHost host: String, password: String = ControlPlaneSecret.password) -> Bool {
         guard password.isEmpty, let server = ControlPlaneClient.baseURL(fromHost: host) else { return false }

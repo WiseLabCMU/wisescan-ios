@@ -5,11 +5,11 @@ import os
 
 /// Holds the screen awake (auto-lock off) while any holder needs it.
 ///
-/// WHY IT EXISTS: an export upload can take ten minutes, and a room scan with automatic stills
+/// WHY IT EXISTS: an export can take minutes to build, and a room scan with automatic stills
 /// needs no taps, so the operator may not touch the screen for longer than the Auto-Lock delay
 /// (30 s on an iPhone by default). When the screen locks, iOS suspends the app: the zip build
-/// stops, an upload on an ordinary session fails, and a recording ends. Field operators were
-/// tapping the screen every half minute to stop that.
+/// stops and a recording ends. Field operators were tapping the screen every half minute to stop
+/// that.
 ///
 /// HOW: one `isIdleTimerDisabled` flag is shared by the whole app, so a plain set/clear from two
 /// places would let the first to finish turn auto-lock back on under the other. Each holder names
@@ -18,7 +18,8 @@ import os
 /// for something never held, is harmless.
 ///
 /// It keeps the app in front only while the screen stays on. Pressing the side button still
-/// locks the phone; `ExportUploader` is what lets an upload finish after that.
+/// locks the phone. A scan's bundle for the Scan4D server needs neither: it goes up in a background
+/// session (`BundleSync`), which the system finishes with the screen locked.
 ///
 /// Callable from any thread: the SwiftData model's status setter is not main-actor isolated. The
 /// holder set is locked, and the flag is applied on main from the set as it stands then, so calls

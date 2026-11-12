@@ -22,7 +22,7 @@ extension ScanExportManager {
     /// or blurred is left out (its depth and confidence with it) and listed in
     /// `privacy_excluded.json`. A blurred still also has the person zeroed in its depth map.
     static func prepareFocusExport(filename: String, scanDir: URL,
-                                   phase: ((ExportPhase) -> Void)? = nil) -> URL? {
+                                   phase: ((ExportPhase) -> Void)? = nil, stop: ExportStop? = nil) -> URL? {
         let fm = FileManager.default
         let source = scanDir.appendingPathComponent(AppConstants.focusCaptureFolder)
         let parent = fm.temporaryDirectory.appendingPathComponent("staging_\(UUID().uuidString)")
@@ -41,11 +41,13 @@ extension ScanExportManager {
             try? fm.copyItem(at: regionFile, to: staging.appendingPathComponent(AppConstants.focusRegionFilename))
         }
         if focusPrivacyFilterWasOn(captureDir: source) {
-            runFocusPrivacyPass(stagingDir: staging, phase: phase)
+            runFocusPrivacyPass(stagingDir: staging, phase: phase, stop: stop)
         } else {
             focusLog.notice("focus export: stills staged unblurred, privacy filter was off for this capture")
         }
 
+        // A stopped export ships nothing: a privacy pass the stop cut short left stills unblurred.
+        guard stop?.isStopped != true else { return nil }
         phase?(ExportPhase("Zipping…"))
         let zipURL = fm.temporaryDirectory.appendingPathComponent(filename)
         try? fm.removeItem(at: zipURL)
@@ -69,7 +71,7 @@ extension ScanExportManager {
         return flag
     }
 
-    private static func runFocusPrivacyPass(stagingDir: URL, phase: ((ExportPhase) -> Void)?) {
+    private static func runFocusPrivacyPass(stagingDir: URL, phase: ((ExportPhase) -> Void)?, stop: ExportStop?) {
         let fm = FileManager.default
         let photosDir = stagingDir.appendingPathComponent("photos")
         let depthDir = stagingDir.appendingPathComponent("photo_depth")
@@ -80,6 +82,7 @@ extension ScanExportManager {
         var clean = 0, blurred = 0
         var excluded: [String] = []
         for (index, url) in stills.enumerated() {
+            if stop?.isStopped == true { break }
             phase?(.counted("Privacy check", index + 1, of: stills.count))
             // Per-still pool: each check decodes a working copy and, for a blur, renders the full
             // 12MP still through autoreleased CF/CI transients.

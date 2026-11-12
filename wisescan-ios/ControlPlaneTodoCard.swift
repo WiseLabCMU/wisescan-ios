@@ -25,7 +25,7 @@ struct ControlPlaneTodoCard: View {
                         .foregroundColor(.gray)
                 }
                 if sync.openTasks.isEmpty {
-                    Text("No focus scans requested by the lab.")
+                    Text("No focus scans requested by the Scan4D server.")
                         .font(.caption)
                         .foregroundColor(.gray)
                 } else {

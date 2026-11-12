@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Convert a Scan4D Nerfstudio export into a flame3d-core ``polycam`` input bundle.
+"""Convert a Scan4D capture's Nerfstudio dataset into a flame3d-core ``polycam`` input bundle.
 
 flame3d-core segments a capture into captioned, queryable 3D objects. Its ``polycam`` data
-source reads a Polycam raw-data export; this script writes that layout from the Scan4D
-**Nerfstudio** export, so a Scan4D capture runs through flame3d with no flame3d change:
+source reads a Polycam raw-data export; this script writes that layout from a Scan4D capture
+as a **Nerfstudio dataset** (``transforms.json``): what scan4d-flows' scan4d-normalize makes of
+the app's Scan4D export, or an older app Nerfstudio export. A Scan4D capture runs through
+flame3d with no flame3d change:
 
     input.zip
     ├── keyframes/
@@ -41,7 +43,7 @@ WHAT flame3d ASSUMES ABOUT FRAMES (flame3d-core @ c8e1595):
 DEPTH. flame3d renders depth from the mesh and only requires each frame to have a
 readable depth PNG; it still holds every map in RAM as float32. So depth is written at the
 LiDAR's own raster (the size of the frame's confidence map, 256x192 on current devices),
-which is also what a real Polycam export ships. The Nerfstudio bundle had upsampled it
+which is also what a real Polycam export ships. The Nerfstudio dataset has it upsampled
 nearest-neighbour to the image size; sampling it back down nearest-neighbour recovers
 the measured values. ``--depth image`` writes it at the image size instead.
 
@@ -62,7 +64,7 @@ either way. It needs no flame3d install.
 
 Requires numpy and Pillow:
 
-    python3 scan4d_to_flame3d.py scan4d_Lab_Room_nerfstudio_....zip -o lab_room.zip
+    python3 scan4d_to_flame3d.py <run>/norm -o lab_room.zip
 """
 
 from __future__ import annotations
@@ -143,7 +145,7 @@ def find_bundle_root(path: Path) -> Path:
     if len(hits) == 1:
         return hits[0].parent
     if not hits:
-        sys.exit(f"{path}: no transforms.json — is this a Scan4D *Nerfstudio* export?")
+        sys.exit(f"{path}: no transforms.json — a Scan4D export needs scan4d-normalize first")
     sys.exit(f"{path}: several transforms.json found ({', '.join(str(h) for h in hits)})")
 
 
@@ -488,7 +490,7 @@ def read_png_channel0(path: Path) -> np.ndarray:
 
 
 def resample_nearest(arr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
-    """Nearest-neighbour, never bilinear (as NerfstudioExport.resampleDepth): interpolating
+    """Nearest-neighbour, never bilinear (as scan4d-normalize resamples it): interpolating
     across a depth edge would invent a surface at a range nothing measured. Sampling at
     output pixel centres makes the trip back down to the LiDAR raster exact even at the
     non-integer 1920/256 ratio, where corner sampling lands a row early every other row."""
@@ -508,7 +510,7 @@ def png16_bytes(arr: np.ndarray) -> bytes:
 
 def lidar_sizes(frames: list[Frame], fallback: tuple[int, int]) -> dict[str, tuple[int, int]]:
     """Per stem, the LiDAR raster the bundle's depth was upsampled from: the confidence
-    map's size, which NerfstudioExport leaves untouched. A frame without a confidence map
+    map's size, which scan4d-normalize leaves on the LiDAR's grid. A frame without a confidence map
     (the first frame of a capture can lack one) takes the most common size."""
     sizes = {}
     for f in frames:
@@ -652,7 +654,7 @@ def describe_check(report: dict) -> list[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Verifying a bundle (the converter's, or the app's Flame3D export)
+# Verifying a bundle (the converter's, or one built elsewhere)
 # ═══════════════════════════════════════════════════════════════════════════
 
 CAMERA_KEYS = [f"t_{r}{c}" for r in range(3) for c in range(4)] + [
@@ -690,7 +692,8 @@ def read_glb(data: bytes) -> dict[str, np.ndarray]:
 def verify_bundle(path: Path) -> tuple[list[str], dict]:
     """Check a flame3d bundle against what flame3d's polycam loader and pipeline need, and
     run the mesh-vs-LiDAR check on it. Returns (problems, info); no problems means flame3d
-    can ingest it. Meant for the app's Flame3D export, which the converter's tests can't run."""
+    can ingest it. Meant for a bundle the converter's tests can't run: an older app Flame3D
+    export, or one built by other tools."""
     problems: list[str] = []
     info: dict = {}
     tmp = None
@@ -874,7 +877,8 @@ def _convert_root(root: Path, source_name: str, out: Path, *, frames_mode: str, 
                   max_size: int, depth_mode: str, check: bool, colors: bool) -> dict:
     mesh_path = root / "mesh.obj"
     if not mesh_path.is_file():
-        sys.exit(f"{root}: no mesh.obj — flame3d needs the scan mesh (re-export as Nerfstudio)")
+        sys.exit(f"{root}: no mesh.obj — flame3d needs the scan mesh (Scan4D exports carry it "
+                 "since the Nerfstudio and Flame3D exports were folded into it)")
 
     all_frames = load_frames(root)
     out_w, out_h = output_size(all_frames, max_size)
@@ -984,12 +988,13 @@ def _convert_root(root: Path, source_name: str, out: Path, *, frames_mode: str, 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
-        description="Convert a Scan4D Nerfstudio export (.zip or folder) into a flame3d-core "
-                    "'polycam' input bundle.")
+        description="Convert a Scan4D capture's Nerfstudio dataset (.zip or folder) into a "
+                    "flame3d-core 'polycam' input bundle.")
     ap.add_argument("bundle", type=Path,
-                    help="Scan4D Nerfstudio export (.zip or folder); with --verify, a flame3d bundle")
+                    help="Nerfstudio dataset (.zip or folder): scan4d-normalize's output, or an older "
+                         "app Nerfstudio export; with --verify, a flame3d bundle")
     ap.add_argument("--verify", action="store_true",
-                    help="check an existing flame3d bundle (e.g. the app's Flame3D export) "
+                    help="check an existing flame3d bundle (e.g. an older app Flame3D export) "
                          "instead of converting; exits non-zero if flame3d couldn't ingest it")
     ap.add_argument("-o", "--out", type=Path, default=None,
                     help="output .zip (default: <bundle>_flame3d.zip next to the input); a path "

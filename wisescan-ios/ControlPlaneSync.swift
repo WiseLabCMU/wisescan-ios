@@ -34,10 +34,10 @@ nonisolated enum ControlPlaneAutoSync: String, CaseIterable, Sendable {
 
 /// Sends the synced spaces' inventory (`ControlPlaneManifest`) to the control plane: on launch and
 /// return to the foreground, a few seconds after SwiftData saves (coalesced), and from Settings.
-/// Then uploads the map-package files the server answers that it wants, one at a time (Settings →
-/// Send map packages). Never during a capture: a request then waits for the capture to end, so
-/// the network and the file reads stay off the AR session's back. Does nothing while no server
-/// host is set.
+/// Then uploads the RoomPlan previews the server answers that it wants, and hands what it says
+/// about each scan's bundle to `BundleSync`, which sends the bundles (docs/design/sync-bundle.md).
+/// Never during a capture: a request then waits for the capture to end, so the network and the
+/// file reads stay off the AR session's back. Does nothing while no server host is set.
 @Observable
 @MainActor
 final class ControlPlaneSync {
@@ -53,8 +53,6 @@ final class ControlPlaneSync {
     }
 
     private(set) var status: Status = .idle
-    /// Whether exports go through the server's grants (from the last sync).
-    private(set) var uploadTarget: ControlPlaneClient.UploadTarget?
     /// Focus scans the server asked this device for, not yet declined or done: the to-do list
     /// (Dashboard), a worker's queue. Kept on the phone, so the list survives a relaunch while the
     /// control plane can't be reached; each sync replaces it.
@@ -68,8 +66,10 @@ final class ControlPlaneSync {
 
     /// The spaces this phone reports: the ones sent with Sync (a space, or a stitched map in the
     /// graph view) and those Auto sync picked up (all, or the ones started after the phone joined).
-    /// The rest stay off the server; an export's Upload is separate.
-    private(set) var syncedSpaces: Set<UUID> = ControlPlaneSync.storedSpaces()
+    /// The rest stay off the server.
+    private(set) var syncedSpaces: Set<UUID> = ControlPlaneSync.storedSpaces(AppConstants.Key.controlPlaneSyncedSpaces)
+    /// The spaces the last successful sync carried: the server has their JSON (the badge's Map).
+    private(set) var confirmedSpaces: Set<UUID> = ControlPlaneSync.storedSpaces(AppConstants.Key.controlPlaneConfirmedSpaces)
 
     /// To-dos not yet answered (the Dashboard tab's badge); none without a control plane.
     var unansweredTasks: Int { client == nil ? 0 : openTasks.filter { $0.status != "accepted" }.count }
@@ -89,11 +89,15 @@ final class ControlPlaneSync {
         UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneHost) ?? AppConstants.controlPlaneHost
     }
     var deviceLabel: String { UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneDeviceLabel) ?? "" }
-    var sendPackages: Bool {
-        UserDefaults.standard.object(forKey: AppConstants.Key.controlPlaneSendPackages) as? Bool
-            ?? AppConstants.controlPlaneSendPackages
-    }
     var client: ControlPlaneClient? { ControlPlaneClient.baseURL(fromHost: host).map { ControlPlaneClient(baseURL: $0) } }
+    /// Whether the confirmed spaces and the bundles' states came from the server set now. After
+    /// the host changes they belong to the old one until a sync reaches the new one (badges show
+    /// nothing meanwhile, and no bundle goes).
+    var stateIsCurrent: Bool {
+        guard let server = ControlPlaneClient.baseURL(fromHost: host)?.absoluteString else { return false }
+        let stored = UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneStateServer)
+        return stored == nil || stored == server
+    }
     var autoSync: ControlPlaneAutoSync {
         ControlPlaneAutoSync(rawValue: UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneAutoSync)
                              ?? AppConstants.controlPlaneAutoSync) ?? .new
@@ -122,13 +126,15 @@ final class ControlPlaneSync {
                 self?.requestSync(after: .zero)
             }
         }
+        BundleSync.shared.start(container: container)
         requestSync(after: .zero)
     }
 
     /// Mirrors `ScanStore.isCaptureActive` (ContentView). A sync asked for during the capture
-    /// runs once it ends.
+    /// runs once it ends, and so does a bundle (`BundleSync`).
     func captureStateChanged(active: Bool) {
         captureActive = active
+        BundleSync.shared.captureStateChanged(active: active)
         if !active && deferredForCapture {
             deferredForCapture = false
             requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
@@ -162,6 +168,7 @@ final class ControlPlaneSync {
         guard let container else { return }
         running = true
         status = .syncing
+        adopt(server: client.baseURL.absoluteString)
 
         let context = container.mainContext
         let allLocations = (try? context.fetch(FetchDescriptor<ScanLocation>())) ?? []
@@ -177,26 +184,32 @@ final class ControlPlaneSync {
                                                      device: DeviceIdentity.manifestDevice(label: deviceLabel))
         let draft = snapshot.manifest
         let files = snapshot.files
-        let packages = sendPackages
         do {
-            // Encoding and the file reads off main (an async call from here would stay on it).
-            let (result, local) = try await Task.detached(priority: .utility) {
+            // Encoding and the file reads (the bundles' fingerprints among them) off main (an async
+            // call from here would stay on it).
+            let (result, local, filterOff) = try await Task.detached(priority: .utility) {
                 var manifest = draft
-                let local = manifest.readScanFiles(files, packages: packages)
+                let local = manifest.readScanFiles(files)
+                let filterOff = Set(manifest.locations.flatMap(\.scans).filter { $0.privacyFilter == false }.map(\.scanId))
                 let result = try await client.sync(manifest)
-                return (result, local)
+                return (result, local, filterOff)
             }.value
             let reply = result.reply
             if joinedAt == nil {
                 UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: AppConstants.Key.controlPlaneJoinedAt)
             }
-            uploadTarget = reply.uploadTarget
+            if confirmedSpaces != reported {
+                confirmedSpaces = reported
+                UserDefaults.standard.set(reported.map(\.uuidString), forKey: AppConstants.Key.controlPlaneConfirmedSpaces)
+            }
             applyLinkUpdates(reply.linkUpdates ?? [])
             receive(result.tasks)
+            BundleSync.shared.received(reply.bundles ?? [], filterOff: filterOff)
             var summary = "\(reply.maps) spaces, \(reply.scans) scans, \(reply.links) links"
             PerfDiag.log("[ControlPlane] synced: \(summary), \(reply.markedGone) marked gone, "
-                         + "\(reply.wanted?.count ?? 0) files wanted")
-            let wanted = packages ? (reply.wanted ?? []) : []
+                         + "\(reply.wanted?.count ?? 0) files wanted, "
+                         + "\((reply.bundles ?? []).filter(\.wanted).count) bundles wanted")
+            let wanted = reply.wanted ?? []
             waitingForWiFi = 0
             if !wanted.isEmpty {
                 let round = try await upload(wanted, from: local, with: client)
@@ -220,6 +233,23 @@ final class ControlPlaneSync {
             rerun = false
             requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
         }
+    }
+
+    /// A sync is about to reach `server`. When the state on hand came from another one, it starts
+    /// afresh: the spaces it confirmed and every bundle's state were that server's, and sending
+    /// them on would only be refused ("Unknown scan"). Before this, the first server is adopted
+    /// as it is.
+    private func adopt(server: String) {
+        let key = AppConstants.Key.controlPlaneStateServer
+        let stored = UserDefaults.standard.string(forKey: key)
+        guard stored != server else { return }
+        if stored != nil {
+            PerfDiag.log("[ControlPlane] another server (\(server)): its spaces and bundles start afresh")
+            confirmedSpaces = []
+            UserDefaults.standard.removeObject(forKey: AppConstants.Key.controlPlaneConfirmedSpaces)
+            BundleSync.shared.serverChanged()
+        }
+        UserDefaults.standard.set(server, forKey: key)
     }
 
     private struct UploadRound {
@@ -287,7 +317,7 @@ final class ControlPlaneSync {
         case notSynced, partlySynced, syncing, synced, failed
     }
 
-    /// Sync on a space or a stitched map, like Upload for an export: from now on these spaces are
+    /// Sync on a space or a stitched map: from now on these spaces are
     /// reported (rescans, focus scans and stitches with them), and a sync runs at once.
     func sync(spaces ids: [UUID]) {
         let all = syncedSpaces.union(ids)
@@ -329,8 +359,8 @@ final class ControlPlaneSync {
         UserDefaults.standard.set(ids.map(\.uuidString), forKey: AppConstants.Key.controlPlaneSyncedSpaces)
     }
 
-    nonisolated private static func storedSpaces() -> Set<UUID> {
-        let ids = UserDefaults.standard.stringArray(forKey: AppConstants.Key.controlPlaneSyncedSpaces) ?? []
+    nonisolated private static func storedSpaces(_ key: String) -> Set<UUID> {
+        let ids = UserDefaults.standard.stringArray(forKey: key) ?? []
         return Set(ids.compactMap(UUID.init(uuidString:)))
     }
 

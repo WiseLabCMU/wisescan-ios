@@ -82,9 +82,41 @@ nonisolated enum DeviceIdentity {
         ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
     }
 
+    /// What the device is called when nobody named it: the model's marketing name where it is in
+    /// `marketingNames`, else the hardware model. The server's paths are ids, so the name is only
+    /// what people see; a name set later replaces it and moves nothing.
+    static var defaultLabel: String { marketingName(model) ?? model }
+
+    /// The LiDAR iPhones and iPads Scan4D runs on, by hardware model. One missing here just shows
+    /// its hardware model.
+    static func marketingName(_ model: String) -> String? {
+        let names: [String: String] = [
+            "iPhone13,3": "iPhone 12 Pro", "iPhone13,4": "iPhone 12 Pro Max",
+            "iPhone14,2": "iPhone 13 Pro", "iPhone14,3": "iPhone 13 Pro Max",
+            "iPhone15,2": "iPhone 14 Pro", "iPhone15,3": "iPhone 14 Pro Max",
+            "iPhone16,1": "iPhone 15 Pro", "iPhone16,2": "iPhone 15 Pro Max",
+            "iPhone17,1": "iPhone 16 Pro", "iPhone17,2": "iPhone 16 Pro Max",
+            "iPad8,9": "iPad Pro 11-inch (2nd generation)", "iPad8,10": "iPad Pro 11-inch (2nd generation)",
+            "iPad8,11": "iPad Pro 12.9-inch (4th generation)", "iPad8,12": "iPad Pro 12.9-inch (4th generation)",
+            "iPad13,4": "iPad Pro 11-inch (M1)", "iPad13,5": "iPad Pro 11-inch (M1)",
+            "iPad13,6": "iPad Pro 11-inch (M1)", "iPad13,7": "iPad Pro 11-inch (M1)",
+            "iPad13,8": "iPad Pro 12.9-inch (M1)", "iPad13,9": "iPad Pro 12.9-inch (M1)",
+            "iPad13,10": "iPad Pro 12.9-inch (M1)", "iPad13,11": "iPad Pro 12.9-inch (M1)",
+            "iPad14,3": "iPad Pro 11-inch (M2)", "iPad14,4": "iPad Pro 11-inch (M2)",
+            "iPad14,5": "iPad Pro 12.9-inch (M2)", "iPad14,6": "iPad Pro 12.9-inch (M2)",
+            "iPad16,3": "iPad Pro 11-inch (M4)", "iPad16,4": "iPad Pro 11-inch (M4)",
+            "iPad16,5": "iPad Pro 13-inch (M4)", "iPad16,6": "iPad Pro 13-inch (M4)"
+        ]
+        return names[model]
+    }
+
+    /// This device as the sync manifest reports it. A blank `label` (the user never named it)
+    /// sends `defaultLabel`, so a new device arrives with a name people can tell apart.
     static func manifestDevice(label: String) -> ControlPlaneManifest.Device {
-        ControlPlaneManifest.Device(deviceId: id, label: label, model: model, systemVersion: systemVersion,
-                                    appVersion: appVersion, appBuild: appBuild, lidar: hasLiDAR)
+        let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ControlPlaneManifest.Device(deviceId: id, label: name.isEmpty ? defaultLabel : name, model: model,
+                                           systemVersion: systemVersion, appVersion: appVersion,
+                                           appBuild: appBuild, lidar: hasLiDAR)
     }
 
     private static func readKeychain() -> UUID? {
