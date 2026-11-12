@@ -400,7 +400,7 @@ enum StitchGraphBuilder {
     /// defines the frame). Falls back to `scan` when the location/scan set is unavailable.
     @MainActor
     static func canonicalScan(for scan: CapturedScan) -> CapturedScan {
-        scan.location?.scans.min(by: CapturedScan.canonicalOrder) ?? scan
+        scan.location?.roomScans.min(by: CapturedScan.canonicalOrder) ?? scan
     }
 
     /// Plane-derived correction to the T-composed pivot edge for one link (Op-2). Compose as

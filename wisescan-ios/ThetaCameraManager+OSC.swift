@@ -70,10 +70,22 @@ extension ThetaCameraManager {
         let response = try await postJSON("/osc/commands/execute", body: body, as: OSCOptionsResponse.self)
         if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "getOptions failed") }
         guard let list = response.results?.options.fileFormatSupport else { return [] }
-        return list.compactMap { format in
+        let all: [StillFormat] = list.compactMap { format in
             guard format.type == "jpeg", let width = format.width, let height = format.height else { return nil }
             return StillFormat(width: width, height: height)
         }
+        // Keep only 2:1 equirectangular formats. The X reports square (dual-fisheye /
+        // non-stitched) JPEG modes too; the whole 360 pipeline — face extraction (W/π),
+        // the equirect→cube math, the rig solver — assumes a stitched equirect, so a
+        // square still would produce garbage faces and a nonsense solve. Screen them out
+        // of BOTH the resolution menu and forceMaxStillResolution's pick (this feeds
+        // both), so an operator can't select one by mistake. Tolerance covers off-by-a-few
+        // reported dims; an empty result falls back to the per-model table, which is 2:1.
+        let equirect = all.filter { abs(Double($0.width) / Double($0.height) - 2.0) < 0.05 }
+        if equirect.count < all.count {
+            log(.config, "Screened \(all.count - equirect.count) non-equirect (square) still format(s) the 360 pipeline can't use")
+        }
+        return equirect
     }
 
     /// Z1/V only: register this app's BLE identity over Wi-Fi

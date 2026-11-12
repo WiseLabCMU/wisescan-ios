@@ -249,7 +249,7 @@ final class RecoveryContentFloorTests: XCTestCase {
             ScanFileManager.shared.saveScan(
                 context: context, locationId: locId, name: "Hallway",
                 meshData: Data(), vertexCount: 0, faceCount: 0,
-                rawDataPath: captureDir, vertexColors: nil, worldMapURL: nil
+                rawDataPath: captureDir, vertexColors: nil, worldMapURL: nil, sweepCoverage: nil
             ),
             "a zero-vertex scan must still save"
         )
@@ -420,7 +420,7 @@ final class RecoveryContentFloorTests: XCTestCase {
             ScanFileManager.shared.saveScan(
                 context: context, locationId: locId, name: "Recovered Scan",
                 meshData: Data(), vertexCount: 0, faceCount: 0,
-                rawDataPath: emptyCapture, vertexColors: nil, worldMapURL: nil
+                rawDataPath: emptyCapture, vertexColors: nil, worldMapURL: nil, sweepCoverage: nil
             ),
             "saveScan is expected to accept this — that is exactly why the floor must gate the caller"
         )

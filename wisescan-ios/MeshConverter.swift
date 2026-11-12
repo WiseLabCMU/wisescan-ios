@@ -5,6 +5,64 @@ import SceneKit
 /// Mesh format conversion utilities for export.
 enum MeshConverter {
 
+    // MARK: - OBJ + colors
+
+    /// Writes `objURL` to `outputURL` with every `v x y z` line extended to `v x y z r g b`
+    /// from colors.bin (per-vertex SIMD4<Float> RGBA, in mesh.obj's vertex order) — the
+    /// vertex-color extension MeshLab, Blender, CloudCompare, Open3D and ModelIO read. Every
+    /// other line passes through unchanged. Returns `false`, writing nothing, unless there is
+    /// exactly one color per vertex — any other count means colors.bin belongs to another mesh
+    /// (the viewer applies the same rule).
+    static func objWithVertexColors(objURL: URL, colorsURL: URL, outputURL: URL) -> Bool {
+        guard let obj = try? Data(contentsOf: objURL),
+              let colorData = try? Data(contentsOf: colorsURL) else {
+            print("[MeshConverter] Failed to read OBJ or colors.bin")
+            return false
+        }
+        let colorCount = colorData.count / MemoryLayout<SIMD4<Float>>.stride
+        var out = Data()
+        out.reserveCapacity(obj.count + colorData.count / 2)
+        var vertex = 0
+        var covered = true
+        colorData.withUnsafeBytes { (rawColors: UnsafeRawBufferPointer) in
+            let colors = rawColors.bindMemory(to: SIMD4<Float>.self)
+            obj.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+                let n = bytes.count
+                var start = 0
+                while start < n {
+                    var end = start
+                    while end < n && bytes[end] != 0x0A { end += 1 }          // '\n'
+                    var lineEnd = end
+                    if lineEnd > start && bytes[lineEnd - 1] == 0x0D { lineEnd -= 1 }   // '\r'
+                    out.append(contentsOf: UnsafeRawBufferPointer(rebasing: bytes[start..<lineEnd]))
+                    // "v " — a vertex position (not "vn"/"vt").
+                    if lineEnd - start > 2 && bytes[start] == 0x76 && bytes[start + 1] == 0x20 {
+                        guard vertex < colors.count else { covered = false; return }
+                        let c = colors[vertex]
+                        let rgb = String(format: " %.4f %.4f %.4f",
+                                         min(max(c.x, 0), 1), min(max(c.y, 0), 1), min(max(c.z, 0), 1))
+                        out.append(contentsOf: rgb.utf8)
+                        vertex += 1
+                    }
+                    out.append(0x0A)
+                    start = end + 1
+                }
+            }
+        }
+        guard covered, vertex > 0, vertex == colorCount else {
+            print("[MeshConverter] colors.bin has \(colorCount) colors for \(vertex) OBJ vertices — not writing colors")
+            return false
+        }
+        do {
+            try out.write(to: outputURL, options: .atomic)
+            print("[MeshConverter] OBJ with vertex colors written: \(vertex) vertices")
+            return true
+        } catch {
+            print("[MeshConverter] Failed to write colored OBJ: \(error)")
+            return false
+        }
+    }
+
     // MARK: - OBJ → PLY
 
     /// Converts an OBJ mesh + colors.bin (per-vertex SIMD4<Float> RGBA) to a binary PLY file
@@ -13,7 +71,10 @@ enum MeshConverter {
     /// Binary PLY is read by all standard mesh tools (MeshLab, CloudCompare, Blender,
     /// Open3D, …) and is ~3–5× smaller and far faster to write than ASCII (no per-value
     /// decimal formatting). `binary_little_endian` matches all target platforms (iOS/macOS).
-    static func objToPLY(objURL: URL, colorsURL: URL, outputURL: URL) -> Bool {
+    ///
+    /// `colorsURL` nil writes geometry only. Callers pass it only for camera-sampled colors:
+    /// the save-time normals colors are an in-app preview and must never ship in an export.
+    static func objToPLY(objURL: URL, colorsURL: URL?, outputURL: URL) -> Bool {
         guard let objData = try? Data(contentsOf: objURL),
               let parsed = MeshParser.parseOBJ(from: objData) else {
             print("[MeshConverter] Failed to read/parse OBJ file")
@@ -24,9 +85,10 @@ enum MeshConverter {
         let faces = parsed.faces
 
         // Load vertex colors (SIMD4<Float> per vertex: R, G, B, A — 16 bytes each)
-        let colorData = try? Data(contentsOf: colorsURL)
+        let colorData = colorsURL.flatMap { try? Data(contentsOf: $0) }
         let stride = MemoryLayout<SIMD4<Float>>.stride
-        let hasColors = colorData != nil && colorData!.count >= vertices.count * stride
+        // Exactly one color per vertex, as the viewer requires; any other count is another mesh's.
+        let hasColors = colorData != nil && colorData!.count == vertices.count * stride
 
         // ASCII header (always text), then a little-endian binary data section.
         var header = "ply\n"

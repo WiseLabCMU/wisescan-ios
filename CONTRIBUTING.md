@@ -63,9 +63,20 @@ The same keys can also leak via **Xcode build settings**: `INFOPLIST_KEY_UIFileS
 - `scripts/pre-push` re-checks the pushed branch tip as a backstop against `git commit --no-verify`.
 - The same paths are also `.gitignore`d as defense-in-depth.
 
+### Credentials never enter the repo
+
+The Meta Wearables toolkit reads `MetaAppID`, `ClientToken` and `TeamID` from the app's Info.plist (README, Testing Guidelines); the Insta360 SDK, if it is ever integrated, takes an App ID and secret in code. Real values stay on the developer's machine. The privacy guard refuses, locally and in CI:
+
+- a `.plist` whose `MetaAppID` or `ClientToken` carries a value (an empty string or a `$(BUILD_SETTING)` placeholder is fine);
+- a Swift file with a literal `setAppid(_:secret:)` call that is not the vendor's placeholder;
+- any `*.secrets.xcconfig` file.
+
+The workflow for keeping a local value out of a tracked file is not finalized. The intended shape: an untracked `Credentials.secrets.xcconfig` whose settings feed the Info.plist keys through build-setting substitution, so the tracked plist holds `$(META_APP_ID)` and never a value. Until that is wired, keep the tracked values empty, set yours locally, and never stage the file (`git add -p` and skip the hunk).
+
 ### 3. Code Style & Architecture
 
 - **SwiftUI First:** All new views should be written using SwiftUI rather than storyboards.
+- **Fewest controls: good defaults, findable overrides.** The fewest buttons make the best interface. Give a feature a default that works with no setting at all, and put any override where someone who needs it will look: Settings, or Developer Mode for tuning and bench switches. Don't add a toggle to an everyday screen (capture, a space's detail) or a per-space or per-scan preference when one default plus an app-wide override covers the need. Example: the Privacy Filter turns itself back on after a 24 h default, with a Developer Mode picker for the limit; a per-space "Always use Privacy Filter" switch was dropped as overkill (#125).
 - **SwiftUI Previews — one per view:** Every `View` should ship a `#Preview` with representative sample data. Previews are the primary way to visually review UI changes when testing across multiple physical devices isn't feasible, so a view without a working canvas preview slows that review — treat adding/updating the preview as part of the change, and keep its parameters in sync when a view's inputs change. Patterns already in use: SwiftData-backed views build an in-memory `ModelContainer` (see `ScansListView`); `@Observable` dependencies inject via `.environment` (see `AlignmentOverlayView`, `CaptureView`); presentational components pass literal sample models (see `CoachBarView`, `StillnessReticle`). When a view genuinely cannot render standalone (e.g. it needs a live `ARSession`), still add a preview as a compile/smoke check and note the limitation in a comment (see `FaceBlurOverlay`).
 - **Data Model:** Follow the hierarchical `Locations` -> `Scans` data model pattern.
 - **SwiftData enums:** Stored strings use raw values; expose enums via `@Transient` computed properties with legacy mapping in the getters, so adding/renaming cases never breaks existing on-device databases.
@@ -124,6 +135,20 @@ Field-found 2026-08-25 (#71): the **first emoji laid out in a session** cost the
 - **Log strings are exempt:** `log(...)` / `PerfDiag.log(...)` lines may carry `⚠️` / `✓` — they exist for the diagnostics export, where they scan well. The events feed does render them, which is why `AppDelegate` **warms CoreText/MobileGestalt on a utility queue at launch** (`CoreText/MobileGestalt warm-up took N ms` in the log). That warm-up is the systemic fix; this rule is hygiene on top. Do not remove either.
 - **Audit:** `grep -n 'Text("[^"]*[\U0001F300-\U0001FAFF\u2600-\u27BF]' wisescan-ios/*.swift` — anything it finds is a bug.
 
+### Never benchmark a process Xcode launched
+Xcode injects its Metal debugging layer (`GPUToolsCapture`, `MetalTools`) into every app it launches, and once the Mac is disconnected those tools' XPC round-trips have nobody to answer them. On 2026-09-01 the same Release build, same device, same scans measured:
+
+| | Xcode-launched | icon-launched |
+|:--|:--|:--|
+| `capture view open` | **18,308 ms** | **192 ms** |
+| main-thread stalls | two, ~18 s each | none |
+
+**95x.** It cost several rounds of chasing a phantom (#71) — two *unrelated* call sites, a CoreText→MobileGestalt lookup and an `ARView.init` Metal blit, both stalling at the same fixed ~18.1 s, which is one tools timeout wearing two stacks.
+
+- **Any timing that will be quoted in an issue** comes from a **force-quit + icon relaunch**, with Perf Diagnostics on and the device off the tether. Xcode runs are for correctness and breakpoints, never for numbers.
+- A stall whose sampled backtrace contains `GPUToolsCapture` or `MetalTools` is an artifact — re-measure before filing anything.
+- Diagnostics exports stamp `build:`; they do **not** record how the process was launched, so say which it was when you post a measurement.
+
 ### Debugging with PerfDiag
 `PerfDiag` (in `PerfDiag.swift`) is the instrumentation for all of the above. It is a **no-op unless** Developer Mode → **Perf Diagnostics** is on, so its calls are safe to leave in hot paths. Output goes to `OSLog` (subsystem `org.arenaxr.scan4d`, category `perf`) — watch it live in Console.app/Xcode — and to `os_signpost` intervals for the Instruments timeline.
 - **`MainThreadWatchdog`** logs `main-thread stall BEGIN/END (max no-frame gap Nms)` — the visible freeze. It runs **app-wide from launch** (not just in capture — the tab-tap and save-flow freezes happen outside the capture view). 2 s into a stall it **samples the main thread's backtrace** and logs one frame per line (`main-thread sample Nms into the stall`); Swift frames arrive mangled — paste into `swift demangle`. Under Xcode it stays quiet by default because lldb pauses on the sampler's signal (that pause *is* the sample: read the stack); to get log samples while tethered, run `process handle SIGUSR1 -n false -p true -s false` in lldb **and** enable Developer Mode → *Sample Stalls Under Debugger*.
@@ -131,6 +156,7 @@ Field-found 2026-08-25 (#71): the **first emoji laid out in a session** cost the
 - The **I/O backlog counter** logs when in-flight encodes exceed the cap; GPU/voxel passes log over-budget durations (`voxel_merge`, `voxel_decay`, `privacy_blur_mask`, etc.).
 - Wrap new discrete hot operations in `PerfDiag.timed("label", warnOverMs:)` rather than guessing — **measure before changing** (guessing here caused regressions).
 - Add toggles to the Developer Mode section of `SettingsView` for any new isolation switch (mirror `pauseVRCompute`).
+- **Every new Developer Mode option goes into `AppConstants.developerOptionDefaults`** (key and default) in the same change that adds its row, placed in the Developer Mode group it belongs to (Capture, Privacy & 360° camera, Color, Display & VR, Simulation, Processing; diagnostics sit under the Developer Mode switch), never below the final **Restore Default Developer Options** section. That list is all the restore button and turning Developer Mode off reset, and it is registered at launch, so code reading the key straight from `UserDefaults` gets the right default too. An option left out keeps its bench value outside Developer Mode. `DeveloperOptionDefaultsTests` checks that a restore brings every listed option back.
 
 ## Build & Test
 
@@ -167,6 +193,10 @@ The `wisescan-ios` repository uses [Release Please](https://github.com/googleapi
 > **Issue and PR References in Commit & PR Messages:**
 > Only use `#NN` notation in commit messages, PR titles, and PR descriptions if they correspond to actual GitHub issues or pull requests. Do **not** use `#NN` notation for internal enumerations of planning docs or triage items (e.g., use `REQ-NNN`, `Task NN`, or plain text instead), as this creates erroneous links and may result in unintended automatic actions.
 
+> [!IMPORTANT]
+> **Icons yes, emoji no.** No emoji characters inside text: documentation, code comments, commit messages, GitHub issue/PR titles and descriptions, and rendered UI strings. Icons are welcome as graphics objects next to the text (`Image(systemName:)`, `Label`, `CoachTip.icon`); see "No emoji in rendered UI text" above for the UI rule and the reason it was measured.
+> Write plain text. Emoji render inconsistently across editors, terminals, diffs, and generated release notes, and add nothing a plain word does not. This applies to all contributors, including automated/agentic coding tools. Icons in the software's own user interface are fine, but they must follow the project's existing conventions for UI icons (here: SF Symbols, see [No emoji in rendered UI text](#no-emoji-in-rendered-ui-text--use-sf-symbols)).
+
 > [!WARNING]
 > **Xcode strips `x-release-please-version` markers.** The `MARKETING_VERSION` lines in `project.pbxproj` contain `/* x-release-please-version */` inline comments that release-please uses to locate the version string. Xcode's project serializer does **not** preserve non-standard inline comments — opening the project or modifying build settings will silently strip these markers. **Before committing any `project.pbxproj` changes, verify the markers are intact:**
 > ```bash
@@ -184,6 +214,8 @@ When adding a new feature, update the following docs alongside the source code:
 2. **[REQUIREMENTS.md](REQUIREMENTS.md)** — Add a REQ-NNN entry (feature matrix row + detailed section) with source map entries.
 3. **[docs/APPSTORE.md](docs/APPSTORE.md)** — Add a line to the App Store description.
 4. **[docs/PRIVACY.md](docs/PRIVACY.md)** — Update if the feature touches data collection, camera usage, or personal data processing.
+5. **[wisescan-ios/UserGuideView.swift](wisescan-ios/UserGuideView.swift)** — The in-app guide is documentation that lives in SwiftUI; update it with any user-facing workflow, tip, or export change.
+6. **[AGENTS.md](AGENTS.md)** — Index any new doc, design note, or tool so agents and new contributors can find it.
 
 ## Stitching / Scan Linking — Implementation Contract
 

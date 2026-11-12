@@ -4,6 +4,7 @@ import ARKit
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
     @State private var scanStore = ScanStore()
     @State private var selectedTab = 0
     @State private var showLiDARWarning = false
@@ -14,6 +15,12 @@ struct ContentView: View {
         ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
     }
 
+    /// The AR session runs whenever the Capture tab is up, relocalizing before any recording
+    /// starts; control plane syncs wait it out (ControlPlaneSync).
+    private var arSessionBusy: Bool {
+        scanStore.isCaptureActive || selectedTab == 1
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             TabView(selection: $selectedTab) {
@@ -21,6 +28,8 @@ struct ContentView: View {
                     .tabItem {
                         Label("Dashboard", systemImage: "square.grid.2x2")
                     }
+                    // The lab's unanswered focus-scan requests (the Dashboard's to-do list).
+                    .badge(ControlPlaneSync.shared.unansweredTasks)
                     .tag(0)
 
                 CaptureView(selectedTab: $selectedTab)
@@ -47,8 +56,10 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .onAppear {
             DemoDataSeeder.seedIfNeeded(context: modelContext)
-            if !hasLiDAR {
+            // Once per install: it explains the device, asks for nothing, and does not change.
+            if !hasLiDAR, !UserDefaults.standard.bool(forKey: AppConstants.Key.liteModeNoticeShown) {
                 showLiDARWarning = true
+                UserDefaults.standard.set(true, forKey: AppConstants.Key.liteModeNoticeShown)
             }
         }
         .task {
@@ -60,12 +71,80 @@ struct ContentView: View {
             // Sweep "Adjacent to …" locations orphaned with 0 scans when a freeze/crash hit the
             // extend flow's record→save (the location is persisted before its scan is recorded).
             StitchLinkStore.reconcileOrphanedAdjacentLocations(context: modelContext)
+            // Control plane: report this phone's inventory now and after every save.
+            ControlPlaneSync.shared.captureStateChanged(active: arSessionBusy)
+            ControlPlaneSync.shared.start(container: modelContext.container)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                ControlPlaneSync.shared.requestSync(after: .seconds(1))
+            }
+        }
+        .onChange(of: arSessionBusy) { _, busy in
+            ControlPlaneSync.shared.captureStateChanged(active: busy)
         }
         .alert("Lite Mode — No LiDAR", isPresented: $showLiDARWarning) {
             Button("Got it", role: .cancel) {}
         } message: {
             Text("This device does not have a LiDAR sensor. You can still capture images and camera poses for server-side photogrammetry, but real-time 3D mesh, depth, and coverage overlay features are unavailable.")
         }
+        // A focus region handed over by deep link (FocusRegionInbox): open its space, whose
+        // detail view takes the region into the editor. Refusals surface as an alert.
+        .onChange(of: FocusRegionInbox.shared.pending) { _, region in
+            guard let region else { return }
+            openSpace(for: region)
+        }
+        .alert("Focus region not opened", isPresented: Binding(
+            get: { FocusRegionInbox.shared.lastError != nil },
+            set: { if !$0 { FocusRegionInbox.shared.lastError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(FocusRegionInbox.shared.lastError ?? "")
+        }
+        // An urgent focus scan the lab asked for (a high-priority task), alerted once ever; every
+        // request also waits in the Dashboard's to-do list. Open takes the region into its
+        // space's editor through the same inbox as a deep link.
+        .alert("Urgent focus scan requested", isPresented: Binding(
+            get: { ControlPlaneSync.shared.taskToPrompt != nil },
+            set: { if !$0 { ControlPlaneSync.shared.dismissPrompt() } }),
+               presenting: ControlPlaneSync.shared.taskToPrompt) { task in
+            Button("Open") { ControlPlaneSync.shared.open(task) }
+            Button("Decline", role: .destructive) { ControlPlaneSync.shared.decline(task) }
+            Button("Later", role: .cancel) { ControlPlaneSync.shared.dismissPrompt() }
+        } message: { task in
+            Text(taskPromptMessage(task))
+        }
+    }
+
+    private func taskPromptMessage(_ task: ControlPlaneClient.ScanTask) -> String {
+        let what = task.region.label.isEmpty ? "A region" : task.region.label
+        let reason = task.reason.isEmpty ? "" : "\n\n\(task.reason)"
+        return "\(what) in \(task.mapName), at \(task.region.detail.title) detail.\(reason)\n\nLater: it waits in the to-do list on the Dashboard."
+    }
+
+    /// The space a handed-over region names; without a known one the region is refused (a file
+    /// picked inside a space's Rescan sheet needs no id).
+    private func openSpace(for region: FocusRegion) {
+        // Switching tabs mid-capture would end the capture (CaptureView's leave-tab teardown).
+        guard !scanStore.isCaptureActive else {
+            FocusRegionInbox.shared.pending = nil
+            FocusRegionInbox.shared.lastError = "A scan is in progress. Finish it, then open the focus region link again."
+            return
+        }
+        guard let locationId = region.locationId else {
+            FocusRegionInbox.shared.pending = nil
+            FocusRegionInbox.shared.lastError = "The focus region does not say which space it belongs to (location_id). Import it from that space's Rescan button instead."
+            return
+        }
+        let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locationId })
+        guard let location = try? modelContext.fetch(descriptor).first, location.latestRoomScan != nil else {
+            FocusRegionInbox.shared.pending = nil
+            FocusRegionInbox.shared.lastError = "The space this focus region names is not on this device, or has no room scan to draw it on."
+            return
+        }
+        selectedTab = 2
+        scanStore.navigationPath = NavigationPath()
+        scanStore.navigationPath.append(location)
     }
 }
 

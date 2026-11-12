@@ -1,5 +1,32 @@
 import SwiftUI
 import SwiftData
+import UniformTypeIdentifiers
+
+/// Which scans a space's list shows. Room scans are the ones you act on (process, color, rescan,
+/// connect); focus scans only save, upload and delete, so Room is the default. Remembered across
+/// spaces; the picker appears only in a space that has a focus scan.
+enum ScanListFilter: String, CaseIterable {
+    case room = "Room"
+    case focus = "Focus"
+    case all = "All"
+
+    func includes(_ kind: ScanKind) -> Bool {
+        switch self {
+        case .room: return kind == .room
+        case .focus: return kind == .focus
+        case .all: return true
+        }
+    }
+
+    /// A save is about to open its space: switch to the new scan's kind if the remembered filter
+    /// would hide it (All stays All).
+    static func reveal(_ kind: ScanKind) {
+        let defaults = UserDefaults.standard
+        let current = ScanListFilter(rawValue: defaults.string(forKey: AppConstants.Key.locationScanFilter) ?? "") ?? .room
+        guard !current.includes(kind) else { return }
+        defaults.set((kind == .focus ? ScanListFilter.focus : .room).rawValue, forKey: AppConstants.Key.locationScanFilter)
+    }
+}
 
 // swiftlint:disable type_body_length
 struct LocationDetailView: View {
@@ -15,6 +42,7 @@ struct LocationDetailView: View {
     /// the user taps delete). > 0 means the cascade will silently remove those spatial links.
     @State private var bulkDeleteLinkedMapCount = 0
     @State private var showSettings = false
+    @State private var passwordPrompt: ControlPlanePendingAction?
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
     @State private var showNoWorldMapAlert = false
@@ -46,18 +74,54 @@ struct LocationDetailView: View {
     /// hands each card its slice, mirroring `bulkColoringMessages`.
     @State private var bulkExportPhases: [PersistentIdentifier: ExportPhase] = [:]
 
+    @AppStorage(AppConstants.Key.locationScanFilter) private var scanFilterRaw = ScanListFilter.room.rawValue
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @State private var isBulkExporting = false
     @State private var exportItems: [ZipExportItem] = []
     @State private var showExportSheet = false
+    /// Rescan asks what to capture: the whole room, or a focus region (drawn in the editor, or
+    /// imported from a focus_region.json and opened in the editor to check).
+    @State private var showRescanChoice = false
+    @State private var showRegionEditor = false
+    @State private var showRegionImporter = false
+    @State private var importedRegion: FocusRegion?
+    @State private var regionImportError: String?
+    /// The region the editor's Scan returned; the focus scan starts once the editor has closed,
+    /// so the rescan's suspect-map confirm presents over this view, not a dismissing cover.
+    @State private var pendingFocusScan: FocusRegion?
 
+    /// Composed from four independently type-checked pieces — same surgery as
+    /// CaptureView.body (#56): measured at **14,345 ms** to type-check, second only to
+    /// CaptureView, with the cost in the 13 modifiers chained on the root, not the
+    /// content. Each helper returns an opaque `some View`, so its chain is solved once.
+    /// Order is semantic — keep root, chrome, sheets, dialogs. Add new modifiers inside
+    /// the matching helper.
     var body: some View {
+        detailDialogs(detailSheets(detailChrome(detailRoot)))
+    }
+
+    /// The filter in force: the remembered one in a space with a focus scan, otherwise everything.
+    private var scanFilter: ScanListFilter {
+        guard location.scans.contains(where: \.isFocusScan) else { return .all }
+        return ScanListFilter(rawValue: scanFilterRaw) ?? .room
+    }
+
+    /// The scans the list shows (and selection and bulk actions cover), newest first.
+    private var visibleScans: [CapturedScan] {
+        let filter = scanFilter
+        return location.scans.filter { filter.includes($0.scanKind) }.sorted { $0.capturedAt > $1.capturedAt }
+    }
+
+    /// The scan list itself (sorting statements included — hence @ViewBuilder).
+    @ViewBuilder
+    private var detailRoot: some View {
         // Sort once per body evaluation and reuse for both the scroll content and the
         // bottom toolbar (which is a sibling of the ScrollView). Previously this sort ran
         // twice per redraw — and redraws are frequent during uploads/selection toggles.
-        let sortedScans = location.scans.sorted { $0.capturedAt > $1.capturedAt }
+        let sortedScans = visibleScans
         ZStack {
             Color.black.ignoresSafeArea()
 
@@ -87,23 +151,10 @@ struct LocationDetailView: View {
                                     verticalPadding: 12,
                                     border: Color.orange.opacity(0.3)
                                 ))
-
-                                Picker("Use Case", selection: Binding(
-                                    get: { location.scanCase },
-                                    set: { newValue in
-                                        location.scanCase = newValue
-                                        try? modelContext.save()
-                                    }
-                                )) {
-                                    Text("Rescan Space").tag(ScanCase.rescanSpace)
-                                    Text("Connect Adjacent Space").tag(ScanCase.linkAdjacent)
-                                }
-                                .pickerStyle(.segmented)
-                                .colorScheme(.dark)
                             }
                         }
 
-                        if !isEditing && !sortedScans.isEmpty {
+                        if !isEditing && !location.scans.isEmpty {
                             // Linked badge. Read straight off the object graph in body — it's a
                             // cheap in-memory walk of `location.scans` relationships (no disk I/O),
                             // and accessing those relationships here registers them as observation
@@ -123,13 +174,13 @@ struct LocationDetailView: View {
                             }
 
                             // Extend / Rescan Latest Scan
-                            if let latestScan = sortedScans.first,
+                            if let latestScan = location.latestRoomScan,
                                !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("ray ban") &&
                                !latestScan.hardwareDeviceModel.localizedCaseInsensitiveContains("glass") {
                                 HStack(spacing: 12) {
-                                    // Rescan Space button
+                                    // Rescan Space: whole room or a focus region (showRescanChoice)
                                     Button(action: {
-                                        startRescan(latestScan)
+                                        showRescanChoice = true
                                     }, label: {
                                         HStack {
                                             Image(systemName: "plus.viewfinder")
@@ -153,6 +204,11 @@ struct LocationDetailView: View {
                                 }
                             }
 
+                            // Control plane: send this space to the lab server, as Upload sends an export.
+                            if ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil {
+                                ControlPlaneSpaceSyncButton(spaceIds: [location.id])
+                            }
+
                             // Global Export Settings
                             VStack(spacing: 12) {
                                 HStack {
@@ -169,7 +225,7 @@ struct LocationDetailView: View {
                                     .tint(.cyan)
                                     .onChange(of: globalSelectedFormatStr) { _, newValue in
                                         for scan in location.scans {
-                                            scan.selectedFormat = ExportFormat(rawValue: newValue) ?? .scan4d
+                                            scan.selectedFormat = ExportFormat.persisted(newValue) ?? .scan4d
                                         }
                                         try? modelContext.save()
                                     }
@@ -187,12 +243,13 @@ struct LocationDetailView: View {
                     .padding(.top, 16)
 
                     // MARK: - Scan Cards
+                    scanFilterPicker
                     if sortedScans.isEmpty {
                         VStack(spacing: 16) {
                             Image(systemName: "tray")
                                 .font(.system(size: 48))
                                 .foregroundColor(.gray)
-                            Text("No scans found in this location.")
+                            Text(emptyListMessage)
                                 .foregroundColor(.gray)
                         }
                         .padding(.top, 60)
@@ -210,15 +267,6 @@ struct LocationDetailView: View {
                                     bulkColoringMessage: bulkColoringMessages[scan.id],
                                     bulkExportPhase: bulkExportPhases[scan.id],
                                     onUpdate: { _ in try? modelContext.save() },
-                                    onDelete: { scanToDelete in
-                                        ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
-                                        // Auto-delete location if no scans remain
-                                        if location.scans.isEmpty {
-                                            modelContext.delete(location)
-                                            try? modelContext.save()
-                                            dismiss()
-                                        }
-                                    },
                                     onSelect: {
                                         if selectedScans.contains(scan.id) {
                                             selectedScans.remove(scan.id)
@@ -232,51 +280,6 @@ struct LocationDetailView: View {
                         }
                     }
 
-                    // MARK: - Server Workflows
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("SERVER WORKFLOWS (COMING SOON)")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
-                            .padding(.horizontal)
-
-                        VStack(spacing: 16) {
-                            WorkflowCard(
-                                icon: "arrow.triangle.2.circlepath.camera.fill",
-                                title: "Quick Mesh",
-                                description: "Fast photogrammetry pipeline optimized for immediate preview. " +
-                                             "Lower resolution textures.",
-                                time: "~5 mins",
-                                buttonText: "Run Workflow",
-                                isPrimary: true,
-                                isDisabled: true
-                            )
-
-                            WorkflowCard(
-                                icon: "camera.macro",
-                                title: "Gaussian Splat",
-                                description: "High-fidelity radiance field reconstruction for " +
-                                             "photo-realistic novel view synthesis.",
-                                time: "~25 mins",
-                                buttonText: "Run Workflow",
-                                isDisabled: true
-                            )
-
-                            WorkflowCard(
-                                icon: "map.fill",
-                                title: "Spatial Indexing",
-                                description: "OpenFLAME spatial indexing with automatic semantic labelling. " +
-                                             "Identifies and tags objects, surfaces, and regions for " +
-                                             "spatial queries and AR anchoring.",
-                                time: "~10 mins",
-                                buttonText: "Run Workflow",
-                                isDisabled: true
-                            )
-                        }
-                        .padding(.horizontal)
-                    }
-                    .padding(.top, 16)
-                    .opacity(isEditing ? 0.3 : 1.0)
-
                     Spacer().frame(height: 100)
                 }
             }
@@ -288,20 +291,58 @@ struct LocationDetailView: View {
                 }
             }
         }
+    }
+
+    /// Room / Focus / All, with counts, in a space that has a focus scan.
+    @ViewBuilder
+    private var scanFilterPicker: some View {
+        let focusCount = location.scans.filter(\.isFocusScan).count
+        if focusCount > 0 {
+            let counts: [ScanListFilter: Int] = [.room: location.scans.count - focusCount, .focus: focusCount,
+                                                 .all: location.scans.count]
+            Picker("Show", selection: $scanFilterRaw) {
+                ForEach(ScanListFilter.allCases, id: \.self) { filter in
+                    Text("\(filter.rawValue) (\(counts[filter] ?? 0))").tag(filter.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+            .colorScheme(.dark)
+            .padding(.horizontal)
+            // Selection and bulk actions cover what is shown: drop what the new filter hides.
+            .onChange(of: scanFilterRaw) { _, _ in
+                selectedScans.formIntersection(visibleScans.map(\.persistentModelID))
+            }
+        }
+    }
+
+    private var emptyListMessage: String {
+        switch scanFilter {
+        case .room where !location.scans.isEmpty: return "No room scans in this space."
+        case .focus where !location.scans.isEmpty: return "No focus scans in this space."
+        default: return "No scans found in this location."
+        }
+    }
+
+    /// Navigation title/mode, toolbar, and the appear hook.
+    private func detailChrome(_ content: some View) -> some View {
+        content
         .navigationTitle(location.name)
         .onAppear { autoProcessPending() }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
                 if isEditing {
+                    // Select All covers the scans the filter shows.
+                    let shown = Set<PersistentIdentifier>(visibleScans.map(\.persistentModelID))
+                    let allSelected = !shown.isEmpty && shown.isSubset(of: selectedScans)
                     Button(action: {
-                        if selectedScans.count == location.scans.count {
+                        if allSelected {
                             selectedScans.removeAll()
                         } else {
-                            selectedScans = Set(location.scans.map { $0.id })
+                            selectedScans = shown
                         }
                     }, label: {
-                        Text(selectedScans.count == location.scans.count ? "Deselect All" : "Select All")
+                        Text(allSelected ? "Deselect All" : "Select All")
                             .font(.subheadline)
                     })
                 }
@@ -325,15 +366,104 @@ struct LocationDetailView: View {
                 }
             }
         }
+    }
+
+    /// Settings and export sheets.
+    private func detailSheets(_ content: some View) -> some View {
+        content
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .controlPlanePasswordPrompt($passwordPrompt)
         .sheet(isPresented: $showExportSheet) {
             ShareSheet(activityItems: exportItems.map { $0.url }) { _, _, _, _ in
                 // Cleanup
                 isBulkExporting = false
             }
         }
+        .fullScreenCover(isPresented: $showRegionEditor, onDismiss: {
+            importedRegion = nil
+            if let region = pendingFocusScan, let latest = location.latestRoomScan {
+                pendingFocusScan = nil
+                startRescan(latest, focus: region)
+            }
+        }) {
+            if let latest = location.latestRoomScan {
+                FocusRegionEditorView(scan: latest, initialRegion: importedRegion, onScan: { region in
+                    pendingFocusScan = region
+                    showRegionEditor = false
+                }, onCancel: { showRegionEditor = false })
+            }
+        }
+        .confirmationDialog("Rescan", isPresented: $showRescanChoice, titleVisibility: .visible) {
+            if let latest = location.latestRoomScan {
+                Button("Whole room") { startRescan(latest) }
+                Button("Focus on a region") { if focusScanGatesAllow(latest) { showRegionEditor = true } }
+                Button("Import a region file") { if focusScanGatesAllow(latest) { showRegionImporter = true } }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("A whole-room scan updates the room's mesh and photos. A focus scan photographs one region in detail (a partial scan).")
+        }
+        .fileImporter(isPresented: $showRegionImporter, allowedContentTypes: [.json]) { result in
+            importRegionFile(result)
+        }
+        .alert("Region not imported", isPresented: Binding(get: { regionImportError != nil },
+                                                           set: { if !$0 { regionImportError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(regionImportError ?? "")
+        }
+        // A region handed over by deep link for this space (ContentView opened it).
+        .onAppear { takeInboxRegion() }
+        .onChange(of: FocusRegionInbox.shared.pending) { _, _ in takeInboxRegion() }
+    }
+
+    /// A focus_region.json picked from Files: opened in the editor on this space's latest room
+    /// scan, to check and adjust before scanning.
+    private func importRegionFile(_ result: Result<URL, Error>) {
+        switch result {
+        case .failure(let error):
+            regionImportError = error.localizedDescription
+        case .success(let url):
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url) else {
+                regionImportError = "The file could not be read."
+                return
+            }
+            switch FocusRegionInbox.region(fromJSON: data) {
+            case .success(let region):
+                importedRegion = region
+                showRegionEditor = true
+            case .failure(let error):
+                regionImportError = error.localizedDescription
+            }
+        }
+    }
+
+    private func takeInboxRegion() {
+        guard let region = FocusRegionInbox.shared.pending, region.locationId == location.id,
+              let latest = location.latestRoomScan else { return }
+        FocusRegionInbox.shared.pending = nil
+        guard focusScanGatesAllow(latest) else { return }
+        importedRegion = region
+        showRegionEditor = true
+    }
+
+    /// The rescan's own gates (world map on disk, post-processing done), checked BEFORE a region
+    /// is drawn or imported, so a refusal never costs the operator a drawn box.
+    private func focusScanGatesAllow(_ latestScan: CapturedScan) -> Bool {
+        guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
+            showNoWorldMapAlert = true
+            return false
+        }
+        return postprocessGateAllows()
+    }
+
+    /// Rename/world-map alerts, the gate/bulk modifier stack, and the confirmation dialog.
+    private func detailDialogs(_ content: some View) -> some View {
+        content
         .alert("Rename Location", isPresented: $showRenameAlert) {
             TextField("New Name", text: $newLocationName)
             Button("Save") {
@@ -464,19 +594,26 @@ struct LocationDetailView: View {
             return
         }
         isBulkExporting = true
-        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
+        let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         Task { @MainActor in
+            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            await ScanExportManager.colorizeForExport(
+                scans, format: format, modelContext: modelContext,
+                progress: { scan, msg in bulkExportPhases[scan.id] = msg.map { ExportPhase($0) } })
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
+            // Read on main, after colorizing: SwiftData models aren't thread-safe.
+            let capturedColorIds = Set(scans.filter { $0.isColored }.map(\.id))
             DispatchQueue.global(qos: .userInitiated).async {
                 var urls: [ZipExportItem] = []
                 for scan in scans {
                     DispatchQueue.main.async { scan.uploadStatus = .zipping }
                     let filename = scan.makeExportFilename(format: format)
                     if let url = ScanExportManager.prepareExport(
-                        filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch,
+                        filename: filename, scanDir: scan.scanDirectory, format: format,
+                        vertexColorsFromCapture: capturedColorIds.contains(scan.id), bulkStitch: bulkStitch,
                         phase: { step in DispatchQueue.main.async { bulkExportPhases[scan.id] = step } }
                     ) {
                         urls.append(ZipExportItem(url: url))
@@ -501,26 +638,53 @@ struct LocationDetailView: View {
         }
     }
 
+    /// The control plane hands out upload destinations; the manual URL is the fallback.
+    private var uploadsConfigured: Bool {
+        ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost)
+    }
+
     private func bulkUpload(scans: [CapturedScan]) {
         // Re-entrancy: this view tracks per-scan status (no bulk flag) — refuse while any
         // selected scan's export/upload is already in flight.
         guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
-        guard !scans.isEmpty, !uploadURL.isEmpty else { return }
-        let format = ExportFormat(rawValue: globalSelectedFormatStr) ?? .scan4d
-        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
+        guard !scans.isEmpty, uploadsConfigured else { return }
+        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) { startBulkUpload(scans: scans) }
+    }
+
+    /// The batch, once `bulkUpload` has passed its checks and any password prompt.
+    private func startBulkUpload(scans: [CapturedScan]) {
+        guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
+        let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
+        // In flight from the start, so the guard above holds while colorize runs.
+        for scan in scans { scan.uploadStatus = .zipping }
         Task { @MainActor in
+            // Mesh exports ship captured colors: colorize any scan that isn't yet.
+            await ScanExportManager.colorizeForExport(
+                scans, format: format, modelContext: modelContext,
+                progress: { scan, msg in bulkExportPhases[scan.id] = msg.map { ExportPhase($0) } })
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             for scan in scans {
-                guard let url = URL(string: baseURLString + scan.makeExportFilename(format: format)) else { continue }
+                // Where it goes: the control plane's grant, or the manual Upload URL.
+                let target: ExportUploadTarget
+                do {
+                    target = try await ExportUploadTarget.resolve(
+                        scanId: scan.id, filename: scan.makeExportFilename(format: format),
+                        contentType: format.effective(for: scan).contentType, format: format, manualURL: uploadURL)
+                } catch {
+                    scan.uploadStatus = .failed(error.localizedDescription)
+                    continue
+                }
                 scan.uploadStatus = .zipping
+                let colorsFromCapture = scan.isColored
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     let filename = scan.makeExportFilename(format: format)
                     guard let exportURL = ScanExportManager.prepareExport(
-                        filename: filename, scanDir: scan.scanDirectory, format: format, bulkStitch: bulkStitch,
+                        filename: filename, scanDir: scan.scanDirectory, format: format,
+                        vertexColorsFromCapture: colorsFromCapture, bulkStitch: bulkStitch,
                         phase: { step in DispatchQueue.main.async { bulkExportPhases[scan.id] = step } }
                     ) else {
                         DispatchQueue.main.async {
@@ -533,27 +697,10 @@ struct LocationDetailView: View {
                     DispatchQueue.main.async {
                         self.bulkExportPhases[scan.id] = nil
                         scan.uploadStatus = .uploading(progress: 0.0)
+                        // Background transfer; the uploader sets the scan's status (see ExportUploader).
+                        ExportUploader.shared.upload(exportURL, request: target.request, scanId: scan.id,
+                                                     exportId: target.exportId)
                     }
-
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "PUT"
-                    request.setValue(format.contentType, forHTTPHeaderField: "Content-Type")
-
-                    let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
-                        try? FileManager.default.removeItem(at: exportURL)
-                        DispatchQueue.main.async {
-                            if let error = error {
-                                scan.uploadStatus = .failed(error.localizedDescription)
-                            } else if let httpResponse = response as? HTTPURLResponse,
-                                      (200...299).contains(httpResponse.statusCode) {
-                                scan.uploadStatus = .success
-                                scan.lastUploadedAt = Date()
-                            } else {
-                                scan.uploadStatus = .failed("Server error")
-                            }
-                        }
-                    }
-                    task.resume()
                 }
             }
         }
@@ -587,11 +734,11 @@ struct LocationDetailView: View {
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
-                    .background(selectedScans.isEmpty || uploadURL.isEmpty ? Color.gray.opacity(0.3) : Color.blue)
-                    .foregroundColor(selectedScans.isEmpty || uploadURL.isEmpty ? .gray : .white)
+                    .background(selectedScans.isEmpty || !uploadsConfigured ? Color.gray.opacity(0.3) : Color.blue)
+                    .foregroundColor(selectedScans.isEmpty || !uploadsConfigured ? .gray : .white)
                     .cornerRadius(10)
             })
-            .disabled(selectedScans.isEmpty || uploadURL.isEmpty)
+            .disabled(selectedScans.isEmpty || !uploadsConfigured)
 
             Button(action: {
                 let scansToSave = sortedScans.filter { selectedScans.contains($0.id) }
@@ -714,7 +861,9 @@ struct LocationDetailView: View {
     /// guard first. DECISION 3 hard gate: the rescan consumes the LATEST scan's proxy/roomplan
     /// (ghost + auto-align reference) and the ORIGINAL's roomplan (registration target) — all
     /// post-process products. A suspect map (tracking excursion baked in) warns before proceeding.
-    private func startRescan(_ latestScan: CapturedScan) {
+    /// `focus`: a focus scan of that region, the identical rescan entry (same map, gates and
+    /// suspect-map confirm); only the capture view's Start differs (the still-capture branch).
+    private func startRescan(_ latestScan: CapturedScan, focus: FocusRegion? = nil) {
         guard FileManager.default.fileExists(atPath: latestScan.worldMapURL.path) else {
             showNoWorldMapAlert = true
             return
@@ -725,6 +874,8 @@ struct LocationDetailView: View {
             scanStore.activeRelocalizationMap = latestScan.worldMapURL
             scanStore.activeScanToExtend = latestScan.id
             scanStore.activeScanCase = .rescanSpace
+            scanStore.activeScanKind = focus == nil ? .room : .focus
+            scanStore.activeFocusRequest = focus.map { FocusCaptureRequest(region: $0) }
             selectedTab = 1
         }
         if latestScan.worldMapSuspect {
@@ -770,7 +921,7 @@ struct LocationDetailView: View {
     private func postprocessGateAllows() -> Bool {
         // Same deterministic comparator as ScanPostprocessor.original(of:) — on a capturedAt tie
         // the gate must bad-check the SAME scan registration will target.
-        let ordered = location.scans.sorted(by: CapturedScan.canonicalOrder)
+        let ordered = location.roomScans.sorted(by: CapturedScan.canonicalOrder)
         let prerequisites = [ordered.first, ordered.last].compactMap { $0 }
         if prerequisites.contains(where: { ScanPostprocessor.isBad($0) }) {
             showBadScanGate = true
@@ -956,68 +1107,6 @@ private struct BulkUploadMixedDialog: ViewModifier {
             Text("\(uploaded.count) of the selected scans have already been uploaded. " +
                  "Upload only the un-uploaded scans, or re-upload everything?")
         }
-    }
-}
-
-// MARK: - Workflow Card
-
-struct WorkflowCard: View {
-    var icon: String
-    var title: String
-    var description: String
-    var time: String
-    var buttonText: String
-    var isPrimary: Bool = false
-    var isDisabled: Bool = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            Image(systemName: icon)
-                .font(.title)
-                .foregroundColor(isPrimary ? .cyan : .white)
-                .frame(width: 40)
-                .padding(.top, 4)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(title)
-                    .font(.headline)
-                    .foregroundColor(.white)
-
-                Text(description)
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.7))
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack {
-                    Label("Time: \(time)", systemImage: "clock")
-                        .font(.caption)
-                        .foregroundColor(.green)
-
-                    Spacer()
-
-                    Button(action: {}, label: {
-                        Text(buttonText)
-                            .font(.caption).bold()
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(isDisabled ? Color.gray.opacity(0.3) :
-                                        (isPrimary ? Color.blue : Color.white.opacity(0.2)))
-                            .foregroundColor(isDisabled ? .white.opacity(0.45) : .white)
-                            .cornerRadius(8)
-                    })
-                    .disabled(isDisabled)
-                }
-                .padding(.top, 4)
-            }
-        }
-        .padding()
-        .background(.ultraThinMaterial)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(isPrimary ? Color.cyan.opacity(0.3) : Color.white.opacity(0.1), lineWidth: 1)
-        )
-        .cornerRadius(16)
-        .opacity(isDisabled ? 0.6 : 1.0)
     }
 }
 

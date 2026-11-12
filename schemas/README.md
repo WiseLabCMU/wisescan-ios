@@ -8,9 +8,10 @@ Each export format includes **only** the data relevant to that format. The commo
 `scan4d_{locationName}_{scanName}_{format}_{timestamp}_{uuid}.{ext}`
 
 ### Scan4D (`.zip`)
-Our native format. Includes relocalization data plus the full Polycam raw import payload.
+Our native format. Includes the full Polycam raw import payload plus the Scan4D-specific spatial sidecars — the ARKit sparse feature cloud, stitching links, and RoomPlan output.
 - `scan4d_metadata.json`: Global metadata for the scan (see schema below).
-- `relocalization.worldmap`: ARKit `ARWorldMap` for relocalizing against this scan.
+- `arkit_features.bin`: The ARKit sparse feature cloud taken from the scan's `ARWorldMap`, in the scan's **raw** capture frame (see format below).
+- `sweep_coverage.bin`: Where the capture sweep actually looked — a coarse cell grid of free-space / surface / visit counts built from camera poses + LiDAR depth, in the scan's **raw** capture frame (see format below). It is what makes `arkit_features.bin` interpretable: an absence of features means something only where coverage says we looked.
 - `stitching.json`: Per-location manifest of spatial boundary links to other scans (present when this scan's location participates in a Pin & Extend or Link Adjacent stitch; see schema below).
 - `semantics.json`: *(Removed in v0.4)* Previously contained per-face mesh classification; replaced by `roomplan.json`.
 - `roomplan.json`: RoomPlan oriented bounding boxes for detected surfaces and objects (see schema below). Present when semantic labeling was enabled during capture.
@@ -27,25 +28,276 @@ Our native format. Includes relocalization data plus the full Polycam raw import
 Polycam's raw data import format only.
 - `images/`, `proxy_images/`, `depth/`, `confidence/`, `cameras/`, `mesh_info.json` — same as above, without Scan4D-specific files.
 
-### RAW (`.zip`)
-Nerfstudio-compatible format only.
-- `images/`: Time-aligned RGB frames.
+### Nerfstudio (`.zip`)
+Trains as-is in **Nerfstudio** and **LichtFeld Studio** — no conversion step. Both read the
+same `transforms.json` schema (LichtFeld's loader for it is its Blender/NeRF loader), so one
+bundle serves both. Built by `NerfstudioExport` from the staged Polycam payload; it does
+**not** copy capture's own `transforms.json`, which writes the pose matrix transposed.
+
+- `images/`: Time-aligned RGB frames, plus the 360° cube faces when a rig was used.
 - `proxy_images/`: Low-resolution or external camera proxy frames.
-- `depth/`: Time-aligned 16-bit depth maps.
+- `depth/`: 16-bit millimetre depth, resampled to each frame's **RGB resolution**.
 - `confidence/`: Time-aligned 8-bit confidence maps for depth.
-- `transforms.json`: Camera poses for all frames in Nerfstudio format.
+- `masks/`: Operator/rod keep-masks for the 360° faces (white = keep), at image resolution.
+- `transforms.json`: Camera poses and intrinsics for all frames (see schema below).
+- `cameras/`, `mesh_info.json`: The per-frame Polycam camera JSONs `transforms.json` was
+  built from — kept rather than deleted; the export never discards captured data.
+- `mesh.obj` (+ `face_classes.bin`): The ARKit scene-reconstruction mesh with its
+  face-aligned classification sidecar, in the location's **canonical** frame. Vertices carry
+  their captured colors as `v x y z r g b` (sRGB, 0–1); see **Mesh vertex colors** below.
+- `roomplan.json`, `roomplan_raw.json`: RoomPlan surfaces and objects (canonical / raw frame).
+- `registration.json`: The raw→canonical transform relating mesh + RoomPlan to the cameras,
+  which stay in the raw capture frame.
+- `arkit_features.bin`: The ARKit sparse feature cloud (see format below). It is in the
+  **raw** capture frame — the same frame as `cameras/` and `transforms.json`, and a
+  *different* frame from `mesh.obj` and `roomplan.json`. Apply `registration.json` before
+  drawing it against either of those.
+- `sweep_coverage.bin`: The observed-space grid (see format below) — also **raw** capture
+  frame, so the same `registration.json` caveat applies. Shipped so the feature cloud's
+  absences are readable; it is data, not a training input.
+
+**The export changes representation, never information.** It renames, re-lays-out, fixes
+the matrix layout and byte order, resamples depth to the size an engine insists on, and
+adds the filler sidecars — all lossless or trivially invertible. Anything that encodes an
+opinion about *training* — the seed point cloud (voxel size, confidence weighting, mesh vs
+LiDAR), rendered normal maps, mesh debiasing and hole filling — is deliberately **not**
+done here: it is tuned against a specific engine version and iterates in minutes on the
+training box versus release cycles on the device. The bundle trains as-is at baseline
+quality; the optional training-side pipeline (`tools/`) consumes the raw artifacts above.
+There is therefore no `sparse_pc.ply` / `ply_file_path` in the export; both engines load
+without one and the pipeline adds its own.
+
+Formerly named **RAW**. `ExportFormat.persisted(_:)` maps the old stored name forward.
+
+#### Why the sidecars look the way they do
+The two engines agree on the schema and disagree on the sidecars, so the bundle satisfies
+both at once:
+- **Nerfstudio** asserts `mask_path` / `depth_file_path` are present on *every* frame or on
+  none. Frames with no real mask get an all-white (keep-everything) one; frames the LiDAR
+  never covered (the 360° faces) get an all-zero depth map. Both are no-ops — Nerfstudio's
+  depth losses build `depth_mask = termination_depth > 0`, and LichtFeld's depth-anchor
+  collector and `pixel_active` both reject `!(t > 0)` — and a uniform image deflates to a
+  few KB even at 12 MP.
+- **LichtFeld** compares sidecar dimensions to the image for *exact equality* and aborts the
+  load with `DEPTH_SIZE_MISMATCH` otherwise, which is why depth is resampled up rather than
+  left at the LiDAR's native raster. Nearest-neighbour, never bilinear: interpolating across
+  a depth discontinuity invents a surface at a range nothing measured.
+- Intrinsics are written **per frame with no globals** whenever more than one intrinsic set
+  is present. Nerfstudio decides per key (`fx_fixed = "fl_x" in meta`) and never reads a
+  per-frame value when the global exists, so the two cannot coexist. ARKit refines focal
+  length continuously, so real captures always take this path.
+- No `ply_file_path` is written (see above). When the training-side pipeline adds a seed
+  cloud it sets the key; LichtFeld then loads it automatically and Nerfstudio needs
+  `ns-train splatfacto --data . nerfstudio-data --load-3D-points True`.
+
+The equirect originals are staged only so the cube faces can be reprojected from them, then
+dropped — at 6720×3360 they would dominate the archive and neither engine reads them from
+this layout. Use **Scan4D** when you want them kept.
+
+### Flame3D (`.zip`)
+Upload-ready input for [flame3d-core](https://github.com/openflam/flame3d-core)'s `polycam`
+data source (3D object segmentation, captioning and semantic search). Built by
+`Flame3DExport` from the privacy-processed Polycam payload. The full contract and its
+reasons live in [tools/scan4d-to-flame3d/README.md](../tools/scan4d-to-flame3d/README.md),
+whose converter writes the same bundle from a Nerfstudio export. Entries sit at the **zip
+root**, because flame3d extracts the upload as-is:
+
+- `keyframes/images/<stem>.jpg`: the stream frames and the hi-res stills, all at one
+  resolution (stills resized to the stream size). No 360° cube faces yet.
+- `keyframes/corrected_cameras/<stem>.json`: a Polycam camera record per frame. `t_00`…`t_23`
+  are the camera-to-world rows in the raw capture frame. `fx fy cx cy width height` are scaled
+  to the exported image.
+- `keyframes/depth/<stem>.png`: 16-bit millimetre LiDAR depth at its native raster, with zeros
+  where a frame has none.
+- `raw.glb`: the mesh in the canonical frame, with captured vertex colors as `COLOR_0` (linear).
+- `mesh_info.json`: `alignmentTransform`, the registration's raw→canonical transform,
+  column-major (identity for an original scan), plus the frame count and image size.
+- `scan4d/`: `registration.json`, `roomplan.json` and `export.json`, which records what was
+  exported and what was left out.
+
+Check a bundle before uploading with
+`python3 tools/scan4d-to-flame3d/scan4d_to_flame3d.py --verify <bundle>.zip`.
 
 ### OBJ (`.obj`)
-Single mesh file export (no vertex colors).
-- The raw `mesh.obj` reconstructed on-device by RealityKit.
+Single mesh file export, with vertex colors.
+- The `mesh.obj` reconstructed on-device by RealityKit, with each vertex's captured color appended as `v x y z r g b` (sRGB, 0–1), the vertex-color extension MeshLab, Blender, CloudCompare and Open3D read.
 
 ### PLY (`.ply`)
-Converted mesh with embedded vertex colors.
-- Single ASCII PLY file with vertices, faces, and per-vertex RGB colors converted from the on-device OBJ + colors.bin.
+Converted mesh with vertex colors.
+- Single binary (`binary_little_endian`) PLY file with vertices, faces and per-vertex RGB (`uchar red/green/blue`).
 
 ### USDZ (`.usdz`)
 Apple's native 3D format, converted via ModelIO.
-- Single USDZ file converted from the on-device OBJ mesh. Opens natively in Quick Look on iOS/macOS.
+- Single USDZ file converted from the on-device OBJ mesh, read with its vertex colors. Opens natively in Quick Look on iOS/macOS.
+
+### Focus scan (`.zip`, any selected format)
+A focus scan (REQ-035) has one export, whatever format is selected: its still-capture folder under one top-level folder named after the export.
+- `photos/photo_NNNNN.jpg`: 12MP ARKit stills, sensor (landscape) orientation, exposure and ISO in EXIF (absent on stills the privacy pass re-encoded).
+- `photo_depth/photo_NNNNN.png`, `photo_confidence/photo_NNNNN.png`: the 256x192 LiDAR depth (16-bit mm) and confidence of the same ARFrame. ARKit reports the still with the video intrinsics scaled up; the still's true focal can differ by a few percent (`manifest.json` setup `expectedStillFocalScale`), so resample depth through both geometries.
+- `photos.csv`: per still, pose (`c2w_00..c2w_23`, row-major camera-to-world), intrinsics, exposure, ISO, tracking, the gate inputs, the blur check at capture (`capture_gyro_*`, `capture_over_budget`) and the region (`region_frame_coverage`, `region_distance_m`, `region_azimuth_deg`, `region_elevation_deg`, `region_cell`, `region_aim_hits`: how many of the five LiDAR aim points landed in the box, -1 without depth).
+- `frames.csv` (every tracking frame's pose), `imu_gyro.csv`, `imu_accel.csv`, `events.log`.
+- `manifest.json`: `setup` (device, stream format, world-map scan, bakes, exposure cap, gate settings, `focusRegion`, `regionToWorld` (column-major box-to-world in this capture's frame), `detailLevel`, `privacyFilter`) and `totals` (counts, `coverage_counts`).
+- `world_map_registration.json`: the world-map scan's `registration.json` (its raw frame to the location's canonical frame); the poses are in that raw frame.
+- `focus_region.json`: the region ([schema](focus_region.schema.json)).
+- `privacy_excluded.json` *(only when stills were left out)*: stills the person check could not verify or blur.
+
+### Mesh vertex colors
+Every export that includes the mesh (Nerfstudio, OBJ, PLY, USDZ) carries per-vertex colors **sampled from the captured frames**: the colorize step projects the mesh into the saved frames and takes a weighted median per vertex. Exporting a scan that hasn't been colorized runs that step first, the same pass as the **Color** button. The save-time colors the in-app viewer shows before that are normals-based, a visual preview only, and are never exported. If colorize can't run (no saved frames, or the scan is mid-process), the mesh exports without colors.
+
+#### `arkit_features.bin` (ARKit sparse feature cloud)
+The sparse 3D feature points ARKit accumulated while tracking, lifted out of the scan's
+`ARWorldMap` at save time. Shipped in the **Scan4D** and **Nerfstudio** bundles; always in
+the scan's **raw** capture frame, the same frame as `cameras/` / `transforms.json` and a
+different frame from `mesh.obj` / `roomplan.json` (apply `registration.json` to cross over).
+
+**Header — exactly 128 bytes of ASCII**, four newline-terminated lines followed by space
+padding, with the 128th byte itself a `\n`:
+
+```
+ARKITFEAT 1
+count <N>
+dtype id:u8,x:f4,y:f4,z:f4
+frame raw
+```
+
+**Body — `N` records of exactly 20 bytes**, little-endian, immediately after the header:
+
+| Offset | Field | Type |
+|---|---|---|
+| 0 | `id` | `UInt64` |
+| 8 | `x` | `Float32` |
+| 12 | `y` | `Float32` |
+| 16 | `z` | `Float32` |
+
+The records are **packed: no padding, no alignment**, neither between fields nor between
+records. This is the one detail a reader has to get right — a naive C `struct { uint64_t id;
+float x, y, z; }` gets padded to 24 bytes by the compiler's alignment rules, so reading the
+file into an array of it lands record 0 correctly and every record from 1 onward as garbage.
+Declare the struct packed, or read the fields by offset. In numpy the layout is one line:
+
+```python
+np.fromfile(p, dtype=np.dtype([('id','<u8'), ('x','<f4'), ('y','<f4'), ('z','<f4')]), offset=128)
+```
+
+A feature-poor capture — a dark room, a blank wall, a very short session — yields a valid
+128-byte header with `count 0` and no body, **not** a missing file: `count 0` is how "ARKit
+had nothing to give" is expressed, so a consumer never has to branch on existence to tell an
+empty cloud from a broken one. The file is absent only when the scan predates the format, or
+when it was expected and lost — and the lost case always names it in `incomplete_artifacts` in
+`scan4d_metadata.json`, whether the sidecar write failed, the promotion into the bundle failed,
+or the world-map export that produces it failed outright. So absence with no
+`incomplete_artifacts` entry means a scan older than the format, and nothing else.
+
+`id` is ARKit's own stable feature identifier, and it survives the map's save/load/save
+cycle. Successive scans of the same location — a rescan that relocalized against the earlier
+map, or a Pin & Extend continuation — therefore reuse ids for the same physical point, so the
+clouds can be joined on `id` rather than re-matched geometrically.
+
+**This is not a training seed cloud.** It is deliberately never named `sparse_pc.ply` and
+never sets `ply_file_path` in `transforms.json`; both of those stay reserved for the
+training-side pipeline in `tools/`, for the reasons given under **The export changes
+representation, never information** and **Why the sidecars look the way they do** above. It is
+a relocalization / registration artifact that happens to be points: unfiltered, unweighted,
+sparse by construction, and carrying none of the opinions about voxel size or confidence
+weighting that a seed cloud encodes. Feeding it to a trainer as one will not produce the
+result the pipeline's cloud does.
+
+#### `sweep_coverage.bin` (sweep coverage grid)
+Where the capture sweep **looked**, accumulated live from camera poses + LiDAR depth — never
+from feature points. Each depth sample is cast as a ray from the camera; the cells it passes
+through are *free*, the cell it ends in is *surface*. Shipped in the **Scan4D** and
+**Nerfstudio** bundles beside `arkit_features.bin`, because it is the null-case field the cloud
+needs: "no features here" is an observation only in cells this grid says were looked at. Zero
+coverage means **no claim is possible**, not "empty". (This is unrelated to
+`photo_coverage` in `scan4d_metadata.json`, which scores keyframe photos against the mesh.)
+
+**Header — exactly 512 bytes of ASCII**, seven newline-terminated lines followed by space
+padding, with the 512th byte itself a `\n`:
+
+```
+SWEEPCOV 1
+count <N>
+cell <metres>
+dtype i:i4,j:i4,k:i4,free:u2,surface:u2,visits:u2
+frame raw
+stats frames=<n> drop_busy=<n> drop_rate=<n> skip_tracking=<n> skip_nodepth=<n> depth=<0|1>
+rays integrated=<n> truncated=<n> lowconf=<n> invalid=<n>
+```
+
+The `stats` line counts frames integrated (`frames`), dropped (`drop_busy`: the integrator was
+still busy with the previous frame; `drop_rate`: over the rate throttle) and skipped
+(`skip_tracking`: tracking not `.normal`; `skip_nodepth`: no depth map); `depth=1` iff a depth
+map was ever available during the capture. The `rays` line counts rays `integrated`,
+`truncated` at the range cap, skipped as low-confidence (`lowconf`), and rejected as `invalid`
+(non-finite / non-positive depth). Readers should parse both lines as space-separated
+`key=value` tokens and ignore unknown keys.
+
+The 512 bytes leave room to spare: with every number at its type's maximum a header uses 368 of
+them, so later layers can add header keys without moving the body. Should a header ever
+outgrow the budget regardless, the writer withholds the diagnostics rather than fail the save:
+every `stats` / `rays` counter is written as `-1`, which no real count can be. `count`, `cell`
+and `depth=` are never withheld, and the body is unaffected.
+
+**Body — `N` records of exactly 18 bytes**, little-endian, packed (no padding or alignment,
+same caveat as `arkit_features.bin`), immediately after the header:
+
+| Offset | Field | Type |
+|---|---|---|
+| 0 | `i` | `Int32` |
+| 4 | `j` | `Int32` |
+| 8 | `k` | `Int32` |
+| 12 | `free` | `UInt16` |
+| 14 | `surface` | `UInt16` |
+| 16 | `visits` | `UInt16` |
+
+```python
+np.fromfile(p, dtype=np.dtype([('i','<i4'), ('j','<i4'), ('k','<i4'), ('free','<u2'), ('surface','<u2'), ('visits','<u2')]), offset=512)
+```
+
+**Cells.** Origin-anchored floor binning: cell `(i, j, k)` spans
+`[i*cell, (i+1)*cell)` × `[j*cell, (j+1)*cell)` × `[k*cell, (k+1)*cell)` — so `-0.1` lands in
+cell `-1`, not `0`. `cell` is **0.5 m** in v1; read it from the header rather than assuming.
+Only touched cells are written; a cell absent from the body was never observed.
+
+**Counters.** `free`, `surface` and `visits` count *frame updates*, not rays: each update
+increments each counter at most once per cell, and all three saturate at 65535 rather than
+wrapping. `visits` is updates that touched the cell in either state. Low-confidence depth
+samples are skipped entirely. Rays longer than **5 m** are truncated: free space is stamped up
+to the cap and no surface is recorded. Only frames with `.normal` tracking are stamped.
+
+**Frame.** The scan's **raw** capture frame, co-framed with `cameras/` at capture time. It is
+**not** snap-corrected the way the saved mesh is (the mesh re-reads live anchor transforms at
+save; this grid keeps whatever pose each frame had when it was stamped), and it is not
+`mesh.obj`'s canonical frame. Apply `registration.json`'s raw→canonical transform before
+comparing it with the mesh or RoomPlan. The on-device registration bake never rewrites it.
+
+**Presence contract** (mirrors `arkit_features.bin`):
+- Every current save writes the file, even when the grid is empty — a valid header with
+  `count 0` and no body.
+- `depth=0` on the `stats` line means the device **could not look** (no depth was ever
+  available): the empty grid makes no claim, and is not "observed empty".
+- Absent **with** an `incomplete_artifacts` entry in `scan4d_metadata.json` means it was lost.
+- Absent with **no** entry means the scan predates the format, and nothing else.
+
+**Scope.** v1 is the **room-relocalization** profile only: any observation counts, with no
+viewing-direction or ground-sample-distance binning. Direction-binned / GSD coverage, and
+*achievability* (which unobserved cells a sweep could have reached — free-space erosion plus
+flood-fill), are planned as later layers on top of this file, not encoded in it.
+Until then, coverage is quantified **relative to a reference scan** rather than absolutely: the
+control plane compares a rescan's grid with the grid of the scan it relocalized against
+(re-coverage of the reference's surfaces as the comparability gate, extension, gaps, and cells
+whose occupancy flipped). See the `scan4d-server` README, "Coverage".
+
+### Control plane sync (not a file)
+
+The JSON the app sends the control plane on every sync, `POST /v1/devices/{device_id}/sync`
+(REQ-038), is this device's whole inventory. It carries spaces with base/tip, scans with their
+`registration.json` transform, `focus_region.json` and map-package file list, and stitch links
+with the same anchors as `stitching.json` plus the fine-tune's server revision. The response
+carries the files the server wants, fine-tune updates, focus-scan tasks (each region a
+`focus_region.json` with `task_id`) and the export upload route. Its contract is defined by the server: the `scan4d-server` repo's README
+("Sync"), with the live schema at the server's `/openapi.json`. The app side is
+`ControlPlaneManifest.swift`, encoded snake_case with ISO 8601 times.
 
 ---
 
@@ -93,10 +345,12 @@ This file is generated by `FrameCaptureSession.swift` and appended to by `ScansL
 - **`gps_altitude`** *(Double, optional)*: GPS altitude in meters, present if location tracking is available.
 - **`gps_accuracy`** *(Double, optional)*: Horizontal GPS accuracy in meters.
 - **`compass_heading`** *(Double, optional)*: True heading (or magnetic if true isn't available) in degrees 0-359.9.
-- **`face_anchors`** *(Array, optional)*: 3D locations of detected faces for privacy filtering. Array of objects with `x`, `y`, `z` floats.
+- **`face_anchors`** *(Array, optional)*: 3D body-center locations of detected people, one per person, for privacy markers. The key name predates body-center detection and is kept for compatibility. Array of objects with `x`, `y`, `z` floats.
 - **`semantic_labeling`** *(Boolean, optional)*: Whether semantic classification was enabled during capture.
 - **`semantic_classes_detected`** *(Array of Strings, optional)*: Display-level semantic classes detected (e.g., `["wall", "floor", "table", "fixture"]`). Only present when `semantic_labeling` is `true`. Fine-grained sub-categories are preserved in `roomplan.json`.
-- **`keyframe_count`** *(Integer)*: Number of sharp stillness keyframes captured (hi-res stills on supporting devices, stream frames otherwise). Keyframes are flagged per-frame via `is_keyframe` in `transforms.json` and the Polycam camera JSONs.
+- **`keyframe_count`** *(Integer)*: Number of sharp stillness keyframes captured (hi-res stills on supporting devices, stream frames otherwise). Keyframes are flagged per-frame via `is_keyframe` in `transforms.json` and the Polycam camera JSONs. With automatic stills (REQ-036) every saved frame is a keyframe.
+- **`auto_stills`** *(Object, optional)*: Room scans with automatic stills (REQ-036): `requested`, `saved`, `ticks_held_blur`, `ticks_held_spacing`, `slow_encode_backoffs`, `frame_gap_backoffs`, `spacing_deg`, `warmup_s`, `blur_budget_rad`, `exposure_cap_s`, `exposure_cap_note`.
+- **`frame_work_ms`** *(Object, optional)*: The AR session delegate's per-frame handler time while recording: `frames`, `mean_ms`, `p99_ms`, `max_ms`.
 
 ### `roomplan.json`
 **Schema definition:** [`roomplan.schema.json`](./roomplan.schema.json)

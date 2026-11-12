@@ -38,10 +38,11 @@ Scan4D is a professional-grade reality capture app for iPhone and iPad. It turns
 • 16-bit depth maps with confidence maps captured at adaptive frame rates
 • Scan capacity metrics: polygon count, drift tracking, session duration
 • Scan coaching: real-time tips guide scanning technique with 4-tier priority (tracking warnings, pattern hints, progress encouragement)
-• Hi-res stillness keyframes: hold still to capture native-resolution photos for maximum texture detail — a reticle, shutter feedback, and an amber/clear coverage overlay show where photos are still needed
+• Automatic hi-res photos: native-resolution stills are taken for you whenever the device is steady and the view has changed, under a short-exposure cap for sharp images — an amber/clear coverage overlay shows where photos are still needed
+• Focus scans: draw a box around one area (a work table, a shelf) on a previous scan and photograph it in detail — from a quick check of a few photos to dense coverage for 3D reconstruction — with a live dial of the angles covered
 • Space staging analyzer: optional pre-scan 360° sweep checks lighting, doors, screens, and people; presents a report with actionable tips before recording
 • Interactive 3D mesh preview with camera-sampled vertex coloring and loading indicator
-• Privacy filtering: person segmentation removes humans from meshes, face blurring in RGB exports
+• Privacy filtering: person segmentation removes humans from meshes, face blurring in RGB exports; switched off, it turns itself back on after 24 hours
 • VIO tracking guard: automatic halt and save prompt on mid-scan tracking loss
 
 PROXY MODE (Meta Ray-Ban Smart Glasses)
@@ -68,14 +69,15 @@ BULK OPERATIONS
 • Background post-scan processing with per-card progress
 
 FLEXIBLE EXPORT FORMATS
-• Scan4D: Full bundle with metadata, relocalization map, images, depth, confidence, and camera data
+• Scan4D: Full bundle with metadata, ARKit feature points, images, depth, confidence, and camera data
 • Polycam: Raw data import compatible with Polycam
 • RAW: Nerfstudio/COLMAP-compatible transforms.json + images + depth
-• OBJ / PLY / USDZ: Native mesh formats for MeshLab, Blender, and iOS Quick Look
+• Flame3D: Upload-ready input for flame3d 3D object segmentation and semantic search
+• OBJ / PLY / USDZ: Native mesh formats, in the scan's real colors, for MeshLab, Blender, and iOS Quick Look
 
 SERVER INTEGRATION
 • Configure any HTTP(S) upload endpoint in Settings
-• Direct PUT upload with live progress tracking
+• Direct PUT upload with live progress tracking that finishes even with the screen locked
 • Save to Files or AirDrop for offline workflows
 • Compatible with self-hosted reconstruction pipelines
 
@@ -97,7 +99,8 @@ Requires a LiDAR-equipped iPhone or iPad Pro. Meta Ray-Ban Smart Glasses support
 • Process step: finish scans on-device — room layout, plane-based registration into a shared per-location frame, rescan ghost, and vertex coloring — with upload/export gated until complete
 • Automatic rescan alignment: walls and floors register each rescan into the location's canonical coordinate frame; unreliable fits are refused, never guessed
 • Multi-level rooms: steps, landings, and ramps are recovered from the scan mesh, and curved walls keep their real geometry instead of being flattened
-• Hi-res tap stills: hold still until the reticle locks, tap to capture a native-resolution photo; amber coverage overlay shows where photos are still needed
+• Focus scans: Rescan Space can now photograph one region in detail — draw a box on the previous scan, pick Check, Detail or Splat, and walk around it; saved as a partial scan you can export or upload
+• Automatic hi-res photos: room scans take native-resolution stills on their own, sharp at walking pace; no more tapping (a tap remains the 360° camera's shutter)
 • Photo coverage tracking: occlusion-correct world-space coverage grid with overlap and parallax coaching, exported for dataset triage
 • Stop safety: the stop button always asks — Save & End, Save & Scan Adjacent, Discard, or Cancel
 • Naming after save: the name prompt now waits for the save pipeline, eliminating the frozen-keyboard stall on stop
@@ -202,7 +205,7 @@ https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md
 | 5 | **Scans List** (location grid with multi-select active) | "Organize scans by location with bulk Save, Upload, and Delete" |
 | 6 | **Link Adjacent Space** (ghost overlay + tracking banner) | "Re-scan over time or link adjacent areas with guided alignment" |
 | 7 | **Meta Ray-Ban PiP** (glasses stream + capture view) | "Stream frames from Meta Ray-Ban Smart Glasses via Bluetooth" |
-| 8 | **Export Format Picker** (scan card with format dropdown) | "Export to Scan4D, Polycam, Nerfstudio, OBJ, PLY, or USDZ" |
+| 8 | **Export Format Picker** (space screen, Global Export Format dropdown) | "Export to Scan4D, Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ" |
 | 9 | **Dashboard** (server status + glasses connection) | "Connect to your server and pair Meta Ray-Ban Smart Glasses" |
 | 10 | **Settings** (upload URL + capture mode + glasses) | "Full control over capture quality, mode, and device pairing" |
 

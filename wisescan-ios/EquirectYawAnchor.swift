@@ -87,15 +87,8 @@ enum EquirectYawAnchor {
 
     // MARK: - Keyframe samples
 
-    /// Unprojects a spread of keyframes into world points carrying their own brightness.
-    /// Strided rather than dense: the score only needs enough points to rank a yaw, and
-    /// this runs inside the Process step alongside the solve itself.
-    static func keyframeSamples(rawDataDir: URL, maxFrames: Int, pixelStride: Int) -> [Sample] {
-        keyframeSampleGroups(rawDataDir: rawDataDir, maxFrames: maxFrames,
-                             pixelStride: pixelStride).flatMap { $0 }
-    }
-
-    /// Same sampling, one array per keyframe: the photometric solver's ZNCC is computed
+    /// Unprojects a spread of keyframes into world points carrying their own brightness,
+    /// one array per keyframe: the photometric solver's ZNCC is computed
     /// per (keyframe, still) PAIR — exposure differs between keyframes, and pooling them
     /// would let one bright frame dominate the normalisation.
     static func keyframeSampleGroups(rawDataDir: URL, maxFrames: Int,
