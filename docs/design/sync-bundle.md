@@ -2,7 +2,7 @@
 
 **Status:** Built, device test pending (2026-11-11). Where the build departed from the plan, this
 doc says what was built and why.
-**Scope:** How a scan reaches the lab server (the control plane in `scan4d-server`), what Share is,
+**Scope:** How a scan reaches the Scan4D server (the control plane in `scan4d-server`), what Share is,
 and what goes away. It builds on [export-consolidation.md](export-consolidation.md), which made
 Scan4D the one capture export.
 
@@ -27,7 +27,7 @@ Two verbs, each with one meaning:
 
 | | What | Where to | When |
 |---|---|---|---|
-| **Sync** | Everything: the map's JSON, a RoomPlan preview, and one bundle per scan | Your lab server | Automatically, for the spaces you sync |
+| **Sync** | Everything: the map's JSON, a RoomPlan preview, and one bundle per scan | Your Scan4D server | Automatically, for the spaces you sync |
 | **Share** | One file another system reads: Scan4D, OBJ, PLY, USDZ | The iOS share sheet (Files, AirDrop, Mail…) | When you tap Share |
 
 **Removed:**
@@ -125,7 +125,7 @@ multipart upload comes if failures on large bundles show it is needed.
   deselected, since its photos show people unblurred, and a phone that had Send map packages off
   starts with every scan it held deselected, since bundles carry far more than packages did.)*
 - **The Server tab.** *(Added after review: the checklist first lived in Settings, where nothing
-  on a scan led to it.)* The app's fourth tab holds the lab server in one place: the last sync's
+  on a scan led to it.)* The app's fourth tab holds the Scan4D server in one place: the last sync's
   status with Sync now, the checklist inline with the Wi-Fi rule, and the connection settings that
   were in Settings. Its icon counts the bundles waiting for Retry. A card whose bundle the checklist
   holds back offers Select on its sync line, and selecting a scan captured with the Privacy Filter

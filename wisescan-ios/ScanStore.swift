@@ -22,7 +22,7 @@ class CapturedScan {
     var uploadProgress: Double
     var isColored: Bool = false
     /// When an app before bundles last uploaded this scan's export. Nothing sets it now: what the
-    /// lab server holds comes from the sync (`BundleSync`). Kept because SwiftData persists it.
+    /// Scan4D server holds comes from the sync (`BundleSync`). Kept because SwiftData persists it.
     var lastUploadedAt: Date?
     /// DECISION 3: timestamp of the last completed Post-process run (structural steps — room /
     /// registration / proxy — done to the tier achievable for this scan). `nil` = never run; the
@@ -220,7 +220,7 @@ class CapturedScan {
 
 /// What a scan exports as. Scan4D is the one capture bundle, a superset of everything the
 /// capture holds; the layouts other tools read (a Nerfstudio dataset, flame3d-core's input)
-/// are made from it on the lab server (scan4d-flows: scan4d-normalize, scan4d-convert). The
+/// are made from it on the Scan4D server (scan4d-flows: scan4d-normalize, scan4d-convert). The
 /// rest are single mesh files for viewing and sharing.
 ///
 /// Every format carries the scan's mesh, and with it the mesh's vertex colors, so exporting

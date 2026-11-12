@@ -308,7 +308,7 @@ struct ScansListView: View {
                 }
                 .disabled(selectedLocations.isEmpty)
 
-                // Sync: the selected spaces go to the lab server, everything in them
+                // Sync: the selected spaces go to the Scan4D server, everything in them
                 Button(action: { bulkSync() }) {
                     Text("Sync")
                         .font(.headline)
@@ -558,7 +558,7 @@ struct ScansListView: View {
         }
     }
 
-    /// Sync on the selected spaces: from now on they are reported to the lab server, and each
+    /// Sync on the selected spaces: from now on they are reported to the Scan4D server, and each
     /// scan's bundle follows once it is processed (`BundleSync`; the pending checklist in
     /// Settings shows what waits). Unprocessed scans are no gate here: their bundles wait.
     /// A server that wants a password this phone hasn't got asks for it first.
@@ -568,7 +568,7 @@ struct ScansListView: View {
         passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) {
             ControlPlaneSync.shared.sync(spaces: spaces)
         }
-        exitEditModeWithBanner("Syncing \(spaces.count) space\(spaces.count == 1 ? "" : "s") with the lab server")
+        exitEditModeWithBanner("Syncing \(spaces.count) space\(spaces.count == 1 ? "" : "s") with the Scan4D server")
     }
 
     /// The scan set a Color request is acting on (selection, cluster, or render view),
@@ -808,7 +808,7 @@ struct LocationGridTile: View {
             .padding(8)
         }
         .overlay(alignment: .topTrailing) {
-            // How much of the space the lab server holds: none, its map, or everything.
+            // How much of the space the Scan4D server holds: none, its map, or everything.
             SyncBadge(location: location)
         }
         .overlay(alignment: .bottom) {
@@ -1291,7 +1291,7 @@ struct ScanCard: View {
                     .font(.caption2)
                     .foregroundColor(.cyan)
 
-                // How much of it the lab server holds, once its space syncs.
+                // How much of it the Scan4D server holds, once its space syncs.
                 SyncLine(scan: scan)
 
                 if let counts = itemCounts {
@@ -1359,7 +1359,7 @@ struct ScanCard: View {
         VStack(spacing: 8) {
             // Share: a file for another app or system (Files, AirDrop, Mail), in the format picked
             // from its menu. A focus scan has one export, its capture zip, so it shares at once.
-            // Reaching the lab server is Sync's job, on the space.
+            // Reaching the Scan4D server is Sync's job, on the space.
             if scan.isFocusScan {
                 Button(action: { saveToFiles(format: .scan4d) }) { shareLabel }
                     .disabled(isEditing)

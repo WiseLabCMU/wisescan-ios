@@ -6,7 +6,7 @@ Scan4D is the time-series reality capture application for the WiSEScan platform.
 **Recommended:** LiDAR-equipped device (iPhone/iPad Pro) for full mesh + depth capture  
 **Optional:** rig-mounted Ricoh Theta X or Z1 as a 360° still source (BLE wake and shutter plus Wi-Fi transfer on both)
 
-**Backend Integration:** the lab's control plane (`scan4d-server`, private) registers devices, keeps the inventory of spaces, maps, scans and links, takes each synced scan whole as one bundle and unpacks it in its working directory, and asks devices for focus scans (REQ-038). Processing runs in the same stack as Prefect flows from `scan4d-flows` (private): `scan4d-splat` takes a room scan or a focus-scan dump through SfM poses, priors, region masks and LichtFeld training to a Gaussian splat, and `scan4d-convert` makes Nerfstudio and flame3d datasets from a scan. See [Backend Receivers](#backend-receivers).
+**Backend Integration:** the Scan4D server (the control plane, `scan4d-server`, private) registers devices, keeps the inventory of spaces, maps, scans and links, takes each synced scan whole as one bundle and unpacks it in its working directory, and asks devices for focus scans (REQ-038). Processing runs in the same stack as Prefect flows from `scan4d-flows` (private): `scan4d-splat` takes a room scan or a focus-scan dump through SfM poses, priors, region masks and LichtFeld training to a Gaussian splat, and `scan4d-convert` makes Nerfstudio and flame3d datasets from a scan. See [Backend Receivers](#backend-receivers).
 
 ## Device Support
 
@@ -63,7 +63,7 @@ To check a device: the `[ARConfig]` launch log lists every supported format with
 - **Sweep Coverage:** A room scan records where the LiDAR sweep actually looked, as per-cell free, surface and visit counts in the raw capture frame, and ships it as `sweep_coverage.bin` in every Scan4D export (a Developer Mode readout shows the live counters).
 - **Feature Point Cloud:** Every save serializes ARKit's sparse feature cloud to `arkit_features.bin` (a 128-byte header over packed id and xyz records) in place of the opaque world map, which only ARKit could read. Feature ids survive map save and load, so clouds from successive scans of one location join on id for change detection. Process backfills the file for scans saved before it existed.
 - **Share:** Hand a scan to another app or device (Files, AirDrop, Mail) as a Scan4D bundle or a native mesh file (OBJ, PLY, USDZ), picked from Share's menu each time (no stored format setting). The capture data is governed by motion-blur rejection and overlap metrics. The screen stays on while a scan is converted.
-- **Control Plane Sync:** Set the lab's control plane server in the **Server** tab (its status, the bundles waiting to go, and the connection) and the phone keeps it up to date with everything in the spaces you sync (Sync to Lab Server in a space, or Sync on a stitched map in the graph view; the Server tab's Auto sync adds every space, the ones started after joining (the default), or none). Two parts, as in [docs/design/sync-bundle.md](docs/design/sync-bundle.md):
+- **Scan4D Server Sync:** Set your Scan4D server in the **Server** tab (its status, the bundles waiting to go, and the connection) and the phone keeps it up to date with everything in the spaces you sync (Sync to Scan4D Server in a space, or Sync on a stitched map in the graph view; the Server tab's Auto sync adds every space, the ones started after joining (the default), or none). Two parts, as in [docs/design/sync-bundle.md](docs/design/sync-bundle.md):
 - **the map**, every sync: base and tip scans, scans, stitch links, registrations, focus regions, and each room scan's RoomPlan layout as a preview;
 - **each scan's bundle**, once processed: everything it holds as one zip (the Scan4D export plus the relocalization map and the proxy meshes), built through the export's privacy passes, uploaded in a background session (it finishes with the screen locked) over Wi-Fi only unless the user allows cellular, and chosen in a pending checklist (selected by default, except a scan captured with the Privacy Filter off, which waits until selected). A build never runs beside a capture or a Share export, and a refusal sending again can't change waits for Retry. The server unpacks it into the scan's directory.
 
@@ -71,7 +71,7 @@ A cloud on each space shows what the server holds: an outline for the map, a gre
 - shares join fine-tunes edited on its web 3D view back to the phone;
 - can ask for a focus scan of a region, for example where its toy change evaluator saw a rescan differ. The server (the `scan4d-server` repo) keeps the fleet's devices, maps and scans in one place, the start of server-directed scanning. See REQ-038.
 
-TestFlight builds start with the lab's server set; App Store and Xcode builds start with none. When the server asks for its password and none is stored, a tapped Sync opens Settings at the password field first, then goes on when Settings closes.
+TestFlight builds start with the Scan4D server set; App Store and Xcode builds start with none. When the server asks for its password and none is stored, a tapped Sync opens Settings at the password field first, then goes on when Settings closes.
 
 > **Note:** For a comprehensive list of all features, architecture diagrams, and detailed implementation status, please see [REQUIREMENTS.md](REQUIREMENTS.md).
 >
@@ -85,7 +85,7 @@ wisescan-ios/
 ├── AppDelegate.swift            # App lifecycle, orientation locking
 ├── AppConstants.swift           # Centralized UI constants, app defaults, pipeline tuning
 ├── ContentView.swift            # Tab bar (Dashboard, Capture, Scans) + LiDAR check
-├── DashboardView.swift          # Lab server status, wearable glasses connect, 360° camera card, lab to-do list
+├── DashboardView.swift          # Scan4D server status, wearable glasses connect, 360° camera card, lab to-do list
 ├── SettingsView.swift           # Control plane, export settings, capture mode, Developer Mode
 ├── ButtonStyles.swift           # Shared button styles
 ├── AdaptiveActionLabel.swift    # Action-button label that carries its icon on iPad and drops it on iPhone
@@ -199,10 +199,10 @@ wisescan-ios/
 ├── ScanBundle.swift             # Each scan's sync bundle: version, cache, background upload (BundleSync)
 ├── SyncViews.swift              # Sync badge, scan card sync line, pending-bundles checklist
 ├── DeviceIdentity.swift         # This phone's identity for the control plane
-├── LabServerView.swift          # The Server tab: status, Sync now, pending bundles, connection
+├── ServerView.swift          # The Server tab: status, Sync now, pending bundles, connection
 ├── ControlPlaneSettingsSection.swift # The Server tab's connection (host, password, device name, certificates, Auto sync)
 ├── ControlPlanePasswordPrompt.swift # Password retry prompt and deferred action replay
-├── ControlPlaneSpaceSyncButton.swift # Sync to Lab Server on a space
+├── ControlPlaneSpaceSyncButton.swift # Sync to Scan4D Server on a space
 ├── ControlPlaneTodoCard.swift   # Dashboard to-do list: focus scans the lab asked for
 │  # Peripherals and diagnostics
 ├── MetaWearableManager.swift    # Meta Ray-Ban DAT SDK lifecycle, streaming, proxy frames
@@ -225,12 +225,12 @@ single-file mesh exports. The filename convention is:
 
 | Format | Extension | Contents | Viewer |
 | :--- | :--- | :--- | :--- |
-| **Scan4D** | `.zip` | `scan4d_metadata.json`, the Polycam payload (`images/`, `depth/`, `confidence/`, `cameras/`, `mesh_info.json`), `mesh.obj` (with captured vertex colors) + `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin`, `sweep_coverage.bin`, `stitching.json`; 360° scans add `equirect_stills/` + cube faces at baked poses with their masks | The lab server (scan4d-flows), which trains splats from it and makes the formats below |
+| **Scan4D** | `.zip` | `scan4d_metadata.json`, the Polycam payload (`images/`, `depth/`, `confidence/`, `cameras/`, `mesh_info.json`), `mesh.obj` (with captured vertex colors) + `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin`, `sweep_coverage.bin`, `stitching.json`; 360° scans add `equirect_stills/` + cube faces at baked poses with their masks | The Scan4D server (scan4d-flows), which trains splats from it and makes the formats below |
 | **OBJ** | `.obj` | Single mesh file with captured vertex colors | MeshLab, Blender |
 | **PLY** | `.ply` | Converted mesh with captured vertex colors | MeshLab, CloudCompare |
 | **USDZ** | `.usdz` | Converted mesh via ModelIO, with vertex colors | iOS Quick Look (native) |
 
-The layouts other tools read are made from the Scan4D export on the lab server, by the
+The layouts other tools read are made from the Scan4D export on the Scan4D server, by the
 `scan4d-convert` pipeline in the flows repo (scan4d-flows): a **Nerfstudio dataset** that
 Nerfstudio and LichtFeld Studio load as-is, and the input bundle
 [flame3d-core](https://github.com/openflam/flame3d-core) reads (its contract is in
@@ -280,7 +280,7 @@ The Scan4D export is also each scan's sync bundle, with the relocalization map a
 
 ## Privacy Filtering
 
-On by default. Switched off on the Capture screen, it turns itself back on after 24 hours (Developer Mode: 12 h, 24 h, 1 week or none). Each synced scan tells the lab server whether the filter was on.
+On by default. Switched off on the Capture screen, it turns itself back on after 24 hours (Developer Mode: 12 h, 24 h, 1 week or none). Each synced scan tells the Scan4D server whether the filter was on.
 
 When enabled (toggle on Capture screen):
 
@@ -294,7 +294,7 @@ When enabled (toggle on Capture screen):
 1. Open the Xcode project in Xcode
 2. Set your development team signing in the target settings
 3. Build and deploy to an ARKit-capable device (LiDAR recommended for full mesh + depth capture)
-4. *(Optional)* Set your lab server in the Server tab, to sync spaces to it
+4. *(Optional)* Set your Scan4D server in the Server tab, to sync spaces to it
 5. *(Optional 360°)* On the Dashboard, tap **+ Add Ricoh Theta 360° Camera** — pick it from the Bluetooth list and confirm the pairing code on the camera screen once. After that, **Connect** wakes and joins it automatically, and a full-sphere still fires with every keyframe pause.
 6. Go to Capture → tap record → scan → tap stop and choose **Save & End** (or **Save & Scan Adjacent** to continue into the next room)
 7. Once the save pipeline finishes, name your space and select its workflow intent — **Rescan** (the same space over time) or **Link Adjacent** (a neighboring space). You will be routed to the Scans tab with a progress overlay while mesh export and data extraction finishes in the background.

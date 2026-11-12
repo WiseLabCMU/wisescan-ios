@@ -388,11 +388,11 @@ private struct ClusterView: View {
             .simultaneousGesture(TapGesture().onEnded { if state != .syncing { onSync() } })
             .accessibilityElement(children: .combine)
             .accessibilityLabel(state.title)
-            .accessibilityHint("Sends every map in this cluster to the lab's control plane")
+            .accessibilityHint("Sends every map in this cluster to the Scan4D server")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { onSync() }
 
-            Text("\(synced) of \(component.count) on the lab server")
+            Text("\(synced) of \(component.count) on the Scan4D server")
                 .font(.caption)
                 .foregroundColor(.gray)
             Spacer(minLength: 0)
@@ -505,7 +505,7 @@ private struct CompactLocationTile: View {
                 }
             }
             .overlay(alignment: .topTrailing) {
-                // How much of the space the lab server holds (SyncBadge): none, its map, or
+                // How much of the space the Scan4D server holds (SyncBadge): none, its map, or
                 // everything. A partly sent space shows its map: the badge never claims more
                 // than is there. Per-scan detail lives on the scan cards.
                 if !isEditing {

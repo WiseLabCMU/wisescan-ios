@@ -3,7 +3,7 @@ import SwiftUI
 
 // MARK: - The sync badge (docs/design/sync-bundle.md, "The sync indicator")
 
-/// How much of a space the lab server holds, on its tile and its graph tile: nothing (no icon),
+/// How much of a space the Scan4D server holds, on its tile and its graph tile: nothing (no icon),
 /// its map (the JSON and the RoomPlan preview: an outline cloud), or everything (every scan's
 /// bundle, extracted: a green check). While a bundle goes up or is unpacked, an upload arrow; when
 /// one failed, a yellow warning. Only what the server confirmed counts.
@@ -32,10 +32,10 @@ struct SyncBadge: View {
     static func look(_ state: BundleSync.SpaceState) -> (symbol: String, color: Color, label: String)? {
         switch state {
         case .off: return nil
-        case .map: return ("icloud", .white.opacity(0.85), "The lab server has this space's map")
-        case .everything: return ("checkmark.icloud.fill", .green, "The lab server has everything in this space")
-        case .uploading: return ("icloud.and.arrow.up", .cyan, "Sending this space's scans to the lab server")
-        case .failed: return ("exclamationmark.icloud", .yellow, "A scan of this space didn't reach the lab server")
+        case .map: return ("icloud", .white.opacity(0.85), "The Scan4D server has this space's map")
+        case .everything: return ("checkmark.icloud.fill", .green, "The Scan4D server has everything in this space")
+        case .uploading: return ("icloud.and.arrow.up", .cyan, "Sending this space's scans to the Scan4D server")
+        case .failed: return ("exclamationmark.icloud", .yellow, "A scan of this space didn't reach the Scan4D server")
         }
     }
 }
@@ -82,18 +82,18 @@ extension View {
     /// carries its photos as captured, people unblurred.
     func unblurredBundleConsent(isPresented: Binding<Bool>, send: @escaping () -> Void) -> some View {
         alert("Send photos with people unblurred?", isPresented: isPresented) {
-            Button("Send to the Lab Server", action: send)
+            Button("Send to the Scan4D Server", action: send)
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This scan was captured with the Privacy Filter off, so people in its photos aren't blurred. " +
-                 "Its bundle goes to the lab server as captured.")
+                 "Its bundle goes to the Scan4D server as captured.")
         }
     }
 }
 
 // MARK: - The pending checklist
 
-/// The Server tab's bundles: the Wi-Fi rule, then every synced scan whose bundle the lab server
+/// The Server tab's bundles: the Wi-Fi rule, then every synced scan whose bundle the Scan4D server
 /// doesn't hold yet, by space. Selected by default, except a scan captured with the Privacy
 /// Filter off, whose photos show people unblurred: it waits until the user selects it. A
 /// deselected scan waits until selected again (deselecting one being sent stops it); a new scan
@@ -111,7 +111,7 @@ struct PendingBundlesSections: View {
                 .foregroundColor(.white)
                 .onChange(of: wifiOnly) { _, _ in bundles.wifiOnlyChanged() }
             if pending.isEmpty {
-                Text("Nothing waiting: the lab server has every synced scan's bundle, or none is processed yet.")
+                Text("Nothing waiting: the Scan4D server has every synced scan's bundle, or none is processed yet.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
@@ -204,7 +204,7 @@ private struct PendingBundleRow: View {
 
 #Preview("Sync badges") {
     // Every state's look. A live SyncBadge shows only what BundleSync knows, which in a preview is
-    // nothing (no lab server is set).
+    // nothing (no Scan4D server is set).
     let looks = [BundleSync.SpaceState.map, .everything, .uploading, .failed].compactMap(SyncBadge.look)
     return HStack {
         ForEach(looks.indices, id: \.self) { index in
@@ -217,7 +217,7 @@ private struct PendingBundleRow: View {
 }
 
 #Preview("Sync line") {
-    // A compile and smoke check: the line is empty until the scan's space syncs with a lab server.
+    // A compile and smoke check: the line is empty until the scan's space syncs with a Scan4D server.
     // The User Guide's troubleshooting rows (UserGuideStatusIcons) show each line it can say.
     SyncLine(scan: CapturedScan(name: "Sample Scan", vertexCount: 1500, faceCount: 2000))
         .padding()

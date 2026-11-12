@@ -325,6 +325,6 @@ iPhone, whether ARKit stills stay at 12MP (`deviceSupportedPhotoDimensions` vs
   verdict that led to v15.
 - **`tools/scan4d-to-flame3d/`** — converts a Scan4D capture's Nerfstudio dataset into a
   flame3d-core input bundle (3D object segmentation + semantic search), with a
-  mesh-vs-LiDAR frame check. Its README is the bundle's contract; the lab server's
+  mesh-vs-LiDAR frame check. Its README is the bundle's contract; the Scan4D server's
   `scan4d-flame3d` flow runs a copy of it on Scan4D exports, and `--verify` checks a
   bundle before upload.

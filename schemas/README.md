@@ -6,7 +6,7 @@ This document outlines the schema of the metadata JSON files and the overall str
 
 The app has one capture export, **Scan4D**, a superset of everything a scan captured, and three
 single-file mesh exports (OBJ, PLY, USDZ) for viewing and sharing. The layouts other tools read
-(a Nerfstudio dataset, flame3d-core's input) are made from the Scan4D export on the lab server;
+(a Nerfstudio dataset, flame3d-core's input) are made from the Scan4D export on the Scan4D server;
 see [Made on the server](#made-on-the-server-nerfstudio-and-flame3d). The common base for the
 filename is:
 `scan4d_{locationName}_{scanName}_{format}_{timestamp}_{uuid}.{ext}`
@@ -14,7 +14,7 @@ filename is:
 ### Scan4D (`.zip`)
 Our native format and the one capture bundle: the full Polycam raw import payload, the mesh, and
 the Scan4D-specific spatial sidecars. The zip holds one top-level folder with the bundle in it.
-It is also each scan's **sync bundle**, what the lab server holds of it
+It is also each scan's **sync bundle**, what the Scan4D server holds of it
 ([docs/design/sync-bundle.md](../docs/design/sync-bundle.md)), so it carries what only the phone
 used to keep too: the relocalization map, the raw vertex colours, and the proxy and dynamic meshes.
 - `scan4d_metadata.json`: Global metadata for the scan (see schema below).

@@ -44,8 +44,8 @@ struct ContentView: View {
                     }
                     .tag(2)
 
-                // The lab server: its status, the bundles waiting to go, and the connection.
-                LabServerView()
+                // The Scan4D server: its status, the bundles waiting to go, and the connection.
+                ServerView()
                     .tabItem {
                         Label("Server", systemImage: "server.rack")
                     }

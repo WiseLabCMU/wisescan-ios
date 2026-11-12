@@ -28,7 +28,7 @@ enum AppConstants {
 
     // MARK: - AppStorage Keys
     enum Key {
-        static let controlPlaneHost = "controlPlaneHost"              // the lab's control plane server (host[:port] or URL); empty = sync off
+        static let controlPlaneHost = "controlPlaneHost"              // the Scan4D server, the control plane (host[:port] or URL); empty = sync off
         static let controlPlaneDeviceLabel = "controlPlaneDeviceLabel" // this phone's name in the fleet (iOS gives apps only "iPhone")
         static let controlPlanePromptedTasks = "controlPlanePromptedTasks" // urgent tasks already alerted (each alerts once; then the to-do list)
         static let controlPlaneOpenTasks = "controlPlaneOpenTasks"    // the to-do list as of the last sync (JSON), shown while the server can't be reached
@@ -45,7 +45,7 @@ enum AppConstants {
         static let controlPlaneBundleStates = "controlPlaneBundleStates"       // each scan's bundle as the server last reported it (JSON), for the sync badge after a relaunch
         static let controlPlaneStateServer = "controlPlaneStateServer"         // the control plane (base URL) the confirmed spaces and bundle states came from; another one starts them afresh
         static let legacyControlPlaneSendPackages = "controlPlaneSendPackages" // builds before bundles: Send map packages (off = nothing but the JSON went); read once to deselect every scan, then removed
-        static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
+        static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the server's own (self-signed) certificate from the control plane and the upload hosts it names
         nonisolated static let controlPlanePasswordWanted = "controlPlanePasswordWanted" // read by ControlPlaneSecret off the main actor; the control plane (base URL) that refused a request for want of a password; a tapped Sync asks for it first
         static let rawOverlapMax = "rawOverlapMax"
         static let rawRejectBlur = "rawRejectBlur"

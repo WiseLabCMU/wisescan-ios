@@ -10,7 +10,7 @@ All scan data (images, depth maps, meshes, and camera poses) is stored locally o
 
 ### Control Plane Sync
 
-If you enter a control plane server in the Server tab, the app keeps that server up to date with the spaces you sync: those you send with Sync to Lab Server in a space or Sync on a stitched map, and, depending on the Server tab's Auto sync, every space (All), those you start after the phone joined (New, the default) or none more (Off). Other spaces stay on the phone. Nothing is sent during a scan.
+If you enter a control plane server in the Server tab, the app keeps that server up to date with the spaces you sync: those you send with Sync to Scan4D Server in a space or Sync on a stitched map, and, depending on the Server tab's Auto sync, every space (All), those you start after the phone joined (New, the default) or none more (Off). Other spaces stay on the phone. Nothing is sent during a scan.
 
 **The map**, on launch and after changes:
 - space and scan names and times;

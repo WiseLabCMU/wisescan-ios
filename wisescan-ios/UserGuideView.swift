@@ -45,7 +45,7 @@ struct UserGuideView: View {
                               "'Color' on a scan card to color its mesh from your photos (it finishes any " +
                               "processing still left first); long-press it to re-run processing. If a scan " +
                               "isn't processed yet, Share and Rescan ask to process it first, and its " +
-                              "bundle for the lab server waits until it is."
+                              "bundle for the Scan4D server waits until it is."
                     )
                     guideRow(
                         icon: "5.circle.fill",
@@ -79,7 +79,7 @@ struct UserGuideView: View {
                               "Once a space has focus scans, its list switches between Room, Focus and All " +
                               "(Room is the default; the list opens on a scan you just saved). " +
                               "A region file from another tool can be imported from the same menu. " +
-                              "With a control plane set, the lab can also ask for a focus scan: the " +
+                              "With a Scan4D server set, it can also ask for a focus scan: the " +
                               "request waits in the To do list on the Dashboard, even offline (an urgent one also " +
                               "alerts once), and Open takes you to the region in the editor."
                     )
@@ -88,16 +88,17 @@ struct UserGuideView: View {
                         title: "Choose Format",
                         text: "Tap Share on a scan, or on scans you selected, and pick a format: Scan4D, " +
                               "OBJ, PLY, or USDZ. Share asks each time. Scan4D carries everything the scan " +
-                              "captured; the lab server turns it into a Nerfstudio dataset or a flame3d " +
+                              "captured; the Scan4D server turns it into a Nerfstudio dataset or a flame3d " +
                               "bundle. A focus scan shares its capture as one zip, so it doesn't ask."
                     )
                     guideRow(
                         icon: "7.circle.fill",
                         title: "Share or Sync",
-                        text: "Share sends the format you pick to another app or device: Files, AirDrop, " +
+                        text: "Without a Scan4D server, the app works on its own and Share is how scans leave it: " +
+                              "it sends the format you pick to another app or device: Files, AirDrop, " +
                               "Mail. The screen stays on while a scan is being converted. Sync keeps your " +
-                              "lab's server up to date with everything in the spaces you sync. Set the " +
-                              "server in the Server tab, then tap Sync to Lab Server in a space, " +
+                              "Scan4D server up to date with everything in the spaces you sync. Set the " +
+                              "server in the Server tab, then tap Sync to Scan4D Server in a space, " +
                               "or Sync on a stitched map in the graph view; the Server tab's Auto sync adds every " +
                               "space (All), the ones you start after joining (New, the default) or none " +
                               "(Off). The server gets each space's map first: names, times, poses, links " +
@@ -209,7 +210,7 @@ struct UserGuideView: View {
                               "stills, 16-bit LiDAR depth and confidence, a camera pose for every image, " +
                               "the mesh with its colors, room layout (RoomPlan), ARKit feature points, " +
                               "spatial links (stitching), 360° stills with their cube faces, and " +
-                              "scan4d_metadata. The lab server turns it into what other tools read: a " +
+                              "scan4d_metadata. The Scan4D server turns it into what other tools read: a " +
                               "Nerfstudio dataset for training, or the input flame3d searches objects in."
                     )
                     formatRow(
@@ -295,13 +296,13 @@ struct UserGuideView: View {
                            website: "https://poly.cam")
                     appRow(name: "Nerfstudio", icon: "desktopcomputer", color: .green,
                            desc: "Desktop tool for NeRF/3DGS training. Train on the Nerfstudio dataset " +
-                                 "the lab server makes from a Scan4D export.",
+                                 "the Scan4D server makes from a Scan4D export.",
                            appStore: nil, website: "https://docs.nerf.studio")
                 } header: {
                     Text("RECOMMENDED VIEWERS")
                 } footer: {
                     Text("USDZ files can be previewed directly in the Files app. For OBJ/PLY, " +
-                         "install MeshLab or Polycam. Scan4D exports are for the lab server, which " +
+                         "install MeshLab or Polycam. Scan4D exports are for the Scan4D server, which " +
                          "turns them into a Nerfstudio dataset or a flame3d bundle.")
                         .font(.caption2)
                         .foregroundColor(.gray)

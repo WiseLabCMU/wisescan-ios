@@ -807,13 +807,13 @@ struct ScanExportManager {
             // colors) and its face classes + RoomPlan + registration + arkit_features.bin +
             // sweep_coverage.bin + stitching/graph + the 360° stills with their cube faces. The
             // export changes representation, never information: the layouts other tools read (a
-            // Nerfstudio dataset, flame3d-core's input) are built from it on the lab server
+            // Nerfstudio dataset, flame3d-core's input) are built from it on the Scan4D server
             // (scan4d-flows: scan4d-normalize, scan4d-convert), and so are debiasing, hole
             // filling, seeding and every other training-side prior.
             // It is also the scan's sync bundle (BundleSync; docs/design/sync-bundle.md), so it
             // carries what only the phone kept too: the relocalization map (arworldmap.map, what
             // lets another device load the map), the raw colors.bin, and the ghost proxy and
-            // dynamic meshes. Their names are the map-package names the lab server reads.
+            // dynamic meshes. Their names are the map-package names the Scan4D server reads.
             return withStagingDir { stagingDir in
                 if let metaURL = findMetadata() {
                     do {

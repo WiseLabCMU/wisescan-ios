@@ -8,7 +8,7 @@
 The app exports one capture bundle, **Scan4D**, plus three single-file meshes (OBJ, PLY,
 USDZ). Scan4D now carries everything the scan captured, the mesh with its captured colors and
 `face_classes.bin` included. The **Polycam**, **Nerfstudio** (formerly RAW) and **Flame3D**
-exports are gone from the app. Each was the same data in another layout, so the lab server now
+exports are gone from the app. Each was the same data in another layout, so the Scan4D server now
 makes those layouts from the Scan4D export, in the flows repo (scan4d-flows, the
 `prefect-server` folder).
 

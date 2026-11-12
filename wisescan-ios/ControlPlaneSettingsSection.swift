@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The Server tab's connection: the lab server this phone reports its spaces, scans and stitches
+/// The Server tab's connection: the Scan4D server this phone reports its spaces, scans and stitches
 /// to (`ControlPlaneSync`; scan4d-server README). Its host, the shared password it may want (kept
 /// in the Keychain), this phone's name, the certificate override and Auto sync. Also what the
 /// password prompt shows (`ControlPlanePasswordPrompt`).
@@ -32,7 +32,7 @@ struct ControlPlaneSettingsSection: View {
                     .autocapitalization(.none)
                     .disableAutocorrection(true)
                     .keyboardType(.URL)
-                Text("The lab's Scan4D server, as host:port or a URL. No scheme means http. Leave empty to turn sync off.")
+                Text("The Scan4D server, as host:port or a URL. No scheme means http. Leave empty to turn sync off.")
                     .font(.caption)
                     .foregroundColor(.gray)
                 SecureField("Server password", text: $password)
@@ -64,7 +64,7 @@ struct ControlPlaneSettingsSection: View {
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Allow untrusted certificates", isOn: $allowUntrusted)
                     .foregroundColor(.white)
-                Text("For servers on the lab's local network with their own (self-signed) certificate, reached by IP address or a .local name: accepted from this server, nowhere else.")
+                Text("For servers on your local network with their own (self-signed) certificate, reached by IP address or a .local name: accepted from this server, nowhere else.")
                     .font(.caption)
                     .foregroundColor(.gray)
             }
@@ -131,8 +131,8 @@ struct ControlPlaneSettingsSection: View {
     private var autoSyncCaption: String {
         switch ControlPlaneAutoSync(rawValue: autoSyncRaw) ?? .new {
         case .all: return "Every space on this phone syncs on its own, those from before it joined too."
-        case .new: return "Spaces started after this phone joined sync on their own; earlier ones go when you tap Sync to Lab Server in the space, or Sync on a stitched map in the graph view."
-        case .off: return "Only the spaces you send with Sync to Lab Server in a space, or Sync on a stitched map in the graph view."
+        case .new: return "Spaces started after this phone joined sync on their own; earlier ones go when you tap Sync to Scan4D Server in the space, or Sync on a stitched map in the graph view."
+        case .off: return "Only the spaces you send with Sync to Scan4D Server in a space, or Sync on a stitched map in the graph view."
         }
     }
 }

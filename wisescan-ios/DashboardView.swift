@@ -25,7 +25,7 @@ struct DashboardView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
 
-                        // Lab Server Status Card
+                        // Scan4D Server Status Card
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
                                 Image(systemName: serverStatusIcon)
@@ -34,7 +34,7 @@ struct DashboardView: View {
                                     .frame(width: 40)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Lab Server")
+                                    Text("Scan4D Server")
                                         .font(.headline)
                                         .foregroundColor(.white)
                                     Text(serverStatusLabel)
@@ -289,11 +289,11 @@ struct DashboardView: View {
         }
     }
 
-    /// The lab server (the control plane): what Sync sends spaces and their bundles to.
+    /// The Scan4D server (the control plane): what Sync sends spaces and their bundles to.
     private var serverConfigured: Bool { ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil }
 
     private var serverCaption: String {
-        serverConfigured ? controlPlaneHost : "No lab server set: see the Server tab"
+        serverConfigured ? controlPlaneHost : "Standalone: no Scan4D server set (Server tab)"
     }
 
     private func checkServer() {

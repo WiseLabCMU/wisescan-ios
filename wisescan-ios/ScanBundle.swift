@@ -8,7 +8,7 @@ import SwiftData
 
 /// The version of a scan's bundle and where a built one waits. The bundle is the Scan4D export
 /// (`ScanExportManager.prepareExport`, privacy passes included), so the Share file and what the
-/// lab server holds are one thing.
+/// Scan4D server holds are one thing.
 nonisolated enum ScanBundle {
     struct Version: Equatable, Sendable {
         /// 32 hex digits: the server takes 1 to 128 letters, digits, - or _.

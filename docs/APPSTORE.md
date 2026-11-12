@@ -65,15 +65,15 @@ TIME-SERIES SCANNING
 BULK OPERATIONS
 • Multi-select locations for bulk delete
 • Multi-select scans for bulk Process, Share, Sync, and Delete with per-tile progress
-• Sync badge per space: whether your lab server has its map or everything in it
+• Sync badge per space: whether your Scan4D server has its map or everything in it
 • Background post-scan processing with per-card progress
 
 FLEXIBLE EXPORT FORMATS
 • Scan4D: Everything a scan captured in one bundle: images, depth, confidence, camera poses, the colored mesh, room layout, ARKit feature points, 360° stills and metadata. A Scan4D server turns it into Nerfstudio training data or flame3d object-search input
 • OBJ / PLY / USDZ: Native mesh formats, in the scan's real colors, for MeshLab, Blender, and iOS Quick Look
 
-LAB SERVER SYNC
-• Sync spaces to your own lab server: each space's map, then every processed scan as one bundle
+SCAN4D SERVER SYNC
+• Sync spaces to your own Scan4D server: each space's map, then every processed scan as one bundle
 • Bundles upload in the background over Wi-Fi, even with the screen locked, from a checklist you control
 • Share to Files or AirDrop for offline workflows
 • Compatible with self-hosted reconstruction pipelines
@@ -102,7 +102,7 @@ Requires a LiDAR-equipped iPhone or iPad Pro. Meta Ray-Ban Smart Glasses support
 • Stop safety: the stop button always asks — Save & End, Save & Scan Adjacent, Discard, or Cancel
 • Naming after save: the name prompt now waits for the save pipeline, eliminating the frozen-keyboard stall on stop
 • Bad-scan warning right after save so a failed capture can be redone on the spot
-• Lab server sync: each space's map, then each processed scan as one bundle, in the background over Wi-Fi; a cloud on each space shows whether the server has its map or everything (replaces Upload and the upload URL)
+• Scan4D server sync: each space's map, then each processed scan as one bundle, in the background over Wi-Fi; a cloud on each space shows whether the server has its map or everything (replaces Upload and the upload URL)
 • Space analyzer: sweep progress in real degrees with honest partial results on timeout
 • Faster, safer exports: memory-bounded blur pipeline and double-tap guards on process, share, and delete
 • Tracking recovery: automatic session re-bootstrap after a mid-scan tracking collapse
@@ -204,7 +204,7 @@ https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md
 | 7 | **Meta Ray-Ban PiP** (glasses stream + capture view) | "Stream frames from Meta Ray-Ban Smart Glasses via Bluetooth" |
 | 8 | **Share Format Menu** (Share on a scan card, its format list open) | "Share as Scan4D, OBJ, PLY, or USDZ" |
 | 9 | **Dashboard** (server status + glasses connection) | "Connect to your server and pair Meta Ray-Ban Smart Glasses" |
-| 10 | **Settings** (lab server + capture mode + glasses) | "Full control over capture quality, mode, and device pairing" |
+| 10 | **Settings** (Scan4D server + capture mode + glasses) | "Full control over capture quality, mode, and device pairing" |
 
 ---
 

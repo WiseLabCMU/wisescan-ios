@@ -199,7 +199,7 @@ struct LocationDetailView: View {
                                 }
                             }
 
-                            // Control plane: keep this space in sync with the lab server.
+                            // Control plane: keep this space in sync with the Scan4D server.
                             if ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil {
                                 ControlPlaneSpaceSyncButton(spaceIds: [location.id])
                             }
@@ -617,7 +617,7 @@ struct LocationDetailView: View {
             .disabled(selectedScans.isEmpty)
 
             // Share: the selected scans, in the format picked from its menu, to the share sheet.
-            // The lab server gets the space through its Sync button.
+            // The Scan4D server gets the space through its Sync button.
             ShareFormatMenu(share: { format in
                 let scansToSave = sortedScans.filter { selectedScans.contains($0.id) }
                 bulkSaveToFiles(scans: scansToSave, format: format)

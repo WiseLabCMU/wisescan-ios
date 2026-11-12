@@ -117,9 +117,9 @@ nonisolated struct ControlPlaneClient: Sendable {
             case .insecureHost(let host):
                 return "iOS allows plain http only to an IP address, a .local name or a bare host name, not \(host). Use one of those, or https."
             case .untrustedCertificate(let host):
-                return "\(host)'s certificate is not trusted. If it is the lab's own, turn on Allow untrusted certificates."
+                return "\(host)'s certificate is not trusted. If it is your server's own, turn on Allow untrusted certificates."
             case .unreachable(let host):
-                return "Can't reach \(host). Check the host and port, and that this phone is on the lab network."
+                return "Can't reach \(host). Check the host and port, and that this phone is on the server's network."
             case .transport(let message):
                 return message
             }

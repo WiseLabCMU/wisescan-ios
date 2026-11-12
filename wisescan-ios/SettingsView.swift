@@ -554,14 +554,14 @@ struct SettingsView: View {
                     // MARK: - User Guide Link
                     settingsSection1
 
-                    // The lab server's settings live in its own tab now.
+                    // The Scan4D server's settings live in its own tab now.
                     Section {
-                        Label("The lab server's connection, status and bundles are in the Server tab.",
+                        Label("The Scan4D server's connection, status and bundles are in the Server tab.",
                               systemImage: "server.rack")
                             .font(.caption)
                             .foregroundColor(.gray)
                     } header: {
-                        Text("LAB SERVER")
+                        Text("SCAN4D SERVER")
                     }
                     .listRowBackground(Color.white.opacity(0.05))
 

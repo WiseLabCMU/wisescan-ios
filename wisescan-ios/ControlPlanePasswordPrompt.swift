@@ -26,7 +26,7 @@ struct ControlPlanePendingAction: Identifiable {
 }
 
 extension View {
-    /// Shows the lab server's connection settings at the password while `pending` holds an
+    /// Shows the Scan4D server's connection settings at the password while `pending` holds an
     /// action, and runs the action once the sheet closes.
     func controlPlanePasswordPrompt(_ pending: Binding<ControlPlanePendingAction?>) -> some View {
         modifier(ControlPlanePasswordPrompt(pending: pending))
@@ -60,7 +60,7 @@ struct ControlPlanePasswordSheet: View {
             List { ControlPlaneSettingsSection(focusPassword: true) }
                 .scrollContentBackground(.hidden)
                 .background(Color.black)
-                .navigationTitle("Lab Server")
+                .navigationTitle("Scan4D Server")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .navigationBarTrailing) {

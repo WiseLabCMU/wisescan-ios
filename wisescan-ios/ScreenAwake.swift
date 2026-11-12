@@ -18,7 +18,7 @@ import os
 /// for something never held, is harmless.
 ///
 /// It keeps the app in front only while the screen stays on. Pressing the side button still
-/// locks the phone. A scan's bundle for the lab server needs neither: it goes up in a background
+/// locks the phone. A scan's bundle for the Scan4D server needs neither: it goes up in a background
 /// session (`BundleSync`), which the system finishes with the screen locked.
 ///
 /// Callable from any thread: the SwiftData model's status setter is not main-actor isolated. The
