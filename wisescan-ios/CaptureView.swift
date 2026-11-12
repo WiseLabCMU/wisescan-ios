@@ -2213,6 +2213,14 @@ struct CaptureView: View {
     func handleVIOCompromised() {
         vioCompromised = false // reset the latch so a later scan can trip the guard again
         guard isRecording else { return }
+        // One halt at a time. A halt invalidates recordingTimer and leaves isRecording on until its
+        // alert's action runs, and every stop path clears the timer before it saves. So a trip that
+        // finds no timer (the first frame after a stall, the frame watchdog after an OS
+        // interruption) belongs to a halt or stop already under way: don't stack a second alert.
+        guard recordingTimer != nil else {
+            PerfDiag.log("tracking lost: a halt or stop is already under way, ignoring a second trip")
+            return
+        }
         // The session's internal map is corrupt (this halt only fires on hard collapse —
         // snap storm / RoomPlan DriftDetection). Schedule a full .resetTracking for the next
         // config run (the post-stop nominal downgrade), or the warm session relocalizes

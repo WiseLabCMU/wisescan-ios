@@ -1256,6 +1256,9 @@ struct ARCoverageView: UIViewRepresentable {
         /// RoomPlan: binding to push the final CapturedRoom snapshot back to CaptureView for export.
         var finalCapturedRoomBinding: Binding<CapturedRoom?>?
         private var vioGuardArmed = false
+        /// Main-thread timer, running only while recording, that halts the scan when ARKit stops
+        /// delivering frames (see checkForFrameStall). Main-owned.
+        private var frameWatchdog: Timer?
         /// ARFrame timestamp when tracking first went degraded (0 = currently fine). Used to
         /// measure *continuous* degradation for the VIO guard. Touched on the delegate queue.
         private var vioDegradedSince: TimeInterval = 0
@@ -1737,8 +1740,51 @@ struct ARCoverageView: UIViewRepresentable {
             hasBillboardMarkers.store(!connectorMarkerEntities.isEmpty || boundaryAnchorEntity != nil, ordering: .relaxed)
         }
 
+        // MARK: Frame-stall watchdog (#81)
+
+        /// The VIO guard runs in `session(_:didUpdate:)`, so it cannot see frames that never come.
+        /// When RoomPlan fails with "World tracking failure" the shared ARSession stops delivering
+        /// frames: recording stayed on over a frozen camera with no halt and no alert (2026-11-12
+        /// device test, 36 s and 56 s). While recording, this timer checks the newest frame's age
+        /// and trips the same halt once it passes `vioHardFrameGapTripSeconds`.
+        func startFrameWatchdog() {
+            frameWatchdog?.invalidate()
+            frameWatchdog = Timer.scheduledTimer(withTimeInterval: AppConstants.frameWatchdogIntervalSeconds,
+                                                 repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.checkForFrameStall() }
+            }
+        }
+
+        func stopFrameWatchdog() {
+            frameWatchdog?.invalidate()
+            frameWatchdog = nil
+        }
+
+        /// Age of the newest ARKit frame in seconds (ARFrame timestamps share CACurrentMediaTime's
+        /// clock), or nil when there is no frame yet.
+        func newestFrameAge() -> TimeInterval? {
+            guard let frame = arView?.session.currentFrame else { return nil }
+            return CACurrentMediaTime() - frame.timestamp
+        }
+
+        private func checkForFrameStall() {
+            guard isRecording.load(ordering: .relaxed),
+                  let age = newestFrameAge(), age > AppConstants.vioHardFrameGapTripSeconds else { return }
+            haltForFrameStall(String(format: "no ARKit frame for %.1fs mid-recording", age))
+        }
+
+        /// Trips the VIO halt for a frame stall, once: the watchdog stops, and the per-frame guard is
+        /// disarmed so the first frame after the stall does not hard-trip a second halt.
+        private func haltForFrameStall(_ why: String) {
+            stopFrameWatchdog()
+            PerfDiag.log("⛔️ \(why) — halting scan")
+            sessionDelegateQueue.async { [weak self] in self?.vioGuardArmed = false }
+            vioCompromisedBinding?.wrappedValue = true
+        }
+
         /// Reset coordinator state when entering recording mode.
         func resetForRecording() {
+            startFrameWatchdog()
             baselineMemoryMB = ScanStats.currentMemoryUsageMB() // read on main in updateStats's publish block
             // [MemDiag] re-arm the model-load one-shots so each recording measures load fresh.
             loggedRoomPlanReady.store(false, ordering: .relaxed)
@@ -1802,6 +1848,7 @@ struct ARCoverageView: UIViewRepresentable {
 
         /// Reset coordinator state when returning to nominal (idle) mode.
         func resetForNominal() {
+            stopFrameWatchdog()
             // Clear delegate-owned counters/flags ON the delegate queue (see resetForRecording).
             sessionDelegateQueue.async { [weak self] in
                 guard let self = self else { return }
@@ -6556,22 +6603,29 @@ extension ARCoverageView.Coordinator: RoomCaptureSessionDelegate {
         // of the main ARKit session. RoomPlan dying does NOT by itself mean the scan is bad —
         // it just means we lose the structured-room data; the frames/mesh/poses from ARKit are
         // still good as long as ARKit's tracking is healthy. So only escalate to the
-        // VIO-compromised halt when ARKit's OWN tracking is also degraded at this moment. If
-        // ARKit is normal, log and keep scanning; the ARKit frame-gap/sustained-degradation
-        // guard remains the backstop for genuine ARKit loss. (Checked on main, where arView
+        // VIO-compromised halt when ARKit's OWN tracking is also degraded. If ARKit is normal,
+        // log and keep scanning; the ARKit frame-gap/sustained-degradation guard and the frame
+        // watchdog remain the backstop for genuine ARKit loss. (Checked on main, where arView
         // and the ARSession are owned.)
+        //
+        // But the failure can also STOP the shared session's frames (2026-11-12 device test: no
+        // frame after any of three such failures until Stop re-ran the session). The newest
+        // frame's tracking state is then stale and read "normal" every time, so wait a moment
+        // and continue only if a NEW frame has arrived.
         if error != nil, isRecording.load(ordering: .relaxed) {
-            DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + AppConstants.roomPlanFailureFrameCheckSeconds) { [weak self] in
                 guard let self = self, self.isRecording.load(ordering: .relaxed) else { return }
-                let arTrackingNormal: Bool
-                switch self.arView?.session.currentFrame?.camera.trackingState {
-                case .normal: arTrackingNormal = true
-                default: arTrackingNormal = false
-                }
-                if arTrackingNormal {
-                    PerfDiag.log("RoomPlan world-tracking failure mid-scan, but ARKit tracking is normal — continuing (structured-room data lost, scan preserved)")
+                let age = self.newestFrameAge() ?? .infinity
+                let framesArriving = age < AppConstants.roomPlanFailureFrameCheckSeconds / 2
+                let arTrackingNormal = self.arView?.session.currentFrame?.camera.trackingState == .normal
+                if framesArriving && arTrackingNormal {
+                    PerfDiag.log("RoomPlan world-tracking failure mid-scan, but ARKit frames and tracking are fine — continuing (structured-room data lost, scan preserved)")
+                } else if !framesArriving {
+                    let newest = age.isFinite ? String(format: "newest %.1fs old", age) : "none yet"
+                    self.haltForFrameStall("RoomPlan failure stopped ARKit frames (\(newest))")
                 } else {
                     PerfDiag.log("⛔️ RoomPlan failure + ARKit tracking degraded mid-scan — halting scan")
+                    self.stopFrameWatchdog()
                     self.vioCompromisedBinding?.wrappedValue = true
                 }
             }
