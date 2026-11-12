@@ -2228,37 +2228,28 @@ struct CaptureView: View {
         let capturedCount = frameCaptureSession.frameCount
         frameCaptureSession.pauseCapture()
 
-        // Would "Save Anyway" actually persist anything? The recovery save is now gated on a content
-        // floor (AppConstants.minRecoveryFrames), so offering the button on `capturedCount > 0` alone
-        // promised to save 1–9 frames that the pipeline then refused — the user was shown the count,
-        // told they could keep it, pressed the affirmative button and got a refusal. The two gates
-        // must be one predicate.
-        //
-        // Evaluated here, with the AR session still live, so it can see what finishStopRecording will
-        // do: the Lite branch (no floor), a surviving mesh (normal save, floor irrelevant), or the
-        // recovery floor. `capturedCount` is the in-memory `frames.count`, which tracks `images/`
-        // exactly — `frames` only grows after a successful atomic write, and a failed write unlinks
-        // the JPEG (FrameCaptureSession.swift:1293-1310) — while the other two streams are read off
-        // disk. Both sources can trail an in-flight ioQueue write by about a frame, which at a floor
-        // of ten cannot flip the decision. See FrameCaptureSession.recoverySaveWouldPersist.
+        // Would "Save Anyway" save anything? Evaluated here, with the AR session still live, so the
+        // alert never offers a save the pipeline then refuses (FrameCaptureSession
+        // .recoverySaveWouldPersist). `capturedCount` is the in-memory `frames.count`, which tracks
+        // `images/`; the other two streams are read off disk.
         let liveContent = FrameCaptureSession.RecoveryContent(
             frameCount: capturedCount,
             proxyFrameCount: FrameCaptureSession.proxyFrameCount(in: frameCaptureSession.captureDir),
             equirectStillCount: thetaManager.scanStillCount)
+        // Mesh made during this recording only: mesh from before Record is not this scan's.
+        let liveMeshVertices = max(0, scanStats.totalVertices - verticesAtRecordStart)
         let saveWouldPersist = FrameCaptureSession.recoverySaveWouldPersist(
-            content: liveContent,
-            supportsLiDAR: ARCoverageView.supportsLiDAR,
-            // Mesh made during this recording only (main's rule): mesh from before Record is not
-            // something this scan captured.
-            liveMeshVertexCount: max(0, scanStats.totalVertices - verticesAtRecordStart))
-        // Stream frames this capture is holding, iPad + wearable. Used to choose between the
-        // below-floor arm (something was captured, keep it) and the nothing-at-all arm (which
-        // discards). 360° stills cannot appear here: any still clears the floor, so a capture
-        // holding one is always in the "Save Anyway" arm above.
-        let heldFrames = liveContent.frameCount + liveContent.proxyFrameCount
+            content: liveContent, liveMeshVertexCount: liveMeshVertices)
+        let captured = FrameCaptureSession.recoveryContentSummary(liveContent,
+                                                                  includesMesh: liveMeshVertices > 0)
+        let isStitchFlow = scanStore.pendingStitchLink != nil
+        PerfDiag.log("tracking lost: recording halted with \(captured) captured"
+                     + (isStitchFlow ? " (stitch flow)" : ""))
 
         let alert: UIAlertController
-        if scanStore.pendingStitchLink != nil {
+        // What the alert stands for if it never comes up (see presentTrackingLostAlert).
+        let fallback: () -> Void
+        if isStitchFlow {
             // Stitch flow (mapB of a Pin & Extend / Link Adjacent link): the link pins pinB's pose
             // to mapB's world-map frame. If tracking is lost the saved map can drift away from that
             // pinned point, silently corrupting the A→B transform — a salvaged-but-misposed link is
@@ -2274,12 +2265,8 @@ struct CaptureView: View {
             alert.addAction(UIAlertAction(title: "Discard & Rescan", style: .destructive) { _ in
                 self.discardInProgressScan(isExtendFlow: false, completion: nil)
             })
+            fallback = { self.discardInProgressScan(isExtendFlow: false, completion: nil) }
         } else if saveWouldPersist {
-            // Photos are automatic and start a few seconds in, so a scan can hold mesh before its
-            // first photo: that is still worth offering to save.
-            let captured = capturedCount > 0
-                ? "the \(capturedCount) photo\(capturedCount == 1 ? "" : "s") and mesh"
-                : "the mesh (no photos yet)"
             alert = UIAlertController(
                 title: "Tracking Lost",
                 message: "AR tracking was interrupted during this scan, so anything captured after that "
@@ -2294,26 +2281,8 @@ struct CaptureView: View {
                 // co-framed with the OBJ; it flips isRecording = false once the map is grabbed.
                 self.performStopRecording()
             })
-        } else if heldFrames > 0 {
-            // Below the recovery content floor: there ARE frames, but too few for the save pipeline
-            // to persist them as a scan, so "Save Anyway" would be a promise it cannot keep. Say what
-            // is true — the count, and that it is short of what a scan needs — and don't offer the
-            // button. The frames are NOT deleted: this arm routes through performStopRecording, whose
-            // below-floor branch refuses to persist while leaving the capture where stop() finalized
-            // it (see finishStopRecording). Deliberately NOT discardInProgressScan, which is what the
-            // arm below does — that would unlink the capture root on a judgement-call predicate. It
-            // also keeps both paths on one code path, so the banner the user ends up seeing is the
-            // pipeline's own accurate one.
-            alert = UIAlertController(
-                title: "Tracking Lost",
-                message: "AR tracking was interrupted after only \(heldFrames) "
-                    + "frame\(heldFrames == 1 ? "" : "s") — too little to save as a usable scan, so "
-                    + "this scan won't be saved. Reposition and rescan when ready.",
-                preferredStyle: .alert
-            )
-            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in
-                self.performStopRecording()
-            })
+            // Unattended, keep what was captured: issue #81 asks the halt to bias toward saving.
+            fallback = { self.performStopRecording() }
         } else {
             // Nothing usable was captured (tracking lost almost immediately) — don't offer a save.
             alert = UIAlertController(
@@ -2325,18 +2294,40 @@ struct CaptureView: View {
             alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in
                 self.discardInProgressScan(isExtendFlow: false, completion: nil)
             })
+            fallback = { self.discardInProgressScan(isExtendFlow: false, completion: nil) }
         }
 
-        // VIO loss takes precedence: if the manual-stop "Insufficient Tracking" alert (which offers
-        // "Keep Scanning") is already up, dismiss it first so a scan that lost tracking can only
-        // be saved as-is or discarded, never extended with post-loss frames.
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let rootVC = (windowScene.windows.first(where: { $0.isKeyWindow }) ??
-                         windowScene.windows.first)?.rootViewController {
-            if let presented = rootVC.presentedViewController {
-                presented.dismiss(animated: false) { rootVC.present(alert, animated: true) }
+        // VIO loss supersedes the manual-stop "Insufficient Tracking" alert (which offers "Keep
+        // Scanning"), so a scan that lost tracking can only be saved as-is or discarded. That alert
+        // is SwiftUI's: clear its binding rather than dismissing it from UIKit, which left SwiftUI
+        // free to present it again over this one (#81). UIKit refuses a presentation while a
+        // dismissal is running, so wait for it when there was one.
+        let wasShowingInsufficientTracking = showInsufficientTrackingAlert
+        showInsufficientTrackingAlert = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + (wasShowingInsufficientTracking ? 0.5 : 0)) {
+            self.presentTrackingLostAlert(alert, fallback: fallback)
+        }
+    }
+
+    /// Shows the tracking-loss alert. It is the halt's only exit (every action is terminal, there
+    /// is no cancel), so if it never comes up recording stays on and the capture tab is stuck
+    /// (#81 defect 1). Half a second after each attempt: if no action has run (still recording, no
+    /// save or discard under way) and the alert is not on screen, try once more, then run
+    /// `fallback`, the action the alert stands for.
+    private func presentTrackingLostAlert(_ alert: UIAlertController, attempt: Int = 1,
+                                          fallback: @escaping () -> Void) {
+        if !presentTopAlert(alert) {
+            PerfDiag.log("tracking lost: no window to present the alert in (attempt \(attempt))")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard self.isRecording, !self.isProcessingMesh, !self.isWaitingToSave,
+                  alert.presentingViewController == nil,
+                  alert.viewIfLoaded?.window == nil else { return }
+            if attempt < 2 {
+                self.presentTrackingLostAlert(alert, attempt: attempt + 1, fallback: fallback)
             } else {
-                rootVC.present(alert, animated: true)
+                PerfDiag.log("tracking lost: the alert never appeared, taking its default action")
+                fallback()
             }
         }
     }
@@ -2346,13 +2337,17 @@ struct CaptureView: View {
     /// world-map-export prompt) can fall back to a safe default instead of stalling.
     @discardableResult
     func presentTopAlert(_ alert: UIAlertController) -> Bool {
-        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+        // The foreground-active scene: `connectedScenes` is an unordered Set, so `.first` can be a
+        // background scene on an iPad with more than one window (#81).
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first,
               let root = (scene.windows.first(where: { $0.isKeyWindow }) ??
                           scene.windows.first)?.rootViewController else {
             return false
         }
+        // Topmost presented controller, skipping one on its way out (presenting on it fails).
         var top: UIViewController = root
-        while let presented = top.presentedViewController { top = presented }
+        while let presented = top.presentedViewController, !presented.isBeingDismissed { top = presented }
         top.present(alert, animated: true)
         return true
     }

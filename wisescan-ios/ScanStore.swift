@@ -403,9 +403,21 @@ class ScanLocation {
     /// post-processing) reads this, not `scans`; focus scans only appear in the scan list.
     @Transient var roomScans: [CapturedScan] { scans.filter { !$0.isFocusScan } }
 
-    /// The newest room scan: a rescan's or focus scan's world map and ghost come from it.
+    /// The newest room scan with a world map on disk: a rescan's or focus scan's world map and
+    /// ghost come from it, Connect Adjacent links from it, and it is the tip scan the control plane
+    /// is told about. A scan without a map (a tracking-loss "Recovered Scan", or one whose map
+    /// failed to save) can't be relocalized against, so as the newest scan it blocked all of that
+    /// for the whole space (#81); it is skipped. When no room scan has a map, the newest one.
+    ///
+    /// One file check in the usual case (the newest scan has its map); views read this several
+    /// times per body.
     @Transient var latestRoomScan: CapturedScan? {
-        roomScans.max(by: { $0.capturedAt < $1.capturedAt })
+        let rooms = roomScans
+        guard let newest = rooms.max(by: { $0.capturedAt < $1.capturedAt }) else { return nil }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: newest.worldMapURL.path) { return newest }
+        return rooms.filter { $0.id != newest.id && fm.fileExists(atPath: $0.worldMapURL.path) }
+            .max(by: { $0.capturedAt < $1.capturedAt }) ?? newest
     }
 }
 

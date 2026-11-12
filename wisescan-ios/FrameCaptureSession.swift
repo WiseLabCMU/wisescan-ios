@@ -570,48 +570,40 @@ class FrameCaptureSession {
         }
     }
 
-    // MARK: - Recovery content floor (issue #81, defect 2)
+    // MARK: - Tracking-loss recovery (issue #81, defect 2)
 
     /// Everything a capture directory holds that counts as content for the tracking-loss recovery
     /// decision. Three separate streams, because the capture root is not just `images/`:
     ///
-    /// - `frameCount` — `images/frame_*.jpg`, the iPad's own movement-gated RGB stream.
+    /// - `frameCount` — `images/frame_*.jpg`: a room scan's automatic 12MP photos
+    ///   (`AppConstants.roomScanAutoStills`), or the stream frames of a capture without them.
     /// - `proxyFrameCount` — `proxy_images/frame_*.jpg`, a wearable's proxy stream
-    ///   (`captureProxyFrame`, up to 15 fps, no movement gate). On a wearable session this is the
-    ///   payload; judging such a capture only by `images/` calls it empty when it is not.
-    /// - `equirectStillCount` — `equirect_stills/still_NNNN.{JPG,json}`, the 360° stills. These are
-    ///   the reason the recovery must never be judged on `images/` alone: each one is a deliberate
-    ///   ~7 s operator trigger, and once the bytes are verified on disk the camera-side original is
-    ///   DELETED (`ThetaCameraManager.swift:1338-1345` → `ScanPostprocessor.sweepCameraOriginals`),
-    ///   so a still on disk can be the only copy in existence. The rig workflow is also exactly the
-    ///   one that produces few `images/` frames: the operator stands at a standpoint (so the
-    ///   movement gate suppresses stream frames) and taps.
+    ///   (`captureProxyFrame`, up to 15 fps). On a wearable session this is the payload; judging such
+    ///   a capture only by `images/` calls it empty when it is not.
+    /// - `equirectStillCount` — `equirect_stills/still_NNNN.{JPG,json}`, the 360° stills. Once the
+    ///   bytes are verified on disk the camera-side original is deleted
+    ///   (`ScanPostprocessor.sweepCameraOriginals`), so a still on disk can be the only copy there is.
     struct RecoveryContent: Equatable {
         var frameCount: Int = 0
         var proxyFrameCount: Int = 0
         var equirectStillCount: Int = 0
+
+        var isEmpty: Bool { frameCount + proxyFrameCount + equirectStillCount == 0 }
     }
 
-    /// What the recovery branch should do with a finalized, mesh-less capture. Named cases rather
-    /// than a Bool because the third one is not "discard": see `refuseKeepingCapture`.
+    /// What the recovery branch does with a finalized, mesh-less capture.
     enum RecoveryOutcome: Equatable {
-        /// Above the floor, non-extend flow — persist it as a mesh-less, map-less "Recovered Scan".
+        /// Anything captured, non-extend flow: persist it as a mesh-less, map-less "Recovered Scan".
+        /// A small one is still saved (issue #81: bias toward save). It can't block the space's
+        /// Rescan or Connect Adjacent, because `ScanLocation.latestRoomScan` skips scans without a
+        /// world map, and a useless one can be deleted from the Scans list.
         case persistRecoveredScan
-        /// Below the floor — do NOT create a scan, and do NOT delete anything. Issue #81 is explicit
-        /// that today's failure is non-destructive (the frames survive on disk) and that the
-        /// predicate must bias toward saving, precisely because false halts are documented in this
-        /// codebase (`ARCoverageView.swift:2812-2817`: charging VIO init time against the mesh budget
-        /// false-halted a recoverable scan at exactly 10 s). Unlinking the capture root would also
-        /// destroy `equirect_stills/` and `proxy_images/` — content the floor did not even look at
-        /// before this type existed, and in the 360° case content whose only other copy has already
-        /// been swept off the camera. A judgement-call predicate does not get to make an
-        /// unrecoverable decision.
-        case refuseKeepingCapture
-        /// Extend/stitch flow — an extend needs a co-framed mesh + world map either way, so the
-        /// recovery is not offered. Also non-destructive, and NOT because the caller cleans up: the
-        /// only completion handler (`CaptureView+Extend.swift:56-64`) shows a toast and returns, and
-        /// could not delete the directory anyway because `frameCaptureSession` has already been
-        /// replaced by the time `completion?(nil)` runs.
+        /// Nothing at all was captured: no scan is created. The empty capture directory is left
+        /// where `stop()` finalized it, in the temp directory, as this branch always has.
+        case nothingCaptured
+        /// Extend/stitch flow: an extend needs a co-framed mesh and world map either way, so the
+        /// recovery is not offered. Non-destructive, as before: the only completion handler
+        /// (`CaptureView+Extend.swift`) shows a toast and returns.
         case abortExtendFlow
     }
 
@@ -619,13 +611,12 @@ class FrameCaptureSession {
     ///
     /// Counts FRAME FILES, not directory entries: `contentsOfDirectory(...).count` on `images/`
     /// answers "is there anything in here", which a stray non-frame file satisfies. `captureFrame`
-    /// is the only writer of that directory and always writes
-    /// `imagesDir.appendingPathComponent("frame_\(paddedIndex).jpg")`, on every device class
-    /// (Lite included), so the prefix/suffix pair is the exact frame set.
+    /// and the automatic stills are the only writers of that directory and always write
+    /// `frame_NNNNN.jpg`, on every device class (Lite included).
     ///
     /// `static` and directory-addressed on purpose: the caller asks about a FINALIZED capture — the
     /// URL `stop()` returned — at a point where the owning session is about to be replaced.
-    /// Unreadable or missing `images/` answers 0, the same as the code this replaces.
+    /// Unreadable or missing `images/` answers 0.
     static func capturedFrameCount(in captureDir: URL?) -> Int {
         frameFileCount(in: captureDir, subdirectory: "images")
     }
@@ -643,13 +634,11 @@ class FrameCaptureSession {
         return names.filter { $0.hasPrefix("frame_") && $0.hasSuffix(".jpg") }.count
     }
 
-    /// How many 360° stills a capture directory holds, counted the way `ScansListView` counts them
-    /// (`:1160-1161`): the max of the SIDECAR count and the JPG count. The sidecar is written at
-    /// trigger time and the equirect bytes drain later, so sidecar-present/JPG-missing means
-    /// "captured, download pending" — which is still captured content and must count. The JPG count
-    /// remains the floor for pre-sidecar scans. The JPG match lowercases the name first because the
-    /// 360° writer's literal is UPPERCASE `.JPG` (`ThetaCameraManager+StillMotion.swift:166`),
-    /// unlike the lowercase `images/` writer.
+    /// How many 360° stills a capture directory holds, counted the way `ScansListView` counts them:
+    /// the max of the SIDECAR count and the JPG count. The sidecar is written at trigger time and
+    /// the equirect bytes drain later, so sidecar-present/JPG-missing means "captured, download
+    /// pending", which is still captured content. The JPG match lowercases the name because the
+    /// 360° writer's literal is UPPERCASE `.JPG`, unlike the lowercase `images/` writer.
     static func equirectStillCount(in captureDir: URL?) -> Int {
         guard let captureDir else { return 0 }
         let path = captureDir.appendingPathComponent("equirect_stills").path
@@ -660,95 +649,62 @@ class FrameCaptureSession {
     }
 
     /// Reads all three content counts off a FINALIZED capture directory (the URL `stop()` returned).
-    /// One pass per subdirectory, on the main thread at Stop — the same cost the single inline
-    /// `images/` read already paid, on directories that are small by construction on this branch.
     static func recoveryContent(in captureDir: URL?) -> RecoveryContent {
         RecoveryContent(frameCount: capturedFrameCount(in: captureDir),
                         proxyFrameCount: proxyFrameCount(in: captureDir),
                         equirectStillCount: equirectStillCount(in: captureDir))
     }
 
-    /// Whether a mesh-less, map-less tracking-loss recovery carries enough content to be worth
-    /// persisting as a scan (`AppConstants.minRecoveryFrames` — see there for why the floor exists,
-    /// why the number is a judgement call, and why there is no vertex term).
-    ///
-    /// Two clauses, both biased toward saving:
-    ///
-    /// 1. ANY 360° still is content, with no floor at all. One still is a deliberate trigger and may
-    ///    be the only surviving copy (see `RecoveryContent`). Refusing a capture that holds stills
-    ///    would leave irreplaceable bytes in a temp directory with no scan to belong to — and it is
-    ///    the persisted scan that gives the still drain and the Process sweep somewhere to land.
-    /// 2. Otherwise the floor applies to the SUM of the two stream frame counts. They are frames of
-    ///    the same nature (RGB stills of the scene, one from the iPad and one from a wearable) and a
-    ///    wearable-driven capture legitimately carries almost all of them in `proxy_images/`.
-    ///
-    /// Never vertex count: on this branch the mesh is empty by construction, and Lite (no-LiDAR)
-    /// devices legitimately save `vertexCount: 0` scans whose frames are the whole payload.
-    static func recoveryHasEnoughContent(_ content: RecoveryContent) -> Bool {
-        if content.equirectStillCount > 0 { return true }
-        return content.frameCount + content.proxyFrameCount >= AppConstants.minRecoveryFrames
-    }
-
     /// The recovery branch's whole decision, as a pure function of what is on disk and which flow we
-    /// are in. Reached only AFTER `finishStopRecording`'s Lite branch has returned, so `supportsLiDAR`
-    /// is not a parameter: on a Lite device a capture with any `images/` frame never gets here.
+    /// are in. Any content is saved: there is no floor. #86 first proposed one (10 frames) to keep
+    /// map-less stubs from blocking Rescan; skipping map-less scans in `latestRoomScan` fixes that
+    /// at the source, and with automatic photos (none in the first 10 s) a floor of 10 refused
+    /// tracking losses in roughly the first 20-30 s of a room scan, leaving the photos stranded in
+    /// the temp directory with nothing in the app pointing at them.
     static func recoveryOutcome(content: RecoveryContent, isExtendFlow: Bool) -> RecoveryOutcome {
         if isExtendFlow { return .abortExtendFlow }
-        return recoveryHasEnoughContent(content) ? .persistRecoveredScan : .refuseKeepingCapture
+        return content.isEmpty ? .nothingCaptured : .persistRecoveredScan
     }
 
-    /// Whether the tracking-loss alert's "Save Anyway" would actually persist something, evaluated
-    /// while the AR session is STILL LIVE — so the alert cannot offer a save the pipeline then
-    /// refuses. Three ways to be honourable, matching the three branches `finishStopRecording` can
-    /// take from here:
+    /// Whether the tracking-loss alert's "Save Anyway" would save something, evaluated while the AR
+    /// session is still live, so the alert never offers a save the pipeline then refuses:
     ///
-    /// - `!supportsLiDAR` with at least one `images/` frame: the Lite branch catches exactly that and
-    ///   saves it through `pendingScan`, so the floor never runs (`CaptureView+Recording.swift:483`).
-    ///   Note the Lite branch's gate is `images/` only — a Lite capture with proxy frames but no
-    ///   `images/` frame falls through to the recovery floor, so this term is not "Lite ⇒ true".
-    /// - `liveMeshVertexCount > 0`: mesh anchors are still present, so `snapshotMeshBuffers` will
-    ///   succeed at Stop and the NORMAL save flow runs — a real scan with mesh and world map, floor
-    ///   irrelevant. This is `scanStats.totalVertices`, the one place issue #81's vertex term is
-    ///   meaningful (see `AppConstants.minRecoveryFrames`). It is republished at 10 Hz, so it can go
-    ///   stale in the alert's favour: if the anchors vanish between the alert and Stop the recovery
-    ///   branch takes over and may refuse — which is now a non-destructive refusal with an accurate
-    ///   message, and erring toward offering the save is the direction issue #81 asks for.
-    /// - otherwise the recovery floor decides, on the same predicate the branch will use.
-    ///
-    /// A capture holding nothing at all is never offered, which is the pre-existing behaviour of the
-    /// alert's third arm (and is why a live mesh with zero frames is not treated as savable here).
-    static func recoverySaveWouldPersist(content: RecoveryContent, supportsLiDAR: Bool,
-                                         liveMeshVertexCount: Int) -> Bool {
-        let anyContent = content.frameCount + content.proxyFrameCount + content.equirectStillCount
-        guard anyContent > 0 else { return false }
-        if !supportsLiDAR, content.frameCount > 0 { return true }
-        if supportsLiDAR, liveMeshVertexCount > 0 { return true }
-        return recoveryHasEnoughContent(content)
+    /// - `liveMeshVertexCount > 0` (mesh made during this recording): the mesh anchors are still
+    ///   present, so `snapshotMeshBuffers` succeeds at Stop and the NORMAL save runs, giving a real
+    ///   scan with mesh and world map. Room scans take no photos in their first 10 s, so this is
+    ///   the only content a tracking loss that early has. It is republished at 10 Hz and can go
+    ///   stale in the alert's favour: if the anchors vanish before Stop, the recovery branch decides
+    ///   on the files instead.
+    /// - otherwise any photo, glasses frame or 360° still: the Lite branch or the recovery branch
+    ///   saves it.
+    static func recoverySaveWouldPersist(content: RecoveryContent, liveMeshVertexCount: Int) -> Bool {
+        liveMeshVertexCount > 0 || !content.isEmpty
     }
 
-    /// The banner shown when a recovery is refused below the floor. Says "Not saved", not
-    /// "Discarded": nothing is deleted on that path, and the two words are not interchangeable to a
-    /// user who just lost a scan. Pluralized, matching the idiom the tracking-loss alert already
-    /// uses (`CaptureView.swift:2152`) — "only 1 frames captured" is reachable, as is a count of 0
-    /// (the case that used to read "No Mesh Data", which told the user nothing they could act on).
-    static func recoveryRefusedMessage(content: RecoveryContent) -> String {
-        let frames = content.frameCount + content.proxyFrameCount
-        guard frames > 0 else { return "Not saved — no frames captured" }
-        return "Not saved — only \(frames) frame\(frames == 1 ? "" : "s") captured"
-    }
-
-    /// The banner shown when a recovery IS persisted. Pluralized for the same reason, and it names
-    /// the 360° stills because they can be the majority — or the whole — of what cleared the floor.
-    static func recoverySavedMessage(content: RecoveryContent) -> String {
-        let frames = content.frameCount + content.proxyFrameCount
-        let stills = content.equirectStillCount
-        var what = frames > 0 ? "\(frames) frame\(frames == 1 ? "" : "s")" : ""
-        if stills > 0 {
-            what += what.isEmpty ? "\(stills) × 360°" : " + \(stills) × 360°"
+    /// What was captured, for the tracking-loss alert and the save banner: "12 photos, 3 360°
+    /// photos and the mesh". `includesMesh` adds the mesh; a mesh with nothing else reads "the mesh
+    /// (no photos yet)", since room-scan photos start about 10 s in.
+    static func recoveryContentSummary(_ content: RecoveryContent, includesMesh: Bool = false) -> String {
+        if content.isEmpty { return includesMesh ? "the mesh (no photos yet)" : "nothing" }
+        var parts: [String] = []
+        func add(_ count: Int, _ one: String, _ many: String) {
+            if count > 0 { parts.append("\(count) \(count == 1 ? one : many)") }
         }
-        if what.isEmpty { what = "capture" }
-        return "Saved \(what) (mesh lost to tracking interruption)"
+        add(content.frameCount, "photo", "photos")
+        add(content.proxyFrameCount, "glasses frame", "glasses frames")
+        add(content.equirectStillCount, "360° photo", "360° photos")
+        if includesMesh { parts.append("the mesh") }
+        guard let last = parts.popLast() else { return "nothing" }
+        return parts.isEmpty ? last : parts.joined(separator: ", ") + " and " + last
     }
+
+    /// The banner shown when a recovery is persisted.
+    static func recoverySavedMessage(content: RecoveryContent) -> String {
+        "Saved \(recoveryContentSummary(content)) (mesh lost to tracking interruption)"
+    }
+
+    /// The banner shown when tracking was lost before anything was captured.
+    static let recoveryNothingCapturedMessage = "Not saved — nothing was captured"
 
     private func captureFrame(from session: ARSession) {
         let fullyTest = isMockingIMU && isMockingImages && isMockingDepth
