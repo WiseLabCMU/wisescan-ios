@@ -4,6 +4,7 @@ platform :ios do
 
   desc "Build and upload to TestFlight"
   lane :beta do
+    # Keeps the pre-rename name: an App Store app's bundle ID can never change (docs/RELEASE.md).
     app_id = "edu.cmu.wiselab.wisescan-ios"
 
     # Authenticate with the App Store Connect API key (capture it so the signing + upload steps

@@ -11,6 +11,8 @@
 		<key>UIImageRespectsSafeAreaInsets</key>
 		<true/>
 	</dict>
+	<!-- wisescandat keeps the pre-rename name on purpose: the Meta AI app returns to the
+	     app by this scheme, so renaming it can break glasses registration. -->
 	<key>MWDAT</key>
 	<dict>
 		<key>AppLinkURLScheme</key>

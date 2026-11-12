@@ -1,4 +1,4 @@
-# Contributing to WiSEScan iOS (Scan4D)
+# Contributing to Scan4D iOS
 
 This document covers **development rules and conventions** specific to `scan4d-ios`. These rules are mandatory for all contributors, including automated/agentic coding tools.
 

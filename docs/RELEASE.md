@@ -8,6 +8,10 @@ This document describes the end-to-end release process for Scan4D (scan4d-ios). 
 Finalize Code → Merge release-please PR → Pull Tag Locally → Fastlane Build & Upload
 ```
 
+## App identity
+
+The App Store app keeps the bundle ID `edu.cmu.wiselab.wisescan-ios` from before the repository was renamed to scan4d-ios (November 2026). Apple never lets an app's bundle ID change: a new one would be a separate App Store app with no TestFlight testers, and installing it would not bring over anyone's on-device scans, settings or stored control-plane password. The app target's `PRODUCT_BUNDLE_IDENTIFIER`, `fastlane/Appfile` and the Fastfile's `app_id` therefore stay as they are. Users see only the display name, Scan4D, so the rename needs nothing from testers: a new build installs over the old one with everything kept. The Meta glasses URL scheme `wisescandat` keeps its name for the same reason (the Meta AI app returns to the app by it).
+
 ## Prerequisites
 
 ### One-Time Setup

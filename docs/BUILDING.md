@@ -15,6 +15,14 @@ CLI build, lint, and CI-validation workflows for Scan4D (scan4d-ios). For local 
   ```
   It blocks a commit if Xcode's project serializer has silently stripped the `x-release-please-version` markers from `project.pbxproj`. Xcode rewrites that file whenever you open the project or change a build setting, so it's easy to stage a reserialized version with the markers gone — the hook catches it before it lands. See [CONTRIBUTING.md](../CONTRIBUTING.md) for why the markers matter.
 
+## Renamed from wisescan-ios
+
+The repository, Xcode project, targets, schemes, source folders and Swift module were renamed from wisescan-ios to scan4d-ios in November 2026. The App Store bundle ID and the `wisescandat` URL scheme keep the old name (see [RELEASE.md](RELEASE.md#app-identity)), so a build installs over an older one with all data kept. For an existing clone:
+
+- GitHub redirects the old URLs, but point the clone at the new one: `git remote set-url origin https://github.com/WiseLabCMU/scan4d-ios.git`.
+- Open `scan4d-ios.xcodeproj` and pick the `scan4d-ios` scheme. Derived data for the old name stays under `~/Library/Developer/Xcode/DerivedData/wisescan-ios-*` and can be deleted.
+- A branch started before the rename: merge main into it. The rename landed as a commit of moves only, so git carries the branch's edits to the moved files. Files the branch added under the old folders are moved into the new ones and reported as conflicts to confirm (`git add` each at its new path); files the branch deleted are reported as deleted by the branch (`git rm` each). Then change `@testable import wisescan_ios` to `scan4d_ios` in any test file the branch added.
+
 ## Build (CLI)
 ```bash
 # Device validation (CI / no signing)
