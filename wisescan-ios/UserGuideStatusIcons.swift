@@ -1,82 +1,103 @@
 import SwiftUI
 
 // MARK: - User Guide: status icon troubleshooting
-// What the upload and warning badges on locations and scan cards mean. Like UserGuideView, this
+// What the sync and warning badges on locations and scan cards mean. Like UserGuideView, this
 // is documentation that lives in SwiftUI: when a badge's look or rule changes, change its row
 // here in the same change set. The rules live in LocationGridTile, ScanCard and CaptureIntegrity
-// (ScansListView.swift), CompactLocationTile (StitchGraphView.swift), UploadStatus
-// (ScanStore.swift), ExportUploader.interruptedMessage, and ControlPlaneSync.SpaceState
-// (ControlPlaneSpaceSyncButton.swift). Status labels, colors and sync symbols are read from those
-// types so the samples cannot drift; only the badge styling is copied.
+// (ScansListView.swift), CompactLocationTile (StitchGraphView.swift), SyncBadge and SyncLine
+// (SyncViews.swift), BundleSync.spaceState and line(for:) (ScanBundle.swift), UploadStatus
+// (ScanStore.swift), InterruptedExports.message, and ControlPlaneSync.SpaceState
+// (ControlPlaneSpaceSyncButton.swift). Badge symbols and colors, status labels and sync symbols
+// are read from those types so the samples cannot drift; only the badge styling is copied.
 
 /// The two troubleshooting sections of the User Guide, placed inside its List.
 struct StatusIconsGuideSections: View {
     var body: some View {
-        uploadSection
+        syncSection
         warningSection
     }
 
-    private var uploadSection: some View {
+    private var syncSection: some View {
         Section {
-            badgeRow(icon: nil, color: .clear, title: "No Cloud Badge",
-                     text: "No scan in this location has been uploaded yet.")
-            badgeRow(icon: "checkmark.icloud.fill", color: .green.opacity(0.4), title: "Dimmed Cloud Badge",
-                     text: "Some of this location's scans are uploaded, but not all. A new rescan or focus " +
-                           "scan dims a fully uploaded location until it is uploaded too, and a bulk Upload " +
-                           "with the Latest scope (the default) sends only the newest scan of each location. " +
-                           "Open the location to see which scans show an Uploaded date.")
-            badgeRow(icon: "checkmark.icloud.fill", color: .green, title: "Green Cloud Badge",
-                     text: "Every scan in this location, focus scans included, has been uploaded.")
+            syncBadgeRow(.off, title: "No Cloud Badge",
+                         text: "This location isn't synced with a Scan4D server: none is set in the Server " +
+                               "tab, or the location hasn't been synced yet. Tap Sync to Scan4D Server in it, " +
+                               "or let the Server tab's Auto sync add it.")
+            syncBadgeRow(.map, title: "Outline Cloud: The Map",
+                         text: "The Scan4D server has this location's map: names, times, poses, links and the " +
+                               "room layout. Some scans' bundles haven't reached it yet. They wait for " +
+                               "processing, for Wi-Fi, or for you to select them (on the card, or in the " +
+                               "Server tab). A new scan, or a scan whose files change (recoloring it, " +
+                               "say), brings the outline back until its bundle goes up again.")
+            syncBadgeRow(.everything, title: "Green Check: Everything",
+                         text: "The server holds every scan's bundle, unpacked: photos, depth, meshes, the " +
+                               "room layout and the world map.")
+            syncBadgeRow(.uploading, title: "Arrow: Sending",
+                         text: "A scan's bundle is going up, or the server is unpacking one. It keeps " +
+                               "going if you lock the screen or switch apps.")
+            syncBadgeRow(.failed, title: "Warning Cloud: A Bundle Failed",
+                         text: "A bundle didn't reach the server, or the server couldn't unpack it. The " +
+                               "scan card's sync line says why, and the Server tab, which lists it, has " +
+                               "Retry. The tab's icon counts these. The app retries a failed upload on its own, waiting " +
+                               "longer after each failure in a row. It doesn't retry when the server " +
+                               "refused the bundle for a reason sending again can't change: uploads " +
+                               "turned off for this phone, a scan it doesn't know, or a bundle larger " +
+                               "than it takes. Fix that on the server, then tap Retry.")
 
-            statusRow(.pending,
-                      text: "Nothing is running for this scan. New scans start here, and canceling a Save " +
-                            "comes back to it.")
+            syncLineRow("Map only · waiting for Wi-Fi", failed: false,
+                        text: "Each scan card in a synced location has a sync line. Map only means the " +
+                              "server has the scan's details but not its bundle yet, and the rest says " +
+                              "what it waits for: Wi-Fi (the Server tab's Upload data bundles " +
+                              "only on Wi-Fi), its turn (waiting to upload), or your choice (not selected, " +
+                              "in the Server tab; tap Select on the card to send it). Privacy Filter was off, not selected: the scan was " +
+                              "captured with people unblurred, so it waits until you select it.")
+            syncLineRow("Uploading 42%", failed: false,
+                        text: "Its bundle is going up. Preparing its bundle and Coloring for sync come " +
+                              "first: a bundle carries the colored mesh, so an uncolored scan is colored " +
+                              "before it is sent.")
+            syncLineRow("Everything · Nov 11, 2026 at 3:40 PM", failed: false,
+                        text: "The server holds this scan's bundle, unpacked at that time.")
+            syncLineRow("The server couldn't unpack it: the zip is damaged", failed: true,
+                        text: "A sync failed, and the reason follows. Sync failed with a network message " +
+                              "or a server error means the upload didn't arrive: check the Server tab " +
+                              "and your connection. The server couldn't unpack it means it " +
+                              "arrived but was refused. Sync stopped means the server refused it for a " +
+                              "reason sending again can't change, so it waits until the scan changes. " +
+                              "Retry in the Server tab sends it again.")
+
             statusRow(.zipping, fraction: 0.4,
-                      text: "Building the export. While it runs, the label names the step (Privacy blur, " +
-                            "Zipping and so on) and the bar shows its progress. Keep the app open until it " +
-                            "finishes: closing the app stops the conversion.")
-            statusRow(.uploading(progress: 0.42), fraction: 0.42,
-                      text: "Sending the export to the upload server. It keeps going if you lock the " +
-                            "screen or switch apps.")
-            statusRow(.success,
-                      text: "The server accepted the upload. The card also shows Uploaded with the date " +
-                            "and time, and the scan counts toward the location's cloud badge.")
+                      text: "Share is building the export. While it runs, the label names the step " +
+                            "(Privacy blur, Zipping and so on) and the bar shows its progress. Keep the " +
+                            "app open until it finishes: the screen stays on, and closing the app stops " +
+                            "the conversion.")
             statusRow(.savedLocally,
-                      text: "The export was saved to Files or sent with AirDrop. That is not an upload, " +
-                            "so the cloud badge does not count it.")
-            statusRow(.failed(ExportUploader.interruptedMessage),
-                      text: "The export or upload did not finish, and the reason follows Failed. " +
-                            "Interrupted means the app closed before it finished. Server error with a " +
-                            "number, or a network message, means the server or the network refused it: " +
-                            "check the upload server in Settings and your connection. Export failed or " +
-                            "No scan data means the scan could not be packaged or its files are missing. " +
-                            "Tap Upload to try again.")
-            iconRow(icon: "clock.arrow.circlepath", color: .cyan, title: "The Label Shows the Last Try",
-                    text: "The status label shows only the most recent attempt. Saving an uploaded scan " +
-                          "to Files changes it to Saved Locally, and a failed re-upload shows Failed, " +
-                          "but the Uploaded date stays and the cloud badge still counts the scan.")
+                      text: "The export was saved to Files or sent with AirDrop. Share sends files to " +
+                            "other apps; it has nothing to do with the cloud badge.")
+            statusRow(.failed(InterruptedExports.message),
+                      text: "The export did not finish, and the reason follows Failed. Interrupted means " +
+                            "the app closed before it finished. Export failed or No scan data means the " +
+                            "scan could not be packaged or its files are missing. Tap Share to try again.")
 
             iconRow(icon: ControlPlaneSync.SpaceState.notSynced.symbol, color: .teal,
-                    title: "Sync Is Not Upload",
-                    text: "With a lab server (control plane) set in Settings, each location also has " +
-                          "a Sync to Lab Server button. Sync keeps the lab's list of your spaces up to " +
-                          "date and sends no photos, so a synced location can still have no cloud " +
-                          "badge. Use Upload to send the scan itself.")
+                    title: ControlPlaneSync.SpaceState.notSynced.title,
+                    text: "With a Scan4D server (control plane) set in the Server tab, each location has this " +
+                          "button. It adds the location to the ones this phone keeps in sync: its map " +
+                          "goes first, then each processed scan's bundle.")
             iconRow(icon: ControlPlaneSync.SpaceState.synced.symbol, color: .teal,
                     title: ControlPlaneSync.SpaceState.synced.title,
-                    text: "The lab server has this space, and new scans in it sync on their own. Tap " +
+                    text: "The Scan4D server has this space, and new scans in it sync on their own. Tap " +
                           "to sync right away.")
             iconRow(icon: ControlPlaneSync.SpaceState.failed.symbol, color: .teal,
                     title: ControlPlaneSync.SpaceState.failed.title,
-                    text: "The last sync did not reach the lab server. Settings > Control Plane shows " +
+                    text: "The last sync did not reach the Scan4D server. The Server tab shows " +
                           "why (a wrong password, a server that can't be reached), so fix that there, " +
-                          "then tap to retry. Large files wait for Wi-Fi rather than fail.")
+                          "then tap to retry. Bundles wait for Wi-Fi rather than fail.")
         } header: {
-            Text("TROUBLESHOOTING: UPLOAD STATUS")
+            Text("TROUBLESHOOTING: SYNC AND SHARE")
         } footer: {
             Text("The cloud badge sits in the top-right corner of each location, in the list and in " +
-                 "the graph view. The status label is at the top right of each scan card inside a " +
-                 "location.")
+                 "the graph view. Each scan card shows its sync line under its details, and Share's " +
+                 "status at its top right while an export runs or after it ends.")
                 .font(.caption2)
                 .foregroundColor(.gray)
         }
@@ -123,6 +144,12 @@ struct StatusIconsGuideSections: View {
 // MARK: - Rows
 
 private extension StatusIconsGuideSections {
+    /// A location's sync badge, its symbol and color read from `SyncBadge`; no badge for `.off`.
+    func syncBadgeRow(_ state: BundleSync.SpaceState, title: String, text: String) -> some View {
+        let look = SyncBadge.look(state)
+        return badgeRow(icon: look?.symbol, color: look?.color ?? .clear, title: title, text: text)
+    }
+
     /// A corner badge drawn as the location tiles draw it; `icon: nil` is the empty slot (no badge).
     @ViewBuilder
     func badgeRow(icon: String?, color: Color, title: String, text: String) -> some View {
@@ -143,6 +170,23 @@ private extension StatusIconsGuideSections {
             }
             .frame(width: 28)
             rowText(title: title, text: text)
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// A scan card's sync line as `SyncLine` draws it, with the explanation under it.
+    @ViewBuilder
+    func syncLineRow(_ line: String, failed: Bool, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: failed ? "exclamationmark.icloud" : "icloud")
+                Text(line).lineLimit(2)
+            }
+            .font(.caption2)
+            .foregroundColor(failed ? .yellow : .green.opacity(0.8))
+            Text(text)
+                .font(.caption)
+                .foregroundColor(.gray)
         }
         .padding(.vertical, 4)
     }

@@ -11,16 +11,12 @@ private struct DevSliderScale {
 
 struct SettingsView: View {
     var scrollToDevMode: Bool = false
-    /// Opened by a tapped Upload or Sync whose server wants a password (ControlPlanePasswordPrompt):
-    /// scroll to Control plane and put the cursor in its password field.
-    var focusControlPlanePassword: Bool = false
     @Environment(\.modelContext) private var modelContext
     @Query private var locations: [ScanLocation]
 
     @AppStorage(AppConstants.Key.rawOverlapMax) private var overlapMax: Double = AppConstants.overlapMax
     @AppStorage(AppConstants.Key.rawRejectBlur) private var rejectBlur: Bool = AppConstants.rejectBlur
     @AppStorage(AppConstants.Key.captureMode) private var captureMode: String = AppConstants.captureMode
-    @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
     @AppStorage(AppConstants.Key.developerMode) private var developerMode: Bool = AppConstants.developerMode
     @AppStorage(AppConstants.Key.mockIMU) private var mockIMU: Bool = AppConstants.mockIMU
     @AppStorage(AppConstants.Key.mockCameraImages) private var mockCameraImages: Bool = AppConstants.mockCameraImages
@@ -70,26 +66,6 @@ struct SettingsView: View {
                 }
                 .padding(.vertical, 4)
             }
-        }
-        .listRowBackground(Color.white.opacity(0.05))
-    }
-
-    @ViewBuilder
-    private var settingsSection2: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 8) {
-                TextField("https://your-server.example.com/uploads/", text: $uploadURL)
-                    .foregroundColor(.white)
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
-                    .keyboardType(.URL)
-                Text("HTTP(S) endpoint for scan uploads. With a working control plane set below, it says where exports go (the lab bucket); whenever it can't, exports come here as before.")
-                    .font(.caption)
-                    .foregroundColor(.gray)
-            }
-            .padding(.vertical, 4)
-        } header: {
-            Text("UPLOAD SERVER")
         }
         .listRowBackground(Color.white.opacity(0.05))
     }
@@ -578,11 +554,16 @@ struct SettingsView: View {
                     // MARK: - User Guide Link
                     settingsSection1
 
-                    // MARK: - General Settings
-                    settingsSection2
-
-                    ControlPlaneSettingsSection(focusPassword: focusControlPlanePassword)
-                        .id("controlPlaneSection")
+                    // The Scan4D server's settings live in its own tab now.
+                    Section {
+                        Label("The Scan4D server's connection, status and bundles are in the Server tab.",
+                              systemImage: "server.rack")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    } header: {
+                        Text("SCAN4D SERVER")
+                    }
+                    .listRowBackground(Color.white.opacity(0.05))
 
                     appearanceSection
 
@@ -601,12 +582,6 @@ struct SettingsView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             withAnimation {
                                 proxy.scrollTo("devModeSection", anchor: .top)
-                            }
-                        }
-                    } else if focusControlPlanePassword {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                            withAnimation {
-                                proxy.scrollTo("controlPlaneSection", anchor: .top)
                             }
                         }
                     }
@@ -672,5 +647,7 @@ extension String {
 }
 
 #Preview {
+    // Settings reads its scans through a SwiftData query.
     SettingsView()
+        .modelContainer(for: [ScanLocation.self, CapturedScan.self], inMemory: true)
 }

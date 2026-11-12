@@ -100,7 +100,7 @@ whose view puts the box nearest the image centre, among the sharpest at capture.
 
 Focus scans never become a relocalization source and are skipped by everything that assumes a
 mesh: rescan's map choice, the original-scan lookup, post-processing, colouring, the history
-scrubber, the combined view and mesh exports. Their actions: view, Save and Upload (the focus
+scrubber, the combined view and mesh exports. Their actions: view, Share and Sync (the focus
 capture zip, person blur applied), Delete.
 
 ### Region import (VLM entry)
@@ -149,7 +149,7 @@ focus capture with the region loaded. Delivery from the server (polling) waits f
   (below 20°, 20 to 50°, above 50°).
 - **Focus card**: the best still (sharp at capture, region share of the frame nearest 35%) and the
   parent room scan's existing preview image. Drawing the box onto that preview is not done.
-- **The space's list filters by kind.** Focus scans only save, upload and delete, so once a space
+- **The space's list filters by kind.** Focus scans only share, sync and delete, so once a space
   has one, its list gets a Room / Focus / All switch (`ScanListFilter`, remembered, Room by
   default). Select All and the bulk actions cover what is shown; a save that opens the space
   switches to its kind if the filter would hide it. The space tile reads "3 room · 2 focus".

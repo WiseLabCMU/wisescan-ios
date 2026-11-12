@@ -28,18 +28,25 @@ enum AppConstants {
 
     // MARK: - AppStorage Keys
     enum Key {
-        static let uploadURL = "uploadURL"
-        static let controlPlaneHost = "controlPlaneHost"              // the lab's control plane server (host[:port] or URL); empty = sync off
+        static let controlPlaneHost = "controlPlaneHost"              // the Scan4D server, the control plane (host[:port] or URL); empty = sync off
         static let controlPlaneDeviceLabel = "controlPlaneDeviceLabel" // this phone's name in the fleet (iOS gives apps only "iPhone")
         static let controlPlanePromptedTasks = "controlPlanePromptedTasks" // urgent tasks already alerted (each alerts once; then the to-do list)
         static let controlPlaneOpenTasks = "controlPlaneOpenTasks"    // the to-do list as of the last sync (JSON), shown while the server can't be reached
         static let controlPlaneTaskAnswers = "controlPlaneTaskAnswers" // open/decline answers the server hasn't had yet, sent with the next sync
         static let controlPlaneSyncedSpaces = "controlPlaneSyncedSpaces" // ids of the spaces reported to the control plane (Sync on a space or stitched map)
+        static let controlPlaneConfirmedSpaces = "controlPlaneConfirmedSpaces" // ids of the spaces the last successful sync carried (the badge's Map)
         static let controlPlaneAutoSync = "controlPlaneAutoSync"      // which spaces start syncing without a tap: all / new / off (ControlPlaneAutoSync)
         static let controlPlaneJoinedAt = "controlPlaneJoinedAt"      // first successful sync (seconds since 1970): what counts as a new space
-        static let controlPlaneSendPackages = "controlPlaneSendPackages" // upload map packages (mesh, room layout, relocalization map) the server asks for
-        static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
-        nonisolated static let controlPlanePasswordWanted = "controlPlanePasswordWanted" // read by ControlPlaneSecret off the main actor; the control plane (base URL) that refused a request for want of a password; tapped Upload and Sync ask for it first
+        static let controlPlaneBundlesWifiOnly = "controlPlaneBundlesWifiOnly" // upload scans' data bundles only on Wi-Fi (the JSON and the RoomPlan preview go on any network)
+        static let controlPlaneBundlesSkipped = "controlPlaneBundlesSkipped"   // scans deselected in the pending checklist: their bundles wait until selected again
+        static let controlPlaneBundlesChosen = "controlPlaneBundlesChosen"     // scans captured with the Privacy Filter off that the user selected in the checklist (held back until then)
+        static let controlPlaneBundlesFilterOff = "controlPlaneBundlesFilterOff" // scans the last sync read as captured with the Privacy Filter off
+        static let controlPlaneBundlesRefused = "controlPlaneBundlesRefused"   // bundles the server refused for good (403, 404, 413), with the version refused (JSON): not sent again until it changes or Retry
+        static let controlPlaneBundleStates = "controlPlaneBundleStates"       // each scan's bundle as the server last reported it (JSON), for the sync badge after a relaunch
+        static let controlPlaneStateServer = "controlPlaneStateServer"         // the control plane (base URL) the confirmed spaces and bundle states came from; another one starts them afresh
+        static let legacyControlPlaneSendPackages = "controlPlaneSendPackages" // builds before bundles: Send map packages (off = nothing but the JSON went); read once to deselect every scan, then removed
+        static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the server's own (self-signed) certificate from the control plane and the upload hosts it names
+        nonisolated static let controlPlanePasswordWanted = "controlPlanePasswordWanted" // read by ControlPlaneSecret off the main actor; the control plane (base URL) that refused a request for want of a password; a tapped Sync asks for it first
         static let rawOverlapMax = "rawOverlapMax"
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"
@@ -50,7 +57,6 @@ enum AppConstants {
         static let privacyFilterOffAt = "privacyFilterOffAt"          // when the Privacy Filter was last switched off (seconds since 1970); cleared when it goes back on (PrivacyFilterTimer)
         static let privacyFilterTimeLimitHours = "privacyFilterTimeLimitHours" // Developer Mode: hours the Privacy Filter may stay off before it turns itself back on; 0 = no limit
         static let mockWearable = "mockWearable"
-        static let selectedExportFormat = "selectedExportFormat"
         static let locationScanFilter = "locationScanFilter"   // a space's scan list: Room / Focus / All (ScanListFilter)
         static let activeMeshColor = "activeMeshColor"
         static let ghostMeshColor = "ghostMeshColor"
@@ -211,11 +217,8 @@ enum AppConstants {
         Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
     }
 
-    static var uploadURL: String {
-        isTestFlight ? "https://wiselambda4.lan.cmu.edu/wisescan-uploads/" : ""
-    }
-    /// The lab's control plane (scan4d-server), on TestFlight only, like the upload URL: App Store
-    /// and Xcode builds start with none. A host the user typed, or cleared, stays theirs.
+    /// The lab's control plane (scan4d-server), on TestFlight only: App Store and Xcode builds
+    /// start with none. A host the user typed, or cleared, stays theirs.
     static var controlPlaneHost: String {
         isTestFlight ? "https://wiselambda4.lan.cmu.edu" : ""
     }
@@ -233,7 +236,6 @@ enum AppConstants {
     /// The Developer Mode choices, in hours; 0 = no limit.
     static let privacyFilterTimeLimitChoices: [Int] = [12, 24, 168, 0]
     static let mockWearable: Bool = false
-    static let selectedExportFormat = "Scan4D" // ExportFormat.scan4d.rawValue
     static let activeMeshColor: String = "Green"
     static let ghostMeshColor: String = "Magenta"
     static let metaWearablesFPS: Double = 7.0
@@ -493,10 +495,6 @@ enum AppConstants {
     static let captureIntegrityMinFrames: Int = 4            // min captured frames before judging modality completeness (too few to be meaningful below this)
     static let captureIntegrityMinFraction: Double = 0.5     // a modality (depth/confidence) present in fewer than this fraction of frames = grossly incomplete capture → warn the user
     static let jpegCompressionQuality: CGFloat = 0.85        // JPEG quality for captured frames
-    // Flame3D export (Flame3DExport; mirrors tools/scan4d-to-flame3d's converter defaults)
-    static let flame3dMaxImageLongEdge: Int = 1920           // cap on the exported long edge; stills are resized to the stream size under it
-    static let flame3dAspectTolerance: Double = 0.01         // a still within 1% of the stream's aspect is resized to it, else left out (SAM3 needs one resolution)
-    static let flame3dJPEGQuality: CGFloat = 0.95            // re-encode quality for resized stills
     static let blurWarningTimeout: TimeInterval = 1.5        // seconds before blur warning auto-dismisses
     static let consecutiveBlurThreshold: Int = 5             // blurred frames before warning triggers
     static let motionBlurVelocity: Float = 0.5               // m/s threshold for motion blur detection
@@ -760,18 +758,23 @@ enum AppConstants {
     // MARK: - Control plane (scan4d-server)
     static let controlPlaneSyncDebounceS: Double = 5             // saves within this window share one sync
     static let controlPlaneRequestTimeoutS: TimeInterval = 15
-    static let controlPlaneUploadBypassS: TimeInterval = 60      // after the control plane is unreachable, exports go straight to the Upload URL this long
-    static let controlPlaneUploadTimeoutS: TimeInterval = 60     // idle time allowed mid map-package upload (tens of MB)
-    static let controlPlaneSendPackages = true                   // map packages go up with the sync unless turned off
+    static let controlPlaneUploadTimeoutS: TimeInterval = 60     // idle time allowed mid map-package upload (the RoomPlan preview, or an older app's files)
+    static let controlPlaneBundlesWifiOnly = true                // data bundles wait for Wi-Fi unless the user lets them use cellular
+    static let controlPlaneBundleCacheMaxAgeS: TimeInterval = 604_800 // 7 days: a built bundle not yet on the server is kept this long, so a failed upload retries without rebuilding
+    static let controlPlaneBundleResourceTimeoutS: TimeInterval = 86_400 // a background bundle upload may take this long overall (GBs, waiting for Wi-Fi)
+    static let controlPlaneBundleProgressStep: Double = 0.01     // the card's upload percentage moves in steps of at least this (each is a redraw)
+    static let controlPlaneBundleIngestCheckS: Double = 15       // after an upload, sync this soon to see the server's unpacking finish
+    static let controlPlaneBundleRetryBaseS: TimeInterval = 900  // a failed upload is tried again after this, doubling with each failure in a row...
+    static let controlPlaneBundleRetryMaxS: TimeInterval = 21_600 // ...up to 6 hours apart
+    static let controlPlaneBundleBusyRetryS: TimeInterval = 60   // a scan Process or Color is working on is tried again this soon
+    static let controlPlaneBundleVersionMaxAgeS: TimeInterval = 3_600 // a scan's bundle version is re-read in full at least this often, even when its folders look unchanged
+    static let shareWaitForBundleColoringPollS: Double = 0.5     // a Share starting while a sync bundle colors a scan checks this often for it to finish
     static let controlPlaneAutoSync = "new"                      // new spaces sync on their own; the backlog from before joining waits for Sync
     static let controlPlaneLargeFileBytes: Int64 = 5_000_000     // package files this big go up only on an unmetered network (Wi-Fi)
     static let controlPlanePollIntervalS: Double = 300           // while the app is open, sync this often so the lab's requests are picked up
 
-    // MARK: - Export uploads (background URLSession, ExportUploader)
-    static let exportUploadSessionId = "edu.cmu.wiselab.wisescan-ios.export-upload" // stable: iOS reattaches a relaunched app's transfers by it
-    static let exportUploadResourceTimeoutS: TimeInterval = 3600 // give up after this long in total; matches scan4d-server's grant lifetime (SCAN4D_EXPORT_URL_TTL_S default), past which a retry is refused anyway
-    static let exportUploadProgressStep: Double = 0.01           // write the scan's progress only when it moves this much (each write is a SwiftData change)
-    static let exportUploadPendingDirectory = "PendingUploads"   // Application Support subfolder holding exports until their transfer ends
+    // MARK: - Exports a closed app left in flight (InterruptedExports)
+    static let legacyPendingUploadsDirectory = "PendingUploads"  // Application Support subfolder where builds with Upload kept exports until sent; deleted at launch
 }
 
 // MARK: - Semantic View Mode

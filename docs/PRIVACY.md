@@ -1,37 +1,34 @@
 # Scan4D Privacy Policy
 
-*Last updated: October 25, 2026*
+*Last updated: November 12, 2026*
 
 ## Data Collection
 
 Scan4D does not collect, store, or transmit any personal data to our servers.
 
-All scan data (images, depth maps, meshes, and camera poses) is stored locally on your device and is only uploaded when you explicitly configure a server URL and tap the Upload button.
+All scan data (images, depth maps, meshes, and camera poses) is stored locally on your device. It leaves only when you share a scan (to Files, AirDrop, Mail or another app), or when you set a control plane server and sync a space to it (below).
 
 ### Control Plane Sync
 
-If you enter a control plane server in Settings → Control plane, the app keeps that server up to date with an inventory of the spaces you sync: those you send with Sync to Lab Server in a space or Sync on a stitched map, and, depending on Settings → Auto sync, every space (All), those you start after the phone joined (New, the default) or none more (Off). Other spaces stay on the phone. It sends this on launch and after changes, and never during a scan. The inventory holds:
+If you enter a control plane server in the Server tab, the app keeps that server up to date with the spaces you sync: those you send with Sync to Scan4D Server in a space or Sync on a stitched map, and, depending on the Server tab's Auto sync, every space (All), those you start after the phone joined (New, the default) or none more (Off). Other spaces stay on the phone. Nothing is sent during a scan.
+
+**The map**, on launch and after changes:
 - space and scan names and times;
 - scan and space IDs;
 - each scan's alignment transform and stitch-link anchor poses;
 - focus-scan regions (a box);
 - whether each scan had Privacy Filtering on (so the lab can see which scans may show people unblurred);
-- upload state;
+- each room scan's room layout (RoomPlan's walls, floors and objects, as boxes);
+- a fingerprint of each processed scan's files, so the server knows which version it holds;
 - the device's model, iOS and app version, the device name you enter, and a random device ID the app makes once.
 
-The inventory holds no images or depth maps.
+The map holds no images or depth maps.
 
-With **Send map packages** on (the default), the app also uploads the files the server asks for, and only those:
-- right after a sync, the small files the server reads itself: each room scan's alignment and room layout, its sparse feature-point cloud and sweep-coverage grid (points and cells, not images), and each focus scan's box;
-- only when the lab requests them (for example, to view a room in 3D): a room scan's mesh (with its captured vertex colours, people already removed at capture), the simplified and content-only versions of it built at Post-process, and its ARKit relocalization map.
-
-Large files go only over Wi-Fi.
-
-Photos and depth maps leave only through an export you start. With a control plane set, the export's destination comes from it: a one-time upload address for the lab's own storage, so no storage credentials are kept on the phone. The privacy filtering above applies to these exports as to any other.
+**Each scan's bundle**, once the scan is processed: everything the scan holds, as one archive. That is its photos (including 360° stills) and depth maps, its mesh with its captured colours, its room layout and the ARKit relocalization map, the same content as a Scan4D export. The privacy filtering below applies to bundles exactly as to exports: with it on, people are pixelated in photos and removed from depth before anything is packed, and a 360° still or focus-scan photo that can't be checked is left out. You choose which bundles go in the Server tab, and they go only over Wi-Fi unless you turn **Upload data bundles only on Wi-Fi** off. Scans are selected by default, except two kinds that wait until you select them: a scan captured with Privacy Filtering off, whose photos show people unblurred, and, if you had **Send map packages** turned off in an earlier version, every scan you had then. Selecting a scan captured with Privacy Filtering off asks you to confirm first.
 
 The server can also ask for a focus scan of a region. The request waits in a to-do list (an urgent one also alerts once), and nothing is captured unless you open it and scan.
 
-If the server has a password, you enter it in Settings; it is kept in the device's Keychain and sent only to that server.
+If the server has a password, you enter it in the Server tab; it is kept in the device's Keychain and sent only to that server.
 
 Nothing is sent while the server field is empty. The server is the one you configure, normally your lab's own on its internal network.
 
@@ -43,7 +40,7 @@ The app uses the rear-facing device camera and LiDAR sensor (when available) for
 
 Scan4D uses **person segmentation** (not face recognition) to keep people out of captured data. The app does not use the front-facing/TrueDepth camera or `ARFaceTrackingConfiguration`, and collects no facial-geometry, face-mesh, or facial-expression data.
 
-When Privacy Filtering is enabled, the app saves ARKit's person segmentation masks alongside each captured frame during scanning — including the high-resolution still keyframes captured when the device is held still, which follow the same masking path as regular frames. These masks are applied at **export time** — before any data leaves the device — to pixelate detected people in RGB images and zero person regions in depth maps. This deferred-blur architecture keeps the real-time capture pipeline lightweight (preventing VIO tracking loss from encode backpressure) while maintaining the same privacy guarantee: no unblurred image or unmasked depth map is ever exported or uploaded.
+When Privacy Filtering is enabled, the app saves ARKit's person segmentation masks alongside each captured frame during scanning — including the high-resolution still keyframes captured when the device is held still, which follow the same masking path as regular frames. These masks are applied at **export time** — before any data leaves the device, and a sync bundle is built by the same export — to pixelate detected people in RGB images and zero person regions in depth maps. This deferred-blur architecture keeps the real-time capture pipeline lightweight (preventing VIO tracking loss from encode backpressure) while maintaining the same privacy guarantee: no unblurred image or unmasked depth map is ever exported or uploaded.
 
 Raw (unblurred) images exist temporarily in the app's sandboxed container between capture and export. They are not accessible to other apps and are only exported after privacy blur is applied. The segmentation masks themselves are internal-only and are not included in any export archive.
 
@@ -79,7 +76,7 @@ Scan4D does not integrate any third-party analytics, advertising, or tracking SD
 
 ## Data Retention
 
-Scan data persists on your device until you manually delete it from within the app. No data is retained on any remote server unless you explicitly upload it to a server you configure, or set a control plane server, which keeps the inventory above. Deleting a scan on the device marks it gone there rather than erasing its record.
+Scan data persists on your device until you manually delete it from within the app. No data is retained on any remote server unless you set a control plane server and sync spaces to it, which keeps their map and the bundles above. Deleting a scan on the device marks it gone there rather than erasing its record or its bundle.
 
 ## Contact
 

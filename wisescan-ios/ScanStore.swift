@@ -15,12 +15,14 @@ class CapturedScan {
     var vertexCount: Int
     var faceCount: Int
     var hardwareDeviceModel: String = "Native iOS"
+    /// Kept for the store's schema; nothing chooses it any more. Share asks for a format each
+    /// time (`ShareFormatMenu`).
     var selectedFormatStr: String
     var uploadStatusStr: String
     var uploadProgress: Double
     var isColored: Bool = false
-    /// Timestamp of the last successful upload to the server. `nil` means never uploaded.
-    /// Updated automatically on HTTP 2xx; persists across launches for server cross-reference.
+    /// When an app before bundles last uploaded this scan's export. Nothing sets it now: what the
+    /// Scan4D server holds comes from the sync (`BundleSync`). Kept because SwiftData persists it.
     var lastUploadedAt: Date?
     /// DECISION 3: timestamp of the last completed Post-process run (structural steps — room /
     /// registration / proxy — done to the tier achievable for this scan). `nil` = never run; the
@@ -138,16 +140,6 @@ class CapturedScan {
         set { focusRegionJSON = newValue?.encoded().flatMap { String(data: $0, encoding: .utf8) } ?? "" }
     }
 
-    @Transient var isUploaded: Bool { lastUploadedAt != nil }
-
-    @Transient var formattedUploadDate: String? {
-        guard let date = lastUploadedAt else { return nil }
-        let fmt = DateFormatter()
-        fmt.dateStyle = .medium
-        fmt.timeStyle = .short
-        return fmt.string(from: date)
-    }
-
     // Configurable base Directory
     @Transient var scanDirectory: URL {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
@@ -226,11 +218,16 @@ class CapturedScan {
     }
 }
 
+/// What a scan exports as. Scan4D is the one capture bundle, a superset of everything the
+/// capture holds; the layouts other tools read (a Nerfstudio dataset, flame3d-core's input)
+/// are made from it on the Scan4D server (scan4d-flows: scan4d-normalize, scan4d-convert). The
+/// rest are single mesh files for viewing and sharing.
+///
+/// Every format carries the scan's mesh, and with it the mesh's vertex colors, so exporting
+/// colorizes the scan first if it hasn't been (`ScanExportManager.colorizeForExport`): the
+/// colors that ship are sampled from the frames, never the normals preview.
 enum ExportFormat: String, CaseIterable, Codable {
     case scan4d = "Scan4D"
-    case polycam = "Polycam"
-    case nerfstudio = "Nerfstudio"
-    case flame3d = "Flame3D"
     case usdz = "USDZ"
     case ply = "PLY"
     case obj = "OBJ"
@@ -240,7 +237,7 @@ enum ExportFormat: String, CaseIterable, Codable {
         case .usdz: return "usdz"
         case .ply: return "ply"
         case .obj: return "obj"
-        case .scan4d, .polycam, .nerfstudio, .flame3d: return "zip"
+        case .scan4d: return "zip"
         }
     }
 
@@ -249,30 +246,20 @@ enum ExportFormat: String, CaseIterable, Codable {
         case .usdz: return "model/vnd.usdz+zip"
         case .ply: return "application/x-ply"
         case .obj: return "application/x-wavefront-obj"
-        case .scan4d, .polycam, .nerfstudio, .flame3d: return "application/zip"
-        }
-    }
-
-    /// The export carries the scan's mesh, and with it the mesh's vertex colors. Exporting
-    /// one colorizes the scan first if it hasn't been (`ScanExportManager.colorizeForExport`),
-    /// so the colors that ship are sampled from the frames, never the normals preview.
-    var includesMesh: Bool {
-        switch self {
-        case .nerfstudio, .flame3d, .usdz, .ply, .obj: return true
-        case .scan4d, .polycam: return false
+        case .scan4d: return "application/zip"
         }
     }
 
     /// Decodes a persisted raw value, mapping names that have changed.
     ///
-    /// This format was called "RAW" until it was rebuilt into a bundle that actually loads
-    /// (it had shipped transposed poses since it was introduced). The name is persisted in
-    /// SwiftData (`CapturedScan.selectedFormatStr`) and in `@AppStorage`, so without this
-    /// mapping every scan and preference holding "RAW" would silently fall back to Scan4D —
-    /// quietly switching the user to a different export.
+    /// The name is persisted in SwiftData (`CapturedScan.selectedFormatStr`). Polycam,
+    /// Nerfstudio and Flame3D (and "RAW", Nerfstudio's name before it was rebuilt into a bundle
+    /// that loads) were folded into Scan4D, which holds all they did; the server makes their
+    /// layouts from it. They map to Scan4D by name here, so a scan holding one reads as the
+    /// bundle that replaced it.
     static func persisted(_ rawValue: String) -> ExportFormat? {
         if let format = ExportFormat(rawValue: rawValue) { return format }
-        return rawValue == "RAW" ? .nerfstudio : nil
+        return ["Polycam", "Nerfstudio", "Flame3D", "RAW"].contains(rawValue) ? .scan4d : nil
     }
 
     /// The format a scan actually exports in. A focus scan has one export, its still-capture zip
