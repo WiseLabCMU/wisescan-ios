@@ -41,59 +41,99 @@ struct SyncBadge: View {
 }
 
 /// A scan card's one sync line: Map only, Everything, Uploading 40%, Waiting for Wi-Fi, Not
-/// selected, or why it failed. Nothing when its space isn't synced.
+/// selected, or why it failed. Nothing when its space isn't synced. When the server wants the
+/// scan's bundle but the checklist holds it back, the line offers Select, so the choice is made
+/// where the line says it waits (a scan captured with the Privacy Filter off asks first).
 struct SyncLine: View {
     let scan: CapturedScan
+    /// Off in the pending checklist, whose own toggle selects.
+    var selectable = true
+    @State private var confirmUnblurred = false
 
     var body: some View {
-        if let line = BundleSync.shared.line(for: scan) {
+        let bundles = BundleSync.shared
+        let id: UUID = scan.id
+        if let line = bundles.line(for: scan) {
             HStack(spacing: 4) {
                 Image(systemName: line.failed ? "exclamationmark.icloud" : "icloud")
                 Text(line.text).lineLimit(2)
+                if selectable && bundles.awaitsSelection(id) {
+                    Button("Select") {
+                        if bundles.filterOff.contains(id) {
+                            confirmUnblurred = true
+                        } else {
+                            bundles.setSelected(id, true)
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption2.bold())
+                    .foregroundColor(.cyan)
+                }
             }
             .font(.caption2)
             .foregroundColor(line.failed ? .yellow : .green.opacity(0.8))
+            .unblurredBundleConsent(isPresented: $confirmUnblurred) { bundles.setSelected(id, true) }
+        }
+    }
+}
+
+extension View {
+    /// Asks before a scan captured with the Privacy Filter off is selected for sync: its bundle
+    /// carries its photos as captured, people unblurred.
+    func unblurredBundleConsent(isPresented: Binding<Bool>, send: @escaping () -> Void) -> some View {
+        alert("Send photos with people unblurred?", isPresented: isPresented) {
+            Button("Send to the Lab Server", action: send)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This scan was captured with the Privacy Filter off, so people in its photos aren't blurred. " +
+                 "Its bundle goes to the lab server as captured.")
         }
     }
 }
 
 // MARK: - The pending checklist
 
-/// Every synced scan whose bundle the lab server doesn't hold yet. Selected by default, except a
-/// scan captured with the Privacy Filter off, whose photos show people unblurred: it waits until
-/// the user selects it. A deselected scan waits until selected again (deselecting one being sent
-/// stops it); a new scan joins selected. A bundle the server couldn't unpack, or refused, waits
-/// for Retry.
-struct PendingBundlesView: View {
-    @Query(sort: \ScanLocation.name) private var locations: [ScanLocation]
+/// The Server tab's bundles: the Wi-Fi rule, then every synced scan whose bundle the lab server
+/// doesn't hold yet, by space. Selected by default, except a scan captured with the Privacy
+/// Filter off, whose photos show people unblurred: it waits until the user selects it. A
+/// deselected scan waits until selected again (deselecting one being sent stops it); a new scan
+/// joins selected. A bundle the server couldn't unpack, or refused, waits for Retry. Sections of
+/// the tab's List.
+struct PendingBundlesSections: View {
+    let locations: [ScanLocation]
     @AppStorage(AppConstants.Key.controlPlaneBundlesWifiOnly) private var wifiOnly = AppConstants.controlPlaneBundlesWifiOnly
 
     var body: some View {
         let bundles = BundleSync.shared
         let pending = Self.pending(in: locations)
-        List {
-            Section {
-                Toggle("Upload data bundles only on Wi-Fi", isOn: $wifiOnly)
-                    .onChange(of: wifiOnly) { _, _ in bundles.wifiOnlyChanged() }
-            } footer: {
-                Text("A scan's bundle is everything it holds: its photos, depth, mesh and room layout, " +
-                     "hundreds of MB or more. The map itself and its RoomPlan preview go on any network.")
-            }
+        Section {
+            Toggle("Upload data bundles only on Wi-Fi", isOn: $wifiOnly)
+                .foregroundColor(.white)
+                .onChange(of: wifiOnly) { _, _ in bundles.wifiOnlyChanged() }
             if pending.isEmpty {
-                Section {
-                    Text("Nothing waiting: the lab server has every synced scan's bundle, or none is processed yet.")
-                        .foregroundColor(.secondary)
-                }
+                Text("Nothing waiting: the lab server has every synced scan's bundle, or none is processed yet.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
             }
-            ForEach(pending) { space in
-                Section(space.name) {
-                    ForEach(space.scans, id: \.self) { scan in
-                        PendingBundleRow(scan: scan)
-                    }
-                }
-            }
+        } header: {
+            Text("BUNDLES")
+        } footer: {
+            Text("A scan's bundle is everything it holds: its photos, depth, mesh and room layout, " +
+                 "hundreds of MB or more. The map itself and its RoomPlan preview go on any network.")
+                .font(.caption2)
+                .foregroundColor(.gray)
         }
-        .navigationTitle("Pending Bundles")
+        .listRowBackground(Color.white.opacity(0.05))
+        ForEach(pending) { space in
+            Section {
+                ForEach(space.scans, id: \.self) { scan in
+                    PendingBundleRow(scan: scan)
+                }
+            } header: {
+                Text(space.name)
+            }
+            .listRowBackground(Color.white.opacity(0.05))
+        }
     }
 
     struct PendingSpace: Identifiable {
@@ -125,6 +165,7 @@ struct PendingBundlesView: View {
 
 private struct PendingBundleRow: View {
     let scan: CapturedScan
+    @State private var confirmUnblurred = false
 
     var body: some View {
         let bundles = BundleSync.shared
@@ -132,10 +173,17 @@ private struct PendingBundleRow: View {
         let failed = bundles.remote[id]?.state == "failed" || bundles.failures[id] != nil || bundles.refusal(id) != nil
         HStack {
             Toggle(isOn: Binding(get: { bundles.isSelected(id) },
-                                 set: { bundles.setSelected(id, $0) })) {
+                                 set: { selected in
+                                     // Selecting a scan captured with the Privacy Filter off asks first.
+                                     if selected && bundles.filterOff.contains(id) {
+                                         confirmUnblurred = true
+                                     } else {
+                                         bundles.setSelected(id, selected)
+                                     }
+                                 })) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(scan.name)
-                    SyncLine(scan: scan)
+                    SyncLine(scan: scan, selectable: false)
                     if bundles.filterOff.contains(id) {
                         Label("Captured with the Privacy Filter off: people in its photos aren't blurred.",
                               systemImage: "exclamationmark.triangle")
@@ -150,6 +198,7 @@ private struct PendingBundleRow: View {
                     .buttonStyle(.borderless)
             }
         }
+        .unblurredBundleConsent(isPresented: $confirmUnblurred) { bundles.setSelected(id, true) }
     }
 }
 
@@ -176,9 +225,11 @@ private struct PendingBundleRow: View {
 }
 
 #Preview("Pending bundles") {
-    let config = ModelConfiguration(isStoredInMemoryOnly: true)
-    // swiftlint:disable:next force_try
-    let container = try! ModelContainer(for: ScanLocation.self, CapturedScan.self, configurations: config)
-    return NavigationStack { PendingBundlesView() }
-        .modelContainer(container)
+    // Empty: nothing is synced in a preview, so it shows the Wi-Fi rule and "Nothing waiting".
+    NavigationStack {
+        List { PendingBundlesSections(locations: []) }
+            .scrollContentBackground(.hidden)
+            .background(Color.black)
+    }
+    .preferredColorScheme(.dark)
 }

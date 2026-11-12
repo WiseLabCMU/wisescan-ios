@@ -26,8 +26,8 @@ struct ControlPlanePendingAction: Identifiable {
 }
 
 extension View {
-    /// Shows Settings at the control plane password while `pending` holds an action, and runs the
-    /// action once Settings closes.
+    /// Shows the lab server's connection settings at the password while `pending` holds an
+    /// action, and runs the action once the sheet closes.
     func controlPlanePasswordPrompt(_ pending: Binding<ControlPlanePendingAction?>) -> some View {
         modifier(ControlPlanePasswordPrompt(pending: pending))
     }
@@ -44,8 +44,34 @@ private struct ControlPlanePasswordPrompt: ViewModifier {
             shown = nil
             action?.run()
         }, content: { action in
-            SettingsView(focusControlPlanePassword: true)
+            ControlPlanePasswordSheet()
                 .onAppear { shown = action }
         })
     }
+}
+
+/// The Server tab's connection settings in a sheet, the cursor in the password field (the same
+/// section the tab shows): Done closes it and the held action runs.
+struct ControlPlanePasswordSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List { ControlPlaneSettingsSection(focusPassword: true) }
+                .scrollContentBackground(.hidden)
+                .background(Color.black)
+                .navigationTitle("Lab Server")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("Done") { dismiss() }
+                    }
+                }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+#Preview {
+    ControlPlanePasswordSheet()
 }

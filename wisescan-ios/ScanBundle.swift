@@ -487,6 +487,18 @@ extension BundleSync {
     /// Whether the scan's bundle is being built or sent now (its Retry waits for that to end).
     func isActive(_ scanId: UUID) -> Bool { active?.scanId == scanId }
 
+    /// The server wants the scan's bundle, but the checklist holds it back: its card offers Select.
+    func awaitsSelection(_ scanId: UUID) -> Bool {
+        !isSelected(scanId) && remote[scanId]?.wanted == true
+    }
+
+    /// Bundles only the user can move on: one the server couldn't unpack, or refused for good
+    /// (both wait for Retry). The Server tab's badge. Failures the app retries itself don't count.
+    var needingAttention: Int {
+        guard ControlPlaneSync.shared.stateIsCurrent else { return 0 }
+        return remote.keys.filter { remote[$0]?.state == "failed" || refusal($0) != nil }.count
+    }
+
     /// The refusal that still applies: the server refused the version the device offers now.
     func refusal(_ scanId: UUID) -> Refusal? {
         guard let refusal = refused[scanId], refusal.fingerprint == remote[scanId]?.deviceFingerprint else { return nil }

@@ -293,7 +293,7 @@ struct DashboardView: View {
     private var serverConfigured: Bool { ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil }
 
     private var serverCaption: String {
-        serverConfigured ? controlPlaneHost : "No lab server set: Settings → Control plane"
+        serverConfigured ? controlPlaneHost : "No lab server set: see the Server tab"
     }
 
     private func checkServer() {

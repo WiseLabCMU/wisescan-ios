@@ -20,14 +20,14 @@ struct StatusIconsGuideSections: View {
     private var syncSection: some View {
         Section {
             syncBadgeRow(.off, title: "No Cloud Badge",
-                         text: "This location isn't synced with a lab server: none is set in Settings > " +
-                               "Control plane, or the location hasn't been synced yet. Tap Sync to Lab " +
-                               "Server in it, or let Settings > Auto sync add it.")
+                         text: "This location isn't synced with a lab server: none is set in the Server " +
+                               "tab, or the location hasn't been synced yet. Tap Sync to Lab Server in it, " +
+                               "or let the Server tab's Auto sync add it.")
             syncBadgeRow(.map, title: "Outline Cloud: The Map",
                          text: "The lab server has this location's map: names, times, poses, links and the " +
                                "room layout. Some scans' bundles haven't reached it yet. They wait for " +
-                               "processing, for Wi-Fi, or for you to select them in Settings > Control plane " +
-                               "> Pending bundles. A new scan, or a scan whose files change (recoloring it, " +
+                               "processing, for Wi-Fi, or for you to select them (on the card, or in the " +
+                               "Server tab). A new scan, or a scan whose files change (recoloring it, " +
                                "say), brings the outline back until its bundle goes up again.")
             syncBadgeRow(.everything, title: "Green Check: Everything",
                          text: "The server holds every scan's bundle, unpacked: photos, depth, meshes, the " +
@@ -37,8 +37,8 @@ struct StatusIconsGuideSections: View {
                                "going if you lock the screen or switch apps.")
             syncBadgeRow(.failed, title: "Warning Cloud: A Bundle Failed",
                          text: "A bundle didn't reach the server, or the server couldn't unpack it. The " +
-                               "scan card's sync line says why, and Settings > Control plane > Pending " +
-                               "bundles has Retry. The app retries a failed upload on its own, waiting " +
+                               "scan card's sync line says why, and the Server tab, which lists it, has " +
+                               "Retry. The tab's icon counts these. The app retries a failed upload on its own, waiting " +
                                "longer after each failure in a row. It doesn't retry when the server " +
                                "refused the bundle for a reason sending again can't change: uploads " +
                                "turned off for this phone, a scan it doesn't know, or a bundle larger " +
@@ -47,9 +47,9 @@ struct StatusIconsGuideSections: View {
             syncLineRow("Map only · waiting for Wi-Fi", failed: false,
                         text: "Each scan card in a synced location has a sync line. Map only means the " +
                               "server has the scan's details but not its bundle yet, and the rest says " +
-                              "what it waits for: Wi-Fi (Settings > Control plane, Upload data bundles " +
+                              "what it waits for: Wi-Fi (the Server tab's Upload data bundles " +
                               "only on Wi-Fi), its turn (waiting to upload), or your choice (not selected, " +
-                              "in Pending bundles). Privacy Filter was off, not selected: the scan was " +
+                              "in the Server tab; tap Select on the card to send it). Privacy Filter was off, not selected: the scan was " +
                               "captured with people unblurred, so it waits until you select it.")
             syncLineRow("Uploading 42%", failed: false,
                         text: "Its bundle is going up. Preparing its bundle and Coloring for sync come " +
@@ -59,11 +59,11 @@ struct StatusIconsGuideSections: View {
                         text: "The server holds this scan's bundle, unpacked at that time.")
             syncLineRow("The server couldn't unpack it: the zip is damaged", failed: true,
                         text: "A sync failed, and the reason follows. Sync failed with a network message " +
-                              "or a server error means the upload didn't arrive: check the server in " +
-                              "Settings and your connection. The server couldn't unpack it means it " +
+                              "or a server error means the upload didn't arrive: check the Server tab " +
+                              "and your connection. The server couldn't unpack it means it " +
                               "arrived but was refused. Sync stopped means the server refused it for a " +
                               "reason sending again can't change, so it waits until the scan changes. " +
-                              "Retry in Pending bundles sends it again.")
+                              "Retry in the Server tab sends it again.")
 
             statusRow(.zipping, fraction: 0.4,
                       text: "Share is building the export. While it runs, the label names the step " +
@@ -80,7 +80,7 @@ struct StatusIconsGuideSections: View {
 
             iconRow(icon: ControlPlaneSync.SpaceState.notSynced.symbol, color: .teal,
                     title: ControlPlaneSync.SpaceState.notSynced.title,
-                    text: "With a lab server (control plane) set in Settings, each location has this " +
+                    text: "With a lab server (control plane) set in the Server tab, each location has this " +
                           "button. It adds the location to the ones this phone keeps in sync: its map " +
                           "goes first, then each processed scan's bundle.")
             iconRow(icon: ControlPlaneSync.SpaceState.synced.symbol, color: .teal,
@@ -89,7 +89,7 @@ struct StatusIconsGuideSections: View {
                           "to sync right away.")
             iconRow(icon: ControlPlaneSync.SpaceState.failed.symbol, color: .teal,
                     title: ControlPlaneSync.SpaceState.failed.title,
-                    text: "The last sync did not reach the lab server. Settings > Control Plane shows " +
+                    text: "The last sync did not reach the lab server. The Server tab shows " +
                           "why (a wrong password, a server that can't be reached), so fix that there, " +
                           "then tap to retry. Bundles wait for Wi-Fi rather than fail.")
         } header: {

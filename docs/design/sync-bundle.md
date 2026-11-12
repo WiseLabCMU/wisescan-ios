@@ -124,6 +124,12 @@ multipart upload comes if failures on large bundles show it is needed.
   server with a backlog. *(Added in review: a scan captured with the Privacy Filter off starts
   deselected, since its photos show people unblurred, and a phone that had Send map packages off
   starts with every scan it held deselected, since bundles carry far more than packages did.)*
+- **The Server tab.** *(Added after review: the checklist first lived in Settings, where nothing
+  on a scan led to it.)* The app's fourth tab holds the lab server in one place: the last sync's
+  status with Sync now, the checklist inline with the Wi-Fi rule, and the connection settings that
+  were in Settings. Its icon counts the bundles waiting for Retry. A card whose bundle the checklist
+  holds back offers Select on its sync line, and selecting a scan captured with the Privacy Filter
+  off asks first. Pulling maps down from the server belongs here when it comes.
 - **Uncoloured scans.** A scan offers its version once processed. The uploader colours it, if it
   can, just before building, and sends the coloured version, so a scan the app can't colour
   still syncs.

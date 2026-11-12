@@ -10,7 +10,7 @@ All scan data (images, depth maps, meshes, and camera poses) is stored locally o
 
 ### Control Plane Sync
 
-If you enter a control plane server in Settings → Control plane, the app keeps that server up to date with the spaces you sync: those you send with Sync to Lab Server in a space or Sync on a stitched map, and, depending on Settings → Auto sync, every space (All), those you start after the phone joined (New, the default) or none more (Off). Other spaces stay on the phone. Nothing is sent during a scan.
+If you enter a control plane server in the Server tab, the app keeps that server up to date with the spaces you sync: those you send with Sync to Lab Server in a space or Sync on a stitched map, and, depending on the Server tab's Auto sync, every space (All), those you start after the phone joined (New, the default) or none more (Off). Other spaces stay on the phone. Nothing is sent during a scan.
 
 **The map**, on launch and after changes:
 - space and scan names and times;
@@ -24,11 +24,11 @@ If you enter a control plane server in Settings → Control plane, the app keeps
 
 The map holds no images or depth maps.
 
-**Each scan's bundle**, once the scan is processed: everything the scan holds, as one archive. That is its photos (including 360° stills) and depth maps, its mesh with its captured colours, its room layout and the ARKit relocalization map, the same content as a Scan4D export. The privacy filtering below applies to bundles exactly as to exports: with it on, people are pixelated in photos and removed from depth before anything is packed, and a 360° still or focus-scan photo that can't be checked is left out. You choose which bundles go in Settings → Control plane → Pending bundles, and they go only over Wi-Fi unless you turn **Upload data bundles only on Wi-Fi** off. Scans are selected by default, except two kinds that wait until you select them: a scan captured with Privacy Filtering off, whose photos show people unblurred, and, if you had **Send map packages** turned off in an earlier version, every scan you had then.
+**Each scan's bundle**, once the scan is processed: everything the scan holds, as one archive. That is its photos (including 360° stills) and depth maps, its mesh with its captured colours, its room layout and the ARKit relocalization map, the same content as a Scan4D export. The privacy filtering below applies to bundles exactly as to exports: with it on, people are pixelated in photos and removed from depth before anything is packed, and a 360° still or focus-scan photo that can't be checked is left out. You choose which bundles go in the Server tab, and they go only over Wi-Fi unless you turn **Upload data bundles only on Wi-Fi** off. Scans are selected by default, except two kinds that wait until you select them: a scan captured with Privacy Filtering off, whose photos show people unblurred, and, if you had **Send map packages** turned off in an earlier version, every scan you had then. Selecting a scan captured with Privacy Filtering off asks you to confirm first.
 
 The server can also ask for a focus scan of a region. The request waits in a to-do list (an urgent one also alerts once), and nothing is captured unless you open it and scan.
 
-If the server has a password, you enter it in Settings; it is kept in the device's Keychain and sent only to that server.
+If the server has a password, you enter it in the Server tab; it is kept in the device's Keychain and sent only to that server.
 
 Nothing is sent while the server field is empty. The server is the one you configure, normally your lab's own on its internal network.
 

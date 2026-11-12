@@ -63,7 +63,7 @@ To check a device: the `[ARConfig]` launch log lists every supported format with
 - **Sweep Coverage:** A room scan records where the LiDAR sweep actually looked, as per-cell free, surface and visit counts in the raw capture frame, and ships it as `sweep_coverage.bin` in every Scan4D export (a Developer Mode readout shows the live counters).
 - **Feature Point Cloud:** Every save serializes ARKit's sparse feature cloud to `arkit_features.bin` (a 128-byte header over packed id and xyz records) in place of the opaque world map, which only ARKit could read. Feature ids survive map save and load, so clouds from successive scans of one location join on id for change detection. Process backfills the file for scans saved before it existed.
 - **Share:** Hand a scan to another app or device (Files, AirDrop, Mail) as a Scan4D bundle or a native mesh file (OBJ, PLY, USDZ), picked from Share's menu each time (no stored format setting). The capture data is governed by motion-blur rejection and overlap metrics. The screen stays on while a scan is converted.
-- **Control Plane Sync:** Set the lab's control plane server in Settings and the phone keeps it up to date with everything in the spaces you sync (Sync to Lab Server in a space, or Sync on a stitched map in the graph view; Settings → Auto sync adds every space, the ones started after joining (the default), or none). Two parts, as in [docs/design/sync-bundle.md](docs/design/sync-bundle.md):
+- **Control Plane Sync:** Set the lab's control plane server in the **Server** tab (its status, the bundles waiting to go, and the connection) and the phone keeps it up to date with everything in the spaces you sync (Sync to Lab Server in a space, or Sync on a stitched map in the graph view; the Server tab's Auto sync adds every space, the ones started after joining (the default), or none). Two parts, as in [docs/design/sync-bundle.md](docs/design/sync-bundle.md):
 - **the map**, every sync: base and tip scans, scans, stitch links, registrations, focus regions, and each room scan's RoomPlan layout as a preview;
 - **each scan's bundle**, once processed: everything it holds as one zip (the Scan4D export plus the relocalization map and the proxy meshes), built through the export's privacy passes, uploaded in a background session (it finishes with the screen locked) over Wi-Fi only unless the user allows cellular, and chosen in a pending checklist (selected by default, except a scan captured with the Privacy Filter off, which waits until selected). A build never runs beside a capture or a Share export, and a refusal sending again can't change waits for Retry. The server unpacks it into the scan's directory.
 
@@ -199,7 +199,8 @@ wisescan-ios/
 ├── ScanBundle.swift             # Each scan's sync bundle: version, cache, background upload (BundleSync)
 ├── SyncViews.swift              # Sync badge, scan card sync line, pending-bundles checklist
 ├── DeviceIdentity.swift         # This phone's identity for the control plane
-├── ControlPlaneSettingsSection.swift # Settings → Control plane
+├── LabServerView.swift          # The Server tab: status, Sync now, pending bundles, connection
+├── ControlPlaneSettingsSection.swift # The Server tab's connection (host, password, device name, certificates, Auto sync)
 ├── ControlPlanePasswordPrompt.swift # Password retry prompt and deferred action replay
 ├── ControlPlaneSpaceSyncButton.swift # Sync to Lab Server on a space
 ├── ControlPlaneTodoCard.swift   # Dashboard to-do list: focus scans the lab asked for
@@ -293,7 +294,7 @@ When enabled (toggle on Capture screen):
 1. Open the Xcode project in Xcode
 2. Set your development team signing in the target settings
 3. Build and deploy to an ARKit-capable device (LiDAR recommended for full mesh + depth capture)
-4. *(Optional)* Set your lab server in Settings → Control plane (gear icon), to sync spaces to it
+4. *(Optional)* Set your lab server in the Server tab, to sync spaces to it
 5. *(Optional 360°)* On the Dashboard, tap **+ Add Ricoh Theta 360° Camera** — pick it from the Bluetooth list and confirm the pairing code on the camera screen once. After that, **Connect** wakes and joins it automatically, and a full-sphere still fires with every keyframe pause.
 6. Go to Capture → tap record → scan → tap stop and choose **Save & End** (or **Save & Scan Adjacent** to continue into the next room)
 7. Once the save pipeline finishes, name your space and select its workflow intent — **Rescan** (the same space over time) or **Link Adjacent** (a neighboring space). You will be routed to the Scans tab with a progress overlay while mesh export and data extraction finishes in the background.

@@ -4,7 +4,7 @@ import os
 
 // MARK: - The URLSession for the control plane
 
-/// With Settings → Control plane → Allow untrusted certificates on, a server certificate iOS
+/// With the Server tab's Allow untrusted certificates on, a server certificate iOS
 /// cannot verify (a lab's self-signed or locally-signed one) is accepted, but only from the
 /// control plane's own host, for its API and for the bundles sent to it. Every other host, and
 /// every host while the switch is off, gets the system's evaluation.

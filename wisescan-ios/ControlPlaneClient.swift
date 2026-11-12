@@ -109,7 +109,7 @@ nonisolated struct ControlPlaneClient: Sendable {
             case .server(let status, let detail):
                 return detail.isEmpty ? "The server answered \(status)." : "The server answered \(status): \(detail)"
             case .unauthorized:
-                return "The server wants its password: enter it in Settings → Control plane."
+                return "The server wants its password: enter it in the Server tab."
             case .waitingForUnmeteredNetwork:
                 return "Waiting for Wi-Fi."
             case .unreadableReply:

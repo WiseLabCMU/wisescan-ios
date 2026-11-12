@@ -43,6 +43,15 @@ struct ContentView: View {
                         Label("Scans", systemImage: "folder")
                     }
                     .tag(2)
+
+                // The lab server: its status, the bundles waiting to go, and the connection.
+                LabServerView()
+                    .tabItem {
+                        Label("Server", systemImage: "server.rack")
+                    }
+                    // Bundles only the user can move on (a failed unpack, a refusal): Retry.
+                    .badge(BundleSync.shared.needingAttention)
+                    .tag(3)
             }
             .environment(scanStore)
             // Stamp the moment the tab actually changes, so the capture view can report how

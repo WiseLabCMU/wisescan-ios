@@ -11,9 +11,6 @@ private struct DevSliderScale {
 
 struct SettingsView: View {
     var scrollToDevMode: Bool = false
-    /// Opened by a tapped Sync whose server wants a password (ControlPlanePasswordPrompt):
-    /// scroll to Control plane and put the cursor in its password field.
-    var focusControlPlanePassword: Bool = false
     @Environment(\.modelContext) private var modelContext
     @Query private var locations: [ScanLocation]
 
@@ -557,8 +554,16 @@ struct SettingsView: View {
                     // MARK: - User Guide Link
                     settingsSection1
 
-                    ControlPlaneSettingsSection(focusPassword: focusControlPlanePassword)
-                        .id("controlPlaneSection")
+                    // The lab server's settings live in its own tab now.
+                    Section {
+                        Label("The lab server's connection, status and bundles are in the Server tab.",
+                              systemImage: "server.rack")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                    } header: {
+                        Text("LAB SERVER")
+                    }
+                    .listRowBackground(Color.white.opacity(0.05))
 
                     appearanceSection
 
@@ -577,12 +582,6 @@ struct SettingsView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             withAnimation {
                                 proxy.scrollTo("devModeSection", anchor: .top)
-                            }
-                        }
-                    } else if focusControlPlanePassword {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                            withAnimation {
-                                proxy.scrollTo("controlPlaneSection", anchor: .top)
                             }
                         }
                     }
@@ -648,7 +647,7 @@ extension String {
 }
 
 #Preview {
-    // The control plane section counts pending bundles through a SwiftData query.
+    // Settings reads its scans through a SwiftData query.
     SettingsView()
         .modelContainer(for: [ScanLocation.self, CapturedScan.self], inMemory: true)
 }

@@ -97,21 +97,21 @@ struct UserGuideView: View {
                         text: "Share sends the format you pick to another app or device: Files, AirDrop, " +
                               "Mail. The screen stays on while a scan is being converted. Sync keeps your " +
                               "lab's server up to date with everything in the spaces you sync. Set the " +
-                              "server in Settings > Control plane, then tap Sync to Lab Server in a space, " +
-                              "or Sync on a stitched map in the graph view; Settings > Auto sync adds every " +
+                              "server in the Server tab, then tap Sync to Lab Server in a space, " +
+                              "or Sync on a stitched map in the graph view; the Server tab's Auto sync adds every " +
                               "space (All), the ones you start after joining (New, the default) or none " +
                               "(Off). The server gets each space's map first: names, times, poses, links " +
                               "and room layouts. Then each processed scan goes up as one bundle, photos " +
                               "included, with people blurred when the Privacy Filter is on. A bundle keeps " +
                               "going if you lock the screen or switch apps. Bundles wait for Wi-Fi unless " +
-                              "you turn that off, and you choose which go in Settings > Control plane > " +
-                              "Pending bundles. All are selected, except a scan captured with the Privacy " +
+                              "you turn that off, and the Server tab lists the ones waiting, where you choose " +
+                              "which go. All are selected, except a scan captured with the Privacy " +
                               "Filter off: its photos show people unblurred, so it waits until you select " +
-                              "it. No bundle is prepared during a scan or while you Share. A cloud on each space shows " +
+                              "it (Select on its card does it too, after asking). No bundle is prepared during a scan or while you Share. A cloud on each space shows " +
                               "what the server has: an outline for its map, a green check for everything, " +
                               "an arrow while a bundle goes up (Troubleshooting, below, explains every " +
-                              "badge). If the server wants its password, Sync opens Settings at the " +
-                              "password field first, then carries on when you tap Done."
+                              "badge). If the server wants its password, Sync asks for it first, then " +
+                              "carries on when you tap Done."
                     )
                 } header: {
                     Text("HOW TO USE")
