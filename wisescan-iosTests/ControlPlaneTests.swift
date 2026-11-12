@@ -224,7 +224,62 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(ScanBundle.version(scanDirectory: dir), first)
 
         try Data(repeating: 3, count: 48).write(to: dir.appendingPathComponent("colors.bin"))
-        XCTAssertNotEqual(ScanBundle.version(scanDirectory: dir)?.fingerprint, first.fingerprint)
+        let colored = try XCTUnwrap(ScanBundle.version(scanDirectory: dir))
+        XCTAssertNotEqual(colored.fingerprint, first.fingerprint)
+
+        // Only what the export reads counts: a cache the colorizer keeps beside the frames doesn't.
+        let faces = dir.appendingPathComponent("raw_data/face_frames")
+        try FileManager.default.createDirectory(at: faces, withIntermediateDirectories: true)
+        try Data(repeating: 4, count: 64).write(to: faces.appendingPathComponent("face_0.jpg"))
+        XCTAssertEqual(ScanBundle.version(scanDirectory: dir), colored)
+        // The person masks never ship, but the privacy blur reads them.
+        let masks = dir.appendingPathComponent("raw_data/masks")
+        try FileManager.default.createDirectory(at: masks, withIntermediateDirectories: true)
+        try Data(repeating: 5, count: 16).write(to: masks.appendingPathComponent("frame_00000.png"))
+        XCTAssertNotEqual(ScanBundle.version(scanDirectory: dir), colored)
+
+        // The cached read agrees with a full one, and sees a top-level file change at once.
+        let full = ScanBundle.version(scanDirectory: dir)
+        XCTAssertEqual(ScanBundle.cachedVersion(scanDirectory: dir), full)
+        try Data(repeating: 6, count: 32).write(to: dir.appendingPathComponent("registration.json"))
+        XCTAssertNotEqual(ScanBundle.cachedVersion(scanDirectory: dir), full)
+        XCTAssertEqual(ScanBundle.cachedVersion(scanDirectory: dir), ScanBundle.version(scanDirectory: dir))
+    }
+
+    /// A focus scan's bundle is its capture folder and region: its version follows them.
+    func testFocusBundleVersionFollowsItsCapture() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cp_\(UUID().uuidString)")
+        let photos = dir.appendingPathComponent(AppConstants.focusCaptureFolder).appendingPathComponent("photos")
+        try FileManager.default.createDirectory(at: photos, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data(repeating: 1, count: 100).write(to: photos.appendingPathComponent("photo_00000.jpg"))
+        let first = try XCTUnwrap(ScanBundle.version(scanDirectory: dir))
+        XCTAssertEqual(first.size, 100)
+        try Data("{}".utf8).write(to: dir.appendingPathComponent(AppConstants.focusRegionFilename))
+        XCTAssertNotEqual(ScanBundle.version(scanDirectory: dir), first)
+        // A room scan's sources are not a focus scan's.
+        try Data("v 0 0 0\n".utf8).write(to: dir.appendingPathComponent("mesh.obj"))
+        XCTAssertEqual(ScanBundle.version(scanDirectory: dir)?.size, 102)
+    }
+
+    /// Failures in a row wait longer each time, up to a cap; refusals that sending again can't
+    /// change (revoked, unknown scan, too large) aren't retried on their own; and a bundle builds
+    /// under a name of its own, never the Share file's.
+    func testBundleRetriesBackOffAndPermanentRefusalsStop() {
+        XCTAssertEqual(ScanBundle.retryDelay(failuresInARow: 1), AppConstants.controlPlaneBundleRetryBaseS)
+        XCTAssertEqual(ScanBundle.retryDelay(failuresInARow: 2), AppConstants.controlPlaneBundleRetryBaseS * 2)
+        XCTAssertEqual(ScanBundle.retryDelay(failuresInARow: 3), AppConstants.controlPlaneBundleRetryBaseS * 4)
+        XCTAssertEqual(ScanBundle.retryDelay(failuresInARow: 30), AppConstants.controlPlaneBundleRetryMaxS)
+        for status in [403, 404, 413] {
+            XCTAssertTrue(ScanBundle.isPermanentRefusal(status: status), "\(status)")
+        }
+        for status in [400, 401, 500, 502, 503] {
+            XCTAssertFalse(ScanBundle.isPermanentRefusal(status: status), "\(status)")
+        }
+        let scan = CapturedScan(name: "Lab", vertexCount: 0, faceCount: 0)
+        let id: UUID = scan.id
+        XCTAssertNotEqual(ScanBundle.buildFilename(scanId: id, fingerprint: "9f2c41d0a7b3e851"),
+                          scan.makeExportFilename(format: .scan4d))
     }
 
     /// The certificate override is scoped to hosts the control plane named.

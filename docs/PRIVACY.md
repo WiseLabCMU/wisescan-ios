@@ -1,6 +1,6 @@
 # Scan4D Privacy Policy
 
-*Last updated: November 11, 2026*
+*Last updated: November 12, 2026*
 
 ## Data Collection
 
@@ -24,7 +24,7 @@ If you enter a control plane server in Settings → Control plane, the app keeps
 
 The map holds no images or depth maps.
 
-**Each scan's bundle**, once the scan is processed: everything the scan holds, as one archive. That is its photos (including 360° stills) and depth maps, its mesh with its captured colours, its room layout and the ARKit relocalization map, the same content as a Scan4D export. The privacy filtering below applies to bundles exactly as to exports: with it on, people are pixelated in photos and removed from depth before anything is packed, and a 360° still or focus-scan photo that can't be checked is left out. You choose which bundles go in Settings → Control plane → Pending bundles (all are selected by default), and they go only over Wi-Fi unless you turn **Upload data bundles only on Wi-Fi** off.
+**Each scan's bundle**, once the scan is processed: everything the scan holds, as one archive. That is its photos (including 360° stills) and depth maps, its mesh with its captured colours, its room layout and the ARKit relocalization map, the same content as a Scan4D export. The privacy filtering below applies to bundles exactly as to exports: with it on, people are pixelated in photos and removed from depth before anything is packed, and a 360° still or focus-scan photo that can't be checked is left out. You choose which bundles go in Settings → Control plane → Pending bundles, and they go only over Wi-Fi unless you turn **Upload data bundles only on Wi-Fi** off. Scans are selected by default, except two kinds that wait until you select them: a scan captured with Privacy Filtering off, whose photos show people unblurred, and, if you had **Send map packages** turned off in an earlier version, every scan you had then.
 
 The server can also ask for a focus scan of a region. The request waits in a to-do list (an urgent one also alerts once), and nothing is captured unless you open it and scan.
 

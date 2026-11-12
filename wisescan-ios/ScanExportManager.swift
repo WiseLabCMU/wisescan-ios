@@ -5,11 +5,50 @@ import UIKit
 import CoreImage
 import CoreImage.CIFilterBuiltins
 
+/// Asks an export in progress to stop: its loops check it per frame, and it is checked once more
+/// before zipping, so a stopped export returns nil and leaves nothing behind (its staging folder
+/// is removed as always). A sync bundle's build takes one, stopped when a capture starts or a
+/// Share needs the device (`BundleSync`). Once stopped, it stays stopped: the check before
+/// zipping therefore also catches a privacy pass a stop cut short, so a half-blurred staging
+/// folder is never zipped.
+nonisolated final class ExportStop: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stopped = false
+
+    var isStopped: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopped
+    }
+
+    func stop() {
+        lock.lock()
+        stopped = true
+        lock.unlock()
+    }
+}
+
 struct ScanExportManager {
     /// Outcome lines go through the unified log, not print(): print is invisible in
     /// RELEASE and TestFlight builds, so anything needed to diagnose a field export has
     /// to be Logger. Per-item chatter can stay on print/PerfDiag.
     private static let log = Logger(subsystem: "org.arenaxr.scan4d", category: "export")
+
+    /// The Polycam payload the Scan4D export copies from a room scan's raw_data/.
+    nonisolated static let scan4dPayload = ["images", "proxy_images", "depth", "confidence", "cameras", "mesh_info.json"]
+    /// The raw geometry it copies from the scan's folder as it is (the mesh with its colors).
+    nonisolated static let scan4dArtifacts = ["mesh.obj", "face_classes.bin", "roomplan.json", "roomplan_raw.json",
+                                              "registration.json", "arkit_features.bin", "sweep_coverage.bin"]
+    /// Everything the Scan4D export of a room scan reads, as paths under the scan's folder: what
+    /// its sync bundle's version is made from (`ScanBundle.version`), so a change to any of them,
+    /// and only to them, makes a new version. `masks/` never ships, but the privacy blur reads it.
+    nonisolated static var scan4dSources: [String] {
+        ["scan4d_metadata.json", "raw_data/scan4d_metadata.json", "raw_data/masks",
+         "raw_data/equirect_stills", "raw_data/equirect_masks",
+         "arworldmap.map", "colors.bin", "mesh_proxy.obj", "mesh_dynamic.obj",
+         "raw_data/mesh_proxy.obj", "raw_data/mesh_dynamic.obj"]
+            + scan4dPayload.map { "raw_data/" + $0 } + scan4dArtifacts
+    }
 
     // `prepareExport` runs off the main actor with no injected ModelContext, so it fetches through
     // the app's shared container on a @MainActor hop (creating its own background ModelContext).
@@ -228,7 +267,7 @@ struct ScanExportManager {
     }
 
     private static func applyExportPrivacyPasses(rawDataDir: URL, stagedDir: URL,
-                                                 phase: ((ExportPhase) -> Void)? = nil) {
+                                                 phase: ((ExportPhase) -> Void)? = nil, stop: ExportStop? = nil) {
         let maskedFrames = maskedFrameNames(rawDataDir: rawDataDir)
         let privacyWasOn = privacyFilterWasOn(rawDataDir: rawDataDir, maskedFrames: maskedFrames)
         guard privacyWasOn else { return }
@@ -238,15 +277,17 @@ struct ScanExportManager {
                 masksDir: rawDataDir.appendingPathComponent("masks"),
                 imagesDir: stagedDir.appendingPathComponent("images"),
                 depthDir: stagedDir.appendingPathComponent("depth"),
-                phase: phase
+                phase: phase,
+                stop: stop
             )
         }
         applyVisionBlurAtExport(
             imagesDir: stagedDir.appendingPathComponent("images"),
             skippingFrames: maskedFrames,
-            phase: phase
+            phase: phase,
+            stop: stop
         )
-        applyVisionBlurAtExport(imagesDir: stagedDir.appendingPathComponent("proxy_images"), phase: phase)
+        applyVisionBlurAtExport(imagesDir: stagedDir.appendingPathComponent("proxy_images"), phase: phase, stop: stop)
     }
 
     /// Vision-based person pixelation for staged JPEGs that have no capture-time segmentation
@@ -256,7 +297,7 @@ struct ScanExportManager {
     /// is never dropped from the export; frames with no detected person re-encode visually
     /// unchanged.
     private static func applyVisionBlurAtExport(imagesDir: URL, skippingFrames: Set<String> = [],
-                                                phase: ((ExportPhase) -> Void)? = nil) {
+                                                phase: ((ExportPhase) -> Void)? = nil, stop: ExportStop? = nil) {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(at: imagesDir, includingPropertiesForKeys: nil)
             .filter({ $0.pathExtension == "jpg" && !skippingFrames.contains($0.deletingPathExtension().lastPathComponent) })
@@ -266,6 +307,7 @@ struct ScanExportManager {
         print("[prepareExport] Vision privacy blur on \(files.count) unmasked images in \(imagesDir.lastPathComponent)/...")
         var written = 0
         for (index, url) in files.enumerated() {
+            if stop?.isStopped == true { break }
             phase?(.counted("Privacy check", index + 1, of: files.count))
             // Per-frame pool for the same reason as applyPrivacyBlurAtExport: each Vision pass
             // decodes + re-renders a full-resolution frame through autoreleased CF transients.
@@ -301,13 +343,14 @@ struct ScanExportManager {
     /// why this exists and why the convention is that way round (COLMAP ignores
     /// zero-valued mask pixels; Nerfstudio treats 1 as keep).
     private static func emitOperatorRigMasks(for stills: [URL], rawDataDir: URL, into stagingDir: URL,
-                                             phase: ((ExportPhase) -> Void)? = nil) {
+                                             phase: ((ExportPhase) -> Void)? = nil, stop: ExportStop? = nil) {
         let maskDir = stagingDir.appendingPathComponent("equirect_masks")
         let fileManager = FileManager.default
         try? fileManager.createDirectory(at: maskDir, withIntermediateDirectories: true)
         let sourceDir = rawDataDir.appendingPathComponent("equirect_masks")
         var copied = 0, built = 0
         for (index, still) in stills.enumerated() {
+            if stop?.isStopped == true { break }
             phase?(.counted("360° masks", index + 1, of: stills.count))
             let name = still.deletingPathExtension().lastPathComponent + ".png"
             let target = maskDir.appendingPathComponent(name)
@@ -329,7 +372,7 @@ struct ScanExportManager {
     }
 
     private static func stageEquirectStills(rawDataDir: URL, stagingDir: URL,
-                                            phase: ((ExportPhase) -> Void)? = nil) {
+                                            phase: ((ExportPhase) -> Void)? = nil, stop: ExportStop? = nil) {
         let fileMgr = FileManager.default
         let srcDir = rawDataDir.appendingPathComponent("equirect_stills")
         guard fileMgr.fileExists(atPath: srcDir.path) else { return }
@@ -349,10 +392,10 @@ struct ScanExportManager {
         // reconstruction-quality artifact (exclude what moves with the camera, keep the
         // floor), not a privacy one. Emitted BEFORE the privacy pass so detection runs
         // on the original pixels rather than on pixelated blobs.
-        emitOperatorRigMasks(for: stills, rawDataDir: rawDataDir, into: stagingDir, phase: phase)
+        emitOperatorRigMasks(for: stills, rawDataDir: rawDataDir, into: stagingDir, phase: phase, stop: stop)
 
         if privacyFilterWasOn(rawDataDir: rawDataDir, maskedFrames: maskedFrameNames(rawDataDir: rawDataDir)) {
-            runEquirectPrivacyPass(on: stills, phase: phase)
+            runEquirectPrivacyPass(on: stills, phase: phase, stop: stop)
         } else {
             print("[prepareExport] 360° stills staged UNBLURRED (\(stills.count)) — privacy filter was OFF "
                 + "for this scan (informed per-scan consent; recorded as privacy_filter in scan4d_metadata)")
@@ -360,16 +403,18 @@ struct ScanExportManager {
 
         // Cube-face emission AFTER the privacy pass — faces sample the staged (blurred or
         // consented) pixels, so they inherit the scan's privacy state by construction.
-        emitCubeFaces(stagingDir: stagingDir, dstDir: dstDir, phase: phase)
+        emitCubeFaces(stagingDir: stagingDir, dstDir: dstDir, phase: phase, stop: stop)
     }
 
     /// Runs the fail-closed per-still verification/blur over the staged equirects (filter-ON path).
-    private static func runEquirectPrivacyPass(on stills: [URL], phase: ((ExportPhase) -> Void)? = nil) {
+    private static func runEquirectPrivacyPass(on stills: [URL], phase: ((ExportPhase) -> Void)? = nil,
+                                               stop: ExportStop? = nil) {
         print("[prepareExport] 360° privacy pass on \(stills.count) equirect still(s)...")
         let passStart = CFAbsoluteTimeGetCurrent()
 
         var cleanCount = 0, blurredCount = 0, excludedCount = 0
         for (index, url) in stills.enumerated() {
+            if stop?.isStopped == true { break }
             phase?(.counted("360° privacy", index + 1, of: stills.count))
             // Per-still pool: each pass decodes a working copy + renders a full-res composite
             // through autoreleased CF/CI transients (same OOM lesson as the frame blur loops).
@@ -416,7 +461,7 @@ struct ScanExportManager {
     /// rig extrinsic (EquirectFaceExport). Non-fatal per still: a face-emission failure
     /// just leaves the archived equirect as the only carrier for that still.
     private static func emitCubeFaces(stagingDir: URL, dstDir: URL,
-                                      phase: ((ExportPhase) -> Void)? = nil) {
+                                      phase: ((ExportPhase) -> Void)? = nil, stop: ExportStop? = nil) {
         let fileMgr = FileManager.default
         let imagesDir = stagingDir.appendingPathComponent("images")
         let camerasDir = stagingDir.appendingPathComponent("cameras")
@@ -434,6 +479,7 @@ struct ScanExportManager {
         let faceStart = CFAbsoluteTimeGetCurrent()
         var facesWritten = 0
         for (index, url) in survivors.enumerated() {
+            if stop?.isStopped == true { break }
             phase?(.counted("Cube faces", index + 1, of: survivors.count))
             autoreleasepool {
                 let sidecar = url.deletingPathExtension().appendingPathExtension("json")
@@ -471,7 +517,7 @@ struct ScanExportManager {
     /// Privacy guarantee: no unblurred image or unmasked depth ever leaves the device.
     /// The masks/ directory itself is NOT included in the export archive.
     private static func applyPrivacyBlurAtExport(masksDir: URL, imagesDir: URL, depthDir: URL,
-                                                 phase: ((ExportPhase) -> Void)? = nil) {
+                                                 phase: ((ExportPhase) -> Void)? = nil, stop: ExportStop? = nil) {
         let fm = FileManager.default
         guard let maskFiles = try? fm.contentsOfDirectory(at: masksDir, includingPropertiesForKeys: nil)
             .filter({ $0.pathExtension == "png" })
@@ -485,6 +531,7 @@ struct ScanExportManager {
         var maskedDepthCount = 0
 
         for (index, maskURL) in maskFiles.enumerated() {
+            if stop?.isStopped == true { break }
             phase?(.counted("Privacy blur", index + 1, of: maskFiles.count))
             // Per-frame autoreleasepool: each iteration decodes a 4032×3024 JPEG plus a 16-bit
             // depth PNG through UIImage/CoreImage/ImageIO, whose CF transients are autoreleased —
@@ -662,15 +709,19 @@ struct ScanExportManager {
     /// once colors.bin holds colors sampled from the captured frames instead of the save-time
     /// normals preview. Mesh exports carry vertex colors only when it is true. It defaults to
     /// false so a caller that forgets it exports geometry alone rather than preview colors.
+    ///
+    /// `stop`, when supplied and stopped, ends the export early with nil and nothing written
+    /// (`ExportStop`); Share passes none.
     static func prepareExport(filename: String, scanDir: URL, format: ExportFormat,
                               vertexColorsFromCapture: Bool = false,
                               bulkStitch: BulkStitchArtifacts? = nil,
-                              phase: ((ExportPhase) -> Void)? = nil) -> URL? {
+                              phase: ((ExportPhase) -> Void)? = nil,
+                              stop: ExportStop? = nil) -> URL? {
         let fm = FileManager.default
         // A focus scan has one export, its still-capture folder, whatever the format
         // (ScanExportManager+Focus). Every Share and sync-bundle path reaches it through here.
         if fm.fileExists(atPath: scanDir.appendingPathComponent(AppConstants.focusCaptureFolder).path) {
-            return prepareFocusExport(filename: filename, scanDir: scanDir, phase: phase)
+            return prepareFocusExport(filename: filename, scanDir: scanDir, phase: phase, stop: stop)
         }
         let rawDataDir = scanDir.appendingPathComponent("raw_data")
 
@@ -693,7 +744,7 @@ struct ScanExportManager {
         // export-time privacy blur but never shipped in the archive.
         func stagePolycamPayload(to dir: URL) {
             phase?(ExportPhase("Copying frames…"))
-            let items = ["images", "proxy_images", "depth", "confidence", "cameras", "mesh_info.json"]
+            let items = scan4dPayload
             for item in items {
                 let src = rawDataDir.appendingPathComponent(item)
                 let dst = dir.appendingPathComponent(item)
@@ -712,11 +763,16 @@ struct ScanExportManager {
             // ── Export-time privacy blur ──
             // Runs off the critical capture path, so performance is not a concern
             // (export is already async). No-op unless privacy was on during capture.
-            applyExportPrivacyPasses(rawDataDir: rawDataDir, stagedDir: dir, phase: phase)
+            applyExportPrivacyPasses(rawDataDir: rawDataDir, stagedDir: dir, phase: phase, stop: stop)
         }
 
         // Zip a staging directory and return the zip URL
         func zipStaging(_ stagingDir: URL) -> URL? {
+            // A stopped export ships nothing: a privacy pass the stop cut short left frames unblurred.
+            guard stop?.isStopped != true else {
+                print("[prepareExport] stopped before zipping, nothing written")
+                return nil
+            }
             phase?(ExportPhase("Zipping…"))
             let zipURL = fm.temporaryDirectory.appendingPathComponent(filename)
             try? fm.removeItem(at: zipURL)
@@ -838,8 +894,7 @@ struct ScanExportManager {
                 //
                 // The fileExists guard below is what lets legacy scans (saved before the cloud
                 // or the coverage grid existed) degrade quietly instead of logging a miss.
-                for artifact in ["mesh.obj", "face_classes.bin", "roomplan.json", "roomplan_raw.json",
-                                 "registration.json", FeaturePointCloudFile.filename, SweepCoverageFile.filename] {
+                for artifact in scan4dArtifacts {
                     let src = scanDir.appendingPathComponent(artifact)
                     guard fm.fileExists(atPath: src.path) else { continue }
                     // The mesh carries its captured vertex colors (`v x y z r g b`) once the
@@ -887,7 +942,7 @@ struct ScanExportManager {
                 // 360° stills (any equirect camera): staged through the toggle-governed privacy
                 // pass — stageEquirectStills enforces the invariant internally (filter ON ⇒
                 // blur or exclude; OFF ⇒ informed per-scan consent).
-                stageEquirectStills(rawDataDir: rawDataDir, stagingDir: stagingDir, phase: phase)
+                stageEquirectStills(rawDataDir: rawDataDir, stagingDir: stagingDir, phase: phase, stop: stop)
 
                 return zipStaging(stagingDir)
             }

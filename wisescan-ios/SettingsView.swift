@@ -648,5 +648,7 @@ extension String {
 }
 
 #Preview {
+    // The control plane section counts pending bundles through a SwiftData query.
     SettingsView()
+        .modelContainer(for: [ScanLocation.self, CapturedScan.self], inMemory: true)
 }

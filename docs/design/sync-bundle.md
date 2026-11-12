@@ -103,19 +103,43 @@ multipart upload comes if failures on large bundles show it is needed.
   So a failed upload retries without rebuilding; the old Upload re-zipped on every failure. iOS
   may purge Caches under storage pressure, which only means a rebuild.
 - **Upload in a background URLSession** from the file, so it continues while the app is
-  suspended. Never during a capture (today's rule).
+  suspended.
+- **Never built beside other heavy work.** Building runs the export's privacy passes. A capture
+  starting, or a Share export starting, stops a build under way (its loops check a stop token,
+  and a stopped build zips nothing), and it starts again when that ends. A bundle never starts
+  while a Share builds, so two privacy passes never run at once (the OOM class behind Share's
+  in-flight guard). A bundle's coloring can't stop midway, so a Share waits for it.
+- **Never a torn copy.** Process and Color rewrite a scan's files. A build doesn't start while
+  either holds the scan or its steps are due, and a build whose files changed while it ran is
+  dropped and tried again a minute later.
+- **Its own file.** A bundle builds under its own name, so a sync and a Share of the same scan
+  never touch each other's zip.
 - **Upload data bundles only on Wi-Fi** is a setting, on by default. The JSON and the preview go
-  on any network.
+  on any network. Turning it on stops an upload that may be on cellular, whatever its progress,
+  and sends it again from the cache under the rule.
 - **The pending checklist** lists each scan whose bundle the server lacks, with its space, size
-  and state, all selected by default. Deselected scans wait until selected again. New scans
-  join selected. The checklist replaces today's "N waiting for Wi-Fi" count, and with it the
-  worry about Auto sync's All mode flooding the server with a backlog.
+  and state, all selected by default. Deselected scans wait until selected again, and
+  deselecting one being sent stops it. New scans join selected. The checklist replaces today's
+  "N waiting for Wi-Fi" count, and with it the worry about Auto sync's All mode flooding the
+  server with a backlog. *(Added in review: a scan captured with the Privacy Filter off starts
+  deselected, since its photos show people unblurred, and a phone that had Send map packages off
+  starts with every scan it held deselected, since bundles carry far more than packages did.)*
 - **Uncoloured scans.** A scan offers its version once processed. The uploader colours it, if it
   can, just before building, and sends the coloured version, so a scan the app can't colour
   still syncs.
-- **Failures.** A failed upload waits 15 minutes, then tries again from the cache. A bundle the
-  server couldn't unpack (`failed`) is not wanted again unasked: **Retry** in the checklist builds
-  it afresh, so a broken bundle can't cost gigabytes every few minutes.
+- **Failures.** A failed upload tries again from the cache, after 15 minutes, then twice as long
+  after each failure in a row, up to 6 hours. Refusals that sending again can't change (uploads
+  revoked for the device, a scan the server doesn't know, a bundle over its size limit) aren't
+  retried until the scan's version changes or the user taps **Retry**. Neither is a bundle the
+  server couldn't unpack (`failed`): Retry builds it afresh, so a broken bundle can't cost
+  gigabytes every few minutes.
+- **The version, cheaply.** A scan's version covers only what the export reads, so caches the app
+  regenerates don't make a new one. It is re-read in full only when a quick look at those files
+  and folders changes, or once an hour. A build reads it afresh, and if that differs from what
+  the server saw, it syncs first so the server wants the new version.
+- **One server's state.** Which spaces the server confirmed, and every bundle's state, belong to
+  the server they came from. A sync that reaches another server starts them afresh. The
+  checklist's choices and built bundles stay.
 
 ## The sync indicator
 

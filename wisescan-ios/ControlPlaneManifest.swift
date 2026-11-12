@@ -150,7 +150,7 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
 
     /// Fills the file-backed fields. File I/O, so off main. Lists each scan's map-package files
     /// and returns where they are, for the uploads the server then asks for, and fingerprints each
-    /// settled scan's bundle (`ScanBundle.version`).
+    /// settled scan's bundle (`ScanBundle.cachedVersion`).
     @discardableResult
     mutating func readScanFiles(_ files: [UUID: ScanFiles]) -> [UUID: [String: LocalFile]] {
         let fm = FileManager.default
@@ -162,7 +162,7 @@ nonisolated struct ControlPlaneManifest: Encodable, Sendable {
                 locations[l].scans[s].hasWorldMap = fm.fileExists(atPath: paths.worldMap.path)
                 locations[l].scans[s].registration = Self.readRegistration(scanDirectory: paths.directory)
                 locations[l].scans[s].privacyFilter = paths.privacyRecord.flatMap(Self.readPrivacyFilter)
-                if paths.settled, let version = ScanBundle.version(scanDirectory: paths.directory) {
+                if paths.settled, let version = ScanBundle.cachedVersion(scanDirectory: paths.directory) {
                     locations[l].scans[s].bundle = BundleOffer(fingerprint: version.fingerprint, size: version.size)
                 }
                 for (name, candidates) in paths.package {
@@ -237,7 +237,7 @@ extension ControlPlaneManifest {
                                            package: packageCandidates(scan),
                                            privacyRecord: scan.isFocusScan ? .focus(captureFolder: scan.focusCaptureURL)
                                                                            : .room(rawData: scan.rawDataPath),
-                                           settled: scan.isFocusScan || !ScanPostprocessor.needsPostprocess(scan))
+                                           settled: scan.isFocusScan || SettledScans.isSettled(scan))
                 return Scan(scanId: scan.id,
                             kind: scan.isFocusScan ? "focus" : "room",
                             name: scan.name,
@@ -304,5 +304,23 @@ extension ControlPlaneManifest {
         guard !scan.isFocusScan else { return [] }
         let raw = scan.scanDirectory.appendingPathComponent("raw_data")
         return [("roomplan.json", [scan.roomPlanFileURL, raw.appendingPathComponent("roomplan.json")])]
+    }
+}
+
+/// Which scans are processed (`ScanPostprocessor.needsPostprocess` clear), remembered once true.
+/// Every sync asks it of every reported scan on main, and the check lists folders and reads
+/// sidecars; a processed scan stays processed, so asking again only costs main-thread time. A
+/// scan Process works on again (Force Rebuild) keeps its answer: its bundle's build checks the
+/// scan itself before building (`BundleSync`), and its files' new version follows.
+@MainActor
+enum SettledScans {
+    private static var settled: Set<UUID> = []
+
+    static func isSettled(_ scan: CapturedScan) -> Bool {
+        let id: UUID = scan.id
+        if settled.contains(id) { return true }
+        guard !ScanPostprocessor.needsPostprocess(scan) else { return false }
+        settled.insert(id)
+        return true
     }
 }

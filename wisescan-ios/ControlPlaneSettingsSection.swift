@@ -1,3 +1,4 @@
+import SwiftData
 import SwiftUI
 
 /// Settings → Control plane: the lab server this phone reports its spaces, scans and stitches to
@@ -13,6 +14,8 @@ struct ControlPlaneSettingsSection: View {
     @AppStorage(AppConstants.Key.controlPlaneBundlesWifiOnly) private var bundlesWifiOnly = AppConstants.controlPlaneBundlesWifiOnly
     @AppStorage(AppConstants.Key.controlPlaneAllowUntrusted) private var allowUntrusted = false
     @AppStorage(AppConstants.Key.controlPlaneAutoSync) private var autoSyncRaw = AppConstants.controlPlaneAutoSync
+    /// For the pending count, read as the checklist reads its rows.
+    @Query private var locations: [ScanLocation]
     @State private var password = ControlPlaneSecret.password
     @State private var connectionMessage: String?
     @State private var isTesting = false
@@ -195,9 +198,9 @@ struct ControlPlaneSettingsSection: View {
         }
     }
 
-    /// Scans whose bundle the server wants or couldn't unpack (the pending checklist's rows).
+    /// The pending checklist's rows, counted by its own filter so the two always agree.
     private var pendingBundles: Int {
-        BundleSync.shared.remote.values.filter { $0.wanted || $0.state == "failed" }.count
+        PendingBundlesView.pending(in: locations).reduce(0) { $0 + $1.scans.count }
     }
 
     private var isBusy: Bool {

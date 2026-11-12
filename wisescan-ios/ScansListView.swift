@@ -521,6 +521,8 @@ struct ScansListView: View {
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         Task { @MainActor in
+            // A sync bundle's build stops for this Share; ShareExports.end() lets it go on.
+            await ShareExports.begin()
             // Exports ship the mesh's captured colors: colorize any scan that isn't yet.
             await ScanExportManager.colorizeForExport(
                 scans, modelContext: modelContext,
@@ -545,6 +547,7 @@ struct ScansListView: View {
                 }
 
                 DispatchQueue.main.async {
+                    ShareExports.end()
                     self.bulkProgressMessage = nil
                     self.exportItems = urls
                     self.showExportSheet = !urls.isEmpty
@@ -1556,6 +1559,8 @@ struct ScanCard: View {
 
         let format = selectedFormat
         Task { @MainActor in
+            // A sync bundle's build stops for this Share; saveExportToFiles ends it on every path.
+            await ShareExports.begin()
             // Exports ship the mesh's captured colors: colorize first if the scan isn't yet.
             await ScanExportManager.colorizeForExport(
                 [scan], modelContext: modelContext,
@@ -1578,6 +1583,7 @@ struct ScanCard: View {
 
         guard FileManager.default.fileExists(atPath: scanDir.path) else {
             print("[SaveToFiles] ERROR: scanDirectory does not exist")
+            ShareExports.end()
             self.scan.uploadStatus = .failed("No data")
             self.onUpdate(self.scan)
             self.showExportError = true
@@ -1591,11 +1597,13 @@ struct ScanCard: View {
                 phase: { step in DispatchQueue.main.async { self.exportPhase = step } }
             ) {
                 DispatchQueue.main.async {
+                    ShareExports.end()
                     self.exportPhase = nil
                     self.exportItem = ZipExportItem(url: exportURL)
                 }
             } else {
                 DispatchQueue.main.async {
+                    ShareExports.end()
                     self.exportPhase = nil
                     self.scan.uploadStatus = .failed("Export failed")
                     self.onUpdate(self.scan)

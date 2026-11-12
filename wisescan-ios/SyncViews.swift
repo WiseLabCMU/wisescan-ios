@@ -59,16 +59,18 @@ struct SyncLine: View {
 
 // MARK: - The pending checklist
 
-/// Every synced scan whose bundle the lab server doesn't hold yet, all selected by default: the
-/// user decides what goes, and whether it waits for Wi-Fi. A deselected scan waits until selected
-/// again; a new scan joins selected. A bundle the server couldn't unpack waits for Retry.
+/// Every synced scan whose bundle the lab server doesn't hold yet. Selected by default, except a
+/// scan captured with the Privacy Filter off, whose photos show people unblurred: it waits until
+/// the user selects it. A deselected scan waits until selected again (deselecting one being sent
+/// stops it); a new scan joins selected. A bundle the server couldn't unpack, or refused, waits
+/// for Retry.
 struct PendingBundlesView: View {
     @Query(sort: \ScanLocation.name) private var locations: [ScanLocation]
     @AppStorage(AppConstants.Key.controlPlaneBundlesWifiOnly) private var wifiOnly = AppConstants.controlPlaneBundlesWifiOnly
 
     var body: some View {
         let bundles = BundleSync.shared
-        let pending = pendingBySpace()
+        let pending = Self.pending(in: locations)
         List {
             Section {
                 Toggle("Upload data bundles only on Wi-Fi", isOn: $wifiOnly)
@@ -94,23 +96,27 @@ struct PendingBundlesView: View {
         .navigationTitle("Pending Bundles")
     }
 
-    private struct PendingSpace: Identifiable {
+    struct PendingSpace: Identifiable {
         let id: UUID
         let name: String
         let scans: [CapturedScan]
     }
 
-    /// Scans of confirmed spaces the server wants a bundle of, or failed to unpack, oldest first.
-    private func pendingBySpace() -> [PendingSpace] {
+    /// The checklist's rows, and Settings' count of them: scans of confirmed spaces whose bundle
+    /// the server wants, couldn't unpack or refused, or that is being sent, oldest first. Nothing
+    /// while the state on hand is another server's.
+    static func pending(in locations: [ScanLocation]) -> [PendingSpace] {
         let bundles = BundleSync.shared
-        let confirmed = ControlPlaneSync.shared.confirmedSpaces
+        let sync = ControlPlaneSync.shared
+        guard sync.stateIsCurrent else { return [] }
         return locations.compactMap { location -> PendingSpace? in
             let spaceId: UUID = location.id
-            guard confirmed.contains(spaceId) else { return nil }
+            guard sync.confirmedSpaces.contains(spaceId) else { return nil }
             let scans = location.scans.sorted(by: CapturedScan.canonicalOrder).filter { scan in
                 let scanId: UUID = scan.id
                 let state = bundles.remote[scanId]
-                return state?.wanted == true || state?.state == "failed" || bundles.active?.scanId == scanId
+                return state?.wanted == true || state?.state == "failed" || bundles.refusal(scanId) != nil
+                    || bundles.isActive(scanId)
             }
             return scans.isEmpty ? nil : PendingSpace(id: spaceId, name: location.name, scans: scans)
         }
@@ -122,18 +128,25 @@ private struct PendingBundleRow: View {
 
     var body: some View {
         let bundles = BundleSync.shared
-        let failed = bundles.remote[scan.id]?.state == "failed"
+        let id: UUID = scan.id
+        let failed = bundles.remote[id]?.state == "failed" || bundles.failures[id] != nil || bundles.refusal(id) != nil
         HStack {
-            Toggle(isOn: Binding(get: { bundles.isSelected(scan.id) },
-                                 set: { bundles.setSelected(scan.id, $0) })) {
+            Toggle(isOn: Binding(get: { bundles.isSelected(id) },
+                                 set: { bundles.setSelected(id, $0) })) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(scan.name)
                     SyncLine(scan: scan)
+                    if bundles.filterOff.contains(id) {
+                        Label("Captured with the Privacy Filter off: people in its photos aren't blurred.",
+                              systemImage: "exclamationmark.triangle")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
                 }
             }
-            .disabled(bundles.active?.scanId == scan.id)
-            if failed || bundles.failures[scan.id] != nil {
-                Button("Retry") { bundles.retry(scan.id) }
+            // Not while its bundle is being built or sent: Retry deletes the cached zip.
+            if failed && !bundles.isActive(id) {
+                Button("Retry") { bundles.retry(id) }
                     .buttonStyle(.borderless)
             }
         }

@@ -105,7 +105,9 @@ struct UserGuideView: View {
                               "included, with people blurred when the Privacy Filter is on. A bundle keeps " +
                               "going if you lock the screen or switch apps. Bundles wait for Wi-Fi unless " +
                               "you turn that off, and you choose which go in Settings > Control plane > " +
-                              "Pending bundles; nothing goes during a scan. A cloud on each space shows " +
+                              "Pending bundles. All are selected, except a scan captured with the Privacy " +
+                              "Filter off: its photos show people unblurred, so it waits until you select " +
+                              "it. No bundle is prepared during a scan or while you Share. A cloud on each space shows " +
                               "what the server has: an outline for its map, a green check for everything, " +
                               "an arrow while a bundle goes up (Troubleshooting, below, explains every " +
                               "badge). If the server wants its password, Sync opens Settings at the " +

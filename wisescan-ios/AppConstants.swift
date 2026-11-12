@@ -39,7 +39,12 @@ enum AppConstants {
         static let controlPlaneJoinedAt = "controlPlaneJoinedAt"      // first successful sync (seconds since 1970): what counts as a new space
         static let controlPlaneBundlesWifiOnly = "controlPlaneBundlesWifiOnly" // upload scans' data bundles only on Wi-Fi (the JSON and the RoomPlan preview go on any network)
         static let controlPlaneBundlesSkipped = "controlPlaneBundlesSkipped"   // scans deselected in the pending checklist: their bundles wait until selected again
+        static let controlPlaneBundlesChosen = "controlPlaneBundlesChosen"     // scans captured with the Privacy Filter off that the user selected in the checklist (held back until then)
+        static let controlPlaneBundlesFilterOff = "controlPlaneBundlesFilterOff" // scans the last sync read as captured with the Privacy Filter off
+        static let controlPlaneBundlesRefused = "controlPlaneBundlesRefused"   // bundles the server refused for good (403, 404, 413), with the version refused (JSON): not sent again until it changes or Retry
         static let controlPlaneBundleStates = "controlPlaneBundleStates"       // each scan's bundle as the server last reported it (JSON), for the sync badge after a relaunch
+        static let controlPlaneStateServer = "controlPlaneStateServer"         // the control plane (base URL) the confirmed spaces and bundle states came from; another one starts them afresh
+        static let legacyControlPlaneSendPackages = "controlPlaneSendPackages" // builds before bundles: Send map packages (off = nothing but the JSON went); read once to deselect every scan, then removed
         static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
         nonisolated static let controlPlanePasswordWanted = "controlPlanePasswordWanted" // read by ControlPlaneSecret off the main actor; the control plane (base URL) that refused a request for want of a password; a tapped Sync asks for it first
         static let rawOverlapMax = "rawOverlapMax"
@@ -753,8 +758,15 @@ enum AppConstants {
     static let controlPlaneRequestTimeoutS: TimeInterval = 15
     static let controlPlaneUploadTimeoutS: TimeInterval = 60     // idle time allowed mid map-package upload (the RoomPlan preview, or an older app's files)
     static let controlPlaneBundlesWifiOnly = true                // data bundles wait for Wi-Fi unless the user lets them use cellular
-    static let controlPlaneBundleCacheDays: Double = 7           // a built bundle not yet on the server is kept this long, so a failed upload retries without rebuilding
+    static let controlPlaneBundleCacheMaxAgeS: TimeInterval = 604_800 // 7 days: a built bundle not yet on the server is kept this long, so a failed upload retries without rebuilding
     static let controlPlaneBundleResourceTimeoutS: TimeInterval = 86_400 // a background bundle upload may take this long overall (GBs, waiting for Wi-Fi)
+    static let controlPlaneBundleProgressStep: Double = 0.01     // the card's upload percentage moves in steps of at least this (each is a redraw)
+    static let controlPlaneBundleIngestCheckS: Double = 15       // after an upload, sync this soon to see the server's unpacking finish
+    static let controlPlaneBundleRetryBaseS: TimeInterval = 900  // a failed upload is tried again after this, doubling with each failure in a row...
+    static let controlPlaneBundleRetryMaxS: TimeInterval = 21_600 // ...up to 6 hours apart
+    static let controlPlaneBundleBusyRetryS: TimeInterval = 60   // a scan Process or Color is working on is tried again this soon
+    static let controlPlaneBundleVersionMaxAgeS: TimeInterval = 3_600 // a scan's bundle version is re-read in full at least this often, even when its folders look unchanged
+    static let shareWaitForBundleColoringPollS: Double = 0.5     // a Share starting while a sync bundle colors a scan checks this often for it to finish
     static let controlPlaneAutoSync = "new"                      // new spaces sync on their own; the backlog from before joining waits for Sync
     static let controlPlaneLargeFileBytes: Int64 = 5_000_000     // package files this big go up only on an unmetered network (Wi-Fi)
     static let controlPlanePollIntervalS: Double = 300           // while the app is open, sync this often so the lab's requests are picked up

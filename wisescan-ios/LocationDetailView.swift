@@ -583,6 +583,8 @@ struct LocationDetailView: View {
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         Task { @MainActor in
+            // A sync bundle's build stops for this Share; ShareExports.end() lets it go on.
+            await ShareExports.begin()
             // Exports ship the mesh's captured colors: colorize any scan that isn't yet.
             await ScanExportManager.colorizeForExport(
                 scans, modelContext: modelContext,
@@ -615,6 +617,7 @@ struct LocationDetailView: View {
                 }
 
                 DispatchQueue.main.async {
+                    ShareExports.end()
                     self.exportItems = urls
                     self.showExportSheet = true
                     self.isBulkExporting = false

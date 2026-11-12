@@ -260,6 +260,18 @@ enum ExportFormat: String, CaseIterable, Codable {
         return ["Polycam", "Nerfstudio", "Flame3D", "RAW"].contains(rawValue) ? .scan4d : nil
     }
 
+    /// Rewrites a retired or unknown format name stored as the chosen export format
+    /// (`AppConstants.Key.selectedExportFormat`) as the format that replaced it, Scan4D for
+    /// anything unknown. The pickers bind that string as it is, so a retired name showed a blank
+    /// picker. Once at launch; returns whether it rewrote it.
+    @discardableResult
+    static func migrateStoredSelection(_ defaults: UserDefaults = .standard) -> Bool {
+        let key = AppConstants.Key.selectedExportFormat
+        guard let stored = defaults.string(forKey: key), ExportFormat(rawValue: stored) == nil else { return false }
+        defaults.set((persisted(stored) ?? .scan4d).rawValue, forKey: key)
+        return true
+    }
+
     /// The format a scan actually exports in. A focus scan has one export, its still-capture zip
     /// (`ScanExportManager.prepareFocusExport`), whatever format is selected, so its filename and
     /// upload content type follow `.scan4d`'s zip.

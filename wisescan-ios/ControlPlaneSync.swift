@@ -90,6 +90,14 @@ final class ControlPlaneSync {
     }
     var deviceLabel: String { UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneDeviceLabel) ?? "" }
     var client: ControlPlaneClient? { ControlPlaneClient.baseURL(fromHost: host).map { ControlPlaneClient(baseURL: $0) } }
+    /// Whether the confirmed spaces and the bundles' states came from the server set now. After
+    /// the host changes they belong to the old one until a sync reaches the new one (badges show
+    /// nothing meanwhile, and no bundle goes).
+    var stateIsCurrent: Bool {
+        guard let server = ControlPlaneClient.baseURL(fromHost: host)?.absoluteString else { return false }
+        let stored = UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneStateServer)
+        return stored == nil || stored == server
+    }
     var autoSync: ControlPlaneAutoSync {
         ControlPlaneAutoSync(rawValue: UserDefaults.standard.string(forKey: AppConstants.Key.controlPlaneAutoSync)
                              ?? AppConstants.controlPlaneAutoSync) ?? .new
@@ -160,6 +168,7 @@ final class ControlPlaneSync {
         guard let container else { return }
         running = true
         status = .syncing
+        adopt(server: client.baseURL.absoluteString)
 
         let context = container.mainContext
         let allLocations = (try? context.fetch(FetchDescriptor<ScanLocation>())) ?? []
@@ -178,11 +187,12 @@ final class ControlPlaneSync {
         do {
             // Encoding and the file reads (the bundles' fingerprints among them) off main (an async
             // call from here would stay on it).
-            let (result, local) = try await Task.detached(priority: .utility) {
+            let (result, local, filterOff) = try await Task.detached(priority: .utility) {
                 var manifest = draft
                 let local = manifest.readScanFiles(files)
+                let filterOff = Set(manifest.locations.flatMap(\.scans).filter { $0.privacyFilter == false }.map(\.scanId))
                 let result = try await client.sync(manifest)
-                return (result, local)
+                return (result, local, filterOff)
             }.value
             let reply = result.reply
             if joinedAt == nil {
@@ -194,7 +204,7 @@ final class ControlPlaneSync {
             }
             applyLinkUpdates(reply.linkUpdates ?? [])
             receive(result.tasks)
-            BundleSync.shared.received(reply.bundles ?? [])
+            BundleSync.shared.received(reply.bundles ?? [], filterOff: filterOff)
             var summary = "\(reply.maps) spaces, \(reply.scans) scans, \(reply.links) links"
             PerfDiag.log("[ControlPlane] synced: \(summary), \(reply.markedGone) marked gone, "
                          + "\(reply.wanted?.count ?? 0) files wanted, "
@@ -223,6 +233,23 @@ final class ControlPlaneSync {
             rerun = false
             requestSync(after: .seconds(AppConstants.controlPlaneSyncDebounceS))
         }
+    }
+
+    /// A sync is about to reach `server`. When the state on hand came from another one, it starts
+    /// afresh: the spaces it confirmed and every bundle's state were that server's, and sending
+    /// them on would only be refused ("Unknown scan"). Before this, the first server is adopted
+    /// as it is.
+    private func adopt(server: String) {
+        let key = AppConstants.Key.controlPlaneStateServer
+        let stored = UserDefaults.standard.string(forKey: key)
+        guard stored != server else { return }
+        if stored != nil {
+            PerfDiag.log("[ControlPlane] another server (\(server)): its spaces and bundles start afresh")
+            confirmedSpaces = []
+            UserDefaults.standard.removeObject(forKey: AppConstants.Key.controlPlaneConfirmedSpaces)
+            BundleSync.shared.serverChanged()
+        }
+        UserDefaults.standard.set(server, forKey: key)
     }
 
     private struct UploadRound {

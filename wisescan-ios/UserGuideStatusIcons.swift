@@ -38,14 +38,19 @@ struct StatusIconsGuideSections: View {
             syncBadgeRow(.failed, title: "Warning Cloud: A Bundle Failed",
                          text: "A bundle didn't reach the server, or the server couldn't unpack it. The " +
                                "scan card's sync line says why, and Settings > Control plane > Pending " +
-                               "bundles has Retry. The app retries a failed upload on its own after a while.")
+                               "bundles has Retry. The app retries a failed upload on its own, waiting " +
+                               "longer after each failure in a row. It doesn't retry when the server " +
+                               "refused the bundle for a reason sending again can't change: uploads " +
+                               "turned off for this phone, a scan it doesn't know, or a bundle larger " +
+                               "than it takes. Fix that on the server, then tap Retry.")
 
             syncLineRow("Map only · waiting for Wi-Fi", failed: false,
                         text: "Each scan card in a synced location has a sync line. Map only means the " +
                               "server has the scan's details but not its bundle yet, and the rest says " +
                               "what it waits for: Wi-Fi (Settings > Control plane, Upload data bundles " +
                               "only on Wi-Fi), its turn (waiting to upload), or your choice (not selected, " +
-                              "in Pending bundles).")
+                              "in Pending bundles). Privacy Filter was off, not selected: the scan was " +
+                              "captured with people unblurred, so it waits until you select it.")
             syncLineRow("Uploading 42%", failed: false,
                         text: "Its bundle is going up. Preparing its bundle and Coloring for sync come " +
                               "first: a bundle carries the colored mesh, so an uncolored scan is colored " +
@@ -56,7 +61,9 @@ struct StatusIconsGuideSections: View {
                         text: "A sync failed, and the reason follows. Sync failed with a network message " +
                               "or a server error means the upload didn't arrive: check the server in " +
                               "Settings and your connection. The server couldn't unpack it means it " +
-                              "arrived but was refused. Retry in Pending bundles sends it again.")
+                              "arrived but was refused. Sync stopped means the server refused it for a " +
+                              "reason sending again can't change, so it waits until the scan changes. " +
+                              "Retry in Pending bundles sends it again.")
 
             statusRow(.zipping, fraction: 0.4,
                       text: "Share is building the export. While it runs, the label names the step " +

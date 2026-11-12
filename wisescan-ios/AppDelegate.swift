@@ -81,10 +81,12 @@ struct Scan4DApp: App {
         } catch {
             print("Failed to configure Meta Wearables SDK: \(error)")
         }
-        // Clear scans an earlier run left converting before any UI can start an export. Not under
-        // unit tests, which must not touch the real store.
+        // Clear scans an earlier run left converting before any UI can start an export, and give
+        // a retired export format name its replacement before a picker shows it. Not under unit
+        // tests, which must not touch the real store or the app's settings.
         if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
             InterruptedExports.sweep(Scan4DApp.sharedModelContainer.mainContext)
+            ExportFormat.migrateStoredSelection()
         }
     }
 
