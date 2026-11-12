@@ -69,7 +69,7 @@ struct CoachBarView: View {
         VStack(spacing: 12) {
             CoachBarView(
                 tip: CoachTip(id: "guidance.pauseForPhoto",
-                              message: "📸 Hold still on amber areas, then tap for a photo",
+                              message: "Hold still on amber areas, then tap for a photo",
                               icon: "camera.fill", priority: .guidance),
                 onDismiss: {}
             )
@@ -88,4 +88,21 @@ struct CoachBarView: View {
         }
         .padding()
     }
+}
+
+
+/// Label with a tinted SF Symbol and untinted title — the replacement for emoji in
+/// rendered UI (CONTRIBUTING: no emoji in UI text; the icon is where the colour lives).
+struct TintedIconLabelStyle: LabelStyle {
+    let tint: Color
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            configuration.icon.foregroundColor(tint)
+            configuration.title
+        }
+    }
+}
+
+extension LabelStyle where Self == TintedIconLabelStyle {
+    static func tintedIcon(_ tint: Color) -> TintedIconLabelStyle { TintedIconLabelStyle(tint: tint) }
 }

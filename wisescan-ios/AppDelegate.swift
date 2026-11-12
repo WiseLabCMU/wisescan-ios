@@ -8,6 +8,8 @@
 import SwiftUI
 import SwiftData
 import UIKit
+import CoreText
+import QuartzCore
 import MWDATCore
 
 /// UIApplicationDelegate for orientation locking support.
@@ -18,6 +20,17 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         return AppDelegate.orientationLocked ? .portrait : .all
+    }
+
+    /// iOS relaunched the app (or woke it) because export uploads ended in the background. The
+    /// uploader's session, created at launch, receives the events and calls this handler when done.
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == AppConstants.exportUploadSessionId else {
+            completionHandler()
+            return
+        }
+        ExportUploader.shared.backgroundEventsCompletion = completionHandler
     }
 }
 
@@ -31,20 +44,46 @@ struct Scan4DApp: App {
         
         // Register defaults for keys read via UserDefaults.standard.bool() (not @AppStorage).
         // @AppStorage provides its own default, but direct UserDefaults reads need registration.
-        UserDefaults.standard.register(defaults: [
-            AppConstants.Key.semanticLabeling: AppConstants.semanticLabeling,
-            AppConstants.Key.meshClassifier: AppConstants.meshClassifier,
-            AppConstants.Key.registerLegacyScans: AppConstants.registerLegacyScans,
-            AppConstants.Key.colorizeFrom360Faces: AppConstants.colorizeFrom360Faces,
-            AppConstants.Key.gpuColorize: AppConstants.gpuColorize,
-            AppConstants.Key.keyframeWeightBonus: AppConstants.keyframeWeightBonus,
-            AppConstants.Key.robustColorMedian: AppConstants.robustColorMedian
-        ])
+        // Every developer option is registered, which is what lets Restore Default Developer
+        // Options simply remove the stored values (see AppConstants.developerOptionDefaults).
+        UserDefaults.standard.register(defaults: AppConstants.developerOptionDefaults)
+        AppConstants.restoreDeveloperDefaultsOutsideDeveloperMode()
+        AppConstants.pruneRetiredDefaults()
         print("Application directory: \(NSHomeDirectory())")
+        // Main-thread stall watchdog, app-wide from first frame (no-op unless Perf
+        // Diagnostics is on). Capture-scoped arming structurally missed the #71 class:
+        // the freeze happens BEFORE CaptureView.onAppear, exactly where it used to start.
+        MainThreadWatchdog.shared.start()
+        // Warm CoreText's device-capability lookup OFF the main thread. The mid-stall
+        // sampler (2026-08-25, 4th occurrence, 18090 ms) caught the ~18 s freeze family:
+        // SwiftUI lays out a Text → CoreText's dispatch_once asks MobileGestalt →
+        // MobileGestalt's OWN dispatch_once loads its extensions and makes a SYNCHRONOUS
+        // XPC call (xpc_connection_send_message_with_reply_sync) that waited ~18 s on
+        // main, every time, starting the instant "Connected" logged — i.e. the first
+        // render of the battery-emoji status line. The daemon wait is Apple's; where
+        // it happens is ours. Rendering an equivalent line here, on a utility queue,
+        // takes both once-tokens before any main-thread Text ever needs them. Timed
+        // and logged so the next diagnostics export proves whether the wait is
+        // inherent (~18 s here too, but invisible) or transition-related (fast here).
+        DispatchQueue.global(qos: .utility).async {
+            let t0 = CACurrentMediaTime()
+            let probe = NSAttributedString(string: "Connected · v1.0.0 · 🔋 88% ⚠️ ✓",
+                                           attributes: [.font: UIFont.preferredFont(forTextStyle: .caption1)])
+            let line = CTLineCreateWithAttributedString(probe)
+            _ = CTLineGetTypographicBounds(line, nil, nil, nil)
+            PerfDiag.log(String(format: "[PerfDiag] CoreText/MobileGestalt warm-up took %.0f ms (off main)",
+                                (CACurrentMediaTime() - t0) * 1000))
+        }
         do {
             try Wearables.configure()
         } catch {
             print("Failed to configure Meta Wearables SDK: \(error)")
+        }
+        // Export uploads run in a background session: re-attach to transfers from an earlier run
+        // (and clear scans left converting or uploading by it) before any UI. Not under unit tests,
+        // which must not touch the real store.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            ExportUploader.shared.start()
         }
     }
 
@@ -89,6 +128,9 @@ struct Scan4DApp: App {
             } else {
                 ContentView()
                     .onOpenURL { url in
+                        // A focus region handed over by a downstream processor (FocusRegionInbox);
+                        // everything else is the Meta Wearables SDK's.
+                        if FocusRegionInbox.shared.receive(url) { return }
                         Task {
                             do {
                                 _ = try await Wearables.shared.handleUrl(url)

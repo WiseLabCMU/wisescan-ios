@@ -21,7 +21,9 @@ struct UserGuideView: View {
                         icon: "2.circle.fill",
                         title: "Capture",
                         text: "Point your device at a scene. The Privacy Filter (on by default) masks " +
-                              "people out of the captured data. Tap the capture button to start recording — " +
+                              "people out of the captured data. Switched off, it turns itself back on " +
+                              "24 hours later, so a switch left off by mistake doesn't keep capturing " +
+                              "people. Tap the capture button to start recording — " +
                               "the mesh overlay shows scanning progress in real-time, and coaching tips " +
                               "appear when the scan needs attention (moving too fast, session near capacity). " +
                               "The overlay color tells you what each area still needs: green = not yet " +
@@ -37,37 +39,74 @@ struct UserGuideView: View {
                     )
                     guideRow(
                         icon: "4.circle.fill",
-                        title: "Process",
-                        text: "Tap 'Process' on the scan card (or 'Process All' on a location) to finish " +
-                              "the scan on-device: it aligns rescans into the location's shared coordinate " +
-                              "frame, prepares the rescan ghost, and applies camera-based color. Upload, " +
-                              "export, and rescan unlock once processing completes."
+                        title: "Process & Color",
+                        text: "Processing runs by itself after you save: it aligns rescans into the " +
+                              "location's shared coordinate frame and prepares the rescan ghost. Tap " +
+                              "'Color' on a scan card to color its mesh from your photos (it finishes any " +
+                              "processing still left first); long-press it to re-run processing. If a scan " +
+                              "isn't processed yet, Upload, Save and Rescan ask to process it first."
                     )
                     guideRow(
                         icon: "5.circle.fill",
                         title: "Rescan Space / Connect Adjacent Space",
                         text: "Tap 'Rescan Space' on any location to re-scan the identical area over time " +
-                              "— a colored ghost overlay (default magenta, configurable in Settings) shows " +
+                              "— a magenta ghost overlay shows " +
                               "your previous scan for reference, and each new scan is auto-aligned into " +
                               "the location's shared frame using detected walls and floors. " +
+                              "Rescan asks what to capture: the whole room, or one region (a focus scan, " +
+                              "below). " +
                               "Tap 'Connect Adjacent Space' to scan a neighboring room: relocalize with your " +
                               "previous scan, walk to where the new connector should be, " +
                               "and confirm to place the connector and start scanning the new space. " +
-                              "You can also tap 'Pin & Extend' mid-scan to drop a connector and continue " +
-                              "into the next space without stopping."
+                              "Or, when you stop a scan, choose 'Save & Scan Adjacent' to drop a connector " +
+                              "and carry straight on into the next space."
+                    )
+                    guideRow(
+                        icon: "scope",
+                        title: "Focus Scan a Region",
+                        text: "Rescan Space > Focus on a region photographs one area in detail, like a " +
+                              "work table. Tap a table or object in the scan to draw a box around it (or " +
+                              "tap the surface for a default box), adjust it with the sliders, and pick " +
+                              "how much to capture: Check takes about 5 photos and finishes by itself, " +
+                              "Detail about 30, Splat 150 or more for 3D reconstruction. Look around until " +
+                              "the ghost mesh appears (the scan can't start before that), and a yellow box " +
+                              "shows the region: tap record and walk around it. If tracking is lost, the " +
+                              "scan stops and keeps the photos taken so far. " +
+                              "Photos are taken only while the box is in view; the dial fills with " +
+                              "the directions you have covered. The result is a partial scan in the same " +
+                              "location (no mesh of its own) that you can save or upload like any other. " +
+                              "Once a space has focus scans, its list switches between Room, Focus and All " +
+                              "(Room is the default; the list opens on a scan you just saved). " +
+                              "A region file from another tool can be imported from the same menu. " +
+                              "With a control plane set, the lab can also ask for a focus scan: the " +
+                              "request waits in the To do list on the Dashboard, even offline (an urgent one also " +
+                              "alerts once), and Open takes you to the region in the editor."
                     )
                     guideRow(
                         icon: "6.circle.fill",
                         title: "Choose Format",
-                        text: "Select an export format (Scan4D, Polycam, OBJ, PLY, USDZ, or RAW) " +
-                              "using the format picker on each scan card."
+                        text: "Pick the export format with Global Export Format on a space's screen: Scan4D " +
+                              "(the default), Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ. It applies " +
+                              "to every space."
                     )
                     guideRow(
                         icon: "7.circle.fill",
                         title: "Save or Upload",
                         text: "Save locally to Files, AirDrop to another device, or upload to your " +
                               "configured server. A cloud badge on each location shows upload state: " +
-                              "solid when every scan is uploaded, dimmed when only some are."
+                              "solid when every scan is uploaded, dimmed when only some are " +
+                              "(Troubleshooting, below, explains every badge). An upload " +
+                              "keeps going if you lock the screen or switch apps, and the screen stays " +
+                              "on while a scan is being converted. With a " +
+                              "control plane server set in Settings, the app also keeps your lab's " +
+                              "server up to date with the spaces you sync: tap Sync to Lab Server in " +
+                              "a space, or Sync on a stitched map in the graph view. Settings > Auto " +
+                              "sync adds every space (All), the ones you start after joining (New, " +
+                              "the default) or none (Off). It sends names, times, poses, the " +
+                              "small files the server reads, and a room's mesh (with its colors) or map when the lab " +
+                              "asks for it, over Wi-Fi; no photos, and never during a scan. If the server " +
+                              "wants its password, Upload and Sync open Settings at the password field " +
+                              "first, then carry on when you tap Done."
                     )
                 } header: {
                     Text("HOW TO USE")
@@ -92,13 +131,16 @@ struct UserGuideView: View {
                     )
                     guideRow(
                         icon: "camera.fill",
-                        title: "Hold Still, Tap for Photos",
-                        text: "To capture a high-resolution photo, hold still until the center ring " +
-                              "locks green, then tap the screen: a shutter click and flash confirm the " +
-                              "shot, and the amber overlay clears where the photo landed. Tap on every " +
-                              "amber area — these crisp stills drive the final texture quality. In the " +
-                              "mesh preview, the camera toggle shows where each still (and motion frame) " +
-                              "was captured."
+                        title: "Photos Are Automatic",
+                        text: "High-resolution photos are taken for you whenever the device is steady " +
+                              "enough and the view has changed since the last one; the amber overlay " +
+                              "clears where photos land. Slow down over amber areas and step sideways " +
+                              "now and then so surfaces are seen from more than one spot. With a 360° " +
+                              "camera connected, tapping the screen while holding still takes a 360° " +
+                              "still and a matching phone photo. The screen flashes briefly for every " +
+                              "photo kept, so you can follow along with the sound off; the screen stays " +
+                              "on while you record. In the mesh preview, the camera toggle " +
+                              "shows where each photo was captured."
                     )
                     guideRow(
                         icon: "arrow.left.and.right",
@@ -119,7 +161,7 @@ struct UserGuideView: View {
                         title: "Watch the Capacity Bar",
                         text: "Long scans approach session limits — save when the capacity warning appears. " +
                               "For large or multi-room spaces, capture several linked scans " +
-                              "(Pin & Extend or Connect Adjacent Space) instead of one huge scan."
+                              "(Save & Scan Adjacent or Connect Adjacent Space) instead of one huge scan."
                     )
                 } header: {
                     Text("SCAN TIPS")
@@ -139,19 +181,26 @@ struct UserGuideView: View {
                 } header: {
                     Text("SEMANTIC COLORS")
                 } footer: {
-                    Text("Room-structure classes detected while scanning (with Semantic Labeling on), " +
+                    Text("Room-structure classes detected while scanning, " +
                          "shown in these colors in the mesh preview's semantics view and listed on the " +
-                         "scan HUD. All detected classes are always included in exports.")
+                         "scan HUD. All detected classes are always included in exports. " +
+                         "The mesh preview names each box with RoomPlan's full label set " +
+                         "(sofa, stove, bathtub and the rest), drawn as shades of these same " +
+                         "colors — tap a legend row to hide or show that label, or tap a box " +
+                         "to identify it.")
                         .font(.caption2)
                         .foregroundColor(.gray)
                 }
                 .listRowBackground(Color.white.opacity(0.05))
 
+                // MARK: - Troubleshooting: status icons (UserGuideStatusIcons.swift)
+                StatusIconsGuideSections()
+
                 // MARK: - Export Formats
                 Section {
                     formatRow(
                         format: "Scan4D",
-                        desc: "Default format. Includes scan4d_metadata, relocalization worldmap, " +
+                        desc: "Default format. Includes scan4d_metadata, ARKit feature points, " +
                               "room layout (roomplan) and spatial-link (stitching) metadata, " +
                               "plus the full Polycam raw import payload " +
                               "(images, depth, cameras, mesh_info). Zip archive."
@@ -162,26 +211,45 @@ struct UserGuideView: View {
                               "(cameras/), and mesh_info.json. Zip archive."
                     )
                     formatRow(
-                        format: "RAW",
-                        desc: "Nerfstudio-compatible bundle: RGB images, 16-bit depth maps, " +
-                              "and camera poses (transforms.json). Use for NeRF/3DGS reconstruction."
+                        format: "Nerfstudio",
+                        desc: "Trains as-is in Nerfstudio and LichtFeld Studio — no conversion. " +
+                              "RGB images, camera poses (transforms.json), 16-bit depth, " +
+                              "operator masks for 360° frames, plus the ARKit mesh with its colors, " +
+                              "RoomPlan and registration for the training-side pipeline."
+                    )
+                    formatRow(
+                        format: "Flame3D",
+                        desc: "Upload-ready input for flame3d, which finds, captions and lets you " +
+                              "search the objects in your scan. Frames, camera poses, depth and the " +
+                              "colored mesh, in the layout flame3d reads. Zip archive."
                     )
                     formatRow(
                         format: "USDZ",
-                        desc: "Apple's 3D format converted from on-device mesh via ModelIO. " +
+                        desc: "Apple's 3D format converted from on-device mesh via ModelIO, with its colors. " +
                               "Opens natively on iPhone/iPad with Quick Look."
                     )
                     formatRow(
                         format: "PLY",
-                        desc: "Polygon file with embedded vertex colors, converted from on-device OBJ mesh."
+                        desc: "Polygon file converted from the on-device mesh, with per-vertex colors."
                     )
                     formatRow(
                         format: "OBJ",
                         desc: "Wavefront 3D mesh file. Universal format supported by almost all " +
-                              "3D software. No vertex colors."
+                              "3D software, with per-vertex colors."
+                    )
+                    formatRow(
+                        format: "Focus scan",
+                        desc: "Focus scans always export as one zip, whatever format is selected: the " +
+                              "photos with their poses, LiDAR depth and confidence, the region box " +
+                              "(focus_region.json) and capture logs. With the Privacy Filter on, people " +
+                              "are blurred, and a photo that can't be checked is left out."
                     )
                 } header: {
                     Text("EXPORT FORMATS")
+                } footer: {
+                    Text("Mesh exports (Nerfstudio, Flame3D, USDZ, PLY, OBJ) color the mesh from your captured " +
+                         "frames first if the scan hasn't been colored yet, so the first such export " +
+                         "of a scan takes a little longer.")
                 }
                 .listRowBackground(Color.white.opacity(0.05))
 

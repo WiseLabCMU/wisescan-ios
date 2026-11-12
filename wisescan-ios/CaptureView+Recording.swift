@@ -10,6 +10,11 @@ import os
 extension CaptureView {
 
     func toggleRecording() {
+        // A focus scan's one divergence from a rescan is what Start and Stop do.
+        if scanStore.activeScanKind == .focus {
+            toggleStillCapture()
+            return
+        }
         if isRecording {
             // Every user-initiated stop confirms via the menu — the old rescan bypass saved
             // immediately on an accidental tap with no way to cancel/discard (2026-07-22 field
@@ -18,6 +23,9 @@ extension CaptureView {
             // stopRecording()/performStopRecording directly and are unaffected.
             showStopMenu = true
         } else {
+            // Privacy Filter past its time limit (or required here): back on, and this tap
+            // doesn't start, so the change is seen before anything is captured.
+            if enforcePrivacyFilterRules(atRecordStart: true) { return }
             // Link-adjacent recording ALWAYS starts programmatically after the user aligns to the
             // previous scan: confirmAlignment / pinAndExtend capture Pin A, reset into the new map,
             // place Pin B, then call startRecording() directly (awaitStabilizationAndPlacePinB),
@@ -261,9 +269,6 @@ extension CaptureView {
         // Start a timer to track recording duration
         recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             recordingSeconds += 1
-            if recordingSeconds > 4 {
-                showExtendPrompt = false // Auto-dismiss after recording starts
-            }
         }
     }
 
@@ -364,6 +369,12 @@ extension CaptureView {
         // another thread; this also guarantees no further frames are captured during shutdown.
         // (FrameCaptureSession.pauseCapture() contract — see its docs.)
         capSession.pauseCapture()
+        // Freeze sweep coverage at the Stop tap, in lockstep with pauseCapture — NOT at
+        // isRecording=false in the save pipeline. Freezing later would keep the accumulator
+        // raycasting through the world-map export window (the gen-8 contention) and stamp frames
+        // that cameras/ never received. nil only if the capture view is already gone; saveScan
+        // names that case in incomplete_artifacts.
+        let sweepCoverage = scanStore.freezeSweepCoverage?()
         // Snapshot the save-routing state NOW, on main, while it's still valid. The pipeline below
         // resolves asynchronously, and a teardown/reset between here and finishStopRecording (most
         // notably onDisappear's resetCaptureState) would otherwise clear scanStore — making an
@@ -385,13 +396,15 @@ extension CaptureView {
             let rawDataPath = capSession.stop()
             DispatchQueue.main.async {
                 self.finishStopRecording(rawDataPath: rawDataPath, locationId: locationId,
-                                         scanCase: scanCase, completion: completion)
+                                         scanCase: scanCase, sweepCoverage: sweepCoverage,
+                                         completion: completion)
             }
         }
     }
 
     // swiftlint:disable:next function_body_length cyclomatic_complexity
     private func finishStopRecording(rawDataPath: URL?, locationId: UUID?, scanCase: ScanCase,
+                                     sweepCoverage: SweepCoverageSnapshot?,
                                      completion: ((CapturedScan?) -> Void)? = nil) {
         // SNAPSHOT the mesh from the still-active AR session: a handful of memcpys (raw vertex/face
         // buffers + segmentation pixels + camera matrices), all by value. This is the only mesh work
@@ -485,6 +498,7 @@ extension CaptureView {
                             locationId: locationId, meshData: Data(), vertexCount: 0, faceCount: 0,
                             rawDataPath: rawDataPath, vertexColors: nil, worldMapURL: mapURL,
                             thumbnailData: thumbnailData, scanCase: scanCase,
+                            sweepCoverage: sweepCoverage,
                             worldMapSuspect: mapSuspect)
                         self.frameCaptureSession = FrameCaptureSession()
                         MetaWearableManager.shared.activeCaptureSession = self.frameCaptureSession
@@ -519,6 +533,7 @@ extension CaptureView {
                     rawDataPath: rawDataPath,
                     vertexColors: nil,
                     worldMapURL: nil,
+                    sweepCoverage: sweepCoverage,
                     thumbnailData: thumbnailData,
                     scanCase: scanCase
                 )
@@ -670,19 +685,28 @@ extension CaptureView {
                 let vertexColors = VertexColorAccumulator.generateNormalsColors(objData: meshData)
 
                 DispatchQueue.main.async {
-                    // Package the Mesh OBJ and ARWorldMap into the raw data directory for zipping.
+                    // Package the ARWorldMap into the raw data directory for zipping.
                     // DECISION 3: raw artifacts only — roomplan.json lands post-save via the
                     // deferred RoomBuilder; registration.json / mesh_proxy.obj are written by
-                    // ScanPostprocessor later.
+                    // ScanPostprocessor later. raw_data/mesh.obj is NOT written here any more:
+                    // saveScan writes the authoritative copy and hard-links this mirror from it,
+                    // so the same tens of MB no longer hit the disk twice on the save transition.
                     if let rawDir = rawDataPath {
-                        let meshFileURL = rawDir.appendingPathComponent("mesh.obj")
-                        try? meshData.write(to: meshFileURL)
                         let destMapURL = rawDir.appendingPathComponent("relocalization.worldmap")
-                        try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
+                        // Hard-link the map (immutable once exported, up to 50 MB) instead of
+                        // copying it; saveScan links its own copy from the same temp file.
+                        if (try? FileManager.default.linkItem(at: mapURL, to: destMapURL)) == nil {
+                            try? FileManager.default.copyItem(at: mapURL, to: destMapURL)
+                        }
                         // Face-aligned per-face classification (the proxy build's subtraction
                         // input). One byte per mesh.obj face; absent when the classifier was off.
+                        // .atomic: files in this directory may end up hard-link siblings after
+                        // save, and the invariant the links rest on is that NO writer in the app
+                        // ever truncates in place — a non-atomic write here would be the sole
+                        // exception, safe only because it happens to run before the links exist.
                         if let classes = result.faceClasses {
-                            try? classes.write(to: rawDir.appendingPathComponent("face_classes.bin"))
+                            try? classes.write(to: rawDir.appendingPathComponent("face_classes.bin"),
+                                               options: .atomic)
                         }
                     }
 
@@ -700,6 +724,7 @@ extension CaptureView {
                             rawDataPath: rawDataPath,
                             vertexColors: vertexColors,
                             worldMapURL: mapURL,
+                            sweepCoverage: sweepCoverage,
                             thumbnailData: thumbnailData,
                             scanCase: capturedScanCase,
                             worldMapSuspect: mapSuspect
@@ -739,6 +764,7 @@ extension CaptureView {
                             worldMapURL: mapURL,
                             thumbnailData: thumbnailData,
                             scanCase: capturedScanCase,
+                            sweepCoverage: sweepCoverage,
                             worldMapSuspect: mapSuspect
                         )
 
@@ -794,8 +820,8 @@ extension CaptureView {
                 alert.addAction(UIAlertAction(title: "Try Again", style: .default) { _ in
                     self.saveMessage = "Saving World Map..."
                     // Keep the full-screen extend overlay text honest during the retry (otherwise it
-                    // keeps showing the stale "📍 Saving scan..." behind the alert).
-                    if isExtendFlow { self.extendPhaseText = "📍 Retrying world map…" }
+                    // keeps showing the stale "Saving scan..." behind the alert).
+                    if isExtendFlow { self.extendPhaseText = "Retrying world map…" }
                     self.exportWorldMapThenContinue(
                         isExtendFlow: isExtendFlow, completion: completion, proceed: proceed
                     )
@@ -849,10 +875,10 @@ extension CaptureView {
     }
 
     /// Deletes a stopped-and-baked pending scan that was never saved (naming-dialog discard,
-    /// after its destructive confirmation): removes the temp artifacts — raw frames dir and
-    /// world map, which both live in FileManager.temporaryDirectory and saveScan would
-    /// normally move — and clears the save-flow state. Dropping pendingScan alone would
-    /// leak the (potentially large) raw-frames dir.
+    /// after its destructive confirmation): removes the temp artifacts — raw frames dir, world
+    /// map, and its feature-point-cloud sidecar, which all live in FileManager.temporaryDirectory
+    /// and saveScan would normally move — and clears the save-flow state. Dropping pendingScan
+    /// alone would leak the (potentially large) raw-frames dir.
     func discardPendingScan() {
         if let pending = pendingScan {
             if let rawDir = pending.rawDataPath {
@@ -860,6 +886,7 @@ extension CaptureView {
             }
             if let mapURL = pending.worldMapURL {
                 try? FileManager.default.removeItem(at: mapURL)
+                try? FileManager.default.removeItem(at: FeaturePointCloudFile.tempURL(besideWorldMap: mapURL))
             }
         }
         pendingScan = nil
@@ -879,7 +906,7 @@ extension CaptureView {
         guard let sourceScan = try? modelContext.fetch(srcDescriptor).first,
               let targetScan = try? modelContext.fetch(tgtDescriptor).first else {
             stitchLog.error("could not resolve endpoint scans (source=\(srcId.uuidString.prefix(8), privacy: .public) target=\(targetScanId.uuidString.prefix(8), privacy: .public))")
-            self.showTransientMessage("⚠️ Scan saved but spatial link failed to write", duration: 5)
+            self.showTransientMessage("Scan saved but spatial link failed to write", duration: 5, systemImage: "exclamationmark.triangle.fill", tint: .orange)
             scanStore.pendingStitchLink = nil
             return
         }
@@ -900,7 +927,7 @@ extension CaptureView {
             stitchLog.info("created link source=\(srcId.uuidString.prefix(8), privacy: .public) target=\(targetScanId.uuidString.prefix(8), privacy: .public)")
         } catch {
             stitchLog.error("failed to save link: \(error.localizedDescription, privacy: .public)")
-            self.showTransientMessage("⚠️ Scan saved but spatial link failed to write", duration: 5)
+            self.showTransientMessage("Scan saved but spatial link failed to write", duration: 5, systemImage: "exclamationmark.triangle.fill", tint: .orange)
         }
         scanStore.pendingStitchLink = nil
     }
@@ -917,10 +944,12 @@ extension CaptureView {
 
     /// Shows a transient message that auto-clears after `duration` seconds.
     /// Uses a version counter to avoid clearing a newer message.
-    func showTransientMessage(_ text: String, duration: TimeInterval) {
+    func showTransientMessage(_ text: String, duration: TimeInterval,
+                              systemImage: String? = nil, tint: Color = .white) {
         messageVersion += 1
         let currentVersion = messageVersion
         saveMessage = text
+        saveMessageIcon = systemImage.map { (name: $0, tint: tint) }
         DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
             if messageVersion == currentVersion {
                 saveMessage = nil
@@ -948,6 +977,10 @@ extension CaptureView {
             locationId = nil // ScanFileManager will create a new location with this name
         }
 
+        // #40 verification: the fix moved the heavy write off main, but nothing logged how
+        // long the main-thread portion actually costs. This is the number that proves it —
+        // and the 18 s teardown stall of 2026-08-25 was caught only by luck, not by a timer.
+        let saveStart = CACurrentMediaTime()
         let savedScan = ScanFileManager.shared.saveScan(
             context: modelContext,
             locationId: locationId,
@@ -959,6 +992,7 @@ extension CaptureView {
             rawDataPath: pending.rawDataPath,
             vertexColors: pending.vertexColors,
             worldMapURL: pending.worldMapURL,
+            sweepCoverage: pending.sweepCoverage,
             thumbnailData: pending.thumbnailData,
             scanCase: pending.scanCase,
             worldMapSuspect: pending.worldMapSuspect
@@ -976,6 +1010,9 @@ extension CaptureView {
             isWaitingToSave = false
             return
         }
+
+        PerfDiag.log(String(format: "[Save] saveScan returned in %.0f ms on the main thread (#40)",
+                            (CACurrentMediaTime() - saveStart) * 1000))
 
         // Write deferred stitching.json now that we have the real target scan ID
         writeStitchingLinkIfPending(targetScanId: savedScan.id)
@@ -1016,6 +1053,7 @@ extension CaptureView {
             guard !Task.isCancelled else { return }
             selectedTab = 2
             if let loc = savedLoc {
+                ScanListFilter.reveal(.room)   // the space's list must show the new scan
                 scanStore.navigationPath = NavigationPath()
                 scanStore.navigationPath.append(loc)
             }

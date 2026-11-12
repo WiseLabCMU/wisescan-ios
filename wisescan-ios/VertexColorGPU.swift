@@ -36,6 +36,14 @@ enum VertexColorGPU {
     private(set) static var normalBuffer: MTLBuffer?
     private(set) static var vertexCount: Int = 0
 
+    /// Per-frame result buffer, allocated once per colorize session and reused by every frame
+    /// rather than re-made per frame. Safe to reuse because the kernel writes EVERY slot it owns
+    /// (`results[tid].rgba`/`.weight` are set before any other branch, right after the tid bound
+    /// check), so no stale observation from frame n can survive into frame n+1; and because
+    /// `projectFrame` still waits for completion, so no dispatch is reading it while the next
+    /// frame re-encodes. Grown, never shrunk — only the first `vertexCount` entries are read.
+    private static var resultBuffer: MTLBuffer?
+
     // MARK: - Packed result struct (must match Metal VertexColorResult)
 
     struct VertexColorResult {
@@ -101,6 +109,7 @@ enum VertexColorGPU {
     static func releaseBuffers() {
         vertexBuffer = nil
         normalBuffer = nil
+        resultBuffer = nil
         vertexCount = 0
     }
 
@@ -199,9 +208,14 @@ enum VertexColorGPU {
             occlusionGradedMinFacing: AppConstants.colorizationOcclusionGradedMinFacing
         )
 
-        // Output buffer
+        // Output buffer — allocated on the first frame of the session and reused after that.
+        // This used to be a fresh V x 8-byte buffer per frame: at 230k vertices that is ~1.8 MB
+        // allocated and freed up to `maxColorizationFrames` times per colorize.
         let resultSize = vertexCount * MemoryLayout<VertexColorResult>.stride
-        guard let resultBuf = device.makeBuffer(length: resultSize, options: .storageModeShared) else { return nil }
+        if (resultBuffer?.length ?? 0) < resultSize {
+            resultBuffer = device.makeBuffer(length: resultSize, options: .storageModeShared)
+        }
+        guard let resultBuf = resultBuffer else { return nil }
 
         // Dispatch
         guard let cmdBuf = queue.makeCommandBuffer(),
@@ -223,6 +237,15 @@ enum VertexColorGPU {
         encoder.endEncoding()
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
+
+        // A failed dispatch must not be read back. With the reused buffer this stopped being
+        // merely-undefined: the readback would deterministically return frame n-1's complete
+        // observation set, double-counting that frame in the weighted median under frame n's
+        // camera. Returning nil hands this frame to the caller's CPU fallback instead.
+        guard cmdBuf.error == nil else {
+            if PerfDiag.enabled { PerfDiag.log("[VertexColorGPU] dispatch failed: \(String(describing: cmdBuf.error)) — frame falls back to CPU") }
+            return nil
+        }
 
         // Read back results
         let ptr = resultBuf.contents().bindMemory(to: VertexColorResult.self, capacity: vertexCount)

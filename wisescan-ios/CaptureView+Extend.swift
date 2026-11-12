@@ -26,7 +26,7 @@ extension CaptureView {
         // already gated this way in awaitStabilizationAndPlacePinB; gate Pin A symmetrically
         // so a bad source pose is never stored in the first place.
         guard frame.camera.trackingState == .normal else {
-            showTransientMessage("Tracking unstable — hold steady, then tap Pin & Extend again", duration: 3)
+            showTransientMessage("Tracking unstable — hold steady, then tap Save & Scan Adjacent again", duration: 3)
             return
         }
 
@@ -46,7 +46,7 @@ extension CaptureView {
         // Show extend overlay and start save
         scanStore.capturePhase = .extending
         showExtendOverlay = true
-        extendPhaseText = "📍 Saving scan..."
+        extendPhaseText = "Saving scan..."
 
         // Stop the recording timer
         recordingTimer?.invalidate()
@@ -72,7 +72,7 @@ extension CaptureView {
             }
 
             // Phase 2: Session restart
-            self.extendPhaseText = "📍 Stay still — starting new session..."
+            self.extendPhaseText = "Stay still — starting new session..."
             self.scanStore.capturePhase = .saving
 
             // Create new location for the adjacent space
@@ -146,7 +146,7 @@ extension CaptureView {
 
                 didLinkSuccessfully = true
                 self.showExtendOverlay = false
-                self.showTransientMessage("📍 Connected! Scanning new space...", duration: 3)
+                self.showTransientMessage("Connected! Scanning new space...", duration: 3, systemImage: "checkmark.seal.fill", tint: .green)
             }
         }
     }

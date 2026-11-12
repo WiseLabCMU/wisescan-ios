@@ -21,6 +21,13 @@ import RoomPlan
 ///   a bootstrap in the scan's own capture frame. The NEXT rescan relocalizes into that raw
 ///   frame while its ghost mesh is canonical — the ghost loader undoes this scan's transform
 ///   (`inverseForGhost`) so ghost + live stay co-framed (visual overlay, manual nudge, ICP probe).
+/// - `arkit_features.bin` — RAW. The feature cloud is serialized from that same `ARWorldMap` at
+///   save time, BEFORE registration runs, so it is permanently in this scan's raw capture frame —
+///   even though the Nerfstudio bundle ships it beside the canonical `mesh.obj` / `roomplan.json`.
+/// - `sweep_coverage.bin` — RAW. The sweep-coverage grid is accumulated from capture poses + depth
+///   during the sweep, so it is co-framed with `cameras/` at capture time. Nothing here re-bases it,
+///   and the ScanPostprocessor registration bake rewrites only `mesh.obj` / `roomplan.json` — it
+///   must never route this file (re-binning a cell grid under a rigid transform is not lossless).
 /// - `roomplan_raw.json` — RAW (Apple's opaque Codable, kept for round-tripping).
 /// - `registration.json` — the sidecar written here: the transform + fit stats + whether it was
 ///   applied, so every consumer (ghost loader, future stitch/pose-graph work) can recover the
@@ -78,7 +85,9 @@ enum SaveRegistration {
     private static let sidecarName = "registration.json"
     private static let artifactNote =
         "mesh.obj and roomplan.json are in the location's canonical (original-scan) frame; "
-        + "relocalization.worldmap and roomplan_raw.json remain in this scan's raw capture frame"
+        + "relocalization.worldmap, roomplan_raw.json, arkit_features.bin and sweep_coverage.bin "
+        + "remain in this scan's "
+        + "raw capture frame"
 
     // MARK: - The save-time registration
 
@@ -245,7 +254,7 @@ enum SaveRegistration {
                                                 confidence: $0.confidence)
             })
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         guard let out = try? encoder.encode(decoded),
               (try? out.write(to: url, options: .atomic)) != nil else { return false }
         return true
@@ -258,7 +267,7 @@ enum SaveRegistration {
     @discardableResult
     static func writeSidecar(_ sidecar: Sidecar, to directory: URL) -> Bool {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         guard let data = try? encoder.encode(sidecar),
               (try? data.write(to: directory.appendingPathComponent(sidecarName), options: .atomic)) != nil
         else { return false }
@@ -367,24 +376,41 @@ enum SaveRegistration {
     /// through verbatim (faces, comments — the save's OBJ carries no normals; extra vertex
     /// components like colors are preserved untransformed). One O(n) text pass — runs on the
     /// save pipeline's background queue (and at ghost load, to undo).
+    ///
+    /// Appends into ONE pre-reserved output string rather than collecting a `[String]` of lines
+    /// and `joined()`-ing it. A room-scale mesh is 600k-1.2M lines, and a transformed vertex line
+    /// is past the small-string inline limit, so the line array was that many heap allocations
+    /// held live at once plus a whole-file string for the join; this replaces both with one output
+    /// string — net one fewer whole-file copy inside the registration bake's rollback window
+    /// (measured: 257 MB peak → 198 MB on a 36 MB mesh). The `[Substring]` from split() still
+    /// materializes (~32 bytes/line) in both versions. The formatting is deliberately unchanged
+    /// (same interpolation, same passthrough), so the output bytes are identical — fuzz-verified
+    /// old-vs-new across 132 cases and locked by SaveRegistrationOBJTests.
     static func transformOBJ(_ data: Data, by m: simd_float4x4) -> Data {
         guard let text = String(data: data, encoding: .utf8) else { return data }
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        var out = [String]()
-        out.reserveCapacity(lines.count)
-        for line in lines {
+        var out = String()
+        // ~3% slack: the output is reliably ~0.5% LONGER than the input (Float's description
+        // prints more digits than authored coordinates), so an exact-size reserve overruns on
+        // essentially every real bake and pays one doubling realloc to ~2x the file.
+        out.reserveCapacity(text.utf8.count + text.utf8.count / 32)
+        var needsSeparator = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if needsSeparator { out += "\n" }
+            needsSeparator = true
             if line.hasPrefix("v ") {
                 let c = line.dropFirst(2).split(separator: " ")
                 if c.count >= 3, let x = Float(c[0]), let y = Float(c[1]), let z = Float(c[2]) {
                     let p = m * SIMD4<Float>(x, y, z, 1)
-                    var v = "v \(p.x) \(p.y) \(p.z)"
-                    for extra in c.dropFirst(3) { v += " \(extra)" }
-                    out.append(v)
+                    out += "v \(p.x) \(p.y) \(p.z)"
+                    for extra in c.dropFirst(3) {
+                        out += " "
+                        out.append(contentsOf: extra)
+                    }
                     continue
                 }
             }
-            out.append(String(line))
+            out.append(contentsOf: line)
         }
-        return Data(out.joined(separator: "\n").utf8)
+        return Data(out.utf8)
     }
 }

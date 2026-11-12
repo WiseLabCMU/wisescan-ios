@@ -70,7 +70,7 @@ enum PhotometricRigSolver {
     /// `stills` are the solve set (steadiest-first, capped) — jpg + capture-time phone pose.
     static func solve(stills: [(jpgURL: URL, phoneToWorld: simd_float4x4)],
                       rawDataDir: URL,
-                      bounds: RigCalibrationSolver.SolveBounds,
+                      bounds: RigModel.SolveBounds,
                       report: (String) -> Void) -> Result? {
         let groups = EquirectYawAnchor.keyframeSampleGroups(
             rawDataDir: rawDataDir,
@@ -154,7 +154,6 @@ enum PhotometricRigSolver {
         let profile = RigProfile(
             offsetPhone: solvedT,
             yaw: solvedYaw,
-            pitchResidual: 0,
             // The persistence slot wants "≥0, finite, lower is better" (isSolved gate).
             // 1 − ZNCC is exactly that; it is NOT pixels and solver ≥15 no longer writes
             // residual_px_rms to the sidecar.
@@ -176,8 +175,8 @@ enum PhotometricRigSolver {
         znccs.reserveCapacity(stills.count * groups.count)
         for (index, still) in stills.enumerated() {
             if let only, index != only { continue }
-            let rig = RigCalibrationSolver.composeRigTransform(
-                phoneToWorld: still.phoneToWorld, offsetPhone: t, yaw: yaw, pitchResidual: 0)
+            let rig = RigModel.composeRigTransform(
+                phoneToWorld: still.phoneToWorld, offsetPhone: t, yaw: yaw)
             let camPos = SIMD3<Float>(rig.columns.3.x, rig.columns.3.y, rig.columns.3.z)
             let rot = simd_float3x3(
                 SIMD3<Float>(rig.columns.0.x, rig.columns.0.y, rig.columns.0.z),
@@ -192,7 +191,7 @@ enum PhotometricRigSolver {
                     let local = rot * (sample.world - camPos)
                     let length = simd_length(local)
                     guard length > 0.3 else { continue }
-                    let (ex, ey) = RigCalibrationSolver.dirToEquirect(
+                    let (ex, ey) = RigModel.dirToEquirect(
                         dir: local / length, width: width, height: height)
                     let x = min(max(Int(ex), 0), width - 1)
                     let y = min(max(Int(ey), 0), height - 1)

@@ -98,7 +98,7 @@ extension CaptureView {
         // flips this to .recording on success and back to .idle (clearing the overlay) on failure.
         scanStore.capturePhase = .saving
         showExtendOverlay = true
-        extendPhaseText = "📍 Aligning — hold still..."
+        extendPhaseText = "Aligning — hold still..."
 
         hapticGenerator.impactOccurred()
 
@@ -138,7 +138,7 @@ extension CaptureView {
 
             didLinkSuccessfully = true
             self.showExtendOverlay = false
-            self.showTransientMessage("📍 Aligned & connected! Scanning new space...", duration: 3)
+            self.showTransientMessage("Aligned & connected! Scanning new space...", duration: 3, systemImage: "checkmark.seal.fill", tint: .green)
         }
     }
 

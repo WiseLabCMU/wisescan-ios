@@ -2,11 +2,15 @@ import SwiftUI
 
 struct DashboardView: View {
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.developerMode) private var developerMode = false
     @State private var showSettings = false
     @State private var serverStatus: ServerStatus = .unknown
+    /// The control plane didn't answer and there is an Upload URL: the card shows that instead.
+    @State private var controlPlaneDown = false
     @State private var wearableManager = MetaWearableManager.shared
     @State private var thetaManager = ThetaCameraManager.shared
+    @State private var bleManager = ThetaBLEManager.shared
 
     enum ServerStatus {
         case unknown, checking, available, unavailable
@@ -33,7 +37,7 @@ struct DashboardView: View {
                                     .frame(width: 40)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Upload Server")
+                                    Text(usesControlPlane && !controlPlaneDown ? "Control Plane" : "Upload Server")
                                         .font(.headline)
                                         .foregroundColor(.white)
                                     Text(serverStatusLabel)
@@ -54,16 +58,16 @@ struct DashboardView: View {
                                     }
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 8)
-                                    .background(uploadURL.isEmpty ? Color.gray.opacity(0.2) : Color.cyan.opacity(0.2))
-                                    .foregroundColor(uploadURL.isEmpty ? .gray : .cyan)
+                                    .background(!serverConfigured ? Color.gray.opacity(0.2) : Color.cyan.opacity(0.2))
+                                    .foregroundColor(!serverConfigured ? .gray : .cyan)
                                     .cornerRadius(8)
                                 }
-                                .disabled(serverStatus == .checking || uploadURL.isEmpty)
+                                .disabled(serverStatus == .checking || !serverConfigured)
                             }
 
-                            Text(uploadURL.isEmpty ? "No upload server configured — set in Settings" : uploadURL)
+                            Text(serverCaption)
                                 .font(.caption2)
-                                .foregroundColor(uploadURL.isEmpty ? .orange : .white.opacity(0.7))
+                                .foregroundColor(!serverConfigured ? .orange : .white.opacity(0.7))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                         }
@@ -75,6 +79,9 @@ struct DashboardView: View {
                         )
                         .cornerRadius(16)
                         .padding(.horizontal)
+
+                        // Focus scans the lab asked this device for (a worker's queue).
+                        ControlPlaneTodoCard()
 
                         // Local Servers (mDNS) — not yet implemented
                         /*
@@ -230,9 +237,18 @@ struct DashboardView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView()
             }
+            // Blocking BLE condition the operator must resolve in iOS Settings (corrupt
+            // GATT cache) — raised prominently rather than left in the event log.
+            .alert("Re-pair the 360° camera",
+                   isPresented: Binding(get: { bleManager.actionRequired != nil },
+                                        set: { if !$0 { bleManager.actionRequired = nil } })) {
+                Button("OK", role: .cancel) { bleManager.actionRequired = nil }
+            } message: {
+                Text(bleManager.actionRequired ?? "")
+            }
             .preferredColorScheme(.dark)
             .onAppear {
-                if !uploadURL.isEmpty { checkServer() }
+                if serverConfigured { checkServer() }
                 // Refresh wearable state when returning to this tab
                 wearableManager.refreshDevices()
             }
@@ -276,7 +292,38 @@ struct DashboardView: View {
         }
     }
 
+    /// With a control plane set it is the server that matters: it hands out upload destinations.
+    /// While it is down, exports go to the Upload URL (ExportUploadTarget), so that is checked.
+    private var usesControlPlane: Bool { ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil }
+
+    private var serverConfigured: Bool { usesControlPlane || !uploadURL.isEmpty }
+
+    private var serverCaption: String {
+        if usesControlPlane && controlPlaneDown { return "Control plane unreachable — uploading to \(uploadURL)" }
+        if usesControlPlane { return controlPlaneHost }
+        return uploadURL.isEmpty ? "No upload server configured — set in Settings" : uploadURL
+    }
+
     private func checkServer() {
+        if usesControlPlane {
+            serverStatus = .checking
+            Task {
+                let reachable = await ControlPlaneSync.shared.isReachable()
+                controlPlaneDown = !reachable && !uploadURL.isEmpty
+                if controlPlaneDown {
+                    checkUploadURL()
+                } else {
+                    serverStatus = reachable ? .available : .unavailable
+                }
+            }
+            return
+        }
+        controlPlaneDown = false
+        checkUploadURL()
+    }
+
+    /// Any HTTP answer from the Upload URL counts as reachable.
+    private func checkUploadURL() {
         guard !uploadURL.isEmpty, let url = URL(string: uploadURL) else {
             serverStatus = .unknown
             return
@@ -540,6 +587,10 @@ struct WearableCard: View {
 /// connected. Camera management (add another / edit Wi-Fi / forget) is always
 /// reachable via the Manage menu. See ThetaCameraManager.
 struct ThetaCameraCard: View {
+    /// The camera bench (still resolution, Test Shutter, its timings and Download & Preview) is
+    /// Developer Mode only: the app already forces maximum resolution on every connect, and a test
+    /// shot is removed from the camera only by Download, so the three go together.
+    @AppStorage(AppConstants.Key.developerMode) private var developerMode = AppConstants.developerMode
     @Bindable var manager: ThetaCameraManager
     @State private var showNetworkSheet = false
     @State private var sheetSSID = ""
@@ -584,7 +635,11 @@ struct ThetaCameraCard: View {
     private var statusLabel: String {
         switch manager.state {
         case .disconnected:
-            return manager.hasStoredNetwork ? "Saved — tap Connect" : "Not set up"
+            if manager.hasStoredNetwork { return "Saved — tap Connect" }
+            // BLE identity stored but no Wi-Fi yet (a hand-off that didn't finish):
+            // "Not set up" was a lie sitting right above live BLE link events.
+            return UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial) != nil
+                ? "Bluetooth paired — finish Wi-Fi in Add Camera" : "Not set up"
         case .connecting: return "Checking…"
         // The header already names the camera (model · serial) — repeating the model
         // here was redundant; the status line carries what the header doesn't.
@@ -646,19 +701,41 @@ struct ThetaCameraCard: View {
                                   bleID: UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLEPeripheralID))
             bleAddStatus = nil
             showNetworkSheet = false
+            hasAttemptedConnect = true
+            eventsExpanded = true
             manager.connect()
         } catch ThetaBLEManager.BLEError.needsWiFiSetup(let model, let serial) {
-            // Not a failure: BLE identified the camera for free. Hand off to manual
-            // setup prefilled with what we learned (SSID form is derived — the user
-            // should confirm it against the camera's own Wi-Fi screen).
-            sheetSSID = ThetaCameraManager.factorySSID(model: model, serial: serial) ?? ""
-            sheetPassphrase = serial
-            sheetPassAutoFill = serial
-            bleAddStatus = "Found \(model) · \(serial). Bluetooth setup is THETA X only for now — "
-                + "press the camera's power button so its Wi-Fi is awake, check the SSID against "
-                + "the camera's screen, then Save & Connect."
+            // Not a failure: BLE identified the camera for free. When the model is one
+            // whose factory SSID we can derive (Z1: THETAYN<serial>.OSC, SDK-confirmed),
+            // finish the add automatically — the X path already auto-saves its derived
+            // SSID without a confirm, and the field showed the manual hand-off dead-ends
+            // ("Save & Connect… back at the Add button, no feedback", 2026-08-25). A
+            // wrong suffix just fails the join visibly, editable in Camera & Network.
+            if let ssid = ThetaCameraManager.factorySSID(model: model, serial: serial) {
+                manager.saveNetwork(ssid: ssid, passphrase: serial)
+                manager.upsertProfile(model: model, serial: serial, ssid: ssid, passphrase: serial,
+                                      bleID: UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLEPeripheralID))
+                bleAddStatus = nil
+                showNetworkSheet = false
+                hasAttemptedConnect = true
+                eventsExpanded = true
+                manager.connect()
+            } else {
+                // Unknown model: prefilled manual hand-off, the user confirms the SSID
+                // against the camera's own screen.
+                sheetSSID = ""
+                sheetPassphrase = serial
+                sheetPassAutoFill = serial
+                bleAddStatus = "Found \(model) · \(serial). Type the SSID shown on the camera's "
+                    + "Wi-Fi screen, then Save & Connect."
+            }
         } catch {
-            bleAddStatus = "Bluetooth setup failed: \(error.localizedDescription)"
+            // A stale GATT cache surfaces here as a terse technical linkState error. The
+            // BLE manager has already composed the real, actionable guidance for exactly
+            // this case — prefer it over the raw string so this inline status says what to
+            // DO, not just that it failed.
+            bleAddStatus = ThetaBLEManager.shared.actionRequired
+                ?? "Bluetooth setup failed: \(error.localizedDescription)"
         }
     }
 
@@ -757,6 +834,11 @@ struct ThetaCameraCard: View {
                                               serial: ThetaCameraManager.factoryPassphrase(fromSSID: ssid),
                                               ssid: ssid, passphrase: sheetPassphrase, bleID: nil)
                         showNetworkSheet = false
+                        // The card mounts AFTER this action's state transitions, so its
+                        // onChange(of: state) can miss them — open the events feed here
+                        // so the first connect narrates instead of running silently.
+                        hasAttemptedConnect = true
+                        eventsExpanded = true
                         if sheetIsAdding, let added = manager.profiles.first(where: { $0.ssid == ssid }) {
                             manager.activateProfile(added)
                         } else {
@@ -767,7 +849,8 @@ struct ThetaCameraCard: View {
                     .disabled(sheetSSID.trimmingCharacters(in: .whitespaces).isEmpty || sheetPassphrase.isEmpty)
                 }
 
-                if manager.hasStoredNetwork {
+                if manager.hasStoredNetwork || !manager.profiles.isEmpty
+                    || UserDefaults.standard.string(forKey: AppConstants.Key.thetaBLESerial) != nil {
                     Section {
                         Button("Forget This Camera", role: .destructive) {
                             manager.forgetCamera()
@@ -799,7 +882,11 @@ struct ThetaCameraCard: View {
         // State machine per field spec: (1) not set up → a single Meta-style add
         // button; (2) saved → identity + connect; (3) events appear only once
         // Connect has been attempted; (4) Test Shutter appears once Wi-Fi completes.
-        if !manager.hasStoredNetwork {
+        // `profiles` is the observable read that makes this branch re-evaluate the
+        // moment Save & Connect registers a camera. hasStoredNetwork alone reads
+        // UserDefaults — invisible to @Observable — so the card sat frozen on the Add
+        // button through the Z1's whole first connect (field, 2026-08-25).
+        if manager.profiles.isEmpty, !manager.hasStoredNetwork {
             Button(action: { openSheet(adding: true) }, label: {
                 HStack {
                     Image(systemName: "plus")
@@ -839,10 +926,32 @@ struct ThetaCameraCard: View {
                             .foregroundColor(.white.opacity(0.7))
                             .lineLimit(1)
                         if let battery = manager.batteryLevel {
-                            Text("· 🔋 \(Int(battery * 100))%")
+                            // SF Symbol, not an emoji: the 🔋 that used to sit here was the
+                            // first emoji rendered each session, and CoreText's first emoji
+                            // layout paid an ~18 s MobileGestalt XPC wait on main (#71) —
+                            // exactly at connect, where it also froze the BLE link window.
+                            Text("·")
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.7))
+                            Image(systemName: battery > 0.875 ? "battery.100" : battery > 0.625 ? "battery.75"
+                                  : battery > 0.375 ? "battery.50" : battery > 0.125 ? "battery.25" : "battery.0")
+                                .font(.caption)
+                                .foregroundColor(battery > 0.2 ? .white.opacity(0.7) : .orange)
+                            Text("\(Int(battery * 100))%")
                                 .font(.caption)
                                 .foregroundColor(.white.opacity(0.7))
                         }
+                    }
+                    // #57 P2: the password is derivable from the SSID beacon itself, so the
+                    // exposure is continuous while the camera is on — a persistent quiet badge,
+                    // not a one-time nag. The remedy is in the connect log line.
+                    if manager.activeCameraUsesFactoryPassword {
+                        HStack(spacing: 3) {
+                            Image(systemName: "lock.open.fill")
+                            Text("factory Wi-Fi password")
+                        }
+                        .font(.caption2)
+                        .foregroundColor(.orange)
                     }
                 }
                 Spacer()
@@ -926,8 +1035,9 @@ struct ThetaCameraCard: View {
                     .foregroundColor(.orange)
             }
 
-            // Still resolution — read from the camera, changeable via a preset menu.
-            if manager.isConnected {
+            // Still resolution — read from the camera, changeable via a preset menu. The app forces the
+            // maximum on every connect (forceMaxStillResolution), so this is a bench override.
+            if developerMode, manager.isConnected {
                 HStack {
                     Text("Still resolution")
                         .font(.caption)
@@ -990,8 +1100,9 @@ struct ThetaCameraCard: View {
                 .disabled(manager.state == .connecting)
 
                 // Rendered only once the Wi-Fi connection completes (field spec) —
-                // a permanently disabled gray button earned its keep never.
-                if manager.isConnected {
+                // a permanently disabled gray button earned its keep never. Developer Mode only,
+                // with the Download that removes its shot from the camera.
+                if developerMode, manager.isConnected {
                     Button(action: { manager.takePicture() }, label: {
                         HStack {
                             if manager.isCapturing {
@@ -1012,8 +1123,9 @@ struct ThetaCameraCard: View {
                 }
             }
 
-            // Last trigger result — the P2 spike's headline number (round-trip latency).
-            if let capture = manager.lastCapture {
+            // Last trigger result — the P2 spike's headline number (round-trip latency). Developer
+            // Mode only; an error still shows for everyone.
+            if developerMode, let capture = manager.lastCapture {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
                     Text("Captured in \(capture.roundTripMs) ms")

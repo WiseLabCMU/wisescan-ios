@@ -179,11 +179,12 @@
       "description": "Whether rig_rod_anchor_m came from the operator's measurement or the built-in default."
     },
     "elevation_offset_deg": {
+      "deprecated": true,
       "type": [
         "number",
         "null"
       ],
-      "description": "Uniform vertical registration offset between the equirect's rows and the latitude mapping, solved per scan (+ = image content sits lower than geometry predicts). Consumers sampling the equirect with the standard mapping should compensate by this much. This is a fitted nuisance parameter absorbing model error, not a measured camera property, and is expected to be retired."
+      "description": "Uniform vertical registration offset between the equirect's rows and the latitude mapping, solved per scan (+ = image content sits lower than geometry predicts). Consumers sampling the equirect with the standard mapping should compensate by this much. This is a fitted nuisance parameter absorbing model error, not a measured camera property, and is expected to be retired. DEPRECATED since solver v15 (2026-08): the parameter was retired, the key is purged from sidecars on re-solve, and readers must default an absent key to 0."
     },
     "frame_timestamp": {
       "type": "number",

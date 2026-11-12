@@ -66,10 +66,6 @@ private struct StitchRoomRow: Identifiable {
 
 struct CombinedMeshScreen: View {
     let request: ComponentRenderRequest
-    /// Colorize request for the shown scans (ids). Provided by the presenter, which owns
-    /// the models and the shared bulk-color path; nil hides the option. The screen
-    /// dismisses on selection so the per-tile progress is visible.
-    var onColor: (([UUID]) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
@@ -82,6 +78,20 @@ struct CombinedMeshScreen: View {
     @State private var proxyAvailability: ProxyAvailability?
     @State private var semanticViewMode: SemanticViewMode = .meshOnly
     @State private var detectedClasses: [SemanticClass] = []
+    /// The RICH RoomPlan categories present ACROSS EVERY map in the render — the legend's rows, and
+    /// therefore what the filter can speak about. A union by construction: the maps are all on
+    /// screen at once here (there is no scrubber and no hidden generation), so a row names something
+    /// that IS drawn, and hiding it hides that label in every map at once.
+    @State private var detectedCategories: [RoomPlanCategory] = []
+    /// Legend rows the user has switched off, as `RoomPlanCategory.legendKey` strings. Transient for
+    /// the same reason as the single-scan preview's: a persisted filter would silently omit geometry
+    /// from a render opened days later.
+    @State private var hiddenLabels: Set<String> = []
+    /// The label under the last tap in the 3D view (nil = no read-out showing).
+    @State private var tappedLabel: TappedSemanticLabel?
+    /// Drives the legend card's sizing — its rows are tap targets, and a phone and an iPad want
+    /// visibly different ones. See `SemanticLegendMetrics`.
+    @Environment(\.horizontalSizeClass) private var legendSizeClass
     @State private var isLoading = true
     @State private var showLegend = true
     /// Live adjuster values by link id (seeded from each link's stored nudge on appear). This is the
@@ -162,6 +172,9 @@ struct CombinedMeshScreen: View {
                         items: presentItems, stitchPoints: placement.stitchPoints,
                         colorByMap: colorByMap, semanticViewMode: semanticViewMode,
                         detectedClasses: $detectedClasses,
+                        detectedCategories: $detectedCategories,
+                        hiddenLabels: hiddenLabels,
+                        tappedLabel: $tappedLabel,
                         heightKeyRange: $heightKeyRange,
                         proxyAvailability: $proxyAvailability,
                         meshSourceMode: meshSourceMode,
@@ -231,6 +244,12 @@ struct CombinedMeshScreen: View {
             .preferredColorScheme(.dark)
             .onAppear(perform: seedDrafts)
             .onChange(of: alwaysAutocorrect) { _, newVal in applyAlwaysChange(newVal) }
+            // Turning the overlays off entirely (`.meshOnly`) leaves a read-out describing a box
+            // that is no longer drawn. The FILTER survives — its rows come back with the overlays,
+            // and dropping it would silently un-hide what the user hid.
+            .onChange(of: semanticViewMode) { _, mode in
+                if !mode.showOutlines { tappedLabel = nil }
+            }
             .animation(.easeInOut(duration: 0.2), value: showLegend)
             .animation(.easeInOut(duration: 0.2), value: editingLinkId)
         }
@@ -264,21 +283,82 @@ struct CombinedMeshScreen: View {
         }
     }
 
+    /// The label key for the combined render — the same card the single-scan preview shows, built
+    /// from the same shared parts (`SemanticLegendRow`, `TappedSemanticLabelReadout`): the tapped
+    /// box's read-out on top, then one filter row per RoomPlan category present in ANY of the maps.
+    ///
+    /// The rows' own gate never looks at `hiddenLabels`: filtering everything out must still leave
+    /// every row (dimmed) on screen, or there would be no way back to the geometry.
     @ViewBuilder private var semanticLegend: some View {
-        if semanticViewMode.showOutlines && !detectedClasses.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(detectedClasses, id: \.rawValue) { cls in
-                    HStack(spacing: 6) {
-                        Circle().fill(cls.swiftUIDisplayColor).frame(width: 10, height: 10)
-                        Text(cls.rawValue).font(.caption2).foregroundColor(.white)
+        let showRows = semanticViewMode.showOutlines && !detectedClasses.isEmpty
+        let metrics = SemanticLegendMetrics.forSizeClass(legendSizeClass)
+        if showRows || tappedLabel != nil {
+            VStack(alignment: .leading, spacing: metrics.stackSpacing) {
+                if let tapped = tappedLabel {
+                    TappedSemanticLabelReadout(tapped: tapped)
+                }
+                if showRows {
+                    if !detectedCategories.isEmpty {
+                        SemanticLegendControls(
+                            hiddenCount: hiddenLabels.count,
+                            totalCount: detectedCategories.count,
+                            showAll: { setAllLabelsHidden(false) },
+                            hideAll: { setAllLabelsHidden(true) }
+                        )
+                        ForEach(detectedCategories, id: \.rawValue) { category in
+                            SemanticLegendRow(color: category.swiftUIFullDetailColor,
+                                              label: category.displayName,
+                                              isFiltered: hiddenLabels.contains(category.rawValue),
+                                              toggle: { toggleLabelFilter(category.rawValue) })
+                        }
+                    } else {
+                        // Geometry IS drawn but no box carried a category this build can parse — a
+                        // `roomplan.json` from a newer RoomPlan. The legend still names what is on
+                        // screen, by coarse class, but those rows are NOT filter controls: the
+                        // filter is keyed by category, and a row that can never match one would be
+                        // a control that does nothing.
+                        ForEach(detectedClasses, id: \.rawValue) { cls in
+                            SemanticLegendRow(color: cls.swiftUIDisplayColor,
+                                              label: cls.rawValue.capitalized)
+                        }
                     }
                 }
             }
-            .padding(10)
+            .padding(metrics.cardPadding + 2)
             .background(Color.black.opacity(0.7))
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .padding(.leading, 16)
             .padding(.bottom, 40)
+        }
+    }
+
+    /// Hide or show EVERY row the legend is offering, across every map in the render.
+    ///
+    /// Hiding all is the useful half: it is how you get to "show me only the stairs" in two taps
+    /// instead of twenty. Every row stays on screen, dimmed and struck through, which is both the
+    /// way back and the reason hiding everything is safe.
+    private func setAllLabelsHidden(_ hidden: Bool) {
+        hiddenLabels = hidden ? Set(detectedCategories.map(\.rawValue)) : []
+        clearReadoutIfHidden()
+    }
+
+    /// Hide or show one legend row's geometry, across every map in the render.
+    private func toggleLabelFilter(_ key: String) {
+        if hiddenLabels.contains(key) {
+            hiddenLabels.remove(key)
+        } else {
+            hiddenLabels.insert(key)
+        }
+        clearReadoutIfHidden()
+    }
+
+    /// A label that has just been filtered out must not still be named by the read-out — it is also
+    /// the rule that keeps a hidden label unidentifiable.
+    private func clearReadoutIfHidden() {
+        if let tapped = tappedLabel,
+           !RoomPlanCategory.isVisible(category: tapped.category.rawValue,
+                                       hiddenLabels: hiddenLabels) {
+            tappedLabel = nil
         }
     }
 
@@ -319,40 +399,6 @@ struct CombinedMeshScreen: View {
         }
     }
 
-    /// Color the shown scans through the presenter's shared bulk path: direct when one
-    /// map is shown, all-maps + per-map menu when several. Dismisses so tile progress shows.
-    @ViewBuilder
-    private func colorButton(present: [CombinedMeshItem], onColor: @escaping ([UUID]) -> Void) -> some View {
-        if present.count == 1 {
-            Button {
-                onColor(present.map(\.id))
-                dismiss()
-            } label: {
-                Image(systemName: "paintbrush")
-            }
-        } else {
-            Menu {
-                Button {
-                    onColor(present.map(\.id))
-                    dismiss()
-                } label: {
-                    Label("Color All \(present.count) Maps", systemImage: "paintbrush.fill")
-                }
-                Divider()
-                ForEach(present) { item in
-                    Button {
-                        onColor([item.id])
-                        dismiss()
-                    } label: {
-                        Text("Color \(item.name)")
-                    }
-                }
-            } label: {
-                Image(systemName: "paintbrush")
-            }
-        }
-    }
-
     @ToolbarContentBuilder
     private func toolbarContent(present: [CombinedMeshItem]) -> some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
@@ -365,14 +411,13 @@ struct CombinedMeshScreen: View {
                         Image(systemName: showLegend ? "list.bullet.rectangle.fill" : "list.bullet.rectangle")
                     }
                 }
-                if let onColor, !present.isEmpty {
-                    colorButton(present: present, onColor: onColor)
+                // Only with room labels to show: without them its third stop hides every mesh.
+                if !detectedClasses.isEmpty {
+                    Button { semanticViewMode = semanticViewMode.next } label: {
+                        Image(systemName: semanticViewMode.iconName)
+                    }
+                    .disabled(present.isEmpty)
                 }
-
-                Button { semanticViewMode = semanticViewMode.next } label: {
-                    Image(systemName: semanticViewMode.iconName)
-                }
-                .disabled(present.isEmpty)
 
                 Button { colorByMap.toggle() } label: {
                     Image(systemName: colorByMap ? "paintpalette.fill" : "paintpalette")
@@ -706,6 +751,13 @@ struct CombinedMeshView: UIViewRepresentable {
     let colorByMap: Bool
     let semanticViewMode: SemanticViewMode
     @Binding var detectedClasses: [SemanticClass]
+    /// The rich RoomPlan categories across every map — the legend's rows. Published by the load
+    /// beside `detectedClasses`, from the same single decode of each map's `roomplan.json`.
+    @Binding var detectedCategories: [RoomPlanCategory]
+    /// Legend rows the user has switched off. A plain value, not a binding: the view only reads it.
+    var hiddenLabels: Set<String> = []
+    /// The label under the last tap, written back by the tap handler.
+    @Binding var tappedLabel: TappedSemanticLabel?
     /// Set by the load once it knows the shared ramp range (and whether anything used it).
     @Binding var heightKeyRange: HeightKeyRange?
     /// Set by the load once it knows how many maps have a usable ghost proxy.
@@ -743,10 +795,27 @@ struct CombinedMeshView: UIViewRepresentable {
         fill.eulerAngles = SCNVector3(Float.pi / 4, -Float.pi / 3, 0)
         scene.rootNode.addChildNode(fill)
 
+        // Tap-to-identify, installed exactly as the single-scan preview installs it:
+        // `allowsCameraControl` has already put SceneKit's own recognizers on the view, so this one
+        // coexists rather than replacing them — it cancels no touches, and it yields to any
+        // multi-tap recognizer so the camera-reset double tap still works.
+        let identifyTap = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.handleSemanticTap(_:))
+        )
+        identifyTap.cancelsTouchesInView = false
+        for existing in scnView.gestureRecognizers ?? [] {
+            if let multiTap = existing as? UITapGestureRecognizer, multiTap.numberOfTapsRequired > 1 {
+                identifyTap.require(toFail: multiTap)
+            }
+        }
+        scnView.addGestureRecognizer(identifyTap)
+
         scnView.delegate = context.coordinator   // per-frame label rescale (constant on-screen size)
         context.coordinator.load(
             into: scnView, items: items, stitchPoints: stitchPoints, colorByMap: colorByMap,
             semanticViewMode: semanticViewMode, detectedClassesBinding: $detectedClasses,
+            detectedCategoriesBinding: $detectedCategories,
             heightKeyBinding: $heightKeyRange, proxyBinding: $proxyAvailability,
             meshSourceMode: meshSourceMode, onLoaded: onLoaded
         )
@@ -759,6 +828,18 @@ struct CombinedMeshView: UIViewRepresentable {
         context.coordinator.viewportSize = uiView.bounds.size
         context.coordinator.applyTint(colorByMap: colorByMap, source: meshSourceMode)
         context.coordinator.applyViewMode(semanticViewMode)
+        // Label filter + tap plumbing. The closure is rebuilt every pass so the handler can never
+        // write through a stale binding; the filter it DECIDES with is the coordinator's own
+        // `appliedHiddenLabels`, which `applyLabelFilter` keeps current.
+        context.coordinator.semanticTapEnabled = semanticViewMode.showOutlines
+        context.coordinator.onSemanticTap = { [tapped = $tappedLabel] hit in
+            // Tapping empty space clears the read-out; tapping the same LABEL again clears it too,
+            // which is the obvious "off" for a control with no close button. Compared on category
+            // alone: two detections of one category can carry different confidences, so comparing
+            // the values would REPLACE the read-out where it should dismiss it.
+            tapped.wrappedValue = (hit?.category == tapped.wrappedValue?.category) ? nil : hit
+        }
+        context.coordinator.applyLabelFilter(hiddenLabels)
         // Live manual adjuster: move pieces + stitch markers to the recomputed transforms without
         // reloading meshes. No-ops until the async load has populated the nodes.
         context.coordinator.applyTransforms(from: items)
@@ -793,6 +874,27 @@ struct CombinedMeshView: UIViewRepresentable {
         private var semanticFillsNode: SCNNode?
         private var allDetectedClasses: [SemanticClass] = []
         private var detectedClassesBinding: Binding<[SemanticClass]>?
+
+        // MARK: Semantic labels (filter / tap — the shared helpers live in
+        // MeshPreviewView+SemanticLabels)
+
+        /// Last filter pushed onto the built boxes. `updateUIView` runs for every unrelated state
+        /// change — a live nudge moves transforms on every slider frame — so the restyle is gated on
+        /// this rather than repeated. Also what the tap handler consults, so a filtered-out label
+        /// cannot be identified.
+        private var appliedHiddenLabels: Set<String> = []
+        /// Whether the boxes have been filtered at all yet: the first pass has to run even with an
+        /// empty filter, since a load can finish after `updateUIView` has already recorded one.
+        private var hasStyledLabels = false
+        /// Per-box RoomPlan confidence, keyed by node identity — the tap read-out's only piece of
+        /// data that `SCNNode` has nowhere to store.
+        private var semanticConfidence: [ObjectIdentifier: String] = [:]
+        /// False whenever a tap must identify nothing — here, only `.meshOnly`. Unlike the timeline
+        /// preview there is no hidden generation to confine the hit test to: every map in this
+        /// render is on screen at once.
+        var semanticTapEnabled = false
+        /// Where a resolved tap goes. Re-set from `updateUIView` on every pass.
+        var onSemanticTap: ((TappedSemanticLabel?) -> Void)?
         // Two geometries per mesh, swapped on toggle (no runtime shader): the real per-vertex
         // colors, and a flat per-map color. The flat one omits the `.color` source so the map hue
         // isn't multiplied into the vertex/normal colors, but keeps `.normal` so it's still lit.
@@ -811,6 +913,7 @@ struct CombinedMeshView: UIViewRepresentable {
         func load(into scnView: SCNView, items: [CombinedMeshItem], stitchPoints: [StitchPoint],
                   colorByMap: Bool, semanticViewMode: SemanticViewMode,
                   detectedClassesBinding: Binding<[SemanticClass]>,
+                  detectedCategoriesBinding: Binding<[RoomPlanCategory]>,
                   heightKeyBinding: Binding<HeightKeyRange?>,
                   proxyBinding: Binding<ProxyAvailability?>,
                   meshSourceMode: MeshSourceMode, onLoaded: @escaping () -> Void) {
@@ -827,15 +930,30 @@ struct CombinedMeshView: UIViewRepresentable {
                 // own extent means the same physical height is a different color per map — actively
                 // misleading for judging whether two landings sit at the same level.
                 //
-                // Deliberately re-parses in pass 2 rather than holding every parsed mesh in memory
-                // at once: N large meshes resident is the worse trade on device, and this runs
-                // off-main behind the existing "Loading N meshes…" overlay.
+                // The parse is HANDED to pass 2 rather than thrown away and redone, COMPACTED first:
+                // parseOBJ's vertex buffer keeps its data.count/30 capacity reservation (~the file
+                // on disk, about twice the live bytes), so each parse is copied to exact-count
+                // arrays before being held. That makes a held parse 16V + 12F bytes against a built
+                // geometry's 40V + 12F across its SceneKit sources (vertices + normals + colors +
+                // indices) — smaller by 24V for EVERY mesh shape, counting the geometry WITHOUT the
+                // 4x room-scale subdivision (gated above meshSubdivisionMaxFaces), which only widens
+                // the gap. Pass 2 drops each parse as it consumes it, so the all-parses plateau at
+                // the start of pass 2 stays under the all-geometries tail that set the peak before;
+                // the peak itself falls because pass 2 no longer re-reads the file. Feeding both
+                // passes from ONE parse also closes a real window: mesh.obj rewrites are atomic, so
+                // the old double read could see pre-registration bytes in pass 1 and
+                // post-registration bytes in pass 2 and silently miscolor the union.
                 var unionMin = Float.greatestFiniteMagnitude
                 var unionMax = -Float.greatestFiniteMagnitude
-                for item in items {
+                var parsedMeshes = [MeshParser.OBJData?](repeating: nil, count: items.count)
+                for (idx, item) in items.enumerated() {
                     guard let data = try? Data(contentsOf: item.meshURL),
-                          let parsed = MeshParser.parseOBJ(from: data),
-                          let r = MeshPreviewView.worldHeightRange(parsed: parsed, transform: item.transform)
+                          let parsed = MeshParser.parseOBJ(from: data)
+                    else { continue }
+                    parsedMeshes[idx] = MeshParser.OBJData(
+                        vertices: parsed.vertices.withUnsafeBufferPointer(Array.init),
+                        faces: parsed.faces.withUnsafeBufferPointer(Array.init))
+                    guard let r = MeshPreviewView.worldHeightRange(parsed: parsed, transform: item.transform)
                     else { continue }
                     unionMin = min(unionMin, r.min)
                     unionMax = max(unionMax, r.max)
@@ -853,12 +971,19 @@ struct CombinedMeshView: UIViewRepresentable {
                 var proxyMissing = 0
                 var dynamicAvailable = 0
                 var dynamicMissing = 0
-                for item in items {
-                    guard let data = try? Data(contentsOf: item.meshURL) else { continue }
+                for (idx, item) in items.enumerated() {
+                    guard let parsed = parsedMeshes[idx] else { continue }
+                    parsedMeshes[idx] = nil   // one parse resident at a time from here: the slot
+                                              // clears now, the local lasts to the end of this pass
                     let colors = item.colorsURL.flatMap { try? Data(contentsOf: $0) }
+                    // Incidental fix riding the parse handoff: only items that PARSED can reach this
+                    // line now, where the old pass 2 re-read the file itself — so a mesh whose parse
+                    // fails can no longer flip the flag and summon a height legend for a map that
+                    // never rendered. Matches the "only when something actually rendered" intent
+                    // documented at the legend publish below.
                     if colors == nil { usedHeightRamp = true }
                     guard let (geometry, _) = MeshPreviewView.buildGeometry(
-                        from: data, vertexColors: colors,
+                        parsed: parsed, vertexColors: colors,
                         heightRange: sharedRange, heightTransform: item.transform
                     ) else { continue }
 
@@ -901,14 +1026,32 @@ struct CombinedMeshView: UIViewRepresentable {
                 // be re-transformed together with the mesh during a live nudge).
                 var allOutlineNodes: [(id: UUID, wireNode: SCNNode, fillNode: SCNNode, transform: simd_float4x4)] = []
                 var detectedSet = Set<SemanticClass>()
+                // The UNION over every map, which is the only thing a legend can mean here: all of
+                // them are drawn at once, so a row names something on screen and switching it off
+                // switches it off everywhere.
+                var detectedCategorySet = Set<RoomPlanCategory>()
+                var confidences: [ObjectIdentifier: String] = [:]
                 for item in items {
                     if let result = MeshPreviewView.buildRoomPlanOutlines(scanDirectoryURL: item.scanDirectoryURL) {
                         for outline in result.outlineNodes {
                             let wire = SCNNode(geometry: outline.geometry)
                             let fill = SCNNode(geometry: outline.fillGeometry)
+                            // The rich RoomPlan category rides `SCNNode.name` here exactly as it
+                            // does in the single-scan preview — it is what the legend filter hides
+                            // by and what a tap resolves to.
+                            wire.name = outline.category?.rawValue
+                            fill.name = outline.category?.rawValue
+                            // Confidence is the one thing an SCNNode has nowhere to keep, and only
+                            // the tap read-out wants it, so it rides a side table keyed by node
+                            // identity rather than being smuggled into the name.
+                            if let confidence = outline.confidence {
+                                confidences[ObjectIdentifier(wire)] = confidence
+                                confidences[ObjectIdentifier(fill)] = confidence
+                            }
                             allOutlineNodes.append((item.id, wire, fill, item.transform))
                         }
                         for cls in result.detectedClasses { detectedSet.insert(cls) }
+                        for category in result.detectedCategories { detectedCategorySet.insert(category) }
                     }
                 }
 
@@ -968,6 +1111,16 @@ struct CombinedMeshView: UIViewRepresentable {
 
                     self.allDetectedClasses = SemanticClass.allCases.filter { detectedSet.contains($0) && $0 != .none }
                     detectedClassesBinding.wrappedValue = self.allDetectedClasses
+                    // `allCases` order, the same order `buildRoomPlanOutlines` publishes a single
+                    // scan's in — so one location's legend reads the same whether you open one map
+                    // or the whole stitched set, rather than being ordered by however `items` came.
+                    detectedCategoriesBinding.wrappedValue = RoomPlanCategory.allCases
+                        .filter { detectedCategorySet.contains($0) }
+                    self.semanticConfidence = confidences
+                    // The load can finish AFTER `updateUIView` has already recorded the current
+                    // filter, so the boxes it just built would keep a row the user switched off
+                    // visible with nothing left to repair it. Forced for exactly that reason.
+                    self.applyLabelFilter(self.appliedHiddenLabels, force: true)
 
                     self.applyTint(colorByMap: colorByMap, source: meshSourceMode)
                     self.frameCamera(scene: scene, contentNode: contentNode, scnView: scnView)
@@ -1033,6 +1186,44 @@ struct CombinedMeshView: UIViewRepresentable {
             for (_, node) in meshNodes { node.isHidden = !mode.showMesh }
             semanticsNode?.isHidden = !mode.showOutlines
             semanticFillsNode?.isHidden = !mode.showFills
+        }
+
+        /// Push the legend filter onto every semantic box in every map.
+        ///
+        /// Cheap by construction — one `isHidden` write and one colour write per box, over a few
+        /// dozen boxes per map — but gated on an actual change all the same, because `updateUIView`
+        /// runs on every frame of a live manual nudge and this would otherwise walk the whole set
+        /// each time. `force` is for the load, which builds boxes after the gate has already been
+        /// satisfied by an earlier pass.
+        ///
+        /// The boxes live one level below the wrappers that carry each map's transform
+        /// (`semanticsNode → wireWrapper → box`), so the walk is over grandchildren, not children.
+        func applyLabelFilter(_ hiddenLabels: Set<String>, force: Bool = false) {
+            guard force || !hasStyledLabels || appliedHiddenLabels != hiddenLabels else { return }
+            hasStyledLabels = true
+            appliedHiddenLabels = hiddenLabels
+            for container in [semanticsNode, semanticFillsNode].compactMap({ $0 }) {
+                for wrapper in container.childNodes {
+                    for box in wrapper.childNodes {
+                        MeshPreviewView.styleSemanticNode(box, hiddenLabels: hiddenLabels)
+                    }
+                }
+            }
+        }
+
+        /// Single-tap handler for tap-to-identify, resolved by the same helper the single-scan
+        /// preview uses. No subtree restriction: every map in this render is on screen at once, so
+        /// there is no switched-off generation for a tap to reach into.
+        @objc func handleSemanticTap(_ gesture: UITapGestureRecognizer) {
+            guard semanticTapEnabled, gesture.state == .ended,
+                  let view = gesture.view as? SCNView else { return }
+            let hit = MeshPreviewView.resolveSemanticTap(
+                in: view,
+                at: gesture.location(in: view),
+                hiddenLabels: appliedHiddenLabels,
+                confidence: semanticConfidence
+            )
+            onSemanticTap?(hit)
         }
 
         /// Live manual adjuster: move each piece (mesh + its outline/fill wrappers) to a recomputed
