@@ -482,9 +482,14 @@ extension CaptureView {
             // anchors, and a relocalizing session's map is unreliable — preserve the raw
             // frames as a mesh-less, map-less scan below rather than discarding everything.
             // Extend flows need a co-framed mesh + world map either way, so those discard.
-            let rawFrameCount: Int = rawDataPath.map {
-                (try? FileManager.default.contentsOfDirectory(atPath: $0.appendingPathComponent("images").path).count) ?? 0
-            } ?? 0
+
+            // What this capture actually holds, off disk: `images/frame_*.jpg`,
+            // `proxy_images/frame_*.jpg` and `equirect_stills/`. Counted as FRAME FILES, not
+            // directory entries, so a stray non-frame file does not read as content. All three
+            // matter: a wearable capture's payload is `proxy_images/`, and a 360° still on disk can
+            // be the only copy there is (see FrameCaptureSession.RecoveryContent).
+            let content = FrameCaptureSession.recoveryContent(in: rawDataPath)
+            let rawFrameCount = content.frameCount
 
             if completion == nil, !ARCoverageView.supportsLiDAR, rawFrameCount > 0 {
                 isRecording = false
@@ -518,7 +523,15 @@ extension CaptureView {
             isRecording = false
             isProcessingMesh = false  // release the re-entrancy claim from performStopRecording
 
-            if completion == nil, rawFrameCount > 0 {
+            // #81 defect 2. The decision is one pure function so it can be tested
+            // (`finishStopRecording` is private to a SwiftUI View extension): anything captured is
+            // saved, nothing captured saves nothing, extend flows abort. A map-less Recovered Scan
+            // no longer blocks the space's Rescan / Connect Adjacent: `latestRoomScan` skips scans
+            // without a world map.
+            let outcome = FrameCaptureSession.recoveryOutcome(content: content,
+                                                              isExtendFlow: completion != nil)
+
+            if outcome == .persistRecoveredScan {
                 // Recover the raw capture: empty mesh (geometry comes from the frames downstream),
                 // no world map (a relocalizing session's map is unreliable / not extendable).
                 let recoveredName = newLocationName.isEmpty ? "Recovered Scan" : newLocationName
@@ -537,10 +550,15 @@ extension CaptureView {
                     thumbnailData: thumbnailData,
                     scanCase: scanCase
                 )
+                // Retire the 360° floor markers with the scan, as savePendingScan does on the
+                // normal save and discardInProgressScan does on a discard: endScanStillSession's
+                // contract is every exit, and this exit was missing it. Markers left standing
+                // would float in the live scene.
+                ThetaCameraManager.shared.endScanStillSession()
                 frameCaptureSession = FrameCaptureSession()
                 MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
                 saveMessage = savedScan != nil
-                    ? "Saved \(rawFrameCount) frames (mesh lost to tracking interruption)"
+                    ? FrameCaptureSession.recoverySavedMessage(content: content)
                     : "Save failed"
                 scanStore.resetCaptureState()
                 clearMessage()
@@ -548,8 +566,16 @@ extension CaptureView {
                 return
             }
 
-            // Nothing usable to preserve (no frames), or a stitch/extend flow — discard.
-            saveMessage = "No Mesh Data"
+            // Nothing captured, or a stitch/extend flow. No scan is created and nothing is deleted:
+            // the capture directory stays where `stop()` finalized it, in the temp directory, as
+            // this branch always has. For an extend abort that matters, since the capture can hold
+            // content: the only completion handler (CaptureView+Extend.swift) shows a toast and
+            // returns, and `frameCaptureSession` is replaced below before `completion?(nil)` runs.
+            ThetaCameraManager.shared.endScanStillSession()  // every exit retires the 360° floor markers
+
+            saveMessage = outcome == .nothingCaptured
+                ? FrameCaptureSession.recoveryNothingCapturedMessage
+                : "No Mesh Data"
             frameCaptureSession = FrameCaptureSession()
             MetaWearableManager.shared.activeCaptureSession = frameCaptureSession
 

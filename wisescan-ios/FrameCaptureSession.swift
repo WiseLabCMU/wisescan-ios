@@ -570,6 +570,142 @@ class FrameCaptureSession {
         }
     }
 
+    // MARK: - Tracking-loss recovery (issue #81, defect 2)
+
+    /// Everything a capture directory holds that counts as content for the tracking-loss recovery
+    /// decision. Three separate streams, because the capture root is not just `images/`:
+    ///
+    /// - `frameCount` — `images/frame_*.jpg`: a room scan's automatic 12MP photos
+    ///   (`AppConstants.roomScanAutoStills`), or the stream frames of a capture without them.
+    /// - `proxyFrameCount` — `proxy_images/frame_*.jpg`, a wearable's proxy stream
+    ///   (`captureProxyFrame`, up to 15 fps). On a wearable session this is the payload; judging such
+    ///   a capture only by `images/` calls it empty when it is not.
+    /// - `equirectStillCount` — `equirect_stills/still_NNNN.{JPG,json}`, the 360° stills. Once the
+    ///   bytes are verified on disk the camera-side original is deleted
+    ///   (`ScanPostprocessor.sweepCameraOriginals`), so a still on disk can be the only copy there is.
+    struct RecoveryContent: Equatable {
+        var frameCount: Int = 0
+        var proxyFrameCount: Int = 0
+        var equirectStillCount: Int = 0
+
+        var isEmpty: Bool { frameCount + proxyFrameCount + equirectStillCount == 0 }
+    }
+
+    /// What the recovery branch does with a finalized, mesh-less capture.
+    enum RecoveryOutcome: Equatable {
+        /// Anything captured, non-extend flow: persist it as a mesh-less, map-less "Recovered Scan".
+        /// A small one is still saved (issue #81: bias toward save). It can't block the space's
+        /// Rescan or Connect Adjacent, because `ScanLocation.latestRoomScan` skips scans without a
+        /// world map, and a useless one can be deleted from the Scans list.
+        case persistRecoveredScan
+        /// Nothing at all was captured: no scan is created. The empty capture directory is left
+        /// where `stop()` finalized it, in the temp directory, as this branch always has.
+        case nothingCaptured
+        /// Extend/stitch flow: an extend needs a co-framed mesh and world map either way, so the
+        /// recovery is not offered. Non-destructive, as before: the only completion handler
+        /// (`CaptureView+Extend.swift`) shows a toast and returns.
+        case abortExtendFlow
+    }
+
+    /// How many RGB frames a capture directory actually holds, counted from `images/frame_*.jpg`.
+    ///
+    /// Counts FRAME FILES, not directory entries: `contentsOfDirectory(...).count` on `images/`
+    /// answers "is there anything in here", which a stray non-frame file satisfies. `captureFrame`
+    /// and the automatic stills are the only writers of that directory and always write
+    /// `frame_NNNNN.jpg`, on every device class (Lite included).
+    ///
+    /// `static` and directory-addressed on purpose: the caller asks about a FINALIZED capture — the
+    /// URL `stop()` returned — at a point where the owning session is about to be replaced.
+    /// Unreadable or missing `images/` answers 0.
+    static func capturedFrameCount(in captureDir: URL?) -> Int {
+        frameFileCount(in: captureDir, subdirectory: "images")
+    }
+
+    /// How many wearable proxy frames a capture directory holds. Same `frame_NNNNN.jpg` naming as
+    /// `images/` — `captureProxyFrame`/`captureProxyFrameData` are its only writers.
+    static func proxyFrameCount(in captureDir: URL?) -> Int {
+        frameFileCount(in: captureDir, subdirectory: "proxy_images")
+    }
+
+    private static func frameFileCount(in captureDir: URL?, subdirectory: String) -> Int {
+        guard let captureDir else { return 0 }
+        let path = captureDir.appendingPathComponent(subdirectory).path
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: path) else { return 0 }
+        return names.filter { $0.hasPrefix("frame_") && $0.hasSuffix(".jpg") }.count
+    }
+
+    /// How many 360° stills a capture directory holds, counted the way `ScansListView` counts them:
+    /// the max of the SIDECAR count and the JPG count. The sidecar is written at trigger time and
+    /// the equirect bytes drain later, so sidecar-present/JPG-missing means "captured, download
+    /// pending", which is still captured content. The JPG match lowercases the name because the
+    /// 360° writer's literal is UPPERCASE `.JPG`, unlike the lowercase `images/` writer.
+    static func equirectStillCount(in captureDir: URL?) -> Int {
+        guard let captureDir else { return 0 }
+        let path = captureDir.appendingPathComponent("equirect_stills").path
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: path) else { return 0 }
+        let sidecars = names.filter { $0.hasPrefix("still_") && $0.hasSuffix(".json") }.count
+        let jpegs = names.filter { $0.hasPrefix("still_") && $0.lowercased().hasSuffix(".jpg") }.count
+        return max(sidecars, jpegs)
+    }
+
+    /// Reads all three content counts off a FINALIZED capture directory (the URL `stop()` returned).
+    static func recoveryContent(in captureDir: URL?) -> RecoveryContent {
+        RecoveryContent(frameCount: capturedFrameCount(in: captureDir),
+                        proxyFrameCount: proxyFrameCount(in: captureDir),
+                        equirectStillCount: equirectStillCount(in: captureDir))
+    }
+
+    /// The recovery branch's whole decision, as a pure function of what is on disk and which flow we
+    /// are in. Any content is saved: there is no floor. #86 first proposed one (10 frames) to keep
+    /// map-less stubs from blocking Rescan; skipping map-less scans in `latestRoomScan` fixes that
+    /// at the source, and with automatic photos (none in the first 10 s) a floor of 10 refused
+    /// tracking losses in roughly the first 20-30 s of a room scan, leaving the photos stranded in
+    /// the temp directory with nothing in the app pointing at them.
+    static func recoveryOutcome(content: RecoveryContent, isExtendFlow: Bool) -> RecoveryOutcome {
+        if isExtendFlow { return .abortExtendFlow }
+        return content.isEmpty ? .nothingCaptured : .persistRecoveredScan
+    }
+
+    /// Whether the tracking-loss alert's "Save Anyway" would save something, evaluated while the AR
+    /// session is still live, so the alert never offers a save the pipeline then refuses:
+    ///
+    /// - `liveMeshVertexCount > 0` (mesh made during this recording): the mesh anchors are still
+    ///   present, so `snapshotMeshBuffers` succeeds at Stop and the NORMAL save runs, giving a real
+    ///   scan with mesh and world map. Room scans take no photos in their first 10 s, so this is
+    ///   the only content a tracking loss that early has. It is republished at 10 Hz and can go
+    ///   stale in the alert's favour: if the anchors vanish before Stop, the recovery branch decides
+    ///   on the files instead.
+    /// - otherwise any photo, glasses frame or 360° still: the Lite branch or the recovery branch
+    ///   saves it.
+    static func recoverySaveWouldPersist(content: RecoveryContent, liveMeshVertexCount: Int) -> Bool {
+        liveMeshVertexCount > 0 || !content.isEmpty
+    }
+
+    /// What was captured, for the tracking-loss alert and the save banner: "12 photos, 3 360°
+    /// photos and the mesh". `includesMesh` adds the mesh; a mesh with nothing else reads "the mesh
+    /// (no photos yet)", since room-scan photos start about 10 s in.
+    static func recoveryContentSummary(_ content: RecoveryContent, includesMesh: Bool = false) -> String {
+        if content.isEmpty { return includesMesh ? "the mesh (no photos yet)" : "nothing" }
+        var parts: [String] = []
+        func add(_ count: Int, _ one: String, _ many: String) {
+            if count > 0 { parts.append("\(count) \(count == 1 ? one : many)") }
+        }
+        add(content.frameCount, "photo", "photos")
+        add(content.proxyFrameCount, "glasses frame", "glasses frames")
+        add(content.equirectStillCount, "360° photo", "360° photos")
+        if includesMesh { parts.append("the mesh") }
+        guard let last = parts.popLast() else { return "nothing" }
+        return parts.isEmpty ? last : parts.joined(separator: ", ") + " and " + last
+    }
+
+    /// The banner shown when a recovery is persisted.
+    static func recoverySavedMessage(content: RecoveryContent) -> String {
+        "Saved \(recoveryContentSummary(content)) (mesh lost to tracking interruption)"
+    }
+
+    /// The banner shown when tracking was lost before anything was captured.
+    static let recoveryNothingCapturedMessage = "Not saved — nothing was captured"
+
     private func captureFrame(from session: ARSession) {
         let fullyTest = isMockingIMU && isMockingImages && isMockingDepth
 
