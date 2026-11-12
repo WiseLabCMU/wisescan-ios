@@ -108,7 +108,7 @@ struct UserGuideView: View {
                               "you turn that off, and the Server tab lists the ones waiting, where you choose " +
                               "which go. All are selected, except a scan captured with the Privacy " +
                               "Filter off: its photos show people unblurred, so it waits until you select " +
-                              "it (Select on its card does it too, after asking). No bundle is prepared during a scan or while you Share. A cloud on each space shows " +
+                              "it (Select on its card does it too, after asking; Always Send stops the asking). No bundle is prepared during a scan or while you Share. A cloud on each space shows " +
                               "what the server has: an outline for its map, a green check for everything, " +
                               "an arrow while a bundle goes up (Troubleshooting, below, explains every " +
                               "badge). If the server wants its password, Sync asks for it first, then " +

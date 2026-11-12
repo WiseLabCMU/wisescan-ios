@@ -40,6 +40,7 @@ enum AppConstants {
         static let controlPlaneBundlesWifiOnly = "controlPlaneBundlesWifiOnly" // upload scans' data bundles only on Wi-Fi (the JSON and the RoomPlan preview go on any network)
         static let controlPlaneBundlesSkipped = "controlPlaneBundlesSkipped"   // scans deselected in the pending checklist: their bundles wait until selected again
         static let controlPlaneBundlesChosen = "controlPlaneBundlesChosen"     // scans captured with the Privacy Filter off that the user selected in the checklist (held back until then)
+        static let controlPlaneHoldBackFilterOff = "controlPlaneHoldBackFilterOff" // scans captured with the Privacy Filter off wait for Select, which asks first; off (Always Send) = they go like any other
         static let controlPlaneBundlesFilterOff = "controlPlaneBundlesFilterOff" // scans the last sync read as captured with the Privacy Filter off
         static let controlPlaneBundlesRefused = "controlPlaneBundlesRefused"   // bundles the server refused for good (403, 404, 413), with the version refused (JSON): not sent again until it changes or Retry
         static let controlPlaneBundleStates = "controlPlaneBundleStates"       // each scan's bundle as the server last reported it (JSON), for the sync badge after a relaunch
@@ -760,6 +761,7 @@ enum AppConstants {
     static let controlPlaneRequestTimeoutS: TimeInterval = 15
     static let controlPlaneUploadTimeoutS: TimeInterval = 60     // idle time allowed mid map-package upload (the RoomPlan preview, or an older app's files)
     static let controlPlaneBundlesWifiOnly = true                // data bundles wait for Wi-Fi unless the user lets them use cellular
+    static let controlPlaneHoldBackFilterOff = true              // scans captured with the Privacy Filter off wait until selected, after a confirmation
     static let controlPlaneBundleCacheMaxAgeS: TimeInterval = 604_800 // 7 days: a built bundle not yet on the server is kept this long, so a failed upload retries without rebuilding
     static let controlPlaneBundleResourceTimeoutS: TimeInterval = 86_400 // a background bundle upload may take this long overall (GBs, waiting for Wi-Fi)
     static let controlPlaneBundleProgressStep: Double = 0.01     // the card's upload percentage moves in steps of at least this (each is a redraw)

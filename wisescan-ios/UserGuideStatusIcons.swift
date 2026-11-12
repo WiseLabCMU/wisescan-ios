@@ -50,7 +50,8 @@ struct StatusIconsGuideSections: View {
                               "what it waits for: Wi-Fi (the Server tab's Upload data bundles " +
                               "only on Wi-Fi), its turn (waiting to upload), or your choice (not selected, " +
                               "in the Server tab; tap Select on the card to send it). Privacy Filter was off, not selected: the scan was " +
-                              "captured with people unblurred, so it waits until you select it.")
+                              "captured with people unblurred, so it waits until you select it. Select asks first; " +
+                              "Always Send stops the asking for every such scan (the Server tab turns it back on).")
             syncLineRow("Uploading 42%", failed: false,
                         text: "Its bundle is going up. Preparing its bundle and Coloring for sync come " +
                               "first: a bundle carries the colored mesh, so an uncolored scan is colored " +

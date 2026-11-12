@@ -59,7 +59,7 @@ struct SyncLine: View {
                 Text(line.text).lineLimit(2)
                 if selectable && bundles.awaitsSelection(id) {
                     Button("Select") {
-                        if bundles.filterOff.contains(id) {
+                        if bundles.isHeldBack(id) {
                             confirmUnblurred = true
                         } else {
                             bundles.setSelected(id, true)
@@ -80,13 +80,20 @@ struct SyncLine: View {
 extension View {
     /// Asks before a scan captured with the Privacy Filter off is selected for sync: its bundle
     /// carries its photos as captured, people unblurred.
+    /// Always Send remembers the answer: such scans then go like any other, with no question,
+    /// until the Server tab's "Ask before sending unblurred scans" is turned back on.
     func unblurredBundleConsent(isPresented: Binding<Bool>, send: @escaping () -> Void) -> some View {
         alert("Send photos with people unblurred?", isPresented: isPresented) {
-            Button("Send to the Scan4D Server", action: send)
+            Button("Send", action: send)
+            Button("Always Send") {
+                BundleSync.shared.setHoldsBackFilterOff(false)
+                send()
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This scan was captured with the Privacy Filter off, so people in its photos aren't blurred. " +
-                 "Its bundle goes to the Scan4D server as captured.")
+                 "Its bundle goes to the Scan4D server as captured. Always Send sends every such scan " +
+                 "without asking; turn that back off in the Server tab.")
         }
     }
 }
@@ -110,6 +117,11 @@ struct PendingBundlesSections: View {
             Toggle("Upload data bundles only on Wi-Fi", isOn: $wifiOnly)
                 .foregroundColor(.white)
                 .onChange(of: wifiOnly) { _, _ in bundles.wifiOnlyChanged() }
+            // On (the default): a scan captured with the Privacy Filter off waits for Select, which
+            // asks first. Always Send in that question turns it off.
+            Toggle("Ask before sending unblurred scans",
+                   isOn: Binding(get: { bundles.holdsBackFilterOff }, set: { bundles.setHoldsBackFilterOff($0) }))
+                .foregroundColor(.white)
             if pending.isEmpty {
                 Text("Nothing waiting: the Scan4D server has every synced scan's bundle, or none is processed yet.")
                     .font(.caption)
@@ -119,7 +131,9 @@ struct PendingBundlesSections: View {
             Text("BUNDLES")
         } footer: {
             Text("A scan's bundle is everything it holds: its photos, depth, mesh and room layout, " +
-                 "hundreds of MB or more. The map itself and its RoomPlan preview go on any network.")
+                 "hundreds of MB or more. The map itself and its RoomPlan preview go on any network. A scan " +
+                 "captured with the Privacy Filter off waits until you select it, unless Ask before sending " +
+                 "unblurred scans is off.")
                 .font(.caption2)
                 .foregroundColor(.gray)
         }
@@ -175,7 +189,7 @@ private struct PendingBundleRow: View {
             Toggle(isOn: Binding(get: { bundles.isSelected(id) },
                                  set: { selected in
                                      // Selecting a scan captured with the Privacy Filter off asks first.
-                                     if selected && bundles.filterOff.contains(id) {
+                                     if selected && bundles.isHeldBack(id) {
                                          confirmUnblurred = true
                                      } else {
                                          bundles.setSelected(id, selected)

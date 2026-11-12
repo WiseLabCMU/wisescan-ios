@@ -129,7 +129,8 @@ multipart upload comes if failures on large bundles show it is needed.
   status with Sync now, the checklist inline with the Wi-Fi rule, and the connection settings that
   were in Settings. Its icon counts the bundles waiting for Retry. A card whose bundle the checklist
   holds back offers Select on its sync line, and selecting a scan captured with the Privacy Filter
-  off asks first. Pulling maps down from the server belongs here when it comes.
+  off asks first, with Always Send to stop asking (undone by the tab's Ask before sending unblurred
+  scans). Pulling maps down from the server belongs here when it comes.
 - **Uncoloured scans.** A scan offers its version once processed. The uploader colours it, if it
   can, just before building, and sends the coloured version, so a scan the app can't colour
   still syncs.

@@ -282,6 +282,10 @@ final class BundleSync {
     private(set) var filterOff: Set<UUID> = BundleSync.storedIds(AppConstants.Key.controlPlaneBundlesFilterOff)
     /// Filter-off scans the user selected in the checklist.
     private(set) var chosen: Set<UUID> = BundleSync.storedIds(AppConstants.Key.controlPlaneBundlesChosen)
+    /// Whether filter-off scans are held back (the default); Always Send turns it off.
+    private(set) var holdsBackFilterOff: Bool =
+        UserDefaults.standard.object(forKey: AppConstants.Key.controlPlaneHoldBackFilterOff) as? Bool
+            ?? AppConstants.controlPlaneHoldBackFilterOff
     /// On cellular or Low Data: a Wi-Fi-only upload waits.
     private(set) var onExpensiveNetwork = false
 
@@ -464,12 +468,26 @@ extension BundleSync {
 
     // MARK: The checklist
 
+    /// Captured with the Privacy Filter off, and such scans are held back (the default): it waits
+    /// until the user selects it, which asks first. With Always Send, it goes like any other.
+    func isHeldBack(_ scanId: UUID) -> Bool {
+        holdsBackFilterOff && filterOff.contains(scanId)
+    }
+
+    /// The Server tab's "Ask before sending unblurred scans", and the consent's Always Send (off).
+    func setHoldsBackFilterOff(_ on: Bool) {
+        guard on != holdsBackFilterOff else { return }
+        holdsBackFilterOff = on
+        UserDefaults.standard.set(on, forKey: AppConstants.Key.controlPlaneHoldBackFilterOff)
+        if !on { next() }
+    }
+
     func isSelected(_ scanId: UUID) -> Bool {
-        filterOff.contains(scanId) ? chosen.contains(scanId) : !skipped.contains(scanId)
+        isHeldBack(scanId) ? chosen.contains(scanId) : !skipped.contains(scanId)
     }
 
     func setSelected(_ scanId: UUID, _ selected: Bool) {
-        if filterOff.contains(scanId) {
+        if isHeldBack(scanId) {
             if selected { chosen.insert(scanId) } else { chosen.remove(scanId) }
             store(chosen, AppConstants.Key.controlPlaneBundlesChosen)
         } else {
@@ -603,18 +621,16 @@ extension BundleSync {
         // Share of this scan running (its status, set a moment before it registers): try again shortly.
         guard !scan.uploadStatus.isInFlight else { return .busy }
 
-        // Captured with the Privacy Filter off: held back unless the user chose it, read from the
-        // scan itself in case no sync has said so yet.
+        // Captured with the Privacy Filter off: held back unless the user chose it (or chose
+        // Always Send), read from the scan itself in case no sync has said so yet.
         let record: ControlPlaneManifest.PrivacyRecord = scan.isFocusScan
             ? .focus(captureFolder: scan.focusCaptureURL) : .room(rawData: scan.rawDataPath)
         let filterWasOff = await Self.offMain { ControlPlaneManifest.readPrivacyFilter(record) == false }
-        if filterWasOff && !chosen.contains(id) {
-            if !filterOff.contains(id) {
-                filterOff.insert(id)
-                store(filterOff, AppConstants.Key.controlPlaneBundlesFilterOff)
-            }
-            return .stopped
+        if filterWasOff && !filterOff.contains(id) {
+            filterOff.insert(id)
+            store(filterOff, AppConstants.Key.controlPlaneBundlesFilterOff)
         }
+        if filterWasOff && holdsBackFilterOff && !chosen.contains(id) { return .stopped }
 
         // Bundles carry captured colors, as every export does.
         if !scan.isColored && !scan.isFocusScan {
@@ -790,7 +806,7 @@ extension BundleSync {
         case "failed": return ("The server couldn't unpack it: \(remote[id]?.error ?? "")", true)
         case "missing", "stale":
             if !isSelected(id) {
-                return (filterOff.contains(id) ? "Map only · Privacy Filter was off, not selected" : "Map only · not selected", false)
+                return (isHeldBack(id) ? "Map only · Privacy Filter was off, not selected" : "Map only · not selected", false)
             }
             if wifiOnly && onExpensiveNetwork { return ("Map only · waiting for Wi-Fi", false) }
             return ("Map only · waiting to upload", false)
