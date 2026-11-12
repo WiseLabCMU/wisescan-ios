@@ -244,26 +244,38 @@ extension ThetaCameraManager {
         return nil
     }
 
-    /// Bulk erase. The spec's special values ("all" / "image" / "video") must be sent
-    /// ALONE in fileUrls. Not permitted during video recording.
     /// Deletes ONE camera-side file by its URL — the single-file twin of the security
     /// sweep that runs after scan stills transfer. Failures are logged, never fatal: the
     /// bytes are already safe on the device, and a file we could not delete is a cleanup
     /// problem rather than a data-loss one.
     func deleteCameraFile(_ fileURL: String) async {
         do {
-            _ = try await execute(name: "camera.delete", parameters: ["fileUrls": [fileURL]])
+            try await postDelete(fileUrls: [fileURL])
             log(.transfer, "Deleted the camera-side original after download")
         } catch {
             log(.transfer, "Could not delete the camera-side original (\(Self.describe(error)))")
         }
     }
 
+    /// Bulk erase. The spec's special values ("all" / "image" / "video") must be sent
+    /// ALONE in fileUrls. Not permitted during video recording. Returns once the camera
+    /// accepts the delete, which can be before it finishes (see deleteAllCameraFiles).
     func deleteAllFiles(fileType: String = "all") async throws {
-        let body: [String: Any] = ["name": "camera.delete",
-                                   "parameters": ["fileUrls": [fileType]]]
+        try await postDelete(fileUrls: [fileType])
+    }
+
+    /// `camera.delete` answers "done" with no results, or "inProgress" while a large delete
+    /// runs: either means the camera took it. Not `execute()`, which knows only takePicture's
+    /// answers (a file URL or a command id) and read a plain "done" as "no command id
+    /// returned" for a delete that worked. Same rule as the scan sweep
+    /// (`ScanPostprocessor.syncCameraDelete`).
+    private func postDelete(fileUrls: [String]) async throws {
+        let body: [String: Any] = ["name": "camera.delete", "parameters": ["fileUrls": fileUrls]]
         let response = try await postJSON("/osc/commands/execute", body: body, as: OSCCommandResponse.self)
         if let error = response.error { throw ThetaError.osc(error.message ?? error.code ?? "delete failed") }
+        guard response.state == "done" || response.state == "inProgress" else {
+            throw ThetaError.osc("delete answered \(response.state)")
+        }
     }
 
     /// Current WLAN mode as the camera reports it — "AP" (its own access point) or

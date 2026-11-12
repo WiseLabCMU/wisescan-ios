@@ -754,6 +754,8 @@ enum AppConstants {
     // MARK: - 360° Still Source (Theta OSC spike — feat/still-source-360)
     static let thetaCaptureTimeout: TimeInterval = 20            // max wait for a takePicture command to reach "done"
     static let thetaStatusPollInterval: TimeInterval = 0.4       // /osc/commands/status poll cadence while a capture is inProgress
+    static let thetaEraseSettleTimeout: TimeInterval = 10        // Erase All: how long to re-read the file count waiting for 0
+    static let thetaEraseRecountInterval: TimeInterval = 1       // Erase All: re-read cadence (each read is a camera.listFiles)
 
     // MARK: - Control plane (scan4d-server)
     static let controlPlaneSyncDebounceS: Double = 5             // saves within this window share one sync
