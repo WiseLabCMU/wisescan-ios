@@ -37,7 +37,7 @@ final class ControlPlanePrivacyTests: XCTestCase {
         // Unknown is left out of the wire format rather than sent as a guess.
         let unknown = ControlPlaneManifest.Scan(scanId: UUID(), kind: "room", name: "s", capturedAt: Date(), parentScanId: nil,
                                                 captureSource: "Native iOS", worldMapSuspect: false, stillCount: 0,
-                                                focusRegion: nil, upload: .init(status: "pending", lastUploadedAt: nil, format: "Scan4D"))
+                                                focusRegion: nil)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: ControlPlaneManifest.encoder.encode(unknown)) as? [String: Any])
         XCTAssertNil(json["privacy_filter"])
     }

@@ -454,14 +454,16 @@ final class ControlPlaneTests: XCTestCase {
         // Not settled (still processing): no bundle offered yet.
         XCTAssertNil(listed.bundle)
 
-        // Settled: its bundle's version goes with it, over every file of the scan.
+        // Settled: its bundle's version goes with it, over every file the Scan4D export reads.
         var settled = draft
         var settledFiles = files
         settledFiles[scanId]?.settled = true
         settled.readScanFiles(settledFiles)
         let offered = try XCTUnwrap(settled.locations.first?.scans.first?.bundle)
         XCTAssertEqual(offered.fingerprint, ScanBundle.version(scanDirectory: dir)?.fingerprint)
-        XCTAssertEqual(offered.size, 8 + Int64(#"{"applied": false, "targetScanId": "x"}"#.utf8.count))
+        // mesh.obj only: the export reads registration.json at the scan's top level (the save
+        // promotes it there), so this fixture's raw_data/ copy is not part of the version.
+        XCTAssertEqual(offered.size, 8)
     }
 
     /// Only the RoomPlan preview goes on its own; everything else, the focus region included, is
