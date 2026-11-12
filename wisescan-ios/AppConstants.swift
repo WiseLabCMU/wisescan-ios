@@ -329,6 +329,8 @@ enum AppConstants {
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
     static let faceAnchorMinObservations: Float = 2         // a person anchor must be seen in at least this many frames to be saved (confidence gate; drops one-frame segmentation false positives)
     static let maxFramesInFlight: Int = 2                    // cap on concurrent frame-save encodes; excess frames are dropped to keep retained CVPixelBuffers from starving ARKit's frame pool (VIO loss corrupts the scan)
+    /// `nonisolated`: read from the wearable frame listener, which runs off the main actor.
+    nonisolated static let wearableFramesInFlight: Int = 1   // cap on concurrent wearable-frame decode/segment/encode jobs; excess frames are dropped, not queued — the work can outrun the stream and a queued frame is stale by the time it lands (the operator wants the newest proxy view, not a backlog)
     static let vioFrameGapTripSeconds: TimeInterval = 1.5    // VIO guard: an ARKit frame-delivery gap this large mid-scan = the session stalled and VIO diverged → halt
     static let vioHardFrameGapTripSeconds: TimeInterval = 4.0 // VIO guard belt: a gap this large trips REGARDLESS of how tracking presents on the recovery frame — covers OS actions (Control Center on iPadOS) that stall delivery without firing sessionWasInterrupted and resume via benign-looking .initializing (7.9s gap → silent SLAM reinit, 2026-07-24 M2 runs). Compute stalls on the marginal iPad top out well under 2s, so 4s is clear of false trips.
     static let meshStartWatchdogSeconds: TimeInterval = 10   // Recording on a LiDAR device with zero ARMeshAnchors for this long AFTER tracking settled = Recon3D is dead for this scan (60fps default-format fallback after RoomPlan's internal reconfigure; Fig err storm, 2026-07-24 runs) → halt via the VIO guard. NOT a live rebuild: re-running the session under active RoomPlan crashed ObjectUnderstanding at save (run 4).
@@ -792,6 +794,8 @@ enum AppConstants {
     // MARK: - 360° Still Source (Theta OSC spike — feat/still-source-360)
     static let thetaCaptureTimeout: TimeInterval = 20            // max wait for a takePicture command to reach "done"
     static let thetaStatusPollInterval: TimeInterval = 0.4       // /osc/commands/status poll cadence while a capture is inProgress
+    static let thetaEraseSettleTimeout: TimeInterval = 10        // Erase All: how long to re-read the file count waiting for 0
+    static let thetaEraseRecountInterval: TimeInterval = 1       // Erase All: re-read cadence (each read is a camera.listFiles)
 
     // MARK: - Control plane (scan4d-server)
     static let controlPlaneSyncDebounceS: Double = 5             // saves within this window share one sync

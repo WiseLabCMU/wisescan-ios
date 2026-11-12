@@ -1656,7 +1656,21 @@ struct CaptureView: View {
 
                         // Status warnings when connected but no proxy image is flowing
                         if wearableManager.latestProxyImage == nil {
-                            if wearableManager.connectionFailed {
+                            if wearableManager.appUpdateRequired {
+                                // The glasses refuse this build's SDK: a retry would fail the same
+                                // way, so no button, just what fixes it.
+                                HStack(spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.yellow)
+                                    Text("Update Scan4D to use these glasses")
+                                }
+                                .font(.caption2).bold()
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.orange.opacity(0.8))
+                                .cornerRadius(8)
+                                .padding(.trailing, AppConstants.UI.pipPaddingX)
+                            } else if wearableManager.connectionFailed {
                                 // DeviceSession timed out — show retry action
                                 Button(action: {
                                     wearableManager.connectionFailed = false

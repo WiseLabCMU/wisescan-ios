@@ -62,6 +62,20 @@ The DAT SDK uses Bluetooth for control but negotiates a hidden **WiFi Direct** c
 2. If prompted by iOS with *"Scan4D wants to join Wi-Fi network RBMeta..."*, you must tap **Join**.
 3. Force quit the Scan4D app and the Meta AI app, then reopen Scan4D.
 
+### 4. "Update Scan4D to use these glasses" Banner
+**Symptoms:**
+- The Dashboard shows *"Scan4D Update Required"*, or the CaptureView shows *"Update Scan4D to use these glasses"*.
+- In the Xcode console, you see `insufficientSDKVersion` or `compatibility: sdkUpdateRequired`.
+
+**Root Cause:**
+The glasses' firmware no longer accepts the version of the Meta Wearables SDK this Scan4D build was built with. Retrying, re-pairing or updating the glasses does not help.
+
+**Recovery Steps:**
+1. Testers and users: install the latest Scan4D build from TestFlight or the App Store.
+2. Developers: bump `meta-wearables-dat-ios` in Xcode (or merge the open Dependabot PR), then ship a new build.
+
+A console line saying the glasses and SDK versions are *outside the recommended range* (`dwaOutOfStuRange`) is only a warning: streaming continues, and no banner is shown.
+
 ---
 
 ## Core AR & Capture Issues
