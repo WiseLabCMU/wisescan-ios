@@ -138,6 +138,30 @@ struct DashboardView: View {
                             .padding(.horizontal)
                         }
 
+                        if wearableManager.appUpdateRequired {
+                            // No button: the fix is a newer Scan4D from TestFlight or the App Store.
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundColor(.orange)
+                                    Text("Scan4D Update Required")
+                                        .font(.headline)
+                                        .foregroundColor(.white)
+                                }
+                                Text("These glasses need a newer version of Scan4D. Install the latest build from TestFlight or the App Store.")
+                                    .font(.caption)
+                                    .foregroundColor(.white.opacity(0.8))
+                            }
+                            .padding()
+                            .background(Color.orange.opacity(0.2))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16)
+                                    .stroke(Color.orange.opacity(0.5), lineWidth: 1)
+                            )
+                            .cornerRadius(16)
+                            .padding(.horizontal)
+                        }
+
                         // Show permission banner only if we've never been granted
                         // (reads from cache to avoid false flash on cold launch before SDK IPC resolves)
                         let cachedPermission = UserDefaults.standard.bool(forKey: AppConstants.Key.metaWearablesPermissionGranted)

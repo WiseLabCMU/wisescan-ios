@@ -35,6 +35,9 @@ class MetaWearableManager {
     var isStreaming = false
     var connectionFailed = false
     var deviceUpdateRequired = false
+    /// The glasses need a newer Meta wearables SDK than this build ships: only a Scan4D update
+    /// fixes it, so the UI says so instead of offering a retry or a glasses update.
+    var appUpdateRequired = false
     var permissionGranted = false {
         didSet {
             // Cache for Dashboard UI banner (so it doesn't flash on cold launch)
@@ -81,6 +84,8 @@ class MetaWearableManager {
     // session. AnyListenerToken.cancel() is async, so cancellation is detached (see cancelStreamListeners).
     private var stateToken: (any AnyListenerToken)?
     private var frameToken: (any AnyListenerToken)?
+    /// Reads the DeviceSession's error stream (see noteSessionError). Cancelled with the listeners.
+    private var sessionErrorTask: Task<Void, Never>?
 
     // Timestamp for frame throttling (thread-safe for background video publisher)
     private final class FrameThrottle: @unchecked Sendable {
@@ -380,6 +385,8 @@ class MetaWearableManager {
     /// Clears the tokens synchronously (so a re-subscribe can't race a pending cancel) and cancels
     /// the SDK subscriptions asynchronously.
     private func cancelStreamListeners() {
+        sessionErrorTask?.cancel()
+        sessionErrorTask = nil
         let state = stateToken
         let frame = frameToken
         stateToken = nil
@@ -488,6 +495,21 @@ class MetaWearableManager {
         }
     }
 
+    /// The session errors (SDK 1.0) that change what the user should do next. Everything else is
+    /// only logged by the caller.
+    private func noteSessionError(_ error: any Error) {
+        guard let error = error as? DeviceSessionError else { return }
+        if error == .insufficientSDKVersion {
+            // Terminal: the glasses' firmware no longer accepts the SDK this build ships. Retrying
+            // can't help; a newer Scan4D build can.
+            appUpdateRequired = true
+        } else if error == .dwaOutOfStuRange {
+            // Not blocking: app and glasses are outside Meta's recommended version range, but
+            // streaming carries on. Logged only, so a tester can say why if something misbehaves.
+            print("[MetaWearable] Glasses and SDK versions are outside the recommended range; continuing")
+        }
+    }
+
     private func setupStreamSession(for deviceId: String) {
         // Synchronous guard prevents concurrent setup attempts
         guard !isSettingUpStream else {
@@ -525,12 +547,16 @@ class MetaWearableManager {
             let compat = device.compatibility()
             if compat == .deviceUpdateRequired {
                 self.deviceUpdateRequired = true
+                self.appUpdateRequired = false
                 print("[MetaWearable] ⚠️ Device reports compatibility: deviceUpdateRequired — will still attempt session")
             } else if compat == .sdkUpdateRequired {
-                self.deviceUpdateRequired = true
+                // The glasses want a newer SDK than this build ships: a glasses update can't fix that.
+                self.deviceUpdateRequired = false
+                self.appUpdateRequired = true
                 print("[MetaWearable] ⚠️ Device reports compatibility: sdkUpdateRequired — will still attempt session")
             } else {
                 self.deviceUpdateRequired = false
+                self.appUpdateRequired = false
             }
 
             // Wait for device to be connected if not already
@@ -576,21 +602,36 @@ class MetaWearableManager {
                         devSession = try Wearables.shared.createSession(deviceSelector: selector)
                     } catch {
                         print("[MetaWearable] Retry failed: \(error)")
+                        self.noteSessionError(error)
                         self.connectionFailed = true
                         return
                     }
                 } else {
                     print("[MetaWearable] Failed to create DeviceSession: \(error)")
+                    self.noteSessionError(error)
                     return
                 }
             }
 
             let stateStream = devSession.stateStream()
 
+            // Read the session's errors from before start(), so an error that arrives while it is
+            // still starting (or that stops it from starting) is not missed. Cancelling the old
+            // listeners here, not after addCamera, keeps this task alive for this session.
+            self.cancelStreamListeners()
+            let errorStream = devSession.errorStream()
+            self.sessionErrorTask = Task { [weak self] in
+                for await error in errorStream {
+                    print("[MetaWearable] DeviceSession error: \(error)")
+                    self?.noteSessionError(error)
+                }
+            }
+
             do {
                 try devSession.start()
             } catch {
                 print("[MetaWearable] Failed to start DeviceSession: \(error)")
+                self.noteSessionError(error)
                 let errStr = String(describing: error).lowercased()
                 if errStr.contains("sessionalreadyexists") || errStr.contains("inprogress") {
                     print("[MetaWearable] Orphaned session detected! Attempting to force-stop...")
@@ -655,9 +696,8 @@ class MetaWearableManager {
             print("[MetaWearable] DeviceSession + Stream created")
 
             // --- MWDAT ANNOUNCER SUBSCRIPTION ---
-            // Cancel any listeners from a prior session before subscribing, so we never leak a
-            // stale subscription that outlives the session it was created for.
-            self.cancelStreamListeners()
+            // Listeners from a prior session were cancelled before start() above, so no stale
+            // subscription outlives the session it was created for.
             self.stateToken = session.statePublisher.listen { state in
                 print("[MetaWearable] Stream state changed: \(state)")
                 Task { @MainActor [weak self] in
