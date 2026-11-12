@@ -1,6 +1,6 @@
-# Contributing to WiSEScan iOS (Scan4D)
+# Contributing to Scan4D iOS
 
-This document covers **development rules and conventions** specific to `wisescan-ios`. These rules are mandatory for all contributors, including automated/agentic coding tools.
+This document covers **development rules and conventions** specific to `scan4d-ios`. These rules are mandatory for all contributors, including automated/agentic coding tools.
 
 ## Development Rules
 
@@ -133,7 +133,7 @@ Field-found 2026-08-25 (#71): the **first emoji laid out in a session** cost the
 - **Icons stay — with colour.** The point is the rendering path, not the picture. Tint a Label's icon with `.labelStyle(.tintedIcon(.orange))` (`TintedIconLabelStyle`, CoachBarView.swift); put a symbol *inside* a string with `Text(Image(systemName: "checkmark.circle.fill")).foregroundColor(.green) + Text(" on spot")`; give a transient banner an icon via `showTransientMessage(_, duration:, systemImage:, tint:)`. Colour vocabulary: green = done/good, cyan = informational/in progress, yellow = wait, orange = warning, red = lost.
 - **Scope, precisely:** this is about **emoji / pictographs** (the Apple Color Emoji font cascade), not all non-ASCII. Typographic characters — `·`, `°`, `—`, `≥`, accented names — are ordinary text and fine.
 - **Log strings are exempt:** `log(...)` / `PerfDiag.log(...)` lines may carry `⚠️` / `✓` — they exist for the diagnostics export, where they scan well. The events feed does render them, which is why `AppDelegate` **warms CoreText/MobileGestalt on a utility queue at launch** (`CoreText/MobileGestalt warm-up took N ms` in the log). That warm-up is the systemic fix; this rule is hygiene on top. Do not remove either.
-- **Audit:** `grep -n 'Text("[^"]*[\U0001F300-\U0001FAFF\u2600-\u27BF]' wisescan-ios/*.swift` — anything it finds is a bug.
+- **Audit:** `grep -n 'Text("[^"]*[\U0001F300-\U0001FAFF\u2600-\u27BF]' scan4d-ios/*.swift` — anything it finds is a bug.
 
 ### Never benchmark a process Xcode launched
 Xcode injects its Metal debugging layer (`GPUToolsCapture`, `MetalTools`) into every app it launches, and once the Mac is disconnected those tools' XPC round-trips have nobody to answer them. On 2026-09-01 the same Release build, same device, same scans measured:
@@ -178,13 +178,13 @@ git config core.hooksPath scripts
 
 Either way, the local hooks are convenience: **CI enforces the same checks on every PR** via `scripts/check-privacy.sh` (see [.github/workflows/lint.yml](.github/workflows/lint.yml)), so a missed install or a `--no-verify` commit can't leak into `main`. Run that check yourself any time with `./scripts/check-privacy.sh`.
 
-To build the project locally, open `wisescan-ios.xcodeproj` with Xcode.
+To build the project locally, open `scan4d-ios.xcodeproj` with Xcode.
 
 Field-testing and debugging tools — Performance Diagnostics, the on-device
 diagnostics log export, simulation toggles, the BLE probe bench, the offline
 solver harness — are catalogued in [docs/developer-tools.md](docs/developer-tools.md).
 
-The `wisescan-ios` repository uses [Release Please](https://github.com/googleapis/release-please) to automate CHANGELOG generation and semantic versioning. Your PR titles *must* follow Conventional Commit standards (e.g., `feat:`, `fix:`, `chore:`). Keep commit subjects to ~50 chars. Fastlane is used to automate TestFlight deployments via `fastlane testflight`.
+The `scan4d-ios` repository uses [Release Please](https://github.com/googleapis/release-please) to automate CHANGELOG generation and semantic versioning. Your PR titles *must* follow Conventional Commit standards (e.g., `feat:`, `fix:`, `chore:`). Keep commit subjects to ~50 chars. Fastlane is used to automate TestFlight deployments via `fastlane testflight`.
 
 > [!CAUTION]
 > **Never use `BREAKING CHANGE` in commit/PR bodies or the `!` suffix on commit/PR types (e.g., `feat!:`, `fix!:`).** These tokens cause release-please to automatically bump the major version. Major version increments are reserved for the maintainer's explicit decision — contributors and agents do not decide what constitutes a breaking change for semver purposes.
@@ -200,7 +200,7 @@ The `wisescan-ios` repository uses [Release Please](https://github.com/googleapi
 > [!WARNING]
 > **Xcode strips `x-release-please-version` markers.** The `MARKETING_VERSION` lines in `project.pbxproj` contain `/* x-release-please-version */` inline comments that release-please uses to locate the version string. Xcode's project serializer does **not** preserve non-standard inline comments — opening the project or modifying build settings will silently strip these markers. **Before committing any `project.pbxproj` changes, verify the markers are intact:**
 > ```bash
-> grep "x-release-please-version" wisescan-ios.xcodeproj/project.pbxproj
+> grep "x-release-please-version" scan4d-ios.xcodeproj/project.pbxproj
 > ```
 > If missing, restore them: `MARKETING_VERSION = X.Y.Z; /* x-release-please-version */` (two occurrences: Debug and Release build configurations).
 
@@ -214,7 +214,7 @@ When adding a new feature, update the following docs alongside the source code:
 2. **[REQUIREMENTS.md](REQUIREMENTS.md)** — Add a REQ-NNN entry (feature matrix row + detailed section) with source map entries.
 3. **[docs/APPSTORE.md](docs/APPSTORE.md)** — Add a line to the App Store description.
 4. **[docs/PRIVACY.md](docs/PRIVACY.md)** — Update if the feature touches data collection, camera usage, or personal data processing.
-5. **[wisescan-ios/UserGuideView.swift](wisescan-ios/UserGuideView.swift)** — The in-app guide is documentation that lives in SwiftUI; update it with any user-facing workflow, tip, or export change.
+5. **[scan4d-ios/UserGuideView.swift](scan4d-ios/UserGuideView.swift)** — The in-app guide is documentation that lives in SwiftUI; update it with any user-facing workflow, tip, or export change.
 6. **[AGENTS.md](AGENTS.md)** — Index any new doc, design note, or tool so agents and new contributors can find it.
 
 ## Stitching / Scan Linking — Implementation Contract

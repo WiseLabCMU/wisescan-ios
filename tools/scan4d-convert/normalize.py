@@ -18,7 +18,7 @@ capture). OUT is a Nerfstudio dataset (the contract is in flows/_lib/nsdataset.p
   depth        ARKit's LiDAR follows the video geometry, not the still's. It is resampled (nearest)
                into each image's own geometry at the image's size (LichtFeld requires the image size),
                16-bit millimetres; confidence with it, on its own grid. Depth the app wrote byte-swapped
-               (scans captured before wisescan-ios #93) is read the right way round.
+               (scans captured before scan4d-ios #93) is read the right way round.
   masks        (exports) the 360 rig faces' operator/rig masks, resampled to the face's size.
   fillers      (exports) Nerfstudio wants depth and masks on every frame or on none: a frame without
                depth gets all-zero depth (both engines ignore zeros), one without a mask an all-keep one.
@@ -66,7 +66,7 @@ def plane(path):
 
 
 def millimetres(a):
-    """16-bit depth as millimetres. The app wrote its LiDAR PNGs byte-swapped until wisescan-ios #93
+    """16-bit depth as millimetres. The app wrote its LiDAR PNGs byte-swapped until scan4d-ios #93
     (DepthPNG.swift), and scans captured before it still are. Real depth lands in 0.1-20 m and the wrong
     byte order scatters over the whole 16-bit range, so a vote over the samples settles it."""
     a = a.astype(np.uint16)

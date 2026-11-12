@@ -80,7 +80,7 @@ TestFlight builds start with the Scan4D server set; App Store and Xcode builds s
 ## Architecture
 
 ```
-wisescan-ios/
+scan4d-ios/
 │  # App shell, settings, guides
 ├── AppDelegate.swift            # App lifecycle, orientation locking
 ├── AppConstants.swift           # Centralized UI constants, app defaults, pipeline tuning
@@ -306,7 +306,7 @@ When enabled (toggle on Capture screen):
 The Meta Wearables DAT SDK relies on specific Xcode build configurations that cannot be safely executed automatically via typical text edits, as it will corrupt the `.pbxproj`. You will need to manually perform these setup steps in Xcode:
 
 1. **Add the Swift Package**
-   In Xcode, go to `File > Add Package Dependencies...` and enter the repository URL: `https://github.com/facebook/meta-wearables-dat-ios`. Add the `meta-wearables-dat-ios` library to the `wisescan-ios` target.
+   In Xcode, go to `File > Add Package Dependencies...` and enter the repository URL: `https://github.com/facebook/meta-wearables-dat-ios`. Add the `meta-wearables-dat-ios` library to the `scan4d-ios` target.
 
 2. **Gather Meta Credentials (Optional)**
    Ensure you have your `MetaAppID`, `ClientToken`, and `TeamID` registered from the Meta Wearables Developer Center. Keep the real values on your machine only: the privacy guard refuses a staged plist that carries them (see CONTRIBUTING, Credentials). Inject these into `Custom-Info.plist` locally without staging the file (or keep them blank to function in Developer Mode). 

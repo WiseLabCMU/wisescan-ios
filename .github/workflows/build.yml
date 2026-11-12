@@ -32,7 +32,7 @@ jobs:
       - name: Build
         run: |
           set -o pipefail
-          xcodebuild -project wisescan-ios.xcodeproj -scheme wisescan-ios \
+          xcodebuild -project scan4d-ios.xcodeproj -scheme scan4d-ios \
             -destination 'generic/platform=iOS' -configuration Debug \
             CODE_SIGNING_ALLOWED=NO build 2>&1 | tee build.log | grep -E 'error:|BUILD ' || true
           grep -q 'BUILD SUCCEEDED' build.log

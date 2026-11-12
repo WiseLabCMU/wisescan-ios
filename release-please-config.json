@@ -3,7 +3,7 @@
     ".": {
       "release-type": "simple",
       "extra-files": [
-        "wisescan-ios.xcodeproj/project.pbxproj"
+        "scan4d-ios.xcodeproj/project.pbxproj"
       ]
     }
   }

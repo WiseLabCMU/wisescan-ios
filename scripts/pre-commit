@@ -10,7 +10,7 @@ HOOK_DIR="$(dirname "$0")"
 FAIL=0
 
 # ---- 1. release-please version markers -------------------------------------
-PBXPROJ="wisescan-ios.xcodeproj/project.pbxproj"
+PBXPROJ="scan4d-ios.xcodeproj/project.pbxproj"
 if git diff --cached --name-only | grep -q "$PBXPROJ"; then
     EXPECTED=2
     FOUND=$(git show :"$PBXPROJ" | grep -c "x-release-please-version" || true)

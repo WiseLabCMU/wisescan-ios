@@ -1,6 +1,6 @@
 # Release Process
 
-This document describes the end-to-end release process for Scan4D (wisescan-ios). The process uses **release-please** for versioning/changelog and **Fastlane** for TestFlight distribution.
+This document describes the end-to-end release process for Scan4D (scan4d-ios). The process uses **release-please** for versioning/changelog and **Fastlane** for TestFlight distribution.
 
 ## Overview
 
@@ -8,13 +8,17 @@ This document describes the end-to-end release process for Scan4D (wisescan-ios)
 Finalize Code → Merge release-please PR → Pull Tag Locally → Fastlane Build & Upload
 ```
 
+## App identity
+
+The App Store app keeps the bundle ID `edu.cmu.wiselab.wisescan-ios` from before the repository was renamed to scan4d-ios (November 2026). Apple never lets an app's bundle ID change: a new one would be a separate App Store app with no TestFlight testers, and installing it would not bring over anyone's on-device scans, settings or stored control-plane password. The app target's `PRODUCT_BUNDLE_IDENTIFIER`, `fastlane/Appfile` and the Fastfile's `app_id` therefore stay as they are. Users see only the display name, Scan4D, so the rename needs nothing from testers: a new build installs over the old one with everything kept. The Meta glasses URL scheme `wisescandat` keeps its name for the same reason (the Meta AI app returns to the app by it).
+
 ## Prerequisites
 
 ### One-Time Setup
 
 1. **Install Fastlane** (via Bundler):
    ```bash
-   cd wisescan-ios
+   cd scan4d-ios
    bundle install
    ```
 
@@ -56,7 +60,7 @@ chore(main): release 0.2.0
 This PR contains:
 - Updated `CHANGELOG.md` with all new entries
 - Updated `.release-please-manifest.json` with the new version
-- Updated `MARKETING_VERSION` in `wisescan-ios.xcodeproj/project.pbxproj` — release-please's `extra-files` config bumps it via the `/* x-release-please-version */` annotation on the app target, so the app's `CFBundleShortVersionString` (shown in Settings) matches the release version once merged
+- Updated `MARKETING_VERSION` in `scan4d-ios.xcodeproj/project.pbxproj` — release-please's `extra-files` config bumps it via the `/* x-release-please-version */` annotation on the app target, so the app's `CFBundleShortVersionString` (shown in Settings) matches the release version once merged
 
 **Review the changelog**, then **merge the PR**. This triggers release-please to:
 - Create a **git tag** (e.g. `v0.2.0`)
