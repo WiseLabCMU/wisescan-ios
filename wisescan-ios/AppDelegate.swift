@@ -133,7 +133,19 @@ struct Scan4DApp: App {
                         if FocusRegionInbox.shared.receive(url) { return }
                         Task {
                             do {
-                                _ = try await Wearables.shared.handleUrl(url)
+                                // Since SDK 1.0 the Meta AI app can start registration itself. The
+                                // plain handleUrl(_:) throws on such a URL, so take the request and
+                                // continue it: the user already chose Scan4D in Meta AI, so a
+                                // second confirmation here would only add a tap.
+                                _ = try await Wearables.shared.handleUrl(url) { request in
+                                    Task {
+                                        do {
+                                            try await request.continueRegistration()
+                                        } catch {
+                                            print("[MetaWearable] Registration from Meta AI failed: \(error)")
+                                        }
+                                    }
+                                }
                             } catch {
                                 print("Error handling Wearables URL: \(error)")
                             }
