@@ -1,5 +1,5 @@
 import XCTest
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Guards the sweep-coverage admission gate. The property that matters most is that nothing is
 /// ever queued: a busy drop must neither backlog work nor shift the next admission window

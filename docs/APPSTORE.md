@@ -173,7 +173,7 @@ Requires a LiDAR-equipped iPhone or iPad Pro. Meta Ray-Ban Smart Glasses support
 
 
 ```
-https://github.com/WiseLabCMU/wisescan-ios
+https://github.com/WiseLabCMU/scan4d-ios
 ```
 
 ---
@@ -181,7 +181,7 @@ https://github.com/WiseLabCMU/wisescan-ios
 ## Privacy Policy URL
 
 ```
-https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md
+https://github.com/WiseLabCMU/scan4d-ios/blob/main/docs/PRIVACY.md
 ```
 
 ---

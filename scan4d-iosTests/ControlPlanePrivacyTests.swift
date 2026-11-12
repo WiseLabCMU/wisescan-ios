@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// The privacy field of the control plane sync: each scan's Privacy Filter state, so the server
 /// can show which scans may have people unblurred.

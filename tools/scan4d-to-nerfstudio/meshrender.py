@@ -27,7 +27,7 @@ Output contract, verified against LichtFeld commit 239b0336:
 Needs numpy + open3d (RaycastingScene) + PIL — all present in the nerfstudio image:
 
   docker run --rm -v /mnt/d/Workspace/WiseLab:/ws nerfstudio:blackwell \\
-    python /ws/wisescan-ios/tools/scan4d-to-nerfstudio/meshrender.py \\
+    python /ws/scan4d-ios/tools/scan4d-to-nerfstudio/meshrender.py \\
     /ws/4dscans/staging_X/both --mesh /ws/4dscans/staging_X/mesh.obj
 
 The mesh must be the OBJ export of the *same scan* (app export format "OBJ"): it is baked

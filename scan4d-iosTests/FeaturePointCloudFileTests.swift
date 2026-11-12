@@ -1,13 +1,13 @@
 import XCTest
 import simd
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Byte-level lock on `FeaturePointCloudFile.encode` — the serializer behind `arkit_features.bin`.
 ///
 /// This is the only automated signal the feature-cloud export has. Everything upstream of `encode`
 /// needs a real device: `ARSession.getCurrentWorldMap` never yields a map in the Simulator, so the
 /// producer path (capture → world map → `rawFeaturePoints` → staged sidecar) cannot run here, and
-/// nothing else in wisescan-iosTests touches export staging. What *is* checkable is the part a
+/// nothing else in scan4d-iosTests touches export staging. What *is* checkable is the part a
 /// consumer actually parses, and that part is pure: two parallel arrays in, bytes out.
 ///
 /// So these tests pin the wire format itself, deliberately duplicating the spec rather than calling

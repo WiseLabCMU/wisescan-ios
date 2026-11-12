@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Restore Default Developer Options and turning Developer Mode off share one list,
 /// AppConstants.developerOptionDefaults. These pin what the list must guarantee: a restore brings

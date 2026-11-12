@@ -1,6 +1,6 @@
 import XCTest
 import simd
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Locks the sweep-coverage grid's binning, voxel traversal, and free/surface integration.
 /// Pure Foundation + simd, so it runs in the Simulator.

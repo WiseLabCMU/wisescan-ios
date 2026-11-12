@@ -1,5 +1,5 @@
 import XCTest
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// The mesh preview's photo-position markers: one on/off toggle for everyone (every photo,
 /// stills and 360° stills), and the full cycle with motion frames in Developer Mode.

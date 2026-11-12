@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// The control plane host's TestFlight default and the password prompt's rule: a tapped Sync
 /// waits for Settings only when its server has refused a request for want of a password.

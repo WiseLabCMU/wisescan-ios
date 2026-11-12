@@ -1,4 +1,4 @@
-# SwiftLint configuration for wisescan-ios
+# SwiftLint configuration for scan4d-ios
 
 # line_length disabled: the codebase deliberately uses long single-line doc comments and inline
 # SwiftUI Text descriptions, which produced pervasive noise with no real signal. Turned off rather

@@ -2,7 +2,7 @@ import XCTest
 import ARKit
 import simd
 import os
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Guards `SweepCoverageRecorder.liveStats()`, the non-freezing read behind the live coverage
 /// readout: zero at `begin()`, tracks processed updates, keeps answering after the Stop-tap

@@ -17,37 +17,37 @@
 			containerPortal = C93B8BC62F568A6F00785D6B /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = C93B8BCD2F568A6F00785D6B;
-			remoteInfo = "wisescan-ios";
+			remoteInfo = "scan4d-ios";
 		};
 		DD0000000000000000000007 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = C93B8BC62F568A6F00785D6B /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = C93B8BCD2F568A6F00785D6B;
-			remoteInfo = "wisescan-ios";
+			remoteInfo = "scan4d-ios";
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		C93B8BCE2F568A6F00785D6B /* wisescan-ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "wisescan-ios.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		C994223E2FA29616004526C4 /* wisescan-iosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "wisescan-iosUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
-		DD0000000000000000000002 /* wisescan-iosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "wisescan-iosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		C93B8BCE2F568A6F00785D6B /* scan4d-ios.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "scan4d-ios.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		C994223E2FA29616004526C4 /* scan4d-iosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "scan4d-iosUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		DD0000000000000000000002 /* scan4d-iosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "scan4d-iosTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		C93B8BD02F568A6F00785D6B /* wisescan-ios */ = {
+		C93B8BD02F568A6F00785D6B /* scan4d-ios */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "wisescan-ios";
+			path = "scan4d-ios";
 			sourceTree = "<group>";
 		};
-		C994223F2FA29616004526C4 /* wisescan-iosUITests */ = {
+		C994223F2FA29616004526C4 /* scan4d-iosUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "wisescan-iosUITests";
+			path = "scan4d-iosUITests";
 			sourceTree = "<group>";
 		};
-		DD0000000000000000000003 /* wisescan-iosTests */ = {
+		DD0000000000000000000003 /* scan4d-iosTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "wisescan-iosTests";
+			path = "scan4d-iosTests";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -82,9 +82,9 @@
 		C93B8BC52F568A6F00785D6B = {
 			isa = PBXGroup;
 			children = (
-				C93B8BD02F568A6F00785D6B /* wisescan-ios */,
-				C994223F2FA29616004526C4 /* wisescan-iosUITests */,
-				DD0000000000000000000003 /* wisescan-iosTests */,
+				C93B8BD02F568A6F00785D6B /* scan4d-ios */,
+				C994223F2FA29616004526C4 /* scan4d-iosUITests */,
+				DD0000000000000000000003 /* scan4d-iosTests */,
 				C93B8BCF2F568A6F00785D6B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -92,9 +92,9 @@
 		C93B8BCF2F568A6F00785D6B /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				C93B8BCE2F568A6F00785D6B /* wisescan-ios.app */,
-				C994223E2FA29616004526C4 /* wisescan-iosUITests.xctest */,
-				DD0000000000000000000002 /* wisescan-iosTests.xctest */,
+				C93B8BCE2F568A6F00785D6B /* scan4d-ios.app */,
+				C994223E2FA29616004526C4 /* scan4d-iosUITests.xctest */,
+				DD0000000000000000000002 /* scan4d-iosTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -102,9 +102,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		C93B8BCD2F568A6F00785D6B /* wisescan-ios */ = {
+		C93B8BCD2F568A6F00785D6B /* scan4d-ios */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = C93B8BD92F568A7000785D6B /* Build configuration list for PBXNativeTarget "wisescan-ios" */;
+			buildConfigurationList = C93B8BD92F568A7000785D6B /* Build configuration list for PBXNativeTarget "scan4d-ios" */;
 			buildPhases = (
 				C93B8BCA2F568A6F00785D6B /* Sources */,
 				C93B8BCB2F568A6F00785D6B /* Frameworks */,
@@ -116,20 +116,20 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				C93B8BD02F568A6F00785D6B /* wisescan-ios */,
+				C93B8BD02F568A6F00785D6B /* scan4d-ios */,
 			);
-			name = "wisescan-ios";
+			name = "scan4d-ios";
 			packageProductDependencies = (
 				C901CDB82F74E87700C5F941 /* MWDATCamera */,
 				C901CDBA2F74E87700C5F941 /* MWDATCore */,
 			);
-			productName = "wisescan-ios";
-			productReference = C93B8BCE2F568A6F00785D6B /* wisescan-ios.app */;
+			productName = "scan4d-ios";
+			productReference = C93B8BCE2F568A6F00785D6B /* scan4d-ios.app */;
 			productType = "com.apple.product-type.application";
 		};
-		C994223D2FA29616004526C4 /* wisescan-iosUITests */ = {
+		C994223D2FA29616004526C4 /* scan4d-iosUITests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = C99422482FA29616004526C4 /* Build configuration list for PBXNativeTarget "wisescan-iosUITests" */;
+			buildConfigurationList = C99422482FA29616004526C4 /* Build configuration list for PBXNativeTarget "scan4d-iosUITests" */;
 			buildPhases = (
 				C994223A2FA29616004526C4 /* Sources */,
 				C994223B2FA29616004526C4 /* Frameworks */,
@@ -141,18 +141,18 @@
 				C99422452FA29616004526C4 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				C994223F2FA29616004526C4 /* wisescan-iosUITests */,
+				C994223F2FA29616004526C4 /* scan4d-iosUITests */,
 			);
-			name = "wisescan-iosUITests";
+			name = "scan4d-iosUITests";
 			packageProductDependencies = (
 			);
-			productName = "wisescan-iosUITests";
-			productReference = C994223E2FA29616004526C4 /* wisescan-iosUITests.xctest */;
+			productName = "scan4d-iosUITests";
+			productReference = C994223E2FA29616004526C4 /* scan4d-iosUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
-		DD0000000000000000000001 /* wisescan-iosTests */ = {
+		DD0000000000000000000001 /* scan4d-iosTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = DD0000000000000000000011 /* Build configuration list for PBXNativeTarget "wisescan-iosTests" */;
+			buildConfigurationList = DD0000000000000000000011 /* Build configuration list for PBXNativeTarget "scan4d-iosTests" */;
 			buildPhases = (
 				DD0000000000000000000004 /* Sources */,
 				DD0000000000000000000005 /* Frameworks */,
@@ -164,13 +164,13 @@
 				DD0000000000000000000008 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				DD0000000000000000000003 /* wisescan-iosTests */,
+				DD0000000000000000000003 /* scan4d-iosTests */,
 			);
-			name = "wisescan-iosTests";
+			name = "scan4d-iosTests";
 			packageProductDependencies = (
 			);
-			productName = "wisescan-iosTests";
-			productReference = DD0000000000000000000002 /* wisescan-iosTests.xctest */;
+			productName = "scan4d-iosTests";
+			productReference = DD0000000000000000000002 /* scan4d-iosTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
@@ -196,7 +196,7 @@
 					};
 				};
 			};
-			buildConfigurationList = C93B8BC92F568A6F00785D6B /* Build configuration list for PBXProject "wisescan-ios" */;
+			buildConfigurationList = C93B8BC92F568A6F00785D6B /* Build configuration list for PBXProject "scan4d-ios" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -213,9 +213,9 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				C93B8BCD2F568A6F00785D6B /* wisescan-ios */,
-				C994223D2FA29616004526C4 /* wisescan-iosUITests */,
-				DD0000000000000000000001 /* wisescan-iosTests */,
+				C93B8BCD2F568A6F00785D6B /* scan4d-ios */,
+				C994223D2FA29616004526C4 /* scan4d-iosUITests */,
+				DD0000000000000000000001 /* scan4d-iosTests */,
 			);
 		};
 /* End PBXProject section */
@@ -293,12 +293,12 @@
 /* Begin PBXTargetDependency section */
 		C99422452FA29616004526C4 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = C93B8BCD2F568A6F00785D6B /* wisescan-ios */;
+			target = C93B8BCD2F568A6F00785D6B /* scan4d-ios */;
 			targetProxy = C99422442FA29616004526C4 /* PBXContainerItemProxy */;
 		};
 		DD0000000000000000000008 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = C93B8BCD2F568A6F00785D6B /* wisescan-ios */;
+			target = C93B8BCD2F568A6F00785D6B /* scan4d-ios */;
 			targetProxy = DD0000000000000000000007 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -433,7 +433,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = "wisescan-ios.entitlements";
+				CODE_SIGN_ENTITLEMENTS = "scan4d-ios.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 24D5JLAEA3;
@@ -475,7 +475,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = "wisescan-ios.entitlements";
+				CODE_SIGN_ENTITLEMENTS = "scan4d-ios.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = 24D5JLAEA3;
@@ -521,7 +521,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.wisescan-iosUITests";
+				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.scan4d-iosUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -529,7 +529,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = "wisescan-ios";
+				TEST_TARGET_NAME = "scan4d-ios";
 			};
 			name = Debug;
 		};
@@ -542,7 +542,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.4;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.wisescan-iosUITests";
+				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.scan4d-iosUITests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -550,7 +550,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = "wisescan-ios";
+				TEST_TARGET_NAME = "scan4d-ios";
 			};
 			name = Release;
 		};
@@ -564,7 +564,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.wisescan-iosTests";
+				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.scan4d-iosTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -572,7 +572,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/wisescan-ios.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/wisescan-ios";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/scan4d-ios.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/scan4d-ios";
 			};
 			name = Debug;
 		};
@@ -586,7 +586,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.wisescan-iosTests";
+				PRODUCT_BUNDLE_IDENTIFIER = "edu.cmu.wiselab.scan4d-iosTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
@@ -594,14 +594,14 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/wisescan-ios.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/wisescan-ios";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/scan4d-ios.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/scan4d-ios";
 			};
 			name = Release;
 		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		C93B8BC92F568A6F00785D6B /* Build configuration list for PBXProject "wisescan-ios" */ = {
+		C93B8BC92F568A6F00785D6B /* Build configuration list for PBXProject "scan4d-ios" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				C93B8BD72F568A7000785D6B /* Debug */,
@@ -610,7 +610,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		C93B8BD92F568A7000785D6B /* Build configuration list for PBXNativeTarget "wisescan-ios" */ = {
+		C93B8BD92F568A7000785D6B /* Build configuration list for PBXNativeTarget "scan4d-ios" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				C93B8BDA2F568A7000785D6B /* Debug */,
@@ -619,7 +619,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		C99422482FA29616004526C4 /* Build configuration list for PBXNativeTarget "wisescan-iosUITests" */ = {
+		C99422482FA29616004526C4 /* Build configuration list for PBXNativeTarget "scan4d-iosUITests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				C99422462FA29616004526C4 /* Debug */,
@@ -628,7 +628,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		DD0000000000000000000011 /* Build configuration list for PBXNativeTarget "wisescan-iosTests" */ = {
+		DD0000000000000000000011 /* Build configuration list for PBXNativeTarget "scan4d-iosTests" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				DD0000000000000000000009 /* Debug */,

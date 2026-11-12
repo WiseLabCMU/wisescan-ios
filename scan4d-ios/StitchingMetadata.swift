@@ -110,7 +110,7 @@ enum StitchingMetadataManager {
 
     /// Dedicated serial queue for stitching file I/O — avoids blocking the main thread
     /// during writes while preventing concurrent read/write races.
-    private static let ioQueue = DispatchQueue(label: "com.wisescan.stitchingIO", qos: .utility)
+    private static let ioQueue = DispatchQueue(label: "org.arenaxr.scan4d.stitchingIO", qos: .utility)
 
     /// Returns the `stitching.json` URL for a given location directory.
     static func url(forLocationDir locationDir: URL) -> URL {

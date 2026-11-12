@@ -1,6 +1,6 @@
 import XCTest
 import simd
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// The focus-scan region: its JSON (also the import format a downstream processor writes) and the
 /// box math the capture gate and the viewer rely on.

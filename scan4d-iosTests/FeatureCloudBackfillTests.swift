@@ -1,6 +1,6 @@
 import XCTest
 import SwiftData
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Guards the `.featureCloud` backfill step's DETECTION and GATING.
 ///

@@ -20,9 +20,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "C994223D2FA29616004526C4"
-               BuildableName = "wisescan-iosUITests.xctest"
-               BlueprintName = "wisescan-iosUITests"
-               ReferencedContainer = "container:wisescan-ios.xcodeproj">
+               BuildableName = "scan4d-iosUITests.xctest"
+               BlueprintName = "scan4d-iosUITests"
+               ReferencedContainer = "container:scan4d-ios.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>

@@ -1,6 +1,6 @@
 import XCTest
 import SwiftData
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Pins what happens to a capture when tracking is lost mid-scan (issue #81, defect 2), and the
 /// map gate that keeps the resulting map-less scan from blocking its space.

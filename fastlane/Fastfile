@@ -22,7 +22,7 @@ platform :ios do
     )
     increment_build_number(
       build_number: latest_build + 1,
-      xcodeproj: "wisescan-ios.xcodeproj"
+      xcodeproj: "scan4d-ios.xcodeproj"
     )
 
     # Code signing via the API key — fixes the export failure that occurred when signing relied on
@@ -35,7 +35,7 @@ platform :ios do
 
     # Build the app (archive + export). Export is manual, using the profile fetched above.
     build_app(
-      scheme: "wisescan-ios",
+      scheme: "scan4d-ios",
       export_method: "app-store",
       xcargs: "-allowProvisioningUpdates",
       export_options: {
@@ -51,14 +51,14 @@ platform :ios do
       api_key: api_key,
       skip_waiting_for_build_processing: true,
       beta_app_feedback_email: "arenaxr@andrew.cmu.edu",
-      changelog: "See https://github.com/WiseLabCMU/wisescan-ios/blob/main/CHANGELOG.md for details."
+      changelog: "See https://github.com/WiseLabCMU/scan4d-ios/blob/main/CHANGELOG.md for details."
     )
   end
 
   desc "Build only (no upload) — for local validation"
   lane :build do
     build_app(
-      scheme: "wisescan-ios",
+      scheme: "scan4d-ios",
       export_method: "app-store",
       xcargs: "-allowProvisioningUpdates",
       skip_archive: false
@@ -68,7 +68,7 @@ platform :ios do
   desc "Generate App Store screenshots via Simulator UI tests"
   lane :screenshots do
     snapshot(
-      scheme: "wisescan-iosUITests",
+      scheme: "scan4d-iosUITests",
       output_directory: "./fastlane/screenshots",
       clean: false,
       stop_after_first_error: true

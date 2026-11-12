@@ -1,7 +1,7 @@
 import CoreGraphics
 import simd
 import XCTest
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Focus scan filing and export helpers that run without a device.
 @MainActor

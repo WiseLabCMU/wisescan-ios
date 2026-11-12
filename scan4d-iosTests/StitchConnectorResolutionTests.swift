@@ -1,7 +1,7 @@
 import XCTest
 import SwiftData
 import simd
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Diagnoses the "outgoing connectors don't render" bug: when rescanning the SOURCE map (endpoint A),
 /// do we resolve the link, its local anchor (in A's frame), and the OTHER map's name? And symmetric

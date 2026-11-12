@@ -1,6 +1,6 @@
 import XCTest
 import simd
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// `ARCoverageView.deriveLevelPlanes` / `deriveRampPlanes` — recovering the walkable surfaces
 /// RoomPlan does not model.

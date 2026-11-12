@@ -1,6 +1,6 @@
 import XCTest
 import simd
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Byte-level lock on `SweepCoverageFile`, the serializer behind `sweep_coverage.bin`.
 ///

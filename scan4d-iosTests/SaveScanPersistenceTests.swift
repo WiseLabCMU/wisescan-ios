@@ -1,6 +1,6 @@
 import XCTest
 import SwiftData
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Guards `ScanFileManager.saveScan`'s on-disk persistence path.
 ///

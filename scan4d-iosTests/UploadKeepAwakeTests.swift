@@ -2,7 +2,7 @@ import Foundation
 import SwiftData
 import UIKit
 import XCTest
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// The device-side rules behind keeping the screen on and flashing for every saved still: which
 /// scans a relaunch marks interrupted, the screen-awake holders, and the flash strengths.

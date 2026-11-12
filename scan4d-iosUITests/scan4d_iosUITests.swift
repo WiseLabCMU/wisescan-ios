@@ -1,13 +1,13 @@
 //
-//  wisescan_iosUITests.swift
-//  wisescan-iosUITests
+//  scan4d_iosUITests.swift
+//  scan4d-iosUITests
 //
 //  Created by mwfarb on 4/29/26.
 //
 
 import XCTest
 
-final class wisescan_iosUITests: XCTestCase {
+final class scan4d_iosUITests: XCTestCase {
 
     override func setUpWithError() throws {
         // Put setup code here. This method is called before the invocation of each test method in the class.

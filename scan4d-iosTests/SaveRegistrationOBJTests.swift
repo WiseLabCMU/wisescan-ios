@@ -1,6 +1,6 @@
 import XCTest
 import simd
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Golden-fixture lock on `SaveRegistration.transformOBJ`'s output bytes.
 ///

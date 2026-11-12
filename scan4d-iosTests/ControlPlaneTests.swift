@@ -2,7 +2,7 @@ import Foundation
 import SwiftData
 import simd
 import XCTest
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// The control plane sync's device-side pieces that run without a server: the host field, the
 /// manifest's wire format, the snapshot's base/tip, the registration sidecar read.

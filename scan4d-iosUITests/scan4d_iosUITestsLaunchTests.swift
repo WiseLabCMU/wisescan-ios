@@ -1,13 +1,13 @@
 //
-//  wisescan_iosUITestsLaunchTests.swift
-//  wisescan-iosUITests
+//  scan4d_iosUITestsLaunchTests.swift
+//  scan4d-iosUITests
 //
 //  Created by mwfarb on 4/29/26.
 //
 
 import XCTest
 
-final class wisescan_iosUITestsLaunchTests: XCTestCase {
+final class scan4d_iosUITestsLaunchTests: XCTestCase {
 
     override class var runsForEachTargetApplicationUIConfiguration: Bool {
         true

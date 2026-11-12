@@ -1,7 +1,7 @@
 import Foundation
 import SwiftData
 import simd
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 // MARK: - Shared test helpers for the stitch-link tests.
 

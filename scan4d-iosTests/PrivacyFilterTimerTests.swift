@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// The Privacy Filter's time limit: switched off, it turns itself back on after the limit, an
 /// unknown switch-off time fails closed, and "None" never turns it back on.

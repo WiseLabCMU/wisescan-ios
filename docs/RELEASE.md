@@ -1,6 +1,6 @@
 # Release Process
 
-This document describes the end-to-end release process for Scan4D (wisescan-ios). The process uses **release-please** for versioning/changelog and **Fastlane** for TestFlight distribution.
+This document describes the end-to-end release process for Scan4D (scan4d-ios). The process uses **release-please** for versioning/changelog and **Fastlane** for TestFlight distribution.
 
 ## Overview
 
@@ -14,7 +14,7 @@ Finalize Code → Merge release-please PR → Pull Tag Locally → Fastlane Buil
 
 1. **Install Fastlane** (via Bundler):
    ```bash
-   cd wisescan-ios
+   cd scan4d-ios
    bundle install
    ```
 
@@ -56,7 +56,7 @@ chore(main): release 0.2.0
 This PR contains:
 - Updated `CHANGELOG.md` with all new entries
 - Updated `.release-please-manifest.json` with the new version
-- Updated `MARKETING_VERSION` in `wisescan-ios.xcodeproj/project.pbxproj` — release-please's `extra-files` config bumps it via the `/* x-release-please-version */` annotation on the app target, so the app's `CFBundleShortVersionString` (shown in Settings) matches the release version once merged
+- Updated `MARKETING_VERSION` in `scan4d-ios.xcodeproj/project.pbxproj` — release-please's `extra-files` config bumps it via the `/* x-release-please-version */` annotation on the app target, so the app's `CFBundleShortVersionString` (shown in Settings) matches the release version once merged
 
 **Review the changelog**, then **merge the PR**. This triggers release-please to:
 - Create a **git tag** (e.g. `v0.2.0`)

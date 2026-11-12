@@ -1,7 +1,7 @@
 import XCTest
 import SwiftData
 import simd
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// Test 3: one-time migration of legacy `stitching.json` files into SwiftData.
 ///

@@ -11,7 +11,7 @@ This document lists all pre-scan analysis checks and mid-scan coaching tips. The
 
 Tap **Analyze** (scope icon) near the Record button to begin. It is offered only before a new space's scan, not during a rescan, a connect or a focus scan. The user pans 360° while the app measures ambient lighting, detects room features via RoomPlan, and checks for people using person segmentation. A report modal presents results as pass/warn/alert/skipped cards.
 
-**Source:** [SpaceAnalyzer.swift](../wisescan-ios/SpaceAnalyzer.swift) · [ScanAnalysisReportView.swift](../wisescan-ios/ScanAnalysisReportView.swift)
+**Source:** [SpaceAnalyzer.swift](../scan4d-ios/SpaceAnalyzer.swift) · [ScanAnalysisReportView.swift](../scan4d-ios/ScanAnalysisReportView.swift)
 
 ### Checks
 
@@ -46,7 +46,7 @@ Real-time tips during recording, evaluated at ~1 Hz by the `ScanCoach` rules eng
 
 **Settings toggle:** Scan Coaching (default ON) — suppresses GUIDANCE and INFO tips; CRITICAL and WARNING always evaluate.
 
-**Source:** [ScanCoach.swift](../wisescan-ios/ScanCoach.swift) · [CoachBarView.swift](../wisescan-ios/CoachBarView.swift)
+**Source:** [ScanCoach.swift](../scan4d-ios/ScanCoach.swift) · [CoachBarView.swift](../scan4d-ios/CoachBarView.swift)
 
 ### Tips by Priority
 
@@ -106,7 +106,7 @@ There is no shutter tap, except as the 360° rig's shutter when a Theta is conne
 | GUIDANCE | Indigo | 6s | 30s | Suppressed when OFF |
 | INFO | Green | 5s | 60s | Suppressed when OFF |
 
-Anti-nag: tips are suppressed after 2 manual dismissals (swipe-up) per session. Cooldown timers are in [AppConstants.swift](../wisescan-ios/AppConstants.swift).
+Anti-nag: tips are suppressed after 2 manual dismissals (swipe-up) per session. Cooldown timers are in [AppConstants.swift](../scan4d-ios/AppConstants.swift).
 
 ## Focus scan status line
 

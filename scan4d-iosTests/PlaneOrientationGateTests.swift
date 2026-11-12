@@ -1,6 +1,6 @@
 import XCTest
 import simd
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// `PlaneRegistration.orientationMatches` — the gate that keeps a live plane anchor from entering the
 /// fit as the wrong KIND of surface.

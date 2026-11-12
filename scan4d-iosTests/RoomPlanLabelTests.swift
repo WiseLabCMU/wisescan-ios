@@ -3,7 +3,7 @@ import simd
 import SceneKit
 import UIKit
 import SwiftUI
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// `RoomPlanCategory` — the rich, unconsolidated RoomPlan label vocabulary that `roomplan.json` has
 /// always stored, and the derived palette / legend-filter helpers that let the mesh preview show it.

@@ -1,5 +1,5 @@
 import XCTest
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// The export format a stored name decodes to. Names persist in SwiftData
 /// (`CapturedScan.selectedFormatStr`), so a format that is folded into another

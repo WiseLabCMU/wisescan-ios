@@ -1,7 +1,7 @@
 // swiftlint:disable identifier_name
 import XCTest
 import simd
-@testable import wisescan_ios
+@testable import scan4d_ios
 
 /// The pure gate math behind the stripped AR still capture. The session itself needs a device
 /// (no ARKit world tracking in the Simulator); these lock the decisions it makes per frame.

@@ -24,7 +24,7 @@ Build a sparse voxel hash map that accumulates high-confidence LiDAR depth + cam
 
 ### VoxelGrid Data Structure
 
-#### [NEW] [VoxelGrid.swift](../../wisescan-ios/VoxelGrid.swift)
+#### [NEW] [VoxelGrid.swift](../../scan4d-ios/VoxelGrid.swift)
 
 A Swift class managing the sparse voxel hash map on CPU, with a Metal buffer mirror for GPU integration.
 
@@ -38,7 +38,7 @@ A Swift class managing the sparse voxel hash map on CPU, with a Metal buffer mir
 
 ### GPU Integration Kernel
 
-#### [MODIFY] [PointCloud.metal](../../wisescan-ios/Shaders/PointCloud.metal)
+#### [MODIFY] [PointCloud.metal](../../scan4d-ios/Shaders/PointCloud.metal)
 
 Add a new `integrateVoxels` compute kernel:
 
@@ -59,7 +59,7 @@ Add a new `integrateVoxels` compute kernel:
 
 ### PointCloudManager Changes
 
-#### [MODIFY] [PointCloudManager.swift](../../wisescan-ios/PointCloudManager.swift)
+#### [MODIFY] [PointCloudManager.swift](../../scan4d-ios/PointCloudManager.swift)
 
 Major additions:
 
@@ -86,7 +86,7 @@ Frame arrives (with movement > 5cm/3°)
 
 ### ARCoverageView Changes
 
-#### [MODIFY] [ARCoverageView.swift](../../wisescan-ios/ARCoverageView.swift)
+#### [MODIFY] [ARCoverageView.swift](../../scan4d-ios/ARCoverageView.swift)
 
 - Pass `session` to `PointCloudManager.update()` (needed for the voxel grid's world-space transform)
 - No other changes needed — the voxel mesh is just another `ModelEntity` in the scene

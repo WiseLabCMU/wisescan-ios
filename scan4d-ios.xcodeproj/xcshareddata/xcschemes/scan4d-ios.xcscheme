@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "C93B8BCD2F568A6F00785D6B"
-               BuildableName = "wisescan-ios.app"
-               BlueprintName = "wisescan-ios"
-               ReferencedContainer = "container:wisescan-ios.xcodeproj">
+               BuildableName = "scan4d-ios.app"
+               BlueprintName = "scan4d-ios"
+               ReferencedContainer = "container:scan4d-ios.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -36,9 +36,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "DD0000000000000000000001"
-               BuildableName = "wisescan-iosTests.xctest"
-               BlueprintName = "wisescan-iosTests"
-               ReferencedContainer = "container:wisescan-ios.xcodeproj">
+               BuildableName = "scan4d-iosTests.xctest"
+               BlueprintName = "scan4d-iosTests"
+               ReferencedContainer = "container:scan4d-ios.xcodeproj">
             </BuildableReference>
          </TestableReference>
          <TestableReference
@@ -47,9 +47,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "C994223D2FA29616004526C4"
-               BuildableName = "wisescan-iosUITests.xctest"
-               BlueprintName = "wisescan-iosUITests"
-               ReferencedContainer = "container:wisescan-ios.xcodeproj">
+               BuildableName = "scan4d-iosUITests.xctest"
+               BlueprintName = "scan4d-iosUITests"
+               ReferencedContainer = "container:scan4d-ios.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -70,9 +70,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "C93B8BCD2F568A6F00785D6B"
-            BuildableName = "wisescan-ios.app"
-            BlueprintName = "wisescan-ios"
-            ReferencedContainer = "container:wisescan-ios.xcodeproj">
+            BuildableName = "scan4d-ios.app"
+            BlueprintName = "scan4d-ios"
+            ReferencedContainer = "container:scan4d-ios.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -87,9 +87,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "C93B8BCD2F568A6F00785D6B"
-            BuildableName = "wisescan-ios.app"
-            BlueprintName = "wisescan-ios"
-            ReferencedContainer = "container:wisescan-ios.xcodeproj">
+            BuildableName = "scan4d-ios.app"
+            BlueprintName = "scan4d-ios"
+            ReferencedContainer = "container:scan4d-ios.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>
