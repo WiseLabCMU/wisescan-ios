@@ -204,7 +204,8 @@ https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md
 | 7 | **Meta Ray-Ban PiP** (glasses stream + capture view) | "Stream frames from Meta Ray-Ban Smart Glasses via Bluetooth" |
 | 8 | **Share Format Menu** (Share on a scan card, its format list open) | "Share as Scan4D, OBJ, PLY, or USDZ" |
 | 9 | **Dashboard** (server status + glasses connection) | "Connect to your server and pair Meta Ray-Ban Smart Glasses" |
-| 10 | **Settings** (Scan4D server + capture mode + glasses) | "Full control over capture quality, mode, and device pairing" |
+| 10 | **Settings** (capture mode + glasses) | "Full control over capture quality, mode, and device pairing" |
+| 11 | **Server tab** (sync status + pending bundles) | "Sync your spaces to your own Scan4D server" |
 
 ---
 
