@@ -478,4 +478,16 @@ final class ControlPlaneTests: XCTestCase {
         XCTAssertEqual(DeviceIdentity.id, DeviceIdentity.id)
         XCTAssertFalse(DeviceIdentity.model.isEmpty)
     }
+
+    /// A device nobody named goes as its model's name, so the server can tell it apart; a name
+    /// set later replaces it.
+    func testAnUnnamedDeviceGoesAsItsModel() {
+        XCTAssertEqual(DeviceIdentity.manifestDevice(label: "").label, DeviceIdentity.defaultLabel)
+        XCTAssertEqual(DeviceIdentity.manifestDevice(label: "  \n").label, DeviceIdentity.defaultLabel)
+        XCTAssertEqual(DeviceIdentity.manifestDevice(label: " Lab iPad 2 ").label, "Lab iPad 2")
+        XCTAssertFalse(DeviceIdentity.defaultLabel.isEmpty)
+        XCTAssertEqual(DeviceIdentity.marketingName("iPad13,8"), "iPad Pro 12.9-inch (M1)")
+        XCTAssertEqual(DeviceIdentity.marketingName("iPhone16,2"), "iPhone 15 Pro Max")
+        XCTAssertNil(DeviceIdentity.marketingName("iPhone99,9"))   // unknown: the model as it is
+    }
 }

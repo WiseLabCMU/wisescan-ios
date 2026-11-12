@@ -51,9 +51,12 @@ struct ControlPlaneSettingsSection: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                TextField("This phone's name, e.g. Lab iPhone 3", text: $deviceLabel)
+                TextField(DeviceIdentity.defaultLabel, text: $deviceLabel)
                     .foregroundColor(.white)
                     .disableAutocorrection(true)
+                Text("This device's name on the server, e.g. Lab iPad 2. Left empty, it goes as \(DeviceIdentity.defaultLabel). The server files everything under the device ID, so renaming moves nothing.")
+                    .font(.caption)
+                    .foregroundColor(.gray)
                 Text("Device ID \(DeviceIdentity.id.uuidString)")
                     .font(.caption2.monospaced())
                     .foregroundColor(.gray)
