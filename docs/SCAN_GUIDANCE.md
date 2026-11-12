@@ -9,7 +9,7 @@ This document lists all pre-scan analysis checks and mid-scan coaching tips. The
 
 ## Pre-Scan Space Analysis
 
-Tap **Analyze** (scope icon) near the Record button to begin. The user pans 360° while the app measures ambient lighting, detects room features via RoomPlan, and checks for people using person segmentation. A report modal presents results as pass/warn/alert/skipped cards.
+Tap **Analyze** (scope icon) near the Record button to begin. It is offered only before a new space's scan, not during a rescan, a connect or a focus scan. The user pans 360° while the app measures ambient lighting, detects room features via RoomPlan, and checks for people using person segmentation. A report modal presents results as pass/warn/alert/skipped cards.
 
 **Source:** [SpaceAnalyzer.swift](../wisescan-ios/SpaceAnalyzer.swift) · [ScanAnalysisReportView.swift](../wisescan-ios/ScanAnalysisReportView.swift)
 
@@ -17,19 +17,19 @@ Tap **Analyze** (scope icon) near the Record button to begin. The user pans 360�
 
 | Check | Condition | Status | Message |
 |:------|:----------|:-------|:--------|
-| **Lighting** | ≥500 lux | ✅ Pass | "Lighting is good (N lux) — X% well-lit · Y% dim" |
-| **Lighting** | 250–500 lux, or >20% dim zones | ⚠️ Warn | "Dim areas detected — scan quality may be reduced. X% well-lit · Y% dim · Z% very dark" |
-| **Lighting** | <250 lux majority | 🔴 Alert | "Very low lighting — RGB capture will be poor. Turn on lights for usable scan data." |
-| **Lighting** | No data | ⏭️ Skip | "Could not measure lighting" |
-| **Screens** | TV detected via RoomPlan | ⚠️ Warn | "TV or monitor detected. Turn off screens to reduce visual artifacts." |
-| **Screens** | No TV detected | ✅ Pass | "No screens detected" |
-| **Screens** | No RoomPlan data | ⏭️ Skip | "Room detection not available" |
-| **Doors** | Doors/openings detected via RoomPlan | ⚠️ Warn | "Door(s) detected. Close doors to avoid trailing incomplete sections." |
-| **Doors** | No doors detected | ✅ Pass | "No open doors detected" |
-| **Doors** | No RoomPlan data | ⏭️ Skip | "Room detection not available" |
-| **People** | Detected, Privacy Filter ON | ⚠️ Warn | "People detected. They will be masked from raw data." |
-| **People** | Detected, Privacy Filter OFF | ⚠️ Warn | "People detected. They will appear in raw data. Tip: Enable the Privacy Filter." |
-| **People** | Not detected | ✅ Pass | "No people detected" |
+| **Lighting** | ≥500 lux | Pass | "Lighting is good (N lux) — X% well-lit · Y% dim" |
+| **Lighting** | 250–500 lux, or >20% dim zones | Warn | "Dim areas detected — scan quality may be reduced. X% well-lit · Y% dim · Z% very dark" |
+| **Lighting** | <250 lux majority | Alert | "Very low lighting — RGB capture will be poor. Turn on lights for usable scan data." |
+| **Lighting** | No data | Skip | "Could not measure lighting" |
+| **Screens** | TV detected via RoomPlan | Warn | "TV or monitor detected. Turn off screens to reduce visual artifacts." |
+| **Screens** | No TV detected | Pass | "No screens detected" |
+| **Screens** | No RoomPlan data | Skip | "Room detection not available" |
+| **Doors** | Doors/openings detected via RoomPlan | Warn | "Door(s) detected. Close doors to avoid trailing incomplete sections." |
+| **Doors** | No doors detected | Pass | "No open doors detected" |
+| **Doors** | No RoomPlan data | Skip | "Room detection not available" |
+| **People** | Detected, Privacy Filter ON | Warn | "People detected. They will be masked from raw data." |
+| **People** | Detected, Privacy Filter OFF | Warn | "People detected. They will appear in raw data. Tip: Enable the Privacy Filter." |
+| **People** | Not detected | Pass | "No people detected" |
 
 ### How It Works
 
@@ -50,46 +50,52 @@ Real-time tips during recording, evaluated at ~1 Hz by the `ScanCoach` rules eng
 
 ### Tips by Priority
 
-#### 🔴 CRITICAL — stays until resolved
+#### CRITICAL — stays until resolved
 
 | Tip ID | Condition | Message |
 |:-------|:----------|:--------|
-| `critical.excessiveMotion` | Tracking limited: excessive motion | "⚠️ Hold steady — excessive motion detected" |
-| `critical.insufficientFeatures` | Tracking limited: insufficient features | "⚠️ Hold steady — not enough visual features" |
-| `critical.notAvailable` | Tracking not available | "⚠️ Tracking unavailable — hold device steady" |
+| `critical.excessiveMotion` | Tracking limited: excessive motion | "Hold steady — excessive motion detected" |
+| `critical.insufficientFeatures` | Tracking limited: insufficient features | "Hold steady — not enough visual features" |
+| `critical.notAvailable` | Tracking not available | "Tracking unavailable — hold device steady" |
+| `critical.thermalCritical` | Thermal state critical | "Device critically hot — save the scan NOW" |
 
-#### 🟠 WARNING — auto-dismiss 8s, no cooldown
+#### WARNING — auto-dismiss 8s, no cooldown
 
 | Tip ID | Condition | Message |
 |:-------|:----------|:--------|
-| `warning.fastMotion` | Motion blur active (fast motion or rotation) | "⚡ Moving fast — depth only (pause for photos)" |
 | `warning.atCapacity` | Session at capacity | "Session at capacity — save now to avoid quality loss" |
 | `warning.nearCapacity` | Session near capacity | "Approaching session limits — consider saving" |
+| `warning.thermalSerious` | Thermal state serious | "Device hot — wrap up and save" |
+| `warning.lowStorage` | Free space below the coach threshold | "Only N.N GB free — free space before a long scan" |
+| `warning.nearDepthObstruction` | Depth shows an obstruction right in front of the camera | "Something is right in front of the camera — check your grip" (rig: "… check the rig clamp/knob") |
+| `warning.rigFloorGap` | Floor faces below `coachFloorMinFaces` with coaching on | "Floor not meshed — sweep the floor" (rig: "Floor gaps — tilt the rig down briefly") |
 
-#### 🔵 GUIDANCE — auto-dismiss 6s, 30s cooldown (suppressed when coaching OFF)
+#### GUIDANCE — auto-dismiss 6s, 30s cooldown (suppressed when coaching OFF)
 
 | Tip ID | Condition | Message |
 |:-------|:----------|:--------|
-| `guidance.scanWalls` | Early scan, <8 anchors, <3m spatial extent | "🏠 Scan all 4 walls quickly for layout context" |
-| `guidance.systematicSweep` | Early scan, erratic movement pattern (<0.3 ratio) | "↔️ Walk the room for depth, pause at each area for photos" |
-| `guidance.moveCloser` | Mid-scan, <200 faces/anchor (coarse geometry) | "🔍 Move closer to capture fine details" |
-| `guidance.varyHeight` | Mid-scan, height variance <0.02 (flat scanning) | "↕️ Try scanning from a different height" |
-| `guidance.semantic.scanFloor` | Semantic ON, walls detected but no floor | "🪟 Walls detected, try scanning the floor" |
-| `guidance.semantic.scanObjects` | Semantic ON, ≥3 surfaces but 0 objects | "🛋️ Don't forget furniture — scan objects up close" |
-| `guidance.semantic.lowerAngle` | Semantic ON, floor detected, <3 objects | "🔽 Try scanning from a lower angle for floor objects" |
+| `guidance.scanWalls` | Early scan, <8 anchors, <3m spatial extent | "Scan all 4 walls quickly for layout context" |
+| `guidance.systematicSweep` | Early scan, erratic movement pattern (<0.3 ratio) | "Walk the room for depth, pause at each area for photos" |
+| `guidance.moveCloser` | Mid-scan, <200 faces/anchor (coarse geometry) | "Move closer to capture fine details" |
+| `guidance.varyHeight` | Mid-scan, height variance <0.02 (flat scanning) | "Try scanning from a different height" |
+| `guidance.semantic.scanFloor` | Semantic ON, walls detected but no floor | "Walls detected, try scanning the floor" |
+| `guidance.semantic.scanObjects` | Semantic ON, ≥3 surfaces but 0 objects | "Don't forget furniture — scan objects up close" |
+| `guidance.semantic.lowerAngle` | Semantic ON, floor detected, <3 objects | "Try scanning from a lower angle for floor objects" |
 | `guidance.pauseForPhoto` | Mid-scan, user moving, photo coverage below `photoCoverageDebtFraction` (0.3) of the mesh with at least `photoCoverageDebtMinVoxels` voxels (the amber areas outrun the stills) | "Slow down over amber areas so photos can land" |
 | `guidance.stillOverlap` | ≥ `stillOverlapMinStills` stills, mean still-to-still overlap below `stillOverlapFloor` | "Move more slowly so photos overlap" |
 | `guidance.stillParallax` | ≥ `stillOverlapMinStills` stills, multi-standpoint fraction below `stillParallaxDiversityFloor` | "Step sideways across covered areas for new angles" |
+| `guidance.fastMotion` | Motion blur active (fast motion or rotation) | "Moving fast — depth only (pause for photos)" |
+| `guidance.rigCeilingGap` | Ceiling faces below `coachCeilingMinFaces` with coaching on | "Ceiling not meshed — sweep the ceiling" (rig: "Ceiling not meshed — tilt the rig up briefly") |
 
 Photos are automatic in a room scan (REQ-036): 12MP stills fire whenever the device is steady
 enough for the exposure and the view has turned about 15° (or shifted as much) since the last one.
 There is no shutter tap, except as the 360° rig's shutter when a Theta is connected.
 
-#### 🟢 INFO — auto-dismiss 5s, 60s cooldown (suppressed when coaching OFF)
+#### INFO — auto-dismiss 5s, 60s cooldown (suppressed when coaching OFF)
 
-| `info.sharpCapture` | Device still, every 5th sharp frame captured | "📸 Sharp photo captured!" |
-| `info.goodCoverage` | Mid-scan, ≥15 anchors, capacity <50% | "⭐ Coverage looking good!" |
-| `info.considerFinishing` | >60s, mapped, ≥20 anchors, mesh growth slowed | "✅ Great coverage — consider finishing" |
+| `info.sharpCapture` | Device still, every 5th sharp frame captured | "Sharp photo captured!" |
+| `info.goodCoverage` | Mid-scan, ≥15 anchors, capacity <50% | "Coverage looking good!" |
+| `info.considerFinishing` | >60s, mapped, ≥20 anchors, mesh growth slowed | "Great coverage — consider finishing" |
 
 ### Priority Behavior
 

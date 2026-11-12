@@ -42,7 +42,7 @@ Scan4D is a professional-grade reality capture app for iPhone and iPad. It turns
 • Focus scans: draw a box around one area (a work table, a shelf) on a previous scan and photograph it in detail — from a quick check of a few photos to dense coverage for 3D reconstruction — with a live dial of the angles covered
 • Space staging analyzer: optional pre-scan 360° sweep checks lighting, doors, screens, and people; presents a report with actionable tips before recording
 • Interactive 3D mesh preview with camera-sampled vertex coloring and loading indicator
-• Privacy filtering: person segmentation removes humans from meshes, face blurring in RGB exports
+• Privacy filtering: person segmentation removes humans from meshes, face blurring in RGB exports; switched off, it turns itself back on after 24 hours
 • VIO tracking guard: automatic halt and save prompt on mid-scan tracking loss
 
 PROXY MODE (Meta Ray-Ban Smart Glasses)
@@ -77,7 +77,7 @@ FLEXIBLE EXPORT FORMATS
 
 SERVER INTEGRATION
 • Configure any HTTP(S) upload endpoint in Settings
-• Direct PUT upload with live progress tracking
+• Direct PUT upload with live progress tracking that finishes even with the screen locked
 • Save to Files or AirDrop for offline workflows
 • Compatible with self-hosted reconstruction pipelines
 
@@ -205,7 +205,7 @@ https://github.com/WiseLabCMU/wisescan-ios/blob/main/docs/PRIVACY.md
 | 5 | **Scans List** (location grid with multi-select active) | "Organize scans by location with bulk Save, Upload, and Delete" |
 | 6 | **Link Adjacent Space** (ghost overlay + tracking banner) | "Re-scan over time or link adjacent areas with guided alignment" |
 | 7 | **Meta Ray-Ban PiP** (glasses stream + capture view) | "Stream frames from Meta Ray-Ban Smart Glasses via Bluetooth" |
-| 8 | **Export Format Picker** (scan card with format dropdown) | "Export to Scan4D, Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ" |
+| 8 | **Export Format Picker** (space screen, Global Export Format dropdown) | "Export to Scan4D, Polycam, Nerfstudio, Flame3D, OBJ, PLY, or USDZ" |
 | 9 | **Dashboard** (server status + glasses connection) | "Connect to your server and pair Meta Ray-Ban Smart Glasses" |
 | 10 | **Settings** (upload URL + capture mode + glasses) | "Full control over capture quality, mode, and device pairing" |
 

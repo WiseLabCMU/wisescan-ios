@@ -1,6 +1,6 @@
 #!/bin/bash
 # Repo-wide privacy check: fails if the committed tree carries debug-only
-# file-sharing plist keys or raw capture artifacts. Shares its patterns with the
+# file-sharing plist keys, raw capture artifacts, or credentials. Shares its patterns with the
 # git hooks via privacy-guard.sh, so the hooks and CI can never drift.
 #
 #   Run locally:  ./scripts/check-privacy.sh        (checks HEAD)
@@ -35,6 +35,16 @@ while IFS= read -r -d '' f; do
         if [ -n "$hits" ]; then
             annotate "$f" "debug-only key(s)$hits must be local-only, never committed"
         fi
+        shits=$(pg_plist_secret_violations "$(git show "$REF:$f" 2>/dev/null || true)")
+        if [ -n "$shits" ]; then
+            annotate "$f" "credential value(s) for$shits committed — credentials never enter the repo (CONTRIBUTING.md -> Credentials)"
+        fi
+        ;;
+    *.swift)
+        lines=$(pg_swift_secret_violations "$(git show "$REF:$f" 2>/dev/null || true)")
+        if [ -n "$lines" ]; then
+            annotate "$f" "literal SDK app id + secret at line $lines — credentials never enter the repo"
+        fi
         ;;
     *.pbxproj)
         hits=$(pg_pbxproj_violations "$(git show "$REF:$f" 2>/dev/null || true)")
@@ -52,4 +62,4 @@ if [ "$fail" -ne 0 ]; then
     echo "See CONTRIBUTING.md -> Privacy Filtering Patterns."
     exit 1
 fi
-echo "✅ $REF: no debug file-sharing keys or raw capture artifacts in the committed tree"
+echo "✅ $REF: no debug file-sharing keys, raw capture artifacts, or credentials in the committed tree"

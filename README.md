@@ -2,25 +2,25 @@
 
 Scan4D is the time-series reality capture application for the WiSEScan platform. It acts as an advanced sensor client designed to bridge high-fidelity device data with backend reconstruction servers.
 
-**Requires:** iOS 17.0+ · ARKit-capable iPhone or iPad · Xcode 15+  
+**Requires:** iOS 18.0+ · ARKit-capable iPhone or iPad · Xcode 26.6+ (CI builds on 26.6; Xcode 27 builds too)  
 **Recommended:** LiDAR-equipped device (iPhone/iPad Pro) for full mesh + depth capture  
-**Optional:** rig-mounted Ricoh Theta (X fully supported; Z1 Wi-Fi-only) as a 360° still source
+**Optional:** rig-mounted Ricoh Theta X or Z1 as a 360° still source (BLE wake and shutter plus Wi-Fi transfer on both)
 
-**Backend Integration:** Receivers: [wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload) (testing fallback) and [wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion) (production Prefect pipeline).
+**Backend Integration:** the lab's control plane (`scan4d-server`, private) registers devices, keeps the inventory of spaces, maps, scans and links, hands out export upload addresses in its working directory, and asks devices for focus scans (REQ-038). Processing runs in the same stack as Prefect flows from `scan4d-flows` (private): `scan4d-splat` takes a room-scan export or focus-scan dump through SfM poses, priors, region masks and LichtFeld training to a Gaussian splat. See [Backend Receivers](#backend-receivers).
 
 ## Device Support
 
 | Capability | Full Mode (LiDAR) | Lite Mode (No LiDAR) | Proxy Mode |
 | :--- | :--- | :--- | :--- |
 | **Devices** | iPhone Pro, iPad Pro | iPhone 16, older iPhones/iPads | Meta Ray-Ban, Glasses |
-| **RGB Frames** | ✅ | ✅ | ✅ Streamed via Bluetooth |
-| **Camera Poses** | ✅ ARKit tracking | ✅ ARKit tracking | ❌ |
-| **Depth Maps** | ✅ LiDAR depth | ❌ | ❌ |
-| **Real-time Mesh** | ✅ Scene reconstruction | ❌ | ❌ |
-| **Coverage Overlay** | ✅ Wireframe | ❌ | ❌ |
-| **Privacy Markers** | ✅ 3D face anchors | ❌ (2D blur only) | ❌ |
-| **Mesh Preview** | ✅ Colored 3D model | ❌ | ❌ |
-| **Server Reconstruction** | Full pipeline | Photogrammetry only | Photogrammetry only |
+| **RGB Frames** | Yes | Yes | Yes: Streamed via Bluetooth |
+| **Camera Poses** | Yes: ARKit tracking | Yes: ARKit tracking | No |
+| **Depth Maps** | Yes: LiDAR depth | No | No |
+| **Real-time Mesh** | Yes: Scene reconstruction | No | No |
+| **Coverage Overlay** | Yes: Wireframe | No | No |
+| **Privacy Markers** | Yes: 3D body-center anchors | No (2D blur only) | No |
+| **Mesh Preview** | Yes: Colored 3D model | No | No |
+| **Server Reconstruction** | `scan4d-splat` flow (SfM poses, LiDAR priors, splat) | Planned: photogrammetry from images and poses (Lite Mode is a test harness today) | Planned: photogrammetry from images alone (proxy mode is a test harness today) |
 
 ### Hi-Res Still Keyframe Resolution
 
@@ -47,7 +47,7 @@ To check a device: the `[ARConfig]` launch log lists every supported format with
 - **AR + VR Capture Modes:** AR mode uses camera passthrough with live wireframe mesh overlay; VR mode renders a live depth point cloud on a black background using Metal shaders. Toggle between modes in Settings.
 - **LiDAR Mesh Capture:** Real-time scene reconstruction with live wireframe overlay, capacity HUD, and real-time scan coaching (LiDAR devices only).
 - **Scan Coaching:** A unified 4-tier coaching system (`ScanCoach`) provides real-time scanning tips during capture — tracking/capacity warnings always show; pattern-based guidance and progress encouragement can be toggled in Settings.
-- **Space Staging Analyzer:** Optional pre-scan analysis phase that checks room conditions before recording. Tap "Analyze" to start a 360° sweep — the app measures ambient lighting, detects doors/screens via RoomPlan, and checks for people in the scene. A report modal summarizes findings with actionable tips (privacy-filter-aware people messaging).
+- **Space Staging Analyzer:** Optional pre-scan analysis phase that checks room conditions before recording a new space (it is not offered during a rescan, a connect or a focus scan). Tap "Analyze" to start a 360° sweep — the app measures ambient lighting, detects doors/screens via RoomPlan, and checks for people in the scene. A report modal summarizes findings with actionable tips (privacy-filter-aware people messaging).
 - **Lite Mode:** Non-LiDAR devices capture images + camera poses for server-side photogrammetry. A persistent banner indicates lite mode. *(Note: Lite mode is only available in local debug builds for testing. TestFlight and App Store releases strictly require LiDAR-equipped devices.)*
 - **Scan4D (Rescan & Link Adjacent):** Group scans by Location and set the workflow intent when saving. The two intents capture different dimensions of a space: **Rescan Space** is *temporal* — re-capture the same physical area at a later time so the backend can diff or merge versions; **Link Adjacent Space** is *spatial* — capture a neighboring area and stitch the chunks into one larger model. Both relocalize against the previous scan's `ARWorldMap` and show a configurable ghost-mesh overlay (default: magenta) of that prior capture. Adjacent chunks join at a shared boundary anchor: drop one mid-scan with **Pin & Extend**, or relocalize back to it in a later session through a guided alignment overlay.
 - **Post-Scan Processing & Plane Registration:** The save path persists raw artifacts only; the room layout (RoomPlan) builds automatically seconds after save, and everything else derived finishes via an explicit **Process** step (per-card button or bulk "Process All" with per-tile progress): **plane registration** aligns each rescan into its location's **canonical coordinate frame** (gravity-locked 4-DOF wall/floor matching with an observability gate, so unobservable solves are refused rather than guessed), and a lightweight **ghost proxy** is generated for future rescan overlays. Post-processing also runs automatically after save and when landing on a location, so the explicit button is mostly recovery. **Coloring is its own verb**: the scan card's primary **Color** button (and bulk Color in both list toolbars, on stitch-graph clusters, and in the combined render) finishes any pending structural steps, then applies camera-based vertex coloring — Metal GPU projection with per-frame LiDAR depth occlusion and a consensus-median reduce; 360° scans can optionally color from cube faces as a pose-quality probe. A trusted registration is baked transactionally (mesh + room layout + `registration.json` sidecar move together, with rollback on failure) and bundled in exports. Upload, export, rescan, and connect are **gated until processing completes**, and a bad-scan check warns right after save when a capture produced no usable room data (so you can redo it while still in the room). During a rescan, the live ghost auto-seats against detected planes.
@@ -59,9 +59,21 @@ To check a device: the `[ARConfig]` launch log lists every supported format with
 - **Capture Quality (Hi-Res Stillness Keyframes):** The app captures native-resolution still photos (`ARSession.captureHighResolutionFrame`, up to ~12MP) as sharp keyframes — automatically in a room scan (above); with a 360° rig, a tap while still pairs a phone still with the 360° still. The AR stream stays on a mesh-friendly format. In AR mode, the coverage overlay shows three states: green (unscanned), amber (depth captured, no photo), and clear camera feed (photo-grade). Photo coverage is tracked on a world-space voxel grid stamped from each keyframe's depth map (so surfaces behind walls are never falsely marked), and the coach nudges you to pause on the amber areas when photo coverage falls behind the mesh. Keyframes are flagged in exports (`is_keyframe`) and weighted higher during vertex coloring; `scan4d_metadata.json` records a `photo_coverage` fraction so backends can triage datasets.
 - **360° Still Source (Ricoh Theta):** A rig-mounted Theta captures a full-sphere still at every stillness keyframe, giving reconstruction all-direction imagery the phone's frustum can't see. Connect is BLE-first: pick the camera from a named Bluetooth list, one-time passkey bond, wake-from-sleep over BLE, then an automatic Wi-Fi join; the shutter rides BLE when the link is up (the new file's URL arrives as a push — no polling). Camera poses are solved **per scan at Process time** against the completed mesh (yaw and mount sag are per-scan nuisances; the measured rig height anchors the solve) and baked into each still's sidecar with provenance. A multi-camera roster switches bodies per collection. Camera-side originals are deleted after verified transfer — raw equirects capture bystanders in every direction — and stills leave the device only through the export privacy passes. See REQ-033 in [REQUIREMENTS.md](REQUIREMENTS.md).
 - **Scan Capacity Metrics:** Live polygon count, anchor count, drift tracking, and session duration with a composite capacity indicator that warns users when approaching ARKit session limits.
-- **Developer Mode:** Toggleable debugging tools — synthetic IMU/camera/depth injection for Simulator testing, performance diagnostics, and a **Force Rebuild Artifacts** switch that re-runs the derived-artifact build (ghost proxy, dynamic mesh, derived surfaces) on an already-current scan so its build diagnostics can be re-read — with a persistent banner across all views.
+- **Developer Mode:** Toggleable debugging tools — synthetic IMU/camera/depth injection for Simulator testing, performance diagnostics, and a **Force Rebuild Artifacts** switch that re-runs the derived-artifact build (ghost proxy, dynamic mesh, derived surfaces) on an already-current scan so its build diagnostics can be re-read — with a persistent banner across all views. It also holds the capture tuning that used to sit in everyday Settings (image overlap, blur rejection, Semantic Labeling, wireframe colours, Meta glasses frame rate), the 360° camera bench (still resolution, Test Shutter, Download & Preview) and the 3D preview's motion-frame markers. **Restore Default Developer Options** at the bottom puts every developer option back to its default (as turning Developer Mode off does).
+- **Sweep Coverage:** A room scan records where the LiDAR sweep actually looked, as per-cell free, surface and visit counts in the raw capture frame, and ships it as `sweep_coverage.bin` in every Scan4D export (a Developer Mode readout shows the live counters).
+- **Feature Point Cloud:** Every save serializes ARKit's sparse feature cloud to `arkit_features.bin` (a 128-byte header over packed id and xyz records) in place of the opaque world map, which only ARKit could read. Feature ids survive map save and load, so clouds from successive scans of one location join on id for change detection. Process backfills the file for scans saved before it existed.
 - **Export & Scan Capture Data:** Export native mesh formats (OBJ, PLY, USDZ) along with RAW RGB, depth, and camera poses governed by motion-blur rejection and overlapping metrics.
-- **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration.
+- **Server Integration:** Direct HTTP upload to configured server URLs for edge or cloud reconstruction orchestration. Uploads run in a background session, so they finish with the screen locked or the app in the background, and the screen stays on while a scan is converted for upload.
+- **Control Plane Sync:** Set the lab's control plane server in Settings and the phone reports the spaces you sync to it (Sync to Lab Server in a space, or Sync on a stitched map in the graph view; Settings → Auto sync adds every space, the ones started after joining (the default), or none): each with its base and tip scans, its scans and its stitch links. It also uploads the parts of each scan's map package the server asks for (a Settings toggle, no photos):
+- the small files it reads itself right away;
+- the mesh and relocalization map only when the lab needs them, and large files only over Wi-Fi.
+
+Nothing is sent during a capture. The server then:
+- hands out each export's upload address in the lab's Versity bucket, revocable per device;
+- shares join fine-tunes edited on its web 3D view back to the phone;
+- can ask for a focus scan of a region, for example where its toy change evaluator saw a rescan differ. The server (the `scan4d-server` repo) keeps the fleet's devices, maps and scans in one place, the start of server-directed scanning. See REQ-038.
+
+TestFlight builds start with the lab's server set, as they do the Upload URL; App Store and Xcode builds start with none. When the server asks for its password and none is stored, a tapped Upload or Sync opens Settings at the password field first, then goes on when Settings closes.
 
 > **Note:** For a comprehensive list of all features, architecture diagrams, and detailed implementation status, please see [REQUIREMENTS.md](REQUIREMENTS.md).
 >
@@ -71,10 +83,21 @@ To check a device: the `[ARConfig]` launch log lists every supported format with
 
 ```
 wisescan-ios/
+│  # App shell, settings, guides
 ├── AppDelegate.swift            # App lifecycle, orientation locking
 ├── AppConstants.swift           # Centralized UI constants, app defaults, pipeline tuning
 ├── ContentView.swift            # Tab bar (Dashboard, Capture, Scans) + LiDAR check
-├── DashboardView.swift          # Upload server status, wearable glasses connect, 360° camera card
+├── DashboardView.swift          # Upload server status, wearable glasses connect, 360° camera card, lab to-do list
+├── SettingsView.swift           # Upload URL, export settings, capture mode, control plane, Developer Mode
+├── ButtonStyles.swift           # Shared button styles
+├── AdaptiveActionLabel.swift    # Action-button label that carries its icon on iPad and drops it on iPhone
+├── PermissionsOverlay.swift     # Camera/AR permission request UI
+├── UserGuideView.swift          # In-app workflow guide (documentation that lives in SwiftUI)
+├── DeviceConnectionGuides.swift # Device setup walkthroughs (Meta Ray-Ban, 360° cameras)
+├── LocationManager.swift        # GPS/heading updates for scan metadata
+├── DemoDataSeeder.swift         # Orphan scan discovery + SwiftData seeding
+├── TestDataGenerator.swift      # Mock camera intrinsics for testing
+│  # Room-scan capture
 ├── CaptureView.swift            # Live capture UI, recording controls, scan HUD, capacity metrics
 ├── CaptureView+Recording.swift  # Record start/stop, stop decision menu, save flow, deferred naming
 ├── CaptureView+Extend.swift     # Pin & Extend: mid-session boundary link + session reset
@@ -89,34 +112,69 @@ wisescan-ios/
 ├── CaptureExposurePolicy.swift  # Short-exposure cap on ARKit's camera (1/500 to 1/120 s), both capture modes
 ├── DelegateWorkMeter.swift      # Per-frame AR delegate timing during a room scan
 ├── StillnessReticle.swift       # Capture-quality reticle: ring fills as device settles (360° rig tap)
+├── PhotoCoverageGrid.swift      # World-space voxel grid tracking photo coverage (amber overlay source)
+├── SweepCoverageRecorder.swift  # Records which parts of the room the LiDAR sweep looked at (sweep_coverage.bin)
+├── SweepCoverageGrid.swift      # Per-cell sweep observation counters (free / surface / visit)
+├── SweepFrameThrottle.swift     # Admission gate: which ARKit frames the sweep-coverage recorder consumes
+├── SweepCoverageFile.swift      # On-disk format for the per-scan sweep coverage grid
+├── SweepCoverageReadout.swift   # Developer readout of the live sweep-coverage counters
+├── TrackingStability.swift      # Mid-scan tracking snap/stability detector
+├── ScanCoach.swift              # Rules engine: 4-tier priority coaching tips (~1Hz evaluation)
+├── CoachBarView.swift           # Coach bar UI: color-coded tip banner with swipe-to-dismiss
+├── SpaceAnalyzer.swift          # Pre-scan analysis engine: 360° yaw tracker, report builder
+├── ScanAnalysisReportView.swift # Space analysis report modal: per-check pass/warn/skip cards
+├── CaptureFlash.swift           # Screen flash for every saved still (full for a tapped still, softer for automatic ones)
+├── ScreenAwake.swift            # Keeps auto-lock off while recording or exporting/uploading
+│  # Focus scan (partial scan of one region)
 ├── ARStillCaptureSession.swift  # Focus-scan still engine: blur/region/spacing gates, coverage, logs, manifest
 ├── ARStillCaptureGates.swift    # Pure gate math (image-motion smear, gyro peak, region view, coverage bins)
 ├── ARStillCaptureController.swift # Focus-scan controller (start/stop, stats polling)
 ├── CaptureView+StillCapture.swift # Focus scan start/stop, filing as a scan, region box placement
 ├── FocusRegion.swift            # Focus region box, detail levels, placement in a map's raw frame
 ├── FocusRegionEditorView.swift  # Draw a focus region on a room scan's mesh
-├── FocusRegionInbox.swift       # Focus region import by deep link
+├── FocusRegionInbox.swift       # Focus region import by deep link or file
 ├── FocusCaptureHUD.swift        # Focus-scan HUD + coverage dial
 ├── FocusScanStorage.swift       # Filing a capture as a focus scan; card thumbnail
 ├── FocusScanViews.swift         # Focus-scan photo grid
 ├── ScanExportManager+Focus.swift # Focus-scan export zip + fail-closed person check
-├── PhotoCoverageGrid.swift      # World-space voxel grid tracking photo coverage (amber overlay source)
-├── ThetaCameraManager.swift     # 360° camera: connect, roster, shutter, still downloads (+OSC/+ScanCapture/+StillFormat)
-├── ThetaBLEManager.swift        # Production BLE: pair, wake-from-nap, shutter with file-URL push (+Link/+Delegates)
+│  # 360° still source (Ricoh Theta rig)
+├── ThetaCameraManager.swift     # 360° camera: connect, roster, shutter, still downloads
+├── ThetaCameraManager+OSC.swift # OSC (Open Spherical Camera) Web API v2.1 transport
+├── ThetaCameraManager+ScanCapture.swift # Persists live-scan stills: equirect JPEG + pose sidecar
+├── ThetaCameraManager+StillFormat.swift # Still-resolution menu for the connected camera
+├── ThetaCameraManager+StillMotion.swift # Exposure-sway measurement + capture guards
+├── ThetaBLEManager.swift        # Production BLE: pair, wake-from-nap, shutter with file-URL push
+├── ThetaBLEManager+Link.swift   # Link establishment: power-on wait, scan, connect, identity
+├── ThetaBLEManager+Delegates.swift # CoreBluetooth delegate callbacks
 ├── ThetaBLEProbe.swift          # Developer Mode GATT bench for exploring BLE devices
+├── ThetaCaptureCue.swift        # Visual/haptic capture cue driven by the manager's capture state
+├── ThetaGravity.swift           # The camera's own gravity vector at capture, recovered from the still
+├── StillSpacingRings.swift      # Floor rings marking taken stills, with a live spacing verdict
+├── RigModel.swift               # Rig geometry model and solve bounds
+├── RigHeightSheet.swift         # Rig-height editor (imperial/metric, own keypad)
+├── OperatorRigMask.swift        # Per-still mask of the operator, grip and rod
+├── EquirectYawAnchor.swift      # Yaw basin for the rig solve from the phone's keyframes (solver v8)
+├── PhotometricRigSolver.swift   # Photometric rig solver (v15) that ships the poses
 ├── EquirectPostCalibration.swift # Per-scan 360° rig solve at Process time (bakes cam_transform + provenance)
-├── RigCalibrationSolver.swift   # Rig geometry solver: yaw circle, elevation sweep, bounded refine
-├── RigCalibrationManager.swift  # Developer Mode calibration bench
 ├── EquirectFaceExport.swift     # Cube faces cut from equirects at baked poses (export + colorize probe)
 ├── EquirectGPU.swift            # Metal equirect sampling/reprojection
-├── EquirectPrivacyBlur.swift    # Per-still person blur for exported equirects
+├── FaceDepthRender.swift        # Depth for a synthetic cube face, rasterized from the scan's own mesh
+├── EquirectPrivacyBlur.swift    # Per-still person blur for exported equirects (hard invariant)
+├── EquirectPrivacyBlur+Projection.swift # Equirect/cube-face geometry for the privacy pass
+├── EquirectPrivacyBlur+Vision.swift # Per-face person segmentation for the privacy pass
+│  # Process step and registration
 ├── ScanPostprocessor.swift      # Process step: downloads, calibration, registration bake, ghost proxy + bad-scan check
 ├── PlaneRegistration.swift      # Gravity-locked 4-DOF plane registration solver (canonical frame)
 ├── SaveRegistration.swift       # registration.json sidecar + transactional mesh/roomplan bake
 ├── RoomPlanExporter.swift       # roomplan.json / roomplan_raw.json sidecar writers
 ├── DerivedSurfaces.swift        # derived_surfaces.json sidecar: levels/ramps recovered from the classified mesh
+├── FeaturePointCloudFile.swift  # arkit_features.bin: ARKit sparse feature cloud (id + xyz) on disk
+├── DepthPNG.swift               # Single decoder for the pipeline's 16-bit depth PNGs
+│  # Scans, preview, linking
 ├── LocationDetailView.swift     # Per-location scan management, export, upload, preview
-├── ScansListView.swift          # Scan cards, location groups, Process/upload gates, format picker
+├── ScansListView.swift          # Scan cards, location groups, Process/upload gates
+├── ScanStore.swift              # Data models (ScanLocation, CapturedScan, ScanStats, capacity)
+├── ThumbnailCache.swift         # Scan card thumbnail cache
 ├── StitchingMetadata.swift      # Boundary-anchor link manifest (stitching.json)
 ├── StitchLinkModel.swift        # Structured logging for the stitch-link subsystem
 ├── StitchGraphModel.swift       # Linked-scan graph model (nodes, edges, components)
@@ -124,29 +182,34 @@ wisescan-ios/
 ├── CombinedMeshView.swift       # Combined SceneKit view of all linked scans
 ├── MeshPreviewView.swift        # SceneKit 3D mesh preview with vertex colors or height gradient
 ├── MeshPreviewView+KeyframeFrustums.swift # Camera frustum markers for stills/frames in preview
-├── ThumbnailCache.swift         # Scan card thumbnail cache
-├── ScanStore.swift              # Data models (ScanLocation, CapturedScan, ScanStats, capacity)
-├── ScanExportManager.swift      # Export packaging (Scan4D, Polycam, RAW, OBJ, PLY, USDZ)
+├── MeshPreviewView+SemanticLabels.swift # Semantic label detail, legend filter, tap-to-identify
+├── MeshPreviewView+Timeline.swift # Time scrubber across a location's room generations
+├── ScanTimelineBar.swift        # The preview's bottom-docked time scrubber
+│  # Export
+├── ScanExportManager.swift      # Export packaging (Scan4D, Polycam, Nerfstudio, Flame3D, OBJ, PLY, USDZ)
+├── NerfstudioExport.swift       # transforms.json bundle for Nerfstudio and LichtFeld Studio
+├── Flame3DExport.swift          # flame3d-core input bundle
+├── ExportUploadTarget.swift     # Where an export upload goes (control-plane-issued address or configured URL)
+├── ExportUploader.swift         # Background-session export uploads that survive a locked screen
 ├── MeshConverter.swift          # OBJ→PLY and OBJ→USDZ mesh conversion
 ├── MeshParser.swift             # Wavefront OBJ parser for RealityKit MeshResource
 ├── VertexColorAccumulator.swift # Vertex coloring: frame selection, top-K observations, consensus-median reduce
 ├── VertexColorGPU.swift         # Metal compute path for per-frame vertex projection (CPU fallback stays in lockstep)
+│  # Control plane (scan4d-server)
+├── ControlPlaneSync.swift       # When and how the app syncs with the control plane
+├── ControlPlaneClient.swift     # Control plane HTTP client: host parsing, requests, error text
+├── ControlPlaneSession.swift    # URLSession for the control plane and the uploads it hands out
+├── ControlPlaneManifest.swift   # Sync manifest snapshot (SwiftData on main, files off main)
+├── DeviceIdentity.swift         # This phone's identity for the control plane
+├── ControlPlaneSettingsSection.swift # Settings → Control plane
+├── ControlPlanePasswordPrompt.swift # Password retry prompt and deferred action replay
+├── ControlPlaneSpaceSyncButton.swift # Sync to Lab Server on a space
+├── ControlPlaneTodoCard.swift   # Dashboard to-do list: focus scans the lab asked for
+│  # Peripherals and diagnostics
 ├── MetaWearableManager.swift    # Meta Ray-Ban DAT SDK lifecycle, streaming, proxy frames
-├── LocationManager.swift        # GPS/heading updates for scan metadata
-├── PermissionsOverlay.swift     # Camera/AR permission request UI
-├── SettingsView.swift           # Upload URL, RAW settings, capture mode, Developer Mode
-├── ButtonStyles.swift           # Shared button styles
-├── ScanCoach.swift              # Rules engine: 4-tier priority coaching tips (~1Hz evaluation)
-├── CoachBarView.swift           # Coach bar UI: color-coded tip banner with swipe-to-dismiss
-├── SpaceAnalyzer.swift          # Pre-scan analysis engine: 360° yaw tracker, report builder
-├── ScanAnalysisReportView.swift # Space analysis report modal: per-check pass/warn/skip cards
-├── TrackingStability.swift      # Mid-scan tracking snap/stability detector
 ├── PerfDiag.swift               # Perf diagnostics: main-thread watchdog, frame gaps, I/O backlog
 ├── LocalizationDiag.swift       # Relocalization diagnostics logging
-├── UserGuideView.swift          # In-app workflow guide
-├── DeviceConnectionGuides.swift # Device setup walkthroughs (Meta Ray-Ban)
-├── DemoDataSeeder.swift         # Orphan scan discovery + SwiftData seeding
-├── TestDataGenerator.swift      # Mock camera intrinsics for testing
+├── DiagnosticsLogExport.swift   # On-device export of the app's own unified-log entries
 └── Shaders/
     ├── PointCloud.metal         # VR point cloud vertex/fragment shaders
     ├── Bloom.metal              # Bloom post-processing shader
@@ -162,10 +225,10 @@ Each export format includes **only** the data relevant to that format. The filen
 
 | Format | Extension | Contents | Viewer |
 | :--- | :--- | :--- | :--- |
-| **Scan4D** | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
+| **Scan4D** | `.zip` | `scan4d_metadata.json`, `arkit_features.bin`, `sweep_coverage.bin`, + full Polycam payload; 360° scans add `equirect_stills/` + cube faces at baked poses | Scan4D server workflows |
 | **Polycam** | `.zip` | `images/`, `depth/`, `cameras/`, `mesh_info.json` | Polycam raw data import |
 | **Flame3D** | `.zip` | `keyframes/images/`, `keyframes/corrected_cameras/`, `keyframes/depth/` (native LiDAR), `raw.glb` (mesh with captured vertex colors), `mesh_info.json` (registration as `alignmentTransform`); entries at the zip root | [flame3d-core](https://github.com/openflam/flame3d-core)'s `polycam` data source, as-is; contract in `tools/scan4d-to-flame3d` |
-| **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `cameras/`, + raw geometry: `mesh.obj` (with captured vertex colors), `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin` | Nerfstudio and LichtFeld Studio, as-is; training-side pipeline in `tools/` |
+| **Nerfstudio** | `.zip` | `images/`, `depth/` (at image resolution), `confidence/`, `masks/`, `transforms.json`, `cameras/`, + raw geometry: `mesh.obj` (with captured vertex colors), `face_classes.bin`, `roomplan*.json`, `registration.json`, `arkit_features.bin`, `sweep_coverage.bin` | Nerfstudio and LichtFeld Studio, as-is; training-side pipeline in `tools/` |
 | **OBJ** | `.obj` | Single mesh file with captured vertex colors | MeshLab, Blender |
 | **PLY** | `.ply` | Converted mesh with captured vertex colors | MeshLab, CloudCompare |
 | **USDZ** | `.usdz` | Converted mesh via ModelIO, with vertex colors | iOS Quick Look (native) |
@@ -175,6 +238,7 @@ Each export format includes **only** the data relevant to that format. The filen
 scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
 ├── scan4d_metadata.json    # GPS tags, Location ID, `export_format`, `hardware_device_model`, & `face_anchors`
 ├── arkit_features.bin       # ARKit sparse feature cloud (id + xyz, raw capture frame)
+├── sweep_coverage.bin       # Where the sweep looked: per-cell free/surface/visit counts (raw capture frame)
 ├── images/                 # RGB frames (JPEG, ~2fps adaptive)
 │   ├── frame_00000.jpg
 │   └── ...
@@ -195,11 +259,17 @@ scan4d_Kitchen_scan1_scan4d_1710520000_a1b2c3d4.zip/
 ```
 
 ### Backend Receivers
-Scan4D is designed to upload these packages directly to edge/cloud servers. Reference implementors:
-- **[wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload):** A simple Python FastAPI receiver that accepts `.zip` PUT requests and saves them. Best for local loopback testing.
-- **[wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion):** The primary production pipeline built on Prefect.io. Automatically routes data to OpenFLAME or COLMAP based on the `scan4d_metadata.json` tags.
+
+Scan4D uploads these packages to the lab's stack. The sibling repos, as they describe themselves today:
+
+- **`scan4d-server`** (private): the control plane. Device registry, the inventory of spaces, maps, scans and links, a working directory served as S3 by its own Versity, export upload addresses granted per device, join fine-tunes shared back to the phone, focus-scan tasks, a web app with a 3D map view, and Prefect with a docker worker for the flows. Its README is the design and the API contract (REQ-038).
+- **`scan4d-flows`** (private): the flows deployed into that Prefect. `scan4d-splat` (room-scan export or focus-scan dump to a trained Gaussian splat: unzip, normalize, SfM poses, priors, region masks, LichtFeld training; GPU), `eagle-splat` (Eagle Max captures), `spark-build-lod` (a Spark level-of-detail fileset for ARENA).
+- **[wisescan-upload](https://github.com/WiseLabCMU/wisescan-upload):** an HTTP/3 upload gateway (Caddy in front of VersityGW) for exports sent to a URL configured in Settings rather than to a control-plane grant.
+- **[wisescan-ingestion](https://github.com/WiseLabCMU/wisescan-ingestion):** a NATS JetStream stack that persists time-series binary streams with per-session JWT authentication. Not on the export path today; the candidate receiver for a streaming mode (REQ-018).
 
 ## Privacy Filtering
+
+On by default. Switched off on the Capture screen, it turns itself back on after 24 hours (Developer Mode: 12 h, 24 h, 1 week or none). Each synced scan tells the lab server whether the filter was on.
 
 When enabled (toggle on Capture screen):
 
@@ -228,7 +298,7 @@ The Meta Wearables DAT SDK relies on specific Xcode build configurations that ca
    In Xcode, go to `File > Add Package Dependencies...` and enter the repository URL: `https://github.com/facebook/meta-wearables-dat-ios`. Add the `meta-wearables-dat-ios` library to the `wisescan-ios` target.
 
 2. **Gather Meta Credentials (Optional)**
-   Ensure you have your `MetaAppID`, `ClientToken`, and `TeamID` registered from the Meta Wearables Developer Center. Inject these into `Custom-Info.plist` (or keep them blank to function in Developer Mode). 
+   Ensure you have your `MetaAppID`, `ClientToken`, and `TeamID` registered from the Meta Wearables Developer Center. Keep the real values on your machine only: the privacy guard refuses a staged plist that carries them (see CONTRIBUTING, Credentials). Inject these into `Custom-Info.plist` locally without staging the file (or keep them blank to function in Developer Mode). 
 
 3. **Enable Developer Mode in Meta View App**
    If you are testing without registered production credentials:

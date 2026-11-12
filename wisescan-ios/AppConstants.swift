@@ -29,6 +29,17 @@ enum AppConstants {
     // MARK: - AppStorage Keys
     enum Key {
         static let uploadURL = "uploadURL"
+        static let controlPlaneHost = "controlPlaneHost"              // the lab's control plane server (host[:port] or URL); empty = sync off
+        static let controlPlaneDeviceLabel = "controlPlaneDeviceLabel" // this phone's name in the fleet (iOS gives apps only "iPhone")
+        static let controlPlanePromptedTasks = "controlPlanePromptedTasks" // urgent tasks already alerted (each alerts once; then the to-do list)
+        static let controlPlaneOpenTasks = "controlPlaneOpenTasks"    // the to-do list as of the last sync (JSON), shown while the server can't be reached
+        static let controlPlaneTaskAnswers = "controlPlaneTaskAnswers" // open/decline answers the server hasn't had yet, sent with the next sync
+        static let controlPlaneSyncedSpaces = "controlPlaneSyncedSpaces" // ids of the spaces reported to the control plane (Sync on a space or stitched map)
+        static let controlPlaneAutoSync = "controlPlaneAutoSync"      // which spaces start syncing without a tap: all / new / off (ControlPlaneAutoSync)
+        static let controlPlaneJoinedAt = "controlPlaneJoinedAt"      // first successful sync (seconds since 1970): what counts as a new space
+        static let controlPlaneSendPackages = "controlPlaneSendPackages" // upload map packages (mesh, room layout, relocalization map) the server asks for
+        static let controlPlaneAllowUntrusted = "controlPlaneAllowUntrusted" // accept the lab's own (self-signed) certificate from the control plane and the upload hosts it names
+        nonisolated static let controlPlanePasswordWanted = "controlPlanePasswordWanted" // read by ControlPlaneSecret off the main actor; the control plane (base URL) that refused a request for want of a password; tapped Upload and Sync ask for it first
         static let rawOverlapMax = "rawOverlapMax"
         static let rawRejectBlur = "rawRejectBlur"
         static let developerMode = "developerMode"
@@ -36,6 +47,8 @@ enum AppConstants {
         static let mockCameraImages = "mockCameraImages"
         static let mockDepthMaps = "mockDepthMaps"
         static let privacyFilter = "privacyFilter"
+        static let privacyFilterOffAt = "privacyFilterOffAt"          // when the Privacy Filter was last switched off (seconds since 1970); cleared when it goes back on (PrivacyFilterTimer)
+        static let privacyFilterTimeLimitHours = "privacyFilterTimeLimitHours" // Developer Mode: hours the Privacy Filter may stay off before it turns itself back on; 0 = no limit
         static let mockWearable = "mockWearable"
         static let selectedExportFormat = "selectedExportFormat"
         static let locationScanFilter = "locationScanFilter"   // a space's scan list: Room / Focus / All (ScanListFilter)
@@ -47,6 +60,7 @@ enum AppConstants {
         static let hideLivePoints = "hideLivePoints"
         static let perfDiagnostics = "perfDiagnostics"
         static let perfSampleUnderDebugger = "perfSampleUnderDebugger"  // Developer Mode: let the stall sampler send SIGUSR1 even when lldb is attached (requires lldb set to pass the signal)
+        static let sweepCoverageLiveReadout = "sweepCoverageLiveReadout"  // Developer Mode: on-screen sweep-coverage counters while recording (shown only with perfDiagnostics also on)
         static let pauseVRCompute = "pauseVRCompute"
         static let vrBloomEnabled = "vrBloomEnabled"
         static let semanticLabeling = "semanticLabeling"
@@ -57,6 +71,7 @@ enum AppConstants {
         static let registerLegacyScans = "registerLegacyScans"
         static let videoFormatIndex = "videoFormatIndex"             // selected ARKit video format index
         static let captureAudioEnabled = "captureAudioEnabled"       // shutter-click + chime sounds
+        static let liteModeNoticeShown = "liteModeNoticeShown"       // the "Lite Mode — No LiDAR" notice was shown (once per install)
         static let rigMeasuredDyDateMs = "rigMeasuredDyDateMs"        // when the rig height was last entered/confirmed, UTC epoch ms — drives the staleness nudge (2026-08-19: a 28.5-inch entry outlived its rig by a day and a half, and poses shipped ~8 cm long with nothing anywhere to say the number had gone stale)
         static let rigMeasuredDyMeters = "rigMeasuredDyMeters"        // user's tape-measured iPad-camera→360°-lens distance — ALWAYS persisted in METERS (UI may display/accept imperial); 0 = unmeasured
         static let rigHeightUnitImperial = "rigHeightUnitImperial"    // display/entry unit preference for the rig height field (false = metric)
@@ -97,13 +112,97 @@ enum AppConstants {
     private static let retiredDefaultsKeys = [
         // Retired 2026-08-28 with the coarse/full label toggle: the mesh preview now always names
         // its RoomPlan boxes with the full vocabulary, so there is no granularity left to persist.
-        "semanticLabelDetail"
+        "semanticLabelDetail",
+        // Retired 2026-10-25: a copy of the control plane device id. Defaults ride backups, so a
+        // phone restored from another's would have synced as it (DeviceIdentity now falls back to
+        // a file excluded from backups).
+        "controlPlaneDeviceId"
     ]
 
     /// Drop every retired key. Cheap, idempotent, and called once from the app's `init`.
     static func pruneRetiredDefaults() {
         for key in retiredDefaultsKeys {
             UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    // MARK: - Developer options
+
+    /// Every option in Settings > Developer Mode, with its default.
+    ///
+    /// RULE: a new Developer Mode option goes in here (key and default) in the same change that
+    /// adds its row. This list is all that Restore Default Developer Options and turning Developer
+    /// Mode off reset, so an option missing from it keeps its bench value outside Developer Mode.
+    /// That matters: Keep 360° Originals left on leaves raw equirects on the camera, Mesh
+    /// Classifier left off drops the wall labels registration needs, and the diagnostics switches
+    /// gate on their own keys, so a left-on one keeps costing.
+    ///
+    /// Registered at launch (Scan4DApp.init), so code that reads a key straight from UserDefaults
+    /// gets the right default with no fallback of its own; that is also why a restore can simply
+    /// remove the stored values. Left out on purpose: `developerMode` itself (a restore keeps
+    /// Developer Mode on).
+    ///
+    /// Outside Developer Mode every option here is at its default: turning Developer Mode off
+    /// restores them, and so does every launch with it off (`restoreDeveloperDefaultsOutsideDeveloperMode`),
+    /// which also covers a setting that moved here from everyday Settings with a changed value.
+    static let developerOptionDefaults: [String: Any] = [
+        // Simulation
+        Key.mockIMU: mockIMU,
+        Key.mockCameraImages: mockCameraImages,
+        Key.mockDepthMaps: mockDepthMaps,
+        Key.mockWearable: mockWearable,
+        // 360° and colorize probes
+        Key.colorizeFrom360Faces: colorizeFrom360Faces,
+        Key.keepCameraOriginals: keepCameraOriginals,
+        Key.privacyFilterTimeLimitHours: privacyFilterTimeLimitHours,
+        Key.gpuColorize: gpuColorize,
+        Key.keyframeWeightBonus: keyframeWeightBonus,
+        Key.robustColorMedian: robustColorMedian,
+        // VR, diagnostics and isolation switches
+        Key.hideLivePoints: hideLivePoints,
+        Key.perfDiagnostics: perfDiagnostics,
+        Key.perfSampleUnderDebugger: perfSampleUnderDebugger,
+        Key.sweepCoverageLiveReadout: sweepCoverageLiveReadout,
+        Key.pauseVRCompute: pauseVRCompute,
+        Key.vrBloomEnabled: vrBloomEnabled,
+        Key.memDiagForceReclaim: memDiagForceReclaim,
+        Key.forceRebuildArtifacts: forceRebuildArtifacts,
+        // Capture tuning, moved here from everyday Settings (fewest controls, CONTRIBUTING §3)
+        Key.rawOverlapMax: overlapMax,
+        Key.rawRejectBlur: rejectBlur,
+        Key.semanticLabeling: semanticLabeling,
+        Key.activeMeshColor: activeMeshColor,
+        Key.ghostMeshColor: ghostMeshColor,
+        Key.metaWearablesFPS: metaWearablesFPS,
+        // Capture quality and processing
+        Key.videoFormatIndex: videoFormatIndex,
+        Key.captureAudioEnabled: captureAudioEnabled,
+        Key.meshClassifier: meshClassifier,
+        Key.registerLegacyScans: registerLegacyScans
+    ]
+
+    /// At launch: with Developer Mode off, every developer option goes back to its default. Turning
+    /// Developer Mode off already did that for the options it had then; this catches a setting that
+    /// later moved into Developer Mode from everyday Settings, which a user may have changed and
+    /// could no longer see or change back (Semantic Labeling off blocks every rescan).
+    static func restoreDeveloperDefaultsOutsideDeveloperMode(in defaults: UserDefaults = .standard) {
+        guard !defaults.bool(forKey: Key.developerMode) else { return }
+        restoreDeveloperDefaults(in: defaults)
+    }
+
+    /// Restore Default Developer Options, which is also what turning Developer Mode off does:
+    /// removes every developer option's stored value, so each reads its registered default again.
+    static func restoreDeveloperDefaults(in defaults: UserDefaults = .standard) {
+        for key in developerOptionDefaults.keys {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    /// True when every developer option reads its default, so a restore would change nothing.
+    static func developerOptionsAreDefault(in defaults: UserDefaults = .standard) -> Bool {
+        developerOptionDefaults.allSatisfy { key, value in
+            guard let stored = defaults.object(forKey: key) else { return true }
+            return (stored as AnyObject).isEqual(value)
         }
     }
 
@@ -115,6 +214,11 @@ enum AppConstants {
     static var uploadURL: String {
         isTestFlight ? "https://wiselambda4.lan.cmu.edu/wisescan-uploads/" : ""
     }
+    /// The lab's control plane (scan4d-server), on TestFlight only, like the upload URL: App Store
+    /// and Xcode builds start with none. A host the user typed, or cleared, stays theirs.
+    static var controlPlaneHost: String {
+        isTestFlight ? "https://wiselambda4.lan.cmu.edu" : ""
+    }
     static let overlapMax: Double = 60.0                           // 60%: fewer redundant motion frames now that sharp stills carry texture detail (photogrammetry overlap rule of thumb)
     static let rejectBlur: Bool = true
     static let developerMode: Bool = false
@@ -122,6 +226,12 @@ enum AppConstants {
     static let mockCameraImages: Bool = false
     static let mockDepthMaps: Bool = false
     static let privacyFilter: Bool = true
+    /// Switched off, the Privacy Filter turns itself back on after this many hours (field
+    /// report 2026-11-11: it was being left off by mistake and scans caught too many people).
+    /// Developer Mode can pick another limit from `privacyFilterTimeLimitChoices`.
+    static let privacyFilterTimeLimitHours: Int = 24
+    /// The Developer Mode choices, in hours; 0 = no limit.
+    static let privacyFilterTimeLimitChoices: [Int] = [12, 24, 168, 0]
     static let mockWearable: Bool = false
     static let selectedExportFormat = "Scan4D" // ExportFormat.scan4d.rawValue
     static let activeMeshColor: String = "Green"
@@ -131,6 +241,7 @@ enum AppConstants {
     static let hideLivePoints: Bool = false
     static let perfDiagnostics: Bool = false   // Developer Mode: emit OSLog/signpost perf diagnostics
     static let perfSampleUnderDebugger: Bool = false   // Developer Mode: stall sampler fires under a debugger too (lldb must pass SIGUSR1, else it pauses)
+    static let sweepCoverageLiveReadout: Bool = false  // Developer Mode: live sweep-coverage readout while recording; a Perf Diagnostics sub-option, inert unless that is on too
     static let pauseVRCompute: Bool = false     // Developer Mode: skip the entire VR GPU pipeline (isolation test)
     static let vrBloomEnabled: Bool = false     // Developer Mode: VR point-cloud bloom post-process (off by default — device A/B found it unmissed with live points visible; helps most when Hide Live Points is on)
     static let semanticLabeling: Bool = true    // Developer Mode: disable entire RoomPlan pipeline to reduce memory
@@ -218,6 +329,8 @@ enum AppConstants {
     static let faceClusterThresholdMeters: Float = 1.0      // merge distance for person anchors (~body size; points now sample any body part via segmentation, not a head)
     static let faceAnchorMinObservations: Float = 2         // a person anchor must be seen in at least this many frames to be saved (confidence gate; drops one-frame segmentation false positives)
     static let maxFramesInFlight: Int = 2                    // cap on concurrent frame-save encodes; excess frames are dropped to keep retained CVPixelBuffers from starving ARKit's frame pool (VIO loss corrupts the scan)
+    /// `nonisolated`: read from the wearable frame listener, which runs off the main actor.
+    nonisolated static let wearableFramesInFlight: Int = 1   // cap on concurrent wearable-frame decode/segment/encode jobs; excess frames are dropped, not queued — the work can outrun the stream and a queued frame is stale by the time it lands (the operator wants the newest proxy view, not a backlog)
     static let vioFrameGapTripSeconds: TimeInterval = 1.5    // VIO guard: an ARKit frame-delivery gap this large mid-scan = the session stalled and VIO diverged → halt
     static let vioHardFrameGapTripSeconds: TimeInterval = 4.0 // VIO guard belt: a gap this large trips REGARDLESS of how tracking presents on the recovery frame — covers OS actions (Control Center on iPadOS) that stall delivery without firing sessionWasInterrupted and resume via benign-looking .initializing (7.9s gap → silent SLAM reinit, 2026-07-24 M2 runs). Compute stalls on the marginal iPad top out well under 2s, so 4s is clear of false trips.
     static let meshStartWatchdogSeconds: TimeInterval = 10   // Recording on a LiDAR device with zero ARMeshAnchors for this long AFTER tracking settled = Recon3D is dead for this scan (60fps default-format fallback after RoomPlan's internal reconfigure; Fig err storm, 2026-07-24 runs) → halt via the VIO guard. NOT a live rebuild: re-running the session under active RoomPlan crashed ObjectUnderstanding at save (run 4).
@@ -455,6 +568,7 @@ enum AppConstants {
     static let coachNearDepthSustainSeconds: TimeInterval = 4  // obstruction must persist this long before the coach warns — a hand passing the lens must not fire it
     static let scanCoachingEnabled: Bool = true                // default for the scan coaching toggle
     static let captureAudioEnabled: Bool = true                // default for shutter-click + chime sounds
+    static let videoFormatIndex: Int = 0                       // Developer Mode video format: 0 = Auto (no override); N = force supportedVideoFormats[N-1]
 
     // MARK: - Capture Quality Constants
     static let motionBlurAngularVelocity: Float = 0.5          // rad/s (~30°/s) — rotational velocity above which frames are rejected as blurry
@@ -469,6 +583,10 @@ enum AppConstants {
     static let stillnessHapticIntensity: CGFloat = 0.6         // soft haptic strength on entering confirmed stillness
     static let captureFlashOpacity: Double = 0.5               // peak opacity of the white shutter flash on keyframe capture
     static let captureFlashDuration: TimeInterval = 0.35       // fade-out duration of the shutter flash
+    static let autoStillFlashOpacity: Double = 0.25            // peak of the softer flash for automatic room and focus-scan stills (up to ~2/s)
+    static let autoStillFlashDuration: TimeInterval = 0.2      // fade-out of the automatic-still flash
+    static let captureFlashDimmedOpacity: Double = 0.1         // every flash's peak with Accessibility > Dim Flashing Lights on
+    static let captureFlashDimmedDuration: TimeInterval = 0.5  // slower, gentler fade with Dim Flashing Lights on
     static let photoCoverageMaxDistance: Float = 4.0           // m — max distance a keyframe photo credibly captures texture detail
     static let photoTintColor = SIMD4<Float>(1.0, 0.72, 0.2, 1.0) // amber overlay marking depth-covered-but-unphotographed mesh
     static let photoTintAlpha: CGFloat = 0.28                  // opacity of the amber "depth only" tint
@@ -585,6 +703,14 @@ enum AppConstants {
     static let stillOverlapMinStills: Int = 3                  // stills required before overlap/parallax coaching can fire (too little signal below this)
     static let stillOverlapFloor: Double = 0.4                 // coach nudges "overlap your photos" while mean still-to-still overlap is below this (photogrammetry target ~0.6)
     static let stillParallaxDiversityFloor: Double = 0.15      // coach nudges "step sideways" while under this fraction of photo-covered voxels has ≥2 standpoints
+    static let sweepCoverageCellSize: Float = 0.5              // m — sweep-coverage cell (room-relocalization profile; finer 0.1-0.2 m guidance is a constant change)
+    static let sweepCoverageMaxHz: Double = 5.0                // max sweep-coverage integrations per second (frames above this rate are dropped)
+    static let sweepCoverageRayColumns: Int = 20               // depth-ray grid columns per frame (20×15 = 300 rays/frame)
+    static let sweepCoverageRayRows: Int = 15                  // depth-ray grid rows per frame
+    static let sweepCoverageMaxRange: Float = 5.0              // m — rays longer than this are truncated: free space to the cap, no surface
+    static let sweepCoverageMinDepth: Float = 0.1              // m — depth at or below this is invalid (sensor floor / zero fill)
+    static let sweepCoverageMinConfidence: UInt8 = 1           // skip ARConfidenceLevel.low only — a High-only filter blanked the cloud under thermal duty-cycling (Shaders/PointCloud.metal:123-128)
+    static let sweepCoverageLogEveryUpdates: Int = 25          // emit a sweep-coverage diagnostic line every N integrated updates
     static let keyframeFrustumDepth: Float = 0.25             // m — length of the still-capture frustum wedge in the preview
     static let keyframeStillColor = SIMD4<Float>(0.2, 0.85, 1.0, 1.0)  // cyan — sharp still (keyframe) capture markers
     static let keyframeMotionColor = SIMD4<Float>(1.0, 0.6, 0.15, 1.0) // amber — motion (sweep) frame markers
@@ -628,6 +754,22 @@ enum AppConstants {
     // MARK: - 360° Still Source (Theta OSC spike — feat/still-source-360)
     static let thetaCaptureTimeout: TimeInterval = 20            // max wait for a takePicture command to reach "done"
     static let thetaStatusPollInterval: TimeInterval = 0.4       // /osc/commands/status poll cadence while a capture is inProgress
+
+    // MARK: - Control plane (scan4d-server)
+    static let controlPlaneSyncDebounceS: Double = 5             // saves within this window share one sync
+    static let controlPlaneRequestTimeoutS: TimeInterval = 15
+    static let controlPlaneUploadBypassS: TimeInterval = 60      // after the control plane is unreachable, exports go straight to the Upload URL this long
+    static let controlPlaneUploadTimeoutS: TimeInterval = 60     // idle time allowed mid map-package upload (tens of MB)
+    static let controlPlaneSendPackages = true                   // map packages go up with the sync unless turned off
+    static let controlPlaneAutoSync = "new"                      // new spaces sync on their own; the backlog from before joining waits for Sync
+    static let controlPlaneLargeFileBytes: Int64 = 5_000_000     // package files this big go up only on an unmetered network (Wi-Fi)
+    static let controlPlanePollIntervalS: Double = 300           // while the app is open, sync this often so the lab's requests are picked up
+
+    // MARK: - Export uploads (background URLSession, ExportUploader)
+    static let exportUploadSessionId = "edu.cmu.wiselab.wisescan-ios.export-upload" // stable: iOS reattaches a relaunched app's transfers by it
+    static let exportUploadResourceTimeoutS: TimeInterval = 3600 // give up after this long in total; matches scan4d-server's grant lifetime (SCAN4D_EXPORT_URL_TTL_S default), past which a retry is refused anyway
+    static let exportUploadProgressStep: Double = 0.01           // write the scan's progress only when it moves this much (each write is a SwiftData change)
+    static let exportUploadPendingDirectory = "PendingUploads"   // Application Support subfolder holding exports until their transfer ends
 }
 
 // MARK: - Semantic View Mode
@@ -665,13 +807,16 @@ enum SemanticViewMode: String, CaseIterable {
     var showFills: Bool { self == .semanticOnly }
 }
 
-/// Four-tier toggle for capture-pose frustum markers in the mesh preview.
-/// Mirrors `SemanticViewMode`'s cycle-button pattern; defaults to hidden so the preview
-/// stays clean until the user opts in. The `.equirectFaces` tier is skipped for scans
-/// without 360° stills (controlled by `next(hasEquirects:)`).
+/// Capture-pose frustum markers in the mesh preview, hidden by default so the preview stays
+/// clean until the user opts in. Everyone gets one on/off toggle between `.none` and `.photos`
+/// (where each photo was taken: stills and 360° stills, `photoPositionsToggled`). Developer Mode
+/// cycles every tier with `next(hasEquirects:)`, which skips `.equirectFaces` for scans without
+/// 360° stills; motion frames are hundreds of wedges and are only there.
 enum KeyframeMarkerMode: String, CaseIterable {
     /// No capture markers.
     case none
+    /// Every photo: sharp stills and 360° stills (the everyday "photo positions" toggle).
+    case photos
     /// Sharp still (keyframe) capture poses only.
     case stills
     /// 360° equirect sphere markers (one translucent sphere + forward arrow per still).
@@ -685,6 +830,7 @@ enum KeyframeMarkerMode: String, CaseIterable {
     var iconName: String {
         switch self {
         case .none:          return "camera.metering.none"
+        case .photos:        return "camera.metering.partial"
         case .stills:        return "camera.metering.partial"
         case .equirectFaces: return "pano"
         case .motion:        return "camera.metering.center.weighted"
@@ -696,6 +842,7 @@ enum KeyframeMarkerMode: String, CaseIterable {
     func next(hasEquirects: Bool) -> KeyframeMarkerMode {
         switch self {
         case .none:          return .stills
+        case .photos:        return .motion
         case .stills:        return hasEquirects ? .equirectFaces : .motion
         case .equirectFaces: return .motion
         case .motion:        return .all
@@ -703,9 +850,12 @@ enum KeyframeMarkerMode: String, CaseIterable {
         }
     }
 
-    var showStills: Bool { self == .stills || self == .all }
+    /// The everyday toggle: off, or every photo's position.
+    var photoPositionsToggled: KeyframeMarkerMode { self == .none ? .photos : .none }
+
+    var showStills: Bool { self == .stills || self == .photos || self == .all }
     var showMotion: Bool { self == .motion || self == .all }
-    var showEquirectFaces: Bool { self == .equirectFaces || self == .all }
+    var showEquirectFaces: Bool { self == .equirectFaces || self == .photos || self == .all }
 }
 
 /// Which GEOMETRY the mesh preview draws — an axis ORTHOGONAL to `SemanticViewMode` (which

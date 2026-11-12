@@ -8,6 +8,7 @@ import SwiftData
 struct CaptureView: View {
     @Environment(ScanStore.self) var scanStore
     @Environment(\.modelContext) var modelContext
+    @Environment(\.scenePhase) var scenePhase
     @State var scanStats = ScanStats()
     @State var locationManager = LocationManager()
     @AppStorage(AppConstants.Key.privacyFilter) var isPrivacyFilterOn = AppConstants.privacyFilter
@@ -68,8 +69,6 @@ struct CaptureView: View {
     @State var recordingSeconds = 0
     @State var recordingTimer: Timer?
     @State var frameCaptureSession = FrameCaptureSession()
-    /// Opacity of the white shutter-flash overlay shown when a sharp keyframe is captured.
-    @State private var captureFlashOpacity: Double = 0
     // Detects main-thread stalls during scanning when Perf Diagnostics is on (no-op otherwise).
     /// [MemDiag] logs a MEM-PRESSURE marker (footprint + headroom) when the OS flags the app near its
     /// jetsam limit — the redline trip-flag. No-op unless Perf Diagnostics is on.
@@ -118,7 +117,6 @@ struct CaptureView: View {
     @State var messageVersion = 0
     @State var hapticGenerator = UIImpactFeedbackGenerator(style: .medium)
 
-    @State var showExtendPrompt = false
     @State var showExtendOverlay = false // Semi-transparent overlay during Pin & Extend save
     @State var extendPhaseText = "" // Text shown in the extend overlay
     @State var showInsufficientTrackingAlert = false // SwiftUI alert for poor mapping status
@@ -128,7 +126,6 @@ struct CaptureView: View {
     @State var showStopMenu = false
     @State var showDiscardConfirm = false // destructive Discard from the stop menu → confirm first
     @State var showPendingDiscardConfirm = false // destructive Discard from the naming dialog → confirm first
-    @State var showExtendErrorAlert = false
     @State var isAwaitingAlignment = false // Phase 2.1 (perfDiag): briefly holding record for the auto-align correction
 
     @State private var showSettings = false
@@ -154,6 +151,7 @@ struct CaptureView: View {
     @State var scanCoach = ScanCoach()
     @AppStorage(AppConstants.Key.scanCoachingEnabled) var scanCoachingEnabled: Bool = AppConstants.scanCoachingEnabled
     @AppStorage(AppConstants.Key.semanticLabeling) private var semanticLabeling: Bool = AppConstants.semanticLabeling
+    @AppStorage(AppConstants.Key.sweepCoverageLiveReadout) private var sweepCoverageLiveReadout: Bool = AppConstants.sweepCoverageLiveReadout
 
     // MARK: - Space Analysis (pre-scan staging check)
     @State var isAnalyzing = false
@@ -179,6 +177,9 @@ struct CaptureView: View {
         let worldMapURL: URL?
         let thumbnailData: Data?
         let scanCase: ScanCase
+        // Sweep-coverage grid frozen at the Stop tap; nil only when the capture view was gone.
+        // A `let` with no default so the memberwise init makes every construction site decide.
+        let sweepCoverage: SweepCoverageSnapshot?
         // Map saved with a wandering outlier cluster in its feature cloud (tracking excursion,
         // e.g. an OS interruption with motion) — persisted so rescan/link can warn (default lets
         // the VIO-recovery construction sites, which save no map, omit it).
@@ -886,7 +887,7 @@ struct CaptureView: View {
         // relocalization is imperfect. Complements the anchor-based AlignmentOverlayView above;
         // startRecording bakes any offset into the world origin so mesh + world map stay co-framed.
         // Hidden during a focus scan: the ghost only initializes the pose and leaves the scene at
-        // Start. (A room recording keeps the chip for Dismiss; its Re-relocalize is a no-op then.)
+        // Start. (A room recording keeps the chip for Dismiss, the only action its dialog offers then.)
         if cachedGhostMeshData != nil && !dismissGhostMesh && !isStillCapturing {
             ghostMeshChipStack
         }
@@ -894,46 +895,34 @@ struct CaptureView: View {
         // Manual alignment slider overlay
         manualAdjustOverlay
 
-        // Keyframe capture flash — a brief white blink (camera-app shutter language)
-        // each time a sharp keyframe is saved. Drawn last so it covers the full view.
-        Color.white
-            .opacity(captureFlashOpacity)
-            .ignoresSafeArea()
-            .allowsHitTesting(false)
+        // Still capture flash: a brief white blink (camera-app shutter language) for every saved
+        // still, so captures show even with the sound muted. Drawn last so it covers the full view;
+        // its own host, so a flash never re-evaluates this body.
+        CaptureFlashHost(frameCaptureSession: frameCaptureSession, stillCapture: stillCapture)
     }
     }
 
     /// Appearance, appear/disappear wiring, and the ghost-alignment dialog.
     private func captureLifecycle(_ content: some View) -> some View {
         content
-        // Announced stills only (the rig's tapped ones): automatic stills land about once a second.
-        .onChange(of: frameCaptureSession.shutterFeedbackCount) { oldCount, newCount in
-            guard newCount > oldCount else { return } // ignore session-start reset to 0
-            // Two-phase so the peak actually renders: commit the peak opacity this
-            // update, then animate down on the next runloop turn — writing both in one
-            // transaction can coalesce to 0→0 and skip the flash entirely.
-            captureFlashOpacity = AppConstants.captureFlashOpacity
-            DispatchQueue.main.async {
-                withAnimation(.easeOut(duration: AppConstants.captureFlashDuration)) {
-                    captureFlashOpacity = 0
-                }
-            }
-        }
         .confirmationDialog("Ghost Mesh Alignment", isPresented: $showRelocDialog) {
-            Button("Re-relocalize") {
-                // Reset transform and reload the world map by toggling the ghost data.
-                guard !isCapturing else { return }   // would reset tracking mid-capture
-                ghostYRotation = 0
-                ghostXOffset = 0
-                ghostZOffset = 0
-                let savedData = cachedGhostMeshData
-                cachedGhostMeshData = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    cachedGhostMeshData = savedData
+            // While capturing only Dismiss means anything: Re-relocalize would reset tracking mid-scan,
+            // and a manual nudge is baked in only at record start.
+            if !isCapturing {
+                Button("Re-relocalize") {
+                    // Reset transform and reload the world map by toggling the ghost data.
+                    ghostYRotation = 0
+                    ghostXOffset = 0
+                    ghostZOffset = 0
+                    let savedData = cachedGhostMeshData
+                    cachedGhostMeshData = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        cachedGhostMeshData = savedData
+                    }
                 }
-            }
-            Button("Manual Adjust") {
-                showManualAdjust = true
+                Button("Manual Adjust") {
+                    showManualAdjust = true
+                }
             }
             Button("Dismiss Ghost Mesh", role: .destructive) {
                 dismissGhostMesh = true
@@ -977,6 +966,8 @@ struct CaptureView: View {
             // below restores its auto-sleep, mirroring the AR session's own ethos.
             thetaManager.setKeepAwake(true)
 
+            // The Privacy Filter's time limit (CaptureView+Privacy).
+            enforcePrivacyFilterRules()
             if let locId = scanStore.activeLocationForScan {
                 let descriptor = FetchDescriptor<ScanLocation>(predicate: #Predicate { $0.id == locId })
                 if let loc = try? modelContext.fetch(descriptor).first {
@@ -1021,8 +1012,6 @@ struct CaptureView: View {
 
             // Start GPS/heading updates for scan metadata
             locationManager.startUpdating()
-
-            showExtendPrompt = (scanStore.activeScanToExtend != nil)
 
             // Prepare haptic engine for pin drop
             hapticGenerator.prepare()
@@ -1178,6 +1167,10 @@ struct CaptureView: View {
                 activeLocationName = nil
             }
         }
+        .onChange(of: isPrivacyFilterOn) { _, isOn in PrivacyFilterTimer.noteSwitch(isOn: isOn) }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { enforcePrivacyFilterRules() }
+        }
         .alert("Name this Space", isPresented: $showNamePrompt) {
             TextField("Location Name (e.g., Living Room)", text: $newLocationName)
             Button("Save", action: {
@@ -1231,11 +1224,6 @@ struct CaptureView: View {
                 + "don't track) — and sweep slowly until tracking improves, then stop again. Or discard "
                 + "and start over. Discarding deletes this recording's frames and photos and cannot be undone.")
         }
-        .alert("Not Enough Features", isPresented: $showExtendErrorAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text("Move the device around to map more of the environment before placing a connector.")
-        }
         .sheet(isPresented: $showRigHeightSheet) {
             RigHeightSheet()
         }
@@ -1249,6 +1237,12 @@ struct CaptureView: View {
     /// Scan-coach and space-analysis observers, and the analysis report sheet.
     private func captureObservers(_ content: some View) -> some View {
         content
+        // Keep the screen on while recording: automatic stills need no taps, and if the screen
+        // auto-locks iOS suspends the app and the scan ends. Covers every stop path (Stop, halt,
+        // discard), since all of them clear the flag.
+        .onChange(of: isCapturing, initial: true) { _, capturing in
+            ScreenAwake.set(ScreenAwake.captureHolder, held: capturing)
+        }
         .onChange(of: scanStats.anchorCount) {
             evaluateScanCoach()
         }
@@ -1423,7 +1417,8 @@ struct CaptureView: View {
                             if scanStats.hasEnoughFeaturesForRelocalization {
                                 pinAndExtend()
                             } else {
-                                showExtendErrorAlert = true
+                                showTransientMessage("Not enough mapped yet: move around to map more, then tap Save & Scan Adjacent again",
+                                                     duration: 4, systemImage: "exclamationmark.triangle.fill", tint: .orange)
                             }
                         }, label: {
                             Text("Save & Scan Adjacent")
@@ -1562,47 +1557,10 @@ struct CaptureView: View {
     @ViewBuilder
     private var captureChromeOverlay: some View {
         VStack {
-            // Scan Mode Prompt (transient)
-            if showExtendPrompt {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(scanStore.activeScanCase == .linkAdjacent ? "Connect Adjacent Space" : "Rescan Space")
-                            .font(.headline)
-                            .foregroundColor(.white)
-                        Text(scanStore.activeScanCase == .linkAdjacent
-                             ? """
-                               Connect Adjacent Space: Relocalize with the \
-                               previous scan, walk to where the new connector should be, and \
-                               confirm to connect this adjacent \
-                               space.
-                               """
-                             : """
-                               Rescan Space: Re-scan the previous area \
-                               to capture changes over time.
-                               """)
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.8))
-                    }
-                    Spacer()
-                    Button(action: { showExtendPrompt = false }, label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.title2)
-                            .foregroundColor(.white.opacity(0.6))
-                    })
-                }
-                .padding()
-                .background(Color.indigo.opacity(0.9))
-                .cornerRadius(16)
-                .padding(.horizontal)
-                .padding(.top, developerMode ? 60 : 20) // Leave room for top controls
-                .transition(.move(edge: .top).combined(with: .opacity))
-                .animation(.spring(), value: showExtendPrompt)
-            }
-
             // Top Controls
             HStack {
                 PrivacyFilterPill(isOn: $isPrivacyFilterOn,
-                                  locked: isRecording,
+                                  recording: isRecording,
                                   show360Note: thetaManager.isConnected)
 
                 Spacer()
@@ -1787,6 +1745,8 @@ struct CaptureView: View {
                 }
             }
 
+            sweepCoverageReadoutRow
+
             Spacer()
 
             // ScanCoach Bar (above HUD, only during recording)
@@ -1806,8 +1766,11 @@ struct CaptureView: View {
 
                     // Capture Button + Analyze Space Button
                     HStack(spacing: 24) {
-                        // Analyze Space button — visible when not recording
-                        if !isRecording {
+                        // Analyze Space: only before a new space's scan. It re-runs the shared session
+                        // with RoomPlan, which upsets a rescan's or connect's relocalization and has
+                        // nothing to stage in a space already scanned (fix-localization-plan.md, the
+                        // 2026-07-07 decision), and a focus scan is a capture of its own.
+                        if !isCapturing && scanStore.activeScanToExtend == nil && cachedGhostMeshData == nil {
                             Button(action: { startAnalysis() }, label: {
                                 VStack(spacing: 4) {
                                     Image(systemName: "scope")
@@ -1943,6 +1906,26 @@ struct CaptureView: View {
         }
     }
 
+    /// Developer sweep-coverage readout (Perf Diagnostics › Live Coverage Readout): numbers only,
+    /// left edge, recording only. It sits in the top chrome's flow AFTER the privacy pill, the
+    /// location label and the trailing wearable/360° column, so it lands below whichever of
+    /// those are showing and cannot overlap them; its height comes out of the Spacer, so nothing
+    /// above or below moves. The left edge below the top chrome is the one region no recording
+    /// chrome uses: top-right is REC + the wearable/360° column, bottom-left the Ghost Mesh chip,
+    /// the bottom the coach bar + stats HUD, the center the reticle and tracking pills.
+    /// The perf half gates on `PerfDiag.enabled` (applied at capture entry, like the other
+    /// perfDiag-only chrome here). When either switch is off the readout is not in the tree at
+    /// all — no timer, no reads.
+    @ViewBuilder private var sweepCoverageReadoutRow: some View {
+        if isRecording, PerfDiag.enabled, sweepCoverageLiveReadout {
+            HStack {
+                SweepCoverageReadout(scanStore: scanStore)
+                Spacer()
+            }
+            .padding(.horizontal)
+        }
+    }
+
     /// Phase 2.1 (perfDiag): full-screen hold shown while toggleRecording briefly waits for the
     /// auto-align correction to land before starting the recording.
     @ViewBuilder private var awaitingAlignmentOverlay: some View {
@@ -1969,8 +1952,9 @@ struct CaptureView: View {
     private var ghostMeshChipStack: some View {
         VStack {
             Spacer()
-            // Phase 2.1 (perfDiagnostics-only): "alignment sweep done — correction locked"
-            // cue. icpAlignReady is set only when a trusted ICP refine has converged during
+            // Phase 2.1: "alignment sweep done — correction locked" cue, shown to everyone (the
+            // "Aligning — wait for green" chip before it is Perf Diagnostics only).
+            // icpAlignReady is set only when a trusted ICP refine has converged during
             // the pre-record phase; its appearance tells the user it's safe to record (the
             // gravity-locked correction will bake into the world origin at record-start).
             if !isRecording, let align = scanStore.icpAlignReady {
@@ -2491,10 +2475,11 @@ private struct CaptureStatsHUD: View {
 /// sees. LOCKED while recording: the setting must describe the whole scan as one binary state —
 /// a mid-scan flip half-masks the capture (segmentation masks exist only for the ON portion)
 /// while the exported `privacy_filter` flag records just the stop-time value, so the export
-/// blur gate would mis-reason about the unmasked half.
+/// blur gate would mis-reason about the unmasked half. Switched off, the filter turns itself
+/// back on after its time limit (PrivacyFilterTimer), which the warning says.
 private struct PrivacyFilterPill: View {
     @Binding var isOn: Bool
-    let locked: Bool
+    let recording: Bool
     let show360Note: Bool
 
     var body: some View {
@@ -2506,7 +2491,7 @@ private struct PrivacyFilterPill: View {
                 Toggle("", isOn: $isOn)
                     .labelsHidden()
                     .tint(.green)
-                    .disabled(locked)
+                    .disabled(recording)
             }
             if !isOn {
                 Text(warningText)
@@ -2520,7 +2505,9 @@ private struct PrivacyFilterPill: View {
         .background(.ultraThinMaterial)
         .cornerRadius(16)
         .frame(maxWidth: 260, alignment: .leading)
-        .opacity(locked ? 0.5 : 1)
+        // Dimmed while recording, but only to 75%: the off warning must stay readable mid-scan
+        // (field report 2026-11-11: at 50% it went unnoticed and scans caught too many people).
+        .opacity(recording ? 0.75 : 1)
         .animation(.easeInOut(duration: 0.2), value: isOn)
     }
 
@@ -2528,6 +2515,10 @@ private struct PrivacyFilterPill: View {
         var text = "People in view will be captured unblurred — moving people will corrupt texture maps."
         if show360Note {
             text += " The connected 360° camera captures ALL directions, including people behind you."
+        }
+        let limit = PrivacyFilterTimer.currentLimitDescription()
+        if limit != PrivacyFilterTimer.describe(hours: 0) {
+            text += " Turns back on by itself \(limit) after being switched off."
         }
         return text
     }
@@ -2537,9 +2528,9 @@ private struct PrivacyFilterPill: View {
     ZStack {
         Color.black.ignoresSafeArea()
         VStack(spacing: 12) {
-            PrivacyFilterPill(isOn: .constant(true), locked: false, show360Note: false)
-            PrivacyFilterPill(isOn: .constant(false), locked: false, show360Note: false)
-            PrivacyFilterPill(isOn: .constant(false), locked: true, show360Note: true)
+            PrivacyFilterPill(isOn: .constant(true), recording: false, show360Note: false)
+            PrivacyFilterPill(isOn: .constant(false), recording: false, show360Note: false)
+            PrivacyFilterPill(isOn: .constant(false), recording: true, show360Note: true)
         }
     }
 }

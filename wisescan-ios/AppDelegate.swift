@@ -21,6 +21,17 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         return AppDelegate.orientationLocked ? .portrait : .all
     }
+
+    /// iOS relaunched the app (or woke it) because export uploads ended in the background. The
+    /// uploader's session, created at launch, receives the events and calls this handler when done.
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == AppConstants.exportUploadSessionId else {
+            completionHandler()
+            return
+        }
+        ExportUploader.shared.backgroundEventsCompletion = completionHandler
+    }
 }
 
 @main
@@ -33,15 +44,10 @@ struct Scan4DApp: App {
         
         // Register defaults for keys read via UserDefaults.standard.bool() (not @AppStorage).
         // @AppStorage provides its own default, but direct UserDefaults reads need registration.
-        UserDefaults.standard.register(defaults: [
-            AppConstants.Key.semanticLabeling: AppConstants.semanticLabeling,
-            AppConstants.Key.meshClassifier: AppConstants.meshClassifier,
-            AppConstants.Key.registerLegacyScans: AppConstants.registerLegacyScans,
-            AppConstants.Key.colorizeFrom360Faces: AppConstants.colorizeFrom360Faces,
-            AppConstants.Key.gpuColorize: AppConstants.gpuColorize,
-            AppConstants.Key.keyframeWeightBonus: AppConstants.keyframeWeightBonus,
-            AppConstants.Key.robustColorMedian: AppConstants.robustColorMedian
-        ])
+        // Every developer option is registered, which is what lets Restore Default Developer
+        // Options simply remove the stored values (see AppConstants.developerOptionDefaults).
+        UserDefaults.standard.register(defaults: AppConstants.developerOptionDefaults)
+        AppConstants.restoreDeveloperDefaultsOutsideDeveloperMode()
         AppConstants.pruneRetiredDefaults()
         print("Application directory: \(NSHomeDirectory())")
         // Main-thread stall watchdog, app-wide from first frame (no-op unless Perf
@@ -72,6 +78,12 @@ struct Scan4DApp: App {
             try Wearables.configure()
         } catch {
             print("Failed to configure Meta Wearables SDK: \(error)")
+        }
+        // Export uploads run in a background session: re-attach to transfers from an earlier run
+        // (and clear scans left converting or uploading by it) before any UI. Not under unit tests,
+        // which must not touch the real store.
+        if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            ExportUploader.shared.start()
         }
     }
 

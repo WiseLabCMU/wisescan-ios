@@ -1,6 +1,6 @@
 #!/bin/bash
 # pre-push hook: privacy backstop. Blocks pushing a branch whose tip tree contains
-# debug-only file-sharing plist keys or raw capture artifacts — catching commits
+# debug-only file-sharing plist keys, raw capture artifacts, or credentials — catching commits
 # made with `git commit --no-verify` (which skips pre-commit).
 #
 # Install via: ./scripts/install-hooks.sh    See CONTRIBUTING.md for details.
@@ -24,6 +24,21 @@ while read -r local_ref local_oid remote_ref remote_oid; do
                 echo ""
                 echo "❌ PUSH BLOCKED: debug-only key(s) in $f:$hits  ($local_ref)"
                 echo "   Remove them and amend/rebase before pushing."
+                FAIL=1
+            fi
+            shits=$(pg_plist_secret_violations "$(git show "$local_oid:$f" 2>/dev/null)")
+            if [ -n "$shits" ]; then
+                echo ""
+                echo "PUSH BLOCKED: credential value(s) in $f:$shits  ($local_ref)"
+                echo "   Credentials never enter the repo — purge from history before pushing."
+                FAIL=1
+            fi
+            ;;
+        *.swift)
+            lines=$(pg_swift_secret_violations "$(git show "$local_oid:$f" 2>/dev/null)")
+            if [ -n "$lines" ]; then
+                echo ""
+                echo "PUSH BLOCKED: literal SDK app id + secret in $f (line $lines)  ($local_ref)"
                 FAIL=1
             fi
             ;;

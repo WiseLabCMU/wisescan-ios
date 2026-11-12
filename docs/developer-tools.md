@@ -5,9 +5,29 @@ reachable **on device, without a debug session** — that constraint shaped most
 
 ## Settings → Developer Mode (master toggle)
 
-Reveals the developer section in Settings and the BLE Probe card on the Dashboard.
-The two diagnostics toggles below persist on their own keys, so turning Developer
-Mode off does not silently change what a field build records.
+Reveals the developer sections in Settings and the BLE Probe card on the Dashboard. The
+sections are grouped like the everyday Settings: under the Developer Mode switch, the field
+diagnostics (Export Diagnostics Log, Perf Diagnostics and its sub-options); then Capture,
+Privacy & 360° camera, Color, Display & VR, Simulation and Processing, each with an orange
+icon header; Restore Default Developer Options last.
+Turning Developer Mode off restores every developer option to its default, and so does
+**Restore Default Developer Options**, Developer Mode's last section (it asks first, keeps
+Developer Mode on, and is greyed out while nothing differs from the defaults). Both reset
+the same list, `AppConstants.developerOptionDefaults`, diagnostics toggles included: they
+gate on their own keys, so a left-on one would keep recording and costing after Developer
+Mode is off. A new developer option has to join that list (see CONTRIBUTING.md); one
+that doesn't is left set by both. Every launch with Developer Mode off restores the list
+as well, so a setting that moved here from everyday Settings cannot stay changed where
+its user can no longer see it.
+
+Moved here from everyday Settings (fewest controls, CONTRIBUTING.md section 3):
+Image Overlap Maximum, Reject Blurred Frames, **Semantic Labeling** (off, scans get no
+room data and Rescan / Connect Adjacent refuse them as bad scans), the active and ghost
+wireframe colours, and the Meta Wearables stream rate. Developer Mode also shows the
+360° camera bench on the Dashboard card (still resolution, Test Shutter, its timings
+and Download & Preview, which is what removes a test shot from the camera) and, in the
+3D preview, the full camera-marker cycle (motion frames); everyone else gets one
+photo-positions toggle.
 
 ### Performance Diagnostics (the big one)
 Gates on the **setting, not the build configuration** — it works identically in
@@ -17,12 +37,26 @@ Release, which is what the field mostly runs. ON enables:
   yaw, zncc, per-still yaw spread, rails), `[VertexColor]` frame selection + gray
   fraction, `[Colorize]` face generation, `[PerfTimer]` step timings, `[TrackStab]`
   tracking jumps and mesh purges, `[LocDiag]` relocalization/map health, `[Session]`
-  interruptions.
+  interruptions, `[ControlPlane]` inventory syncs (counts sent, rows the server marked
+  gone, or the failure).
 - **MainThreadWatchdog** — logs `main-thread stall BEGIN/END (max no-frame gap Nms)`
   for stalls over 400 ms. Mid-recording stalls ≥4 s independently hard-trip the VIO
   guard (that is a capture-safety mechanism, always on).
 - **MemDiag** — 1 Hz `footprint/resident/faces/verts/anchors/fps/cpu/thermal` telemetry
   plus lifecycle events (`RECORD-START`, `RP-STOP`, …) and per-thread CPU breakdowns.
+- **`[Coverage]` sweep lines** — the sweep-coverage recorder's measured cost, every 25
+  integrated updates while recording: per-update CPU (`last/mean/max` ms), `cpu_total` as a
+  share of one core, cell count, the throttle's `drop_busy`/`drop_rate` drops and the
+  `skip_tracking`/`skip_nodepth` skips. One `sweep FINAL` line at the Stop tap adds the
+  frame and ray totals that land in `sweep_coverage.bin`'s header. Only the lines are gated —
+  the grid itself is always recorded and saved.
+- **Live Coverage Readout** (sub-toggle, shown under Perf Diagnostics, off by default) — the
+  same counters on screen while recording, refreshed once a second in a small monospaced
+  block at the left edge under the top chrome: `cov surf/free` cells (with `nodepth` until a
+  depth frame arrives), `upd`, `drop busy/rate`, `skip tracking/nodepth`, and per-update
+  `cpu` last/avg/max ms. It reads a lock-guarded copy the recorder republishes per update —
+  never the recorder's queue, never the Stop-time freeze — so watching it does not pause or
+  slow the sweep.
 - **os_signpost intervals** for the Instruments timeline when a cable IS available.
 
 Decision-bearing lines (map-suspect verdicts, link drops, calibration rails) log at
@@ -60,6 +94,13 @@ diagnostics log.
 Debug-only escape from the security sweep that deletes each transferred still from the
 camera. Leave OFF except when comparing device bytes against camera-side originals —
 the camera's open AP is the weakest place to leave raw equirects.
+
+### Privacy Filter Time Limit
+How long the Privacy Filter may stay off before it turns itself back on: 12 h, 24 h (the
+default), 1 week or None. `PrivacyFilterTimer` records when the switch went off
+(`privacyFilterOffAt`) and checks when the capture screen opens, on return to the
+foreground and at a record tap, never mid-scan; an unknown switch-off time counts as
+expired. It is a developer option, so leaving Developer Mode puts it back to 24 h.
 
 ## Dashboard (Developer Mode)
 

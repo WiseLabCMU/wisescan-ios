@@ -51,7 +51,9 @@ struct ScansListView: View {
     @State private var isBulkUploading = false
     @State private var bulkUploadCompleted = 0
     @State private var bulkUploadTotal = 0
+    @State private var passwordPrompt: ControlPlanePendingAction?
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @Binding var selectedTab: Int
@@ -187,6 +189,7 @@ struct ScansListView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView()
             }
+            .controlPlanePasswordPrompt($passwordPrompt)
             .sheet(isPresented: $showExportSheet, onDismiss: {
                 // Safety net: if dismissed via swipe-down before the completion handler fires,
                 // reset so the Save button isn't stuck disabled.
@@ -198,13 +201,8 @@ struct ScansListView: View {
                 }
             }
             .fullScreenCover(item: $renderRequest) { req in
-                // Color from the render view: resolve item ids back to scans and run the
-                // shared bulk path. The cover dismisses so the tile progress is visible.
-                CombinedMeshScreen(request: req, onColor: { ids in
-                    let idSet = Set(ids)
-                    let scans = locations.flatMap(\.scans).filter { idSet.contains($0.id) }
-                    requestBulkColorize(scans: scans)
-                })
+                // Coloring is the cluster card's and each scan card's job, not the render's.
+                CombinedMeshScreen(request: req)
             }
             .confirmationDialog(
                 "Delete \(bulkScope == .allScans ? "Locations" : "Scans")",
@@ -393,7 +391,7 @@ struct ScansListView: View {
     }
 
     private var uploadDisabled: Bool {
-        selectedLocations.isEmpty || uploadURL.isEmpty
+        selectedLocations.isEmpty || !ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost)
     }
 
     private var bulkRunDisabled: Bool {
@@ -589,9 +587,15 @@ struct ScansListView: View {
     /// independently on a background queue. Banner tracks per-scan completion and upload progress.
     private func bulkUpload(scans: [CapturedScan]) {
         guard !isBulkUploading else { return }   // re-entrancy: double-tap = concurrent export+upload batches
-        guard !scans.isEmpty, !uploadURL.isEmpty else { return }
+        guard !scans.isEmpty,
+              ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost) else { return }
+        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) { startBulkUpload(scans: scans) }
+    }
+
+    /// The batch, once `bulkUpload` has passed its checks and any password prompt.
+    private func startBulkUpload(scans: [CapturedScan]) {
+        guard !isBulkUploading else { return }
         let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
-        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
 
         isBulkUploading = true
         bulkUploadCompleted = 0
@@ -610,7 +614,14 @@ struct ScansListView: View {
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             for scan in scans {
                 let filename = scan.makeExportFilename(format: format)
-                guard let url = URL(string: baseURLString + filename) else {
+                // Where it goes: the control plane's grant, or the manual Upload URL.
+                let target: ExportUploadTarget
+                do {
+                    target = try await ExportUploadTarget.resolve(
+                        scanId: scan.id, filename: filename, contentType: format.effective(for: scan).contentType,
+                        format: format, manualURL: uploadURL)
+                } catch {
+                    scan.uploadStatus = .failed(error.localizedDescription)
                     bulkUploadCompleted += 1
                     checkBulkUploadCompletion()
                     continue
@@ -618,7 +629,6 @@ struct ScansListView: View {
                 scan.uploadStatus = .zipping
                 let scanDir = scan.scanDirectory
                 let colorsFromCapture = scan.isColored
-                let contentType = format.effective(for: scan).contentType   // read on main (SwiftData)
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     guard let exportURL = ScanExportManager.prepareExport(
@@ -636,29 +646,15 @@ struct ScansListView: View {
                         return
                     }
 
-                    DispatchQueue.main.async { scan.uploadStatus = .uploading(progress: 0.0) }
-
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "PUT"
-                    request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-
-                    let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
-                        try? FileManager.default.removeItem(at: exportURL)
-                        DispatchQueue.main.async {
-                            if let error = error {
-                                scan.uploadStatus = .failed(error.localizedDescription)
-                            } else if let httpResponse = response as? HTTPURLResponse,
-                                      (200...299).contains(httpResponse.statusCode) {
-                                scan.uploadStatus = .success
-                                scan.lastUploadedAt = Date()
-                            } else {
-                                scan.uploadStatus = .failed("Server error")
-                            }
+                    DispatchQueue.main.async {
+                        scan.uploadStatus = .uploading(progress: 0.0)
+                        // Background transfer; the uploader sets the scan's status (see ExportUploader).
+                        ExportUploader.shared.upload(exportURL, request: target.request, scanId: scan.id,
+                                                     exportId: target.exportId) { _ in
                             self.bulkUploadCompleted += 1
                             self.checkBulkUploadCompletion()
                         }
                     }
-                    task.resume()
                 }
             }
         }
@@ -818,6 +814,22 @@ enum CaptureIntegrity {
         if depth < floorCount { deficient.append("depth (\(depth)/\(frames))") }
         if confidence < floorCount { deficient.append("confidence (\(confidence)/\(frames))") }
         return deficient
+    }
+}
+
+// MARK: - Upload status color
+// Shared by the scan card's status label and the User Guide's sample of it (UserGuideStatusIcons).
+
+extension UploadStatus {
+    var tint: Color {
+        switch self {
+        case .pending: return .white.opacity(0.6)   // was .gray — unreadable on the badge's own gray tint
+        case .zipping: return .cyan
+        case .savedLocally: return .green
+        case .uploading: return .blue
+        case .success: return .green
+        case .failed: return .red
+        }
     }
 }
 
@@ -1014,14 +1026,13 @@ struct ScanCard: View {
     var uploadURL: String
     var isEditing: Bool
     var onUpdate: (CapturedScan) -> Void
-    var onDelete: (CapturedScan) -> Void
 
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
     @AppStorage(AppConstants.Key.forceRebuildArtifacts) private var forceRebuildArtifacts: Bool = AppConstants.forceRebuildArtifacts
     @Environment(\.modelContext) private var modelContext
     @State private var exportItem: ZipExportItem?
     @State private var showExportError = false
-    @State private var showDeleteConfirm = false
     @State private var itemCounts: (images: Int, proxy: Int, depth: Int, confidence: Int, cameras: Int, equirect: Int)?
     @State private var showDataIntegrityAlert = false
     @State private var showMeshPreview = false
@@ -1039,6 +1050,7 @@ struct ScanCard: View {
     @State private var exportPhase: ExportPhase?
     /// DECISION 3 hard gate: upload requires this scan post-processed.
     @State private var showPostprocessAlert = false
+    @State private var passwordPrompt: ControlPlanePendingAction?
     /// Focus scans: the photo viewer (in place of the mesh preview), and the room scan the
     /// capture relocalized into, shown small beside the photo.
     @State private var showFocusPhotos = false
@@ -1066,7 +1078,7 @@ struct ScanCard: View {
     /// Single-card save/upload uses the local `exportPhase` @State.
     var bulkExportPhase: ExportPhase?
 
-    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, bulkColoringMessage: String? = nil, bulkExportPhase: ExportPhase? = nil, onUpdate: @escaping (CapturedScan) -> Void, onDelete: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
+    init(scan: CapturedScan, isLatest: Bool, uploadURL: String, isEditing: Bool, isSelected: Bool = false, bulkColoringMessage: String? = nil, bulkExportPhase: ExportPhase? = nil, onUpdate: @escaping (CapturedScan) -> Void, onSelect: (() -> Void)? = nil) {
         self.scan = scan
         self.isLatest = isLatest
         self.uploadURL = uploadURL
@@ -1075,7 +1087,6 @@ struct ScanCard: View {
         self.bulkColoringMessage = bulkColoringMessage
         self.bulkExportPhase = bulkExportPhase
         self.onUpdate = onUpdate
-        self.onDelete = onDelete
         self.onSelect = onSelect
     }
 
@@ -1294,17 +1305,6 @@ struct ScanCard: View {
                     }
                 }
             }
-        }
-        .confirmationDialog(
-            "Delete Scan",
-            isPresented: $showDeleteConfirm
-        ) {
-            Button("Delete \"\(scan.name)\"", role: .destructive) {
-                onDelete(scan)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This will permanently delete this scan and its data.")
         }
     }
 
@@ -1550,6 +1550,7 @@ struct ScanCard: View {
                 .disabled(processDisabled)
             }
         }
+        .controlPlanePasswordPrompt($passwordPrompt)
         .alert("Post-process Required", isPresented: $showPostprocessAlert) {
             Button("Post-process Now") { reRunProcessing() }
             Button("Cancel", role: .cancel) {}
@@ -1636,7 +1637,12 @@ struct ScanCard: View {
     }
 
     private var uploadButtonDisabled: Bool {
-        isEditing || uploadURL.isEmpty || scan.uploadStatus.isUploading
+        isEditing || !uploadsConfigured || scan.uploadStatus.isUploading
+    }
+
+    /// The control plane hands out upload destinations; the manual URL is the fallback.
+    private var uploadsConfigured: Bool {
+        ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost)
     }
 
     @ViewBuilder
@@ -1686,16 +1692,7 @@ struct ScanCard: View {
         .animation(.easeInOut(duration: 0.15), value: label)
     }
 
-    private var statusColor: Color {
-        switch scan.uploadStatus {
-        case .pending: return .white.opacity(0.6)   // was .gray — unreadable on the badge's own gray tint
-        case .zipping: return .cyan
-        case .savedLocally: return .green
-        case .uploading: return .blue
-        case .success: return .green
-        case .failed: return .red
-        }
-    }
+    private var statusColor: Color { scan.uploadStatus.tint }
 
     private func formattedCount(_ count: Int) -> String {
         if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000.0) }
@@ -1704,7 +1701,7 @@ struct ScanCard: View {
     }
 
     private func uploadScan() {
-        guard !uploadURL.isEmpty else { return }
+        guard uploadsConfigured else { return }
         // Re-entrancy: an export/upload for this scan is already running — a second concurrent
         // prepareExport doubles the privacy-blur working set (OOM on phones; see UploadStatus.isInFlight).
         guard !scan.uploadStatus.isInFlight else { return }
@@ -1714,6 +1711,12 @@ struct ScanCard: View {
             showPostprocessAlert = true
             return
         }
+        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) { startUpload() }
+    }
+
+    /// The export and upload, once `uploadScan` has passed its checks and any password prompt.
+    private func startUpload() {
+        guard !scan.uploadStatus.isInFlight else { return }
         scan.uploadStatus = .zipping
         onUpdate(scan)
 
@@ -1724,25 +1727,26 @@ struct ScanCard: View {
                 [scan], format: format, modelContext: modelContext,
                 progress: { _, msg in exportPhase = msg.map { ExportPhase($0) } })
             exportPhase = nil
-            uploadExport(format: format)
+            // Where it goes: the control plane's grant, or the manual Upload URL.
+            do {
+                let target = try await ExportUploadTarget.resolve(
+                    scanId: scan.id, filename: scan.makeExportFilename(format: format),
+                    contentType: format.effective(for: scan).contentType, format: format, manualURL: uploadURL)
+                uploadExport(format: format, to: target)
+            } catch {
+                scan.uploadStatus = .failed(error.localizedDescription)
+                onUpdate(scan)
+            }
         }
     }
 
-    /// The upload proper, once `uploadScan` has the scan ready to export.
-    private func uploadExport(format: ExportFormat) {
+    /// The upload proper, once `uploadScan` has the scan ready to export and somewhere to send it.
+    private func uploadExport(format: ExportFormat, to target: ExportUploadTarget) {
         let filename = scan.makeExportFilename(format: format)
-
-        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
-        guard let url = URL(string: baseURLString + filename) else {
-            scan.uploadStatus = .failed("Invalid URL")
-            onUpdate(scan)
-            return
-        }
 
         // Capture scan directory on main thread (SwiftData models aren't thread-safe)
         let scanDir = scan.scanDirectory
         let colorsFromCapture = scan.isColored
-        let contentType = format.effective(for: scan).contentType
         print("[Upload] scanDirectory: \(scanDir.path) exists=\(FileManager.default.fileExists(atPath: scanDir.path))")
         guard FileManager.default.fileExists(atPath: scanDir.path) else {
             scan.uploadStatus = .failed("No scan data")
@@ -1769,45 +1773,14 @@ struct ScanCard: View {
                 self.exportPhase = nil
                 self.scan.uploadStatus = .uploading(progress: 0.0)
                 self.onUpdate(self.scan)
-            }
-
-            // Upload natively via streaming
-            var request = URLRequest(url: url)
-            request.httpMethod = "PUT"
-            request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-
-            // Track upload progress using KVO
-            class ObserverBox { var observer: NSKeyValueObservation? }
-            let box = ObserverBox()
-
-            let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, uploadError in
-                _ = box
-
-                try? FileManager.default.removeItem(at: exportURL)
-                DispatchQueue.main.async {
+                // A background transfer: it finishes with the screen locked or the app closed, and
+                // the uploader sets the scan's progress, status and lastUploadedAt itself.
+                ExportUploader.shared.upload(exportURL, request: target.request, scanId: self.scan.id,
+                                             exportId: target.exportId) { _ in
                     self.scan.selectedFormat = self.selectedFormat
-                    if let uploadError = uploadError {
-                        self.scan.uploadStatus = .failed(uploadError.localizedDescription)
-                    } else if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
-                        self.scan.uploadStatus = .success
-                        self.scan.lastUploadedAt = Date()
-                    } else {
-                        self.scan.uploadStatus = .failed("Server error")
-                    }
                     self.onUpdate(self.scan)
                 }
             }
-
-            box.observer = task.progress.observe(\.fractionCompleted) { progress, _ in
-                DispatchQueue.main.async {
-                    if case .uploading = self.scan.uploadStatus {
-                        self.scan.uploadStatus = .uploading(progress: progress.fractionCompleted)
-                        self.onUpdate(self.scan)
-                    }
-                }
-            }
-
-            task.resume()
         }
     }
 
@@ -1932,8 +1905,7 @@ struct ShareSheet: UIViewControllerRepresentable {
         isLatest: true,
         uploadURL: "https://example.com/upload",
         isEditing: false,
-        onUpdate: { _ in },
-        onDelete: { _ in }
+        onUpdate: { _ in }
     )
     .padding()
     .background(Color.black)

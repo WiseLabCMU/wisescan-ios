@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.9.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.8.0...v0.9.0) (2026-11-05)
+
+
+### Features
+
+* background uploads, screen kept on, still flash, lab server password ([7f92134](https://github.com/WiseLabCMU/wisescan-ios/commit/7f921340d8aef36c6b3fd4acc7085ff67c19bc46))
+* **capture:** flash the screen for every saved still ([36e9e4f](https://github.com/WiseLabCMU/wisescan-ios/commit/36e9e4f1d12a1486f0b16d1bda25e339f62eca1e))
+* **control-plane:** ask for the server password before a tapped upload ([98affa5](https://github.com/WiseLabCMU/wisescan-ios/commit/98affa54c24aa0a5054c84fc61c825a29545bc69))
+* **control-plane:** start TestFlight builds with the lab's server ([3de3b17](https://github.com/WiseLabCMU/wisescan-ios/commit/3de3b17a56cde4403363faadc87aa46b50ebfe9f))
+* **upload:** finish uploads in a background session ([eb243ca](https://github.com/WiseLabCMU/wisescan-ios/commit/eb243ca9eacd0284562e9e16133fe124a27b980d))
+
+
+### Bug Fixes
+
+* keep the screen on while recording or uploading ([e0b30ca](https://github.com/WiseLabCMU/wisescan-ios/commit/e0b30ca2d8b7b679c5e7706b6f59f6afefafb974))
+
+## [0.8.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.7.0...v0.8.0) (2026-11-03)
+
+
+### Features
+
+* arkit capture mode ([bfb9dd6](https://github.com/WiseLabCMU/wisescan-ios/commit/bfb9dd610c2c394115b72aa5e620dd4cb826db18))
+* **capture:** room scan takes automatic 12MP stills ([aeb152f](https://github.com/WiseLabCMU/wisescan-ios/commit/aeb152f80d44e9650f29336fc76b41eb8252b82f))
+* **experiment:** AR Capture angular blur gate + short-exposure toggle ([6019a0c](https://github.com/WiseLabCMU/wisescan-ios/commit/6019a0c1bd2e68eab47195b7e326c5df2329773e))
+* **experiment:** AR Capture gyro-peak blur gate, capture-time blur, frame timing ([d56bd21](https://github.com/WiseLabCMU/wisescan-ios/commit/d56bd212457766d6ef3997c5faff53b687b71218))
+* **experiment:** AR Capture, capture-only branch of a rescan ([4d04a16](https://github.com/WiseLabCMU/wisescan-ios/commit/4d04a16cf4692a882f003df0066fdd4e9cc52d74))
+* **experiment:** raw capture - pics+depth+IMU ([57af473](https://github.com/WiseLabCMU/wisescan-ios/commit/57af47375cbbff769a78487727eb863ea1003953))
+* record swept space per scan, from poses and depth ([6c6687a](https://github.com/WiseLabCMU/wisescan-ios/commit/6c6687a324725a3b330cc99612edb030729237e7))
+* **scan:** draw a focus region; Rescan offers room or region ([b81c947](https://github.com/WiseLabCMU/wisescan-ios/commit/b81c947699c058d6ae46e74be51417d9bf711e2b))
+* **scan:** filter a space's scans by kind (Room / Focus / All) ([60b0ceb](https://github.com/WiseLabCMU/wisescan-ios/commit/60b0ceba02d6ba12636047e9d49d85250b3c14a2))
+* **scan:** focus scan capture, saved as a partial scan ([854ede9](https://github.com/WiseLabCMU/wisescan-ios/commit/854ede9fe47cecff37fef3b6a9e07738575f5520))
+* **scan:** import a focus region by deep link or file ([2938bca](https://github.com/WiseLabCMU/wisescan-ios/commit/2938bcaae261f9832e013c946d2cbbeb45813cb8))
+* **scan:** scan kind, focus region model; room-only consumers ([c1e20a4](https://github.com/WiseLabCMU/wisescan-ios/commit/c1e20a4a321c0997f85c4ad7f6963c93b9b07453))
+* **sync:** Auto sync picks which spaces sync without a tap: all, new or off ([5ad623e](https://github.com/WiseLabCMU/wisescan-ios/commit/5ad623eaade589f221098d99b17e101f4764a612))
+* **sync:** partial packages over Wi-Fi, to-do list, server password ([631be39](https://github.com/WiseLabCMU/wisescan-ios/commit/631be3999703f2eeaed38d6c67b905c83bc57e96))
+* **sync:** report this phone's inventory to the lab control plane ([fb30be6](https://github.com/WiseLabCMU/wisescan-ios/commit/fb30be68db5d376cfabca38efc53002eb69063b2))
+* **sync:** send a space or a stitched map to the control plane, like Upload ([b4c6162](https://github.com/WiseLabCMU/wisescan-ios/commit/b4c6162c45078f4fb674a979cfa2a05870d9bb6f))
+* **sync:** send the mesh's colours with it ([f9e1b1d](https://github.com/WiseLabCMU/wisescan-ios/commit/f9e1b1d3aaf151d3ebd485c1fd7d33513dd471e3))
+* **sync:** send the proxy and dynamic meshes when the lab asks ([7c6a7fb](https://github.com/WiseLabCMU/wisescan-ios/commit/7c6a7fb673af17db4d43fae967c6e04d250142c4))
+* **sync:** server-issued uploads, shared join edits, scan requests ([5e2bf84](https://github.com/WiseLabCMU/wisescan-ios/commit/5e2bf847af7c6167394cbfefc2cc2a156114b3e0))
+* **sync:** the to-do list stays on the phone, answers wait for the server ([6f351da](https://github.com/WiseLabCMU/wisescan-ios/commit/6f351daf9fe720f1afaa5a16d4882da67f93e9d0))
+* **sync:** upload map packages the control plane asks for ([ad70150](https://github.com/WiseLabCMU/wisescan-ios/commit/ad7015002a003856c15278c5f585a10b0911a44a))
+
+
+### Bug Fixes
+
+* **experiment:** keep the AR session put during an AR Capture ([13fbefa](https://github.com/WiseLabCMU/wisescan-ios/commit/13fbefa27c39b96701a204b6a40303161fb5ad06))
+* **scan:** focus region and stills only in the room scan's frame ([0d4fb1c](https://github.com/WiseLabCMU/wisescan-ios/commit/0d4fb1c54b6459372306002f0742c63ee8b84bde))
+* **scan:** focus region test from LiDAR aim points, not the box centre ([697710f](https://github.com/WiseLabCMU/wisescan-ios/commit/697710f85208e08935c3a14e351a34b2776f7fc7))
+* **scan:** focus scan records the privacy filter as it stands at Stop ([7f028c3](https://github.com/WiseLabCMU/wisescan-ios/commit/7f028c3b996c19ce57bbc17bbce60473b499d5ce))
+* **scan:** review pass on the capture-modes work ([fe67733](https://github.com/WiseLabCMU/wisescan-ios/commit/fe677336104553895a039199ba8b051d6df85676))
+* **scan:** second review pass on the capture-modes fixes ([5a02b6b](https://github.com/WiseLabCMU/wisescan-ios/commit/5a02b6bd266b2ce544febfb7e897cc239d86786d))
+* **sync:** without a working control plane, exports upload as before ([c90c9f3](https://github.com/WiseLabCMU/wisescan-ios/commit/c90c9f3a9debfeb66218ba2dbd0f442e10eb9207))
+* the stitch placement lives in StitchGraphBuilder ([13a60ca](https://github.com/WiseLabCMU/wisescan-ios/commit/13a60ca3bb41b308c79d18d66059ffaf043991af))
+
 ## [0.7.0](https://github.com/WiseLabCMU/wisescan-ios/compare/v0.6.0...v0.7.0) (2026-10-07)
 
 

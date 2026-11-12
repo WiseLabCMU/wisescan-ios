@@ -42,6 +42,7 @@ struct LocationDetailView: View {
     /// the user taps delete). > 0 means the cascade will silently remove those spatial links.
     @State private var bulkDeleteLinkedMapCount = 0
     @State private var showSettings = false
+    @State private var passwordPrompt: ControlPlanePendingAction?
     @State private var newLocationName = ""
     @State private var showRenameAlert = false
     @State private var showNoWorldMapAlert = false
@@ -75,6 +76,7 @@ struct LocationDetailView: View {
 
     @AppStorage(AppConstants.Key.locationScanFilter) private var scanFilterRaw = ScanListFilter.room.rawValue
     @AppStorage(AppConstants.Key.uploadURL) private var uploadURL = AppConstants.uploadURL
+    @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
     @AppStorage(AppConstants.Key.selectedExportFormat)
     private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @State private var isBulkExporting = false
@@ -149,19 +151,6 @@ struct LocationDetailView: View {
                                     verticalPadding: 12,
                                     border: Color.orange.opacity(0.3)
                                 ))
-
-                                Picker("Use Case", selection: Binding(
-                                    get: { location.scanCase },
-                                    set: { newValue in
-                                        location.scanCase = newValue
-                                        try? modelContext.save()
-                                    }
-                                )) {
-                                    Text("Rescan Space").tag(ScanCase.rescanSpace)
-                                    Text("Connect Adjacent Space").tag(ScanCase.linkAdjacent)
-                                }
-                                .pickerStyle(.segmented)
-                                .colorScheme(.dark)
                             }
                         }
 
@@ -213,6 +202,11 @@ struct LocationDetailView: View {
                                     })
                                     .buttonStyle(FilledActionButtonStyle(background: Color.orange.opacity(0.8)))
                                 }
+                            }
+
+                            // Control plane: send this space to the lab server, as Upload sends an export.
+                            if ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil {
+                                ControlPlaneSpaceSyncButton(spaceIds: [location.id])
                             }
 
                             // Global Export Settings
@@ -273,15 +267,6 @@ struct LocationDetailView: View {
                                     bulkColoringMessage: bulkColoringMessages[scan.id],
                                     bulkExportPhase: bulkExportPhases[scan.id],
                                     onUpdate: { _ in try? modelContext.save() },
-                                    onDelete: { scanToDelete in
-                                        ScanFileManager.shared.deleteScan(scanToDelete, context: modelContext)
-                                        // Auto-delete location if no scans remain
-                                        if location.scans.isEmpty {
-                                            modelContext.delete(location)
-                                            try? modelContext.save()
-                                            dismiss()
-                                        }
-                                    },
                                     onSelect: {
                                         if selectedScans.contains(scan.id) {
                                             selectedScans.remove(scan.id)
@@ -294,51 +279,6 @@ struct LocationDetailView: View {
                             }
                         }
                     }
-
-                    // MARK: - Server Workflows
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("SERVER WORKFLOWS (COMING SOON)")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
-                            .padding(.horizontal)
-
-                        VStack(spacing: 16) {
-                            WorkflowCard(
-                                icon: "arrow.triangle.2.circlepath.camera.fill",
-                                title: "Quick Mesh",
-                                description: "Fast photogrammetry pipeline optimized for immediate preview. " +
-                                             "Lower resolution textures.",
-                                time: "~5 mins",
-                                buttonText: "Run Workflow",
-                                isPrimary: true,
-                                isDisabled: true
-                            )
-
-                            WorkflowCard(
-                                icon: "camera.macro",
-                                title: "Gaussian Splat",
-                                description: "High-fidelity radiance field reconstruction for " +
-                                             "photo-realistic novel view synthesis.",
-                                time: "~25 mins",
-                                buttonText: "Run Workflow",
-                                isDisabled: true
-                            )
-
-                            WorkflowCard(
-                                icon: "map.fill",
-                                title: "Spatial Indexing",
-                                description: "OpenFLAME spatial indexing with automatic semantic labelling. " +
-                                             "Identifies and tags objects, surfaces, and regions for " +
-                                             "spatial queries and AR anchoring.",
-                                time: "~10 mins",
-                                buttonText: "Run Workflow",
-                                isDisabled: true
-                            )
-                        }
-                        .padding(.horizontal)
-                    }
-                    .padding(.top, 16)
-                    .opacity(isEditing ? 0.3 : 1.0)
 
                     Spacer().frame(height: 100)
                 }
@@ -434,6 +374,7 @@ struct LocationDetailView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .controlPlanePasswordPrompt($passwordPrompt)
         .sheet(isPresented: $showExportSheet) {
             ShareSheet(activityItems: exportItems.map { $0.url }) { _, _, _, _ in
                 // Cleanup
@@ -697,13 +638,23 @@ struct LocationDetailView: View {
         }
     }
 
+    /// The control plane hands out upload destinations; the manual URL is the fallback.
+    private var uploadsConfigured: Bool {
+        ExportUploadTarget.isConfigured(manualURL: uploadURL, controlPlaneHost: controlPlaneHost)
+    }
+
     private func bulkUpload(scans: [CapturedScan]) {
         // Re-entrancy: this view tracks per-scan status (no bulk flag) — refuse while any
         // selected scan's export/upload is already in flight.
         guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
-        guard !scans.isEmpty, !uploadURL.isEmpty else { return }
+        guard !scans.isEmpty, uploadsConfigured else { return }
+        passwordPrompt = ControlPlanePendingAction.runOrHold(host: controlPlaneHost) { startBulkUpload(scans: scans) }
+    }
+
+    /// The batch, once `bulkUpload` has passed its checks and any password prompt.
+    private func startBulkUpload(scans: [CapturedScan]) {
+        guard !scans.contains(where: { $0.uploadStatus.isInFlight }) else { return }
         let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
-        let baseURLString = uploadURL.hasSuffix("/") ? uploadURL : uploadURL + "/"
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         // In flight from the start, so the guard above holds while colorize runs.
@@ -716,13 +667,18 @@ struct LocationDetailView: View {
             // Build the stitch graph ONCE for the whole batch (was rebuilt per scan).
             let bulkStitch = await ScanExportManager.makeBulkStitchArtifacts(forLocationIds: locationIds)
             for scan in scans {
-                guard let url = URL(string: baseURLString + scan.makeExportFilename(format: format)) else {
-                    scan.uploadStatus = .failed("Bad upload URL")
+                // Where it goes: the control plane's grant, or the manual Upload URL.
+                let target: ExportUploadTarget
+                do {
+                    target = try await ExportUploadTarget.resolve(
+                        scanId: scan.id, filename: scan.makeExportFilename(format: format),
+                        contentType: format.effective(for: scan).contentType, format: format, manualURL: uploadURL)
+                } catch {
+                    scan.uploadStatus = .failed(error.localizedDescription)
                     continue
                 }
                 scan.uploadStatus = .zipping
                 let colorsFromCapture = scan.isColored
-                let contentType = format.effective(for: scan).contentType   // read on main (SwiftData)
 
                 DispatchQueue.global(qos: .userInitiated).async {
                     let filename = scan.makeExportFilename(format: format)
@@ -741,27 +697,10 @@ struct LocationDetailView: View {
                     DispatchQueue.main.async {
                         self.bulkExportPhases[scan.id] = nil
                         scan.uploadStatus = .uploading(progress: 0.0)
+                        // Background transfer; the uploader sets the scan's status (see ExportUploader).
+                        ExportUploader.shared.upload(exportURL, request: target.request, scanId: scan.id,
+                                                     exportId: target.exportId)
                     }
-
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "PUT"
-                    request.setValue(contentType, forHTTPHeaderField: "Content-Type")
-
-                    let task = URLSession.shared.uploadTask(with: request, fromFile: exportURL) { _, response, error in
-                        try? FileManager.default.removeItem(at: exportURL)
-                        DispatchQueue.main.async {
-                            if let error = error {
-                                scan.uploadStatus = .failed(error.localizedDescription)
-                            } else if let httpResponse = response as? HTTPURLResponse,
-                                      (200...299).contains(httpResponse.statusCode) {
-                                scan.uploadStatus = .success
-                                scan.lastUploadedAt = Date()
-                            } else {
-                                scan.uploadStatus = .failed("Server error")
-                            }
-                        }
-                    }
-                    task.resume()
                 }
             }
         }
@@ -795,11 +734,11 @@ struct LocationDetailView: View {
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
-                    .background(selectedScans.isEmpty || uploadURL.isEmpty ? Color.gray.opacity(0.3) : Color.blue)
-                    .foregroundColor(selectedScans.isEmpty || uploadURL.isEmpty ? .gray : .white)
+                    .background(selectedScans.isEmpty || !uploadsConfigured ? Color.gray.opacity(0.3) : Color.blue)
+                    .foregroundColor(selectedScans.isEmpty || !uploadsConfigured ? .gray : .white)
                     .cornerRadius(10)
             })
-            .disabled(selectedScans.isEmpty || uploadURL.isEmpty)
+            .disabled(selectedScans.isEmpty || !uploadsConfigured)
 
             Button(action: {
                 let scansToSave = sortedScans.filter { selectedScans.contains($0.id) }
@@ -1168,68 +1107,6 @@ private struct BulkUploadMixedDialog: ViewModifier {
             Text("\(uploaded.count) of the selected scans have already been uploaded. " +
                  "Upload only the un-uploaded scans, or re-upload everything?")
         }
-    }
-}
-
-// MARK: - Workflow Card
-
-struct WorkflowCard: View {
-    var icon: String
-    var title: String
-    var description: String
-    var time: String
-    var buttonText: String
-    var isPrimary: Bool = false
-    var isDisabled: Bool = false
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            Image(systemName: icon)
-                .font(.title)
-                .foregroundColor(isPrimary ? .cyan : .white)
-                .frame(width: 40)
-                .padding(.top, 4)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text(title)
-                    .font(.headline)
-                    .foregroundColor(.white)
-
-                Text(description)
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.7))
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack {
-                    Label("Time: \(time)", systemImage: "clock")
-                        .font(.caption)
-                        .foregroundColor(.green)
-
-                    Spacer()
-
-                    Button(action: {}, label: {
-                        Text(buttonText)
-                            .font(.caption).bold()
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(isDisabled ? Color.gray.opacity(0.3) :
-                                        (isPrimary ? Color.blue : Color.white.opacity(0.2)))
-                            .foregroundColor(isDisabled ? .white.opacity(0.45) : .white)
-                            .cornerRadius(8)
-                    })
-                    .disabled(isDisabled)
-                }
-                .padding(.top, 4)
-            }
-        }
-        .padding()
-        .background(.ultraThinMaterial)
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(isPrimary ? Color.cyan.opacity(0.3) : Color.white.opacity(0.1), lineWidth: 1)
-        )
-        .cornerRadius(16)
-        .opacity(isDisabled ? 0.6 : 1.0)
     }
 }
 

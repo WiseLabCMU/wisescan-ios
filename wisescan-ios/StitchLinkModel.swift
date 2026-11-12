@@ -60,6 +60,10 @@ final class StitchLink {
     var manualDX: Double = 0
     var manualDY: Double = 0
     var manualDZ: Double = 0
+    // The control plane's revision of the fine-tune above that this device last synced
+    // (scan4d-server README, "Shared edits"): the fine-tune is shared across the fleet and the
+    // web, and the server resolves an edit against the revision it was made on. 0 = never synced.
+    var manualRevision: Int = 0
 
     var linkedAt: Date = Date()
     var linkTypeStr: String = StitchingLink.LinkType.midSession.rawValue
