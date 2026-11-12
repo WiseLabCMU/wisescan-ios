@@ -51,6 +51,7 @@ struct Scan4DApp: App {
         UserDefaults.standard.register(defaults: AppConstants.developerOptionDefaults)
         AppConstants.restoreDeveloperDefaultsOutsideDeveloperMode()
         AppConstants.pruneRetiredDefaults()
+        AppConstants.keepPrefilledControlPlaneHost()
         print("Application directory: \(NSHomeDirectory())")
         // Main-thread stall watchdog, app-wide from first frame (no-op unless Perf
         // Diagnostics is on). Capture-scoped arming structurally missed the #71 class:

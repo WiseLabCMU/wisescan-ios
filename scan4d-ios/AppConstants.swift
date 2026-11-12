@@ -214,14 +214,25 @@ enum AppConstants {
     }
 
     // MARK: - Default Values
-    static var isTestFlight: Bool {
-        Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
-    }
 
-    /// The lab's control plane (scan4d-server), on TestFlight only: App Store and Xcode builds
-    /// start with none. A host the user typed, or cleared, stays theirs.
-    static var controlPlaneHost: String {
-        isTestFlight ? "https://wiselambda4.lan.cmu.edu" : ""
+    /// The control plane sync setting starts empty on every build. No real server URL ships in the
+    /// app: tests and examples use example URLs, and a real one comes only from what a user enters
+    /// in the Server tab. A host the user typed, or cleared, stays theirs.
+    static let controlPlaneHost = ""
+
+    /// TestFlight builds before 0.10 started with a server set without saving it, so a tester who
+    /// never typed a host synced through that default. A device that has synced keeps the server
+    /// it used: this saves the URL the device itself recorded, from its last sync or from the
+    /// server that asked it for a password. A device with neither record (it never synced, ran
+    /// 0.8, or had its password set before its first sync) starts empty. Run once per launch,
+    /// from the app's `init`.
+    static func keepPrefilledControlPlaneHost(in defaults: UserDefaults = .standard) {
+        guard defaults.object(forKey: Key.controlPlaneHost) == nil,
+              defaults.object(forKey: Key.controlPlaneJoinedAt) != nil else { return }
+        let recorded = [Key.controlPlaneStateServer, Key.controlPlanePasswordWanted]
+            .lazy.compactMap { defaults.string(forKey: $0) }.first { !$0.isEmpty }
+        guard let server = recorded else { return }
+        defaults.set(server, forKey: Key.controlPlaneHost)
     }
     static let overlapMax: Double = 60.0                           // 60%: fewer redundant motion frames now that sharp stills carry texture detail (photogrammetry overlap rule of thumb)
     static let rejectBlur: Bool = true
