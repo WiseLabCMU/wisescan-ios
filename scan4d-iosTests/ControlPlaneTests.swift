@@ -16,9 +16,9 @@ final class ControlPlaneTests: XCTestCase {
     }
 
     func testHostKeepsSchemeAndPathPrefix() throws {
-        let url = try XCTUnwrap(ControlPlaneClient.baseURL(fromHost: "https://wiselambda4.lan.cmu.edu/scan4d/"))
+        let url = try XCTUnwrap(ControlPlaneClient.baseURL(fromHost: "https://example.com/scan4d/"))
         XCTAssertEqual(url.appending(path: "v1/health").absoluteString,
-                       "https://wiselambda4.lan.cmu.edu/scan4d/v1/health")
+                       "https://example.com/scan4d/v1/health")
     }
 
     func testUnusableHostsAreRefused() {
@@ -30,8 +30,8 @@ final class ControlPlaneTests: XCTestCase {
 
     func testATSRefusalExplainsWhichHostsWork() {
         let failure = ControlPlaneClient.failure(for: URLError(.appTransportSecurityRequiresSecureConnection),
-                                                 host: "wiselambda4.lan.cmu.edu")
-        XCTAssertEqual(failure, .insecureHost("wiselambda4.lan.cmu.edu"))
+                                                 host: "example.com")
+        XCTAssertEqual(failure, .insecureHost("example.com"))
     }
 
     func testServerErrorDetailIsRead() {
@@ -284,11 +284,11 @@ final class ControlPlaneTests: XCTestCase {
 
     /// The certificate override is scoped to hosts the control plane named.
     func testTrustIsOnlyForNamedHosts() {
-        ControlPlaneSession.allow(host: "Versity.LAN.cmu.edu")
-        XCTAssertTrue(ControlPlaneSession.isAllowed(host: "versity.lan.cmu.edu"))
+        ControlPlaneSession.allow(host: "Uploads.Example.COM")
+        XCTAssertTrue(ControlPlaneSession.isAllowed(host: "uploads.example.com"))
         XCTAssertFalse(ControlPlaneSession.isAllowed(host: "example.com"))
-        _ = ControlPlaneClient(baseURL: URL(string: "https://scan4d.lan.cmu.edu:8443")!)
-        XCTAssertTrue(ControlPlaneSession.isAllowed(host: "scan4d.lan.cmu.edu"))
+        _ = ControlPlaneClient(baseURL: URL(string: "https://scan4d.example.com:8443")!)
+        XCTAssertTrue(ControlPlaneSession.isAllowed(host: "scan4d.example.com"))
     }
 
     // MARK: - Stitch math, against scan4d-server's reference vectors (api/tests/stitch.vectors.json)

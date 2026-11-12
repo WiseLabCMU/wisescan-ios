@@ -71,7 +71,7 @@ A cloud on each space shows what the server holds: an outline for the map, a gre
 - shares join fine-tunes edited on its web 3D view back to the phone;
 - can ask for a focus scan of a region, for example where its toy change evaluator saw a rescan differ. The server (the `scan4d-server` repo) keeps the fleet's devices, maps and scans in one place, the start of server-directed scanning. See REQ-038.
 
-TestFlight builds start with the Scan4D server set; App Store and Xcode builds start with none. When the server asks for its password and none is stored, a tapped Sync opens Settings at the password field first, then goes on when Settings closes.
+The Scan4D server setting starts empty on every build, TestFlight included: nothing syncs until a user enters a real server URL in the Server tab. A device that synced on an earlier TestFlight build keeps the server it used. When the server asks for its password and none is stored, a tapped Sync opens Settings at the password field first, then goes on when Settings closes.
 
 > **Note:** For a comprehensive list of all features, architecture diagrams, and detailed implementation status, please see [REQUIREMENTS.md](REQUIREMENTS.md).
 >
