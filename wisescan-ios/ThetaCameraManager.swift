@@ -1220,8 +1220,22 @@ final class ThetaCameraManager {
         do {
             let before = (try? await fetchFileCount()) ?? 0
             try await deleteAllFiles()
-            let after = (try? await fetchFileCount()) ?? 0
-            log(.transfer, "Erased camera storage — \(before) file(s) before, \(after) after")
+            // The camera accepts the delete and keeps working, so a count read straight away
+            // still shows the old number (field, THETA X 2.93.1: "16 before, 16 after", then 0
+            // on the next refresh). Re-read until it reaches 0. A nil read (camera too busy to
+            // answer) is unknown, not done.
+            var after = try? await fetchFileCount()
+            let deadline = Date().addingTimeInterval(AppConstants.thetaEraseSettleTimeout)
+            while after != 0, Date() < deadline {
+                try? await Task.sleep(nanoseconds: UInt64(AppConstants.thetaEraseRecountInterval * 1_000_000_000))
+                after = try? await fetchFileCount()
+            }
+            if after == 0 {
+                log(.transfer, "Erased camera storage — \(before) file(s) removed")
+            } else {
+                let still = after.map { "\($0) of \(before) file(s) still listed" } ?? "file count unknown"
+                log(.transfer, "Erase sent, but \(still) after \(Int(AppConstants.thetaEraseSettleTimeout)) s — the camera may still be deleting; refresh to check")
+            }
             return true
         } catch {
             log(.transfer, "⚠️ Erase failed: \(Self.describe(error))")
