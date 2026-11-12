@@ -197,7 +197,8 @@ holds. Today it shows exports uploaded: none, some or all. Share needs no indica
 
 ## Share
 
-The share sheet offers the Scan4D bundle as a file, and OBJ, PLY and USDZ. Nerfstudio and
+Share asks for a format each time and hands it to the share sheet: the Scan4D bundle as a
+file, or OBJ, PLY or USDZ. There is no stored format setting. Nerfstudio and
 flame3d layouts come from a converter script, so everyone still gets the superset by default.
 That script lives in the public app repo (`tools/`): `normalize.py` moves there from
 scan4d-flows and becomes the original, next to the flame3d converter, and the flows copy both,

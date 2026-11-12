@@ -74,8 +74,6 @@ struct LocationDetailView: View {
 
     @AppStorage(AppConstants.Key.locationScanFilter) private var scanFilterRaw = ScanListFilter.room.rawValue
     @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
-    @AppStorage(AppConstants.Key.selectedExportFormat)
-    private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @State private var isBulkExporting = false
     @State private var exportItems: [ZipExportItem] = []
     @State private var showExportSheet = false
@@ -205,35 +203,7 @@ struct LocationDetailView: View {
                             if ControlPlaneClient.baseURL(fromHost: controlPlaneHost) != nil {
                                 ControlPlaneSpaceSyncButton(spaceIds: [location.id])
                             }
-
-                            // Global Export Settings
-                            VStack(spacing: 12) {
-                                HStack {
-                                    Text("Global Export Format")
-                                        .font(.caption)
-                                        .foregroundColor(.white.opacity(0.7))
-                                    Spacer()
-                                    Picker("Format", selection: $globalSelectedFormatStr) {
-                                        ForEach(ExportFormat.allCases, id: \.self) { (format: ExportFormat) in
-                                            Text(format.rawValue).tag(format.rawValue)
-                                        }
-                                    }
-                                    .pickerStyle(.menu)
-                                    .tint(.cyan)
-                                    .onChange(of: globalSelectedFormatStr) { _, newValue in
-                                        for scan in location.scans {
-                                            scan.selectedFormat = ExportFormat.persisted(newValue) ?? .scan4d
-                                        }
-                                        try? modelContext.save()
-                                    }
-                                }
-
-                                // Bulk actions moved to bottom toolbar in edit mode
-                            }
-                            .padding()
-                            .background(Color.white.opacity(0.05))
-                            .cornerRadius(12)
-                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                            // No export format here: Share asks for one each time (ShareFormatMenu).
                         }
                     }
                     .padding(.horizontal)
@@ -569,7 +539,7 @@ struct LocationDetailView: View {
         if willBeEmpty { dismiss() }
     }
 
-    private func bulkSaveToFiles(scans: [CapturedScan]) {
+    private func bulkSaveToFiles(scans: [CapturedScan], format: ExportFormat) {
         guard !isBulkExporting else { return }   // re-entrancy: double-tap = concurrent exports (OOM class)
         guard !scans.isEmpty else { return }
         // DECISION 3 hard gate: never export a scan with pending structural post-process work
@@ -579,7 +549,6 @@ struct LocationDetailView: View {
             return
         }
         isBulkExporting = true
-        let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
         let locationIds = Set(scans.compactMap { $0.location?.id })
 
         Task { @MainActor in
@@ -647,14 +616,14 @@ struct LocationDetailView: View {
             })
             .disabled(selectedScans.isEmpty)
 
-            Button(action: {
+            // Share: the selected scans, in the format picked from its menu, to the share sheet.
+            // The lab server gets the space through its Sync button.
+            ShareFormatMenu(share: { format in
                 let scansToSave = sortedScans.filter { selectedScans.contains($0.id) }
-                bulkSaveToFiles(scans: scansToSave)
+                bulkSaveToFiles(scans: scansToSave, format: format)
                 isEditing = false
                 selectedScans.removeAll()
             }, label: {
-                // Share: the selected format's files, to the share sheet. The lab server gets
-                // the space through its Sync button.
                 Text("Share")
                     .font(.headline)
                     .frame(maxWidth: .infinity)

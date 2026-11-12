@@ -48,8 +48,6 @@ struct ScansListView: View {
     @State private var showExportSheet = false
     @State private var passwordPrompt: ControlPlanePendingAction?
     @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
-    @AppStorage(AppConstants.Key.selectedExportFormat)
-    private var globalSelectedFormatStr: String = AppConstants.selectedExportFormat
     @Binding var selectedTab: Int
 
     let columns = [
@@ -322,8 +320,8 @@ struct ScansListView: View {
                 }
                 .disabled(syncDisabled)
 
-                // Share: the selected format's files, to the share sheet
-                Button(action: { bulkSaveToFiles() }) {
+                // Share: the selected spaces' scans, in the format picked from its menu, to the share sheet
+                ShareFormatMenu(share: { format in bulkSaveToFiles(format: format) }) {
                     Text("Share")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
@@ -501,7 +499,7 @@ struct ScansListView: View {
 
     /// Export selected scans to the share sheet. Runs export packaging on a background queue.
     /// Progress banner shows per-scan preparation status.
-    private func bulkSaveToFiles() {
+    private func bulkSaveToFiles(format: ExportFormat) {
         guard !isBulkExporting else { return }   // re-entrancy: double-tap = concurrent exports (OOM class)
         let scans = resolveTargetScans()
         guard !scans.isEmpty else { return }
@@ -513,7 +511,6 @@ struct ScansListView: View {
         }
         isBulkExporting = true
         selectedLocations.removeAll()
-        let format = ExportFormat.persisted(globalSelectedFormatStr) ?? .scan4d
         let totalScans = scans.count
 
         bulkProgressMessage = "Preparing 1/\(totalScans)…"
@@ -894,7 +891,6 @@ struct ScanCard: View {
     var onUpdate: (CapturedScan) -> Void
 
     @AppStorage(AppConstants.Key.controlPlaneHost) private var controlPlaneHost = AppConstants.controlPlaneHost
-    @AppStorage(AppConstants.Key.selectedExportFormat) private var selectedFormatStr: String = AppConstants.selectedExportFormat
     @AppStorage(AppConstants.Key.forceRebuildArtifacts) private var forceRebuildArtifacts: Bool = AppConstants.forceRebuildArtifacts
     @Environment(\.modelContext) private var modelContext
     @State private var exportItem: ZipExportItem?
@@ -920,11 +916,6 @@ struct ScanCard: View {
     /// capture relocalized into, shown small beside the photo.
     @State private var showFocusPhotos = false
     @State private var parentPreviewImage: UIImage?
-
-    private var selectedFormat: ExportFormat {
-        get { ExportFormat.persisted(selectedFormatStr) ?? .scan4d }
-        nonmutating set { selectedFormatStr = newValue.rawValue }
-    }
 
     /// Effective coloring progress: single-card @State, or the parent's bulk message.
     private var activeColoringMessage: String? { coloringMessage ?? bulkColoringMessage }
@@ -1349,24 +1340,33 @@ struct ScanCard: View {
             + "The capture is grossly incomplete and is likely unusable for 3D reconstruction downstream — consider re-scanning."
     }
 
+    /// The Share button's face, the same whether it opens the format menu or shares at once.
+    private var shareLabel: some View {
+        HStack {
+            Image(systemName: "square.and.arrow.up")
+            Text("Share")
+                .font(.subheadline).bold()
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
+        .foregroundColor(isEditing ? .gray : .white)
+        .cornerRadius(10)
+    }
+
     @ViewBuilder
     private var actionButtonsBlock: some View {
         VStack(spacing: 8) {
-            // Share: the selected format as a file for another app or system (Files, AirDrop,
-            // Mail). Reaching the lab server is Sync's job, on the space.
-            Button(action: { saveToFiles() }) {
-                HStack {
-                    Image(systemName: "square.and.arrow.up")
-                    Text("Share")
-                        .font(.subheadline).bold()
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(isEditing ? Color.gray.opacity(0.3) : Color.cyan.opacity(0.8))
-                .foregroundColor(isEditing ? .gray : .white)
-                .cornerRadius(10)
+            // Share: a file for another app or system (Files, AirDrop, Mail), in the format picked
+            // from its menu. A focus scan has one export, its capture zip, so it shares at once.
+            // Reaching the lab server is Sync's job, on the space.
+            if scan.isFocusScan {
+                Button(action: { saveToFiles(format: .scan4d) }) { shareLabel }
+                    .disabled(isEditing)
+            } else {
+                ShareFormatMenu(share: { format in saveToFiles(format: format) }) { shareLabel }
+                    .disabled(isEditing)
             }
-            .disabled(isEditing)
 
             // COLOR is the user's verb (field redesign 2026-08-06): post-processing is
             // AUTOMATED (save + landing), so the primary button just makes the scan
@@ -1542,7 +1542,8 @@ struct ScanCard: View {
         return "\(count)"
     }
 
-    private func saveToFiles() {
+    /// Share in the format the menu picked.
+    private func saveToFiles(format: ExportFormat) {
         // Re-entrancy: the zip build is long and silent — a second tap here started a second
         // CONCURRENT prepareExport whose doubled privacy-blur working set OOM-killed the app
         // (2026-07-23 iPhone 17 Pro field report; see UploadStatus.isInFlight).
@@ -1557,7 +1558,6 @@ struct ScanCard: View {
         scan.uploadStatus = .zipping
         onUpdate(scan)
 
-        let format = selectedFormat
         Task { @MainActor in
             // A sync bundle's build stops for this Share; saveExportToFiles ends it on every path.
             await ShareExports.begin()

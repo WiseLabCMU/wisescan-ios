@@ -86,15 +86,15 @@ struct UserGuideView: View {
                     guideRow(
                         icon: "6.circle.fill",
                         title: "Choose Format",
-                        text: "Pick the export format with Global Export Format on a space's screen: Scan4D " +
-                              "(the default), OBJ, PLY, or USDZ. It applies to every space. Scan4D carries " +
-                              "everything the scan captured; the lab server turns it into a Nerfstudio " +
-                              "dataset or a flame3d bundle."
+                        text: "Tap Share on a scan, or on scans you selected, and pick a format: Scan4D, " +
+                              "OBJ, PLY, or USDZ. Share asks each time. Scan4D carries everything the scan " +
+                              "captured; the lab server turns it into a Nerfstudio dataset or a flame3d " +
+                              "bundle. A focus scan shares its capture as one zip, so it doesn't ask."
                     )
                     guideRow(
                         icon: "7.circle.fill",
                         title: "Share or Sync",
-                        text: "Share sends the selected format to another app or device: Files, AirDrop, " +
+                        text: "Share sends the format you pick to another app or device: Files, AirDrop, " +
                               "Mail. The screen stays on while a scan is being converted. Sync keeps your " +
                               "lab's server up to date with everything in the spaces you sync. Set the " +
                               "server in Settings > Control plane, then tap Sync to Lab Server in a space, " +

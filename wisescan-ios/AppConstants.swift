@@ -57,7 +57,6 @@ enum AppConstants {
         static let privacyFilterOffAt = "privacyFilterOffAt"          // when the Privacy Filter was last switched off (seconds since 1970); cleared when it goes back on (PrivacyFilterTimer)
         static let privacyFilterTimeLimitHours = "privacyFilterTimeLimitHours" // Developer Mode: hours the Privacy Filter may stay off before it turns itself back on; 0 = no limit
         static let mockWearable = "mockWearable"
-        static let selectedExportFormat = "selectedExportFormat"
         static let locationScanFilter = "locationScanFilter"   // a space's scan list: Room / Focus / All (ScanListFilter)
         static let activeMeshColor = "activeMeshColor"
         static let ghostMeshColor = "ghostMeshColor"
@@ -237,7 +236,6 @@ enum AppConstants {
     /// The Developer Mode choices, in hours; 0 = no limit.
     static let privacyFilterTimeLimitChoices: [Int] = [12, 24, 168, 0]
     static let mockWearable: Bool = false
-    static let selectedExportFormat = "Scan4D" // ExportFormat.scan4d.rawValue
     static let activeMeshColor: String = "Green"
     static let ghostMeshColor: String = "Magenta"
     static let metaWearablesFPS: Double = 7.0

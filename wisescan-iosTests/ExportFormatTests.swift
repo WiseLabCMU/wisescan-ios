@@ -2,8 +2,8 @@ import XCTest
 @testable import wisescan_ios
 
 /// The export format a stored name decodes to. Names persist in SwiftData
-/// (`CapturedScan.selectedFormatStr`) and `@AppStorage`, so a format that is folded into another
-/// must keep decoding, or every scan and preference holding it would fall back silently.
+/// (`CapturedScan.selectedFormatStr`), so a format that is folded into another
+/// must keep decoding, or every scan holding it would fall back silently.
 final class ExportFormatTests: XCTestCase {
 
     func testCurrentNamesDecodeToThemselves() {
@@ -27,27 +27,14 @@ final class ExportFormatTests: XCTestCase {
         XCTAssertNil(ExportFormat.persisted("GLB"))
     }
 
-    /// The format pickers bind the stored name as it is, so a retired one showed a blank picker
-    /// until launch rewrote it as its replacement.
+    /// Share asks for a format each time (ShareFormatMenu): Scan4D, the bundle that holds
+    /// everything, first, and a line for each saying what it carries.
     @MainActor
-    func testStoredSelectionIsRewrittenOnce() throws {
-        let suite = "ExportFormatTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let key = AppConstants.Key.selectedExportFormat
-
-        XCTAssertFalse(ExportFormat.migrateStoredSelection(defaults))   // nothing stored: the default holds
-        defaults.set("Nerfstudio", forKey: key)
-        XCTAssertTrue(ExportFormat.migrateStoredSelection(defaults))
-        XCTAssertEqual(defaults.string(forKey: key), ExportFormat.scan4d.rawValue)
-        XCTAssertFalse(ExportFormat.migrateStoredSelection(defaults))   // once
-
-        defaults.set("GLB", forKey: key)                                // unknown: the default format
-        XCTAssertTrue(ExportFormat.migrateStoredSelection(defaults))
-        XCTAssertEqual(defaults.string(forKey: key), ExportFormat.scan4d.rawValue)
-
-        defaults.set(ExportFormat.ply.rawValue, forKey: key)            // a current name stays
-        XCTAssertFalse(ExportFormat.migrateStoredSelection(defaults))
-        XCTAssertEqual(defaults.string(forKey: key), ExportFormat.ply.rawValue)
+    func testShareMenuListsEveryFormatScan4DFirst() {
+        XCTAssertEqual(ExportFormat.allCases.first, .scan4d)
+        for format in ExportFormat.allCases {
+            XCTAssertFalse(format.shareSummary.isEmpty, format.rawValue)
+        }
+        XCTAssertEqual(Set(ExportFormat.allCases.map(\.shareSummary)).count, ExportFormat.allCases.count)
     }
 }
